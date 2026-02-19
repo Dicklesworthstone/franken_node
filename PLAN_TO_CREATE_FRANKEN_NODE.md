@@ -49,9 +49,9 @@ Build `franken_node` into the category-defining runtime product layer that funct
 
 Category-defining disruptive floor (non-optional):
 - `>= 95%` pass on targeted compatibility corpus for high-value Node/Bun usage bands.
-- `>= 3x` migration velocity (time-to-safe-production) versus baseline migration patterns.
+- `>= 3x` migration throughput and confidence quality versus baseline migration patterns.
 - `>= 10x` reduction in successful host compromise under adversarial extension campaigns versus baseline Node/Bun default posture.
-- `<= 15 min` from fresh install to first policy-governed safe extension workload in production-like mode.
+- friction-minimized, automation-first path from install to policy-governed safe extension workloads.
 - `100%` deterministic replay artifact availability for high-severity security and policy incidents.
 - `>= 3` impossible-by-default product capabilities broadly adopted by production users.
 
@@ -86,6 +86,19 @@ Category-creation test:
 9. Ecosystem reputation graph with explainable trust transitions.
 10. Public verifier toolkit for benchmark and security claims.
 
+## 3.3 Baseline Build Strategy Decision (Hybrid, Spec-First)
+`franken_node` will **not** begin with a full clean-room Bun reimplementation as the initial baseline move.
+
+Canonical strategy:
+- Use Node/Bun as behavioral reference systems and oracle targets, not as architecture templates.
+- Execute spec-first compatibility capture (Essence Extraction) for prioritized high-value API/runtime bands.
+- Implement product/runtime behavior natively on `franken_engine` + `asupersync` with `franken_node` trust/migration architecture from day one.
+- Reuse proven implementation patterns from `/dp/pi_agent_rust` where directly accretive (policy surfaces, deterministic replay discipline, conformance-first workflows), while avoiding architecture lock-in to legacy runtimes.
+
+Decision rationale:
+- A Bun-first clone path creates architecture lock-in and delays category-defining differentiators.
+- A spec-first hybrid path delivers a strong compatibility baseline quickly while preserving the trust-native design required for ATC, DGIS, BPET, VEF, and verifier economy outcomes.
+
 ## 4. Non-Negotiable Constraints
 - `franken_node` depends on `/dp/franken_engine`; it does not fork engine internals.
 - No local reintroduction of engine core crates in this repository.
@@ -97,13 +110,14 @@ Category-creation test:
 - `/dp/fastapi_rust` SHOULD be used for service/API control surfaces where HTTP control-plane exposure is required.
 - Any deviation from these substrate rules requires an explicit, signed waiver artifact with rationale, risk analysis, and expiry.
 - Compatibility shims must be explicit, typed, and policy-visible.
+- Line-by-line translation from Bun/Node implementations is off-charter; legacy runtimes may be used for spec extraction and conformance fixture capture only.
 - Dangerous compatibility behavior must be gated by policy and auditable receipts.
 - Every major claim ships with reproducible benchmark/security artifacts.
 - Migration tooling must be deterministic and replayable for high-severity failures.
 - Product defaults prioritize safe operation while preserving practical adoption velocity.
 
 ## 5. Method Stack (Required)
-This program is intentionally driven by three complementary methodologies.
+This program is intentionally driven by four complementary methodologies.
 
 ### 5.1 extreme-software-optimization (Execution Discipline)
 Mandatory loop:
@@ -128,6 +142,15 @@ Adopt only high-EV disruptive primitives with fallback contracts:
 - EV thresholding (`EV >= 2.0`)
 - failure-mode predesign
 - deterministic degraded operation pathways
+
+### 5.4 porting-to-rust (Spec-First Essence Extraction Protocol)
+For compatibility surfaces, apply the porting discipline as an extraction-and-proof method:
+- extract behavior into explicit specs (data shapes, invariants, defaults, errors, edge cases)
+- capture Node/Bun fixture outputs as conformance baselines
+- implement from spec and fixture contracts, not legacy source structure
+- enforce parity and divergence visibility via lockstep oracle + artifact gates
+
+Rule: legacy code is input to specification and oracle generation, not implementation blueprint.
 
 ## 6. Security And Trust Product Doctrine
 ### 6.1 Problem Statement
@@ -235,8 +258,8 @@ This separation is intentional: `franken_node` should not reinvent control seman
 10. **No ambient authority pathways**  
     Any ambient network, spawn, or privileged side effect path in control-plane code is a correctness/security defect.
 
-### 8.6 Asupersync Integration Adoption Phases (Mandatory, Parallel Program)
-**AS-0: Boundary codification and policy baseline**
+### 8.6 Asupersync Integration Adoption Tracks (Mandatory, Parallel Program)
+**AS-A: Boundary codification and policy baseline**
 - define franken_engine/asupersync/franken_node ownership map
 - enumerate high-impact workflows and required asupersync primitives
 - install static guardrails against ambient side effects
@@ -246,7 +269,7 @@ Exit gate:
 - guardrails active in CI
 - baseline capability map complete
 
-**AS-1: Control-plane execution migration**
+**AS-B: Control-plane execution migration**
 - migrate lifecycle/rollout/revocation/quarantine orchestration to region-owned tasks
 - enforce Cx-first entrypoints and cancellation protocol behavior
 - replace unsafe ad hoc channels with obligation-tracked patterns for critical flows
@@ -256,7 +279,7 @@ Exit gate:
 - no detached-orphan task paths on critical flows
 - no obligation leaks in lab scenarios
 
-**AS-2: Distributed control semantics**
+**AS-C: Distributed control semantics**
 - integrate remote named computations, idempotency, and saga semantics
 - add epoch-scoped validity and transition barriers
 - implement remote bulkheads and lane-aware scheduling for control traffic
@@ -266,7 +289,7 @@ Exit gate:
 - epoch transitions are deterministic and auditable
 - idempotency/saga conformance green
 
-**AS-3: Evidence and verification industrialization**
+**AS-D: Evidence and verification industrialization**
 - make evidence ledger mandatory for policy-driven decisions
 - add evidence replay validator and deterministic incident bundle export
 - add virtual fault harness + cancellation injection + schedule exploration gates
@@ -276,7 +299,7 @@ Exit gate:
 - deterministic fault scenarios reproducibly replayed from seed artifacts
 - protocol gate suite required in release pipeline
 
-**AS-4: Production hardening and autonomy**
+**AS-E: Production hardening and autonomy**
 - bind policy controller actions to invariant guardrails with hard precedence
 - operationalize region/obligation/cancellation observability dashboards
 - enforce release claims on asupersync-backed conformance artifacts
@@ -317,13 +340,15 @@ Integration stance:
    - `L2 Engine Boundary Oracle`: franken_engine + reference microcorpus checks for semantic boundary integrity used by product safety gates.  
    Both oracles are required; neither replaces the other.
 4. **Path convention contract (resolve crate-root ambiguity)**  
-   Artifact paths like `src/...`, `tests/...`, `services/...`, and `docs/...` in TODO tracks are crate-root relative to `/dp/franken_node/crates/franken-node/` unless explicitly prefixed with an absolute path.
-5. **KPI precedence contract (resolve time-to-safe target ambiguity)**  
-   Primary category target remains `<= 15 min` install-to-first-safe-production workload.  
-   Greenfield onboarding allowance (`<= 30 min`) is a temporary adoption-floor metric during early rollout and must trend down to the primary target.
+   - Code paths (`src/...`, `tests/...`, `benchmarks/...`, `fuzz/...`, `fixtures/...`) are crate-root relative to `/dp/franken_node/crates/franken-node/` unless explicitly absolute.  
+   - Repository program paths (`docs/...`, `artifacts/...`, `spec/...`, `vectors/...`, `.github/...`, `config/...`, `tools/...`) are repo-root relative to `/dp/franken_node/` unless explicitly absolute.  
+   - `services/...` must declare scope in the owning task: repo-root service package or crate-local service module.
+5. **KPI clarity contract (capability-and-evidence framing)**  
+   Primary category KPI is migration-friction collapse with strong safety and verifier-backed trust guarantees.  
+   Delivery framing is capability-gated and evidence-gated, not sequence-date constrained.
 
-## 9. Multi-Phase Build Program
-### Phase A: Product Substrate And Split Governance
+## 9. Multi-Track Build Program
+### Track A: Product Substrate And Split Governance
 - enforce engine/product split contract in CI
 - establish compatibility harness skeleton
 - establish migration diagnostics foundation
@@ -334,7 +359,7 @@ Exit gate:
 - deterministic baseline compatibility harness green on seed corpus
 - initial migration report artifacts reproducible
 
-### Phase B: Compatibility Superset + Migration Singularity
+### Track B: Compatibility Superset + Migration Singularity
 - implement high-value Node/Bun API compatibility bands
 - ship zero-to-first-safe-run migration pipeline
 - add dual-layer lockstep oracle (L1 Node/Bun/franken_node + L2 engine-boundary reference checks)
@@ -345,7 +370,7 @@ Exit gate:
 - migration pipeline produces actionable reports + rewrite plans on representative projects
 - divergence receipts generated and reproducible
 
-### Phase C: Trust-Native Ecosystem Layer
+### Track C: Trust-Native Ecosystem Layer
 - ship signed extension registry and provenance verification flow
 - ship trust cards and reputation graph v1
 - ship revocation/quarantine operator workflows
@@ -356,7 +381,7 @@ Exit gate:
 - replay and audit bundle pass external verifier checks
 - revocation/quarantine drills meet latency and correctness gates
 
-### Phase D: Category Benchmark + Market Capture
+### Track D: Category Benchmark + Market Capture
 - publish benchmark + verifier toolkit
 - run public Node/Bun/franken_node comparison campaigns
 - ship enterprise governance integration surfaces
@@ -367,7 +392,7 @@ Exit gate:
 - at least one independent external replication of headline claims
 - enterprise pilot adoption shows measurable security/velocity lift
 
-### Phase E: Frontier Industrialization
+### Track E: Frontier Industrialization
 - ship frontier programs at production reliability
 - harden ecosystem network effects and adoption funnels
 - scale global support and compliance evidence channels
@@ -408,7 +433,7 @@ Exit gate:
 10. **Category Benchmark And Standard Ownership**  
     Define and maintain the benchmark and verification standards for secure extension runtime quality, then make external adoption part of product strategy.
 
-Recommended staged order:
+Recommended dependency order:
 1. Compatibility envelope + divergence ledger
 2. Migration autopilot
 3. Dual-layer lockstep oracle (L1 + L2)
@@ -533,7 +558,7 @@ Global rule:
 10. Conformance/golden-vector migration gates for interop stability.
 
 ## 9F. Moonshot Bets: Top 15 Category-Shift Initiatives
-1. Migration singularity engine (minutes, not weeks).
+1. Migration singularity engine (automation-first, low-friction execution).
 2. Continuous compatibility theorem prover for high-value surfaces.
 3. Live exploit market simulator for policy stress-testing.
 4. Enterprise policy autopilot with formal override governance.
@@ -784,7 +809,7 @@ Terminology mapping for this section:
 14. **Append-only marker stream as the atomic truth of control history**  
     **Entails:** Store high-impact control events in fixed-record append-only marker streams with dense sequence invariants and tamper-evident chaining.  
     **How It Works:** Marker IDs are domain-separated hashes over canonical record prefixes; readers gain O(1) sequence lookup and deterministic replay anchor points.  
-    **Why Compelling:** Incident timelines and rollback boundaries become precise, fast to query, and cryptographically checkable.  
+    **Why Compelling:** Incident event sequences and rollback boundaries become precise, fast to query, and cryptographically checkable.  
     **Rationale:** A clear atomic truth stream is foundational for robust audit, replay, and fleet consistency checks.
 
 15. **MMR-backed prefix/inclusion proofs for fleet history equivalence**  
@@ -820,7 +845,7 @@ Terminology mapping for this section:
 20. **Lane-aware scheduling as a formal product SLA mechanism**  
     **Entails:** Formalize Cancel/Timed/Ready lanes as explicit SLA controls tied to p99 latency, cleanup responsiveness, and background fairness budgets.  
     **How It Works:** Task classes map to lanes with required checkpoint frequency and bulkhead/rate-limit controls; telemetry reports lane health and starvation regressions.  
-    **Why Compelling:** Foreground deadlines and safety-critical cleanup remain reliable even during heavy background churn.  
+    **Why Compelling:** Foreground priority guarantees and safety-critical cleanup remain reliable even during heavy background churn.  
     **Rationale:** Lane semantics convert scheduler internals into product-grade operational guarantees.
 
 ## 9K. Idea-Wizard x Alien-Artifact x Alien-Graveyard Radical Expansion Set (Top 15)
@@ -838,7 +863,7 @@ Terminology mapping for this section:
 
 3. **Deterministic time-travel runtime for extension host incidents**  
    **Entails:** Introduce full-fidelity deterministic capture and replay for extension-host execution, including scheduler decisions, capability checks, I/O intents, and policy outcomes.  
-   **How It Works:** Runtime emits canonical event streams into `frankensqlite` with strict sequencing and replay tokens; incident tooling can reconstruct exact execution timelines and step backward/forward through decision points with state snapshots.  
+   **How It Works:** Runtime emits canonical event streams into `frankensqlite` with strict sequencing and replay tokens; incident tooling can reconstruct exact execution event sequences and step backward/forward through decision points with state snapshots.  
    **Why Compelling:** Root-cause analysis shifts from guesswork to deterministic forensic reconstruction, slashing MTTR and improving confidence in fixes.  
    **Rationale:** Category-defining security platforms need replay as a first-class primitive; without deterministic time travel, high-stakes reliability claims remain weak.
 
@@ -899,8 +924,8 @@ Terminology mapping for this section:
 13. **Heterogeneous hardware execution planner for secure performance scaling**  
    **Entails:** Create a hardware-aware product planner that maps workloads across CPU classes, memory tiers, and optional accelerators while preserving deterministic policy behavior and auditability.  
    **How It Works:** Planner computes placements using capability constraints, risk classes, cache locality, and latency budgets; decisions are persisted as evidence, validated against policy invariants, and executed through franken_engine/runtime interfaces rather than local engine-core reimplementation.  
-    **Why Compelling:** The platform can extract large performance gains from hardware diversity without introducing opaque, non-reproducible runtime behavior.  
-    **Rationale:** Next-generation runtime platforms must treat hardware heterogeneity as a first-class optimization surface, not an afterthought.
+   **Why Compelling:** The platform can extract large performance gains from hardware diversity without introducing opaque, non-reproducible runtime behavior.  
+   **Rationale:** Next-generation runtime platforms must treat hardware heterogeneity as a first-class optimization surface, not an afterthought.
 
 14. **Counterfactual incident lab and autonomous mitigation design loop**  
     **Entails:** Add a simulation-first incident program that can replay real incidents, generate counterfactual mitigation plans, and evaluate expected-loss reduction before production rollout.  
@@ -914,12 +939,41 @@ Terminology mapping for this section:
     **Why Compelling:** Market messaging gains exceptional credibility because every major claim is coupled to living evidence, not one-time marketing snapshots.  
     **Rationale:** In disruptive category creation, trust leadership depends on making truth operational and continuously measurable.
 
+## 9L. Verifiable Execution Fabric (VEF): Proof-Carrying Runtime Compliance
+1. **Proof-carrying execution compliance fabric for high-risk extension actions**  
+   **Entails:** Add a runtime-compliance fabric where high-risk extension actions (network, filesystem, process, secret access, policy transitions, artifact promotion) emit deterministic canonical receipts, and those receipts are mapped to machine-verifiable policy constraints.  
+   **How It Works:** A policy-constraint compiler translates runtime policy into proof-checkable predicates; execution emits hash-chained receipt streams plus commitment checkpoints; proof workers generate compact compliance proofs over bounded receipt windows; verifiers validate proofs before claims are elevated and before sensitive control transitions remain in high-trust mode.  
+   **Why Compelling:** This upgrades trust from "we logged and replayed it" to "we can cryptographically demonstrate policy compliance for what actually executed," which is a major category-level differentiation over wrapper-style security tooling.  
+   **Rationale:** `franken_node` already has evidence ledger, replay, verifier SDK, and claim compiler primitives; VEF is the highest-EV accretive layer because it fuses those primitives into a single verifiable runtime-trust loop that external stakeholders can independently validate.
+
+## 9M. Adversarial Trust Commons (ATC): Federated Behavioral Intelligence
+1. **Privacy-preserving federated trust intelligence across participating deployments**  
+   **Entails:** Add a federated intelligence layer where participating `franken_node` deployments contribute behavioral trust signals (anomaly fingerprints, trust-state transitions, revocation/quarantine triggers, attack-pattern sketches) without exposing raw sensitive telemetry.  
+   **How It Works:** Each participant computes local summaries and submits cryptographically protected updates using secure aggregation, differential-privacy budgets, and mergeable sketches; global services compute ecosystem priors and emerging threat indicators; local control planes consume signed federation outputs to update risk posture and preemptive controls.  
+   **Why Compelling:** This converts defense from isolated fortress mode into collective network defense, where high-quality detections in one environment improve prevention quality in all others while preserving privacy boundaries.  
+   **Rationale:** The plan already includes adversary graphs, trust cards, verifier systems, and quarantine propagation; ATC is the highest-leverage next layer because it transforms those local capabilities into ecosystem-scale compounding intelligence that is structurally hard for incumbent runtimes to replicate.
+
+## 9N. Dependency Graph Immune System (DGIS): Topological Contagion Modeling + Preemptive Containment
+1. **Topology-aware dependency immunization and cascade preemption**  
+   **Entails:** Treat the full dependency graph (direct + transitive packages, extension supply roots, publisher/maintainer trust signals, build-time/runtime edges) as a first-class attack surface and build a continuous immune system that predicts catastrophic cascade paths before compromise occurs.  
+   **How It Works:** Maintain a canonical signed graph model; compute centrality/percolation/fan-out risk metrics; run adversarial contagion simulations over likely campaign classes (slow-burn maintainer takeover, staged typosquat pivot, delayed payload activation, build-pipeline poisoning); generate preemptive containment plans that insert trust barriers at topological choke points (behavioral sandboxes, composition firewalls, forced verified-fork pinning, constrained update windows); continuously fold ATC-derived global topology indicators into local posterior risk and re-plan barrier placement under policy and performance budgets.  
+   **Why Compelling:** This changes security economics from reactive node-level defense to proactive graph-level immunization, shrinking blast radius before attackers can exploit high-leverage positions in the supply chain and making xz-style campaigns materially harder to execute at scale.  
+   **Rationale:** Existing trust cards, adversary graph inference, quarantine, VEF proof gates, and ATC federation become multiplicatively stronger when topology is explicit in risk inference and containment policy; DGIS is the missing structural layer that converts these components into a coherent preemptive defense fabric.
+
+## 9O. Behavioral Phenotype Evolution Tracker (BPET): Longitudinal Trust Genetics For Extensions
+1. **Pre-compromise behavioral trajectory detection across extension lifecycles**  
+   **Entails:** Model every extension as a longitudinal behavioral genome rather than a sequence of disconnected point-in-time snapshots, tracking phenotype evolution across versions, maintainer transitions, dependency rewrites, build-pipeline changes, capability usage shifts, API-surface growth, runtime resource envelopes, network behavior, and structural complexity trends.  
+   **How It Works:** Build canonical per-version phenotype vectors and signed lineage chains; compute time-series drift features and regime-shift signals using changepoint detection, Hidden Markov behavioral-state inference, and survival-style hazard estimation for compromise-propensity progression risk; fuse trajectory risk with DGIS topological criticality and ATC federated priors; emit calibrated evolution-risk scores plus explanation traces that distinguish normal growth/refactor behavior from suspicious mutation patterns (capability creep, obfuscation ramps, dormant-to-active bursts, handoff-then-pivot sequences).  
+   **Why Compelling:** This shifts detection from reactive mutation catching to predictive compromise precursors, allowing containment before malicious payloads are fully expressed and significantly reducing attacker dwell-time advantage in slow-burn campaigns.  
+   **Rationale:** Trust cards, adversary graph scoring, migration gates, and operator decisions all gain major signal quality when temporal evolution becomes explicit; BPET adds the missing time dimension that converts a strong trust stack into a predictive trust stack.
+
 ## 10. Ultra-Detailed TODO (Program Level)
 ### 10.N Execution Normalization Contract (No Duplicate Implementations)
 - `10.0` through `10.12` are strategic epics and coverage gates.
-- `10.13` through `10.17` are canonical implementation-level work breakdowns.
+- `10.13` through `10.21` are canonical implementation-level work breakdowns.
 - If the same capability appears in multiple tracks, exactly one canonical implementation path owns the protocol/code semantics; all other appearances are integration, adoption, policy, or release gating layers.
 - Duplicate implementation of the same protocol semantics in parallel tracks is explicitly off-charter.
+- Oracle delivery close condition: dual-layer oracle is only complete when L1 (`10.2`) + L2 (`10.17`) + release policy linkage (`10.2`) are all green.
 
 Canonical ownership map (non-reductive, full-feature):
 - remote registry/idempotency/saga semantics: canonical in `10.14`, integrated and policy-gated in `10.15`.
