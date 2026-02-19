@@ -1,0 +1,11 @@
+[package]
+name = "frankenengine-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+tokio.workspace = true
+frankenengine-engine = { path = "../../../franken_engine/crates/franken-engine" }
+frankenengine-extension-host = { path = "../../../franken_engine/crates/franken-extension-host" }

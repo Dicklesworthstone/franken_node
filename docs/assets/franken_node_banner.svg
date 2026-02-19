@@ -1,0 +1,38 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="420" viewBox="0 0 1600 420" role="img" aria-labelledby="title desc">
+  <title id="title">franken_node banner</title>
+  <desc id="desc">franken_node trust-native runtime platform banner</desc>
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="50%" stop-color="#111827" />
+      <stop offset="100%" stop-color="#1f2937" />
+    </linearGradient>
+    <linearGradient id="accent" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#22c55e" />
+      <stop offset="100%" stop-color="#38bdf8" />
+    </linearGradient>
+  </defs>
+
+  <rect width="1600" height="420" fill="url(#bg)" />
+  <rect x="70" y="70" width="1460" height="280" rx="24" fill="#0b1220" stroke="#334155" stroke-width="2" />
+  <rect x="70" y="70" width="1460" height="8" rx="4" fill="url(#accent)" />
+
+  <text x="120" y="185" fill="#e2e8f0" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="72" font-weight="700">
+    franken_node
+  </text>
+  <text x="122" y="242" fill="#93c5fd" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="30">
+    Trust-native JS/TS runtime platform
+  </text>
+  <text x="122" y="286" fill="#94a3b8" font-family="Menlo, Monaco, Consolas, 'Liberation Mono', monospace" font-size="24">
+    Compatibility + migration + policy + deterministic replay
+  </text>
+
+  <g transform="translate(1080 118)">
+    <rect x="0" y="0" width="360" height="180" rx="16" fill="#111827" stroke="#1e293b" stroke-width="2" />
+    <circle cx="42" cy="35" r="7" fill="#22c55e" />
+    <text x="62" y="41" fill="#cbd5e1" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">status: implemented</text>
+    <text x="22" y="80" fill="#38bdf8" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">node + bun lockstep</text>
+    <text x="22" y="110" fill="#38bdf8" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">trust cards + revocation</text>
+    <text x="22" y="140" fill="#38bdf8" font-family="Menlo, Monaco, Consolas, monospace" font-size="18">incident replay bundles</text>
+  </g>
+</svg>

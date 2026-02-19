@@ -1,0 +1,27 @@
+/target/
+/build/
+/dist/
+/tmp/
+
+# Local/editor noise
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and transient outputs
+*.log
+*.tmp
+*.bak
+
+# Local env files
+.env
+.env.*
+!.env.example
+
+# Local transplant helper artifact
+/transplant_manifest.txt
+
+# Source image kept out of repo; committed asset is WebP
+/franken_node_illustration.png
