@@ -1,0 +1,480 @@
+{
+  "bead_id": "bd-2808",
+  "title": "Deterministic repro bundle export for control-plane failures",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 39,
+  "summary": {
+    "passing": 93,
+    "failing": 0,
+    "total": 93
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/tools/repro_bundle_export.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-2808_contract.md"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "39 tests (minimum 25)"
+    },
+    {
+      "check": "schema version constant",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "DefaultHasher for determinism",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct TraceEvent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum TraceEventType",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct EvidenceRef",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct FailureContext",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum FailureType",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ConfigSnapshot",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ReproBundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ExportContext",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ReplayOutcome",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum SchemaError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ReproBundleExporter",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn generate_repro_bundle(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn replay_bundle(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn validate_bundle(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn event_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn evidence_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_portable(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_json(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn export(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn find_bundle(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn bundle_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn should_auto_export(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn export_for_range",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn with_entry(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn label(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: REPRO_BUNDLE_EXPORTED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: REPRO_BUNDLE_REPLAY_START",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: REPRO_BUNDLE_REPLAY_COMPLETE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: REPRO_BUNDLE_REPLAY_DIVERGENCE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPRO-DETERMINISTIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPRO-COMPLETE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPRO-VERSIONED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trace_event_type: EpochTransition",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trace_event_type: BarrierEvent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trace_event_type: PolicyEvaluation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trace_event_type: MarkerIntegrityCheck",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trace_event_type: ConfigChange",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trace_event_type: ExternalSignal",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "failure_type: EpochTransitionTimeout",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "failure_type: BarrierTimeout",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "failure_type: PolicyViolation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "failure_type: MarkerIntegrityBreak",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "replay_variant: Match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "replay_variant: Divergence",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "schema_error: MissingField",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "schema_error: InvalidVersion",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "schema_error: NonPortablePath",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "schema_error: EmptyEventTrace",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trace_event_type_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trace_event_type_all_six",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trace_event_type_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: failure_type_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: failure_type_all_four",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: failure_type_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: config_snapshot_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: config_snapshot_with_entries",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: config_snapshot_not_portable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: evidence_ref_portable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: evidence_ref_not_portable_unix",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: evidence_ref_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: generate_bundle_from_context",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_determinism",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_determinism_100_runs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: different_context_different_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: event_trace_ordering_preserved",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: empty_trace_produces_valid_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_is_portable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_to_json",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_produces_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_deterministic_100_runs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_wrong_schema_version",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_misordered_events_diverge",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_outcome_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: valid_bundle_passes_schema",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: empty_bundle_id_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: wrong_version_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: empty_error_message_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: non_portable_path_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: schema_error_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: exporter_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: exporter_custom_triggers",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: exporter_exports_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: exporter_multiple_bundles",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: exporter_find_missing_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: exporter_time_range_query",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: json_round_trip_preserves_key_fields",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: config_snapshot_in_bundle",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

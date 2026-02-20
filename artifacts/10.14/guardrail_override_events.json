@@ -1,0 +1,72 @@
+{
+  "bead_id": "bd-15u3",
+  "title": "Guardrail Override Events",
+  "description": "Instances where guardrails blocked Bayesian top-ranked candidates",
+  "generated": "2026-02-20",
+  "events": [
+    {
+      "epoch_id": 1,
+      "scenario": "Memory budget exceeded",
+      "top_candidate": "aggressive-repair",
+      "top_posterior": 0.82,
+      "blocking_guardrails": ["memory_budget"],
+      "reason": "memory utilization 96.0% exceeds block threshold 95.0%",
+      "outcome": "AllCandidatesBlocked",
+      "fallback": null
+    },
+    {
+      "epoch_id": 2,
+      "scenario": "Hardening regression attempt",
+      "top_candidate": "downgrade-encoding",
+      "top_posterior": 0.71,
+      "blocking_guardrails": ["hardening_regression"],
+      "reason": "hardening regression from Standard to Baseline (INV-001-MONOTONIC-HARDENING)",
+      "outcome": "TopCandidateBlockedFallbackUsed",
+      "fallback": {
+        "candidate": "maintain-encoding",
+        "rank": 1,
+        "posterior": 0.29
+      }
+    },
+    {
+      "epoch_id": 3,
+      "scenario": "Evidence emission disabled",
+      "top_candidate": "compact-storage",
+      "top_posterior": 0.65,
+      "blocking_guardrails": ["evidence_emission"],
+      "reason": "evidence emission is disabled (INV-002-EVIDENCE-EMISSION)",
+      "outcome": "AllCandidatesBlocked",
+      "fallback": null
+    },
+    {
+      "epoch_id": 4,
+      "scenario": "Per-candidate guardrail filter",
+      "top_candidate": "risky-optimization",
+      "top_posterior": 0.88,
+      "blocking_guardrails": ["per_candidate_guardrail"],
+      "reason": "candidate risky-optimization blocked by guardrail filter",
+      "outcome": "TopCandidateBlockedFallbackUsed",
+      "fallback": {
+        "candidate": "safe-optimization",
+        "rank": 1,
+        "posterior": 0.12
+      }
+    },
+    {
+      "epoch_id": 5,
+      "scenario": "Durability below threshold",
+      "top_candidate": "lossy-compression",
+      "top_posterior": 0.73,
+      "blocking_guardrails": ["durability_budget"],
+      "reason": "durability 0.85 below minimum 0.90",
+      "outcome": "AllCandidatesBlocked",
+      "fallback": null
+    }
+  ],
+  "summary": {
+    "total_overrides": 5,
+    "all_blocked": 3,
+    "fallback_used": 2,
+    "guardrail_types_triggered": ["memory_budget", "hardening_regression", "evidence_emission", "per_candidate_guardrail", "durability_budget"]
+  }
+}

@@ -1,0 +1,111 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "ReproBundle Schema v1",
+  "description": "Deterministic repro bundle for control-plane failure reproduction",
+  "type": "object",
+  "required": [
+    "bundle_id",
+    "schema_version",
+    "seed",
+    "epoch_id",
+    "timestamp_ms",
+    "failure_type",
+    "error_message",
+    "trigger",
+    "config",
+    "event_trace",
+    "evidence_refs"
+  ],
+  "properties": {
+    "bundle_id": {
+      "type": "string",
+      "pattern": "^RB-[0-9a-f]{16}$",
+      "description": "Deterministically-derived bundle identifier"
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Schema version for forward compatibility"
+    },
+    "seed": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Random seed used for stochastic decisions"
+    },
+    "epoch_id": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Epoch at time of export"
+    },
+    "timestamp_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Monotonic timestamp of export (ms)"
+    },
+    "failure_type": {
+      "type": "string",
+      "enum": [
+        "epoch_transition_timeout",
+        "barrier_timeout",
+        "policy_violation",
+        "marker_integrity_break"
+      ],
+      "description": "Classification of the failure"
+    },
+    "error_message": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Human-readable error message"
+    },
+    "trigger": {
+      "type": "string",
+      "description": "Triggering condition description"
+    },
+    "config": {
+      "type": "object",
+      "description": "Configuration snapshot as key-value pairs"
+    },
+    "event_trace": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["seq", "event_type", "timestamp_ms", "payload"],
+        "properties": {
+          "seq": {"type": "integer", "minimum": 0},
+          "event_type": {
+            "type": "string",
+            "enum": [
+              "epoch_transition",
+              "barrier_event",
+              "policy_evaluation",
+              "marker_integrity_check",
+              "config_change",
+              "external_signal"
+            ]
+          },
+          "timestamp_ms": {"type": "integer", "minimum": 0},
+          "payload": {"type": "string"}
+        }
+      },
+      "description": "Ordered sequence of control-plane events"
+    },
+    "evidence_refs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["evidence_id", "decision_kind", "epoch_id", "relative_path"],
+        "properties": {
+          "evidence_id": {"type": "string"},
+          "decision_kind": {"type": "string"},
+          "epoch_id": {"type": "integer", "minimum": 0},
+          "relative_path": {
+            "type": "string",
+            "pattern": "^[^/\\\\]",
+            "description": "Relative path (no absolute paths for portability)"
+          }
+        }
+      },
+      "description": "References to evidence artifacts"
+    }
+  }
+}

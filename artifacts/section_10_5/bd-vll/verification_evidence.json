@@ -1,0 +1,67 @@
+{
+  "bead_id": "bd-vll",
+  "timestamp_utc": "2026-02-20T19:27:12Z",
+  "status": "completed_with_known_rch_remote_workspace_blocker",
+  "implementation": {
+    "files": [
+      "crates/franken-node/src/tools/replay_bundle.rs",
+      "crates/franken-node/src/tools/mod.rs",
+      "crates/franken-node/src/main.rs",
+      "docs/specs/section_10_5/bd-vll_contract.md",
+      "scripts/check_replay_bundle.py",
+      "tests/test_check_replay_bundle.py"
+    ],
+    "highlights": [
+      "Implemented deterministic replay bundle model with canonical JSON serialization and integrity hashing.",
+      "Implemented bundle generation, integrity validation, replay verification, and chunk metadata for >10MB bundles.",
+      "Wired CLI incident bundle/replay flows in main command dispatch.",
+      "Added a deterministic verification script and Python unit tests for acceptance checks."
+    ]
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "python3 scripts/check_replay_bundle.py --json",
+        "result": "pass",
+        "details": "PASS: 19/19 checks (determinism + integrity + wiring + fixture checks)."
+      },
+      {
+        "command": "python3 -m unittest tests/test_check_replay_bundle.py",
+        "result": "pass",
+        "details": "PASS: 13 tests in 0.007s."
+      },
+      {
+        "command": "rch exec -- cargo test --manifest-path crates/franken-node/Cargo.toml replay_bundle -- --nocapture",
+        "result": "fail",
+        "details": "Remote worker failed to resolve workspace path dependency franken_engine (missing Cargo.toml under remote mirror)."
+      }
+    ],
+    "rch_environment_notes": [
+      "Cargo verification was executed through rch as required.",
+      "Current remote workspace sync does not include local sibling path dependency franken_engine.",
+      "Failure is environmental/workspace-layout related, not a replay_bundle assertion failure."
+    ]
+  },
+  "acceptance_criteria_mapping": [
+    {
+      "criterion": "ReplayBundle and timeline schema are implemented with required fields and deterministic ordering.",
+      "evidence": "crates/franken-node/src/tools/replay_bundle.rs types ReplayBundle, TimelineEvent, BundleManifest, BundleChunk."
+    },
+    {
+      "criterion": "Deterministic generation produces byte-identical output for identical inputs.",
+      "evidence": "scripts/check_replay_bundle.py sample determinism check (bundle A == bundle B)."
+    },
+    {
+      "criterion": "Integrity hash can be recomputed and validated.",
+      "evidence": "validate_bundle_integrity(...) + script integrity check PASS."
+    },
+    {
+      "criterion": "CLI incident bundle/replay surfaces are integrated.",
+      "evidence": "crates/franken-node/src/main.rs incident bundle/replay dispatch paths."
+    },
+    {
+      "criterion": "Verification tooling and artifacts exist for section gate consumption.",
+      "evidence": "scripts/check_replay_bundle.py, tests/test_check_replay_bundle.py, artifacts/section_10_5/bd-vll/*."
+    }
+  ]
+}

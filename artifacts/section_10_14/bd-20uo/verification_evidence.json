@@ -1,0 +1,345 @@
+{
+  "bead_id": "bd-20uo",
+  "title": "Proof-carrying repair artifacts for decode/reconstruction paths",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 35,
+  "summary": {
+    "passing": 66,
+    "failing": 0,
+    "total": 66
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/repair/proof_carrying_decode.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-20uo_contract.md"
+    },
+    {
+      "check": "file: golden vectors",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/repair_proof_samples.json"
+    },
+    {
+      "check": "golden vectors artifact",
+      "pass": true,
+      "detail": "5 samples (minimum 3)"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "35 tests (minimum 25)"
+    },
+    {
+      "check": "Serialize/Deserialize derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "SHA-256 hashing",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct RepairProof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ProofCarryingDecoder",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ProofVerificationApi",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct Fragment",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct AlgorithmId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct Attestation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum VerificationResult",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ProofMode",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DecodeResult",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ProofAuditEvent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ProofCarryingDecodeError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn decode(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn verify(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn check_proof_presence(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn set_mode(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn register_algorithm(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: REPAIR_PROOF_EMITTED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: REPAIR_PROOF_VERIFIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: REPAIR_PROOF_MISSING",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: REPAIR_PROOF_INVALID",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPAIR-PROOF-COMPLETE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPAIR-PROOF-BINDING",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPAIR-PROOF-DETERMINISTIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_fragment_hash_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_fragment_hash_different_data",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_algorithm_id_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_success",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_emits_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_audit_event",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_unregistered_algorithm",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_empty_fragments",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_output_is_concatenation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_proof_id_format",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_timestamp_propagated",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_trace_id_propagated",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_mandatory",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_advisory",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_switch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_register_algorithm",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_register_duplicate_algorithm",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_valid_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_tampered_fragment_hash",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_wrong_algorithm",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_output_hash_mismatch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_invalid_signature",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_presence_mandatory_with_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_presence_mandatory_without_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_presence_advisory_without_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verification_result_event_codes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_repair_proof_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_result_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_proof_mode_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_error_display_missing",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_error_display_invalid",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_error_display_reconstruction",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_proof_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_multiple_decodes_audit_log",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decode_single_fragment",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "bead_id": "bd-25nl",
+  "section": "10.14",
+  "timestamp": "2026-02-20T19:27:35Z",
+  "status": "implemented_with_blocked_full_validation",
+  "artifacts": {
+    "code": [
+      "crates/franken-node/src/control_plane/root_pointer.rs"
+    ],
+    "tests": [
+      "tests/security/root_bootstrap_fail_closed.rs"
+    ],
+    "spec": [
+      "docs/specs/root_bootstrap_auth.md"
+    ],
+    "report": [
+      "artifacts/10.14/root_bootstrap_validation_report.json"
+    ]
+  },
+  "acceptance_mapping": [
+    {
+      "criterion": "Missing root pointer fails closed",
+      "evidence": "BootstrapError::RootMissing + security test missing_root_is_rejected"
+    },
+    {
+      "criterion": "Malformed root pointer fails closed",
+      "evidence": "BootstrapError::RootMalformed + security test malformed_root_is_rejected"
+    },
+    {
+      "criterion": "Invalid auth material is rejected",
+      "evidence": "BootstrapError::RootAuthFailed + security test invalid_auth_material_is_rejected"
+    },
+    {
+      "criterion": "Future-epoch root pointer rejected",
+      "evidence": "BootstrapError::RootEpochInvalid + security test future_epoch_root_is_rejected"
+    },
+    {
+      "criterion": "Version mismatch rejected",
+      "evidence": "BootstrapError::RootVersionMismatch + security test version_mismatch_is_rejected"
+    },
+    {
+      "criterion": "Valid authenticated root succeeds",
+      "evidence": "VerifiedRoot return path + security test valid_root_auth_bootstrap_succeeds"
+    }
+  ],
+  "validation_blockers": [
+    {
+      "type": "rch_remote_path_dependency",
+      "detail": "Workers missing synced franken_engine path dependency at expected workspace-relative location."
+    },
+    {
+      "type": "pre_existing_unrelated_compile_error",
+      "detail": "Lifetime error in crates/franken-node/src/tools/repro_bundle_export.rs:590 blocks full cargo test/check execution."
+    }
+  ]
+}

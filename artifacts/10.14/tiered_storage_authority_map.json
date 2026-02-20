@@ -1,0 +1,58 @@
+{
+  "bead_id": "bd-okqy",
+  "title": "Tiered Storage Authority Map",
+  "description": "Default class-to-tier-to-authority mapping for L1/L2/L3 trust storage",
+  "generated": "2026-02-20",
+  "tiers": {
+    "L1_local": {
+      "authority_level": 3,
+      "latency": "hot",
+      "purpose": "Working set for immediate control-plane decisions"
+    },
+    "L2_warm": {
+      "authority_level": 2,
+      "latency": "moderate",
+      "purpose": "Recently-active artifacts for rapid recovery"
+    },
+    "L3_archive": {
+      "authority_level": 1,
+      "latency": "cold",
+      "purpose": "Durable long-term copies for audit and disaster recovery"
+    }
+  },
+  "authority_mapping": {
+    "critical_marker": {
+      "authoritative_tier": "L1_local",
+      "authority_level": 3,
+      "rationale": "Immediate control-plane access required"
+    },
+    "trust_receipt": {
+      "authoritative_tier": "L2_warm",
+      "authority_level": 2,
+      "rationale": "Rapid recovery for audit verification"
+    },
+    "replay_bundle": {
+      "authoritative_tier": "L3_archive",
+      "authority_level": 1,
+      "rationale": "Durable long-term storage for incident replay"
+    },
+    "telemetry_artifact": {
+      "authoritative_tier": "L2_warm",
+      "authority_level": 2,
+      "rationale": "On-demand observability access"
+    }
+  },
+  "recovery_paths": [
+    {"from": "L2_warm", "to": "L1_local", "valid": true},
+    {"from": "L3_archive", "to": "L1_local", "valid": true},
+    {"from": "L3_archive", "to": "L2_warm", "valid": true},
+    {"from": "L1_local", "to": "L2_warm", "valid": false, "reason": "Lower authority cannot be source"},
+    {"from": "L1_local", "to": "L3_archive", "valid": false, "reason": "Lower authority cannot be source"},
+    {"from": "L2_warm", "to": "L3_archive", "valid": false, "reason": "Cannot recover into coldest tier"}
+  ],
+  "eviction_preconditions": {
+    "L1_local": "Artifact must exist in L2 or L3",
+    "L2_warm": "Artifact must exist in L3",
+    "L3_archive": "No precondition (permanent deletion)"
+  }
+}

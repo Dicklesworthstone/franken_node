@@ -1,0 +1,92 @@
+{
+  "bead_id": "bd-3nr",
+  "timestamp_utc": "2026-02-20T19:47:49Z",
+  "status": "completed_with_known_repo_gate_failures",
+  "implementation": {
+    "files": [
+      "crates/franken-node/src/security/degraded_mode_policy.rs",
+      "crates/franken-node/src/security/mod.rs",
+      "docs/specs/section_10_5/bd-3nr_contract.md",
+      "scripts/check_degraded_mode.py",
+      "tests/test_check_degraded_mode.py"
+    ],
+    "highlights": [
+      "Implemented DegradedModePolicy with required trigger/action/audit/recovery fields.",
+      "Implemented deterministic policy engine with Normal/Degraded/Suspended states.",
+      "Implemented mandatory periodic audit ticks with AuditEventMissed detection.",
+      "Implemented degraded action auditing and denial annotations.",
+      "Implemented stabilization-window recovery and bounded degradation escalation."
+    ]
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "python3 scripts/check_degraded_mode.py --json",
+        "result": "pass",
+        "details": "PASS: 28/28 checks (ordering, denied action, mandatory ticks/missed alert, recovery, trigger variants)."
+      },
+      {
+        "command": "python3 -m unittest tests/test_check_degraded_mode.py",
+        "result": "pass",
+        "details": "PASS: 14 tests."
+      },
+      {
+        "command": "rustfmt --edition 2024 --check --config skip_children=true crates/franken-node/src/security/degraded_mode_policy.rs crates/franken-node/src/security/mod.rs",
+        "result": "pass",
+        "details": "PASS on touched Rust files."
+      },
+      {
+        "command": "rch exec -- cargo test --manifest-path crates/franken-node/Cargo.toml degraded_mode_policy -- --nocapture",
+        "result": "fail",
+        "details": "Remote worker failed to resolve sibling workspace dependency franken_engine under remote mirror path."
+      },
+      {
+        "command": "rch exec -- cargo fmt --manifest-path crates/franken-node/Cargo.toml --all --check",
+        "result": "fail",
+        "details": "Workspace formatting drift exists across unrelated files (including sibling franken_engine surfaces)."
+      },
+      {
+        "command": "rch exec -- cargo check --manifest-path crates/franken-node/Cargo.toml --all-targets",
+        "result": "fail",
+        "details": "Remote worker failed to resolve sibling workspace dependency franken_engine under remote mirror path."
+      },
+      {
+        "command": "rch exec -- cargo clippy --manifest-path crates/franken-node/Cargo.toml --all-targets -- -D warnings",
+        "result": "fail",
+        "details": "Remote worker failed to resolve sibling workspace dependency franken_engine under remote mirror path."
+      }
+    ],
+    "rch_environment_notes": [
+      "Cargo verification was executed via rch as required by AGENTS.md.",
+      "Current rch remote mirror for this repository does not include sibling path dependency franken_engine.",
+      "cargo fmt --check reports broad pre-existing formatting drift outside bd-3nr scope.",
+      "Failures are workspace/environmental and not a degraded-mode verifier/test assertion failure."
+    ]
+  },
+  "acceptance_criteria_mapping": [
+    {
+      "criterion": "DegradedModePolicy defines trigger conditions, allowed/denied actions, mandatory audits, and recovery criteria.",
+      "evidence": "DegradedModePolicy + TriggerCondition + AuditEventSpec + RecoveryCriterion in degraded_mode_policy.rs."
+    },
+    {
+      "criterion": "Activation emits DegradedModeEntered event before degraded action processing.",
+      "evidence": "activate(...) emits TRUST_INPUT_STALE + DEGRADED_MODE_ENTERED; verifier checks ordering entered_idx < action_idx."
+    },
+    {
+      "criterion": "Actions in degraded mode emit action audit events with permit/deny semantics.",
+      "evidence": "evaluate_action(...) emits DegradedModeActionAudit; denied path references denied_actions.<action>."
+    },
+    {
+      "criterion": "Mandatory audit events emit periodically and missing intervals trigger alert.",
+      "evidence": "tick_mandatory_audits(...) emits MandatoryAuditTick and AuditEventMissed."
+    },
+    {
+      "criterion": "Recovery requires all criteria satisfied for stabilization window before exit.",
+      "evidence": "observe_recovery(...) enforces all criteria + stabilization window then emits DegradedModeExited."
+    },
+    {
+      "criterion": "Verification script/tests cover trigger variants, denied path, missed alert, stabilization window.",
+      "evidence": "scripts/check_degraded_mode.py + tests/test_check_degraded_mode.py passing."
+    }
+  ]
+}

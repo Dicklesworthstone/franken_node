@@ -1,0 +1,67 @@
+{
+  "title": "Retroactive Hardening Pipeline Report",
+  "bead_id": "bd-1daz",
+  "section": "10.14",
+  "description": "Per-object repairability scores before and after retroactive hardening. Each object is created at a different creation_level and hardened to Critical.",
+  "pipeline_epoch": 42,
+  "target_level": "critical",
+  "objects": [
+    {
+      "object_id": "obj-baseline-001",
+      "creation_level": "baseline",
+      "target_level": "critical",
+      "repairability_before": 0.0,
+      "repairability_after": 0.95,
+      "artifacts_created": 4,
+      "protection_types_added": ["checksum", "parity", "integrity_proof", "redundant_copy"]
+    },
+    {
+      "object_id": "obj-standard-002",
+      "creation_level": "standard",
+      "target_level": "critical",
+      "repairability_before": 0.1,
+      "repairability_after": 0.95,
+      "artifacts_created": 3,
+      "protection_types_added": ["parity", "integrity_proof", "redundant_copy"]
+    },
+    {
+      "object_id": "obj-enhanced-003",
+      "creation_level": "enhanced",
+      "target_level": "critical",
+      "repairability_before": 0.3,
+      "repairability_after": 0.95,
+      "artifacts_created": 2,
+      "protection_types_added": ["integrity_proof", "redundant_copy"]
+    },
+    {
+      "object_id": "obj-maximum-004",
+      "creation_level": "maximum",
+      "target_level": "critical",
+      "repairability_before": 0.45,
+      "repairability_after": 0.95,
+      "artifacts_created": 1,
+      "protection_types_added": ["redundant_copy"]
+    },
+    {
+      "object_id": "obj-critical-005",
+      "creation_level": "critical",
+      "target_level": "critical",
+      "repairability_before": 0.95,
+      "repairability_after": 0.95,
+      "artifacts_created": 0,
+      "protection_types_added": []
+    }
+  ],
+  "summary": {
+    "total_objects": 5,
+    "total_artifacts_created": 10,
+    "all_repairability_monotonic": true,
+    "identity_stable": true,
+    "invariants_satisfied": [
+      "INV-RETROHARDEN-UNION-ONLY",
+      "INV-RETROHARDEN-MONOTONIC",
+      "INV-RETROHARDEN-IDEMPOTENT",
+      "INV-RETROHARDEN-BOUNDED"
+    ]
+  }
+}

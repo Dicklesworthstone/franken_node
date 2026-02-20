@@ -1,0 +1,66 @@
+{
+  "bead_id": "bd-25nl",
+  "generated_at": "2026-02-20T19:27:35Z",
+  "scope": {
+    "code": [
+      "crates/franken-node/src/control_plane/root_pointer.rs"
+    ],
+    "security_tests": [
+      "tests/security/root_bootstrap_fail_closed.rs"
+    ],
+    "spec": [
+      "docs/specs/root_bootstrap_auth.md"
+    ]
+  },
+  "implementation": {
+    "bootstrap_api": "bootstrap_root(dir: &Path, auth_config: &RootAuthConfig) -> Result<VerifiedRoot, BootstrapError>",
+    "checks": [
+      "root pointer file presence/readability",
+      "root pointer JSON parse validity",
+      "detached auth record parse validity",
+      "root format version match",
+      "future-epoch rejection via max_allowed_epoch",
+      "root hash match against detached auth record",
+      "detached epoch match against root epoch",
+      "detached MAC verification against trust anchor"
+    ],
+    "bootstrap_errors": [
+      "RootMissing",
+      "RootMalformed",
+      "RootAuthFailed",
+      "RootEpochInvalid",
+      "RootVersionMismatch"
+    ]
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "rch doctor",
+        "exit_code": 0,
+        "status": "pass"
+      },
+      {
+        "command": "rch exec -- cargo test -p frankenengine-node root_pointer",
+        "exit_code": 101,
+        "status": "blocked",
+        "reason": "Remote worker path dependency missing: /data/tmp/rch_bolddesert/franken_node/franken_engine/crates/franken-engine/Cargo.toml"
+      },
+      {
+        "command": "rch exec -- cargo test --manifest-path franken_node/Cargo.toml -p frankenengine-node root_pointer",
+        "exit_code": 101,
+        "status": "blocked",
+        "reason": "RCH sync fallback hit local build path; compile blocked by pre-existing unrelated lifetime error in crates/franken-node/src/tools/repro_bundle_export.rs:590"
+      },
+      {
+        "command": "rustfmt --edition 2024 crates/franken-node/src/control_plane/root_pointer.rs tests/security/root_bootstrap_fail_closed.rs",
+        "exit_code": 0,
+        "status": "pass"
+      }
+    ],
+    "overall": "partial",
+    "notes": [
+      "bd-25nl implementation and tests are in place.",
+      "Full cargo validation is currently blocked by environment/path-dependency and unrelated compile errors outside bd-25nl scope."
+    ]
+  }
+}

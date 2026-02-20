@@ -1,0 +1,430 @@
+{
+  "bead_id": "bd-1daz",
+  "title": "Retroactive hardening pipeline (union-only protection artifacts)",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 49,
+  "summary": {
+    "passing": 83,
+    "failing": 0,
+    "total": 83
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/retroactive_hardening.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-1daz_contract.md"
+    },
+    {
+      "check": "file: report artifact",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/retroactive_hardening_report.json"
+    },
+    {
+      "check": "report artifact: per-object repairability",
+      "pass": true,
+      "detail": "5 objects with valid per-object repairability scores"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "49 tests (minimum 40)"
+    },
+    {
+      "check": "Serialize/Deserialize derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "hardening state machine integration",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "SHA-256 content hashing",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ObjectId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ProtectionType",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ProtectionArtifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct CanonicalObject",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct RepairabilityScore",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct HardeningProgressRecord",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct HardeningResult",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct RetroactiveHardeningPipeline",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn harden(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn harden_corpus(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn verify_identity_stable(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn measure_repairability(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn required_protections(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-RETROHARDEN-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-RETROHARDEN-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-RETROHARDEN-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-RETROHARDEN-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-RETROHARDEN-UNION-ONLY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-RETROHARDEN-MONOTONIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-RETROHARDEN-IDEMPOTENT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-RETROHARDEN-BOUNDED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "protection_type: Checksum",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "protection_type: Parity",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "protection_type: IntegrityProof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "protection_type: RedundantCopy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_object_id_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_protection_type_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_protection_type_all",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_protection_type_weights_sum_close_to_one",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_protection_type_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_canonical_object_creation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_canonical_object_hash_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_canonical_object_different_content_different_hash",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_required_protections_baseline_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_required_protections_standard_checksum",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_required_protections_enhanced",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_required_protections_maximum",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_required_protections_critical_all_four",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_required_protections_monotonically_increasing",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_baseline_to_standard",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_standard_to_enhanced",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_baseline_to_critical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_same_level_no_artifacts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_reverse_direction_no_artifacts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_already_at_max_no_artifacts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_artifact_ids_contain_object_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_artifact_data_nonempty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_redundant_copy_matches_content",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_identity_stable_same_object",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_identity_stable_clone",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_identity_unstable_different_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_identity_unstable_different_content",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_does_not_modify_object",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_repairability_no_artifacts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_repairability_with_checksum",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_repairability_with_all_protections",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_repairability_increases_with_hardening",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_repairability_capped_at_one",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_repairability_deduplicates_same_type",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_corpus_basic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_corpus_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_corpus_repairability_improves",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_corpus_same_level_no_artifacts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_corpus_progress_record_fields",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_corpus_multi_level_gap",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_large_corpus",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_protection_artifact_serialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_hardening_result_serialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_repairability_score_serialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_checksum_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_parity_data_length",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_harden_empty_content_object",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

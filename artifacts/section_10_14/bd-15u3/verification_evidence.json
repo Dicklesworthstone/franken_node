@@ -1,14 +1,14 @@
 {
   "bead_id": "bd-15u3",
-  "title": "Guardrail precedence over Bayesian recommendations",
+  "title": "Guardrail precedence enforcement (decision engine)",
   "section": "10.14",
   "overall_pass": true,
   "verdict": "PASS",
   "test_count": 34,
   "summary": {
-    "passing": 61,
+    "passing": 57,
     "failing": 0,
-    "total": 61
+    "total": 57
   },
   "checks": [
     {
@@ -37,7 +37,17 @@
       "detail": "found"
     },
     {
-      "check": "guardrail_filtered field usage",
+      "check": "guardrail monitor integration",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "bayesian diagnostics integration",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "precedence enforcement logic",
       "pass": true,
       "detail": "found"
     },
@@ -67,12 +77,12 @@
       "detail": "found"
     },
     {
-      "check": "method: fn decide(",
+      "check": "method: fn new(",
       "pass": true,
       "detail": "found"
     },
     {
-      "check": "method: fn new(",
+      "check": "method: fn decide(",
       "pass": true,
       "detail": "found"
     },
@@ -113,36 +123,6 @@
     },
     {
       "check": "invariant: INV-DECIDE-NO-PANIC",
-      "pass": true,
-      "detail": "found"
-    },
-    {
-      "check": "reason_variant: TopCandidateAccepted",
-      "pass": true,
-      "detail": "found"
-    },
-    {
-      "check": "reason_variant: TopCandidateBlockedFallbackUsed",
-      "pass": true,
-      "detail": "found"
-    },
-    {
-      "check": "reason_variant: AllCandidatesBlocked",
-      "pass": true,
-      "detail": "found"
-    },
-    {
-      "check": "reason_variant: NoCandidates",
-      "pass": true,
-      "detail": "found"
-    },
-    {
-      "check": "upstream: bayesian_diagnostics",
-      "pass": true,
-      "detail": "found"
-    },
-    {
-      "check": "upstream: guardrail_monitor",
       "pass": true,
       "detail": "found"
     },

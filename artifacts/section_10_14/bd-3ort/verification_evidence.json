@@ -1,0 +1,430 @@
+{
+  "bead_id": "bd-3ort",
+  "title": "Proof-presence requirement for quarantine promotion",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 33,
+  "summary": {
+    "passing": 83,
+    "failing": 0,
+    "total": 83
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/connector/high_assurance_promotion.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-3ort_contract.md"
+    },
+    {
+      "check": "file: promotion matrix artifact",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/high_assurance_promotion_matrix.json"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum AssuranceMode",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ObjectClass",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ProofRequirement",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ProofBundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum PromotionDenialReason",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct PolicyAuthorization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct HighAssuranceGate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct PromotionMatrixEntry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "assurance_mode: Standard",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "assurance_mode: HighAssurance",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "object_class: CriticalMarker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "object_class: StateObject",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "object_class: TelemetryArtifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "object_class: ConfigObject",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "proof_requirement: FullProofChain",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "proof_requirement: IntegrityProof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "proof_requirement: IntegrityHash",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "proof_requirement: SchemaProof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "denial_reason: ProofBundleMissing",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "denial_reason: ProofBundleInsufficient",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "denial_reason: UnauthorizedModeDowngrade",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn evaluate(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn switch_mode(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn promotion_matrix(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn satisfies(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn empty(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn full(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn label(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn requires_proof(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn code(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_json(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn proof_requirement_for(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: QUARANTINE_PROMOTION_APPROVED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: QUARANTINE_PROMOTION_DENIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: ASSURANCE_MODE_CHANGED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-HA-PROOF-REQUIRED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-HA-FAIL-CLOSED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-HA-MODE-POLICY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "denial_code: PROMOTION_DENIED_PROOF_BUNDLE_MISSING",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "denial_code: PROMOTION_DENIED_PROOF_INSUFFICIENT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "denial_code: MODE_DOWNGRADE_UNAUTHORIZED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: assurance_mode_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: assurance_mode_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: assurance_mode_requires_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: object_class_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: object_class_all_four",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: object_class_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: proof_requirement_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: proof_requirement_mapping",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: empty_proof_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: full_proof_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: proof_bundle_satisfies_check",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: standard_mode_allows_without_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: standard_mode_allows_with_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: high_assurance_rejects_without_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: high_assurance_rejects_insufficient_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: high_assurance_approves_with_full_proof",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: high_assurance_per_class_enforcement",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: high_assurance_each_class_has_requirement",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: upgrade_to_high_assurance_no_auth_needed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: downgrade_without_auth_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: downgrade_with_auth_allowed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: same_mode_switch_is_noop",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: counters_accumulate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: promotion_matrix_standard_mode",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: promotion_matrix_high_assurance_mode",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: promotion_matrix_per_class_requirements",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: matrix_entry_to_json",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: denial_reason_codes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: denial_reason_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: partial_bundle_rejected_for_critical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: mode_downgrade_via_direct_mutation_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: gate_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: gate_high_assurance_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "33 tests (minimum 25)"
+    },
+    {
+      "check": "matrix is list",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "matrix has 4 entries",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "matrix covers all classes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "HA entries have proof requirements",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

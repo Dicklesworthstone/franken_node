@@ -1,0 +1,10 @@
+# Cx-first policy exception allowlist.
+# Each exception must be time-bounded and documented.
+#
+# Schema:
+# [[exceptions]]
+# function_path = "crates/franken-node/src/connector/example.rs::function_name"
+# reason = "why this temporary exception is required"
+# expires_on = "YYYY-MM-DD"
+
+exceptions = []

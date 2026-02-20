@@ -1,0 +1,67 @@
+{
+  "title": "Repair Proof Golden Vectors",
+  "bead_id": "bd-20uo",
+  "section": "10.14",
+  "description": "Sample repair proofs for conformance testing",
+  "samples": [
+    {
+      "name": "three_fragment_concat",
+      "object_id": "obj-golden-001",
+      "algorithm_id": "simple_concat",
+      "fragment_count": 3,
+      "input_fragment_hashes": [
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592",
+        "2c624232cdd221771294dfbb310aca000a0df6ac8b166e8b32c4bdc7c0e3f100"
+      ],
+      "output_hash": "abc123def456",
+      "mode": "mandatory",
+      "expected_verification": "valid"
+    },
+    {
+      "name": "single_fragment_identity",
+      "object_id": "obj-golden-002",
+      "algorithm_id": "simple_concat",
+      "fragment_count": 1,
+      "input_fragment_hashes": [
+        "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+      ],
+      "output_hash": "single_output_hash",
+      "mode": "mandatory",
+      "expected_verification": "valid"
+    },
+    {
+      "name": "tampered_fragment",
+      "object_id": "obj-golden-003",
+      "algorithm_id": "simple_concat",
+      "fragment_count": 2,
+      "input_fragment_hashes": [
+        "tampered_hash_value",
+        "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592"
+      ],
+      "output_hash": "output_hash_value",
+      "mode": "mandatory",
+      "expected_verification": "invalid_fragment_hash"
+    },
+    {
+      "name": "missing_proof_advisory",
+      "object_id": "obj-golden-004",
+      "algorithm_id": "simple_concat",
+      "fragment_count": 0,
+      "input_fragment_hashes": [],
+      "output_hash": "",
+      "mode": "advisory",
+      "expected_verification": "missing_proof_allowed"
+    },
+    {
+      "name": "missing_proof_mandatory",
+      "object_id": "obj-golden-005",
+      "algorithm_id": "simple_concat",
+      "fragment_count": 0,
+      "input_fragment_hashes": [],
+      "output_hash": "",
+      "mode": "mandatory",
+      "expected_verification": "missing_proof_rejected"
+    }
+  ]
+}

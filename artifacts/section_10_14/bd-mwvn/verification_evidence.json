@@ -1,0 +1,320 @@
+{
+  "bead_id": "bd-mwvn",
+  "title": "Policy action explainer (diagnostic vs guarantee confidence)",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 35,
+  "summary": {
+    "passing": 61,
+    "failing": 0,
+    "total": 61
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/policy_explainer.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-mwvn_contract.md"
+    },
+    {
+      "check": "file: examples artifact",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/policy_explainer_examples.json"
+    },
+    {
+      "check": "examples artifact: scenario count",
+      "pass": true,
+      "detail": "5 scenarios (minimum 5)"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "35 tests (minimum 25)"
+    },
+    {
+      "check": "Serialize/Deserialize derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "vocabulary separation constants",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "decision engine integration",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "bayesian diagnostics integration",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct PolicyExplanation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DiagnosticSection",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct GuaranteeSection",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct BlockedExplanation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct WordingValidation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct PolicyExplainer",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn explain(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn validate_wording(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_json(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-EXPLAIN-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-EXPLAIN-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-EXPLAIN-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-EXPLAIN-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-EXPLAIN-SEPARATION",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-EXPLAIN-WORDING",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-EXPLAIN-COMPLETE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_explain_top_accepted",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_explain_fallback",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_explain_all_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_explain_no_candidates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_diagnostic_section_present_with_observations",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_diagnostic_section_present_without_observations",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_diagnostic_section_present_all_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_guarantee_section_present_accepted",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_guarantee_section_present_fallback",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_guarantee_section_present_all_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_wording_valid_top_accepted",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_wording_valid_fallback",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_wording_valid_all_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_wording_valid_no_candidates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_wording_valid_empty_diagnostics",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_wording_rejects_guarantee_term_in_diagnostic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_wording_rejects_diagnostic_term_in_guarantee",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_blocked_alternatives_empty_when_top_accepted",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_blocked_alternatives_present_on_fallback",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_blocked_alternatives_present_on_all_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_blocked_explanation_has_guardrail_ids",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_serialization_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_json_has_both_top_level_sections",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_epoch_propagated",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_guarantee_vocabulary_non_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_diagnostic_vocabulary_non_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_vocabularies_are_disjoint",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_confidence_level_low_with_no_observations",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_confidence_level_with_many_observations",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_invariants_verified_present",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_all_blocked_has_no_panic_invariant",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_wording_validation_serialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_diagnostic_summary_uses_heuristic_language",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_guarantee_summary_uses_guarantee_language",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

@@ -1,0 +1,88 @@
+{
+  "bead_id": "bd-2fa",
+  "timestamp_utc": "2026-02-20T19:35:38Z",
+  "status": "completed_with_known_repo_gate_failures",
+  "implementation": {
+    "files": [
+      "crates/franken-node/src/tools/counterfactual_replay.rs",
+      "crates/franken-node/src/tools/mod.rs",
+      "crates/franken-node/src/main.rs",
+      "docs/specs/section_10_5/bd-2fa_contract.md",
+      "scripts/check_counterfactual.py",
+      "tests/test_check_counterfactual.py"
+    ],
+    "highlights": [
+      "Implemented CounterfactualReplayEngine with deterministic, sandboxed event evaluation.",
+      "Implemented required result model: DecisionPoint, DivergenceRecord, SummaryStatistics, CounterfactualResult.",
+      "Implemented simulation modes SinglePolicySwap and ParameterSweep with max 20 values.",
+      "Implemented execution bounds (max_replay_steps, max_wall_clock_millis) returning partial results on bound errors.",
+      "Integrated incident counterfactual CLI flow in main command dispatch."
+    ]
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "python3 scripts/check_counterfactual.py --json",
+        "result": "pass",
+        "details": "PASS: 20/20 checks (implementation, wiring, determinism, sweep, timeout/step guards)."
+      },
+      {
+        "command": "python3 -m unittest tests/test_check_counterfactual.py",
+        "result": "pass",
+        "details": "PASS: 10 tests."
+      },
+      {
+        "command": "rch exec -- cargo test --manifest-path crates/franken-node/Cargo.toml counterfactual_replay -- --nocapture",
+        "result": "fail",
+        "details": "Remote worker failed to resolve sibling workspace dependency franken_engine under remote mirror path."
+      },
+      {
+        "command": "rch exec -- cargo fmt --manifest-path crates/franken-node/Cargo.toml --all --check",
+        "result": "fail",
+        "details": "Workspace formatting drift exists across unrelated files (including sibling franken_engine surfaces); not limited to bd-2fa edits."
+      },
+      {
+        "command": "rch exec -- cargo check --manifest-path crates/franken-node/Cargo.toml --all-targets",
+        "result": "fail",
+        "details": "Remote worker failed to resolve sibling workspace dependency franken_engine under remote mirror path."
+      },
+      {
+        "command": "rch exec -- cargo clippy --manifest-path crates/franken-node/Cargo.toml --all-targets -- -D warnings",
+        "result": "fail",
+        "details": "Remote worker failed to resolve sibling workspace dependency franken_engine under remote mirror path."
+      }
+    ],
+    "rch_environment_notes": [
+      "Cargo verification was executed via rch as required by AGENTS.md.",
+      "Current rch remote mirror for this repository does not include sibling path dependency franken_engine.",
+      "cargo fmt --check reports broad pre-existing formatting drift outside bd-2fa scope.",
+      "Failures are environmental/workspace-level and not a failing counterfactual replay assertion."
+    ]
+  },
+  "acceptance_criteria_mapping": [
+    {
+      "criterion": "CounterfactualReplayEngine accepts replay bundle + alternate policy and re-executes timeline.",
+      "evidence": "CounterfactualReplayEngine::replay and replay_with_baseline in counterfactual_replay.rs."
+    },
+    {
+      "criterion": "CounterfactualResult includes original/counterfactual outcomes, divergence points, summary stats.",
+      "evidence": "CounterfactualResult, DivergenceRecord, SummaryStatistics structs implemented."
+    },
+    {
+      "criterion": "Sandboxed deterministic evaluation with no side effects.",
+      "evidence": "SandboxedExecutor trait + PureSandboxedExecutor pure event evaluation path."
+    },
+    {
+      "criterion": "SinglePolicySwap and ParameterSweep modes are implemented.",
+      "evidence": "SimulationMode enum + simulate(...) sweep execution and validation logic."
+    },
+    {
+      "criterion": "Step and timeout bounds return structured errors with partial results.",
+      "evidence": "StepLimitExceeded and WallClockExceeded include partial_result payloads."
+    },
+    {
+      "criterion": "Verification script/tests assert divergence, both modes, and timeout guard.",
+      "evidence": "scripts/check_counterfactual.py + tests/test_check_counterfactual.py passing."
+    }
+  ]
+}

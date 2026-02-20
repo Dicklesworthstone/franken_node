@@ -1,0 +1,26 @@
+[
+  {
+    "object_class": "critical_marker",
+    "assurance_mode": "high_assurance",
+    "proof_required": true,
+    "proof_requirement": "full_proof_chain"
+  },
+  {
+    "object_class": "state_object",
+    "assurance_mode": "high_assurance",
+    "proof_required": true,
+    "proof_requirement": "integrity_proof"
+  },
+  {
+    "object_class": "telemetry_artifact",
+    "assurance_mode": "high_assurance",
+    "proof_required": true,
+    "proof_requirement": "integrity_hash"
+  },
+  {
+    "object_class": "config_object",
+    "assurance_mode": "high_assurance",
+    "proof_required": true,
+    "proof_requirement": "schema_proof"
+  }
+]

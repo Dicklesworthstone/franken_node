@@ -1,0 +1,135 @@
+{
+  "bead_id": "bd-mwvn",
+  "title": "Policy Explainer Examples",
+  "description": "Example explanations covering different decision scenarios",
+  "generated": "2026-02-20",
+  "examples": [
+    {
+      "scenario": "All guardrails pass, top candidate accepted",
+      "decision_reason": "TopCandidateAccepted",
+      "explanation": {
+        "diagnostic_confidence": {
+          "posterior_prob": 0.82,
+          "observation_count": 45,
+          "confidence_interval": [0.72, 0.91],
+          "confidence_level": "high",
+          "summary": "Data indicates the chosen action is statistically suggested with high diagnostic confidence based on 45 observations. This is a heuristic estimate, not a safety guarantee."
+        },
+        "guarantee_confidence": {
+          "all_guardrails_passed": true,
+          "guardrails_checked": [],
+          "invariants_verified": ["INV-DECIDE-PRECEDENCE", "INV-GUARD-ANYTIME"],
+          "summary": "All guardrails passed. The chosen action is verified by guardrail checks and proven within bounds of all monitored invariants."
+        },
+        "action_summary": "Action 'repair-strategy-A' selected: top-ranked candidate passed all guardrails.",
+        "blocked_alternatives": []
+      }
+    },
+    {
+      "scenario": "Top candidate blocked, fallback used",
+      "decision_reason": "TopCandidateBlockedFallbackUsed",
+      "explanation": {
+        "diagnostic_confidence": {
+          "posterior_prob": 0.35,
+          "observation_count": 20,
+          "confidence_interval": [0.22, 0.48],
+          "confidence_level": "medium",
+          "summary": "Data indicates the chosen action is statistically suggested with medium diagnostic confidence based on 20 observations. This is a heuristic estimate, not a safety guarantee."
+        },
+        "guarantee_confidence": {
+          "all_guardrails_passed": false,
+          "guardrails_checked": ["memory_budget"],
+          "invariants_verified": ["INV-DECIDE-PRECEDENCE", "INV-GUARD-ANYTIME"],
+          "summary": "The chosen action is verified by guardrail checks. 1 higher-ranked alternative(s) were blocked, guaranteed by invariant enforcement."
+        },
+        "action_summary": "Action 'conservative-repair' selected: top candidate blocked, fell back to rank 1.",
+        "blocked_alternatives": [
+          {
+            "candidate": "aggressive-repair",
+            "bayesian_rank": 0,
+            "blocked_by": ["memory_budget"],
+            "explanation": "Candidate 'aggressive-repair' (rank 0) was blocked by guardrail(s): memory_budget. Reasons: memory utilization 96% exceeds threshold."
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "All candidates blocked",
+      "decision_reason": "AllCandidatesBlocked",
+      "explanation": {
+        "diagnostic_confidence": {
+          "posterior_prob": null,
+          "observation_count": 30,
+          "confidence_interval": null,
+          "confidence_level": "high",
+          "summary": "Data indicates 30 observations were processed with high diagnostic confidence, but no candidate was eligible for selection. This is an observation-based assessment."
+        },
+        "guarantee_confidence": {
+          "all_guardrails_passed": false,
+          "guardrails_checked": ["durability_budget"],
+          "invariants_verified": ["INV-DECIDE-PRECEDENCE", "INV-DECIDE-NO-PANIC", "INV-GUARD-ANYTIME"],
+          "summary": "No action could be verified by guardrail checks. All candidates were blocked, guaranteed by invariant enforcement to prevent unsafe operations."
+        },
+        "action_summary": "No action selected: all 2 candidate(s) blocked by guardrails.",
+        "blocked_alternatives": [
+          {
+            "candidate": "encoding-compact",
+            "bayesian_rank": 0,
+            "blocked_by": ["durability_budget"],
+            "explanation": "Candidate 'encoding-compact' (rank 0) was blocked by guardrail(s): durability_budget. Reasons: durability 0.85 below minimum 0.90."
+          },
+          {
+            "candidate": "encoding-legacy",
+            "bayesian_rank": 1,
+            "blocked_by": ["durability_budget"],
+            "explanation": "Candidate 'encoding-legacy' (rank 1) was blocked by guardrail(s): durability_budget. Reasons: durability 0.85 below minimum 0.90."
+          }
+        ]
+      }
+    },
+    {
+      "scenario": "High diagnostic confidence, low guarantee (system in warn state)",
+      "decision_reason": "TopCandidateAccepted",
+      "explanation": {
+        "diagnostic_confidence": {
+          "posterior_prob": 0.91,
+          "observation_count": 100,
+          "confidence_interval": [0.85, 0.96],
+          "confidence_level": "high",
+          "summary": "Data indicates the chosen action is statistically suggested with high diagnostic confidence based on 100 observations. This is a heuristic estimate, not a safety guarantee."
+        },
+        "guarantee_confidence": {
+          "all_guardrails_passed": true,
+          "guardrails_checked": [],
+          "invariants_verified": ["INV-DECIDE-PRECEDENCE", "INV-GUARD-ANYTIME"],
+          "summary": "All guardrails passed. The chosen action is verified by guardrail checks and proven within bounds of all monitored invariants."
+        },
+        "action_summary": "Action 'lossy-compression' selected: top-ranked candidate passed all guardrails.",
+        "blocked_alternatives": [],
+        "note": "High diagnostic confidence (0.91) from extensive data. Guardrails passed but system was in memory-warn state."
+      }
+    },
+    {
+      "scenario": "Low diagnostic confidence, high guarantee (few observations but guardrails solid)",
+      "decision_reason": "TopCandidateAccepted",
+      "explanation": {
+        "diagnostic_confidence": {
+          "posterior_prob": 0.52,
+          "observation_count": 3,
+          "confidence_interval": [0.15, 0.89],
+          "confidence_level": "low",
+          "summary": "Data indicates the chosen action is statistically suggested with low diagnostic confidence based on 3 observations. This is a heuristic estimate, not a safety guarantee."
+        },
+        "guarantee_confidence": {
+          "all_guardrails_passed": true,
+          "guardrails_checked": [],
+          "invariants_verified": ["INV-DECIDE-PRECEDENCE", "INV-GUARD-ANYTIME"],
+          "summary": "All guardrails passed. The chosen action is verified by guardrail checks and proven within bounds of all monitored invariants."
+        },
+        "action_summary": "Action 'standard-encoding' selected: top-ranked candidate passed all guardrails.",
+        "blocked_alternatives": [],
+        "note": "Low diagnostic confidence (only 3 observations, wide CI) but all guardrails passed -- safe to proceed."
+      }
+    }
+  ]
+}
