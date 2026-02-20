@@ -1,0 +1,295 @@
+{
+  "bead_id": "bd-1iyx",
+  "title": "Determinism conformance tests",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 66,
+  "summary": {
+    "passing": 56,
+    "failing": 0,
+    "total": 56
+  },
+  "checks": [
+    {
+      "check": "file: test harness",
+      "pass": true,
+      "detail": "exists: tests/conformance/replica_artifact_determinism.rs"
+    },
+    {
+      "check": "file: test stub",
+      "pass": true,
+      "detail": "exists: crates/franken-node/tests/replica_artifact_determinism.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-1iyx_contract.md"
+    },
+    {
+      "check": "file: results CSV",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/determinism_conformance_results.csv"
+    },
+    {
+      "check": "file: seed implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/encoding/deterministic_seed.rs"
+    },
+    {
+      "check": "fixture count >= 3",
+      "pass": true,
+      "detail": "3 fixtures"
+    },
+    {
+      "check": "fixture readable: edge_case_minimal.json",
+      "pass": true,
+      "detail": "edge_case_minimal.json"
+    },
+    {
+      "check": "fixture readable: medium_multi_domain.json",
+      "pass": true,
+      "detail": "medium_multi_domain.json"
+    },
+    {
+      "check": "fixture readable: small_encoding.json",
+      "pass": true,
+      "detail": "small_encoding.json"
+    },
+    {
+      "check": "harness: struct Divergence",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "harness: struct Replica",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "harness: struct FixtureResult",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "harness: fn compare_artifacts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "harness: fn run_fixture",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "harness: fn verify_expected_seeds",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "harness: fn guess_root_cause",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "harness: fn parse_domain",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DETERMINISM_CHECK_STARTED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DETERMINISM_CHECK_PASSED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DETERMINISM_CHECK_FAILED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "divergence: hex context",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "divergence: root cause",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "divergence: offset",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_small_encoding_replicas_identical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_medium_multi_domain_replicas_identical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_edge_case_minimal_replicas_identical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_small_encoding_expected_seeds",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_medium_multi_domain_expected_seeds",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_edge_case_minimal_expected_seeds",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_ten_replicas_identical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_divergence_detected_when_injected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_divergence_reports_correct_offset",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_divergence_length_mismatch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_no_divergence_identical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_timestamp_root_cause_hint",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_all_fixtures_pass",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_divergence_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_parse_all_domains",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_parse_unknown_domain_panics",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_single_replica_always_passes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_context_hex_dump_correct_length",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "harness test count >= 15",
+      "pass": true,
+      "detail": "19 tests (minimum 15)"
+    },
+    {
+      "check": "CSV header present",
+      "pass": true,
+      "detail": "header found"
+    },
+    {
+      "check": "CSV data rows >= 3",
+      "pass": true,
+      "detail": "4 data rows"
+    },
+    {
+      "check": "CSV all_identical = true for all fixtures",
+      "pass": true,
+      "detail": "all pass"
+    },
+    {
+      "check": "fixture edge_case_minimal: encoding",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture edge_case_minimal: repair",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture medium_multi_domain: encoding",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture medium_multi_domain: repair",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture medium_multi_domain: scheduling",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture medium_multi_domain: placement",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture medium_multi_domain: verification",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture small_encoding: encoding",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture small_encoding: repair",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "fixture small_encoding: scheduling",
+      "pass": true,
+      "detail": "match"
+    }
+  ]
+}

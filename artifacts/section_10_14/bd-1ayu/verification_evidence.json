@@ -1,0 +1,78 @@
+{
+  "bead_id": "bd-1ayu",
+  "title": "Overhead/rate clamp policy for hardening escalations",
+  "overall_pass": true,
+  "checks": [
+    {
+      "check": "impl_exists",
+      "pass": true,
+      "detail": "HardeningClampPolicy struct found"
+    },
+    {
+      "check": "escalation_budget",
+      "pass": true,
+      "detail": "EscalationBudget with all required fields"
+    },
+    {
+      "check": "clamp_result",
+      "pass": true,
+      "detail": "ClampResult with Allowed/Clamped/Denied"
+    },
+    {
+      "check": "check_escalation_fn",
+      "pass": true,
+      "detail": "check_escalation function present"
+    },
+    {
+      "check": "clamp_event",
+      "pass": true,
+      "detail": "ClampEvent with required fields and CSV support"
+    },
+    {
+      "check": "event_codes",
+      "pass": true,
+      "detail": "all EVD-CLAMP event codes present"
+    },
+    {
+      "check": "rate_limit_logic",
+      "pass": true,
+      "detail": "rate limit logic with window counting"
+    },
+    {
+      "check": "overhead_limit_logic",
+      "pass": true,
+      "detail": "overhead limit logic with estimation and fallback"
+    },
+    {
+      "check": "determinism_test",
+      "pass": true,
+      "detail": "determinism test (1000 runs) present"
+    },
+    {
+      "check": "min_max_bounds",
+      "pass": true,
+      "detail": "min/max level bound enforcement present"
+    },
+    {
+      "check": "test_count",
+      "pass": true,
+      "detail": "32 unit tests"
+    },
+    {
+      "check": "spec_exists",
+      "pass": true,
+      "detail": "spec document with required content"
+    },
+    {
+      "check": "metrics_csv",
+      "pass": true,
+      "detail": "metrics CSV valid with 11 rows"
+    }
+  ],
+  "test_count": 32,
+  "artifacts": {
+    "implementation": "crates/franken-node/src/policy/hardening_clamps.rs",
+    "spec": "docs/specs/section_10_14/bd-1ayu_contract.md",
+    "metrics": "artifacts/10.14/hardening_clamp_metrics.csv"
+  }
+}

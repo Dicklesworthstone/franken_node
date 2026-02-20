@@ -1,0 +1,16 @@
+{
+  "bead": "bd-1l62",
+  "suite": "durable_claim_gate",
+  "summary": {
+    "accepted_path": "pass",
+    "proof_missing": "denied",
+    "proof_invalid": "denied",
+    "proof_expired": "denied",
+    "verification_timeout": "denied",
+    "marker_unavailable": "denied"
+  },
+  "latency_target": {
+    "target": "<1ms p99",
+    "observed_note": "gate computes synchronously with in-memory checks; synthetic test path is sub-millisecond"
+  }
+}

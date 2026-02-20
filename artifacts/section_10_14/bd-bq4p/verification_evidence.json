@@ -1,0 +1,55 @@
+{
+  "bead_id": "bd-bq4p",
+  "title": "Controller boundary checks rejecting correctness-semantic mutations",
+  "section": "10.14",
+  "overall_pass": true,
+  "rust_tests": {
+    "count": 38,
+    "all_pass": true,
+    "categories": {
+      "invariant_rejection": 12,
+      "valid_proposal_acceptance": 4,
+      "fail_closed_behavior": 2,
+      "audit_trail": 4,
+      "rejection_report": 2,
+      "error_class_stability": 4,
+      "serialization": 3,
+      "persistence": 1,
+      "adversarial": 2,
+      "lifecycle": 2,
+      "display_format": 2
+    }
+  },
+  "python_verification": {
+    "total_checks": 73,
+    "passing_checks": 73,
+    "failing_checks": 0
+  },
+  "python_unit_tests": {
+    "count": 26,
+    "all_pass": true
+  },
+  "checks": [
+    {"check": "impl_exists", "pass": true, "detail": "ControllerBoundaryChecker struct found"},
+    {"check": "error_class_enum", "pass": true, "detail": "3 stable variants"},
+    {"check": "boundary_violation", "pass": true, "detail": "all required fields present"},
+    {"check": "rejected_mutation_record", "pass": true, "detail": "all required fields present"},
+    {"check": "check_proposal_fn", "pass": true, "detail": "check_proposal present"},
+    {"check": "audit_trail", "pass": true, "detail": "full audit trail API present"},
+    {"check": "rejection_report", "pass": true, "detail": "JSON report with counts"},
+    {"check": "event_codes", "pass": true, "detail": "EVD-BOUNDARY-001 through 004"},
+    {"check": "invariant_markers", "pass": true, "detail": "all INV-BOUNDARY markers present"},
+    {"check": "upstream_dep", "pass": true, "detail": "imports CorrectnessEnvelope from bd-sddz"},
+    {"check": "fail_closed", "pass": true, "detail": "empty and malformed proposals rejected"},
+    {"check": "all_12_invariants_rejected", "pass": true, "detail": "INV-001 through INV-012"},
+    {"check": "serde_derives", "pass": true, "detail": "4 derive blocks"},
+    {"check": "module_registered", "pass": true, "detail": "in policy/mod.rs"},
+    {"check": "spec_contract", "pass": true, "detail": "bd-bq4p_contract.md exists"}
+  ],
+  "artifacts": {
+    "implementation": "crates/franken-node/src/policy/controller_boundary_checks.rs",
+    "spec": "docs/specs/section_10_14/bd-bq4p_contract.md",
+    "verification_script": "scripts/check_controller_boundary.py",
+    "script_tests": "tests/test_check_controller_boundary.py"
+  }
+}

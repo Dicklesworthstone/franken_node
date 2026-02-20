@@ -1,0 +1,400 @@
+{
+  "bead_id": "bd-2ona",
+  "title": "Evidence-ledger replay validator",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 34,
+  "summary": {
+    "passing": 77,
+    "failing": 0,
+    "total": 77
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/tools/evidence_replay_validator.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-2ona_contract.md"
+    },
+    {
+      "check": "module in tools/mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "tools module in main.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "upstream: evidence_ledger.rs",
+      "pass": true,
+      "detail": "exists"
+    },
+    {
+      "check": "imports DecisionKind + EvidenceEntry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "34 tests (minimum 30)"
+    },
+    {
+      "check": "type: pub struct EvidenceReplayValidator",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ReplayContext",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ReplayResult",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ReplayDiff",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DiffField",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ActionRef",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct Candidate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct Constraint",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ReplaySummary",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn validate(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn validate_batch(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn summary_report(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn replay_decision(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn matching_context(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn test_replay_entry(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_valid(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_match(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_mismatch(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_unresolvable(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn all_match(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn from_entry(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn event_code(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-REPLAY-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-REPLAY-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-REPLAY-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-REPLAY-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPLAY-DETERMINISTIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPLAY-COMPLETE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-REPLAY-INDEPENDENT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "decision_kind: DecisionKind::Admit",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "decision_kind: DecisionKind::Deny",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "decision_kind: DecisionKind::Quarantine",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "decision_kind: DecisionKind::Release",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "decision_kind: DecisionKind::Rollback",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "decision_kind: DecisionKind::Throttle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "decision_kind: DecisionKind::Escalate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: action_ref_from_entry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: action_ref_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_diff_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_diff_single_field",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_diff_multiple_fields",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_result_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_result_mismatch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_result_unresolvable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_result_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_context_valid",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_context_invalid_empty_candidates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: replay_context_invalid_empty_snapshot",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_admit_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_deny_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_quarantine_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_release_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_rollback_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_throttle_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_escalate_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_decision_kind_mismatch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_decision_id_mismatch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_invalid_context_unresolvable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_epoch_mismatch_unresolvable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: determinism_identical_runs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: determinism_100_runs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validate_batch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: summary_report",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: summary_not_all_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: summary_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: results_log_accumulates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validator_default",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: candidate_fields",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: constraint_satisfied",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: all_decision_kinds_covered",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "bead_id": "bd-sddz",
+  "title": "Immutable correctness envelope verification",
+  "overall_pass": true,
+  "checks": [
+    {
+      "check": "impl_exists",
+      "pass": true,
+      "detail": "CorrectnessEnvelope struct found"
+    },
+    {
+      "check": "mod_rs",
+      "pass": true,
+      "detail": "correctness_envelope module declared"
+    },
+    {
+      "check": "invariant_count",
+      "pass": true,
+      "detail": "12 invariants defined"
+    },
+    {
+      "check": "unique_ids",
+      "pass": true,
+      "detail": "12 unique invariant IDs"
+    },
+    {
+      "check": "no_enforcement_none",
+      "pass": true,
+      "detail": "no EnforcementMode::None found"
+    },
+    {
+      "check": "is_within_envelope",
+      "pass": true,
+      "detail": "is_within_envelope function present"
+    },
+    {
+      "check": "log_codes",
+      "pass": true,
+      "detail": "all EVD-ENVELOPE log codes present"
+    },
+    {
+      "check": "spec_exists",
+      "pass": true,
+      "detail": "governance spec present with invariant references"
+    },
+    {
+      "check": "manifest",
+      "pass": true,
+      "detail": "manifest valid with 12 invariants"
+    },
+    {
+      "check": "test_coverage",
+      "pass": true,
+      "detail": "all invariants tested in rejection tests"
+    }
+  ],
+  "invariant_count": 12,
+  "artifacts": {
+    "implementation": "crates/franken-node/src/policy/correctness_envelope.rs",
+    "spec": "docs/specs/section_10_14/bd-sddz_contract.md",
+    "manifest": "artifacts/10.14/correctness_envelope_manifest.json"
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "bead": "bd-3hdv",
+  "section": "10.14",
+  "title": "Monotonic control epoch in canonical manifest state",
+  "timestamp": "2026-02-20T18:23:41.209788+00:00",
+  "verification_results": {
+    "python_checks": {
+      "verdict": "PASS",
+      "passing": 57,
+      "total": 57
+    },
+    "python_unit_tests": {
+      "verdict": "PASS",
+      "passed": 34,
+      "total": 34
+    },
+    "rust_unit_tests": {
+      "verdict": "PASS",
+      "passed": 30,
+      "total": 30
+    },
+    "cargo_check": {
+      "verdict": "PASS",
+      "warnings": 14,
+      "errors": 0,
+      "note": "warnings are pre-existing dead code outside bead scope"
+    }
+  },
+  "artifacts": {
+    "implementation": "crates/franken-node/src/control_plane/control_epoch.rs",
+    "spec": "docs/specs/section_10_14/bd-3hdv_contract.md",
+    "verification_script": "scripts/check_control_epoch.py",
+    "python_tests": "tests/test_check_control_epoch.py",
+    "module_registration": "crates/franken-node/src/control_plane/mod.rs"
+  },
+  "acceptance_criteria": {
+    "monotonic_epoch": true,
+    "regression_rejected": true,
+    "epoch_overflow_handled": true,
+    "signed_events": true,
+    "crash_recovery": true,
+    "mac_verification": true,
+    "serde_serialization": true,
+    "copy_ord_hash": true
+  },
+  "invariants_verified": [
+    "INV-EPOCH-MONOTONIC",
+    "INV-EPOCH-DURABLE",
+    "INV-EPOCH-SIGNED-EVENT",
+    "INV-EPOCH-NO-GAP"
+  ]
+}

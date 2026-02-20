@@ -1,0 +1,51 @@
+{
+  "bead": "bd-21z",
+  "chain": [
+    {
+      "receipt_id": "0199f4f0-0fd3-7d7d-95ad-f6fd0c6c0001",
+      "action_name": "quarantine",
+      "actor_identity": "trust-control-plane",
+      "timestamp": "2026-02-20T12:00:00Z",
+      "input_hash": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "output_hash": "60303ae22b9988617223ba1a4ec7ea0f3f0617f5fcbf0f9aa910f8a1622f00d3",
+      "decision": "approved",
+      "rationale": "Quarantine trigger matched policy threshold.",
+      "evidence_refs": [
+        "ledger-1001",
+        "incident-INC-2026-0007"
+      ],
+      "policy_rule_chain": [
+        "policy.rule.high-impact-receipt",
+        "policy.rule.quarantine-threshold"
+      ],
+      "confidence": 0.93,
+      "rollback_command": "franken-node fleet release --incident INC-2026-0007",
+      "previous_receipt_hash": null,
+      "chain_hash": "2584267e26d6a13f5e0ca8cc8b2b66482b92f4dbb37aa44244026ddc934150c1",
+      "signature": "iT87WHCWjuD/9z5pVG3/9uvVxsu41Ddzaesu/lszCEF/vd2ySIJ4lEW1p9pqPocQXa8UWMnisanLKAIHgIrdBw=="
+    },
+    {
+      "receipt_id": "0199f4f0-0fd3-7d7d-95ad-f6fd0c6c0002",
+      "action_name": "revocation",
+      "actor_identity": "trust-control-plane",
+      "timestamp": "2026-02-20T12:02:00Z",
+      "input_hash": "2cf24dba5fb0a030eebfce82f9f6f9f12d403f8f6f0a3f2d80f3c8d2f8d3c6de",
+      "output_hash": "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4",
+      "decision": "denied",
+      "rationale": "Revocation blocked pending secondary approval.",
+      "evidence_refs": [
+        "ledger-1002",
+        "incident-INC-2026-0007"
+      ],
+      "policy_rule_chain": [
+        "policy.rule.high-impact-receipt",
+        "policy.rule.revocation-dual-control"
+      ],
+      "confidence": 0.88,
+      "rollback_command": "franken-node trust sync --force",
+      "previous_receipt_hash": "2584267e26d6a13f5e0ca8cc8b2b66482b92f4dbb37aa44244026ddc934150c1",
+      "chain_hash": "99018508162fe9804c1fd2482ceaa2948718863f2531170f17d1d8aa11914fb1",
+      "signature": "ZJHZpB3z9PbFZNKuAksPDCmcQntRKglvqOIr/kjX8u9vFr96ucjzsEM5ZdtEDIoSb8kx7qb6veUJbI+ZDjWgCg=="
+    }
+  ]
+}

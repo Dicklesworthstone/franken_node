@@ -1,0 +1,38 @@
+{
+  "bead": "bd-1l62",
+  "title": "Durable claim gate on verifiable marker/proof availability",
+  "section": "10.14",
+  "all_pass": true,
+  "checks": [
+    {
+      "check": "implementation module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/durable_claim_gate.rs"
+    },
+    {
+      "check": "security test suite",
+      "pass": true,
+      "detail": "tests/security/durable_claim_gate.rs"
+    },
+    {
+      "check": "stable denial reason codes",
+      "pass": true,
+      "detail": "CLAIM_PROOF_MISSING, CLAIM_PROOF_INVALID, CLAIM_PROOF_EXPIRED, CLAIM_PROOF_VERIFICATION_TIMEOUT, CLAIM_MARKER_UNAVAILABLE"
+    },
+    {
+      "check": "fail-closed semantics",
+      "pass": true,
+      "detail": "incomplete/invalid/missing verification paths reject claims"
+    },
+    {
+      "check": "spec document",
+      "pass": true,
+      "detail": "docs/specs/durable_claim_requirements.md"
+    },
+    {
+      "check": "artifact results",
+      "pass": true,
+      "detail": "artifacts/10.14/durable_claim_gate_results.json"
+    }
+  ]
+}

@@ -1,0 +1,82 @@
+{
+  "bead_id": "bd-2xv8",
+  "timestamp_utc": "2026-02-20T18:40:00Z",
+  "status": "completed_with_known_repo_gate_failures",
+  "implementation": {
+    "files": [
+      "crates/franken-node/src/control_plane/control_epoch.rs",
+      "crates/franken-node/src/connector/artifact_persistence.rs",
+      "tests/security/future_epoch_rejection.rs",
+      "tests/integration/artifact_replay_hooks.rs",
+      "docs/specs/validity_window_rules.md",
+      "artifacts/10.14/epoch_rejection_events.json"
+    ],
+    "highlights": [
+      "Added ValidityWindowPolicy fail-closed checks with typed EpochRejection reasons.",
+      "Added EpochArtifactEvent telemetry payload with stable event codes for accept/reject.",
+      "Enforced check_artifact_epoch in ArtifactStore::persist before mutation to prevent ingestion bypass.",
+      "Added hot-reload policy support in ArtifactStore and regression tests for future/expired rejection behavior."
+    ]
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "rch exec -- cargo test --manifest-path /data/projects/franken_node/Cargo.toml -p frankenengine-node artifact_persistence -- --nocapture",
+        "result": "pass",
+        "details": "19 tests passed"
+      },
+      {
+        "command": "rch exec -- cargo test --manifest-path /data/projects/franken_node/Cargo.toml -p frankenengine-node validity_window -- --nocapture",
+        "result": "pass",
+        "details": "7 tests passed"
+      },
+      {
+        "command": "rch exec -- cargo test --manifest-path /data/projects/franken_node/Cargo.toml -p frankenengine-node event_contains_required_context -- --nocapture",
+        "result": "pass",
+        "details": "2 tests passed"
+      },
+      {
+        "command": "rch exec -- cargo check --manifest-path /data/projects/franken_node/Cargo.toml -p frankenengine-node --all-targets",
+        "result": "pass_with_warnings",
+        "details": "check succeeded; pre-existing dead_code warnings in config module"
+      },
+      {
+        "command": "rch exec -- cargo clippy --manifest-path /data/projects/franken_node/Cargo.toml -p frankenengine-node --all-targets -- -D warnings",
+        "result": "fail",
+        "details": "pre-existing repository-wide clippy debt across connector/security/policy modules; not introduced by this bead"
+      },
+      {
+        "command": "rch exec -- cargo fmt --manifest-path /data/projects/franken_node/Cargo.toml --check",
+        "result": "fail",
+        "details": "pre-existing formatting drift in unrelated observability/policy files"
+      }
+    ],
+    "rch_environment_notes": [
+      "Remote sync attempted for each command.",
+      "Sync repeatedly failed on /data/projects/remote_compilation_helper/perf.data permission denied (rsync code 23).",
+      "rch fallback-to-local execution completed command runs."
+    ]
+  },
+  "acceptance_criteria_mapping": [
+    {
+      "criterion": "Future-epoch artifacts rejected with FutureEpoch",
+      "evidence": "control_epoch validity tests + artifact_persistence reject_future_epoch_before_persisting"
+    },
+    {
+      "criterion": "Expired artifacts rejected with ExpiredEpoch",
+      "evidence": "control_epoch validity tests + tests/security/future_epoch_rejection.rs"
+    },
+    {
+      "criterion": "Boundary acceptance at current and lower inclusive edge",
+      "evidence": "control_epoch validity tests + tests/security/future_epoch_rejection.rs"
+    },
+    {
+      "criterion": "Structured rejection telemetry includes full context",
+      "evidence": "EpochArtifactEvent + artifacts/10.14/epoch_rejection_events.json"
+    },
+    {
+      "criterion": "No ingestion path bypass in artifact persistence",
+      "evidence": "ArtifactStore::persist calls check_artifact_epoch before persistence-side mutation"
+    }
+  ]
+}

@@ -1,0 +1,60 @@
+{
+  "bundle_id": "VB-a3f8c1e204b76d9e",
+  "event_count": 5,
+  "artifact_count": 2,
+  "hardening_level": "critical",
+  "epoch_id": 42,
+  "timestamp_ms": 1708444800000,
+  "causal_events": [
+    {
+      "type": "guardrail_rejection",
+      "timestamp_ms": 1708444795000,
+      "description": "memory budget exceeded: 95% of 512MB limit, connector ext-sqlite holding 487MB",
+      "evidence_ref": "EVD-POLICY-001-e42a"
+    },
+    {
+      "type": "hardening_escalation",
+      "timestamp_ms": 1708444795100,
+      "description": "escalated from enhanced to maximum: third guardrail rejection in epoch 42",
+      "evidence_ref": "EVD-POLICY-002-e42b"
+    },
+    {
+      "type": "repair_failed",
+      "timestamp_ms": 1708444796000,
+      "description": "attempted integrity repair for objects/abc123def: backup not available, WAL replay failed with checksum mismatch",
+      "evidence_ref": null
+    },
+    {
+      "type": "integrity_check_failed",
+      "timestamp_ms": 1708444797000,
+      "description": "full integrity sweep at critical level: 2 of 147 objects failed hash verification",
+      "evidence_ref": "EVD-INTEGRITY-001-e42c"
+    },
+    {
+      "type": "artifact_unverifiable",
+      "timestamp_ms": 1708444798000,
+      "description": "artifact objects/abc123def: proof chain broken at node 3, merkle root cannot be recomputed",
+      "evidence_ref": "EVD-PROOF-001-e42d"
+    }
+  ],
+  "failed_artifacts": [
+    {
+      "path": "objects/abc123def",
+      "expected_hash": "a3f8c1e204b76d9e5f1234567890abcdef0123456789abcdef0123456789abcd",
+      "actual_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "reason": "hash mismatch after repair attempt: WAL replay produced different content"
+    },
+    {
+      "path": "objects/def456abc",
+      "expected_hash": "b2e7d0f315c86e8f6a2345678901bcdef1234567890bcdef1234567890bcdef",
+      "actual_hash": "c1d6e0a426d97f9g7b3456789012cdef2345678901cdef2345678901cdef01",
+      "reason": "page-level corruption detected: B-tree interior node checksum invalid"
+    }
+  ],
+  "proof_context": {
+    "failed_proofs": ["proof-abc123-merkle", "proof-def456-page-hash"],
+    "missing_proofs": ["proof-abc123-wal-chain"],
+    "passed_proofs": ["proof-ghi789-header", "proof-jkl012-schema"]
+  },
+  "halt_policy": "halt_all"
+}

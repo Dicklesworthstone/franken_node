@@ -1,0 +1,370 @@
+{
+  "bead_id": "bd-b9b6",
+  "title": "Durability contract violation diagnostic bundles",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 30,
+  "summary": {
+    "passing": 71,
+    "failing": 0,
+    "total": 71
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/observability/durability_violation.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-b9b6_contract.md"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "30 tests (minimum 25)"
+    },
+    {
+      "check": "type: pub struct BundleId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct CausalEvent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum CausalEventType",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct FailedArtifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ProofContext",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum HaltPolicy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ViolationBundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ViolationContext",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DurabilityViolationDetector",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DurabilityHaltedError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn generate_bundle(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn check_durable_op(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn clear_halt(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_halted(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_scope_halted(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn halt_policy(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn bundle_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_json(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn all_failed(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn event_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn artifact_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-VIOLATION-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-VIOLATION-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-VIOLATION-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-VIOLATION-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-VIOLATION-DETERMINISTIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-VIOLATION-CAUSAL",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-VIOLATION-HALT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "causal_event_type: GuardrailRejection",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "causal_event_type: HardeningEscalation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "causal_event_type: RepairFailed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "causal_event_type: IntegrityCheckFailed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "causal_event_type: ArtifactUnverifiable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "halt_policy: HaltAll",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "halt_policy: HaltScope",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "halt_policy: WarnOnly",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_type: DurabilityHaltedError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_id_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: causal_event_type_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: causal_event_type_all",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: causal_event_type_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: proof_context_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: proof_context_all_failed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: proof_context_not_all_failed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: halt_policy_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: halt_policy_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: generate_bundle_from_context",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_determinism",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_determinism_100_runs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: different_context_different_bundle_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: causal_events_ordering_preserved",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: empty_context_produces_valid_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_to_json",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: detector_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: detector_generates_bundle_and_halts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: detector_halt_all_blocks_all_scopes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: detector_halt_scope_blocks_only_matching",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: detector_warn_only_never_blocks",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: detector_clear_halt",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: detector_op_before_violation_allowed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: halted_error_contains_bundle_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: failed_artifact_hash_mismatch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: multiple_bundles_accumulate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: bundle_includes_proof_context",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: is_scope_halted_with_halt_all",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: is_scope_halted_with_matching_scope",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: is_scope_halted_with_warn_only",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

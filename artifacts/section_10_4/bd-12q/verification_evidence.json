@@ -1,0 +1,44 @@
+{
+  "gate": "revocation_integration_verification",
+  "bead": "bd-12q",
+  "section": "10.4",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T17:53:45.608586+00:00",
+  "checks": [
+    {
+      "id": "REV-SPEC",
+      "description": "Spec contract exists with required invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "REV-RUST",
+      "description": "Rust module exposes revocation integration APIs",
+      "status": "PASS"
+    },
+    {
+      "id": "REV-MOD",
+      "description": "Supply-chain module exports revocation integration",
+      "status": "PASS"
+    },
+    {
+      "id": "REV-INTEG",
+      "description": "Integration tests cover revocation workflow invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "REV-FIXTURE",
+      "description": "Fixture corpus contains stale/revoked/warn scenarios",
+      "status": "PASS"
+    },
+    {
+      "id": "REV-ARTIFACT",
+      "description": "Decision artifact captures pass/fail outcomes",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total_checks": 6,
+    "passing_checks": 6,
+    "failing_checks": 0
+  }
+}

@@ -1,0 +1,49 @@
+{
+  "gate": "signed_receipt_verification",
+  "bead": "bd-21z",
+  "section": "10.5",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "id": "SR-IMPL",
+      "description": "Receipt implementation exists with required API symbols",
+      "status": "PASS"
+    },
+    {
+      "id": "SR-ERRORS",
+      "description": "Receipt error coverage present",
+      "status": "PASS"
+    },
+    {
+      "id": "SR-CLI",
+      "description": "CLI receipt export wiring exists for trust/incident paths",
+      "status": "PASS"
+    },
+    {
+      "id": "SR-FIXTURE",
+      "description": "Receipt sample fixture present with >=4 cases",
+      "status": "PASS"
+    },
+    {
+      "id": "SR-ARTIFACT",
+      "description": "Receipt chain artifact is structurally valid",
+      "status": "PASS"
+    },
+    {
+      "id": "SR-SPEC",
+      "description": "Spec contract defines receipt invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "SR-SIGNATURE",
+      "description": "Signature correctness validated on sample receipt chain",
+      "status": "PASS",
+      "details": "verified 2 signed receipt(s)"
+    }
+  ],
+  "summary": {
+    "total_checks": 7,
+    "passing_checks": 7,
+    "failing_checks": 0
+  }
+}

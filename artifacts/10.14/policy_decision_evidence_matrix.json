@@ -1,0 +1,45 @@
+{
+  "bead_id": "bd-oolt",
+  "matrix": [
+    {
+      "action": "commit",
+      "decision_kind": "admit",
+      "evidence_required": true,
+      "rejection_on_missing": true,
+      "test_coverage": [
+        "commit_with_evidence_executes",
+        "commit_without_evidence_rejected"
+      ]
+    },
+    {
+      "action": "abort",
+      "decision_kind": "deny",
+      "evidence_required": true,
+      "rejection_on_missing": true,
+      "test_coverage": [
+        "abort_with_evidence_executes",
+        "abort_without_evidence_rejected"
+      ]
+    },
+    {
+      "action": "quarantine",
+      "decision_kind": "quarantine",
+      "evidence_required": true,
+      "rejection_on_missing": true,
+      "test_coverage": [
+        "quarantine_with_evidence_executes",
+        "quarantine_without_evidence_rejected"
+      ]
+    },
+    {
+      "action": "release",
+      "decision_kind": "release",
+      "evidence_required": true,
+      "rejection_on_missing": true,
+      "test_coverage": [
+        "release_with_evidence_executes",
+        "release_without_evidence_rejected"
+      ]
+    }
+  ]
+}

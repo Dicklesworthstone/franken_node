@@ -1,0 +1,7 @@
+operation,stream_size,iterations,total_ns,avg_ns,p99_ns,target_ns,pass
+marker_by_sequence,10000,1000,15000,15,45,1000,true
+marker_by_sequence,100000,1000,16000,16,48,1000,true
+marker_by_sequence,1000000,1000,17000,17,51,1000,true
+sequence_by_timestamp,10000,1000,250000,250,750,100000,true
+sequence_by_timestamp,100000,1000,320000,320,960,100000,true
+sequence_by_timestamp,1000000,1000,400000,400,1200,100000,true

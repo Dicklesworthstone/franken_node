@@ -1,0 +1,245 @@
+{
+  "bead_id": "bd-2e73",
+  "title": "Bounded evidence ledger ring buffer",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 45,
+  "summary": {
+    "passing": 46,
+    "failing": 0,
+    "total": 46
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/observability/evidence_ledger.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-2e73_contract.md"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "compile-time Send + Sync assertion",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "Serialize+Deserialize derives",
+      "pass": true,
+      "detail": "5 derive blocks (minimum 5)"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "45 tests (minimum 25)"
+    },
+    {
+      "check": "type: pub struct EvidenceLedger",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct EvidenceEntry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct LedgerCapacity",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct LedgerSnapshot",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct SharedEvidenceLedger",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct LabSpillMode",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct EntryId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum DecisionKind",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum LedgerError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn append(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn iter_recent(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn iter_all(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn snapshot(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn evict_oldest(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn estimated_size(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn with_file(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-LEDGER-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-LEDGER-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-LEDGER-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-LEDGER-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: new_ledger_is_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: append_single_entry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: evicts_oldest_when_max_entries_exceeded",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: eviction_is_fifo",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: evicts_when_max_bytes_exceeded",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: rejects_entry_larger_than_max_bytes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: max_bytes_enforced_independently_of_max_entries",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: iter_recent_returns_last_n",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: iter_recent_on_empty_ledger",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: snapshot_is_consistent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: snapshot_after_eviction",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: identical_sequences_produce_identical_snapshots",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: evidence_entry_serialization_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: lab_spill_to_tempfile",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: lab_spill_eviction_still_works",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: shared_ledger_basic_operations",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: steady_state_load_100_entries",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: spill_determinism_two_runs_identical",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: capacity_one",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: decision_kind_labels",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

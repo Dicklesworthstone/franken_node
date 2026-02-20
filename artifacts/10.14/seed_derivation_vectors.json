@@ -1,0 +1,150 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-29r6",
+  "vectors": [
+    {
+      "vector_id": "v-encoding-zero",
+      "domain": "encoding",
+      "domain_prefix": "franken_node.encoding.v1",
+      "content_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "config_version": 1,
+      "config_params": {
+        "chunk_size": "65536"
+      },
+      "config_hash_hex": "219e80fa4b808af8d2a940b7a347692a5e3f3a6df36dd7b100bc795115fb2f55",
+      "expected_seed_hex": "d8b83283a0d2c3f033349b6b33dc708e84da3cb59d43700a6b2ae82878abd604"
+    },
+    {
+      "vector_id": "v-repair-zero",
+      "domain": "repair",
+      "domain_prefix": "franken_node.repair.v1",
+      "content_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "config_version": 1,
+      "config_params": {
+        "chunk_size": "65536"
+      },
+      "config_hash_hex": "219e80fa4b808af8d2a940b7a347692a5e3f3a6df36dd7b100bc795115fb2f55",
+      "expected_seed_hex": "122136b2aa720cacf89b40cb210a695803bf645d8f9d22f36e4f3888bad1a7f7"
+    },
+    {
+      "vector_id": "v-scheduling-zero",
+      "domain": "scheduling",
+      "domain_prefix": "franken_node.scheduling.v1",
+      "content_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "config_version": 1,
+      "config_params": {
+        "chunk_size": "65536"
+      },
+      "config_hash_hex": "219e80fa4b808af8d2a940b7a347692a5e3f3a6df36dd7b100bc795115fb2f55",
+      "expected_seed_hex": "51b6eeb2e3769361927f9d72cc994a5b0c61f4cfcc2fef3ec3d2d9cbd9306d8e"
+    },
+    {
+      "vector_id": "v-placement-zero",
+      "domain": "placement",
+      "domain_prefix": "franken_node.placement.v1",
+      "content_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "config_version": 1,
+      "config_params": {
+        "chunk_size": "65536"
+      },
+      "config_hash_hex": "219e80fa4b808af8d2a940b7a347692a5e3f3a6df36dd7b100bc795115fb2f55",
+      "expected_seed_hex": "8d6d085476a090c051447db0b967c0533fcfa44caf7676cd8817d47eece59f0f"
+    },
+    {
+      "vector_id": "v-verification-zero",
+      "domain": "verification",
+      "domain_prefix": "franken_node.verification.v1",
+      "content_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+      "config_version": 1,
+      "config_params": {
+        "chunk_size": "65536"
+      },
+      "config_hash_hex": "219e80fa4b808af8d2a940b7a347692a5e3f3a6df36dd7b100bc795115fb2f55",
+      "expected_seed_hex": "9becc3b08f204e783523a7bc6c39d50eead70aa48965cec8d0a74d94c1143517"
+    },
+    {
+      "vector_id": "v-repair-ff",
+      "domain": "repair",
+      "domain_prefix": "franken_node.repair.v1",
+      "content_hash_hex": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+      "config_version": 1,
+      "config_params": {
+        "priority": "high"
+      },
+      "config_hash_hex": "c08c710f03ffbcbe2f2f69899fb2f1edb5a0116b8700e644f0819d966bd7f19c",
+      "expected_seed_hex": "2d1f002b6dc5667c40fbf7e54d6ce2fc56fdb9f71717f838828feb597362d5f6"
+    },
+    {
+      "vector_id": "v-encoding-seq-v2",
+      "domain": "encoding",
+      "domain_prefix": "franken_node.encoding.v1",
+      "content_hash_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "config_version": 2,
+      "config_params": {
+        "chunk_size": "131072",
+        "erasure_k": "4",
+        "erasure_m": "2"
+      },
+      "config_hash_hex": "235b7f9838e579db24dd9087ff33a1462d2aa828914bf1e63d85650577814127",
+      "expected_seed_hex": "18a575885ba28992305779428226b4941fb0bf732aa42f769f8513fee168c1e3"
+    },
+    {
+      "vector_id": "v-scheduling-empty-params",
+      "domain": "scheduling",
+      "domain_prefix": "franken_node.scheduling.v1",
+      "content_hash_hex": "4242424242424242424242424242424242424242424242424242424242424242",
+      "config_version": 1,
+      "config_params": {},
+      "config_hash_hex": "67abdd721024f0ff4e0b3f4c2fc13bc5bad42d0b7851d456d88d203d15aaa450",
+      "expected_seed_hex": "61f252f03ede3e2706969fc4c626583e9782f8eb455c3702285f3b9c26432f0d"
+    },
+    {
+      "vector_id": "v-placement-maxver",
+      "domain": "placement",
+      "domain_prefix": "franken_node.placement.v1",
+      "content_hash_hex": "abababababababababababababababababababababababababababababababab",
+      "config_version": 4294967295,
+      "config_params": {
+        "replicas": "3"
+      },
+      "config_hash_hex": "a012e219d17e9c66866dfb845f5d50080d457f7f4137ba08b0e7055257ac5983",
+      "expected_seed_hex": "9c8539e2b65a25c5a7207b2a3333066340e90b26e38d508d3f158179a1037341"
+    },
+    {
+      "vector_id": "v-verification-singlebit",
+      "domain": "verification",
+      "domain_prefix": "franken_node.verification.v1",
+      "content_hash_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+      "config_version": 1,
+      "config_params": {
+        "depth": "8"
+      },
+      "config_hash_hex": "db1d0e09ac6442b15fb16c07bd186dedc77ec8768f883c777c010ac98bc2b1e1",
+      "expected_seed_hex": "211f46e576b22b720ec6083f568d26e91b0bb374f9d08b14beb19df2fcda6e7f"
+    },
+    {
+      "vector_id": "v-domain-sep-encoding",
+      "domain": "encoding",
+      "domain_prefix": "franken_node.encoding.v1",
+      "content_hash_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+      "config_version": 1,
+      "config_params": {
+        "chunk_size": "65536"
+      },
+      "config_hash_hex": "219e80fa4b808af8d2a940b7a347692a5e3f3a6df36dd7b100bc795115fb2f55",
+      "expected_seed_hex": "be440a3e2d5321bffa7174afc0eb64268e1cee4e7b4b3e9a91577269339562f0"
+    },
+    {
+      "vector_id": "v-domain-sep-repair",
+      "domain": "repair",
+      "domain_prefix": "franken_node.repair.v1",
+      "content_hash_hex": "5555555555555555555555555555555555555555555555555555555555555555",
+      "config_version": 1,
+      "config_params": {
+        "chunk_size": "65536"
+      },
+      "config_hash_hex": "219e80fa4b808af8d2a940b7a347692a5e3f3a6df36dd7b100bc795115fb2f55",
+      "expected_seed_hex": "2bb6591e67188e793618e75278cda311e95b28a606869c76513f7a2776b21c82"
+    }
+  ]
+}

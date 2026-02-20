@@ -1,0 +1,34 @@
+{
+  "bead": "bd-12q",
+  "section": "10.4",
+  "generated_at": "2026-02-20T17:55:00Z",
+  "decisions": [
+    {
+      "case_id": "high_stale_deny",
+      "allowed": false,
+      "status": "failed_stale",
+      "event": "EXTENSION_REVOCATION_CHECK_FAILED",
+      "error_code": "REVOCATION_DATA_STALE",
+      "revocation_head": 7,
+      "staleness_secs": 4000
+    },
+    {
+      "case_id": "low_stale_warn",
+      "allowed": true,
+      "status": "warn_stale",
+      "event": "EXTENSION_REVOCATION_STALE_WARNING",
+      "error_code": null,
+      "revocation_head": 7,
+      "staleness_secs": 30000
+    },
+    {
+      "case_id": "revoked_extension_block",
+      "allowed": false,
+      "status": "failed_revoked",
+      "event": "EXTENSION_REVOCATION_CHECK_FAILED",
+      "error_code": "REVOCATION_EXTENSION_REVOKED",
+      "revocation_head": 8,
+      "staleness_secs": 120
+    }
+  ]
+}

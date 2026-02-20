@@ -1,0 +1,50 @@
+{
+  "bead": "bd-xwk5",
+  "generated_at": "2026-02-20T12:20:50-06:00",
+  "scenarios": [
+    {
+      "name": "identical_streams",
+      "local_len": 128,
+      "remote_len": 128,
+      "expected": {
+        "has_common_prefix": true,
+        "common_prefix_seq": 127,
+        "has_divergence": false,
+        "divergence_seq": 128
+      }
+    },
+    {
+      "name": "divergence_at_zero",
+      "local_len": 64,
+      "remote_len": 64,
+      "expected": {
+        "has_common_prefix": false,
+        "common_prefix_seq": 0,
+        "has_divergence": true,
+        "divergence_seq": 0
+      }
+    },
+    {
+      "name": "divergence_at_1000",
+      "local_len": 1400,
+      "remote_len": 1400,
+      "expected": {
+        "has_common_prefix": true,
+        "common_prefix_seq": 999,
+        "has_divergence": true,
+        "divergence_seq": 1000
+      }
+    },
+    {
+      "name": "length_mismatch_after_shared_prefix",
+      "local_len": 300,
+      "remote_len": 200,
+      "expected": {
+        "has_common_prefix": true,
+        "common_prefix_seq": 199,
+        "has_divergence": true,
+        "divergence_seq": 200
+      }
+    }
+  ]
+}

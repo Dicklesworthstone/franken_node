@@ -1,0 +1,94 @@
+{
+  "gate": "object_class_profile_registry_verification",
+  "bead": "bd-2573",
+  "section": "10.14",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T17:23:45.735114+00:00",
+  "checks": [
+    {
+      "id": "OCP-SPEC",
+      "description": "Spec describes required classes and invariants",
+      "status": "PASS",
+      "details": {
+        "missing_terms": []
+      }
+    },
+    {
+      "id": "OCP-CONFIG",
+      "description": "TOML registry has required classes and reject policy",
+      "status": "PASS",
+      "details": {
+        "class_names": [
+          "critical_marker",
+          "replay_bundle",
+          "telemetry_artifact",
+          "trust_receipt"
+        ],
+        "missing_classes": [],
+        "reject_policy": true,
+        "missing_profile_fields": {}
+      }
+    },
+    {
+      "id": "OCP-REGISTRY",
+      "description": "Registry JSON snapshot matches config and version contract",
+      "status": "PASS",
+      "details": {
+        "class_match": true,
+        "reject_match": true,
+        "versions_ok": true
+      }
+    },
+    {
+      "id": "OCP-UNIT",
+      "description": "Class validator accepts required classes and rejects unknown class",
+      "status": "PASS",
+      "details": {
+        "known_ok": true,
+        "unknown_ok": false,
+        "unknown_error": "OCP_UNKNOWN_CLASS"
+      }
+    },
+    {
+      "id": "OCP-INTEGRATION",
+      "description": "Fixture cases agree with registry validator semantics",
+      "status": "PASS",
+      "details": {
+        "case_count": 3,
+        "matched_cases": 3
+      }
+    },
+    {
+      "id": "OCP-E2E",
+      "description": "End-to-end gate inputs exist for registry verification flow",
+      "status": "PASS",
+      "details": {
+        "missing_paths": []
+      }
+    },
+    {
+      "id": "OCP-LOGS",
+      "description": "Stable event/error code sets are present for telemetry and triage",
+      "status": "PASS",
+      "details": {
+        "event_codes": [
+          "OCP_REGISTRY_LOADED",
+          "OCP_CLASS_VALIDATED",
+          "OCP_UNKNOWN_CLASS_REJECTED",
+          "OCP_REGISTRY_VERIFIED"
+        ],
+        "error_codes": [
+          "OCP_MISSING_REQUIRED_CLASS",
+          "OCP_UNKNOWN_CLASS",
+          "OCP_INVALID_PROFILE_FIELD",
+          "OCP_VERSION_MISMATCH"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "total_checks": 7,
+    "passing_checks": 7,
+    "failing_checks": 0
+  }
+}

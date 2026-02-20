@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "cases": [
+    {
+      "id": "known-critical-marker",
+      "class_name": "critical_marker",
+      "expected_valid": true
+    },
+    {
+      "id": "known-telemetry-artifact",
+      "class_name": "telemetry_artifact",
+      "expected_valid": true
+    },
+    {
+      "id": "unknown-class-rejected",
+      "class_name": "shadow_object",
+      "expected_valid": false,
+      "expected_error": "OCP_UNKNOWN_CLASS"
+    }
+  ]
+}

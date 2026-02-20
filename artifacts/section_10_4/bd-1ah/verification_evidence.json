@@ -1,0 +1,49 @@
+{
+  "gate": "provenance_attestation_verification",
+  "bead": "bd-1ah",
+  "section": "10.4",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T17:43:23.292799+00:00",
+  "checks": [
+    {
+      "id": "PAT-SPEC",
+      "description": "Spec contract exists with required invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "PAT-SCHEMA",
+      "description": "Schema includes required provenance fields",
+      "status": "PASS"
+    },
+    {
+      "id": "PAT-ENVELOPE",
+      "description": "Schema supports in-toto and franken envelope formats",
+      "status": "PASS"
+    },
+    {
+      "id": "PAT-RUST",
+      "description": "Rust implementation exposes required verifier API",
+      "status": "PASS"
+    },
+    {
+      "id": "PAT-INTEG",
+      "description": "Integration tests cover chain verification scenarios",
+      "status": "PASS"
+    },
+    {
+      "id": "PAT-FIXTURE",
+      "description": "Fixture corpus includes pass/fail and envelope variants",
+      "status": "PASS"
+    },
+    {
+      "id": "PAT-ARTIFACT",
+      "description": "Attestation chain report artifact is present and structured",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total_checks": 7,
+    "passing_checks": 7,
+    "failing_checks": 0
+  }
+}

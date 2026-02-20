@@ -1,0 +1,229 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "franken_node/evidence_entry/v1",
+  "title": "EvidenceEntry",
+  "description": "Canonical schema for product control decision evidence entries.",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "decision_id",
+    "decision_kind",
+    "decision_time",
+    "trace_id",
+    "candidates",
+    "constraints",
+    "chosen_action",
+    "witness_refs",
+    "canonical_order"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "decision_id": {
+      "type": "string",
+      "pattern": "^DEC-[0-9]{8}-[a-z0-9_-]+$"
+    },
+    "decision_kind": {
+      "type": "string",
+      "enum": [
+        "admit",
+        "deny",
+        "quarantine",
+        "release",
+        "rollback",
+        "throttle",
+        "escalate"
+      ]
+    },
+    "decision_time": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "trace_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "candidates": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "ordinal",
+          "candidate_id",
+          "action_code",
+          "score",
+          "feasible",
+          "rationale_refs"
+        ],
+        "properties": {
+          "ordinal": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "candidate_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "action_code": {
+            "type": "string",
+            "minLength": 1
+          },
+          "score": {
+            "type": "number"
+          },
+          "feasible": {
+            "type": "boolean"
+          },
+          "rationale_refs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "constraints": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "constraint_id",
+          "severity",
+          "status",
+          "details"
+        ],
+        "properties": {
+          "constraint_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "severity": {
+            "type": "string",
+            "enum": [
+              "low",
+              "medium",
+              "high",
+              "critical"
+            ]
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "pass",
+              "fail",
+              "waived"
+            ]
+          },
+          "details": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "chosen_action": {
+      "type": "object",
+      "required": [
+        "candidate_id",
+        "action_code",
+        "justification",
+        "expected_loss"
+      ],
+      "properties": {
+        "candidate_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action_code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "justification": {
+          "type": "string",
+          "minLength": 1
+        },
+        "expected_loss": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "witness_refs": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "witness_id",
+          "witness_type",
+          "digest_sha256",
+          "uri"
+        ],
+        "properties": {
+          "witness_id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "witness_type": {
+            "type": "string",
+            "enum": [
+              "marker",
+              "proof",
+              "receipt",
+              "log",
+              "snapshot"
+            ]
+          },
+          "digest_sha256": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          },
+          "uri": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "canonical_order": {
+      "type": "object",
+      "required": [
+        "root_fields",
+        "candidate_sort_rule",
+        "constraint_sort_rule"
+      ],
+      "properties": {
+        "root_fields": {
+          "type": "array",
+          "const": [
+            "schema_version",
+            "decision_id",
+            "decision_kind",
+            "decision_time",
+            "trace_id",
+            "candidates",
+            "constraints",
+            "chosen_action",
+            "witness_refs",
+            "canonical_order"
+          ]
+        },
+        "candidate_sort_rule": {
+          "const": "ordinal-ascending-then-candidate-id"
+        },
+        "constraint_sort_rule": {
+          "const": "constraint-id-lexicographic"
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

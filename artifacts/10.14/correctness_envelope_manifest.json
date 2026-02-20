@@ -1,0 +1,119 @@
+{
+  "schema_version": "1.0",
+  "envelope_version": "1.0",
+  "invariant_count": 12,
+  "invariants": [
+    {
+      "id": "INV-001-MONOTONIC-HARDENING",
+      "name": "Monotonic hardening direction",
+      "description": "Security hardening level can only increase within an epoch; reversal requires a governance artifact with quorum approval.",
+      "owner_track": "10.14",
+      "enforcement": "runtime"
+    },
+    {
+      "id": "INV-002-EVIDENCE-EMISSION",
+      "name": "Evidence emission mandatory",
+      "description": "Every policy-driven control action must emit an EvidenceEntry (per bd-nupr schema). Suppression is not a tunable parameter.",
+      "owner_track": "10.14",
+      "enforcement": "runtime"
+    },
+    {
+      "id": "INV-003-DETERMINISTIC-SEED",
+      "name": "Deterministic seed derivation algorithm",
+      "description": "The content-derived seed algorithm (SHA-256 over canonical representation) is fixed per version. Controllers cannot substitute alternative hash functions or seed sources.",
+      "owner_track": "10.14",
+      "enforcement": "compile"
+    },
+    {
+      "id": "INV-004-INTEGRITY-PROOF-VERIFICATION",
+      "name": "Integrity proof verification cannot be bypassed",
+      "description": "Marker stream hash-chain verification and integrity proof checks run unconditionally. No controller flag can disable them.",
+      "owner_track": "10.14",
+      "enforcement": "runtime"
+    },
+    {
+      "id": "INV-005-RING-BUFFER-FIFO",
+      "name": "Ring buffer overflow policy is FIFO",
+      "description": "When the evidence ledger ring buffer is full, the oldest entry is evicted. The eviction order is not policy-tunable.",
+      "owner_track": "10.14",
+      "enforcement": "compile"
+    },
+    {
+      "id": "INV-006-EPOCH-MONOTONIC",
+      "name": "Epoch boundaries are monotonically increasing",
+      "description": "Control epoch IDs must strictly increase. A controller cannot set an epoch ID less than or equal to the current epoch.",
+      "owner_track": "10.14",
+      "enforcement": "runtime"
+    },
+    {
+      "id": "INV-007-WITNESS-HASH-SHA256",
+      "name": "Witness reference integrity hashes are SHA-256",
+      "description": "All witness_ref digest fields use SHA-256. The hash algorithm is not overridable by policy controllers.",
+      "owner_track": "10.14",
+      "enforcement": "compile"
+    },
+    {
+      "id": "INV-008-GUARDRAIL-PRECEDENCE",
+      "name": "Guardrail precedence over Bayesian recommendations",
+      "description": "When a guardrail monitor fires, its decision overrides any Bayesian posterior recommendation. Controllers cannot invert this precedence.",
+      "owner_track": "10.14",
+      "enforcement": "runtime"
+    },
+    {
+      "id": "INV-009-OBJECT-CLASS-APPEND-ONLY",
+      "name": "Object class profiles are versioned and append-only",
+      "description": "Object class profile definitions are append-only. Existing profile versions cannot be mutated or deleted by policy controllers; only new versions can be added.",
+      "owner_track": "10.14",
+      "enforcement": "runtime"
+    },
+    {
+      "id": "INV-010-REMOTE-CAP-REQUIRED",
+      "name": "Remote capability tokens required for network operations",
+      "description": "All network-bound trust and control operations must present a valid RemoteCap token. Controllers cannot grant implicit network access.",
+      "owner_track": "10.14",
+      "enforcement": "runtime"
+    },
+    {
+      "id": "INV-011-MARKER-CHAIN-APPEND-ONLY",
+      "name": "Marker stream is append-only",
+      "description": "The marker stream is strictly append-only with hash-chain linking. No controller can rewrite, delete, or reorder existing markers.",
+      "owner_track": "10.14",
+      "enforcement": "runtime"
+    },
+    {
+      "id": "INV-012-RECEIPT-CHAIN-IMMUTABLE",
+      "name": "Decision receipt chain is immutable",
+      "description": "Signed decision receipts form a hash-chain that cannot be truncated, modified, or forked by controllers.",
+      "owner_track": "10.5",
+      "enforcement": "runtime"
+    }
+  ],
+  "immutable_field_count": 25,
+  "immutable_fields": [
+    {"field_prefix": "hardening.direction", "invariant_id": "INV-001-MONOTONIC-HARDENING"},
+    {"field_prefix": "hardening.level_decrease", "invariant_id": "INV-001-MONOTONIC-HARDENING"},
+    {"field_prefix": "evidence.emission_enabled", "invariant_id": "INV-002-EVIDENCE-EMISSION"},
+    {"field_prefix": "evidence.suppress", "invariant_id": "INV-002-EVIDENCE-EMISSION"},
+    {"field_prefix": "seed.algorithm", "invariant_id": "INV-003-DETERMINISTIC-SEED"},
+    {"field_prefix": "seed.hash_function", "invariant_id": "INV-003-DETERMINISTIC-SEED"},
+    {"field_prefix": "integrity.proof_verification_enabled", "invariant_id": "INV-004-INTEGRITY-PROOF-VERIFICATION"},
+    {"field_prefix": "integrity.bypass_hash_check", "invariant_id": "INV-004-INTEGRITY-PROOF-VERIFICATION"},
+    {"field_prefix": "ring_buffer.overflow_policy", "invariant_id": "INV-005-RING-BUFFER-FIFO"},
+    {"field_prefix": "ring_buffer.eviction_order", "invariant_id": "INV-005-RING-BUFFER-FIFO"},
+    {"field_prefix": "epoch.set_id", "invariant_id": "INV-006-EPOCH-MONOTONIC"},
+    {"field_prefix": "epoch.decrement", "invariant_id": "INV-006-EPOCH-MONOTONIC"},
+    {"field_prefix": "witness.hash_algorithm", "invariant_id": "INV-007-WITNESS-HASH-SHA256"},
+    {"field_prefix": "guardrail.precedence", "invariant_id": "INV-008-GUARDRAIL-PRECEDENCE"},
+    {"field_prefix": "guardrail.override_bayesian", "invariant_id": "INV-008-GUARDRAIL-PRECEDENCE"},
+    {"field_prefix": "object_class.mutate_existing", "invariant_id": "INV-009-OBJECT-CLASS-APPEND-ONLY"},
+    {"field_prefix": "object_class.delete_version", "invariant_id": "INV-009-OBJECT-CLASS-APPEND-ONLY"},
+    {"field_prefix": "network.implicit_access", "invariant_id": "INV-010-REMOTE-CAP-REQUIRED"},
+    {"field_prefix": "network.bypass_remote_cap", "invariant_id": "INV-010-REMOTE-CAP-REQUIRED"},
+    {"field_prefix": "marker_stream.rewrite", "invariant_id": "INV-011-MARKER-CHAIN-APPEND-ONLY"},
+    {"field_prefix": "marker_stream.delete", "invariant_id": "INV-011-MARKER-CHAIN-APPEND-ONLY"},
+    {"field_prefix": "marker_stream.reorder", "invariant_id": "INV-011-MARKER-CHAIN-APPEND-ONLY"},
+    {"field_prefix": "receipt_chain.truncate", "invariant_id": "INV-012-RECEIPT-CHAIN-IMMUTABLE"},
+    {"field_prefix": "receipt_chain.modify", "invariant_id": "INV-012-RECEIPT-CHAIN-IMMUTABLE"},
+    {"field_prefix": "receipt_chain.fork", "invariant_id": "INV-012-RECEIPT-CHAIN-IMMUTABLE"}
+  ]
+}

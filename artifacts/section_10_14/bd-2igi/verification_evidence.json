@@ -1,0 +1,335 @@
+{
+  "bead_id": "bd-2igi",
+  "title": "Bayesian posterior diagnostics for explainable policy ranking",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 31,
+  "summary": {
+    "passing": 64,
+    "failing": 0,
+    "total": 64
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/bayesian_diagnostics.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-2igi_contract.md"
+    },
+    {
+      "check": "file: diagnostics report",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/posterior_diagnostics_report.json"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "31 tests (minimum 25)"
+    },
+    {
+      "check": "BTreeMap for deterministic ordering",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "Beta distribution conjugate update",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "Serialize/Deserialize derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct BayesianDiagnostics",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct CandidateRef",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct Observation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct RankedCandidate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum DiagnosticConfidence",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: struct BetaState",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn new(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn update(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn rank_candidates(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn replay_from(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn total_observations(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn overall_confidence(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_json(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn candidates_seen(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn with_epoch(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn mean(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn confidence_interval_95(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-BAYES-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-BAYES-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-BAYES-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-BAYES-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-BAYES-ADVISORY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-BAYES-REPRODUCIBLE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-BAYES-NORMALIZED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-BAYES-TRANSPARENT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_new_is_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_default_is_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_with_epoch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_update_single_success",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_update_single_failure",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_update_chaining",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_rank_empty_candidates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_rank_no_observations_uniform",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_rank_with_observations",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_rank_posterior_sums_to_one",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_rank_descending_order",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_confidence_interval_bounds",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_confidence_interval_narrows",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_guardrail_filtered_flag",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_guardrail_does_not_reorder",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_replay_from_reproducible",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_replay_from_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_replay_matches_incremental",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_uniform_prior_converges",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_contradictory_observations",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_overall_confidence_low",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_overall_confidence_medium",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_overall_confidence_high",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_single_candidate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_many_candidates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_unobserved_candidate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_serialization_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_ranked_candidate_serialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_prior_prob_reflects_candidate_count",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_observation_count_per_candidate",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

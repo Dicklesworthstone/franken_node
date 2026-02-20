@@ -1,0 +1,340 @@
+{
+  "bead_id": "bd-1oof",
+  "title": "Trace-witness references for high-impact ledger entries",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 39,
+  "summary": {
+    "passing": 65,
+    "failing": 0,
+    "total": 65
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/observability/witness_ref.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-1oof_contract.md"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "imports DecisionKind + EvidenceEntry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "39 tests (minimum 25)"
+    },
+    {
+      "check": "type: pub struct WitnessId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum WitnessKind",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct WitnessRef",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct WitnessSet",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct WitnessValidator",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct WitnessAudit",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum WitnessValidationError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_high_impact(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn validate(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn verify_integrity(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn coverage_audit(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn hash_hex(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn with_locator(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn has_duplicates(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn high_impact_kinds(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_complete(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-WITNESS-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-WITNESS-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-WITNESS-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-WITNESS-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-WITNESS-PRESENCE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-WITNESS-INTEGRITY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-WITNESS-RESOLVABLE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "witness_kind: Telemetry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "witness_kind: StateSnapshot",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "witness_kind: ProofArtifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "witness_kind: ExternalSignal",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_MISSING_WITNESSES",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_INTEGRITY_HASH_MISMATCH",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_UNRESOLVABLE_LOCATOR",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_DUPLICATE_WITNESS_ID",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_id_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_kind_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_kind_all_four_variants",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_ref_creation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_ref_with_locator",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_ref_hash_hex",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_set_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_set_add",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_set_no_duplicates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: witness_set_detects_duplicates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: quarantine_is_high_impact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: release_is_high_impact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: escalate_is_high_impact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: admit_is_not_high_impact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: deny_is_not_high_impact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: all_decision_kinds_classified",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: high_impact_with_witnesses_passes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: high_impact_without_witnesses_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: non_high_impact_without_witnesses_passes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: duplicate_witness_ids_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: strict_mode_requires_locator",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: strict_mode_with_locator_passes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: integrity_hash_matches",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: integrity_hash_mismatch_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: coverage_audit_complete",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: coverage_audit_incomplete",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: multiple_witnesses_preserves_ordering",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: validator_counters_accumulate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: all_high_impact_kinds_require_witnesses",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

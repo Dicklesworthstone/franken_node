@@ -1,0 +1,59 @@
+{
+  "bead": "bd-xwk5",
+  "title": "[10.14] Implement fork/divergence detection via marker-id prefix comparison and binary search",
+  "section": "10.14",
+  "generated_at": "2026-02-20T12:20:50-06:00",
+  "verdict": "PASS_WITH_ENV_BLOCKERS",
+  "checks": [
+    {
+      "check": "implementation: divergence types + finder",
+      "pass": true,
+      "detail": "crates/franken-node/src/control_plane/marker_stream.rs contains DivergenceComparison, DivergenceEvidence, DivergenceResult, find_divergence_point"
+    },
+    {
+      "check": "spec: divergence detection contract",
+      "pass": true,
+      "detail": "docs/specs/divergence_detection.md"
+    },
+    {
+      "check": "integration scenarios file",
+      "pass": true,
+      "detail": "tests/integration/marker_divergence_detection.rs"
+    },
+    {
+      "check": "examples artifact",
+      "pass": true,
+      "detail": "artifacts/10.14/divergence_detection_examples.json"
+    },
+    {
+      "check": "unit tests: divergence suite",
+      "pass": true,
+      "detail": "rch exec -- cargo test divergence_ -- --nocapture => 7 passed, 0 failed"
+    },
+    {
+      "check": "quality gate: cargo check --all-targets via rch",
+      "pass": false,
+      "detail": "remote worker path-dependency closure missing /data/tmp/.../franken_engine/.../Cargo.toml (os error 2)"
+    },
+    {
+      "check": "quality gate: cargo clippy --all-targets -- -D warnings via rch",
+      "pass": false,
+      "detail": "remote toolchain unavailable on selected worker (nightly-2026-02-19 missing), then local fallback surfaced pre-existing repository-wide clippy failures unrelated to bd-xwk5"
+    },
+    {
+      "check": "quality gate: cargo fmt --check via rch",
+      "pass": false,
+      "detail": "detected unrelated formatting drift in crates/franken-node/src/control_plane/mmr_proofs.rs from concurrent work"
+    }
+  ],
+  "summary": {
+    "total_checks": 8,
+    "passing_checks": 5,
+    "failing_checks": 3,
+    "blockers": [
+      "rch remote workers not uniformly provisioned with required nightly toolchain",
+      "rch remote path-dependency closure for sibling /data/projects/franken_engine not present on worker",
+      "concurrent unformatted changes outside bd-xwk5 scope"
+    ]
+  }
+}

@@ -1,0 +1,55 @@
+{
+  "bead": "bd-1ah",
+  "section": "10.4",
+  "generated_at": "2026-02-20T17:45:00Z",
+  "decisions": [
+    {
+      "case_id": "prod_level3_valid",
+      "chain_valid": true,
+      "provenance_level": "level3_independent_reproduced",
+      "events": [
+        "PROVENANCE_LEVEL_ASSIGNED",
+        "ATTESTATION_VERIFIED"
+      ],
+      "issues": []
+    },
+    {
+      "case_id": "prod_chain_incomplete",
+      "chain_valid": false,
+      "provenance_level": "level2_signed_reproducible",
+      "events": [
+        "PROVENANCE_LEVEL_ASSIGNED",
+        "CHAIN_INCOMPLETE",
+        "PROVENANCE_CHAIN_BROKEN",
+        "ATTESTATION_REJECTED"
+      ],
+      "issues": [
+        {
+          "code": "CHAIN_INCOMPLETE",
+          "link_role": null,
+          "message": "required 3 links, found 2",
+          "remediation": "Provide full publisher -> build_system -> source_vcs attestation coverage for required depth."
+        }
+      ]
+    },
+    {
+      "case_id": "cached_window_soft_stale",
+      "chain_valid": true,
+      "provenance_level": "level3_independent_reproduced",
+      "events": [
+        "PROVENANCE_LEVEL_ASSIGNED",
+        "CHAIN_STALE",
+        "PROVENANCE_DEGRADED_MODE_ENTERED",
+        "ATTESTATION_VERIFIED"
+      ],
+      "issues": [
+        {
+          "code": "CHAIN_STALE",
+          "link_role": "publisher",
+          "message": "link age 40s exceeded policy window",
+          "remediation": "Cached trust window is active; refresh this link immediately to avoid hard rejection."
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{"trigger_id":"trig-0001","rejection_id":"rej-MemoryBudgetGuardrail-memory_budget-1","evidence_entry_id":"evd-autotrig-0001-1000","from":"baseline","to":"standard","timestamp":1000}
+{"trigger_id":"trig-0002","rejection_id":"rej-DurabilityLossGuardrail-durability_budget-1","evidence_entry_id":"evd-autotrig-0002-1001","from":"standard","to":"enhanced","timestamp":1001}
+{"trigger_id":"trig-0003","rejection_id":"rej-HardeningRegressionGuardrail-hardening_regression-1","evidence_entry_id":"evd-autotrig-0003-1002","from":"enhanced","to":"maximum","timestamp":1002}
+{"trigger_id":"trig-0004","rejection_id":"rej-EvidenceEmissionGuardrail-evidence_emission-1","evidence_entry_id":"evd-autotrig-0004-1003","from":"maximum","to":"critical","timestamp":1003}

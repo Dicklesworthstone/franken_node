@@ -1,0 +1,5 @@
+fixture_name,replica_count,artifact_count,all_identical,first_divergence_artifact,first_divergence_offset,root_cause
+small_encoding,3,3,true,,,
+medium_multi_domain,3,5,true,,,
+edge_case_minimal,3,2,true,,,
+ten_replicas,10,2,true,,,

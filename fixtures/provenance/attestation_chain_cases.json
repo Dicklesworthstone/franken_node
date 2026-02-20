@@ -1,0 +1,150 @@
+{
+  "bead": "bd-1ah",
+  "section": "10.4",
+  "cases": [
+    {
+      "id": "prod_level3_valid",
+      "description": "Production profile accepts full transitive chain",
+      "policy": {
+        "mode": "fail_closed",
+        "required_chain_depth": 3,
+        "allow_self_signed": false,
+        "min_level": "level2_signed_reproducible"
+      },
+      "attestation": {
+        "envelope_format": "in_toto",
+        "links": [
+          {
+            "role": "publisher",
+            "signature": "d92811710ad10abf6224a3428b8ad793d6f6872c13be4f9099f8ee49cc4d8f24"
+          },
+          {
+            "role": "build_system",
+            "signature": "55fe8eb7c4dc96f4487d2eacb7f510f2788ab9e5b57fee54f3a2fe0f6f4b5143"
+          },
+          {
+            "role": "source_vcs",
+            "signature": "33f130f6a5529bbf8e5f95df9534ef26ba05f40fd9f2db1260ae126f4f97f6d3"
+          }
+        ]
+      },
+      "expected_valid": true,
+      "expected_level": "level3_independent_reproduced",
+      "expected_error_codes": []
+    },
+    {
+      "id": "prod_chain_incomplete",
+      "description": "Production profile rejects missing source_vcs link",
+      "policy": {
+        "mode": "fail_closed",
+        "required_chain_depth": 3,
+        "allow_self_signed": false,
+        "min_level": "level2_signed_reproducible"
+      },
+      "attestation": {
+        "envelope_format": "franken_node_envelope_v1",
+        "links": [
+          {
+            "role": "publisher",
+            "signature": "d92811710ad10abf6224a3428b8ad793d6f6872c13be4f9099f8ee49cc4d8f24"
+          },
+          {
+            "role": "build_system",
+            "signature": "55fe8eb7c4dc96f4487d2eacb7f510f2788ab9e5b57fee54f3a2fe0f6f4b5143"
+          }
+        ]
+      },
+      "expected_valid": false,
+      "expected_level": "level2_signed_reproducible",
+      "expected_error_codes": [
+        "CHAIN_INCOMPLETE"
+      ]
+    },
+    {
+      "id": "prod_invalid_signature",
+      "description": "Invalid canonical signature rejects chain",
+      "policy": {
+        "mode": "fail_closed",
+        "required_chain_depth": 3,
+        "allow_self_signed": false,
+        "min_level": "level2_signed_reproducible"
+      },
+      "attestation": {
+        "envelope_format": "in_toto",
+        "links": [
+          {
+            "role": "publisher",
+            "signature": "00"
+          },
+          {
+            "role": "build_system",
+            "signature": "55fe8eb7c4dc96f4487d2eacb7f510f2788ab9e5b57fee54f3a2fe0f6f4b5143"
+          },
+          {
+            "role": "source_vcs",
+            "signature": "33f130f6a5529bbf8e5f95df9534ef26ba05f40fd9f2db1260ae126f4f97f6d3"
+          }
+        ]
+      },
+      "expected_valid": false,
+      "expected_level": "level0_unsigned",
+      "expected_error_codes": [
+        "INVALID_SIGNATURE"
+      ]
+    },
+    {
+      "id": "dev_self_signed_depth1",
+      "description": "Development profile accepts single self-signed publisher link",
+      "policy": {
+        "mode": "cached_trust_window",
+        "required_chain_depth": 1,
+        "allow_self_signed": true,
+        "min_level": "level1_publisher_signed"
+      },
+      "attestation": {
+        "envelope_format": "franken_node_envelope_v1",
+        "links": [
+          {
+            "role": "publisher",
+            "signature": "7d0acc4450b8e3f076381f994ff4ea9dc6dd6f4de907b9c547f8dfba541f64d3"
+          }
+        ]
+      },
+      "expected_valid": true,
+      "expected_level": "level1_publisher_signed",
+      "expected_error_codes": []
+    },
+    {
+      "id": "cached_window_soft_stale",
+      "description": "Cached trust window allows stale-only chain for short grace period",
+      "policy": {
+        "mode": "cached_trust_window",
+        "required_chain_depth": 3,
+        "allow_self_signed": false,
+        "min_level": "level2_signed_reproducible"
+      },
+      "attestation": {
+        "envelope_format": "in_toto",
+        "links": [
+          {
+            "role": "publisher",
+            "signature": "d92811710ad10abf6224a3428b8ad793d6f6872c13be4f9099f8ee49cc4d8f24"
+          },
+          {
+            "role": "build_system",
+            "signature": "55fe8eb7c4dc96f4487d2eacb7f510f2788ab9e5b57fee54f3a2fe0f6f4b5143"
+          },
+          {
+            "role": "source_vcs",
+            "signature": "33f130f6a5529bbf8e5f95df9534ef26ba05f40fd9f2db1260ae126f4f97f6d3"
+          }
+        ]
+      },
+      "expected_valid": true,
+      "expected_level": "level3_independent_reproduced",
+      "expected_error_codes": [
+        "CHAIN_STALE"
+      ]
+    }
+  ]
+}

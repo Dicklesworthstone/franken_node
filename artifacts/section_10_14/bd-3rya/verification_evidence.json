@@ -1,0 +1,62 @@
+{
+  "bead_id": "bd-3rya",
+  "title": "Monotonic hardening state machine verification",
+  "overall_pass": true,
+  "checks": [
+    {
+      "check": "impl_exists",
+      "pass": true,
+      "detail": "HardeningStateMachine struct found"
+    },
+    {
+      "check": "hardening_levels",
+      "pass": true,
+      "detail": "5 hardening levels defined"
+    },
+    {
+      "check": "escalate_fn",
+      "pass": true,
+      "detail": "escalate function present"
+    },
+    {
+      "check": "governance_rollback_fn",
+      "pass": true,
+      "detail": "governance_rollback function present"
+    },
+    {
+      "check": "replay_fn",
+      "pass": true,
+      "detail": "replay_transitions function present"
+    },
+    {
+      "check": "log_codes",
+      "pass": true,
+      "detail": "all EVD-HARDEN log codes present"
+    },
+    {
+      "check": "governance_artifact",
+      "pass": true,
+      "detail": "GovernanceRollbackArtifact with validation"
+    },
+    {
+      "check": "error_types",
+      "pass": true,
+      "detail": "all HardeningError variants present"
+    },
+    {
+      "check": "test_count",
+      "pass": true,
+      "detail": "35 unit tests"
+    },
+    {
+      "check": "history_artifact",
+      "pass": true,
+      "detail": "state history valid with 4 transitions"
+    }
+  ],
+  "test_count": 35,
+  "artifacts": {
+    "implementation": "crates/franken-node/src/policy/hardening_state_machine.rs",
+    "history": "artifacts/10.14/hardening_state_history.json"
+  }
+}

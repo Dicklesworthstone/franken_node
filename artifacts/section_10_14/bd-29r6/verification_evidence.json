@@ -1,0 +1,350 @@
+{
+  "bead_id": "bd-29r6",
+  "title": "Deterministic seed derivation",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 47,
+  "summary": {
+    "passing": 67,
+    "failing": 0,
+    "total": 67
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/encoding/deterministic_seed.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-29r6_contract.md"
+    },
+    {
+      "check": "file: vectors",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/seed_derivation_vectors.json"
+    },
+    {
+      "check": "file: encoding/mod.rs",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/encoding/mod.rs"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DeterministicSeedDeriver",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DeterministicSeed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ContentHash",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ScheduleConfig",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct VersionBumpRecord",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum DomainTag",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum SeedError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn derive_seed(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn config_hash(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn from_hex(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_hex(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn prefix_hex(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn bump_records(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn clear_bump_records(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn tracked_domains(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn with_param(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "domain_prefix: franken_node.encoding.v1",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "domain_prefix: franken_node.repair.v1",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "domain_prefix: franken_node.scheduling.v1",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "domain_prefix: franken_node.placement.v1",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "domain_prefix: franken_node.verification.v1",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: SEED_DERIVED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: SEED_VERSION_BUMP",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-SEED-DOMAIN-SEP",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-SEED-STABLE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-SEED-BOUNDED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-SEED-NO-PLATFORM",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "compile-time Send + Sync assertion",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "Serialize+Deserialize derives",
+      "pass": true,
+      "detail": "7 derive blocks (minimum 4)"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "47 tests (minimum 25)"
+    },
+    {
+      "check": "test: test_derive_seed_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_domain_separation_encoding_vs_repair",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_domain_separation_all_pairs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_different_content_different_seed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_different_config_different_seed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_config_param_order_irrelevant",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_deriver_config_change_triggers_bump",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_no_collisions_100_samples",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_golden_vector_encoding_zero",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_golden_vector_repair_ff",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_golden_vector_encoding_seq_v2",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_golden_vector_scheduling_empty_params",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_golden_vector_verification_singlebit",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_seed_serialization_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_content_hash_serialization_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_single_bit_content_change",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_empty_content_hash",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "vectors file exists",
+      "pass": true,
+      "detail": "artifacts/10.14/seed_derivation_vectors.json"
+    },
+    {
+      "check": "vectors count >= 10",
+      "pass": true,
+      "detail": "12 vectors"
+    },
+    {
+      "check": "vector: v-encoding-zero",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-repair-zero",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-scheduling-zero",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-placement-zero",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-verification-zero",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-repair-ff",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-encoding-seq-v2",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-scheduling-empty-params",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-placement-maxver",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-verification-singlebit",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-domain-sep-encoding",
+      "pass": true,
+      "detail": "match"
+    },
+    {
+      "check": "vector: v-domain-sep-repair",
+      "pass": true,
+      "detail": "match"
+    }
+  ]
+}

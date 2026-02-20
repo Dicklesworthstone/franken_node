@@ -1,0 +1,22 @@
+{
+  "fixture_name": "medium_multi_domain",
+  "description": "Medium fixture: all 5 domains, multi-param config v2, non-trivial content hash",
+  "content_hash_hex": "abababababababababababababababababababababababababababababababab",
+  "domains": ["encoding", "repair", "scheduling", "placement", "verification"],
+  "config": {
+    "version": 2,
+    "parameters": {
+      "chunk_size": "131072",
+      "erasure_k": "8",
+      "erasure_m": "4",
+      "replicas": "3"
+    }
+  },
+  "expected_seeds": {
+    "encoding": "8d1f2a24520700c91929a66a161c92295f8ff8d024d04d15b0fc4f93fac90d34",
+    "repair": "c927cdea6baffc735d855ce39a22a64783e9708b07e417fc39a32ac2c92ca8e5",
+    "scheduling": "ea98014f58ab4a3e761bf4815ad980d924ef91cdf8f2750b39c11d7ec7feb0aa",
+    "placement": "262a150f6e3b09146a0da27acfe458d8c8d6e3d5a9387f26950d3c723cf0a6c3",
+    "verification": "075c510235ca74e2225153c3fb418d2b6259bd7fc9f8f7dea5351b610d190f27"
+  }
+}

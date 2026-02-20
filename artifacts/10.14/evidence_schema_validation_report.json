@@ -1,0 +1,74 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-nupr",
+  "section": "10.14",
+  "event_code": "EVIDENCE_SCHEMA_VALIDATION_COMPLETED",
+  "schema_path": "spec/evidence_entry_v1.json",
+  "generated_at": "2026-02-20T17:13:00Z",
+  "cases": [
+    {
+      "id": "valid-canonical-entry",
+      "description": "Canonical valid entry satisfies required shape and ordering contract.",
+      "expected": "PASS",
+      "actual": "PASS"
+    },
+    {
+      "id": "missing-witness-refs",
+      "description": "Entry without witness references is rejected.",
+      "expected": "FAIL",
+      "actual": "FAIL",
+      "error_code": "EE_MISSING_REQUIRED_FIELD"
+    },
+    {
+      "id": "candidate-order-violation",
+      "description": "Candidates not sorted by ordinal are rejected.",
+      "expected": "FAIL",
+      "actual": "FAIL",
+      "error_code": "EE_INVALID_CANDIDATE_ORDER"
+    },
+    {
+      "id": "chosen-candidate-missing",
+      "description": "Chosen action candidate must exist in candidates list.",
+      "expected": "FAIL",
+      "actual": "FAIL",
+      "error_code": "EE_UNKNOWN_CHOSEN_CANDIDATE"
+    }
+  ],
+  "structured_logs": [
+    {
+      "event_code": "EVIDENCE_SCHEMA_VALIDATION_STARTED",
+      "trace_id": "trace-bd-nupr-001"
+    },
+    {
+      "event_code": "EVIDENCE_SCHEMA_VALIDATION_CASE",
+      "trace_id": "trace-bd-nupr-001",
+      "case_id": "valid-canonical-entry"
+    },
+    {
+      "event_code": "EVIDENCE_SCHEMA_VALIDATION_CASE",
+      "trace_id": "trace-bd-nupr-001",
+      "case_id": "missing-witness-refs"
+    },
+    {
+      "event_code": "EVIDENCE_SCHEMA_VALIDATION_CASE",
+      "trace_id": "trace-bd-nupr-001",
+      "case_id": "candidate-order-violation"
+    },
+    {
+      "event_code": "EVIDENCE_SCHEMA_VALIDATION_CASE",
+      "trace_id": "trace-bd-nupr-001",
+      "case_id": "chosen-candidate-missing"
+    },
+    {
+      "event_code": "EVIDENCE_SCHEMA_VALIDATION_COMPLETED",
+      "trace_id": "trace-bd-nupr-001",
+      "verdict": "PASS"
+    }
+  ],
+  "summary": {
+    "total_cases": 4,
+    "expected_failures": 3,
+    "actual_matches_expectation": 4,
+    "verdict": "PASS"
+  }
+}

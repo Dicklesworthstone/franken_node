@@ -1,0 +1,285 @@
+{
+  "bead_id": "bd-1zym",
+  "title": "Automatic hardening trigger on guardrail rejection evidence",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 22,
+  "summary": {
+    "passing": 54,
+    "failing": 0,
+    "total": 54
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/hardening_auto_trigger.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-1zym_contract.md"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "upstream: hardening_state_machine.rs",
+      "pass": true,
+      "detail": "exists"
+    },
+    {
+      "check": "upstream: guardrail_monitor.rs",
+      "pass": true,
+      "detail": "exists"
+    },
+    {
+      "check": "imports HardeningStateMachine + HardeningLevel",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "imports GuardrailRejection + BudgetId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "idempotency key with HashSet dedup",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "next_level escalation mapping",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "22 tests (minimum 20)"
+    },
+    {
+      "check": "type: pub enum TriggerResult",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct TriggerEvent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct TriggerConfig",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct HardeningAutoTrigger",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn on_guardrail_rejection(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn reset_idempotency(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn events(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn event_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn dedup_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_jsonl(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn event_code(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn with_defaults(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-AUTOTRIG-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-AUTOTRIG-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-AUTOTRIG-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-AUTOTRIG-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-AUTOTRIG-LATENCY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-AUTOTRIG-IDEMPOTENT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-AUTOTRIG-CAUSAL",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "variant: Escalated",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "variant: AlreadyAtMax",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "variant: Suppressed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trigger_result_escalated_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trigger_result_already_at_max_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trigger_result_suppressed_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trigger_result_event_codes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trigger_event_to_jsonl",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: next_level_progression",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: single_rejection_triggers_escalation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: sequential_rejections_escalate_through_levels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: already_at_max_returns_correctly",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: duplicate_rejection_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: duplicate_at_same_level_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: same_budget_different_epoch_is_not_deduped",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: different_budget_same_epoch_is_not_deduped",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: idempotency_across_100_duplicates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: idempotency_disabled",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trigger_event_has_causal_pointers",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: trigger_events_accumulate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: reset_clears_dedup_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: default_config_values",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: escalation_latency_is_zero_for_synchronous",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: full_escalation_then_max",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: events_export_as_jsonl",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

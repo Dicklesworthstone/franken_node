@@ -1,0 +1,320 @@
+{
+  "bead_id": "bd-15u3",
+  "title": "Guardrail precedence over Bayesian recommendations",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 34,
+  "summary": {
+    "passing": 61,
+    "failing": 0,
+    "total": 61
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/decision_engine.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-15u3_contract.md"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "34 tests (minimum 25)"
+    },
+    {
+      "check": "Serialize/Deserialize derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "guardrail_filtered field usage",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DecisionEngine",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DecisionOutcome",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct BlockedCandidate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum DecisionReason",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct GuardrailId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn decide(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn new(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn as_str(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-DECIDE-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-DECIDE-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-DECIDE-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-DECIDE-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-DECIDE-PRECEDENCE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-DECIDE-DETERMINISTIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-DECIDE-NO-PANIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason_variant: TopCandidateAccepted",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason_variant: TopCandidateBlockedFallbackUsed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason_variant: AllCandidatesBlocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason_variant: NoCandidates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "upstream: bayesian_diagnostics",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "upstream: guardrail_monitor",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_empty_candidates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_single_candidate_passes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_single_candidate_blocked_per_candidate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_top_blocked_fallback_to_second",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_all_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_system_level_block",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_system_plus_per_candidate_block",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_preserves_bayesian_rank_order",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_memory_budget_blocks_all",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_durability_blocks_all",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_hardening_regression_blocks_all",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_epoch_id_propagated",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_multiple_candidates_all_pass",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_no_monitors_allows_all",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_per_candidate_no_monitors",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_blocked_candidate_has_reasons",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_warn_does_not_block",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_tie_with_guardrail",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decision_outcome_serialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_guardrail_id_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decision_reason_top_accepted",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decision_reason_fallback",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decision_reason_all_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decision_reason_no_candidates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_multiple_system_blocks_accumulate",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_fallback_picks_first_passing",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_middle_and_first_blocked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_large_candidate_set",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_blocked_candidate_serialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_single_monitor_blocks",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_engine_different_epochs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decide_all_filtered_empty_monitors",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

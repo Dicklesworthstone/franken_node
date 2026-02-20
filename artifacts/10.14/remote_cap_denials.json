@@ -1,0 +1,48 @@
+{
+  "bead": "bd-1nfu",
+  "section": "10.14",
+  "generated_at_epoch_secs": 1700000200,
+  "description": "Representative RemoteCap denial events for security audit and replay fixtures.",
+  "denials": [
+    {
+      "event_code": "REMOTECAP_DENIED",
+      "legacy_event_code": "RC_CHECK_DENIED",
+      "trace_id": "trace-missing-cap",
+      "operation": "network_egress",
+      "endpoint": "https://api.example.com/v1",
+      "denial_code": "REMOTECAP_MISSING"
+    },
+    {
+      "event_code": "REMOTECAP_DENIED",
+      "legacy_event_code": "RC_CHECK_DENIED",
+      "trace_id": "trace-expired-cap",
+      "operation": "revocation_fetch",
+      "endpoint": "revocation://global-feed/latest",
+      "denial_code": "REMOTECAP_EXPIRED"
+    },
+    {
+      "event_code": "REMOTECAP_DENIED",
+      "legacy_event_code": "RC_CHECK_DENIED",
+      "trace_id": "trace-invalid-signature",
+      "operation": "telemetry_export",
+      "endpoint": "https://telemetry.example.com/push",
+      "denial_code": "REMOTECAP_INVALID"
+    },
+    {
+      "event_code": "REMOTECAP_DENIED",
+      "legacy_event_code": "RC_CHECK_DENIED",
+      "trace_id": "trace-scope-denied",
+      "operation": "federation_sync",
+      "endpoint": "federation://cluster-a",
+      "denial_code": "REMOTECAP_SCOPE_DENIED"
+    },
+    {
+      "event_code": "REMOTECAP_DENIED",
+      "legacy_event_code": "RC_CHECK_DENIED",
+      "trace_id": "trace-replay",
+      "operation": "telemetry_export",
+      "endpoint": "https://telemetry.example.com/push",
+      "denial_code": "REMOTECAP_REPLAY"
+    }
+  ]
+}

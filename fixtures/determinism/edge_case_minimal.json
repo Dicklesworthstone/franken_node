@@ -1,0 +1,14 @@
+{
+  "fixture_name": "edge_case_minimal",
+  "description": "Edge case: single-bit content hash, empty config params, 2 domains",
+  "content_hash_hex": "0000000000000000000000000000000000000000000000000000000000000001",
+  "domains": ["encoding", "repair"],
+  "config": {
+    "version": 1,
+    "parameters": {}
+  },
+  "expected_seeds": {
+    "encoding": "96f841d435f56cbaff467b6d93b5129dce983a5d243f4dd6d7ca8f82d7b02b7c",
+    "repair": "80287ee0edd64bb10d66304b2b61f633ff6e06ef4f5ce385f433446fcadbbb59"
+  }
+}

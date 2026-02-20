@@ -1,0 +1,5 @@
+crash_point,expected_canonical_root,observed_outcome
+write_temp,old_or_new,old
+fsync_temp,old_or_new,old
+rename,old_or_new,new
+fsync_dir,old_or_new,new

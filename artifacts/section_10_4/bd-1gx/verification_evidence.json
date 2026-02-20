@@ -1,0 +1,44 @@
+{
+  "gate": "extension_manifest_schema_verification",
+  "bead": "bd-1gx",
+  "section": "10.4",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T17:20:48.291388+00:00",
+  "checks": [
+    {
+      "id": "EMS-SPEC",
+      "description": "Spec contract exists with invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "EMS-SCHEMA",
+      "description": "JSON schema exists with canonical field order",
+      "status": "PASS"
+    },
+    {
+      "id": "EMS-CAPS",
+      "description": "Capability enum aligns with engine ExtensionManifest",
+      "status": "PASS"
+    },
+    {
+      "id": "EMS-RUST",
+      "description": "Rust module implements schema + engine integration",
+      "status": "PASS"
+    },
+    {
+      "id": "EMS-LOGS",
+      "description": "Structured manifest event codes are defined",
+      "status": "PASS"
+    },
+    {
+      "id": "EMS-INTEG",
+      "description": "Integration tests cover admission fail-closed invariants",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total_checks": 6,
+    "passing_checks": 6,
+    "failing_checks": 0
+  }
+}

@@ -1,0 +1,235 @@
+{
+  "bead": "bd-129f",
+  "title": "O(1) marker lookup by sequence and O(log N) timestamp-to-sequence search",
+  "section": "10.14",
+  "verdict": "PASS",
+  "summary": {
+    "passing_checks": 37,
+    "failing_checks": 0,
+    "total_checks": 37
+  },
+  "checks": [
+    {
+      "id": "MKL-FILE-IMPLEMENTATION",
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/control_plane/marker_stream.rs"
+    },
+    {
+      "id": "MKL-FILE-SPEC",
+      "check": "file: spec",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-129f_contract.md"
+    },
+    {
+      "id": "MKL-METHOD-MARKER_BY_SEQUENCE",
+      "check": "method: fn marker_by_sequence",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-METHOD-SEQUENCE_BY_TIMESTAMP",
+      "check": "method: fn sequence_by_timestamp",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-METHOD-FIRST",
+      "check": "method: fn first",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-ALGO-O1_VEC_INDEX",
+      "check": "algorithm: O(1) Vec index for sequence lookup",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-ALGO-BINARY_SEARCH_LOOP",
+      "check": "algorithm: Binary search loop for timestamp lookup",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-ALGO-BINARY_SEARCH_MID",
+      "check": "algorithm: Midpoint calculation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-ALGO-MONOTONIC_PRECONDITION",
+      "check": "algorithm: Monotonic time precondition documented",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-EDGE-EMPTY_NONE",
+      "check": "edge case: Empty stream returns None",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-EDGE-OUT_OF_RANGE",
+      "check": "edge case: Out-of-range returns None via get()",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-EDGE-BEFORE_FIRST",
+      "check": "edge case: Before-first timestamp check",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-EDGE-RIGHTMOST",
+      "check": "edge case: Rightmost marker at-or-before timestamp",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-RTYPE-SEQ_OPTION_REF",
+      "check": "return type: marker_by_sequence returns Option<&Marker>",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-RTYPE-TS_OPTION_U64",
+      "check": "return type: sequence_by_timestamp returns Option<u64>",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-COUNT",
+      "check": "bd-129f test count",
+      "pass": true,
+      "detail": "14 bd-129f tests (minimum 12)"
+    },
+    {
+      "id": "MKL-TEST-MARKER-BY-SEQUENCE-FIRST",
+      "check": "test: marker_by_sequence_first",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-MARKER-BY-SEQUENCE-LAST",
+      "check": "test: marker_by_sequence_last",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-MARKER-BY-SEQUENCE-MIDDLE",
+      "check": "test: marker_by_sequence_middle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-MARKER-BY-SEQUENCE-OUT-OF-RANGE",
+      "check": "test: marker_by_sequence_out_of_range",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-MARKER-BY-SEQUENCE-EMPTY-STREAM",
+      "check": "test: marker_by_sequence_empty_stream",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-SEQUENCE-BY-TIMESTAMP-EXACT-MATCH",
+      "check": "test: sequence_by_timestamp_exact_match",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-SEQUENCE-BY-TIMESTAMP-BETWEEN-MARKERS",
+      "check": "test: sequence_by_timestamp_between_markers",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-SEQUENCE-BY-TIMESTAMP-BEFORE-FIRST",
+      "check": "test: sequence_by_timestamp_before_first",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-SEQUENCE-BY-TIMESTAMP-AFTER-LAST",
+      "check": "test: sequence_by_timestamp_after_last",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-SEQUENCE-BY-TIMESTAMP-EMPTY-STREAM",
+      "check": "test: sequence_by_timestamp_empty_stream",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-SEQUENCE-BY-TIMESTAMP-SINGLE-MARKER",
+      "check": "test: sequence_by_timestamp_single_marker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-SEQUENCE-BY-TIMESTAMP-DUPLICATE-TIMESTAM",
+      "check": "test: sequence_by_timestamp_duplicate_timestamps",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-SEQUENCE-BY-TIMESTAMP-LARGE-STREAM",
+      "check": "test: sequence_by_timestamp_large_stream",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-TEST-MARKER-BY-SEQUENCE-MATCHES-GET",
+      "check": "test: marker_by_sequence_matches_get",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-SPEC-O(1)",
+      "check": "spec content: O(1)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-SPEC-O(LOG-N)",
+      "check": "spec content: O(log N)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-SPEC-MARKER_BY_SEQUENCE",
+      "check": "spec content: marker_by_sequence",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-SPEC-SEQUENCE_BY_TIMESTAM",
+      "check": "spec content: sequence_by_timestamp",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-SPEC-BINARY-SEARCH",
+      "check": "spec content: binary search",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-SPEC-<-1-MICROSECOND",
+      "check": "spec content: < 1 microsecond",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "MKL-SPEC-<-100-MICROSECONDS",
+      "check": "spec content: < 100 microseconds",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

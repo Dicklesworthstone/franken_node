@@ -1,0 +1,12 @@
+timestamp,proposed_level,effective_level,clamp_reason,budget_utilization_pct,rate_count
+1000,standard,standard,allowed,0.0000,0
+2000,enhanced,enhanced,allowed,0.3333,1
+3000,maximum,maximum,allowed,0.6667,2
+4000,critical,critical,rate limit: 3/3 escalations in window,1.0000,3
+65000,critical,enhanced,overhead clamped: 60.0% exceeds budget 40.0%; effective enhanced,0.0000,0
+66000,maximum,maximum,allowed,0.3333,1
+67000,critical,enhanced,overhead clamped: 60.0% exceeds budget 40.0%; effective enhanced,0.6667,2
+68000,critical,enhanced,rate limit: 3/3 escalations in window,1.0000,3
+100000,critical,maximum,capped at max_level maximum,0.0000,0
+100100,maximum,standard,effective level standard not above current enhanced after clamping,0.3333,1
+200000,standard,standard,proposed standard is not above current standard,0.0000,0

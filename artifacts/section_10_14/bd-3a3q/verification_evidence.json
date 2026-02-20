@@ -1,0 +1,68 @@
+{
+  "bead_id": "bd-3a3q",
+  "title": "Anytime-valid guardrail monitor set",
+  "overall_pass": true,
+  "checks": [
+    {
+      "check": "impl_exists",
+      "pass": true,
+      "detail": "GuardrailMonitor trait found"
+    },
+    {
+      "check": "verdict_enum",
+      "pass": true,
+      "detail": "GuardrailVerdict with Allow/Block/Warn"
+    },
+    {
+      "check": "system_state",
+      "pass": true,
+      "detail": "SystemState with all required fields"
+    },
+    {
+      "check": "concrete_monitors",
+      "pass": true,
+      "detail": "4 concrete monitors implemented"
+    },
+    {
+      "check": "monitor_set",
+      "pass": true,
+      "detail": "GuardrailMonitorSet with check_all and evaluate"
+    },
+    {
+      "check": "event_codes",
+      "pass": true,
+      "detail": "all EVD-GUARD event codes present"
+    },
+    {
+      "check": "anytime_valid",
+      "pass": true,
+      "detail": "anytime-valid property implemented and tested"
+    },
+    {
+      "check": "threshold_enforcement",
+      "pass": true,
+      "detail": "threshold enforcement with envelope minimums"
+    },
+    {
+      "check": "test_count",
+      "pass": true,
+      "detail": "43 unit tests"
+    },
+    {
+      "check": "spec_exists",
+      "pass": true,
+      "detail": "spec document with required content"
+    },
+    {
+      "check": "telemetry_csv",
+      "pass": true,
+      "detail": "telemetry CSV valid with 12 rows"
+    }
+  ],
+  "test_count": 43,
+  "artifacts": {
+    "implementation": "crates/franken-node/src/policy/guardrail_monitor.rs",
+    "spec": "docs/specs/section_10_14/bd-3a3q_contract.md",
+    "telemetry": "artifacts/10.14/guardrail_monitor_telemetry.csv"
+  }
+}

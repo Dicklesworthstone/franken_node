@@ -1,0 +1,30 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-2xv8",
+  "event_samples": [
+    {
+      "event_code": "EPOCH_ARTIFACT_ACCEPTED",
+      "artifact_id": "artifact-current",
+      "artifact_epoch": 20,
+      "current_epoch": 20,
+      "rejection_reason": null,
+      "trace_id": "trace-current"
+    },
+    {
+      "event_code": "EPOCH_ARTIFACT_REJECTED",
+      "artifact_id": "artifact-future",
+      "artifact_epoch": 21,
+      "current_epoch": 20,
+      "rejection_reason": "FutureEpoch",
+      "trace_id": "trace-future"
+    },
+    {
+      "event_code": "EPOCH_ARTIFACT_REJECTED",
+      "artifact_id": "artifact-expired",
+      "artifact_epoch": 16,
+      "current_epoch": 20,
+      "rejection_reason": "ExpiredEpoch",
+      "trace_id": "trace-expired"
+    }
+  ]
+}

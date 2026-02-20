@@ -1,0 +1,33 @@
+{
+  "bead": "bd-nwhn",
+  "title": "Root pointer atomic publication protocol",
+  "section": "10.14",
+  "all_pass": true,
+  "checks": [
+    {
+      "check": "implementation module",
+      "pass": true,
+      "detail": "crates/franken-node/src/control_plane/root_pointer.rs"
+    },
+    {
+      "check": "integration test",
+      "pass": true,
+      "detail": "tests/integration/root_pointer_crash_safety.rs"
+    },
+    {
+      "check": "protocol step order",
+      "pass": true,
+      "detail": "write_temp -> fsync_temp -> rename -> fsync_dir"
+    },
+    {
+      "check": "crash matrix",
+      "pass": true,
+      "detail": "artifacts/10.14/root_publication_crash_matrix.csv"
+    },
+    {
+      "check": "spec document",
+      "pass": true,
+      "detail": "docs/specs/root_publication_protocol.md"
+    }
+  ]
+}

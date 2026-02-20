@@ -1,0 +1,43 @@
+{
+  "bead": "bd-12q",
+  "section": "10.4",
+  "cases": [
+    {
+      "id": "high_stale_deny",
+      "operation": "invoke",
+      "tier": "high",
+      "revocation_data_age_secs": 4000,
+      "expected_allowed": false,
+      "expected_status": "failed_stale",
+      "expected_error_code": "REVOCATION_DATA_STALE"
+    },
+    {
+      "id": "low_stale_warn",
+      "operation": "background_refresh",
+      "tier": "low",
+      "revocation_data_age_secs": 30000,
+      "expected_allowed": true,
+      "expected_status": "warn_stale",
+      "expected_error_code": null
+    },
+    {
+      "id": "revoked_extension_block",
+      "operation": "install",
+      "tier": "medium",
+      "revocation_data_age_secs": 120,
+      "expected_allowed": false,
+      "expected_status": "failed_revoked",
+      "expected_error_code": "REVOCATION_EXTENSION_REVOKED"
+    },
+    {
+      "id": "propagation_sla_miss",
+      "operation": "update",
+      "tier": "medium",
+      "revocation_data_age_secs": 120,
+      "expected_allowed": true,
+      "expected_status": "passed",
+      "expected_error_code": null,
+      "expected_propagation_error": "REVOCATION_PROPAGATION_SLA_MISSED"
+    }
+  ]
+}

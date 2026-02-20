@@ -1,0 +1,118 @@
+{
+  "bead": "bd-1nfu",
+  "title": "Require RemoteCap (or equivalent) for network-bound trust/control operations",
+  "section": "10.14",
+  "verdict": "PARTIAL_WITH_EXTERNAL_BLOCKERS",
+  "summary": {
+    "passing_checks": 11,
+    "failing_checks": 0,
+    "blocked_checks": 4,
+    "total_checks": 15
+  },
+  "checks": [
+    {
+      "id": "RC-FILE-IMPL",
+      "check": "remote capability implementation module exists",
+      "pass": true,
+      "detail": "crates/franken-node/src/security/remote_cap.rs"
+    },
+    {
+      "id": "RC-FILE-MOD-WIRE",
+      "check": "security mod exports remote_cap",
+      "pass": true,
+      "detail": "crates/franken-node/src/security/mod.rs contains `pub mod remote_cap;`"
+    },
+    {
+      "id": "RC-FILE-GUARD-INTEGRATION",
+      "check": "network guard calls centralized capability gate",
+      "pass": true,
+      "detail": "crates/franken-node/src/security/network_guard.rs::process_egress enforces CapabilityGate::authorize_network"
+    },
+    {
+      "id": "RC-FILE-SEC-TEST",
+      "check": "security test suite exists for remote capability enforcement",
+      "pass": true,
+      "detail": "tests/security/remote_cap_enforcement.rs"
+    },
+    {
+      "id": "RC-FILE-CONFORMANCE-UPDATED",
+      "check": "network guard conformance tests updated for RemoteCap enforcement",
+      "pass": true,
+      "detail": "tests/conformance/network_guard_policy.rs"
+    },
+    {
+      "id": "RC-FILE-SPEC",
+      "check": "RemoteCap spec contract exists",
+      "pass": true,
+      "detail": "docs/specs/remote_cap_contract.md"
+    },
+    {
+      "id": "RC-FILE-DENIAL-ARTIFACT",
+      "check": "denial audit artifact exists",
+      "pass": true,
+      "detail": "artifacts/10.14/remote_cap_denials.json"
+    },
+    {
+      "id": "RC-ERROR-CODES",
+      "check": "stable fail-closed error codes present",
+      "pass": true,
+      "detail": "REMOTECAP_MISSING, REMOTECAP_EXPIRED, REMOTECAP_INVALID, REMOTECAP_SCOPE_DENIED, REMOTECAP_REPLAY, REMOTECAP_REVOKED"
+    },
+    {
+      "id": "RC-EVENT-CODES",
+      "check": "issuance/consumption/denial event codes present",
+      "pass": true,
+      "detail": "REMOTECAP_ISSUED, REMOTECAP_CONSUMED, REMOTECAP_DENIED (+ legacy RC_* aliases)"
+    },
+    {
+      "id": "RC-LOCAL-ONLY-MODE",
+      "check": "local-only operation path remains functional without RemoteCap",
+      "pass": true,
+      "detail": "CapabilityGate::authorize_local_operation + unit test coverage"
+    },
+    {
+      "id": "RC-RCH-UNIT-TEST",
+      "check": "rch-offloaded targeted remote_cap tests",
+      "pass": true,
+      "detail": "rch exec cargo test ... remote_cap => 9 passed, 0 failed"
+    },
+    {
+      "id": "RC-CLI-WIRING",
+      "check": "CLI `franken-node remotecap issue --scope ... --ttl ...` wired in runtime command dispatch",
+      "pass": false,
+      "blocked": true,
+      "detail": "Deferred in this pass to avoid active `main.rs` reservation overlap with JadeFalcon"
+    },
+    {
+      "id": "RC-RCH-CHECK-ALL-TARGETS",
+      "check": "rch-offloaded cargo check --all-targets",
+      "pass": false,
+      "blocked": true,
+      "detail": "Fails outside bead scope: crates/franken-node/src/observability/evidence_ledger.rs missing fields in EvidenceEntry initializer (E0063)"
+    },
+    {
+      "id": "RC-RCH-CLIPPY-ALL-TARGETS",
+      "check": "rch-offloaded cargo clippy --all-targets -- -D warnings",
+      "pass": false,
+      "blocked": true,
+      "detail": "Fails on large pre-existing repo-wide lint debt unrelated to bd-1nfu"
+    },
+    {
+      "id": "RC-RCH-FMT-CHECK",
+      "check": "rch-offloaded cargo fmt --check",
+      "pass": false,
+      "blocked": true,
+      "detail": "rch reports non-compilation command + fmt drift in unrelated files (observability/policy modules)"
+    }
+  ],
+  "blocking_context": [
+    {
+      "type": "rch_sync",
+      "detail": "Remote rsync repeatedly fails on /data/projects/remote_compilation_helper/perf.data (permission denied), forcing local fallback execution"
+    },
+    {
+      "type": "reservation_conflict",
+      "detail": "main.rs actively reserved by JadeFalcon during this pass; CLI dispatch wiring intentionally deferred to avoid overlapping edits"
+    }
+  ]
+}

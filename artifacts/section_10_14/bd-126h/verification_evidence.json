@@ -1,0 +1,235 @@
+{
+  "bead": "bd-126h",
+  "title": "Append-only marker stream for high-impact control events",
+  "section": "10.14",
+  "passed": 45,
+  "total": 45,
+  "all_pass": true,
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/control_plane/marker_stream.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-126h_contract.md"
+    },
+    {
+      "check": "file: conformance tests",
+      "pass": true,
+      "detail": "exists: tests/conformance/marker_stream_invariants.rs"
+    },
+    {
+      "check": "struct/enum: pub struct Marker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "struct/enum: pub struct MarkerStream",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "struct/enum: pub enum MarkerEventType",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "struct/enum: pub enum MarkerStreamError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_type: TrustDecision",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_type: RevocationEvent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_type: QuarantineAction",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_type: PolicyChange",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_type: EpochTransition",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_type: IncidentEscalation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: MKS_SEQUENCE_GAP",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: MKS_HASH_CHAIN_BREAK",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: MKS_TIME_REGRESSION",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: MKS_EMPTY_STREAM",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: MKS_INTEGRITY_FAILURE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: MKS_TORN_TAIL",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: MKS_INVALID_PAYLOAD",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "operation: fn append(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "operation: fn head(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "operation: fn get(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "operation: fn len(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "operation: fn verify_integrity(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "operation: fn recover_torn_tail(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "spec_invariant: INV-MKS-APPEND-ONLY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "spec_invariant: INV-MKS-DENSE-SEQUENCE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "spec_invariant: INV-MKS-HASH-CHAIN",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "spec_invariant: INV-MKS-MONOTONIC-TIME",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "spec_invariant: INV-MKS-TORN-TAIL",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "27 tests (minimum 20)"
+    },
+    {
+      "check": "test: append_single_marker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: dense_sequence_numbers",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: hash_chain_links_correctly",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: time_regression_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: empty_payload_hash_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: verify_integrity_valid_stream",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: verify_integrity_detects_hash_chain_break",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: recover_torn_tail_corrupt_last",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: recover_torn_tail_healthy_stream",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: all_event_types_appendable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: error_codes_all_present",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: large_stream_integrity",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "genesis: GENESIS_PREV_HASH",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

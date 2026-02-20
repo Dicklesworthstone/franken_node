@@ -1,0 +1,32 @@
+{
+  "cases": [
+    {
+      "id": "receipt:quarantine:approved",
+      "action_name": "quarantine",
+      "decision": "approved",
+      "expected_verify": true,
+      "expected_high_impact_required": true
+    },
+    {
+      "id": "receipt:revocation:denied",
+      "action_name": "revocation",
+      "decision": "denied",
+      "expected_verify": true,
+      "expected_high_impact_required": true
+    },
+    {
+      "id": "receipt:low-risk:no-receipt",
+      "action_name": "low_risk_status_poll",
+      "decision": "approved",
+      "expected_verify": false,
+      "expected_high_impact_required": false
+    },
+    {
+      "id": "receipt:tamper:signature-break",
+      "action_name": "policy_change",
+      "decision": "escalated",
+      "expected_verify": false,
+      "expected_high_impact_required": true
+    }
+  ]
+}

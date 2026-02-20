@@ -1,0 +1,23 @@
+{
+  "bead_id": "bd-1oof",
+  "title": "Witness Link Audit",
+  "description": "Witness coverage audit across test corpus",
+  "generated": "2026-02-20",
+  "high_impact_kinds": ["Quarantine", "Release", "Escalate"],
+  "non_high_impact_kinds": ["Admit", "Deny", "Rollback", "Throttle"],
+  "test_scenarios": {
+    "high_impact_with_witnesses": "PASS",
+    "high_impact_without_witnesses": "REJECTED (ERR_MISSING_WITNESSES)",
+    "non_high_impact_without_witnesses": "PASS (optional)",
+    "duplicate_witness_ids": "REJECTED (ERR_DUPLICATE_WITNESS_ID)",
+    "integrity_hash_mismatch": "REJECTED (ERR_INTEGRITY_HASH_MISMATCH)",
+    "unresolvable_locator_strict": "REJECTED (ERR_UNRESOLVABLE_LOCATOR)",
+    "multi_witness_ordering": "PRESERVED"
+  },
+  "coverage": {
+    "high_impact_entries_tested": 3,
+    "high_impact_with_witnesses": 3,
+    "coverage_pct": 100.0,
+    "witness_kinds_tested": ["telemetry", "state_snapshot", "proof_artifact", "external_signal"]
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "fixture_name": "small_encoding",
+  "description": "Small encoding fixture: single content chunk with basic erasure coding config, 3 domains",
+  "content_hash_hex": "0000000000000000000000000000000000000000000000000000000000000000",
+  "domains": ["encoding", "repair", "scheduling"],
+  "config": {
+    "version": 1,
+    "parameters": {
+      "chunk_size": "65536",
+      "erasure_k": "4",
+      "erasure_m": "2"
+    }
+  },
+  "expected_seeds": {
+    "encoding": "5c3b07805bc7aec22bc2b91ad7aa65c7c8785d5707de02e911fea345fc92d2d2",
+    "repair": "3288d4f014f645a3f4cb540f1b20cf88b60e12d6ed312027a1a5937348e03e90",
+    "scheduling": "37241cb9f603b259036ffb7a82cfd6d68deaa8a6dd45f54b3810dbdcaa9da9e4"
+  }
+}

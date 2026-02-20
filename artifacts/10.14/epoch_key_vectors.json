@@ -1,0 +1,73 @@
+{
+  "schema_version": "1.0",
+  "kdf": "HKDF-SHA256",
+  "info_format": "franken-node:epoch={epoch}:domain={domain}",
+  "vectors": [
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 1,
+      "domain": "marker",
+      "expected_key_hex": "3a2c69af2025b183040dd2646c3c6c2a4ca2e7f74c20a3a0bd88f38ae2236af6"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 2,
+      "domain": "manifest",
+      "expected_key_hex": "ad52b514a0ecb44bcc9f14a80fd96af8d888338934d6d8e3e84491c5498b8538"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 3,
+      "domain": "control",
+      "expected_key_hex": "bd99c7fdce59e7fa6348ff1603dfd2240882170bf8d60e33bd03f3eba1426f96"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 5,
+      "domain": "receipt",
+      "expected_key_hex": "240a5d46a78e7dd241520701f421e7bf5937fcd0f519eea8cdb3648a613a6435"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 8,
+      "domain": "policy",
+      "expected_key_hex": "618911186be6ea4466e4bfc033306907ce3dcde73e49dec267e920f5c8b13464"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 13,
+      "domain": "marker",
+      "expected_key_hex": "7b2a3bbde4103713f9986ccde3c763e116d0d5723635e353297e724c1d2a50f0"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 21,
+      "domain": "manifest",
+      "expected_key_hex": "340b0901e60c6a3f3ca6463bb6020fc8a17edc129b0dec1be303464ad1f87f83"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 34,
+      "domain": "control",
+      "expected_key_hex": "f2cf49c278c1f852961d7bbd83ec8271b1f162d8ac84ace2647d79200b0ebbf6"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 55,
+      "domain": "receipt",
+      "expected_key_hex": "c8de387ea49a518c701fda4ee48a119a26a2e342a670f9497cca3e313f9f6a67"
+    },
+    {
+      "root_secret_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+      "epoch": 89,
+      "domain": "policy",
+      "expected_key_hex": "89c3d4a8aaab460acb9c70ae13b6177c8dd5213e12d4cd8fd7056fcd4d63cf47"
+    }
+  ],
+  "signature_kat": {
+    "artifact_hex": "61727469666163742d616c706861",
+    "epoch": 13,
+    "domain": "marker",
+    "expected_signature_hex": "ab39e9df44b940453a89358528d54bff9bd9d180359dac0a1f3dd2f924e43494"
+  }
+}

@@ -1,0 +1,59 @@
+{
+  "gate": "expected_loss_scoring_verification",
+  "bead": "bd-33b",
+  "section": "10.5",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "id": "ELS-IMPL",
+      "description": "Rust implementation exposes required expected-loss scoring symbols",
+      "status": "PASS"
+    },
+    {
+      "id": "ELS-SPEC",
+      "description": "Spec contract exists with expected invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "ELS-TESTS",
+      "description": "Python verification test file exists",
+      "status": "PASS"
+    },
+    {
+      "id": "ELS-SELFTEST",
+      "description": "Verification self-test scenarios pass",
+      "status": "PASS",
+      "details": "3/3 checks"
+    }
+  ],
+  "self_test": {
+    "verdict": "PASS",
+    "checks": [
+      {
+        "id": "SELF-RANKING",
+        "status": "PASS",
+        "details": "best_action=quarantine"
+      },
+      {
+        "id": "SELF-DEGENERATE",
+        "status": "PASS",
+        "details": "expected_loss=2.5"
+      },
+      {
+        "id": "SELF-SENSITIVITY",
+        "status": "PASS",
+        "details": "records=4"
+      }
+    ],
+    "summary": {
+      "total_checks": 3,
+      "passing_checks": 3,
+      "failing_checks": 0
+    }
+  },
+  "summary": {
+    "total_checks": 4,
+    "passing_checks": 4,
+    "failing_checks": 0
+  }
+}

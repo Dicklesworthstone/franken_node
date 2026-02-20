@@ -1,0 +1,335 @@
+{
+  "bead_id": "bd-oolt",
+  "title": "Mandatory evidence emission for policy-driven actions",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 31,
+  "summary": {
+    "passing": 64,
+    "failing": 0,
+    "total": 64
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/evidence_emission.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-oolt_contract.md"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "upstream: evidence_ledger.rs",
+      "pass": true,
+      "detail": "exists"
+    },
+    {
+      "check": "imports EvidenceLedger + DecisionKind + EvidenceEntry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "31 tests (minimum 25)"
+    },
+    {
+      "check": "type: pub enum PolicyAction",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ActionId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct EvidenceRequirement",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum PolicyActionOutcome",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct EvidenceConformanceChecker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ConformanceError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct CoverageEntry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn verify_and_execute(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn expected_decision_kind(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn coverage_check(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn coverage_matrix(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn action_log(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn executed_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn rejected_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn build_evidence_entry(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn for_action(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn all_requirements(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-POLICY-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-POLICY-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-POLICY-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-EVIDENCE-MANDATORY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-EVIDENCE-LINKAGE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-EVIDENCE-COMPLETE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "action: Commit",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "action: Abort",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "action: Quarantine",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "action: Release",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_MISSING_EVIDENCE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_DECISION_KIND_MISMATCH",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_ACTION_ID_MISMATCH",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_MALFORMED_EVIDENCE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_LEDGER_APPEND_FAILED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: action_id_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: policy_action_all_four_variants",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: policy_action_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: policy_action_decision_kind_mapping",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: evidence_requirement_for_each_action",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: all_requirements_covers_all_actions",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: conformance_error_codes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: outcome_executed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: outcome_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: commit_with_evidence_executes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: abort_with_evidence_executes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: quarantine_with_evidence_executes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: release_with_evidence_executes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: commit_without_evidence_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: abort_without_evidence_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: quarantine_without_evidence_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: release_without_evidence_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: wrong_decision_kind_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: wrong_action_id_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: empty_decision_id_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: coverage_check_all_four_actions",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: coverage_matrix_all_actions",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: action_log_accumulates",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: full_lifecycle_all_four_actions_with_evidence",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: full_lifecycle_all_four_without_evidence",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: build_evidence_entry_sets_correct_fields",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

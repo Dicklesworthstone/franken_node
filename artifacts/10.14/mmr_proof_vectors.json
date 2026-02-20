@@ -1,0 +1,454 @@
+{
+  "bead": "bd-1dar",
+  "title": "Optional MMR checkpoints and inclusion/prefix proof APIs",
+  "section": "10.14",
+  "inclusion_vector_count": 10,
+  "prefix_vector_count": 5,
+  "inclusion_cases": [
+    {
+      "id": "inc-01",
+      "stream_markers": [
+        "marker-00",
+        "marker-01"
+      ],
+      "target_seq": 0,
+      "marker_hash": "2dd18ea806e0126c511eb1cb147196b7603eac0c34d7372829c53cd2b7e06699",
+      "mmr_root": {
+        "tree_size": 2,
+        "root_hash": "192efdfe633e66f24382ee525ecf0c1160c59e10b36b2c486a7d8e231d9443df"
+      },
+      "inclusion_proof": {
+        "leaf_index": 0,
+        "tree_size": 2,
+        "leaf_hash": "792ee5a1a37c7a6d6501f634db6a7f33aa821518da1dbbf3c93bb2fe83daa965",
+        "audit_path": [
+          "a3a408f6f0792dbfabb84c90d8f063dd469e0963b936a038cf0e4a8b88da682e"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-02",
+      "stream_markers": [
+        "marker-00",
+        "marker-01"
+      ],
+      "target_seq": 1,
+      "marker_hash": "3554ad36e77e858fe3658a26c23decd4ada7b75a3c07aec76f9fa0abebd96945",
+      "mmr_root": {
+        "tree_size": 2,
+        "root_hash": "192efdfe633e66f24382ee525ecf0c1160c59e10b36b2c486a7d8e231d9443df"
+      },
+      "inclusion_proof": {
+        "leaf_index": 1,
+        "tree_size": 2,
+        "leaf_hash": "a3a408f6f0792dbfabb84c90d8f063dd469e0963b936a038cf0e4a8b88da682e",
+        "audit_path": [
+          "792ee5a1a37c7a6d6501f634db6a7f33aa821518da1dbbf3c93bb2fe83daa965"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-03",
+      "stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02"
+      ],
+      "target_seq": 0,
+      "marker_hash": "2dd18ea806e0126c511eb1cb147196b7603eac0c34d7372829c53cd2b7e06699",
+      "mmr_root": {
+        "tree_size": 3,
+        "root_hash": "b02b756814972b0576afb46f4589e3c0ff65eddd895b61c3908fbbb36bf5d7c7"
+      },
+      "inclusion_proof": {
+        "leaf_index": 0,
+        "tree_size": 3,
+        "leaf_hash": "792ee5a1a37c7a6d6501f634db6a7f33aa821518da1dbbf3c93bb2fe83daa965",
+        "audit_path": [
+          "a3a408f6f0792dbfabb84c90d8f063dd469e0963b936a038cf0e4a8b88da682e",
+          "bcf08eb416980c646477e93f999ba2490777303c32965ea0e9dcaa26d4707f91"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-04",
+      "stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02"
+      ],
+      "target_seq": 2,
+      "marker_hash": "056a21e3d42648d7369ce69cec88bf521552f7c7097a1420b8e69739988f7045",
+      "mmr_root": {
+        "tree_size": 3,
+        "root_hash": "b02b756814972b0576afb46f4589e3c0ff65eddd895b61c3908fbbb36bf5d7c7"
+      },
+      "inclusion_proof": {
+        "leaf_index": 2,
+        "tree_size": 3,
+        "leaf_hash": "33c59c8dfbd8d0bf1fb9c56f1f9c6571e499f79581362842aa02f237f9a6daf8",
+        "audit_path": [
+          "33c59c8dfbd8d0bf1fb9c56f1f9c6571e499f79581362842aa02f237f9a6daf8",
+          "192efdfe633e66f24382ee525ecf0c1160c59e10b36b2c486a7d8e231d9443df"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-05",
+      "stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03"
+      ],
+      "target_seq": 1,
+      "marker_hash": "3554ad36e77e858fe3658a26c23decd4ada7b75a3c07aec76f9fa0abebd96945",
+      "mmr_root": {
+        "tree_size": 4,
+        "root_hash": "a677cbfdb2ce0fc355fa4ba9f8bf7f5a5ea21c62c3ccc912caa55ffb58ef904d"
+      },
+      "inclusion_proof": {
+        "leaf_index": 1,
+        "tree_size": 4,
+        "leaf_hash": "a3a408f6f0792dbfabb84c90d8f063dd469e0963b936a038cf0e4a8b88da682e",
+        "audit_path": [
+          "792ee5a1a37c7a6d6501f634db6a7f33aa821518da1dbbf3c93bb2fe83daa965",
+          "d537457a6330f3a61ce65ef74bbfbe60b62b8ef17e0083721910e40d32ba0721"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-06",
+      "stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04"
+      ],
+      "target_seq": 4,
+      "marker_hash": "331e1089461beedbe23606d91e9e2819856127e154354335e2fe2ce98a036a73",
+      "mmr_root": {
+        "tree_size": 5,
+        "root_hash": "54c165a03a7e6e9af4e52240bb2238364ec7d02985c93f3c6de4e539ce2c3cf0"
+      },
+      "inclusion_proof": {
+        "leaf_index": 4,
+        "tree_size": 5,
+        "leaf_hash": "c72bfdb7546a53c6ed41c97eb57945ad9014d7fe53644dcac687bf36948e665f",
+        "audit_path": [
+          "c72bfdb7546a53c6ed41c97eb57945ad9014d7fe53644dcac687bf36948e665f",
+          "a29d34c066b75cacaa905d449fa8ef6660cd9ce8e4bdaa8ef06f40deaec694d8",
+          "a677cbfdb2ce0fc355fa4ba9f8bf7f5a5ea21c62c3ccc912caa55ffb58ef904d"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-07",
+      "stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05",
+        "marker-06",
+        "marker-07"
+      ],
+      "target_seq": 3,
+      "marker_hash": "354ed28f08255338bf9e3301ec5755a660a9deeb463ffbdafdb2e1eb14a2a3f6",
+      "mmr_root": {
+        "tree_size": 8,
+        "root_hash": "b45887da8172607c23c98c36858b71852698114ceef59df5059a5b3b85609c99"
+      },
+      "inclusion_proof": {
+        "leaf_index": 3,
+        "tree_size": 8,
+        "leaf_hash": "04cc1fab394b897b95a1783d730ea7efa409e10eccc99786f08c6cd1d14cd133",
+        "audit_path": [
+          "33c59c8dfbd8d0bf1fb9c56f1f9c6571e499f79581362842aa02f237f9a6daf8",
+          "192efdfe633e66f24382ee525ecf0c1160c59e10b36b2c486a7d8e231d9443df",
+          "c85ee541dede09f9461249780d749cd9d63023f9ea721ed83106638b1abe966a"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-08",
+      "stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05",
+        "marker-06",
+        "marker-07",
+        "marker-08",
+        "marker-09"
+      ],
+      "target_seq": 0,
+      "marker_hash": "2dd18ea806e0126c511eb1cb147196b7603eac0c34d7372829c53cd2b7e06699",
+      "mmr_root": {
+        "tree_size": 10,
+        "root_hash": "455451c563c3670f8e1618894214c8d14d1e0a60a5cfa7eaf4f363ab178be356"
+      },
+      "inclusion_proof": {
+        "leaf_index": 0,
+        "tree_size": 10,
+        "leaf_hash": "792ee5a1a37c7a6d6501f634db6a7f33aa821518da1dbbf3c93bb2fe83daa965",
+        "audit_path": [
+          "a3a408f6f0792dbfabb84c90d8f063dd469e0963b936a038cf0e4a8b88da682e",
+          "d537457a6330f3a61ce65ef74bbfbe60b62b8ef17e0083721910e40d32ba0721",
+          "c85ee541dede09f9461249780d749cd9d63023f9ea721ed83106638b1abe966a",
+          "56aba597c3310cfd19b90a56337fdedfe95e306d3def3a2aa85feebaf16910ff"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-09",
+      "stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05",
+        "marker-06",
+        "marker-07",
+        "marker-08",
+        "marker-09"
+      ],
+      "target_seq": 9,
+      "marker_hash": "8dc12e8fe9286e3e86697e99f937cbaca04a6e300b54a1b2130c9f4d74bccc50",
+      "mmr_root": {
+        "tree_size": 10,
+        "root_hash": "455451c563c3670f8e1618894214c8d14d1e0a60a5cfa7eaf4f363ab178be356"
+      },
+      "inclusion_proof": {
+        "leaf_index": 9,
+        "tree_size": 10,
+        "leaf_hash": "e3328e21f166da68711a120d9291495b1c240957af4906fd3f2d5dc31e4adca2",
+        "audit_path": [
+          "14d4a12325a12070edbf440ed1f1cb591e0eee12af7e22f744eb237ca78fddb4",
+          "98493d158009254caf278456b3cf00f50604e95ba0979552cb598fd6ee674aea",
+          "f6d1d3c777d12cebb6494d924d3f19d65a15d37856ece8367fe008a20f8c2387",
+          "b45887da8172607c23c98c36858b71852698114ceef59df5059a5b3b85609c99"
+        ]
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "inc-10",
+      "stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05"
+      ],
+      "target_seq": 2,
+      "marker_hash": "df4c8465db339baa54c51e60d57f3156b7cf8c963d17cd453edfdc71ee2c85d0",
+      "mmr_root": {
+        "tree_size": 6,
+        "root_hash": "3eca1fbd1720ab1e81854cc2285004d48d0586e3660197d929a938f3077006bd"
+      },
+      "inclusion_proof": {
+        "leaf_index": 2,
+        "tree_size": 6,
+        "leaf_hash": "33c59c8dfbd8d0bf1fb9c56f1f9c6571e499f79581362842aa02f237f9a6daf8",
+        "audit_path": [
+          "04cc1fab394b897b95a1783d730ea7efa409e10eccc99786f08c6cd1d14cd133",
+          "192efdfe633e66f24382ee525ecf0c1160c59e10b36b2c486a7d8e231d9443df",
+          "373c7dabb7800c1a6a3f1fb0a05f1b98a5837fe90e33255cbd293a31a2ce62ee"
+        ]
+      },
+      "expected_verification_result": false
+    }
+  ],
+  "prefix_cases": [
+    {
+      "id": "pre-01",
+      "prefix_stream_markers": [
+        "marker-00",
+        "marker-01"
+      ],
+      "super_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03"
+      ],
+      "prefix_root": {
+        "tree_size": 2,
+        "root_hash": "192efdfe633e66f24382ee525ecf0c1160c59e10b36b2c486a7d8e231d9443df"
+      },
+      "super_root": {
+        "tree_size": 4,
+        "root_hash": "a677cbfdb2ce0fc355fa4ba9f8bf7f5a5ea21c62c3ccc912caa55ffb58ef904d"
+      },
+      "prefix_proof": {
+        "prefix_size": 2,
+        "super_tree_size": 4,
+        "prefix_root_hash": "192efdfe633e66f24382ee525ecf0c1160c59e10b36b2c486a7d8e231d9443df",
+        "super_root_hash": "a677cbfdb2ce0fc355fa4ba9f8bf7f5a5ea21c62c3ccc912caa55ffb58ef904d",
+        "prefix_root_from_super": "192efdfe633e66f24382ee525ecf0c1160c59e10b36b2c486a7d8e231d9443df"
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "pre-02",
+      "prefix_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02"
+      ],
+      "super_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05",
+        "marker-06"
+      ],
+      "prefix_root": {
+        "tree_size": 3,
+        "root_hash": "b02b756814972b0576afb46f4589e3c0ff65eddd895b61c3908fbbb36bf5d7c7"
+      },
+      "super_root": {
+        "tree_size": 7,
+        "root_hash": "4a4f359d99ad1b0d2820eb129e31054b2ab4753e59faf10b546b5d22181e77c0"
+      },
+      "prefix_proof": {
+        "prefix_size": 3,
+        "super_tree_size": 7,
+        "prefix_root_hash": "b02b756814972b0576afb46f4589e3c0ff65eddd895b61c3908fbbb36bf5d7c7",
+        "super_root_hash": "4a4f359d99ad1b0d2820eb129e31054b2ab4753e59faf10b546b5d22181e77c0",
+        "prefix_root_from_super": "b02b756814972b0576afb46f4589e3c0ff65eddd895b61c3908fbbb36bf5d7c7"
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "pre-03",
+      "prefix_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04"
+      ],
+      "super_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05",
+        "marker-06",
+        "marker-07",
+        "marker-08",
+        "marker-09"
+      ],
+      "prefix_root": {
+        "tree_size": 5,
+        "root_hash": "54c165a03a7e6e9af4e52240bb2238364ec7d02985c93f3c6de4e539ce2c3cf0"
+      },
+      "super_root": {
+        "tree_size": 10,
+        "root_hash": "455451c563c3670f8e1618894214c8d14d1e0a60a5cfa7eaf4f363ab178be356"
+      },
+      "prefix_proof": {
+        "prefix_size": 5,
+        "super_tree_size": 10,
+        "prefix_root_hash": "54c165a03a7e6e9af4e52240bb2238364ec7d02985c93f3c6de4e539ce2c3cf0",
+        "super_root_hash": "455451c563c3670f8e1618894214c8d14d1e0a60a5cfa7eaf4f363ab178be356",
+        "prefix_root_from_super": "54c165a03a7e6e9af4e52240bb2238364ec7d02985c93f3c6de4e539ce2c3cf0"
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "pre-04",
+      "prefix_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05",
+        "marker-06",
+        "marker-07"
+      ],
+      "super_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05",
+        "marker-06",
+        "marker-07"
+      ],
+      "prefix_root": {
+        "tree_size": 8,
+        "root_hash": "b45887da8172607c23c98c36858b71852698114ceef59df5059a5b3b85609c99"
+      },
+      "super_root": {
+        "tree_size": 8,
+        "root_hash": "b45887da8172607c23c98c36858b71852698114ceef59df5059a5b3b85609c99"
+      },
+      "prefix_proof": {
+        "prefix_size": 8,
+        "super_tree_size": 8,
+        "prefix_root_hash": "b45887da8172607c23c98c36858b71852698114ceef59df5059a5b3b85609c99",
+        "super_root_hash": "b45887da8172607c23c98c36858b71852698114ceef59df5059a5b3b85609c99",
+        "prefix_root_from_super": "b45887da8172607c23c98c36858b71852698114ceef59df5059a5b3b85609c99"
+      },
+      "expected_verification_result": true
+    },
+    {
+      "id": "pre-05",
+      "prefix_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03"
+      ],
+      "super_stream_markers": [
+        "marker-00",
+        "marker-01",
+        "marker-02",
+        "marker-03",
+        "marker-04",
+        "marker-05",
+        "marker-06",
+        "marker-07",
+        "marker-08"
+      ],
+      "prefix_root": {
+        "tree_size": 4,
+        "root_hash": "a677cbfdb2ce0fc355fa4ba9f8bf7f5a5ea21c62c3ccc912caa55ffb58ef904d"
+      },
+      "super_root": {
+        "tree_size": 9,
+        "root_hash": "62f4a6f23e37b2b2c97a1c2397354dc6cc3c571339d9f12b60e086625538e978"
+      },
+      "prefix_proof": {
+        "prefix_size": 4,
+        "super_tree_size": 9,
+        "prefix_root_hash": "a677cbfdb2ce0fc355fa4ba9f8bf7f5a5ea21c62c3ccc912caa55ffb58ef904d",
+        "super_root_hash": "62f4a6f23e37b2b2c97a1c2397354dc6cc3c571339d9f12b60e086625538e978",
+        "prefix_root_from_super": "b1a395b2c4325d1b37cd2cc51d3111b54d8417d007ff6c922127567806184764"
+      },
+      "expected_verification_result": false
+    }
+  ]
+}

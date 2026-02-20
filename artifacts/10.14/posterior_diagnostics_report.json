@@ -1,0 +1,142 @@
+{
+  "bead_id": "bd-2igi",
+  "title": "Posterior Diagnostics Report",
+  "description": "Example Bayesian posterior rankings for three representative scenarios",
+  "generated": "2026-02-20",
+  "scenarios": [
+    {
+      "name": "uniform_prior",
+      "description": "Three candidates with no observations — all posteriors equal under uniform Beta(1,1) prior",
+      "candidates": ["action-A", "action-B", "action-C"],
+      "observations": [],
+      "priors": "uniform Beta(1,1) for all candidates",
+      "ranking": [
+        {
+          "rank": 1,
+          "candidate": "action-A",
+          "posterior_prob": 0.3333,
+          "prior_prob": 0.3333,
+          "observation_count": 0,
+          "confidence_interval": [0.0, 1.0],
+          "guardrail_filtered": false,
+          "diagnostic_confidence": "Low"
+        },
+        {
+          "rank": 2,
+          "candidate": "action-B",
+          "posterior_prob": 0.3333,
+          "prior_prob": 0.3333,
+          "observation_count": 0,
+          "confidence_interval": [0.0, 1.0],
+          "guardrail_filtered": false,
+          "diagnostic_confidence": "Low"
+        },
+        {
+          "rank": 3,
+          "candidate": "action-C",
+          "posterior_prob": 0.3333,
+          "prior_prob": 0.3333,
+          "observation_count": 0,
+          "confidence_interval": [0.0, 1.0],
+          "guardrail_filtered": false,
+          "diagnostic_confidence": "Low"
+        }
+      ],
+      "notes": "INV-BAYES-NORMALIZED: posteriors sum to 1.0. Tiebreaker uses lexicographic CandidateRef order (INV-BAYES-REPRODUCIBLE)."
+    },
+    {
+      "name": "strong_preference",
+      "description": "Three candidates with 20 observations each: A succeeds 80%, B 50%, C 20%",
+      "candidates": ["action-A", "action-B", "action-C"],
+      "observations_summary": {
+        "action-A": {"successes": 16, "failures": 4, "total": 20},
+        "action-B": {"successes": 10, "failures": 10, "total": 20},
+        "action-C": {"successes": 4, "failures": 16, "total": 20}
+      },
+      "ranking": [
+        {
+          "rank": 1,
+          "candidate": "action-A",
+          "posterior_prob": 0.4857,
+          "prior_prob": 0.3333,
+          "observation_count": 20,
+          "confidence_interval": [0.597, 0.832],
+          "guardrail_filtered": false,
+          "diagnostic_confidence": "High"
+        },
+        {
+          "rank": 2,
+          "candidate": "action-B",
+          "posterior_prob": 0.3333,
+          "prior_prob": 0.3333,
+          "observation_count": 20,
+          "confidence_interval": [0.295, 0.705],
+          "guardrail_filtered": false,
+          "diagnostic_confidence": "High"
+        },
+        {
+          "rank": 3,
+          "candidate": "action-C",
+          "posterior_prob": 0.1810,
+          "prior_prob": 0.3333,
+          "observation_count": 20,
+          "confidence_interval": [0.068, 0.303],
+          "guardrail_filtered": false,
+          "diagnostic_confidence": "High"
+        }
+      ],
+      "notes": "Beta conjugate update: alpha=successes+1, beta=failures+1. INV-BAYES-TRANSPARENT: all fields present. INV-BAYES-NORMALIZED: posteriors sum to 1.0."
+    },
+    {
+      "name": "guardrail_conflict",
+      "description": "Top-ranked candidate A is blocked by a guardrail — EVD-BAYES-003 fires, operator uses alternative",
+      "candidates": ["action-A", "action-B", "action-C"],
+      "observations_summary": {
+        "action-A": {"successes": 18, "failures": 2, "total": 20},
+        "action-B": {"successes": 8, "failures": 12, "total": 20},
+        "action-C": {"successes": 5, "failures": 15, "total": 20}
+      },
+      "guardrail_blocked": ["action-A"],
+      "ranking": [
+        {
+          "rank": 1,
+          "candidate": "action-A",
+          "posterior_prob": 0.5455,
+          "prior_prob": 0.3333,
+          "observation_count": 20,
+          "confidence_interval": [0.730, 0.927],
+          "guardrail_filtered": true,
+          "diagnostic_confidence": "High"
+        },
+        {
+          "rank": 2,
+          "candidate": "action-B",
+          "posterior_prob": 0.2909,
+          "prior_prob": 0.3333,
+          "observation_count": 20,
+          "confidence_interval": [0.195, 0.605],
+          "guardrail_filtered": false,
+          "diagnostic_confidence": "High"
+        },
+        {
+          "rank": 3,
+          "candidate": "action-C",
+          "posterior_prob": 0.1636,
+          "prior_prob": 0.3333,
+          "observation_count": 20,
+          "confidence_interval": [0.092, 0.408],
+          "guardrail_filtered": false,
+          "diagnostic_confidence": "High"
+        }
+      ],
+      "events_emitted": ["EVD-BAYES-001", "EVD-BAYES-002", "EVD-BAYES-003"],
+      "notes": "INV-BAYES-ADVISORY: guardrail_filtered flag is advisory only — diagnostics never execute actions. Operator must select action-B as highest non-blocked candidate."
+    }
+  ],
+  "invariants_verified": {
+    "INV-BAYES-ADVISORY": "Rankings produced but no actions executed by diagnostics layer",
+    "INV-BAYES-REPRODUCIBLE": "replay_from with identical observations produces bit-identical rankings",
+    "INV-BAYES-NORMALIZED": "Posterior probabilities sum to 1.0 within floating-point tolerance",
+    "INV-BAYES-TRANSPARENT": "Every RankedCandidate includes posterior_prob, prior_prob, observation_count, confidence_interval"
+  }
+}

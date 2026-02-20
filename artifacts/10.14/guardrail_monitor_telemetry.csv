@@ -1,0 +1,13 @@
+monitor_name,verdict,budget_id,reason,memory_util_pct,durability_level,hardening_level,epoch_id
+MemoryBudgetGuardrail,allow,memory_budget,,50.0,0.99,standard,42
+DurabilityLossGuardrail,allow,durability_budget,,50.0,0.99,standard,42
+HardeningRegressionGuardrail,allow,hardening_regression,,50.0,0.99,standard,42
+EvidenceEmissionGuardrail,allow,evidence_emission,,50.0,0.99,standard,42
+MemoryBudgetGuardrail,warn,memory_budget,memory utilization 85.0% exceeds warn threshold 80.0%,85.0,0.99,standard,43
+DurabilityLossGuardrail,allow,durability_budget,,85.0,0.99,standard,43
+MemoryBudgetGuardrail,block,memory_budget,memory utilization 96.0% exceeds block threshold 95.0%,96.0,0.99,standard,44
+DurabilityLossGuardrail,block,durability_budget,durability 0.85 below minimum 0.90,96.0,0.85,standard,45
+HardeningRegressionGuardrail,block,hardening_regression,hardening regression from standard to baseline (INV-001),50.0,0.99,standard,46
+EvidenceEmissionGuardrail,block,evidence_emission,evidence emission is disabled (INV-002),50.0,0.99,standard,47
+MemoryBudgetGuardrail,allow,memory_budget,,30.0,0.99,enhanced,48
+DurabilityLossGuardrail,warn,durability_budget,durability 0.92 approaching minimum 0.90 (margin 0.05),30.0,0.92,enhanced,48

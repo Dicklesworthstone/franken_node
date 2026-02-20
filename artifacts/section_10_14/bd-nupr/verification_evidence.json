@@ -1,0 +1,84 @@
+{
+  "gate": "evidence_entry_schema_verification",
+  "bead": "bd-nupr",
+  "section": "10.14",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T17:18:19.646018+00:00",
+  "checks": [
+    {
+      "id": "EE-SCHEMA",
+      "description": "Schema file exists and encodes canonical fields",
+      "status": "PASS",
+      "details": {
+        "required_count": 10,
+        "root_const_matches": true
+      }
+    },
+    {
+      "id": "EE-SPEC",
+      "description": "Spec contract documents required invariants",
+      "status": "PASS",
+      "details": {
+        "missing_terms": []
+      }
+    },
+    {
+      "id": "EE-REPORT",
+      "description": "Validation report artifact is present and complete",
+      "status": "PASS",
+      "details": {
+        "case_count": 4,
+        "expected_cases_present": true,
+        "summary_verdict": "PASS"
+      }
+    },
+    {
+      "id": "EE-UNIT",
+      "description": "Unit semantics for positive and negative schema cases",
+      "status": "PASS",
+      "details": {
+        "valid_error_count": 0,
+        "missing_case_errors": [
+          "EE_INVALID_CANONICAL_ORDER",
+          "EE_MISSING_REQUIRED_FIELD"
+        ],
+        "order_case_errors": [
+          "EE_INVALID_CANDIDATE_ORDER"
+        ]
+      }
+    },
+    {
+      "id": "EE-INTEGRATION",
+      "description": "Integration check: canonical serialization round-trip",
+      "status": "PASS",
+      "details": {
+        "json_length": 1288
+      }
+    },
+    {
+      "id": "EE-E2E",
+      "description": "E2E gate inputs exist for full validation flow",
+      "status": "PASS",
+      "details": {
+        "missing_paths": []
+      }
+    },
+    {
+      "id": "EE-LOGS",
+      "description": "Structured log event codes are stable and present",
+      "status": "PASS",
+      "details": {
+        "found_event_codes": [
+          "EVIDENCE_SCHEMA_VALIDATION_CASE",
+          "EVIDENCE_SCHEMA_VALIDATION_COMPLETED",
+          "EVIDENCE_SCHEMA_VALIDATION_STARTED"
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "total_checks": 7,
+    "passing_checks": 7,
+    "failing_checks": 0
+  }
+}

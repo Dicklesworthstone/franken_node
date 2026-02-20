@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-2573",
+  "section": "10.14",
+  "registry_version": "2026-02-20",
+  "default_unknown_class_policy": "reject",
+  "required_classes": [
+    "critical_marker",
+    "trust_receipt",
+    "replay_bundle",
+    "telemetry_artifact"
+  ],
+  "classes": {
+    "critical_marker": {
+      "retention_class": "required",
+      "max_size_bytes": 65536,
+      "symbol_overhead_budget": 0.1,
+      "fetch_policy": "eager",
+      "integrity_level": "strict"
+    },
+    "trust_receipt": {
+      "retention_class": "required",
+      "max_size_bytes": 131072,
+      "symbol_overhead_budget": 0.15,
+      "fetch_policy": "on_demand",
+      "integrity_level": "verified"
+    },
+    "replay_bundle": {
+      "retention_class": "required",
+      "max_size_bytes": 5242880,
+      "symbol_overhead_budget": 0.25,
+      "fetch_policy": "lazy",
+      "integrity_level": "verified"
+    },
+    "telemetry_artifact": {
+      "retention_class": "ephemeral",
+      "max_size_bytes": 262144,
+      "symbol_overhead_budget": 0.2,
+      "fetch_policy": "on_demand",
+      "integrity_level": "best_effort"
+    }
+  },
+  "error_codes": [
+    "OCP_MISSING_REQUIRED_CLASS",
+    "OCP_UNKNOWN_CLASS",
+    "OCP_INVALID_PROFILE_FIELD",
+    "OCP_VERSION_MISMATCH"
+  ],
+  "event_codes": [
+    "OCP_REGISTRY_LOADED",
+    "OCP_CLASS_VALIDATED",
+    "OCP_UNKNOWN_CLASS_REJECTED",
+    "OCP_REGISTRY_VERIFIED"
+  ]
+}

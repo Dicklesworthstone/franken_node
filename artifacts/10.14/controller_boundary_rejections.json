@@ -1,0 +1,27 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-bq4p",
+  "description": "Controller boundary rejection report from verification run",
+  "total_rejections": 12,
+  "total_passed": 4,
+  "per_invariant": {
+    "INV-001-MONOTONIC-HARDENING": 1,
+    "INV-002-EVIDENCE-EMISSION": 1,
+    "INV-003-DETERMINISTIC-SEED": 1,
+    "INV-004-INTEGRITY-PROOF-VERIFICATION": 1,
+    "INV-005-RING-BUFFER-FIFO": 1,
+    "INV-006-EPOCH-MONOTONIC": 1,
+    "INV-007-WITNESS-HASH-SHA256": 1,
+    "INV-008-GUARDRAIL-PRECEDENCE": 1,
+    "INV-009-OBJECT-CLASS-APPEND-ONLY": 1,
+    "INV-010-REMOTE-CAP-REQUIRED": 1,
+    "INV-011-MARKER-CHAIN-APPEND-ONLY": 1,
+    "INV-012-RECEIPT-CHAIN-IMMUTABLE": 1
+  },
+  "per_error_class": {
+    "correctness_semantic_mutation": 12,
+    "envelope_bypass": 0,
+    "unknown_invariant_target": 0
+  },
+  "test_verified": true
+}

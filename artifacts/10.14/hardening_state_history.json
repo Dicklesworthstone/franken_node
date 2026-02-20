@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-3rya",
+  "description": "Hardening state machine transition history from verification run",
+  "initial_level": "baseline",
+  "final_level": "maximum",
+  "transitions": [
+    {
+      "from": "baseline",
+      "to": "standard",
+      "timestamp": 1000,
+      "trigger": "escalation",
+      "trace_id": "trace-0001"
+    },
+    {
+      "from": "standard",
+      "to": "enhanced",
+      "timestamp": 1001,
+      "trigger": "escalation",
+      "trace_id": "trace-0002"
+    },
+    {
+      "from": "enhanced",
+      "to": "standard",
+      "timestamp": 1002,
+      "trigger": "governance_rollback",
+      "artifact_id": "GOV-2026-001",
+      "approver_id": "admin@franken.io",
+      "trace_id": "trace-0003"
+    },
+    {
+      "from": "standard",
+      "to": "maximum",
+      "timestamp": 1003,
+      "trigger": "escalation",
+      "trace_id": "trace-0004"
+    }
+  ],
+  "rejection_tests": [
+    {
+      "attempted": {"from": "standard", "to": "standard"},
+      "error": "HARDEN_ILLEGAL_REGRESSION",
+      "verified": true
+    },
+    {
+      "attempted": {"from": "enhanced", "to": "standard"},
+      "error": "HARDEN_ILLEGAL_REGRESSION",
+      "verified": true
+    },
+    {
+      "attempted": {"from": "critical", "to": "baseline"},
+      "error": "HARDEN_ILLEGAL_REGRESSION",
+      "verified": true
+    }
+  ],
+  "replay_determinism": {
+    "runs": 100,
+    "all_identical": true
+  }
+}
