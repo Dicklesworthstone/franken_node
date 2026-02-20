@@ -732,7 +732,7 @@ mod tests {
         let mut intervals = Vec::new();
 
         for i in 1..=5 {
-            let evidence = EvidenceTrajectory::new(i * 2, i as u32, 0.9 - (i as f64 * 0.1), Trend::Degrading, i);
+            let evidence = EvidenceTrajectory::new(i * 2, i as u32, 0.9 - (i as f64 * 0.1), Trend::Degrading, i as u64);
             sched.update_trajectory(&evidence);
             intervals.push(sched.next_sweep_interval().as_millis());
         }

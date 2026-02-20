@@ -352,29 +352,29 @@ impl DurabilityController {
         new_mode: DurabilityMode,
         operator_authorized: bool,
     ) -> Result<(), DurabilityError> {
+        let current_mode = self.mode.clone();
         if !self
             .policy
-            .is_authorized(&self.mode, &new_mode, operator_authorized)
+            .is_authorized(&current_mode, &new_mode, operator_authorized)
         {
             self.emit(
                 DM_MODE_SWITCH_DENIED,
-                &self.mode,
+                &current_mode,
                 format!(
                     "Mode switch from {} to {} denied for class {}",
-                    self.mode, new_mode, self.class_id
+                    current_mode, new_mode, self.class_id
                 ),
             );
-            return Err(DurabilityError::mode_switch_denied(&self.mode, &new_mode));
+            return Err(DurabilityError::mode_switch_denied(&current_mode, &new_mode));
         }
 
-        let old_mode = self.mode.clone();
         self.mode = new_mode.clone();
         self.emit(
             DM_MODE_SWITCH,
             &new_mode,
             format!(
                 "Mode switched from {} to {} for class {}",
-                old_mode, new_mode, self.class_id
+                current_mode, new_mode, self.class_id
             ),
         );
         Ok(())
@@ -382,18 +382,19 @@ impl DurabilityController {
 
     /// Execute a local write. Returns a claim on success.
     pub fn write_local(&mut self) -> Result<DurabilityClaim, DurabilityError> {
-        match &self.mode {
+        let mode = self.mode.clone();
+        match &mode {
             DurabilityMode::Local => {
                 let outcome = WriteOutcome::LocalFsyncConfirmed;
-                let claim = DurabilityClaim::derive(&self.mode, &outcome);
+                let claim = DurabilityClaim::derive(&mode, &outcome);
                 self.emit(
                     DM_WRITE_LOCAL_CONFIRMED,
-                    &self.mode,
+                    &mode,
                     format!("Local fsync confirmed for class {}", self.class_id),
                 );
                 self.emit(
                     DM_CLAIM_GENERATED,
-                    &self.mode,
+                    &mode,
                     format!("Claim: {}", claim.claim_string),
                 );
                 Ok(claim)
@@ -415,17 +416,19 @@ impl DurabilityController {
         &mut self,
         responses: &[ReplicaResponse],
     ) -> Result<DurabilityClaim, DurabilityError> {
-        match &self.mode {
+        let mode = self.mode.clone();
+        match &mode {
             DurabilityMode::Quorum { min_acks } => {
                 let acked = responses.iter().filter(|r| r.acked).count() as u32;
                 let total = responses.len() as u32;
+                let min_acks = *min_acks;
 
-                if acked >= *min_acks {
+                if acked >= min_acks {
                     let outcome = WriteOutcome::QuorumAcked { acked, total };
-                    let claim = DurabilityClaim::derive(&self.mode, &outcome);
+                    let claim = DurabilityClaim::derive(&mode, &outcome);
                     self.emit(
                         DM_WRITE_QUORUM_CONFIRMED,
-                        &self.mode,
+                        &mode,
                         format!(
                             "Quorum write confirmed: {}/{} acks for class {}",
                             acked, total, self.class_id
@@ -433,20 +436,20 @@ impl DurabilityController {
                     );
                     self.emit(
                         DM_CLAIM_GENERATED,
-                        &self.mode,
+                        &mode,
                         format!("Claim: {}", claim.claim_string),
                     );
                     Ok(claim)
                 } else {
                     let outcome = WriteOutcome::QuorumFailed {
                         acked,
-                        required: *min_acks,
+                        required: min_acks,
                         total,
                     };
-                    let claim = DurabilityClaim::derive(&self.mode, &outcome);
+                    let claim = DurabilityClaim::derive(&mode, &outcome);
                     self.emit(
                         DM_WRITE_QUORUM_FAILED,
-                        &self.mode,
+                        &mode,
                         format!(
                             "Quorum write FAILED: {}/{} acks (required {}) for class {}",
                             acked, total, min_acks, self.class_id
@@ -454,10 +457,10 @@ impl DurabilityController {
                     );
                     self.emit(
                         DM_CLAIM_GENERATED,
-                        &self.mode,
+                        &mode,
                         format!("Claim: {}", claim.claim_string),
                     );
-                    Err(DurabilityError::quorum_insufficient(acked, *min_acks))
+                    Err(DurabilityError::quorum_insufficient(acked, min_acks))
                 }
             }
             DurabilityMode::Local => Err(DurabilityError::new(

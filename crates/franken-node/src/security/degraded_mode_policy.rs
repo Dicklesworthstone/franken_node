@@ -23,7 +23,7 @@ const DEFAULT_MANDATORY_AUDIT_INTERVAL_SECS: u64 = 60;
 const DEFAULT_STABILIZATION_WINDOW_SECS: u64 = 300;
 const DEFAULT_MAX_DEGRADED_DURATION_SECS: u64 = 3_600;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DegradedModePolicy {
     pub mode_name: String,
     pub trigger_conditions: Vec<TriggerCondition>,

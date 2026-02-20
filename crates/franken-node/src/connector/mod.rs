@@ -6,6 +6,7 @@ pub mod conformance_profile;
 pub mod control_channel;
 pub mod crdt;
 pub mod device_profile;
+pub mod durability;
 pub mod error_code_registry;
 pub mod execution_scorer;
 pub mod fencing;
