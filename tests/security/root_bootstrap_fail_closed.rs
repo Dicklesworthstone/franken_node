@@ -87,8 +87,8 @@ fn invalid_auth_material_is_rejected() {
     publish_root(dir.path(), &root, &signing_key, "trace-bad-auth").expect("publish root");
 
     let auth_path = root_auth_path(dir.path());
-    let mut auth: RootAuthRecord = serde_json::from_slice(&fs::read(&auth_path).expect("read auth"))
-        .expect("parse auth");
+    let mut auth: RootAuthRecord =
+        serde_json::from_slice(&fs::read(&auth_path).expect("read auth")).expect("parse auth");
     auth.mac = "tampered".to_string();
     fs::write(
         auth_path,
@@ -146,6 +146,9 @@ fn valid_root_auth_bootstrap_succeeds() {
     let verified = bootstrap_root(dir.path(), &cfg).expect("bootstrap should succeed");
 
     assert_eq!(verified.root, root);
-    assert_eq!(verified.auth.root_format_version, ROOT_POINTER_FORMAT_VERSION);
+    assert_eq!(
+        verified.auth.root_format_version,
+        ROOT_POINTER_FORMAT_VERSION
+    );
     assert_eq!(verified.auth.epoch, ControlEpoch(5));
 }
