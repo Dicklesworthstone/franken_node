@@ -1,0 +1,455 @@
+{
+  "bead_id": "bd-1fp4",
+  "title": "Integrity sweep escalation/de-escalation policy",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 44,
+  "summary": {
+    "passing": 88,
+    "failing": 0,
+    "total": 88
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/integrity_sweep_scheduler.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-1fp4_contract.md"
+    },
+    {
+      "check": "file: trajectory artifact",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/sweep_policy_trajectory.csv"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum Trend",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct EvidenceTrajectory",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum PolicyBand",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum SweepDepth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct SweepScheduleDecision",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct SweepSchedulerConfig",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct IntegritySweepScheduler",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trend: Improving",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trend: Stable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trend: Degrading",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "band: Green",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "band: Yellow",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "band: Red",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "depth: Quick",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "depth: Standard",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "depth: Deep",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "depth: Full",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn update_trajectory(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn next_sweep_interval(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn current_sweep_depth(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn classify_band(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn with_defaults(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn to_csv(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn current_band(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn hysteresis_counter(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn update_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn decisions(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-SWEEP-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-SWEEP-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-SWEEP-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: EVD-SWEEP-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-SWEEP-ADAPTIVE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-SWEEP-HYSTERESIS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-SWEEP-DETERMINISTIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-SWEEP-BOUNDED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "serde derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "Duration import",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_new_starts_green",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_default_is_with_defaults",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_classify_green",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_classify_yellow_by_rejections",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_classify_yellow_by_escalations",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_classify_yellow_by_degrading_trend",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_classify_red_by_rejections",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_classify_red_by_degrading_low_repairability",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_green_interval",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_green_depth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_red_interval_and_depth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_yellow_interval_and_depth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_escalation_immediate_green_to_red",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_escalation_immediate_green_to_yellow",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_escalation_immediate_yellow_to_red",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_deescalation_requires_hysteresis",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_deescalation_one_step_at_a_time",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_hysteresis_reset_on_escalation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_hysteresis_threshold_zero",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_oscillation_prevention",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_oscillation_prevention_1000_alternating",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_cadence_increases_during_sustained_degradation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_cadence_decreases_during_sustained_improvement",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decisions_recorded",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_decision_fields_populated",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_update_count_increments",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_deterministic_scheduling",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_first_update_green",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_first_update_red",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_all_zero_trajectory",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_nan_repairability_clamped",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_inf_repairability_clamped",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_negative_inf_clamped",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_high_rejection_count",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_band_ordering",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_band_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_trend_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_sweep_depth_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_scheduler_serialization_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_evidence_trajectory_serialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_csv_export_header",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_csv_export_rows",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_default_config_valid",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "44 tests (minimum 35)"
+    },
+    {
+      "check": "trajectory has header",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trajectory has data rows",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

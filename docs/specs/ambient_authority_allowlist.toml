@@ -1,0 +1,43 @@
+# Ambient-authority exception allowlist.
+# Exceptions are temporary and require deterministic signatures.
+#
+# Signature format:
+# sha256({module_path}\n{ambient_api}\n{justification}\n{signer}\n{expires_on})
+
+exceptions = []
+
+[[exceptions]]
+id = "AAL-001"
+module_path = "crates/franken-node/src/connector/durable_claim_gate.rs"
+ambient_api = "std::time::Instant"
+justification = "Monotonic latency budget tracking in durable claim gate pending capability-clock adapter."
+signer = "MistyBridge"
+expires_on = "2026-12-31"
+signature = "sha256:b908f7e57ad86d6c4275a553c89782a133cec44a51b393657e6d90946bdc8f33"
+
+[[exceptions]]
+id = "AAL-002"
+module_path = "crates/franken-node/src/connector/rollout_state.rs"
+ambient_api = "std::fs"
+justification = "Atomic rollout snapshot persistence currently uses std::fs until capability-gated storage lands."
+signer = "MistyBridge"
+expires_on = "2026-12-31"
+signature = "sha256:0a28abaea7a1d018161fa494af948c3e0e287a04af703ad0806cbfd8d8b12795"
+
+[[exceptions]]
+id = "AAL-003"
+module_path = "crates/franken-node/src/connector/rollout_state.rs"
+ambient_api = "std::time::SystemTime"
+justification = "Rollout fixture timestamp derivation still uses SystemTime for deterministic artifact naming."
+signer = "MistyBridge"
+expires_on = "2026-12-31"
+signature = "sha256:83d344e6f0b5befc9f6762d695a407705580a5dabe0b33d75014f4a5e00af81b"
+
+[[exceptions]]
+id = "AAL-004"
+module_path = "crates/franken-node/src/connector/state_model.rs"
+ambient_api = "std::time::SystemTime"
+justification = "State-model deterministic fixture IDs still derive from SystemTime pending Cx clock wiring."
+signer = "MistyBridge"
+expires_on = "2026-12-31"
+signature = "sha256:6e0c0908fe5ca34e184c2b8c6b1d8d519f758fa960a068db2a57f4d092ae820f"

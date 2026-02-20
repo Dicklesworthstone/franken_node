@@ -1,0 +1,50 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-181w",
+  "decisions": [
+    {
+      "artifact_type": "health_gate_policy",
+      "artifact_id": "health-policy-epv-current",
+      "artifact_epoch": 12,
+      "current_epoch": 12,
+      "max_lookback": 2,
+      "decision": "accepted",
+      "reason": "within_validity_window",
+      "event_code": "EPV-001",
+      "trace_id": "trace-health-current"
+    },
+    {
+      "artifact_type": "rollout_plan",
+      "artifact_id": "rollout-plan:connector-epoch-valid",
+      "artifact_epoch": 10,
+      "current_epoch": 12,
+      "max_lookback": 2,
+      "decision": "accepted",
+      "reason": "within_validity_window_lower_bound",
+      "event_code": "EPV-001",
+      "trace_id": "trace-rollout-valid"
+    },
+    {
+      "artifact_type": "fencing_token",
+      "artifact_id": "fencing:obj-future:1",
+      "artifact_epoch": 13,
+      "current_epoch": 12,
+      "max_lookback": 2,
+      "decision": "rejected",
+      "reason": "future_epoch",
+      "event_code": "EPV-002",
+      "trace_id": "trace-fencing-future"
+    },
+    {
+      "artifact_type": "rollout_plan",
+      "artifact_id": "rollout-plan:connector-epoch-expired",
+      "artifact_epoch": 8,
+      "current_epoch": 12,
+      "max_lookback": 2,
+      "decision": "rejected",
+      "reason": "expired_epoch",
+      "event_code": "EPV-003",
+      "trace_id": "trace-rollout-expired"
+    }
+  ]
+}
