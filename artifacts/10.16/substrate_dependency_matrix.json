@@ -1,0 +1,2036 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-02-20T19:48:47.109408Z",
+  "module_root": "crates/franken-node/src",
+  "modules": [
+    {
+      "path": "crates/franken-node/src",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankentui",
+          "plane": "presentation",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "product boundary spanning all integration planes"
+    },
+    {
+      "path": "crates/franken-node/src/conformance",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/connector",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "control-plane publication and validation requires durable state and service semantics"
+    },
+    {
+      "path": "crates/franken-node/src/encoding",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/observability",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "observability/evidence ledger durability and typed evidence records"
+    },
+    {
+      "path": "crates/franken-node/src/policy",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/repair",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "repair pipeline uses typed proof/state models"
+    },
+    {
+      "path": "crates/franken-node/src/runtime",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "runtime recovery and crash-loop state should remain durable"
+    },
+    {
+      "path": "crates/franken-node/src/security",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/tools",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
+      "path": "crates/franken-node/src/cli.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankentui",
+          "plane": "presentation",
+          "integration_type": "mandatory"
+        }
+      ],
+      "justification": "primary operator CLI/TUI surface"
+    },
+    {
+      "path": "crates/franken-node/src/config.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "typed configuration model boundary"
+    },
+    {
+      "path": "crates/franken-node/src/conformance/connector_method_validator.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/conformance/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/conformance/protocol_harness.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/connector/activation_pipeline.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/admission_budget.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/anti_amplification.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/artifact_persistence.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/conformance_profile.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/control_channel.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/crdt.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/device_profile.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/durability.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/durable_claim_gate.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/error_code_registry.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/execution_scorer.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/fencing.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/frame_parser.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/fuzz_corpus.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/golden_vectors.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/health_gate.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/high_assurance_promotion.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/interop_suite.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/lease_conflict.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/lease_coordinator.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/lease_service.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/lifecycle.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/manifest_negotiation.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/offline_coverage.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/prestage_engine.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/quarantine_promotion.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/quarantine_store.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/repair_controller.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/retention_policy.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/rollout_state.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/schema_migration.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/snapshot_policy.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/state_model.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/telemetry_namespace.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/tiered_trust_storage.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/trace_context.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/control_epoch.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "control-plane publication and validation requires durable state and service semantics"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/marker_stream.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "control-plane publication and validation requires durable state and service semantics"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/mmr_proofs.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "control-plane publication and validation requires durable state and service semantics"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "control-plane publication and validation requires durable state and service semantics"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/root_pointer.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "control-plane publication and validation requires durable state and service semantics"
+    },
+    {
+      "path": "crates/franken-node/src/encoding/deterministic_seed.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/encoding/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/main.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankentui",
+          "plane": "presentation",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "entrypoint orchestrates operator and service flows"
+    },
+    {
+      "path": "crates/franken-node/src/observability/durability_violation.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "observability/evidence ledger durability and typed evidence records"
+    },
+    {
+      "path": "crates/franken-node/src/observability/evidence_ledger.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "observability/evidence ledger durability and typed evidence records"
+    },
+    {
+      "path": "crates/franken-node/src/observability/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "observability/evidence ledger durability and typed evidence records"
+    },
+    {
+      "path": "crates/franken-node/src/observability/witness_ref.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "observability/evidence ledger durability and typed evidence records"
+    },
+    {
+      "path": "crates/franken-node/src/policy/bayesian_diagnostics.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/controller_boundary_checks.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/correctness_envelope.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/decision_engine.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/evidence_emission.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/guardrail_monitor.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/hardening_auto_trigger.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/hardening_clamps.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/hardening_state_machine.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/integrity_sweep_scheduler.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/policy_explainer.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/retroactive_hardening.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/repair/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "repair pipeline uses typed proof/state models"
+    },
+    {
+      "path": "crates/franken-node/src/repair/proof_carrying_decode.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "repair pipeline uses typed proof/state models"
+    },
+    {
+      "path": "crates/franken-node/src/runtime/crash_loop_detector.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "runtime recovery and crash-loop state should remain durable"
+    },
+    {
+      "path": "crates/franken-node/src/runtime/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "runtime recovery and crash-loop state should remain durable"
+    },
+    {
+      "path": "crates/franken-node/src/security/decision_receipt.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/degraded_mode_audit.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/degraded_mode_policy.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/epoch_scoped_keys.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/interface_hash.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/isolation_backend.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/network_guard.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/remote_cap.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/revocation_freshness.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/sandbox_policy_compiler.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/ssrf_policy.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/threshold_sig.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/manifest.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/provenance.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/provenance_gate.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/revocation_integration.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/revocation_registry.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/transparency_verifier.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/tools/counterfactual_replay.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
+      "path": "crates/franken-node/src/tools/evidence_replay_validator.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
+      "path": "crates/franken-node/src/tools/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
+      "path": "crates/franken-node/src/tools/replay_bundle.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
+      "path": "crates/franken-node/src/tools/repro_bundle_export.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    }
+  ],
+  "unmapped_modules": [],
+  "coverage_summary": {
+    "module_count": 109,
+    "directory_count": 12,
+    "file_count": 97,
+    "planes": {
+      "presentation": 3,
+      "persistence": 68,
+      "model": 91,
+      "service": 89
+    },
+    "substrates": {
+      "frankentui": 3,
+      "frankensqlite": 68,
+      "sqlmodel_rust": 91,
+      "fastapi_rust": 89
+    }
+  }
+}

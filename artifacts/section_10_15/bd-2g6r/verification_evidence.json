@@ -1,0 +1,12 @@
+{
+  "bead_id": "bd-2g6r",
+  "gate": "cx_first_api_gate",
+  "generated_on": "2026-02-20",
+  "status": "pass",
+  "total_functions_checked": 0,
+  "compliant_functions": 0,
+  "violations": 0,
+  "exceptions_applied": 0,
+  "expired_exceptions": 0,
+  "violation_details": []
+}
