@@ -61,8 +61,7 @@ class TestTypeChecks:
         "pub enum PolicyBand",
         "pub enum SweepDepth",
         "pub struct SweepScheduleDecision",
-        "pub struct BandThresholds",
-        "pub struct SweepIntervals",
+        "pub struct SweepSchedulerConfig",
         "pub struct IntegritySweepScheduler",
     ]
 
@@ -85,8 +84,8 @@ class TestEventCodes:
 
 class TestInvariants:
     INVARIANTS = [
-        "INV-SWEEP-ESCALATE-IMMEDIATE",
-        "INV-SWEEP-DEESCALATE-HYSTERESIS",
+        "INV-SWEEP-ADAPTIVE",
+        "INV-SWEEP-HYSTERESIS",
         "INV-SWEEP-DETERMINISTIC",
         "INV-SWEEP-BOUNDED",
     ]

@@ -41,7 +41,7 @@ def run_checks() -> list[dict]:
     # Types
     for ty in ["pub enum Trend", "pub struct EvidenceTrajectory", "pub enum PolicyBand",
                "pub enum SweepDepth", "pub struct SweepScheduleDecision",
-               "pub struct BandThresholds", "pub struct SweepIntervals",
+               "pub struct SweepSchedulerConfig",
                "pub struct IntegritySweepScheduler"]:
         checks.append(_check(f"type: {ty}", ty in src))
 
@@ -60,8 +60,9 @@ def run_checks() -> list[dict]:
     # Methods
     for method in ["fn update_trajectory(", "fn next_sweep_interval(",
                    "fn current_sweep_depth(", "fn classify_band(",
-                   "fn with_hysteresis(", "fn with_thresholds(", "fn with_intervals(",
-                   "fn current_band(", "fn hysteresis_counter(", "fn decisions("]:
+                   "fn with_defaults(", "fn to_csv(",
+                   "fn current_band(", "fn hysteresis_counter(",
+                   "fn update_count(", "fn decisions("]:
         checks.append(_check(f"method: {method}", method in src))
 
     # Event codes
@@ -69,41 +70,70 @@ def run_checks() -> list[dict]:
         checks.append(_check(f"event_code: {code}", code in src))
 
     # Invariants
-    for inv in ["INV-SWEEP-ESCALATE-IMMEDIATE", "INV-SWEEP-DEESCALATE-HYSTERESIS",
+    for inv in ["INV-SWEEP-ADAPTIVE", "INV-SWEEP-HYSTERESIS",
                 "INV-SWEEP-DETERMINISTIC", "INV-SWEEP-BOUNDED"]:
         checks.append(_check(f"invariant: {inv}", inv in src))
 
-    # Tests
+    # Serde derives
+    checks.append(_check("serde derives", "Serialize" in src and "Deserialize" in src))
+
+    # Duration import
+    checks.append(_check("Duration import", "Duration" in src))
+
+    # Tests (actual test names from the implementation)
     test_names = [
-        "trend_labels", "trend_display",
-        "policy_band_labels", "policy_band_ordering", "policy_band_display",
-        "sweep_depth_labels", "sweep_depth_ordering",
-        "evidence_trajectory_stable", "evidence_trajectory_clamps_repairability",
-        "classify_green_band", "classify_yellow_band_rejections",
-        "classify_yellow_band_repairability", "classify_yellow_band_escalations",
-        "classify_red_band_rejections", "classify_red_band_repairability",
-        "classify_red_band_escalations", "classify_red_band_degrading_trend",
-        "scheduler_defaults", "green_band_long_interval", "sweep_depth_per_band",
-        "immediate_escalation_green_to_red", "immediate_escalation_green_to_yellow",
-        "immediate_escalation_yellow_to_red",
-        "deescalation_requires_hysteresis", "hysteresis_resets_on_escalation",
-        "hysteresis_threshold_zero_allows_immediate_deescalation",
-        "oscillation_prevention_1000_updates",
-        "decisions_recorded", "decision_contains_band_and_depth",
-        "decision_trajectory_summary_non_empty", "update_count_increments",
-        "cadence_increases_with_degradation",
-        "sustained_improvement_deescalates", "sustained_degradation_escalates",
-        "first_update_no_history", "trajectory_all_zeroes", "decisions_bounded",
-        "custom_hysteresis", "custom_intervals", "custom_thresholds",
-        "event_codes_defined", "default_is_new",
+        "test_new_starts_green",
+        "test_default_is_with_defaults",
+        "test_classify_green",
+        "test_classify_yellow_by_rejections",
+        "test_classify_yellow_by_escalations",
+        "test_classify_yellow_by_degrading_trend",
+        "test_classify_red_by_rejections",
+        "test_classify_red_by_degrading_low_repairability",
+        "test_green_interval",
+        "test_green_depth",
+        "test_red_interval_and_depth",
+        "test_yellow_interval_and_depth",
+        "test_escalation_immediate_green_to_red",
+        "test_escalation_immediate_green_to_yellow",
+        "test_escalation_immediate_yellow_to_red",
+        "test_deescalation_requires_hysteresis",
+        "test_deescalation_one_step_at_a_time",
+        "test_hysteresis_reset_on_escalation",
+        "test_hysteresis_threshold_zero",
+        "test_oscillation_prevention",
+        "test_oscillation_prevention_1000_alternating",
+        "test_cadence_increases_during_sustained_degradation",
+        "test_cadence_decreases_during_sustained_improvement",
+        "test_decisions_recorded",
+        "test_decision_fields_populated",
+        "test_update_count_increments",
+        "test_deterministic_scheduling",
+        "test_first_update_green",
+        "test_first_update_red",
+        "test_all_zero_trajectory",
+        "test_nan_repairability_clamped",
+        "test_inf_repairability_clamped",
+        "test_negative_inf_clamped",
+        "test_high_rejection_count",
+        "test_band_ordering",
+        "test_band_labels",
+        "test_trend_labels",
+        "test_sweep_depth_labels",
+        "test_event_codes_defined",
+        "test_scheduler_serialization_roundtrip",
+        "test_evidence_trajectory_serialization",
+        "test_csv_export_header",
+        "test_csv_export_rows",
+        "test_default_config_valid",
     ]
     for test in test_names:
         checks.append(_check(f"test: {test}", f"fn {test}(" in src))
 
     # Unit test count
     test_count = len(re.findall(r"#\[test\]", src))
-    checks.append(_check("unit test count", test_count >= 30,
-                          f"{test_count} tests (minimum 30)"))
+    checks.append(_check("unit test count", test_count >= 35,
+                          f"{test_count} tests (minimum 35)"))
 
     # Trajectory artifact validity
     if os.path.isfile(TRAJECTORY):
@@ -147,6 +177,8 @@ def main():
     passing = sum(1 for c in checks if c["pass"])
     failing = total - passing
 
+    test_count = len(re.findall(r"#\[test\]", open(IMPL).read())) if os.path.isfile(IMPL) else 0
+
     if args.json:
         result = {
             "bead_id": "bd-1fp4",
@@ -154,7 +186,7 @@ def main():
             "section": "10.14",
             "overall_pass": failing == 0,
             "verdict": "PASS" if failing == 0 else "FAIL",
-            "test_count": 42,
+            "test_count": test_count,
             "summary": {"passing": passing, "failing": failing, "total": total},
             "checks": checks,
         }
