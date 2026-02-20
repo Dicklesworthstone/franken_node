@@ -1,0 +1,55 @@
+name: Change Summary Contract Gate
+
+on:
+  pull_request:
+    paths:
+      - "crates/franken-node/src/**"
+      - "crates/franken-engine/src/**"
+      - "crates/asupersync/src/**"
+      - "services/**"
+      - "docs/change_summaries/**"
+      - "docs/templates/change_summary_template.md"
+      - "scripts/check_change_summary_contract.py"
+      - "tests/test_check_change_summary_contract.py"
+  push:
+    branches: [main]
+    paths:
+      - "crates/franken-node/src/**"
+      - "crates/franken-engine/src/**"
+      - "crates/asupersync/src/**"
+      - "services/**"
+      - "docs/change_summaries/**"
+      - "docs/templates/change_summary_template.md"
+      - "scripts/check_change_summary_contract.py"
+      - "tests/test_check_change_summary_contract.py"
+
+jobs:
+  change-summary-contract:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build changed-file list
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            git diff --name-only "origin/${{ github.base_ref }}...HEAD" > /tmp/changed_files.txt
+          else
+            git diff --name-only HEAD~1...HEAD > /tmp/changed_files.txt
+          fi
+          cat /tmp/changed_files.txt
+
+      - name: Run change-summary contract gate
+        run: |
+          python3 scripts/check_change_summary_contract.py \
+            --changed-files /tmp/changed_files.txt \
+            --json > /tmp/change_summary_contract_gate.json
+
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: change-summary-contract-gate
+          path: /tmp/change_summary_contract_gate.json

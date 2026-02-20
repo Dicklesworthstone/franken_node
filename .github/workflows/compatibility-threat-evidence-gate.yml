@@ -1,0 +1,55 @@
+name: Compatibility Threat Evidence Gate
+
+on:
+  pull_request:
+    paths:
+      - "crates/franken-node/src/**"
+      - "crates/franken-engine/src/**"
+      - "crates/asupersync/src/**"
+      - "services/**"
+      - "docs/change_summaries/**"
+      - "docs/templates/change_summary_template.md"
+      - "scripts/check_compatibility_threat_evidence.py"
+      - "tests/test_check_compatibility_threat_evidence.py"
+  push:
+    branches: [main]
+    paths:
+      - "crates/franken-node/src/**"
+      - "crates/franken-engine/src/**"
+      - "crates/asupersync/src/**"
+      - "services/**"
+      - "docs/change_summaries/**"
+      - "docs/templates/change_summary_template.md"
+      - "scripts/check_compatibility_threat_evidence.py"
+      - "tests/test_check_compatibility_threat_evidence.py"
+
+jobs:
+  compatibility-threat-evidence:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Build changed-file list
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            git diff --name-only "origin/${{ github.base_ref }}...HEAD" > /tmp/changed_files.txt
+          else
+            git diff --name-only HEAD~1...HEAD > /tmp/changed_files.txt
+          fi
+          cat /tmp/changed_files.txt
+
+      - name: Run compatibility-threat evidence gate
+        run: |
+          python3 scripts/check_compatibility_threat_evidence.py \
+            --changed-files /tmp/changed_files.txt \
+            --json > /tmp/compatibility_threat_evidence_gate.json
+
+      - name: Upload gate evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: compatibility-threat-evidence-gate
+          path: /tmp/compatibility_threat_evidence_gate.json
