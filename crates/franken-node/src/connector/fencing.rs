@@ -486,7 +486,10 @@ mod tests {
             outcome.epoch_check_event_code,
             epoch_event_codes::EPOCH_CHECK_PASSED
         );
-        assert_eq!(outcome.scope_log.event_code, epoch_event_codes::EPOCH_SCOPE_LOGGED);
+        assert_eq!(
+            outcome.scope_log.event_code,
+            epoch_event_codes::EPOCH_SCOPE_LOGGED
+        );
     }
 
     #[test]
@@ -516,7 +519,10 @@ mod tests {
             .unwrap_err();
         match err {
             FencingError::EpochRejected { rejection } => {
-                assert_eq!(rejection.rejection_reason, EpochRejectionReason::FutureEpoch);
+                assert_eq!(
+                    rejection.rejection_reason,
+                    EpochRejectionReason::FutureEpoch
+                );
             }
             _ => panic!("expected epoch rejection"),
         }

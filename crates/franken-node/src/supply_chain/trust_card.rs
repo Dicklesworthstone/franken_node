@@ -31,16 +31,24 @@ type HmacSha256 = Hmac<Sha256>;
 pub enum TrustCardError {
     #[error("trust card not found for extension `{0}`")]
     NotFound(String),
+    #[error("trust card version `{version}` not found for extension `{extension_id}`")]
+    VersionNotFound { extension_id: String, version: u64 },
     #[error("trust card signature verification failed for extension `{0}`")]
     SignatureInvalid(String),
     #[error("trust card hash mismatch for extension `{0}`")]
     CardHashMismatch(String),
     #[error("json serialization error: {0}")]
-    Json(#[from] serde_json::Error),
+    Json(String),
     #[error("invalid hmac key")]
     InvalidRegistryKey,
     #[error("invalid pagination: page={page}, per_page={per_page}")]
     InvalidPagination { page: usize, per_page: usize },
+}
+
+impl From<serde_json::Error> for TrustCardError {
+    fn from(e: serde_json::Error) -> Self {
+        TrustCardError::Json(e.to_string())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -497,12 +505,18 @@ impl TrustCardRegistry {
     }
 
     pub fn list(
-        &self,
+        &mut self,
         filter: &TrustCardListFilter,
         trace_id: &str,
         now_secs: u64,
     ) -> Vec<TrustCard> {
-        let _ = (trace_id, now_secs);
+        self.emit(
+            TRUST_CARD_QUERIED,
+            None,
+            trace_id,
+            now_secs,
+            "query trust cards by filter",
+        );
         let mut out = Vec::new();
         for history in self.cards_by_extension.values() {
             let Some(card) = history.last() else {
@@ -529,17 +543,20 @@ impl TrustCardRegistry {
             }
             out.push(card.clone());
         }
-        out.sort_by(|left, right| left.extension.extension_id.cmp(&right.extension.extension_id));
+        out.sort_by(|left, right| {
+            left.extension
+                .extension_id
+                .cmp(&right.extension.extension_id)
+        });
         out
     }
 
     pub fn list_by_publisher(
-        &self,
+        &mut self,
         publisher_id: &str,
         now_secs: u64,
         trace_id: &str,
     ) -> Vec<TrustCard> {
-        let _ = (now_secs, trace_id);
         self.list(
             &TrustCardListFilter {
                 certification_level: None,
@@ -551,13 +568,14 @@ impl TrustCardRegistry {
         )
     }
 
-    pub fn search(
-        &self,
-        query: &str,
-        now_secs: u64,
-        trace_id: &str,
-    ) -> Vec<TrustCard> {
-        let _ = (now_secs, trace_id);
+    pub fn search(&mut self, query: &str, now_secs: u64, trace_id: &str) -> Vec<TrustCard> {
+        self.emit(
+            TRUST_CARD_QUERIED,
+            None,
+            trace_id,
+            now_secs,
+            &format!("search trust cards by query: {query}"),
+        );
         let query_lc = query.to_ascii_lowercase();
         let mut out = Vec::new();
         for history in self.cards_by_extension.values() {
@@ -579,60 +597,99 @@ impl TrustCardRegistry {
                 out.push(card.clone());
             }
         }
-        out.sort_by(|left, right| left.extension.extension_id.cmp(&right.extension.extension_id));
+        out.sort_by(|left, right| {
+            left.extension
+                .extension_id
+                .cmp(&right.extension.extension_id)
+        });
         out
     }
 
     pub fn compare(
-        &self,
+        &mut self,
         left_extension_id: &str,
         right_extension_id: &str,
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCardComparison, TrustCardError> {
-        let _ = (now_secs, trace_id);
-        let left = self
-            .latest_card(left_extension_id)
-            .ok_or_else(|| TrustCardError::NotFound(left_extension_id.to_string()))?;
-        let right = self
-            .latest_card(right_extension_id)
-            .ok_or_else(|| TrustCardError::NotFound(right_extension_id.to_string()))?;
+        let comparison = {
+            let left = self
+                .latest_card(left_extension_id)
+                .ok_or_else(|| TrustCardError::NotFound(left_extension_id.to_string()))?;
+            let right = self
+                .latest_card(right_extension_id)
+                .ok_or_else(|| TrustCardError::NotFound(right_extension_id.to_string()))?;
+            comparison_from_cards(
+                left,
+                right,
+                left_extension_id.to_string(),
+                right_extension_id.to_string(),
+            )
+        };
+        self.emit(
+            TRUST_CARD_DIFF_COMPUTED,
+            Some(left_extension_id.to_string()),
+            trace_id,
+            now_secs,
+            &format!("computed trust-card diff against {right_extension_id}"),
+        );
+        Ok(comparison)
+    }
 
-        let mut changes = Vec::new();
-        if left.certification_level != right.certification_level {
-            changes.push(TrustCardDiffEntry {
-                field: "certification_level".to_string(),
-                left: format!("{:?}", left.certification_level).to_ascii_lowercase(),
-                right: format!("{:?}", right.certification_level).to_ascii_lowercase(),
-            });
-        }
-        if left.reputation_score_basis_points != right.reputation_score_basis_points {
-            changes.push(TrustCardDiffEntry {
-                field: "reputation_score_basis_points".to_string(),
-                left: left.reputation_score_basis_points.to_string(),
-                right: right.reputation_score_basis_points.to_string(),
-            });
-        }
-        if left.revocation_status != right.revocation_status {
-            changes.push(TrustCardDiffEntry {
-                field: "revocation_status".to_string(),
-                left: format!("{:?}", left.revocation_status).to_ascii_lowercase(),
-                right: format!("{:?}", right.revocation_status).to_ascii_lowercase(),
-            });
-        }
-        if left.active_quarantine != right.active_quarantine {
-            changes.push(TrustCardDiffEntry {
-                field: "active_quarantine".to_string(),
-                left: left.active_quarantine.to_string(),
-                right: right.active_quarantine.to_string(),
-            });
-        }
+    pub fn compare_versions(
+        &mut self,
+        extension_id: &str,
+        left_version: u64,
+        right_version: u64,
+        now_secs: u64,
+        trace_id: &str,
+    ) -> Result<TrustCardComparison, TrustCardError> {
+        let comparison = {
+            let history = self
+                .cards_by_extension
+                .get(extension_id)
+                .ok_or_else(|| TrustCardError::NotFound(extension_id.to_string()))?;
+            let left = history
+                .iter()
+                .find(|card| card.trust_card_version == left_version)
+                .ok_or_else(|| TrustCardError::VersionNotFound {
+                    extension_id: extension_id.to_string(),
+                    version: left_version,
+                })?;
+            let right = history
+                .iter()
+                .find(|card| card.trust_card_version == right_version)
+                .ok_or_else(|| TrustCardError::VersionNotFound {
+                    extension_id: extension_id.to_string(),
+                    version: right_version,
+                })?;
+            comparison_from_cards(
+                left,
+                right,
+                format!("{extension_id}@{left_version}"),
+                format!("{extension_id}@{right_version}"),
+            )
+        };
 
-        Ok(TrustCardComparison {
-            left_extension_id: left_extension_id.to_string(),
-            right_extension_id: right_extension_id.to_string(),
-            changes,
-        })
+        self.emit(
+            TRUST_CARD_DIFF_COMPUTED,
+            Some(extension_id.to_string()),
+            trace_id,
+            now_secs,
+            &format!("computed trust-card version diff {left_version} -> {right_version}"),
+        );
+        Ok(comparison)
+    }
+
+    pub fn read_version(&self, extension_id: &str, trust_card_version: u64) -> Option<TrustCard> {
+        self.cards_by_extension
+            .get(extension_id)
+            .and_then(|history| {
+                history
+                    .iter()
+                    .find(|card| card.trust_card_version == trust_card_version)
+            })
+            .cloned()
     }
 
     #[must_use]
@@ -661,6 +718,73 @@ impl TrustCardRegistry {
             timestamp_secs,
             detail: detail.to_string(),
         });
+    }
+}
+
+fn comparison_from_cards(
+    left: &TrustCard,
+    right: &TrustCard,
+    left_extension_id: String,
+    right_extension_id: String,
+) -> TrustCardComparison {
+    let mut changes = Vec::new();
+    if left.certification_level != right.certification_level {
+        changes.push(TrustCardDiffEntry {
+            field: "certification_level".to_string(),
+            left: format!("{:?}", left.certification_level).to_ascii_lowercase(),
+            right: format!("{:?}", right.certification_level).to_ascii_lowercase(),
+        });
+    }
+    if left.reputation_score_basis_points != right.reputation_score_basis_points {
+        changes.push(TrustCardDiffEntry {
+            field: "reputation_score_basis_points".to_string(),
+            left: left.reputation_score_basis_points.to_string(),
+            right: right.reputation_score_basis_points.to_string(),
+        });
+    }
+    if left.revocation_status != right.revocation_status {
+        changes.push(TrustCardDiffEntry {
+            field: "revocation_status".to_string(),
+            left: format!("{:?}", left.revocation_status).to_ascii_lowercase(),
+            right: format!("{:?}", right.revocation_status).to_ascii_lowercase(),
+        });
+    }
+    if left.active_quarantine != right.active_quarantine {
+        changes.push(TrustCardDiffEntry {
+            field: "active_quarantine".to_string(),
+            left: left.active_quarantine.to_string(),
+            right: right.active_quarantine.to_string(),
+        });
+    }
+    if left.capability_declarations != right.capability_declarations {
+        changes.push(TrustCardDiffEntry {
+            field: "capability_declarations".to_string(),
+            left: left
+                .capability_declarations
+                .iter()
+                .map(|cap| cap.name.clone())
+                .collect::<Vec<_>>()
+                .join(","),
+            right: right
+                .capability_declarations
+                .iter()
+                .map(|cap| cap.name.clone())
+                .collect::<Vec<_>>()
+                .join(","),
+        });
+    }
+    if left.extension.version != right.extension.version {
+        changes.push(TrustCardDiffEntry {
+            field: "extension_version".to_string(),
+            left: left.extension.version.clone(),
+            right: right.extension.version.clone(),
+        });
+    }
+
+    TrustCardComparison {
+        left_extension_id,
+        right_extension_id,
+        changes,
     }
 }
 
@@ -793,8 +917,7 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
                 network_access: true,
                 filesystem_access: false,
                 subprocess_access: false,
-                profile_summary: "Network-only auth checks with bounded side effects"
-                    .to_string(),
+                profile_summary: "Network-only auth checks with bounded side effects".to_string(),
             },
             revocation_status: RevocationStatus::Active,
             provenance_summary: ProvenanceSummary {
@@ -812,8 +935,9 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
             last_verified_timestamp: "2026-02-20T12:00:00Z".to_string(),
             user_facing_risk_assessment: RiskAssessment {
                 level: RiskLevel::Low,
-                summary: "Token validation extension with strong provenance and no local disk access"
-                    .to_string(),
+                summary:
+                    "Token validation extension with strong provenance and no local disk access"
+                        .to_string(),
             },
         },
         now_secs,
@@ -998,7 +1122,9 @@ mod tests {
     #[test]
     fn create_and_read_round_trip() {
         let mut registry = TrustCardRegistry::default();
-        let card = registry.create(sample_input(), 1_000, "trace").expect("create");
+        let card = registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
         assert_eq!(card.trust_card_version, 1);
         let fetched = registry
             .read("npm:@acme/plugin", 1_005, "trace")
@@ -1010,7 +1136,9 @@ mod tests {
     #[test]
     fn update_creates_hash_linked_version() {
         let mut registry = TrustCardRegistry::default();
-        let first = registry.create(sample_input(), 1_000, "trace").expect("create");
+        let first = registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
         let second = registry
             .update(
                 "npm:@acme/plugin",
@@ -1028,13 +1156,18 @@ mod tests {
             )
             .expect("update");
         assert_eq!(second.trust_card_version, 2);
-        assert_eq!(second.previous_version_hash.as_deref(), Some(&first.card_hash));
+        assert_eq!(
+            second.previous_version_hash.as_deref(),
+            Some(first.card_hash.as_str())
+        );
     }
 
     #[test]
     fn signature_verification_rejects_tampered_card() {
         let mut registry = TrustCardRegistry::default();
-        let mut card = registry.create(sample_input(), 1_000, "trace").expect("create");
+        let mut card = registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
         card.reputation_score_basis_points = 10;
         let err = verify_card_signature(&card, DEFAULT_REGISTRY_KEY).expect_err("must fail");
         assert!(matches!(err, TrustCardError::CardHashMismatch(_)));
@@ -1042,7 +1175,7 @@ mod tests {
 
     #[test]
     fn list_filter_by_publisher_and_capability() {
-        let registry = demo_registry(1_000).expect("demo");
+        let mut registry = demo_registry(1_000).expect("demo");
         let by_pub = registry.list_by_publisher("pub-acme", 1_010, "trace");
         assert_eq!(by_pub.len(), 1);
         let by_capability = registry.search("telemetry", 1_010, "trace");
@@ -1051,7 +1184,7 @@ mod tests {
 
     #[test]
     fn compare_shows_changes() {
-        let registry = demo_registry(1_000).expect("demo");
+        let mut registry = demo_registry(1_000).expect("demo");
         let diff = registry
             .compare(
                 "npm:@acme/auth-guard",
@@ -1061,6 +1194,37 @@ mod tests {
             )
             .expect("compare");
         assert!(!diff.changes.is_empty());
+    }
+
+    #[test]
+    fn compare_versions_for_same_extension() {
+        let mut registry = demo_registry(1_000).expect("demo");
+        let diff = registry
+            .compare_versions("npm:@beta/telemetry-bridge", 1, 2, 1_100, "trace")
+            .expect("compare versions");
+        assert!(!diff.changes.is_empty());
+        assert_eq!(
+            diff.left_extension_id,
+            "npm:@beta/telemetry-bridge@1".to_string()
+        );
+        assert_eq!(
+            diff.right_extension_id,
+            "npm:@beta/telemetry-bridge@2".to_string()
+        );
+    }
+
+    #[test]
+    fn read_specific_version() {
+        let registry = demo_registry(1_000).expect("demo");
+        let version_1 = registry
+            .read_version("npm:@beta/telemetry-bridge", 1)
+            .expect("version 1");
+        assert_eq!(version_1.trust_card_version, 1);
+        assert!(
+            registry
+                .read_version("npm:@beta/telemetry-bridge", 9)
+                .is_none()
+        );
     }
 
     #[test]
@@ -1077,14 +1241,20 @@ mod tests {
     #[test]
     fn telemetry_includes_cache_miss_and_hit() {
         let mut registry = TrustCardRegistry::new(60, DEFAULT_REGISTRY_KEY);
-        registry.create(sample_input(), 1_000, "trace").expect("create");
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
         registry
             .read("npm:@acme/plugin", 1_001, "trace")
             .expect("read1");
         registry
             .read("npm:@acme/plugin", 1_002, "trace")
             .expect("read2");
-        let codes: Vec<&str> = registry.telemetry().iter().map(|evt| evt.event_code.as_str()).collect();
+        let codes: Vec<&str> = registry
+            .telemetry()
+            .iter()
+            .map(|evt| evt.event_code.as_str())
+            .collect();
         assert!(codes.contains(&TRUST_CARD_CACHE_HIT));
     }
 }

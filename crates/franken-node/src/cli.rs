@@ -41,6 +41,10 @@ pub enum Command {
     #[command(subcommand)]
     Trust(TrustCommand),
 
+    /// Trust-card API/CLI parity surfaces.
+    #[command(subcommand, name = "trust-card")]
+    TrustCard(TrustCardCommand),
+
     /// Fleet control plane operations.
     #[command(subcommand)]
     Fleet(FleetCommand),
@@ -231,6 +235,98 @@ pub struct TrustSyncArgs {
     /// Force sync even if cache is fresh.
     #[arg(long)]
     pub force: bool,
+}
+
+// -- trust-card --
+
+#[derive(Debug, Subcommand)]
+pub enum TrustCardCommand {
+    /// Show trust-card details for one extension.
+    Show(TrustCardShowArgs),
+
+    /// Export a trust card in machine-readable form.
+    Export(TrustCardExportArgs),
+
+    /// List trust cards with publisher/search filters.
+    List(TrustCardListArgs),
+
+    /// Compare trust posture between two extensions.
+    Compare(TrustCardCompareArgs),
+
+    /// Diff two trust-card versions for the same extension.
+    Diff(TrustCardDiffArgs),
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustCardShowArgs {
+    /// Extension identifier (e.g., npm:@example/plugin).
+    pub extension_id: String,
+
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustCardExportArgs {
+    /// Extension identifier (e.g., npm:@example/plugin).
+    pub extension_id: String,
+
+    /// Required explicit JSON export flag for machine pipelines.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustCardListArgs {
+    /// Filter cards to one publisher ID.
+    #[arg(long)]
+    pub publisher: Option<String>,
+
+    /// Search by extension id, publisher id, or capability text.
+    #[arg(long)]
+    pub query: Option<String>,
+
+    /// Page number, 1-based.
+    #[arg(long, default_value_t = 1)]
+    pub page: usize,
+
+    /// Number of entries per page.
+    #[arg(long, default_value_t = 20)]
+    pub per_page: usize,
+
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustCardCompareArgs {
+    /// Left extension identifier.
+    pub left_extension_id: String,
+
+    /// Right extension identifier.
+    pub right_extension_id: String,
+
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct TrustCardDiffArgs {
+    /// Extension identifier.
+    pub extension_id: String,
+
+    /// Left trust-card version.
+    pub left_version: u64,
+
+    /// Right trust-card version.
+    pub right_version: u64,
+
+    /// Emit JSON instead of human-readable output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- fleet --

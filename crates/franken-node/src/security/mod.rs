@@ -1,3 +1,5 @@
+pub mod challenge_flow;
+pub mod copilot_engine;
 pub mod decision_receipt;
 pub mod degraded_mode_audit;
 pub mod degraded_mode_policy;

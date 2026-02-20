@@ -1,3 +1,4 @@
+pub mod approval_workflow;
 pub mod bayesian_diagnostics;
 pub mod controller_boundary_checks;
 pub mod correctness_envelope;
@@ -8,5 +9,7 @@ pub mod hardening_auto_trigger;
 pub mod hardening_clamps;
 pub mod hardening_state_machine;
 pub mod integrity_sweep_scheduler;
+pub mod object_class_tuning;
+pub mod perf_budget_guard;
 pub mod policy_explainer;
 pub mod retroactive_hardening;

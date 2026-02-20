@@ -477,7 +477,10 @@ mod tests {
             result.epoch_check_event_code,
             epoch_event_codes::EPOCH_CHECK_PASSED
         );
-        assert_eq!(result.scope_log.event_code, epoch_event_codes::EPOCH_SCOPE_LOGGED);
+        assert_eq!(
+            result.scope_log.event_code,
+            epoch_event_codes::EPOCH_SCOPE_LOGGED
+        );
     }
 
     #[test]

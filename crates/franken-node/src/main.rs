@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod api;
 mod cli;
 mod config;
 pub mod conformance;
@@ -13,6 +14,7 @@ pub mod repair;
 pub mod root_pointer;
 pub mod runtime;
 pub mod security;
+pub mod storage;
 pub mod supply_chain;
 pub mod tools;
 
@@ -20,13 +22,21 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::{Path, PathBuf};
 
+use api::trust_card_routes::{
+    Pagination, compare_trust_card_versions, compare_trust_cards, get_trust_card,
+    get_trust_cards_by_publisher, list_trust_cards, search_trust_cards,
+};
 use cli::{
     BenchCommand, Cli, Command, FleetCommand, IncidentCommand, MigrateCommand, RegistryCommand,
-    TrustCommand, VerifyCommand,
+    TrustCardCommand, TrustCommand, VerifyCommand,
 };
 use security::decision_receipt::{
     Decision, Receipt, ReceiptQuery, append_signed_receipt, demo_signing_key,
     export_receipts_to_path, write_receipts_markdown,
+};
+use supply_chain::trust_card::{
+    TrustCard, TrustCardListFilter, TrustCardRegistry, demo_registry as demo_trust_registry,
+    render_comparison_human, render_trust_card_human, to_canonical_json as trust_card_to_json,
 };
 use tools::counterfactual_replay::{
     CounterfactualReplayEngine, PolicyConfig, summarize_output,
@@ -100,6 +110,134 @@ fn incident_bundle_output_path(incident_id: &str) -> PathBuf {
         "artifacts/section_10_5/bd-vll/{}_bundle.json",
         slug
     ))
+}
+
+fn now_unix_secs() -> u64 {
+    let ts = chrono::Utc::now().timestamp();
+    if ts <= 0 { 0 } else { ts as u64 }
+}
+
+fn trust_card_cli_registry() -> Result<TrustCardRegistry> {
+    demo_trust_registry(now_unix_secs()).map_err(Into::into)
+}
+
+fn render_trust_card_list(cards: &[TrustCard]) -> String {
+    if cards.is_empty() {
+        return "no trust cards matched the current filters".to_string();
+    }
+
+    let mut lines = Vec::with_capacity(cards.len() + 1);
+    lines.push("extension | publisher | cert | reputation | status".to_string());
+    for card in cards {
+        let status = match &card.revocation_status {
+            supply_chain::trust_card::RevocationStatus::Active => "active".to_string(),
+            supply_chain::trust_card::RevocationStatus::Revoked { reason, .. } => {
+                format!("revoked:{reason}")
+            }
+        };
+        lines.push(format!(
+            "{} | {} | {:?} | {}bp ({:?}) | {}",
+            card.extension.extension_id,
+            card.publisher.publisher_id,
+            card.certification_level,
+            card.reputation_score_basis_points,
+            card.reputation_trend,
+            status
+        ));
+    }
+    lines.join("\n")
+}
+
+fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
+    let mut registry = trust_card_cli_registry()?;
+    let now_secs = now_unix_secs();
+    let trace_id = "trace-cli-trust-card";
+
+    match command {
+        TrustCardCommand::Show(args) => {
+            let response = get_trust_card(&mut registry, &args.extension_id, now_secs, trace_id)?;
+            let card = response
+                .data
+                .ok_or_else(|| anyhow::anyhow!("trust card not found: {}", args.extension_id))?;
+            if args.json {
+                println!("{}", trust_card_to_json(&card)?);
+            } else {
+                println!("{}", render_trust_card_human(&card));
+            }
+        }
+        TrustCardCommand::Export(args) => {
+            if !args.json {
+                anyhow::bail!("`trust-card export` requires `--json`");
+            }
+            let response = get_trust_card(&mut registry, &args.extension_id, now_secs, trace_id)?;
+            let card = response
+                .data
+                .ok_or_else(|| anyhow::anyhow!("trust card not found: {}", args.extension_id))?;
+            println!("{}", trust_card_to_json(&card)?);
+        }
+        TrustCardCommand::List(args) => {
+            let pagination = Pagination {
+                page: args.page,
+                per_page: args.per_page,
+            };
+            let response = if let Some(query) = args.query.as_deref() {
+                search_trust_cards(&mut registry, query, now_secs, trace_id, pagination)?
+            } else if let Some(publisher_id) = args.publisher.as_deref() {
+                get_trust_cards_by_publisher(
+                    &mut registry,
+                    publisher_id,
+                    now_secs,
+                    trace_id,
+                    pagination,
+                )?
+            } else {
+                list_trust_cards(
+                    &mut registry,
+                    &TrustCardListFilter::empty(),
+                    now_secs,
+                    trace_id,
+                    pagination,
+                )?
+            };
+
+            if args.json {
+                println!("{}", trust_card_to_json(&response)?);
+            } else {
+                println!("{}", render_trust_card_list(&response.data));
+            }
+        }
+        TrustCardCommand::Compare(args) => {
+            let response = compare_trust_cards(
+                &mut registry,
+                &args.left_extension_id,
+                &args.right_extension_id,
+                now_secs,
+                trace_id,
+            )?;
+            if args.json {
+                println!("{}", trust_card_to_json(&response)?);
+            } else {
+                println!("{}", render_comparison_human(&response.data));
+            }
+        }
+        TrustCardCommand::Diff(args) => {
+            let response = compare_trust_card_versions(
+                &mut registry,
+                &args.extension_id,
+                args.left_version,
+                args.right_version,
+                now_secs,
+                trace_id,
+            )?;
+            if args.json {
+                println!("{}", trust_card_to_json(&response)?);
+            } else {
+                println!("{}", render_comparison_human(&response.data));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -200,6 +338,10 @@ async fn main() -> Result<()> {
                 eprintln!("[not yet implemented]");
             }
         },
+
+        Command::TrustCard(sub) => {
+            handle_trust_card_command(sub)?;
+        }
 
         Command::Fleet(sub) => match sub {
             FleetCommand::Status(args) => {

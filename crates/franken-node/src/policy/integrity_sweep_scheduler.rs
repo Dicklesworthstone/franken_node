@@ -308,7 +308,7 @@ impl IntegritySweepScheduler {
         let proposed_band = self.classify_band(evidence);
 
         // Apply escalation/de-escalation logic
-        let old_band = self.current_band;
+        let _old_band = self.current_band;
 
         if proposed_band > self.current_band {
             // Escalation: immediate

@@ -1,6 +1,11 @@
+pub mod certification;
+pub mod ecosystem_telemetry;
 pub mod manifest;
 pub mod provenance;
 pub mod provenance_gate;
+pub mod quarantine;
+pub mod reputation;
 pub mod revocation_integration;
 pub mod revocation_registry;
 pub mod transparency_verifier;
+pub mod trust_card;
