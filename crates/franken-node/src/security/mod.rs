@@ -1,5 +1,6 @@
 pub mod decision_receipt;
 pub mod degraded_mode_audit;
+pub mod degraded_mode_policy;
 pub mod interface_hash;
 pub mod isolation_backend;
 pub mod network_guard;

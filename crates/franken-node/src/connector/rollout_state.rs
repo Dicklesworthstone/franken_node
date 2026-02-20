@@ -9,8 +9,21 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
 
+use crate::control_plane::control_epoch::{
+    ControlEpoch, EpochArtifactEvent, EpochRejection, EpochRejectionReason, ValidityWindowPolicy,
+    check_artifact_epoch,
+};
+
 use super::health_gate::HealthGateResult;
 use super::lifecycle::ConnectorState;
+
+/// Stable event codes for epoch-scoped validity checks.
+pub mod epoch_event_codes {
+    pub const EPOCH_CHECK_PASSED: &str = "EPV-001";
+    pub const FUTURE_EPOCH_REJECTED: &str = "EPV-002";
+    pub const STALE_EPOCH_REJECTED: &str = "EPV-003";
+    pub const EPOCH_SCOPE_LOGGED: &str = "EPV-004";
+}
 
 /// Rollout phases for gradual traffic migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -43,6 +56,8 @@ impl fmt::Display for RolloutPhase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RolloutState {
     pub connector_id: String,
+    #[serde(default = "default_rollout_epoch")]
+    pub rollout_epoch: ControlEpoch,
     pub lifecycle_state: ConnectorState,
     pub health: HealthGateResult,
     pub rollout_phase: RolloutPhase,
@@ -59,8 +74,26 @@ impl RolloutState {
         health: HealthGateResult,
         rollout_phase: RolloutPhase,
     ) -> Self {
+        Self::new_with_epoch(
+            connector_id,
+            ControlEpoch::GENESIS,
+            lifecycle_state,
+            health,
+            rollout_phase,
+        )
+    }
+
+    /// Create a new rollout state with an explicit epoch stamp.
+    pub fn new_with_epoch(
+        connector_id: String,
+        rollout_epoch: ControlEpoch,
+        lifecycle_state: ConnectorState,
+        health: HealthGateResult,
+        rollout_phase: RolloutPhase,
+    ) -> Self {
         Self {
             connector_id,
+            rollout_epoch,
             lifecycle_state,
             health,
             rollout_phase,
@@ -75,6 +108,10 @@ impl RolloutState {
         self.version += 1;
         self.persisted_at = now_iso8601();
     }
+}
+
+fn default_rollout_epoch() -> ControlEpoch {
+    ControlEpoch::GENESIS
 }
 
 /// Errors from rollout-state persistence operations.
@@ -121,6 +158,116 @@ impl fmt::Display for PersistError {
 }
 
 impl std::error::Error for PersistError {}
+
+/// Structured epoch-scope log for accepted high-impact operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochScopeLog {
+    pub event_code: String,
+    pub artifact_type: String,
+    pub artifact_id: String,
+    pub artifact_epoch: ControlEpoch,
+    pub current_epoch: ControlEpoch,
+    pub trace_id: String,
+}
+
+impl EpochScopeLog {
+    fn for_rollout_plan(
+        artifact_id: &str,
+        artifact_epoch: ControlEpoch,
+        current_epoch: ControlEpoch,
+        trace_id: &str,
+    ) -> Self {
+        Self {
+            event_code: epoch_event_codes::EPOCH_SCOPE_LOGGED.to_string(),
+            artifact_type: "rollout_plan".to_string(),
+            artifact_id: artifact_id.to_string(),
+            artifact_epoch,
+            current_epoch,
+            trace_id: trace_id.to_string(),
+        }
+    }
+}
+
+/// Epoch-scoped persistence result for rollout plans.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochScopedPersistResult {
+    pub epoch_check_event_code: String,
+    pub epoch_event: EpochArtifactEvent,
+    pub scope_log: EpochScopeLog,
+}
+
+/// Error type for epoch-scoped rollout persistence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code")]
+pub enum EpochPersistError {
+    #[serde(rename = "EPV-002")]
+    FutureEpochRejected { rejection: EpochRejection },
+    #[serde(rename = "EPV-003")]
+    StaleEpochRejected { rejection: EpochRejection },
+    #[serde(rename = "PERSIST_ERROR")]
+    Persist { source: PersistError },
+}
+
+impl EpochPersistError {
+    fn from_rejection(rejection: EpochRejection) -> Self {
+        match rejection.rejection_reason {
+            EpochRejectionReason::FutureEpoch => Self::FutureEpochRejected { rejection },
+            EpochRejectionReason::ExpiredEpoch => Self::StaleEpochRejected { rejection },
+        }
+    }
+}
+
+impl fmt::Display for EpochPersistError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FutureEpochRejected { rejection } | Self::StaleEpochRejected { rejection } => {
+                write!(
+                    f,
+                    "{}: artifact={} artifact_epoch={} current_epoch={} reason={}",
+                    rejection.code(),
+                    rejection.artifact_id,
+                    rejection.artifact_epoch.value(),
+                    rejection.current_epoch.value(),
+                    rejection.code()
+                )
+            }
+            Self::Persist { source } => write!(f, "{source}"),
+        }
+    }
+}
+
+impl std::error::Error for EpochPersistError {}
+
+/// Persist rollout state after canonical epoch-window validation.
+pub fn persist_epoch_scoped(
+    state: &RolloutState,
+    path: &Path,
+    validity_policy: &ValidityWindowPolicy,
+    trace_id: &str,
+) -> Result<EpochScopedPersistResult, EpochPersistError> {
+    let artifact_id = format!("rollout-plan:{}", state.connector_id);
+    check_artifact_epoch(&artifact_id, state.rollout_epoch, validity_policy, trace_id)
+        .map_err(EpochPersistError::from_rejection)?;
+
+    persist(state, path).map_err(|source| EpochPersistError::Persist { source })?;
+
+    let current_epoch = validity_policy.current_epoch();
+    Ok(EpochScopedPersistResult {
+        epoch_check_event_code: epoch_event_codes::EPOCH_CHECK_PASSED.to_string(),
+        epoch_event: EpochArtifactEvent::accepted(
+            &artifact_id,
+            state.rollout_epoch,
+            current_epoch,
+            trace_id,
+        ),
+        scope_log: EpochScopeLog::for_rollout_plan(
+            &artifact_id,
+            state.rollout_epoch,
+            current_epoch,
+            trace_id,
+        ),
+    })
+}
 
 /// Save rollout state to a JSON file atomically.
 ///
@@ -210,13 +357,15 @@ fn now_iso8601() -> String {
 mod tests {
     use super::*;
     use crate::connector::health_gate::{HealthGateResult, standard_checks};
+    use crate::control_plane::control_epoch::ValidityWindowPolicy;
     use tempfile::TempDir;
 
     fn sample_state() -> RolloutState {
         let checks = standard_checks(true, true, true, true);
         let health = HealthGateResult::evaluate(checks);
-        RolloutState::new(
+        RolloutState::new_with_epoch(
             "test-connector-1".to_string(),
+            ControlEpoch::new(6),
             ConnectorState::Configured,
             health,
             RolloutPhase::Shadow,
@@ -227,6 +376,7 @@ mod tests {
     fn new_state_has_version_1() {
         let state = sample_state();
         assert_eq!(state.version, 1);
+        assert_eq!(state.rollout_epoch, ControlEpoch::new(6));
     }
 
     #[test]
@@ -304,6 +454,7 @@ mod tests {
         let json = serde_json::to_string(&state).unwrap();
         let parsed: RolloutState = serde_json::from_str(&json).unwrap();
         assert_eq!(state.connector_id, parsed.connector_id);
+        assert_eq!(state.rollout_epoch, parsed.rollout_epoch);
         assert_eq!(state.lifecycle_state, parsed.lifecycle_state);
         assert_eq!(state.rollout_phase, parsed.rollout_phase);
     }
@@ -312,5 +463,46 @@ mod tests {
     fn load_nonexistent_returns_error() {
         let err = load(Path::new("/nonexistent/state.json")).unwrap_err();
         assert!(matches!(err, PersistError::IoError { .. }));
+    }
+
+    #[test]
+    fn persist_epoch_scoped_accepts_current_epoch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state-epoch.json");
+        let state = sample_state();
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let result = persist_epoch_scoped(&state, &path, &policy, "trace-rollout").unwrap();
+        assert_eq!(
+            result.epoch_check_event_code,
+            epoch_event_codes::EPOCH_CHECK_PASSED
+        );
+        assert_eq!(result.scope_log.event_code, epoch_event_codes::EPOCH_SCOPE_LOGGED);
+    }
+
+    #[test]
+    fn persist_epoch_scoped_rejects_future_epoch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state-epoch-future.json");
+        let mut state = sample_state();
+        state.rollout_epoch = ControlEpoch::new(10);
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = persist_epoch_scoped(&state, &path, &policy, "trace-rollout-future")
+            .expect_err("future epoch must fail-closed");
+        assert!(matches!(err, EpochPersistError::FutureEpochRejected { .. }));
+    }
+
+    #[test]
+    fn persist_epoch_scoped_rejects_expired_epoch() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state-epoch-expired.json");
+        let mut state = sample_state();
+        state.rollout_epoch = ControlEpoch::new(2);
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = persist_epoch_scoped(&state, &path, &policy, "trace-rollout-expired")
+            .expect_err("stale epoch must be rejected");
+        assert!(matches!(err, EpochPersistError::StaleEpochRejected { .. }));
     }
 }

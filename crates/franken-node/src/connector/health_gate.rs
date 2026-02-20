@@ -7,6 +7,19 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::control_plane::control_epoch::{
+    ControlEpoch, EpochArtifactEvent, EpochRejection, EpochRejectionReason, ValidityWindowPolicy,
+    check_artifact_epoch,
+};
+
+/// Stable event codes for epoch-scoped validity checks.
+pub mod epoch_event_codes {
+    pub const EPOCH_CHECK_PASSED: &str = "EPV-001";
+    pub const FUTURE_EPOCH_REJECTED: &str = "EPV-002";
+    pub const STALE_EPOCH_REJECTED: &str = "EPV-003";
+    pub const EPOCH_SCOPE_LOGGED: &str = "EPV-004";
+}
+
 /// A single health check result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthCheck {
@@ -82,6 +95,149 @@ impl fmt::Display for HealthGateError {
 }
 
 impl std::error::Error for HealthGateError {}
+
+/// Epoch-scoped health-gate policy artifact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochScopedHealthPolicy {
+    pub policy_id: String,
+    pub policy_epoch: ControlEpoch,
+    pub checks: Vec<HealthCheck>,
+    pub trace_id: String,
+}
+
+impl EpochScopedHealthPolicy {
+    #[must_use]
+    pub fn new(
+        policy_id: String,
+        policy_epoch: ControlEpoch,
+        checks: Vec<HealthCheck>,
+        trace_id: String,
+    ) -> Self {
+        Self {
+            policy_id,
+            policy_epoch,
+            checks,
+            trace_id,
+        }
+    }
+}
+
+/// Structured epoch-scope log for accepted high-impact operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochScopeLog {
+    pub event_code: String,
+    pub artifact_type: String,
+    pub artifact_id: String,
+    pub artifact_epoch: ControlEpoch,
+    pub current_epoch: ControlEpoch,
+    pub trace_id: String,
+}
+
+impl EpochScopeLog {
+    fn for_health_policy(
+        artifact_id: &str,
+        artifact_epoch: ControlEpoch,
+        current_epoch: ControlEpoch,
+        trace_id: &str,
+    ) -> Self {
+        Self {
+            event_code: epoch_event_codes::EPOCH_SCOPE_LOGGED.to_string(),
+            artifact_type: "health_gate_policy".to_string(),
+            artifact_id: artifact_id.to_string(),
+            artifact_epoch,
+            current_epoch,
+            trace_id: trace_id.to_string(),
+        }
+    }
+}
+
+/// Result of evaluating an epoch-scoped health policy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochScopedHealthResult {
+    pub epoch_check_event_code: String,
+    pub gate_result: HealthGateResult,
+    pub epoch_event: EpochArtifactEvent,
+    pub scope_log: EpochScopeLog,
+}
+
+/// Error returned when epoch-scoped policy validation fails.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code")]
+pub enum EpochHealthGateError {
+    #[serde(rename = "EPV-002")]
+    FutureEpochRejected { rejection: EpochRejection },
+    #[serde(rename = "EPV-003")]
+    StaleEpochRejected { rejection: EpochRejection },
+}
+
+impl EpochHealthGateError {
+    fn from_rejection(rejection: EpochRejection) -> Self {
+        match rejection.rejection_reason {
+            EpochRejectionReason::FutureEpoch => Self::FutureEpochRejected { rejection },
+            EpochRejectionReason::ExpiredEpoch => Self::StaleEpochRejected { rejection },
+        }
+    }
+
+    #[must_use]
+    pub fn rejection(&self) -> &EpochRejection {
+        match self {
+            Self::FutureEpochRejected { rejection } | Self::StaleEpochRejected { rejection } => {
+                rejection
+            }
+        }
+    }
+}
+
+impl fmt::Display for EpochHealthGateError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let rejection = self.rejection();
+        write!(
+            f,
+            "{}: artifact={} artifact_epoch={} current_epoch={} reason={}",
+            rejection.code(),
+            rejection.artifact_id,
+            rejection.artifact_epoch.value(),
+            rejection.current_epoch.value(),
+            rejection.code()
+        )
+    }
+}
+
+impl std::error::Error for EpochHealthGateError {}
+
+/// Evaluate a health gate only after canonical epoch-window validation.
+pub fn evaluate_epoch_scoped_policy(
+    policy: &EpochScopedHealthPolicy,
+    validity_policy: &ValidityWindowPolicy,
+) -> Result<EpochScopedHealthResult, EpochHealthGateError> {
+    check_artifact_epoch(
+        &policy.policy_id,
+        policy.policy_epoch,
+        validity_policy,
+        &policy.trace_id,
+    )
+    .map_err(EpochHealthGateError::from_rejection)?;
+
+    let gate_result = HealthGateResult::evaluate(policy.checks.clone());
+    let current_epoch = validity_policy.current_epoch();
+
+    Ok(EpochScopedHealthResult {
+        epoch_check_event_code: epoch_event_codes::EPOCH_CHECK_PASSED.to_string(),
+        gate_result,
+        epoch_event: EpochArtifactEvent::accepted(
+            &policy.policy_id,
+            policy.policy_epoch,
+            current_epoch,
+            &policy.trace_id,
+        ),
+        scope_log: EpochScopeLog::for_health_policy(
+            &policy.policy_id,
+            policy.policy_epoch,
+            current_epoch,
+            &policy.trace_id,
+        ),
+    })
+}
 
 /// The four standard health checks per the specification.
 pub fn standard_checks(
@@ -176,5 +332,58 @@ mod tests {
         let json = serde_json::to_string(&result).unwrap();
         let parsed: HealthGateResult = serde_json::from_str(&json).unwrap();
         assert_eq!(result, parsed);
+    }
+
+    #[test]
+    fn epoch_scoped_policy_accepts_current_epoch() {
+        let policy = EpochScopedHealthPolicy::new(
+            "health-policy-1".to_string(),
+            ControlEpoch::new(7),
+            standard_checks(true, true, true, true),
+            "trace-hg-accept".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let result = evaluate_epoch_scoped_policy(&policy, &validity).unwrap();
+        assert_eq!(
+            result.epoch_check_event_code,
+            epoch_event_codes::EPOCH_CHECK_PASSED
+        );
+        assert_eq!(result.scope_log.event_code, epoch_event_codes::EPOCH_SCOPE_LOGGED);
+        assert_eq!(result.scope_log.artifact_epoch, ControlEpoch::new(7));
+    }
+
+    #[test]
+    fn epoch_scoped_policy_rejects_future_epoch() {
+        let policy = EpochScopedHealthPolicy::new(
+            "health-policy-future".to_string(),
+            ControlEpoch::new(9),
+            standard_checks(true, true, true, true),
+            "trace-hg-future".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(8), 2);
+
+        let err = evaluate_epoch_scoped_policy(&policy, &validity).unwrap_err();
+        assert!(matches!(
+            err,
+            EpochHealthGateError::FutureEpochRejected { .. }
+        ));
+    }
+
+    #[test]
+    fn epoch_scoped_policy_rejects_stale_epoch() {
+        let policy = EpochScopedHealthPolicy::new(
+            "health-policy-stale".to_string(),
+            ControlEpoch::new(2),
+            standard_checks(true, true, true, true),
+            "trace-hg-stale".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(8), 2);
+
+        let err = evaluate_epoch_scoped_policy(&policy, &validity).unwrap_err();
+        assert!(matches!(
+            err,
+            EpochHealthGateError::StaleEpochRejected { .. }
+        ));
     }
 }

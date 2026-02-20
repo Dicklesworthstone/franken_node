@@ -7,11 +7,25 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::control_plane::control_epoch::{
+    ControlEpoch, EpochArtifactEvent, EpochRejection, EpochRejectionReason, ValidityWindowPolicy,
+    check_artifact_epoch,
+};
+
+/// Stable event codes for epoch-scoped validity checks.
+pub mod epoch_event_codes {
+    pub const EPOCH_CHECK_PASSED: &str = "EPV-001";
+    pub const FUTURE_EPOCH_REJECTED: &str = "EPV-002";
+    pub const STALE_EPOCH_REJECTED: &str = "EPV-003";
+    pub const EPOCH_SCOPE_LOGGED: &str = "EPV-004";
+}
+
 /// A lease that grants write permission to a specific state object.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lease {
     pub lease_seq: u64,
     pub object_id: String,
+    pub epoch: ControlEpoch,
     pub holder_id: String,
     pub acquired_at: String,
     pub expires_at: String,
@@ -42,6 +56,21 @@ pub enum FencingError {
         lease_object: String,
         target_object: String,
     },
+    #[serde(rename = "LEASE_EPOCH_REJECTED")]
+    EpochRejected { rejection: EpochRejection },
+}
+
+impl FencingError {
+    #[must_use]
+    pub fn epoch_event_code(&self) -> Option<&'static str> {
+        match self {
+            Self::EpochRejected { rejection } => Some(match rejection.rejection_reason {
+                EpochRejectionReason::FutureEpoch => epoch_event_codes::FUTURE_EPOCH_REJECTED,
+                EpochRejectionReason::ExpiredEpoch => epoch_event_codes::STALE_EPOCH_REJECTED,
+            }),
+            _ => None,
+        }
+    }
 }
 
 impl fmt::Display for FencingError {
@@ -69,6 +98,14 @@ impl fmt::Display for FencingError {
                 f,
                 "LEASE_OBJECT_MISMATCH: lease for '{lease_object}', target '{target_object}'"
             ),
+            Self::EpochRejected { rejection } => write!(
+                f,
+                "LEASE_EPOCH_REJECTED: artifact={} artifact_epoch={} current_epoch={} reason={}",
+                rejection.artifact_id,
+                rejection.artifact_epoch.value(),
+                rejection.current_epoch.value(),
+                rejection.code()
+            ),
         }
     }
 }
@@ -81,6 +118,43 @@ pub struct FenceState {
     pub object_id: String,
     pub current_seq: u64,
     pub current_holder: Option<String>,
+}
+
+/// Structured epoch-scope log for accepted high-impact operations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochScopeLog {
+    pub event_code: String,
+    pub artifact_type: String,
+    pub artifact_id: String,
+    pub artifact_epoch: ControlEpoch,
+    pub current_epoch: ControlEpoch,
+    pub trace_id: String,
+}
+
+impl EpochScopeLog {
+    fn for_fencing_token(
+        artifact_id: &str,
+        artifact_epoch: ControlEpoch,
+        current_epoch: ControlEpoch,
+        trace_id: &str,
+    ) -> Self {
+        Self {
+            event_code: epoch_event_codes::EPOCH_SCOPE_LOGGED.to_string(),
+            artifact_type: "fencing_token".to_string(),
+            artifact_id: artifact_id.to_string(),
+            artifact_epoch,
+            current_epoch,
+            trace_id: trace_id.to_string(),
+        }
+    }
+}
+
+/// Result of epoch-scoped fencing validation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EpochScopedWriteOutcome {
+    pub epoch_check_event_code: String,
+    pub epoch_event: EpochArtifactEvent,
+    pub scope_log: EpochScopeLog,
 }
 
 impl FenceState {
@@ -100,11 +174,23 @@ impl FenceState {
         acquired_at: String,
         expires_at: String,
     ) -> Lease {
+        self.acquire_lease_with_epoch(holder_id, acquired_at, expires_at, ControlEpoch::GENESIS)
+    }
+
+    /// Acquire a new lease bound to a specific control epoch.
+    pub fn acquire_lease_with_epoch(
+        &mut self,
+        holder_id: String,
+        acquired_at: String,
+        expires_at: String,
+        epoch: ControlEpoch,
+    ) -> Lease {
         self.current_seq += 1;
         self.current_holder = Some(holder_id.clone());
         Lease {
             lease_seq: self.current_seq,
             object_id: self.object_id.clone(),
+            epoch,
             holder_id,
             acquired_at,
             expires_at,
@@ -147,6 +233,39 @@ impl FenceState {
 
         Ok(())
     }
+
+    /// Validate a fenced write, requiring canonical epoch-window acceptance.
+    pub fn validate_write_epoch_scoped(
+        &self,
+        write: &FencedWrite,
+        lease: &Lease,
+        current_time: &str,
+        validity_policy: &ValidityWindowPolicy,
+        trace_id: &str,
+    ) -> Result<EpochScopedWriteOutcome, FencingError> {
+        let artifact_id = format!("fencing:{}:{}", lease.object_id, lease.lease_seq);
+        check_artifact_epoch(&artifact_id, lease.epoch, validity_policy, trace_id)
+            .map_err(|rejection| FencingError::EpochRejected { rejection })?;
+
+        self.validate_write(write, lease, current_time)?;
+
+        let current_epoch = validity_policy.current_epoch();
+        Ok(EpochScopedWriteOutcome {
+            epoch_check_event_code: epoch_event_codes::EPOCH_CHECK_PASSED.to_string(),
+            epoch_event: EpochArtifactEvent::accepted(
+                &artifact_id,
+                lease.epoch,
+                current_epoch,
+                trace_id,
+            ),
+            scope_log: EpochScopeLog::for_fencing_token(
+                &artifact_id,
+                lease.epoch,
+                current_epoch,
+                trace_id,
+            ),
+        })
+    }
 }
 
 /// A rejection receipt for audit logging.
@@ -162,6 +281,7 @@ pub struct RejectionReceipt {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control_plane::control_epoch::ValidityWindowPolicy;
     use serde_json::json;
 
     #[test]
@@ -329,5 +449,76 @@ mod tests {
     fn error_display_stable() {
         let err = FencingError::WriteUnfenced;
         assert!(err.to_string().contains("WRITE_UNFENCED"));
+    }
+
+    #[test]
+    fn lease_can_carry_epoch_stamp() {
+        let mut fs = FenceState::new("obj-epoch".into());
+        let lease = fs.acquire_lease_with_epoch(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+            ControlEpoch::new(11),
+        );
+        assert_eq!(lease.epoch, ControlEpoch::new(11));
+    }
+
+    #[test]
+    fn epoch_scoped_validation_accepts_current_epoch() {
+        let mut fs = FenceState::new("obj-epoch-accept".into());
+        let lease = fs.acquire_lease_with_epoch(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+            ControlEpoch::new(5),
+        );
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: "obj-epoch-accept".into(),
+            payload: json!({"ok": true}),
+        };
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(5), 2);
+
+        let outcome = fs
+            .validate_write_epoch_scoped(&write, &lease, "2026-06-01T00:00:00Z", &policy, "t-1")
+            .unwrap();
+        assert_eq!(
+            outcome.epoch_check_event_code,
+            epoch_event_codes::EPOCH_CHECK_PASSED
+        );
+        assert_eq!(outcome.scope_log.event_code, epoch_event_codes::EPOCH_SCOPE_LOGGED);
+    }
+
+    #[test]
+    fn epoch_scoped_validation_rejects_future_epoch() {
+        let mut fs = FenceState::new("obj-epoch-future".into());
+        let lease = fs.acquire_lease_with_epoch(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+            ControlEpoch::new(8),
+        );
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: "obj-epoch-future".into(),
+            payload: json!({"ok": true}),
+        };
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = fs
+            .validate_write_epoch_scoped(
+                &write,
+                &lease,
+                "2026-06-01T00:00:00Z",
+                &policy,
+                "t-future",
+            )
+            .unwrap_err();
+        match err {
+            FencingError::EpochRejected { rejection } => {
+                assert_eq!(rejection.rejection_reason, EpochRejectionReason::FutureEpoch);
+            }
+            _ => panic!("expected epoch rejection"),
+        }
     }
 }
