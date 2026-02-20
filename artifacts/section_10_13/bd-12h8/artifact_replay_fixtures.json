@@ -1,0 +1,15 @@
+{
+  "fixtures": [
+    {"artifact_id": "inv-001", "artifact_type": "invoke", "sequence_number": 0, "payload_hash": "sha256:abc123", "trace_id": "t-001"},
+    {"artifact_id": "res-001", "artifact_type": "response", "sequence_number": 0, "payload_hash": "sha256:def456", "trace_id": "t-002"},
+    {"artifact_id": "rcp-001", "artifact_type": "receipt", "sequence_number": 0, "payload_hash": "sha256:ghi789", "trace_id": "t-003"},
+    {"artifact_id": "apr-001", "artifact_type": "approval", "sequence_number": 0, "payload_hash": "sha256:jkl012", "trace_id": "t-004"},
+    {"artifact_id": "rev-001", "artifact_type": "revocation", "sequence_number": 0, "payload_hash": "sha256:mno345", "trace_id": "t-005"},
+    {"artifact_id": "aud-001", "artifact_type": "audit", "sequence_number": 0, "payload_hash": "sha256:pqr678", "trace_id": "t-006"}
+  ],
+  "replay_sequence": [
+    {"step": 1, "artifact_id": "inv-001", "verify_hash": "sha256:abc123", "expected": "match"},
+    {"step": 2, "artifact_id": "res-001", "verify_hash": "sha256:def456", "expected": "match"},
+    {"step": 3, "artifact_id": "inv-001", "verify_hash": "sha256:wrong", "expected": "mismatch"}
+  ]
+}

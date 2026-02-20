@@ -1,6 +1,7 @@
 pub mod activation_pipeline;
 pub mod admission_budget;
 pub mod anti_amplification;
+pub mod artifact_persistence;
 pub mod crdt;
 pub mod device_profile;
 pub mod execution_scorer;
@@ -14,6 +15,7 @@ pub mod prestage_engine;
 pub mod quarantine_promotion;
 pub mod quarantine_store;
 pub mod repair_controller;
+pub mod retention_policy;
 pub mod manifest_negotiation;
 pub mod offline_coverage;
 pub mod rollout_state;
