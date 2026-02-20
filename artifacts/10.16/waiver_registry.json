@@ -1,0 +1,8 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-02-20T20:16:00Z",
+  "policy_doc": "docs/policy/adjacent_substrate_waiver_process.md",
+  "policy_manifest": "artifacts/10.16/substrate_dependency_matrix.json",
+  "max_waiver_duration_days": 90,
+  "waivers": []
+}

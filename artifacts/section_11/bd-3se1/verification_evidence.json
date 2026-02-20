@@ -1,0 +1,102 @@
+{
+  "bead_id": "bd-3se1",
+  "generated_at": "2026-02-20T23:03:15Z",
+  "status": "pass",
+  "contract": {
+    "template": "docs/templates/change_summary_template.md",
+    "example_json": "docs/change_summaries/example_change_summary.json",
+    "example_yaml": "docs/examples/change_summary_example.yaml",
+    "workflow_gate": ".github/workflows/change-summary-contract-gate.yml"
+  },
+  "checks": [
+    {
+      "name": "change_summary_self_test",
+      "command": "python3 scripts/check_change_summary_contract.py --self-test --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "self_test": "passed"
+      }
+    },
+    {
+      "name": "change_summary_validation",
+      "command": "python3 scripts/check_change_summary_contract.py --changed-files artifacts/section_11/bd-3se1/changed_files_for_validation.txt --json",
+      "exit_code": 0,
+      "output": {
+        "bead_id": "bd-3se1",
+        "changed_file_count": 2,
+        "changed_files_source": "artifacts/section_11/bd-3se1/changed_files_for_validation.txt",
+        "errors": [],
+        "events": [
+          {
+            "event_code": "CONTRACT_CHANGE_SUMMARY_VALIDATED",
+            "message": "change summary validated: docs/change_summaries/example_change_summary.json",
+            "severity": "info",
+            "summary_file": "docs/change_summaries/example_change_summary.json",
+            "trace_correlation": "ca40d98878ee77b2fa2f7a8c3d966fcea5a8d0f1b81ff3b275b169d21f7554f0"
+          }
+        ],
+        "example": "docs/change_summaries/example_change_summary.json",
+        "ok": true,
+        "required_event_codes": [
+          "CONTRACT_CHANGE_SUMMARY_VALIDATED",
+          "CONTRACT_INCOMPLETE",
+          "CONTRACT_MISSING"
+        ],
+        "requires_change_summary": true,
+        "subsystem_change_count": 1,
+        "summary_directory": "docs/change_summaries",
+        "summary_files_checked": [
+          "docs/change_summaries/example_change_summary.json"
+        ],
+        "template": "docs/templates/change_summary_template.md",
+        "validated_summaries": [
+          {
+            "errors": [],
+            "events": [
+              {
+                "event_code": "CONTRACT_CHANGE_SUMMARY_VALIDATED",
+                "message": "change summary validated: docs/change_summaries/example_change_summary.json",
+                "severity": "info",
+                "summary_file": "docs/change_summaries/example_change_summary.json",
+                "trace_correlation": "ca40d98878ee77b2fa2f7a8c3d966fcea5a8d0f1b81ff3b275b169d21f7554f0"
+              }
+            ],
+            "modules": [
+              "crates/franken-node/src/connector/lease_coordinator.rs",
+              "crates/franken-node/src/connector/lease_service.rs"
+            ],
+            "ok": true,
+            "subsystems": [
+              "franken_node.connector",
+              "franken_node.control_plane"
+            ],
+            "summary_file": "docs/change_summaries/example_change_summary.json",
+            "trace_correlation": "ca40d98878ee77b2fa2f7a8c3d966fcea5a8d0f1b81ff3b275b169d21f7554f0",
+            "warnings": []
+          }
+        ],
+        "warnings": []
+      }
+    },
+    {
+      "name": "unittest_verification",
+      "command": "python3 -m unittest tests/test_check_change_summary_contract.py",
+      "exit_code": 0,
+      "output": " OK"
+    }
+  ],
+  "coverage": {
+    "required_fields_enforced": true,
+    "ci_gate_present": true,
+    "summary_required_for_subsystem_changes": true,
+    "required_event_codes": [
+      "CONTRACT_CHANGE_SUMMARY_VALIDATED",
+      "CONTRACT_MISSING",
+      "CONTRACT_INCOMPLETE"
+    ],
+    "validated_summary_count": 1,
+    "subsystem_change_count": 1,
+    "pending_items": 0
+  }
+}

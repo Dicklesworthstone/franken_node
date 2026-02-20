@@ -1,0 +1,173 @@
+{
+  "bead_id": "bd-phf",
+  "section": "10.4",
+  "title": "Ecosystem Telemetry for Trust and Adoption Metrics",
+  "timestamp": "2026-02-20T23:02:53.468457+00:00",
+  "overall_pass": true,
+  "checks": {
+    "files": {
+      "spec": {
+        "path": "docs/specs/section_10_4/bd-phf_contract.md",
+        "exists": true,
+        "size_bytes": 3375
+      },
+      "rust_impl": {
+        "path": "crates/franken-node/src/supply_chain/ecosystem_telemetry.rs",
+        "exists": true,
+        "size_bytes": 30416
+      },
+      "mod_rs": {
+        "path": "crates/franken-node/src/supply_chain/mod.rs",
+        "exists": true,
+        "size_bytes": 267
+      }
+    },
+    "spec_invariants": {
+      "pass": true,
+      "found": [
+        "INV-TEL-OPT-IN",
+        "INV-TEL-PRIVACY",
+        "INV-TEL-RETENTION",
+        "INV-TEL-ANOMALY",
+        "INV-TEL-BUDGET",
+        "INV-TEL-QUERY",
+        "INV-TEL-EXPORT",
+        "INV-TEL-GOVERNANCE"
+      ],
+      "missing": []
+    },
+    "rust_symbols": {
+      "pass": true,
+      "found": [
+        "pub enum TrustMetricKind",
+        "pub enum AdoptionMetricKind",
+        "pub enum MetricKind",
+        "pub struct TelemetryDataPoint",
+        "pub enum AggregationLevel",
+        "pub struct DataGovernance",
+        "pub struct RetentionPolicy",
+        "pub enum AnomalyType",
+        "pub enum AnomalySeverity",
+        "pub struct AnomalyAlert",
+        "pub struct AnomalyConfig",
+        "pub struct TelemetryQuery",
+        "pub struct TelemetryQueryResult",
+        "pub struct EcosystemHealthExport",
+        "pub struct ResourceBudget",
+        "pub struct TelemetryPipeline"
+      ],
+      "missing": []
+    },
+    "event_codes": {
+      "pass": true,
+      "found": [
+        "TELEMETRY_INGESTED",
+        "TELEMETRY_AGGREGATED",
+        "TELEMETRY_QUERY_SERVED",
+        "TELEMETRY_ANOMALY_DETECTED",
+        "TELEMETRY_EXPORT_GENERATED",
+        "TELEMETRY_PRIVACY_FILTER_APPLIED"
+      ],
+      "missing": []
+    },
+    "trust_metrics": {
+      "pass": true,
+      "found": [
+        "CertificationDistribution",
+        "RevocationPropagationLatency",
+        "QuarantineResolutionTime",
+        "ProvenanceCoverageRate",
+        "ReputationDistribution"
+      ],
+      "missing": []
+    },
+    "adoption_metrics": {
+      "pass": true,
+      "found": [
+        "ExtensionsPublished",
+        "ProvenanceLevelAdoption",
+        "TrustCardQueryVolume",
+        "PolicyOverrideFrequency",
+        "QuarantineActionsPerPeriod"
+      ],
+      "missing": []
+    },
+    "anomaly_types": {
+      "pass": true,
+      "found": [
+        "ProvenanceCoverageDrop",
+        "QuarantineSpike",
+        "ReputationDistributionShift",
+        "RevocationPropagationDelay",
+        "PublicationVolumeAnomaly"
+      ],
+      "missing": []
+    },
+    "pipeline_methods": {
+      "pass": true,
+      "found": [
+        "pub fn new()",
+        "pub fn with_governance",
+        "pub fn enable_collection",
+        "pub fn ingest(",
+        "pub fn detect_anomalies(",
+        "pub fn query(",
+        "pub fn export_health(",
+        "pub fn active_alerts(",
+        "pub fn ingested_count(",
+        "pub fn stored_count(",
+        "pub fn governance(",
+        "pub fn resource_budget("
+      ],
+      "missing": []
+    },
+    "tests": {
+      "pass": true,
+      "found": [
+        "test_collection_disabled_by_default",
+        "test_collection_after_enable",
+        "test_query_by_metric",
+        "test_query_by_time_range",
+        "test_anomaly_detection_provenance_drop",
+        "test_anomaly_detection_quarantine_spike",
+        "test_anomaly_detection_reputation_shift",
+        "test_anomaly_detection_revocation_delay",
+        "test_anomaly_detection_publication_volume",
+        "test_no_anomaly_within_threshold",
+        "test_health_export",
+        "test_resource_budget_eviction",
+        "test_governance_default_opt_in"
+      ],
+      "missing": []
+    },
+    "mod_registration": {
+      "pass": true,
+      "registered": true
+    },
+    "privacy_governance": {
+      "pass": true,
+      "governance_struct": true,
+      "opt_in_default": true,
+      "k_anonymity": true,
+      "retention_policy": true
+    },
+    "anomaly_detection": {
+      "pass": true,
+      "anomaly_config": true,
+      "detect_function": true,
+      "deviation_threshold": true,
+      "min_data_points": true
+    },
+    "resource_budget": {
+      "pass": true,
+      "budget_struct": true,
+      "max_points": true,
+      "eviction_logic": true
+    }
+  },
+  "summary": {
+    "total_checks": 13,
+    "passed": 13,
+    "failed": 0
+  }
+}

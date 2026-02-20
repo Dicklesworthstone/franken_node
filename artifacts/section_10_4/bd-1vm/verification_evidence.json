@@ -1,0 +1,185 @@
+{
+  "bead_id": "bd-1vm",
+  "section": "10.4",
+  "title": "Fast Quarantine/Recall Workflow for Compromised Artifacts",
+  "timestamp": "2026-02-20T23:02:53.383075+00:00",
+  "overall_pass": true,
+  "checks": {
+    "files": {
+      "spec": {
+        "path": "docs/specs/section_10_4/bd-1vm_contract.md",
+        "exists": true,
+        "size_bytes": 3526
+      },
+      "rust_impl": {
+        "path": "crates/franken-node/src/supply_chain/quarantine.rs",
+        "exists": true,
+        "size_bytes": 44639
+      },
+      "mod_rs": {
+        "path": "crates/franken-node/src/supply_chain/mod.rs",
+        "exists": true,
+        "size_bytes": 267
+      }
+    },
+    "spec_invariants": {
+      "pass": true,
+      "found": [
+        "INV-QUAR-MODES",
+        "INV-QUAR-FAST-PATH",
+        "INV-QUAR-FAIL-CLOSED",
+        "INV-QUAR-DURABLE",
+        "INV-QUAR-LIFECYCLE",
+        "INV-QUAR-CLEARANCE",
+        "INV-QUAR-RECALL-VERIFY",
+        "INV-QUAR-AUDIT"
+      ],
+      "missing": []
+    },
+    "rust_symbols": {
+      "pass": true,
+      "found": [
+        "pub enum QuarantineMode",
+        "pub enum QuarantineSeverity",
+        "pub enum QuarantineScope",
+        "pub struct QuarantineOrder",
+        "pub enum QuarantineReason",
+        "pub enum QuarantineState",
+        "pub struct RecallOrder",
+        "pub struct RecallReceipt",
+        "pub struct QuarantineImpactReport",
+        "pub struct QuarantineClearance",
+        "pub struct QuarantineAuditEntry",
+        "pub struct QuarantineRecord",
+        "pub struct QuarantineRegistry",
+        "pub struct QuarantineError"
+      ],
+      "missing": []
+    },
+    "event_codes": {
+      "pass": true,
+      "found": [
+        "QUARANTINE_INITIATED",
+        "QUARANTINE_PROPAGATED",
+        "QUARANTINE_ENFORCED",
+        "QUARANTINE_DRAIN_STARTED",
+        "QUARANTINE_DRAIN_COMPLETED",
+        "QUARANTINE_LIFTED",
+        "RECALL_TRIGGERED",
+        "RECALL_ARTIFACT_REMOVED",
+        "RECALL_RECEIPT_EMITTED",
+        "RECALL_COMPLETED"
+      ],
+      "missing": []
+    },
+    "error_codes": {
+      "pass": true,
+      "found": [
+        "ERR_QUARANTINE_NOT_FOUND",
+        "ERR_QUARANTINE_ALREADY_ACTIVE",
+        "ERR_RECALL_WITHOUT_QUARANTINE",
+        "ERR_LIFT_REQUIRES_CLEARANCE",
+        "ERR_AUDIT_CHAIN_BROKEN"
+      ],
+      "missing": []
+    },
+    "registry_methods": {
+      "pass": true,
+      "found": [
+        "pub fn initiate_quarantine(",
+        "pub fn record_propagation(",
+        "pub fn enforce_quarantine(",
+        "pub fn start_drain(",
+        "pub fn complete_drain(",
+        "pub fn generate_impact_report(",
+        "pub fn trigger_recall(",
+        "pub fn record_recall_receipt(",
+        "pub fn complete_recall(",
+        "pub fn lift_quarantine(",
+        "pub fn is_quarantined(",
+        "pub fn get_active_quarantine(",
+        "pub fn get_record(",
+        "pub fn recall_completion_pct(",
+        "pub fn verify_audit_integrity(",
+        "pub fn audit_trail(",
+        "pub fn query_audit_by_extension("
+      ],
+      "missing": []
+    },
+    "tests": {
+      "pass": true,
+      "found": [
+        "test_initiate_soft_quarantine",
+        "test_initiate_hard_quarantine",
+        "test_critical_fast_path_enforcement",
+        "test_duplicate_quarantine_rejected",
+        "test_propagation_transitions_state",
+        "test_enforcement_and_drain_lifecycle",
+        "test_lift_quarantine_with_clearance",
+        "test_lift_without_justification_fails",
+        "test_recall_lifecycle",
+        "test_recall_without_quarantine_fails",
+        "test_impact_report",
+        "test_recall_completion_percentage",
+        "test_audit_trail_integrity",
+        "test_audit_trail_tamper_detection",
+        "test_query_audit_by_extension",
+        "test_publisher_scope_quarantine",
+        "test_all_versions_scope",
+        "test_state_history_tracked",
+        "test_quarantine_reason_variants",
+        "test_severity_ordering"
+      ],
+      "missing": []
+    },
+    "quarantine_reasons": {
+      "pass": true,
+      "found": [
+        "VulnerabilityDisclosure",
+        "MalwareDetection",
+        "SupplyChainAttack",
+        "BehavioralAnomaly",
+        "OperatorInitiated",
+        "RevocationEvent",
+        "PolicyTrigger"
+      ],
+      "missing": []
+    },
+    "mod_registration": {
+      "pass": true,
+      "registered": true
+    },
+    "state_machine": {
+      "pass": true,
+      "found": [
+        "Initiated",
+        "Propagated",
+        "Enforced",
+        "Draining",
+        "Isolated",
+        "Lifted",
+        "RecallTriggered",
+        "RecallCompleted"
+      ],
+      "missing": [],
+      "total_states": 8
+    },
+    "hash_chain": {
+      "pass": true,
+      "hash_chain": true,
+      "sha256": true,
+      "integrity_check": true
+    },
+    "fast_path": {
+      "pass": true,
+      "critical_severity_check": true,
+      "fast_path_logic": true,
+      "immediate_enforcement": true
+    }
+  },
+  "summary": {
+    "total_checks": 12,
+    "passed": 12,
+    "failed": 0
+  }
+}

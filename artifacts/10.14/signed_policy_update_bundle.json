@@ -1,0 +1,109 @@
+{
+  "version": 1,
+  "timestamp": "2026-02-20T00:00:00Z",
+  "run_id": "run-001",
+  "hardware_fingerprint": "a1b2c3d4e5f60718",
+  "previous_bundle_hash": null,
+  "regression_threshold_pct": 20.0,
+  "candidates": [
+    {
+      "class_id": "critical_marker",
+      "symbol_size_bytes": 256,
+      "overhead_ratio": 0.02,
+      "fetch_priority": "critical",
+      "prefetch_policy": "eager",
+      "p50_encode_us": 1.5,
+      "p99_encode_us": 5.0,
+      "p50_decode_us": 1.2,
+      "p99_decode_us": 4.0
+    },
+    {
+      "class_id": "trust_receipt",
+      "symbol_size_bytes": 1024,
+      "overhead_ratio": 0.05,
+      "fetch_priority": "normal",
+      "prefetch_policy": "lazy",
+      "p50_encode_us": 8.0,
+      "p99_encode_us": 25.0,
+      "p50_decode_us": 6.0,
+      "p99_decode_us": 20.0
+    },
+    {
+      "class_id": "replay_bundle",
+      "symbol_size_bytes": 16384,
+      "overhead_ratio": 0.08,
+      "fetch_priority": "background",
+      "prefetch_policy": "none",
+      "p50_encode_us": 120.0,
+      "p99_encode_us": 350.0,
+      "p50_decode_us": 100.0,
+      "p99_decode_us": 300.0
+    },
+    {
+      "class_id": "telemetry_artifact",
+      "symbol_size_bytes": 4096,
+      "overhead_ratio": 0.04,
+      "fetch_priority": "background",
+      "prefetch_policy": "none",
+      "p50_encode_us": 30.0,
+      "p99_encode_us": 80.0,
+      "p50_decode_us": 25.0,
+      "p99_decode_us": 65.0
+    }
+  ],
+  "deltas": [
+    {
+      "class_id": "critical_marker",
+      "old_symbol_size": 256,
+      "new_symbol_size": 256,
+      "old_overhead": 0.02,
+      "new_overhead": 0.02,
+      "old_priority": "critical",
+      "new_priority": "critical",
+      "old_prefetch": "eager",
+      "new_prefetch": "eager",
+      "p99_encode_change_pct": 0.0,
+      "p99_decode_change_pct": 0.0
+    },
+    {
+      "class_id": "trust_receipt",
+      "old_symbol_size": 1024,
+      "new_symbol_size": 1024,
+      "old_overhead": 0.05,
+      "new_overhead": 0.05,
+      "old_priority": "normal",
+      "new_priority": "normal",
+      "old_prefetch": "lazy",
+      "new_prefetch": "lazy",
+      "p99_encode_change_pct": 0.0,
+      "p99_decode_change_pct": 0.0
+    },
+    {
+      "class_id": "replay_bundle",
+      "old_symbol_size": 16384,
+      "new_symbol_size": 16384,
+      "old_overhead": 0.08,
+      "new_overhead": 0.08,
+      "old_priority": "background",
+      "new_priority": "background",
+      "old_prefetch": "none",
+      "new_prefetch": "none",
+      "p99_encode_change_pct": 0.0,
+      "p99_decode_change_pct": 0.0
+    },
+    {
+      "class_id": "telemetry_artifact",
+      "old_symbol_size": 4096,
+      "new_symbol_size": 4096,
+      "old_overhead": 0.04,
+      "new_overhead": 0.04,
+      "old_priority": "background",
+      "new_priority": "background",
+      "old_prefetch": "none",
+      "new_prefetch": "none",
+      "p99_encode_change_pct": 0.0,
+      "p99_decode_change_pct": 0.0
+    }
+  ],
+  "signature": "harness-signed-v1"
+}

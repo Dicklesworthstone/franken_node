@@ -1,0 +1,52 @@
+{
+  "bead_id": "bd-1a1j",
+  "generated_at": "2026-02-20T20:23:00Z",
+  "status": "pass",
+  "contract": {
+    "path": "docs/specs/frankensqlite_persistence_contract.md",
+    "matrix": "artifacts/10.16/frankensqlite_persistence_matrix.json"
+  },
+  "checks": [
+    {
+      "name": "contract_self_test",
+      "command": "python3 scripts/check_frankensqlite_contract.py --self-test --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "self_test": "passed"
+      }
+    },
+    {
+      "name": "contract_validation",
+      "command": "python3 scripts/check_frankensqlite_contract.py --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "mapped_module_count": 21,
+        "detected_stateful_module_count": 21,
+        "unmapped_stateful_modules": [],
+        "table_count": 47,
+        "errors": [],
+        "warnings": [],
+        "trace_correlation": "ced233fc337368de1525c6099d201928f7c66b53b4b18c9f39b94819fb3dba9d"
+      }
+    },
+    {
+      "name": "unittest_verification",
+      "command": "python3 -m unittest tests/test_check_frankensqlite_contract.py",
+      "exit_code": 0,
+      "output": "Ran 8 tests: OK"
+    }
+  ],
+  "coverage": {
+    "required_sections_present": true,
+    "stateful_modules_mapped": true,
+    "pending_checklist_items": 0,
+    "event_codes": [
+      "PERSISTENCE_CONTRACT_LOADED",
+      "PERSISTENCE_CLASS_UNMAPPED",
+      "PERSISTENCE_TIER_INVALID",
+      "PERSISTENCE_REPLAY_UNSUPPORTED"
+    ]
+  }
+}

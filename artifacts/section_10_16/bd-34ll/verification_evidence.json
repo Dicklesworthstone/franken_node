@@ -1,0 +1,50 @@
+{
+  "bead_id": "bd-34ll",
+  "generated_at": "2026-02-20T20:06:30Z",
+  "status": "pass",
+  "contract": {
+    "path": "docs/specs/frankentui_integration_contract.md",
+    "checklist": "artifacts/10.16/frankentui_contract_checklist.json"
+  },
+  "checks": [
+    {
+      "name": "contract_self_test",
+      "command": "python3 scripts/check_frankentui_contract.py --self-test --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "self_test": "passed"
+      }
+    },
+    {
+      "name": "contract_validation",
+      "command": "python3 scripts/check_frankentui_contract.py --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "mapped_component_count": 7,
+        "discovered_output_module_count": 6,
+        "unmapped_output_modules": [],
+        "errors": [],
+        "warnings": [],
+        "trace_correlation": "dd8d17a04d577fb60461e7d859a1065ca82319259f3bd778ecd06292a962e3cf"
+      }
+    },
+    {
+      "name": "unittest_verification",
+      "command": "python3 -m unittest tests/test_check_frankentui_contract.py",
+      "exit_code": 0,
+      "output": "Ran 6 tests: OK"
+    }
+  ],
+  "coverage": {
+    "required_sections_present": true,
+    "cli_surface_mapped": true,
+    "checklist_pending_items": 0,
+    "event_codes": [
+      "FRANKENTUI_CONTRACT_LOADED",
+      "FRANKENTUI_COMPONENT_UNMAPPED",
+      "FRANKENTUI_STYLING_VIOLATION"
+    ]
+  }
+}

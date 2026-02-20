@@ -1,0 +1,30 @@
+{
+  "bead_id": "bd-22e7",
+  "title": "Method Stack Compliance — 4 execution disciplines",
+  "section": "5",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "python_checks": 72,
+  "python_unit_tests": 27,
+  "artifacts": {
+    "method_stack_doc": "docs/methodology/method_stack_compliance.md",
+    "compliance_matrix": "docs/methodology/compliance_matrix.json",
+    "spec_contract": "docs/specs/section_5/bd-22e7_contract.md",
+    "verification_script": "scripts/check_method_stack_compliance.py",
+    "test_file": "tests/test_check_method_stack_compliance.py"
+  },
+  "checks": [
+    {"group": "files", "count": 3, "pass": 3},
+    {"group": "stacks_documented", "count": 4, "pass": 4},
+    {"group": "stack_domains", "count": 4, "pass": 4},
+    {"group": "artifact_keywords", "count": 11, "pass": 11},
+    {"group": "compliance_checks", "count": 4, "pass": 4},
+    {"group": "event_codes", "count": 4, "pass": 4},
+    {"group": "invariants", "count": 4, "pass": 4},
+    {"group": "matrix_json", "count": 13, "pass": 13},
+    {"group": "compliance_table", "count": 10, "pass": 10},
+    {"group": "pr_checklist", "count": 4, "pass": 4},
+    {"group": "spec_contract", "count": 8, "pass": 8},
+    {"group": "self_test", "count": 3, "pass": 3}
+  ]
+}

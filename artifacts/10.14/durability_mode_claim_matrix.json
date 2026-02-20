@@ -1,0 +1,62 @@
+{
+  "bead_id": "bd-18ud",
+  "title": "Durability Mode Claim Matrix",
+  "description": "Deterministic mapping from (mode, outcome) pairs to claim strings",
+  "generated": "2026-02-20",
+  "claims": [
+    {
+      "mode": "local",
+      "outcome": "fsync_confirmed",
+      "claim_string": "local-fsync-confirmed",
+      "deterministic": true
+    },
+    {
+      "mode": "quorum(1)",
+      "outcome": "acked",
+      "acked": 1,
+      "total": 3,
+      "claim_string": "quorum-1-of-3-acked(min=1)",
+      "deterministic": true
+    },
+    {
+      "mode": "quorum(1)",
+      "outcome": "failed",
+      "acked": 0,
+      "total": 3,
+      "claim_string": "quorum-failed-0-of-3-acked(required=1,min=1)",
+      "deterministic": true
+    },
+    {
+      "mode": "quorum(3)",
+      "outcome": "acked",
+      "acked": 3,
+      "total": 5,
+      "claim_string": "quorum-3-of-5-acked(min=3)",
+      "deterministic": true
+    },
+    {
+      "mode": "quorum(3)",
+      "outcome": "failed",
+      "acked": 2,
+      "total": 5,
+      "claim_string": "quorum-failed-2-of-5-acked(required=3,min=3)",
+      "deterministic": true
+    },
+    {
+      "mode": "quorum(5)",
+      "outcome": "acked",
+      "acked": 5,
+      "total": 7,
+      "claim_string": "quorum-5-of-7-acked(min=5)",
+      "deterministic": true
+    },
+    {
+      "mode": "quorum(5)",
+      "outcome": "failed",
+      "acked": 4,
+      "total": 7,
+      "claim_string": "quorum-failed-4-of-7-acked(required=5,min=5)",
+      "deterministic": true
+    }
+  ]
+}

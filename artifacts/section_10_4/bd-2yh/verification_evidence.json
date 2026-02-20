@@ -1,0 +1,113 @@
+{
+  "bead_id": "bd-2yh",
+  "timestamp_utc": "2026-02-20T20:03:32Z",
+  "status": "completed_with_known_repo_gate_failures",
+  "implementation": {
+    "files": [
+      "crates/franken-node/src/supply_chain/trust_card.rs",
+      "crates/franken-node/src/supply_chain/mod.rs",
+      "crates/franken-node/src/api/mod.rs",
+      "crates/franken-node/src/api/trust_card_routes.rs",
+      "crates/franken-node/src/cli.rs",
+      "crates/franken-node/src/main.rs",
+      "docs/specs/section_10_4/bd-2yh_contract.md",
+      "scripts/check_trust_card.py",
+      "tests/test_check_trust_card.py",
+      "artifacts/section_10_4/bd-2yh/trust_card_report.json",
+      "artifacts/section_10_4/bd-2yh/trust_card_self_test.json"
+    ],
+    "highlights": [
+      "Implemented trust-card registry model with deterministic hash/signature, cache semantics, telemetry, and version hash-linking.",
+      "Added API handlers for create/update/read/list/publisher-search/query-search and compare/diff surfaces with pagination metadata.",
+      "Added CLI `trust-card` command family: show/export/list/compare/diff with JSON and human-readable output modes.",
+      "Added version-aware diff support for same-extension trust-card history (`compare_versions`).",
+      "Added section contract doc and verifier/test harness for bead gate evidence."
+    ]
+  },
+  "verification": {
+    "commands": [
+      {
+        "command": "python3 scripts/check_trust_card.py --json",
+        "result": "pass",
+        "details": "PASS: 77/77 checks."
+      },
+      {
+        "command": "python3 scripts/check_trust_card.py --self-test --json",
+        "result": "pass",
+        "details": "PASS: verifier self-test checks all green."
+      },
+      {
+        "command": "python3 -m unittest tests/test_check_trust_card.py",
+        "result": "pass",
+        "details": "PASS: 8 tests."
+      },
+      {
+        "command": "rch doctor",
+        "result": "pass",
+        "details": "PASS: diagnostics healthy, workers available."
+      },
+      {
+        "command": "rch exec -- rustfmt --edition 2024 --check --config skip_children=true crates/franken-node/src/supply_chain/trust_card.rs crates/franken-node/src/supply_chain/mod.rs crates/franken-node/src/api/mod.rs crates/franken-node/src/api/trust_card_routes.rs crates/franken-node/src/cli.rs crates/franken-node/src/main.rs",
+        "result": "pass",
+        "details": "PASS on touched files."
+      },
+      {
+        "command": "rch exec -- cargo test --manifest-path crates/franken-node/Cargo.toml trust_card -- --nocapture",
+        "result": "fail",
+        "details": "Remote worker mirror for repo-root invocation cannot resolve sibling path dependency `franken_engine` (missing `/data/tmp/.../franken_engine/...`)."
+      },
+      {
+        "command": "rch exec -- cargo check --manifest-path crates/franken-node/Cargo.toml --all-targets",
+        "result": "fail",
+        "details": "Remote worker mirror for repo-root invocation cannot resolve sibling path dependency `franken_engine`."
+      },
+      {
+        "command": "rch exec -- cargo clippy --manifest-path crates/franken-node/Cargo.toml --all-targets -- -D warnings",
+        "result": "fail",
+        "details": "Remote worker mirror for repo-root invocation cannot resolve sibling path dependency `franken_engine`."
+      },
+      {
+        "command": "rch exec -- cargo fmt --manifest-path crates/franken-node/Cargo.toml --all --check",
+        "result": "fail",
+        "details": "Reports broad pre-existing format drift and parse blockers outside bd-2yh scope (cross-repo/sibling surfaces)."
+      },
+      {
+        "command": "rch exec -- cargo check --manifest-path franken_node/crates/franken-node/Cargo.toml --all-targets (workdir=/data/projects)",
+        "result": "fail",
+        "details": "Progresses past sibling path resolution, then fails on pre-existing upstream error in `franken_engine/crates/franken-extension-host`: unresolved import `serde` (E0432)."
+      }
+    ],
+    "rch_environment_notes": [
+      "All Cargo-heavy verification was executed via `rch` per AGENTS.md.",
+      "Repo-root rch mirroring does not include sibling path dependency layout expected by this crate graph.",
+      "Cross-project invocation confirms independent upstream compile blocker in sibling `franken_engine` crate (`serde` missing import/dependency wiring in extension-host).",
+      "These cargo failures are environmental/upstream and not caused by bd-2yh touched files."
+    ]
+  },
+  "acceptance_criteria_mapping": [
+    {
+      "criterion": "Trust-card model captures identity, certification, capabilities, behavior, provenance, revocation, risk, audit history.",
+      "evidence": "`crates/franken-node/src/supply_chain/trust_card.rs` with `TrustCard` model and supporting structs/enums."
+    },
+    {
+      "criterion": "API surfaces expose read/list/search plus mutation/compare helpers with pagination.",
+      "evidence": "`crates/franken-node/src/api/trust_card_routes.rs` functions: create/update/get/list/by_publisher/search/compare/version-diff."
+    },
+    {
+      "criterion": "CLI provides show/export/list/compare/diff with JSON + human output.",
+      "evidence": "`crates/franken-node/src/cli.rs` + `crates/franken-node/src/main.rs` trust-card command wiring and rendering."
+    },
+    {
+      "criterion": "Mutations are hash-linked for audit trail evolution.",
+      "evidence": "`TrustCardRegistry::create` and `update` set `trust_card_version` and `previous_version_hash`; verifier simulates link integrity."
+    },
+    {
+      "criterion": "Cards are cryptographically signed and verification is mandatory before serving.",
+      "evidence": "`verify_card_signature` and read path verification in `TrustCardRegistry::read`; verifier checks deterministic hash+HMAC validation."
+    },
+    {
+      "criterion": "Structured telemetry is emitted for key trust-card lifecycle and query events.",
+      "evidence": "Event constants + `emit` usage across create/update/read/list/search/compare/version-diff paths."
+    }
+  ]
+}

@@ -1,0 +1,57 @@
+{
+  "bead_id": "bd-3ndj",
+  "generated_at": "2026-02-20T20:36:30Z",
+  "status": "pass",
+  "contract": {
+    "doc": "docs/specs/fastapi_rust_integration_contract.md",
+    "checklist": "artifacts/10.16/fastapi_contract_checklist.json",
+    "error_registry": "crates/franken-node/src/connector/error_code_registry.rs"
+  },
+  "checks": [
+    {
+      "name": "contract_self_test",
+      "command": "python3 scripts/check_fastapi_contract.py --self-test --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "self_test": "passed"
+      }
+    },
+    {
+      "name": "contract_validation",
+      "command": "python3 scripts/check_fastapi_contract.py --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "required_group_count": 3,
+        "mapped_group_count": 3,
+        "registry_error_code_count": 23,
+        "mapped_error_code_count": 23,
+        "missing_groups": [],
+        "missing_error_codes": [],
+        "errors": [],
+        "warnings": [],
+        "trace_correlation": "451a81dde9a5ea3fd110675f203cb74b4dc44df933c3dc319628df03b2104fbe"
+      }
+    },
+    {
+      "name": "unittest_verification",
+      "command": "python3 -m unittest tests/test_check_fastapi_contract.py",
+      "exit_code": 0,
+      "output": "Ran 8 tests: OK"
+    }
+  ],
+  "coverage": {
+    "endpoint_groups_complete": true,
+    "auth_policy_hooks_defined": true,
+    "error_mapping_complete": true,
+    "observability_requirements_defined": true,
+    "pending_checklist_items": 0,
+    "event_codes": [
+      "FASTAPI_CONTRACT_LOADED",
+      "FASTAPI_ENDPOINT_UNMAPPED",
+      "FASTAPI_ERROR_MAPPING_INCOMPLETE",
+      "FASTAPI_AUTH_UNDEFINED"
+    ]
+  }
+}

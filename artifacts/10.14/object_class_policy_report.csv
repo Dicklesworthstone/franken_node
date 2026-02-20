@@ -1,0 +1,5 @@
+class_id,symbol_size_bytes,overhead_ratio,fetch_priority,prefetch_policy
+critical_marker,256,0.0200,critical,eager
+trust_receipt,1024,0.0500,normal,lazy
+replay_bundle,16384,0.0800,background,none
+telemetry_artifact,4096,0.0400,background,none

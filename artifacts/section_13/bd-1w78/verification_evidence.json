@@ -1,0 +1,110 @@
+{
+  "bead_id": "bd-1w78",
+  "section": "13",
+  "title": "Continuous Lockstep Validation",
+  "verified_at": "2026-02-20T00:00:00Z",
+  "verification_script": "scripts/check_lockstep_validation.py",
+  "checks": [
+    {
+      "name": "files_exist",
+      "passed": true,
+      "detail": "all files present"
+    },
+    {
+      "name": "spec_completeness",
+      "passed": true,
+      "detail": "all sections present"
+    },
+    {
+      "name": "lockstep_architecture",
+      "passed": true,
+      "detail": "L1 + L2 architecture documented"
+    },
+    {
+      "name": "ci_integration",
+      "passed": true,
+      "detail": "CI integration documented"
+    },
+    {
+      "name": "corpus_requirements",
+      "passed": true,
+      "detail": "corpus requirements met"
+    },
+    {
+      "name": "divergence_classification",
+      "passed": true,
+      "detail": "all divergence classes documented"
+    },
+    {
+      "name": "event_codes",
+      "passed": true,
+      "detail": "all event codes defined"
+    },
+    {
+      "name": "invariants",
+      "passed": true,
+      "detail": "all invariants defined"
+    },
+    {
+      "name": "targets",
+      "passed": true,
+      "detail": "all quantitative targets present"
+    },
+    {
+      "name": "alerting_policy",
+      "passed": true,
+      "detail": "alerting policy documented"
+    }
+  ],
+  "event_codes": [
+    {
+      "code": "CLV-001",
+      "name": "lockstep_run_completed",
+      "verified": true
+    },
+    {
+      "code": "CLV-002",
+      "name": "divergence_detected",
+      "verified": true
+    },
+    {
+      "code": "CLV-003",
+      "name": "regression_blocked",
+      "verified": true
+    },
+    {
+      "code": "CLV-004",
+      "name": "corpus_updated",
+      "verified": true
+    }
+  ],
+  "invariants": [
+    {
+      "id": "INV-CLV-CONTINUOUS",
+      "description": "Lockstep runs on every CI push",
+      "verified": true
+    },
+    {
+      "id": "INV-CLV-COVERAGE",
+      "description": "Corpus covers >= 95% API surface, pass rate >= 95%",
+      "verified": true
+    },
+    {
+      "id": "INV-CLV-REGRESSION",
+      "description": "Zero undetected regressions merged",
+      "verified": true
+    },
+    {
+      "id": "INV-CLV-CORPUS",
+      "description": "Version-controlled corpus with >= 1000 test cases",
+      "verified": true
+    }
+  ],
+  "targets": {
+    "compatibility_pass_rate": ">= 95%",
+    "divergence_detection_latency": "< 100 ms per test",
+    "undetected_regressions": "0",
+    "minimum_corpus_size": ">= 1000 test cases"
+  },
+  "summary": "All 10 checks passed. Continuous lockstep validation contract fully verified."
+}

@@ -1,0 +1,30 @@
+{
+  "bead_id": "bd-35l5",
+  "title": "Performance overhead guardrails for adjacent substrate integrations",
+  "section": "10.16",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "rust_tests": 50,
+  "python_checks": 121,
+  "python_unit_tests": 39,
+  "artifacts": {
+    "perf_test": "tests/perf/adjacent_substrate_overhead_gate.rs",
+    "spec": "docs/specs/section_10_16/bd-35l5_contract.md",
+    "overhead_csv": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+    "verification_script": "scripts/check_substrate_overhead.py",
+    "test_file": "tests/test_check_substrate_overhead.py"
+  },
+  "checks": [
+    {"group": "files", "count": 3, "pass": 3},
+    {"group": "impl_test_count", "count": 1, "pass": 1},
+    {"group": "serde_derives", "count": 1, "pass": 1},
+    {"group": "types", "count": 7, "pass": 7},
+    {"group": "methods", "count": 19, "pass": 19},
+    {"group": "event_codes", "count": 5, "pass": 5},
+    {"group": "invariants", "count": 4, "pass": 4},
+    {"group": "substrate_variants", "count": 4, "pass": 4},
+    {"group": "impl_tests", "count": 50, "pass": 50},
+    {"group": "overhead_csv", "count": 14, "pass": 14},
+    {"group": "spec_content", "count": 13, "pass": 13}
+  ]
+}

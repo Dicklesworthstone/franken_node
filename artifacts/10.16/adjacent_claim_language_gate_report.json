@@ -1,0 +1,85 @@
+{
+  "bead_id": "bd-2ji2",
+  "section": "10.16",
+  "gate_verdict": "PASS",
+  "summary": {
+    "total_claims": 8,
+    "linked": 8,
+    "unlinked": 0,
+    "broken_links": 0
+  },
+  "claims": [
+    {
+      "file": "docs/policy/adjacent_substrate_claim_language.md",
+      "line": 12,
+      "claim_text": "frankentui snapshot test or migration inventory",
+      "category": "tui",
+      "linked_artifact": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+      "artifact_exists": true,
+      "status": "linked"
+    },
+    {
+      "file": "docs/policy/adjacent_substrate_claim_language.md",
+      "line": 13,
+      "claim_text": "fastapi_rust endpoint conformance report",
+      "category": "api",
+      "linked_artifact": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+      "artifact_exists": true,
+      "status": "linked"
+    },
+    {
+      "file": "docs/policy/adjacent_substrate_claim_language.md",
+      "line": 14,
+      "claim_text": "frankensqlite adapter conformance report or persistence matrix",
+      "category": "storage",
+      "linked_artifact": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+      "artifact_exists": true,
+      "status": "linked"
+    },
+    {
+      "file": "docs/policy/adjacent_substrate_claim_language.md",
+      "line": 15,
+      "claim_text": "sqlmodel_rust contract test results",
+      "category": "model",
+      "linked_artifact": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+      "artifact_exists": true,
+      "status": "linked"
+    },
+    {
+      "file": "docs/specs/section_10_16/bd-35l5_contract.md",
+      "line": 18,
+      "claim_text": "frankentui render_status_panel within 5ms budget",
+      "category": "tui",
+      "linked_artifact": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+      "artifact_exists": true,
+      "status": "linked"
+    },
+    {
+      "file": "docs/specs/section_10_16/bd-35l5_contract.md",
+      "line": 21,
+      "claim_text": "frankensqlite fencing_token_write within 10ms budget",
+      "category": "storage",
+      "linked_artifact": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+      "artifact_exists": true,
+      "status": "linked"
+    },
+    {
+      "file": "docs/specs/section_10_16/bd-35l5_contract.md",
+      "line": 23,
+      "claim_text": "sqlmodel_rust typed_model_serialize within 1ms budget",
+      "category": "model",
+      "linked_artifact": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+      "artifact_exists": true,
+      "status": "linked"
+    },
+    {
+      "file": "docs/specs/section_10_16/bd-35l5_contract.md",
+      "line": 25,
+      "claim_text": "fastapi_rust middleware_pipeline within 3ms budget",
+      "category": "api",
+      "linked_artifact": "artifacts/10.16/adjacent_substrate_overhead_report.csv",
+      "artifact_exists": true,
+      "status": "linked"
+    }
+  ]
+}

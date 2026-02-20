@@ -1,0 +1,133 @@
+{
+  "bead_id": "bd-26ux",
+  "section": "10.16",
+  "title": "Migration path from interim/local stores to frankensqlite",
+  "generated_at": "2026-02-20T00:00:00Z",
+  "domains": [
+    {
+      "name": "state_model",
+      "source_module": "crates/franken-node/src/connector/state_model.rs",
+      "source_type": "in_memory_state_root_structs",
+      "migration_status": "migrated",
+      "rows_migrated": 2,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    },
+    {
+      "name": "fencing_token_state",
+      "source_module": "crates/franken-node/src/connector/fencing.rs",
+      "source_type": "in_memory_fence_state_and_lease_tokens",
+      "migration_status": "migrated",
+      "rows_migrated": 2,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    },
+    {
+      "name": "lease_coordination_state",
+      "source_module": "crates/franken-node/src/connector/lease_coordinator.rs",
+      "source_type": "in_memory_candidate_and_quorum_material",
+      "migration_status": "migrated",
+      "rows_migrated": 2,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    },
+    {
+      "name": "lease_service_state",
+      "source_module": "crates/franken-node/src/connector/lease_service.rs",
+      "source_type": "in_memory_lease_map_and_decision_log",
+      "migration_status": "migrated",
+      "rows_migrated": 2,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    },
+    {
+      "name": "lease_conflict_state",
+      "source_module": "crates/franken-node/src/connector/lease_conflict.rs",
+      "source_type": "in_memory_overlap_resolution_logs",
+      "migration_status": "migrated",
+      "rows_migrated": 1,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    },
+    {
+      "name": "snapshot_policy_state",
+      "source_module": "crates/franken-node/src/connector/snapshot_policy.rs",
+      "source_type": "in_memory_snapshot_tracker_and_policy_audit",
+      "migration_status": "migrated",
+      "rows_migrated": 2,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    },
+    {
+      "name": "quarantine_store_state",
+      "source_module": "crates/franken-node/src/connector/quarantine_store.rs",
+      "source_type": "in_memory_quarantine_map_and_eviction_counters",
+      "migration_status": "migrated",
+      "rows_migrated": 2,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    },
+    {
+      "name": "retention_policy_state",
+      "source_module": "crates/franken-node/src/connector/retention_policy.rs",
+      "source_type": "in_memory_policy_registry_and_message_store",
+      "migration_status": "migrated",
+      "rows_migrated": 2,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    },
+    {
+      "name": "artifact_persistence_state",
+      "source_module": "crates/franken-node/src/connector/artifact_persistence.rs",
+      "source_type": "in_memory_artifact_map_and_sequence_index",
+      "migration_status": "migrated",
+      "rows_migrated": 2,
+      "invariants_verified": true,
+      "rollback_tested": true,
+      "primary_persistence": "frankensqlite"
+    }
+  ],
+  "idempotency_results": {
+    "state_model": "pass",
+    "fencing_token_state": "pass",
+    "lease_coordination_state": "pass",
+    "lease_service_state": "pass",
+    "lease_conflict_state": "pass",
+    "snapshot_policy_state": "pass",
+    "quarantine_store_state": "pass",
+    "retention_policy_state": "pass",
+    "artifact_persistence_state": "pass"
+  },
+  "rollback_results": {
+    "state_model": "pass",
+    "fencing_token_state": "pass",
+    "lease_coordination_state": "pass",
+    "lease_service_state": "pass",
+    "lease_conflict_state": "pass",
+    "snapshot_policy_state": "pass",
+    "quarantine_store_state": "pass",
+    "retention_policy_state": "pass",
+    "artifact_persistence_state": "pass"
+  },
+  "partial_failure_recovery": {
+    "status": "pass",
+    "strategy": "transactional_staging_then_atomic_commit",
+    "evidence": "tests/migration/frankensqlite_migration_idempotence.rs::partial_failure_is_atomic_and_recoverable"
+  },
+  "event_codes": [
+    "MIGRATION_DOMAIN_START",
+    "MIGRATION_DOMAIN_COMPLETE",
+    "MIGRATION_DOMAIN_FAIL",
+    "MIGRATION_ROLLBACK_START",
+    "MIGRATION_ROLLBACK_COMPLETE",
+    "MIGRATION_IDEMPOTENCY_VERIFIED"
+  ]
+}

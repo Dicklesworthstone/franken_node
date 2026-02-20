@@ -1,0 +1,52 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-22e7",
+  "method_stacks": {
+    "MS-01": {
+      "name": "extreme-software-optimization",
+      "domain": "Performance-sensitive changes",
+      "required_artifacts": ["before_after_benchmark", "flamegraph_evidence", "compatibility_proof"],
+      "compliance_check": "MSC-001:MS-01"
+    },
+    "MS-02": {
+      "name": "alien-artifact-coding",
+      "domain": "Decision surfaces and control points",
+      "required_artifacts": ["formal_decision_rationale", "policy_receipt"],
+      "compliance_check": "MSC-001:MS-02"
+    },
+    "MS-03": {
+      "name": "alien-graveyard",
+      "domain": "Advanced primitive adoption",
+      "required_artifacts": ["ev_analysis", "fallback_contract", "degraded_mode_test"],
+      "compliance_check": "MSC-001:MS-03"
+    },
+    "MS-04": {
+      "name": "porting-to-rust",
+      "domain": "Compatibility surfaces",
+      "required_artifacts": ["spec_reference", "fixture_ids", "parity_report"],
+      "compliance_check": "MSC-001:MS-04"
+    }
+  },
+  "section_requirements": {
+    "10.2": ["MS-04"],
+    "10.3": ["MS-04"],
+    "10.4": ["MS-03"],
+    "10.5": ["MS-02"],
+    "10.6": ["MS-01"],
+    "10.7": ["MS-04"],
+    "10.14": ["MS-01", "MS-03"],
+    "10.15": ["MS-01", "MS-03"],
+    "10.16": ["MS-03"],
+    "10.17": ["MS-01", "MS-02"],
+    "10.18": ["MS-01"],
+    "10.19": ["MS-02"],
+    "10.20": ["MS-02"],
+    "10.21": ["MS-02"]
+  },
+  "event_codes": {
+    "MSC-001": "compliance_check_passed",
+    "MSC-002": "compliance_violation",
+    "MSC-003": "stack_citation_found",
+    "MSC-004": "missing_required_artifact"
+  }
+}

@@ -1,0 +1,25 @@
+{
+  "bead_id": "bd-27o2",
+  "title": "Profile tuning harness with signed policy updates",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 47,
+  "summary": {
+    "passing": 98,
+    "failing": 0,
+    "total": 98
+  },
+  "checks": [
+    {"check": "file: implementation", "pass": true, "detail": "exists: crates/franken-node/src/tools/profile_tuning_harness.rs"},
+    {"check": "file: spec contract", "pass": true, "detail": "exists: docs/specs/section_10_14/bd-27o2_contract.md"},
+    {"check": "file: signed bundle artifact", "pass": true, "detail": "exists: artifacts/10.14/signed_policy_update_bundle.json"},
+    {"check": "module registered in mod.rs", "pass": true, "detail": "found"},
+    {"check": "11 types verified", "pass": true, "detail": "BenchmarkResult, BaselineRow, CandidateUpdate, PolicyDelta, HardwareFingerprint, SignedPolicyBundle, RegressionDiagnostic, HarnessEvent, HarnessOutcome, HarnessConfig, ProfileTuningHarness"},
+    {"check": "6 event codes verified", "pass": true, "detail": "PT_HARNESS_START, PT_BENCHMARK_COMPLETE, PT_CANDIDATE_COMPUTED, PT_REGRESSION_REJECTED, PT_BUNDLE_SIGNED, PT_BUNDLE_VERIFIED"},
+    {"check": "4 invariants verified", "pass": true, "detail": "INV-PT-IDEMPOTENT, INV-PT-SIGNED, INV-PT-REGRESSION-SAFE, INV-PT-CHAIN"},
+    {"check": "47 Rust unit tests", "pass": true, "detail": "47 tests (minimum 40)"},
+    {"check": "serde derives", "pass": true, "detail": "found"},
+    {"check": "signed bundle has signature and version", "pass": true, "detail": "found"}
+  ]
+}

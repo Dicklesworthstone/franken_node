@@ -1,0 +1,22 @@
+{
+  "bead_id": "bd-3gnh",
+  "title": "Observability dashboards for asupersync control health",
+  "section": "10.15",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "python_checks": 39,
+  "python_unit_tests": 26,
+  "artifacts": {
+    "dashboard_doc": "docs/observability/asupersync_control_dashboards.md",
+    "dashboard_snapshot": "artifacts/10.15/dashboard_snapshot.json",
+    "alert_policy_map": "artifacts/10.15/alert_policy_map.json",
+    "verification_script": "scripts/check_observability_dashboards.py",
+    "test_file": "tests/test_check_observability_dashboards.py"
+  },
+  "checks": [
+    {"group": "files", "count": 3, "pass": 3},
+    {"group": "doc_content", "count": 15, "pass": 15},
+    {"group": "dashboard_snapshot", "count": 12, "pass": 12},
+    {"group": "alert_policy_map", "count": 9, "pass": 9}
+  ]
+}

@@ -1,0 +1,34 @@
+{
+  "bead_id": "bd-2ji2",
+  "section": "10.16",
+  "title": "Claim language gate for substrate-backed evidence",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "verdict": "PASS",
+  "files": {
+    "conformance_tests": "tests/conformance/adjacent_claim_language_gate.rs",
+    "policy_doc": "docs/policy/adjacent_substrate_claim_language.md",
+    "spec_doc": "docs/specs/section_10_16/bd-2ji2_contract.md",
+    "gate_report": "artifacts/10.16/adjacent_claim_language_gate_report.json",
+    "verification_script": "scripts/check_claim_language_gate.py",
+    "python_tests": "tests/test_check_claim_language_gate.py"
+  },
+  "metrics": {
+    "rust_conformance_tests": 39,
+    "python_verification_checks": 86,
+    "python_unit_tests": 41,
+    "claim_categories": 4,
+    "event_codes": 6,
+    "invariants": 4,
+    "types": 6,
+    "methods": 11,
+    "gate_report_claims": 8,
+    "gate_report_linked": 8,
+    "gate_report_unlinked": 0,
+    "gate_report_broken_links": 0
+  },
+  "checks_summary": {
+    "passing": 86,
+    "failing": 0,
+    "total": 86
+  }
+}

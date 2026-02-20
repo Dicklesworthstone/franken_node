@@ -1,0 +1,77 @@
+{
+  "bead_id": "bd-s4cu",
+  "section": "12",
+  "title": "Risk Control — Compatibility Illusion",
+  "status": "pass",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "checks": [
+    {
+      "name": "spec_exists",
+      "passed": true,
+      "detail": "Spec file found: docs/specs/section_12/bd-s4cu_contract.md"
+    },
+    {
+      "name": "risk_policy_exists",
+      "passed": true,
+      "detail": "Risk policy found: docs/policy/risk_compatibility_illusion.md"
+    },
+    {
+      "name": "risk_documented",
+      "passed": true,
+      "detail": "Risk description, impact, and likelihood documented"
+    },
+    {
+      "name": "countermeasures",
+      "passed": true,
+      "detail": "All countermeasures documented"
+    },
+    {
+      "name": "threshold",
+      "passed": true,
+      "detail": "95% threshold present in spec and policy"
+    },
+    {
+      "name": "event_codes",
+      "passed": true,
+      "detail": "All event codes present"
+    },
+    {
+      "name": "invariants",
+      "passed": true,
+      "detail": "All invariants present"
+    },
+    {
+      "name": "alert_pipeline",
+      "passed": true,
+      "detail": "Alert pipeline documented with warning and critical thresholds"
+    },
+    {
+      "name": "spec_keywords",
+      "passed": true,
+      "detail": "All spec keywords present"
+    },
+    {
+      "name": "escalation",
+      "passed": true,
+      "detail": "Escalation procedures documented"
+    },
+    {
+      "name": "evidence_requirements",
+      "passed": true,
+      "detail": "Evidence requirements for review documented"
+    },
+    {
+      "name": "verification_evidence",
+      "passed": true,
+      "detail": "Evidence file valid"
+    },
+    {
+      "name": "verification_summary",
+      "passed": true,
+      "detail": "Summary file found"
+    }
+  ],
+  "passed": 13,
+  "total": 13,
+  "all_passed": true
+}

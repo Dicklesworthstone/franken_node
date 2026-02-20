@@ -1,0 +1,28 @@
+{
+  "bead_id": "bd-ud5h",
+  "title": "Security and Trust Product Doctrine",
+  "section": "6",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "python_checks": 57,
+  "python_unit_tests": 18,
+  "artifacts": {
+    "doctrine_doc": "docs/doctrine/security_and_trust.md",
+    "spec_contract": "docs/specs/section_6/bd-ud5h_contract.md",
+    "verification_script": "scripts/check_security_doctrine.py",
+    "test_file": "tests/test_check_security_doctrine.py"
+  },
+  "checks": [
+    {"group": "files", "count": 2, "pass": 2},
+    {"group": "adversary_classes", "count": 5, "pass": 5},
+    {"group": "mitigations", "count": 9, "pass": 9},
+    {"group": "trust_surfaces", "count": 5, "pass": 5},
+    {"group": "safety_targets", "count": 4, "pass": 4},
+    {"group": "thresholds", "count": 3, "pass": 3},
+    {"group": "event_codes", "count": 5, "pass": 5},
+    {"group": "invariants", "count": 4, "pass": 4},
+    {"group": "cross_section", "count": 8, "pass": 8},
+    {"group": "required_sections", "count": 6, "pass": 6},
+    {"group": "spec_contract", "count": 6, "pass": 6}
+  ]
+}

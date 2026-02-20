@@ -1,0 +1,85 @@
+{
+  "bead_id": "bd-159q",
+  "title": "Adjacent substrate waiver workflow",
+  "section": "10.16",
+  "timestamp": "2026-02-20T20:19:25.673862+00:00",
+  "trace_id": "b825f433b90e79d9",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "summary": {
+    "waiver_count": 0,
+    "passing_checks": 12,
+    "failing_checks": 0,
+    "errors": 0,
+    "events": 0
+  },
+  "checks": [
+    {
+      "check": "file exists: waiver registry",
+      "pass": true,
+      "detail": "artifacts/10.16/waiver_registry.json"
+    },
+    {
+      "check": "file exists: substrate manifest",
+      "pass": true,
+      "detail": "artifacts/10.16/substrate_dependency_matrix.json"
+    },
+    {
+      "check": "file exists: waiver policy doc",
+      "pass": true,
+      "detail": "docs/policy/adjacent_substrate_waiver_process.md"
+    },
+    {
+      "check": "registry schema_version present",
+      "pass": true,
+      "detail": "schema_version='1.0.0'"
+    },
+    {
+      "check": "max waiver duration <= 90 days",
+      "pass": true,
+      "detail": "max_waiver_duration_days=90"
+    },
+    {
+      "check": "waivers is a list",
+      "pass": true,
+      "detail": "type=list"
+    },
+    {
+      "check": "substrate manifest has modules",
+      "pass": true,
+      "detail": "module_count=109"
+    },
+    {
+      "check": "substrate manifest has rule ids",
+      "pass": true,
+      "detail": "rule_count=9"
+    },
+    {
+      "check": "no active waiver is expired",
+      "pass": true,
+      "detail": "now=2026-02-20T20:19:25.673862+00:00"
+    },
+    {
+      "check": "all waived modules exist in substrate manifest",
+      "pass": true,
+      "detail": "cross-reference complete"
+    },
+    {
+      "check": "all waived rules exist in substrate manifest",
+      "pass": true,
+      "detail": "cross-reference complete"
+    },
+    {
+      "check": "all active waivers include required risk/scope/owner/remediation fields",
+      "pass": true,
+      "detail": "required fields present"
+    }
+  ],
+  "errors": [],
+  "events": [],
+  "manifest_stats": {
+    "module_count": 109,
+    "rule_count": 9,
+    "substrate_count": 4
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "bead_id": "bd-bt82",
+  "generated_at": "2026-02-20T20:30:30Z",
+  "status": "pass",
+  "policy": {
+    "doc": "docs/specs/sqlmodel_rust_usage_policy.md",
+    "matrix": "artifacts/10.16/sqlmodel_policy_matrix.json",
+    "source_persistence_matrix": "artifacts/10.16/frankensqlite_persistence_matrix.json"
+  },
+  "checks": [
+    {
+      "name": "policy_self_test",
+      "command": "python3 scripts/check_sqlmodel_policy.py --self-test --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "self_test": "passed"
+      }
+    },
+    {
+      "name": "policy_validation",
+      "command": "python3 scripts/check_sqlmodel_policy.py --json",
+      "exit_code": 0,
+      "output": {
+        "ok": true,
+        "expected_domain_count": 21,
+        "classified_domain_count": 21,
+        "missing_domains": [],
+        "model_count": 21,
+        "errors": [],
+        "warnings": [],
+        "trace_correlation": "3c73fd9f20a89b5aae8ff0ff55664b16d9171a81b0a4cf7bda437e665c910b4b"
+      }
+    },
+    {
+      "name": "unittest_verification",
+      "command": "python3 -m unittest tests/test_check_sqlmodel_policy.py",
+      "exit_code": 0,
+      "output": "Ran 8 tests: OK"
+    }
+  ],
+  "coverage": {
+    "all_persistence_domains_classified": true,
+    "mandatory_domains_have_typed_models": true,
+    "ownership_uniqueness_enforced": true,
+    "pending_checklist_items": 0,
+    "event_codes": [
+      "SQLMODEL_POLICY_LOADED",
+      "SQLMODEL_DOMAIN_UNCLASSIFIED",
+      "SQLMODEL_OWNERSHIP_CONFLICT",
+      "SQLMODEL_CODEGEN_STALE"
+    ]
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "bead_id": "bd-1fck",
+  "title": "Retrievability-before-eviction proofs",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 41,
+  "summary": {
+    "passing": 105,
+    "failing": 0,
+    "total": 105
+  },
+  "checks": [
+    {"check": "file: implementation", "pass": true, "detail": "exists: crates/franken-node/src/storage/retrievability_gate.rs"},
+    {"check": "file: spec contract", "pass": true, "detail": "exists: docs/specs/section_10_14/bd-1fck_contract.md"},
+    {"check": "file: proof receipts artifact", "pass": true, "detail": "exists: artifacts/10.14/retrievability_proof_receipts.json"},
+    {"check": "module registered in storage/mod.rs", "pass": true, "detail": "found"},
+    {"check": "storage module in main.rs", "pass": true, "detail": "found"},
+    {"check": "12 types verified", "pass": true, "detail": "ArtifactId, SegmentId, StorageTier, ProofFailureReason, RetrievabilityProof, RetrievabilityError, RetrievabilityConfig, ProofReceipt, GateEvent, EvictionPermit, RetrievabilityGate, TargetTierState"},
+    {"check": "12 methods verified", "pass": true, "detail": "check_retrievability, attempt_eviction, register_target, receipts, events, config, passed_count, failed_count, receipts_json, content_hash, label, error_code"},
+    {"check": "5 event codes verified", "pass": true, "detail": "RG_PROOF_PASSED, RG_PROOF_FAILED, RG_EVICTION_BLOCKED, RG_EVICTION_PERMITTED, RG_GATE_INITIALIZED"},
+    {"check": "4 error codes verified", "pass": true, "detail": "ERR_HASH_MISMATCH, ERR_LATENCY_EXCEEDED, ERR_TARGET_UNREACHABLE, ERR_EVICTION_BLOCKED"},
+    {"check": "4 invariants verified", "pass": true, "detail": "INV-RG-BLOCK-EVICTION, INV-RG-PROOF-BINDING, INV-RG-FAIL-CLOSED, INV-RG-AUDIT-TRAIL"},
+    {"check": "serde derives", "pass": true, "detail": "found"},
+    {"check": "SHA-256 for content hash", "pass": true, "detail": "found"},
+    {"check": "Send + Sync asserted", "pass": true, "detail": "found"},
+    {"check": "41 Rust unit tests", "pass": true, "detail": "41 tests (minimum 35)"},
+    {"check": "receipts artifact", "pass": true, "detail": "5 receipts with pass and fail entries"}
+  ]
+}

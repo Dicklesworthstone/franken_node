@@ -1,0 +1,76 @@
+{
+  "bead_id": "bd-34d5",
+  "section": "section_13",
+  "timestamp_utc": "2026-02-20T00:00:00+00:00",
+  "total_checks": 13,
+  "passed": 13,
+  "failed": 0,
+  "all_passed": true,
+  "checks": [
+    {
+      "check": "spec_exists",
+      "passed": true,
+      "detail": "Spec file found at docs/specs/section_13/bd-34d5_contract.md"
+    },
+    {
+      "check": "policy_exists",
+      "passed": true,
+      "detail": "Policy file found at docs/policy/friction_minimized_pathway.md"
+    },
+    {
+      "check": "archetypes_defined",
+      "passed": true,
+      "detail": "All 5 archetypes present"
+    },
+    {
+      "check": "time_budget",
+      "passed": true,
+      "detail": "Time budget of 300s / 5 min found"
+    },
+    {
+      "check": "zero_edit_requirement",
+      "passed": true,
+      "detail": "Zero-edit requirement documented"
+    },
+    {
+      "check": "event_codes",
+      "passed": true,
+      "detail": "All 4 event codes defined"
+    },
+    {
+      "check": "invariants",
+      "passed": true,
+      "detail": "All 4 invariants defined"
+    },
+    {
+      "check": "telemetry_policy",
+      "passed": true,
+      "detail": "Telemetry schema and event codes in policy"
+    },
+    {
+      "check": "error_handling_policy",
+      "passed": true,
+      "detail": "Error handling policy complete"
+    },
+    {
+      "check": "ci_gate_policy",
+      "passed": true,
+      "detail": "CI gate policy defined for all archetypes"
+    },
+    {
+      "check": "spec_sections",
+      "passed": true,
+      "detail": "All required spec sections present"
+    },
+    {
+      "check": "policy_pathway_steps",
+      "passed": true,
+      "detail": "All 4 pathway steps defined in policy"
+    },
+    {
+      "check": "archetype_scores",
+      "passed": true,
+      "detail": "Found 5/5 archetype compatibility scores"
+    }
+  ]
+}

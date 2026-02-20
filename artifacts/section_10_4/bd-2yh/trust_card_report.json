@@ -1,0 +1,410 @@
+{
+  "bead_id": "bd-2yh",
+  "title": "Trust-card API and CLI surfaces",
+  "section": "10.4",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "summary": {
+    "passing": 77,
+    "failing": 0,
+    "total": 77
+  },
+  "checks": [
+    {
+      "check": "file: trust card implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/supply_chain/trust_card.rs"
+    },
+    {
+      "check": "file: supply chain module",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/supply_chain/mod.rs"
+    },
+    {
+      "check": "file: trust card api routes",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/api/trust_card_routes.rs"
+    },
+    {
+      "check": "file: api module",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/api/mod.rs"
+    },
+    {
+      "check": "file: cli surface",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/cli.rs"
+    },
+    {
+      "check": "file: main command wiring",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/main.rs"
+    },
+    {
+      "check": "file: bd-2yh contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_4/bd-2yh_contract.md"
+    },
+    {
+      "check": "trust_card.rs: pub struct TrustCard",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub struct TrustCardInput",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub struct TrustCardMutation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub struct TrustCardRegistry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn create(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn update(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn read(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn list(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn list_by_publisher(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn search(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn compare(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn compare_versions(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn read_version(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn verify_card_signature(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn render_trust_card_human(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: pub fn render_comparison_human(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: TRUST_CARD_CREATED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: TRUST_CARD_UPDATED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: TRUST_CARD_REVOKED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: TRUST_CARD_QUERIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: TRUST_CARD_CACHE_HIT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: TRUST_CARD_CACHE_MISS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: TRUST_CARD_STALE_REFRESH",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card.rs: TRUST_CARD_DIFF_COMPUTED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub fn create_trust_card(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub fn update_trust_card(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub fn get_trust_card(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub fn list_trust_cards(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub fn get_trust_cards_by_publisher(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub fn search_trust_cards(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub fn compare_trust_cards(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub fn compare_trust_card_versions(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub struct Pagination",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "trust_card_routes.rs: pub struct ApiResponse",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: name = \"trust-card\"",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: TrustCard(TrustCardCommand)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: pub enum TrustCardCommand",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: Show(TrustCardShowArgs)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: Export(TrustCardExportArgs)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: List(TrustCardListArgs)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: Compare(TrustCardCompareArgs)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: Diff(TrustCardDiffArgs)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: pub struct TrustCardShowArgs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: pub struct TrustCardExportArgs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: pub struct TrustCardListArgs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: pub struct TrustCardCompareArgs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: pub struct TrustCardDiffArgs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "cli.rs: pub json: bool",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: pub mod api;",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: Command::TrustCard(sub)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: fn handle_trust_card_command(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: TrustCardCommand::Show",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: TrustCardCommand::Export",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: TrustCardCommand::List",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: TrustCardCommand::Compare",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: TrustCardCommand::Diff",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: get_trust_card(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: get_trust_cards_by_publisher(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: search_trust_cards(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: compare_trust_cards(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: compare_trust_card_versions(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "main.rs: list_trust_cards(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "mod export: trust_card",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "mod export: trust_card_routes",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "deterministic card hash",
+      "pass": true,
+      "detail": "same input -> same hash"
+    },
+    {
+      "check": "v1 signature verifies",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "v2 signature verifies",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "hash chain linkage",
+      "pass": true,
+      "detail": "v2.previous_version_hash == v1.card_hash"
+    },
+    {
+      "check": "diff identifies trust posture changes",
+      "pass": true,
+      "detail": "changed=['certification_level', 'reputation_score_basis_points', 'revocation_status', 'active_quarantine', 'extension']"
+    },
+    {
+      "check": "unit test count in trust_card.rs",
+      "pass": true,
+      "detail": "9 tests"
+    }
+  ],
+  "simulation": {
+    "changed_fields": [
+      "certification_level",
+      "reputation_score_basis_points",
+      "revocation_status",
+      "active_quarantine",
+      "extension"
+    ],
+    "v1_card_hash": "3d9692d795998840cf9d20cf4e8ffb53e4141e752e9d853875ca7ac940844a94",
+    "v2_card_hash": "c62df1418cf3a183351fccd7cf61d305ea4c1713ca3050a4cea481461d2a0769"
+  }
+}

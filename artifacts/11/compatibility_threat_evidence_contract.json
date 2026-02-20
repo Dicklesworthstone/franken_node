@@ -1,0 +1,44 @@
+{
+  "contract_id": "compatibility-threat-evidence-v1",
+  "bead_id": "bd-36wa",
+  "description": "Canonical compatibility/threat evidence contract payload for Section 11.",
+  "source_summary": "docs/change_summaries/example_change_summary.json",
+  "compatibility_and_threat_evidence": {
+    "compatibility_test_suites": [
+      {
+        "suite_name": "tests/security/control_epoch_validity.rs",
+        "pass_count": 6,
+        "fail_count": 0,
+        "artifact_path": "artifacts/11/compatibility_threat_evidence_contract.json"
+      },
+      {
+        "suite_name": "tests/integration/frankentui_surface_migration.rs",
+        "pass_count": 44,
+        "fail_count": 0,
+        "artifact_path": "artifacts/10.16/frankentui_surface_inventory.csv"
+      }
+    ],
+    "regression_risk_assessment": {
+      "risk_level": "medium",
+      "api_families": [
+        "POST /v1/fleet/lease/validate",
+        "fn finalize_lease(...) -> Result<LeaseFinalizeReceipt, LeaseError>"
+      ],
+      "notes": "Validation tightens admission checks without removing public runtime surfaces."
+    },
+    "threat_vectors": [
+      {
+        "vector": "privilege_escalation",
+        "mitigation": "Fencing evidence must be current before lease finalize."
+      },
+      {
+        "vector": "data_exfiltration",
+        "mitigation": "Failure receipts redact sensitive internals."
+      },
+      {
+        "vector": "denial_of_service",
+        "mitigation": "Retry/backoff caps and cached validations bound expensive retries."
+      }
+    ]
+  }
+}

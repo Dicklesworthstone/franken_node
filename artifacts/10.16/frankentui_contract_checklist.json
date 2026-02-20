@@ -1,0 +1,119 @@
+{
+  "contract_id": "bd-34ll",
+  "version": "1.0.0",
+  "generated_at": "2026-02-20T20:05:00Z",
+  "components": [
+    {
+      "franken_node_module": "crates/franken-node/src/cli.rs",
+      "frankentui_component": "CommandSurface",
+      "boundary_type": "surface_definition",
+      "styling_strategy": "token_only",
+      "snapshot_hook": "tests/conformance/frankentui/cli_command_surface.snap"
+    },
+    {
+      "franken_node_module": "crates/franken-node/src/main.rs",
+      "frankentui_component": "Panel",
+      "boundary_type": "renderer",
+      "styling_strategy": "token_only",
+      "snapshot_hook": "tests/conformance/frankentui/main_panel.snap"
+    },
+    {
+      "franken_node_module": "crates/franken-node/src/policy/correctness_envelope.rs",
+      "frankentui_component": "AlertBanner",
+      "boundary_type": "diagnostic_renderer",
+      "styling_strategy": "token_only",
+      "snapshot_hook": "tests/conformance/frankentui/correctness_alert.snap"
+    },
+    {
+      "franken_node_module": "crates/franken-node/src/policy/controller_boundary_checks.rs",
+      "frankentui_component": "Table",
+      "boundary_type": "diagnostic_renderer",
+      "styling_strategy": "token_only",
+      "snapshot_hook": "tests/conformance/frankentui/controller_boundary_table.snap"
+    },
+    {
+      "franken_node_module": "crates/franken-node/src/policy/evidence_emission.rs",
+      "frankentui_component": "StatusBar",
+      "boundary_type": "diagnostic_renderer",
+      "styling_strategy": "token_only",
+      "snapshot_hook": "tests/conformance/frankentui/evidence_status.snap"
+    },
+    {
+      "franken_node_module": "crates/franken-node/src/observability/evidence_ledger.rs",
+      "frankentui_component": "LogStreamPanel",
+      "boundary_type": "diagnostic_renderer",
+      "styling_strategy": "token_only",
+      "snapshot_hook": "tests/conformance/frankentui/evidence_log_stream.snap"
+    },
+    {
+      "franken_node_module": "crates/franken-node/src/tools/evidence_replay_validator.rs",
+      "frankentui_component": "DiffPanel",
+      "boundary_type": "diagnostic_renderer",
+      "styling_strategy": "token_only",
+      "snapshot_hook": "tests/conformance/frankentui/replay_diff.snap"
+    }
+  ],
+  "event_loop_contract": {
+    "owner": "franken_node_tokio_runtime_with_frankentui_render_adapter",
+    "tick_rate_ms": 16,
+    "state_propagation_pattern": "view_model_delta_bus_then_render_invalidations",
+    "input_dispatch": "frankentui_input_router_to_command_handlers"
+  },
+  "styling_policy": {
+    "ansi_escape_sequences_forbidden": true,
+    "required_token_source": "frankentui::tokens",
+    "non_tty_fallback": "plain_text_with_semantic_labels"
+  },
+  "error_mapping": {
+    "error_registry_module": "crates/franken-node/src/connector/error_code_registry.rs",
+    "rendering_mode": "structured_problem_cards",
+    "severity_mapping": {
+      "critical": "blocking_alert_panel",
+      "high": "blocking_alert_panel",
+      "medium": "warning_banner",
+      "low": "inline_status"
+    }
+  },
+  "event_codes": [
+    "FRANKENTUI_CONTRACT_LOADED",
+    "FRANKENTUI_COMPONENT_UNMAPPED",
+    "FRANKENTUI_STYLING_VIOLATION"
+  ],
+  "checklist": [
+    {
+      "requirement": "component_boundary_table_complete",
+      "status": "defined",
+      "detail": "All currently detected operator-output modules are mapped to frankentui component boundaries."
+    },
+    {
+      "requirement": "cli_surface_coverage",
+      "status": "defined",
+      "detail": "`crates/franken-node/src/cli.rs` explicitly included as mandatory command-surface boundary."
+    },
+    {
+      "requirement": "styling_token_policy_no_raw_ansi",
+      "status": "defined",
+      "detail": "Contract prohibits raw ANSI escapes and requires frankentui token indirection."
+    },
+    {
+      "requirement": "event_loop_ownership_defined",
+      "status": "defined",
+      "detail": "Runtime/render ownership and tick strategy explicitly assigned."
+    },
+    {
+      "requirement": "input_routing_defined",
+      "status": "defined",
+      "detail": "Typed input router contract defined for key/mouse events."
+    },
+    {
+      "requirement": "error_rendering_contract_defined",
+      "status": "defined",
+      "detail": "Error-code registry mapping and severity rendering policy specified."
+    },
+    {
+      "requirement": "snapshot_hooks_defined",
+      "status": "defined",
+      "detail": "Each component mapping includes deterministic snapshot-hook path."
+    }
+  ]
+}

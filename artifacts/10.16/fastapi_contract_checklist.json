@@ -1,0 +1,250 @@
+{
+  "contract_id": "bd-3ndj",
+  "version": "1.0.0",
+  "generated_at": "2026-02-20T20:33:00Z",
+  "lifecycle_policy": {
+    "states": [
+      "experimental",
+      "stable",
+      "deprecated",
+      "removed"
+    ],
+    "min_deprecation_days": 90,
+    "forbidden_transitions": [
+      "stable->removed"
+    ]
+  },
+  "endpoint_groups": [
+    {
+      "group_name": "operator",
+      "endpoints": [
+        "GET /v1/operator/node-status",
+        "GET /v1/operator/health",
+        "GET /v1/operator/config",
+        "GET /v1/operator/rollout-state"
+      ],
+      "lifecycle_state": "stable",
+      "auth_method": "mtls_or_api_key",
+      "policy_hook": "policy.operator.read"
+    },
+    {
+      "group_name": "verifier",
+      "endpoints": [
+        "POST /v1/verifier/conformance/run",
+        "GET /v1/verifier/evidence/{id}",
+        "GET /v1/verifier/audit-log"
+      ],
+      "lifecycle_state": "stable",
+      "auth_method": "token",
+      "policy_hook": "policy.verifier.query"
+    },
+    {
+      "group_name": "fleet_control",
+      "endpoints": [
+        "POST /v1/fleet/leases/grant",
+        "POST /v1/fleet/fencing/validate",
+        "POST /v1/fleet/coordination/reconcile"
+      ],
+      "lifecycle_state": "stable",
+      "auth_method": "mtls_and_token",
+      "policy_hook": "policy.fleet.control"
+    }
+  ],
+  "error_mapping": [
+    {
+      "franken_node_error_code": "FRANKEN_CAPABILITY_BAR",
+      "http_status": 400,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_CAPABILITY_NOT_FOUND",
+      "http_status": 404,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_CONFORMANCE_W",
+      "http_status": 422,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_CONNECTOR_LEASE_EXPIRED",
+      "http_status": 409,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_CONNECTOR_X",
+      "http_status": 400,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_EGRESS_BAZ",
+      "http_status": 400,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_EGRESS_TIMEOUT",
+      "http_status": 504,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_INVALID_X",
+      "http_status": 400,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_PROTOCOL_A",
+      "http_status": 400,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_PROTOCOL_AUTH_TIMEOUT",
+      "http_status": 504,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_PROTOCOL_B",
+      "http_status": 400,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_PROTOCOL_DUP",
+      "http_status": 409,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_PROTOCOL_FOO",
+      "http_status": 400,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_PROTOCOL_NO_SUCH",
+      "http_status": 404,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_RUNTIME_INIT",
+      "http_status": 500,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_RUNTIME_Y",
+      "http_status": 500,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_SECURITY_C",
+      "http_status": 403,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_SECURITY_FATAL_BAD",
+      "http_status": 500,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_SECURITY_KEY_COMPROMISED",
+      "http_status": 503,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_SECURITY_QUX",
+      "http_status": 403,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_SECURITY_Z",
+      "http_status": 403,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_SUPPLY_CHAIN_Z",
+      "http_status": 409,
+      "response_schema": "rfc7807"
+    },
+    {
+      "franken_node_error_code": "FRANKEN_UNKNOWN_FOO",
+      "http_status": 500,
+      "response_schema": "rfc7807"
+    }
+  ],
+  "observability_requirements": {
+    "tracing": {
+      "trace_context_module": "crates/franken-node/src/connector/trace_context.rs",
+      "propagation": "w3c_trace_context",
+      "required_fields": [
+        "trace_id",
+        "span_id",
+        "route",
+        "method"
+      ]
+    },
+    "metrics": {
+      "required": [
+        "http_request_latency_ms_p50",
+        "http_request_latency_ms_p95",
+        "http_request_latency_ms_p99",
+        "http_requests_total",
+        "http_errors_total"
+      ],
+      "cardinality_dimensions": [
+        "endpoint_group",
+        "route",
+        "status_code",
+        "error_code"
+      ]
+    },
+    "logging": {
+      "format": "structured_json",
+      "required_fields": [
+        "timestamp",
+        "trace_id",
+        "route",
+        "method",
+        "status_code",
+        "latency_ms"
+      ]
+    },
+    "opentelemetry": {
+      "required": true,
+      "exporter": "otlp"
+    }
+  },
+  "rate_limiting": {
+    "anti_amplification_module": "crates/franken-node/src/connector/anti_amplification.rs",
+    "policy": "group_specific_burst_and_sustained_limits",
+    "fleet_control_fail_closed": true
+  },
+  "event_codes": [
+    "FASTAPI_CONTRACT_LOADED",
+    "FASTAPI_ENDPOINT_UNMAPPED",
+    "FASTAPI_ERROR_MAPPING_INCOMPLETE",
+    "FASTAPI_AUTH_UNDEFINED"
+  ],
+  "checklist": [
+    {
+      "requirement": "lifecycle_policy_defined",
+      "status": "defined",
+      "detail": "Lifecycle states and transition constraints including deprecation minimum are explicit."
+    },
+    {
+      "requirement": "endpoint_groups_have_auth_and_policy_hooks",
+      "status": "defined",
+      "detail": "All required endpoint groups define auth_method and policy_hook."
+    },
+    {
+      "requirement": "error_mapping_complete",
+      "status": "defined",
+      "detail": "All FRANKEN_* error codes in registry are mapped to HTTP statuses."
+    },
+    {
+      "requirement": "observability_requirements_defined",
+      "status": "defined",
+      "detail": "Tracing, metrics, logging, and OpenTelemetry requirements are explicit."
+    },
+    {
+      "requirement": "rate_limit_integration_defined",
+      "status": "defined",
+      "detail": "Integration with anti-amplification module is explicit and fail-closed for fleet control."
+    }
+  ]
+}

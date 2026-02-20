@@ -1,0 +1,60 @@
+{
+  "bead_id": "bd-1fck",
+  "title": "Retrievability Proof Receipts",
+  "generated": "2026-02-20",
+  "proof_receipts": [
+    {
+      "artifact_id": "cm-epoch-42-marker",
+      "segment_id": "seg-l2-0042",
+      "source_tier": "L2_warm",
+      "target_tier": "L3_archive",
+      "content_hash": "a1b2c3d4e5f60718",
+      "proof_timestamp": "2026-02-20T12:00:00Z",
+      "latency_ms": 120,
+      "result": "passed"
+    },
+    {
+      "artifact_id": "tr-audit-receipt-007",
+      "segment_id": "seg-l2-0071",
+      "source_tier": "L2_warm",
+      "target_tier": "L3_archive",
+      "content_hash": "f0e1d2c3b4a59687",
+      "proof_timestamp": "2026-02-20T12:05:00Z",
+      "latency_ms": 85,
+      "result": "passed"
+    },
+    {
+      "artifact_id": "rb-incident-replay-003",
+      "segment_id": "seg-l1-0031",
+      "source_tier": "L1_local",
+      "target_tier": "L2_warm",
+      "content_hash": "1a2b3c4d5e6f7890",
+      "proof_timestamp": "2026-02-20T12:10:00Z",
+      "latency_ms": 45,
+      "result": "passed"
+    },
+    {
+      "artifact_id": "cm-epoch-43-marker",
+      "segment_id": "seg-l2-0043",
+      "source_tier": "L2_warm",
+      "target_tier": "L3_archive",
+      "content_hash": "deadbeef12345678",
+      "proof_timestamp": "2026-02-20T12:15:00Z",
+      "latency_ms": null,
+      "result": "failed",
+      "failure_reason": "TargetUnreachable"
+    },
+    {
+      "artifact_id": "ta-telemetry-snap-099",
+      "segment_id": "seg-l2-0099",
+      "source_tier": "L2_warm",
+      "target_tier": "L3_archive",
+      "content_hash": "cafebabe90abcdef",
+      "proof_timestamp": "2026-02-20T12:20:00Z",
+      "latency_ms": 6200,
+      "result": "failed",
+      "failure_reason": "LatencyExceeded",
+      "latency_bound_ms": 5000
+    }
+  ]
+}

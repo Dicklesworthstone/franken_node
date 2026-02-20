@@ -1,0 +1,11 @@
+{
+  "bead_id": "bd-159q",
+  "self_test_pass": true,
+  "checks": [
+    "valid registry -> PASS",
+    "active expired waiver rejected -> PASS",
+    "missing field rejected -> PASS",
+    "unknown module/rule rejected -> PASS",
+    "empty registry accepted -> PASS"
+  ]
+}

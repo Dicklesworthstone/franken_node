@@ -1,0 +1,28 @@
+{
+  "bead_id": "bd-k25j",
+  "title": "Architecture Blueprint — 3-kernel, 10 invariants, 5 contracts",
+  "section": "8",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "python_checks": 52,
+  "python_unit_tests": 13,
+  "artifacts": {
+    "blueprint_doc": "docs/architecture/blueprint.md",
+    "spec_contract": "docs/specs/section_8/bd-k25j_contract.md",
+    "verification_script": "scripts/check_architecture_blueprint.py",
+    "test_file": "tests/test_check_architecture_blueprint.py"
+  },
+  "checks": [
+    {"group": "files", "count": 2, "pass": 2},
+    {"group": "three_kernels", "count": 3, "pass": 3},
+    {"group": "product_planes", "count": 5, "pass": 5},
+    {"group": "control_planes", "count": 3, "pass": 3},
+    {"group": "ten_invariants", "count": 10, "pass": 10},
+    {"group": "alignment_contracts", "count": 5, "pass": 5},
+    {"group": "boundary_rules", "count": 3, "pass": 3},
+    {"group": "event_codes", "count": 4, "pass": 4},
+    {"group": "meta_invariants", "count": 4, "pass": 4},
+    {"group": "required_sections", "count": 6, "pass": 6},
+    {"group": "spec_contract", "count": 7, "pass": 7}
+  ]
+}

@@ -1,0 +1,485 @@
+{
+  "bead_id": "bd-18ud",
+  "title": "Durability modes (local and quorum)",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": "50",
+  "summary": {
+    "passing": 94,
+    "failing": 0,
+    "total": 94
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/connector/durability.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-18ud_contract.md"
+    },
+    {
+      "check": "file: claim matrix artifact",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/durability_mode_claim_matrix.json"
+    },
+    {
+      "check": "claim matrix artifact exists",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "claim matrix: claim count",
+      "pass": true,
+      "detail": "7 claims (minimum 5)"
+    },
+    {
+      "check": "claim matrix: all deterministic",
+      "pass": true,
+      "detail": "all deterministic"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "50 tests (minimum 40)"
+    },
+    {
+      "check": "Serialize/Deserialize derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "two mode variants",
+      "pass": true,
+      "detail": "Local and Quorum both present"
+    },
+    {
+      "check": "fail-closed quorum semantics",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "mode switch policy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "claim determinism implementation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum DurabilityMode",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum WriteOutcome",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DurabilityClaim",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DurabilityError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DurabilityEvent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ModeSwitchPolicy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ReplicaResponse",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct DurabilityController",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn write_local(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn write_quorum(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn switch_mode(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn claim_matrix(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn derive(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_authorized(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn validate(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn mode(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn class_id(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DM_MODE_INITIALIZED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DM_MODE_SWITCH",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DM_MODE_SWITCH_DENIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DM_WRITE_LOCAL_CONFIRMED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DM_WRITE_QUORUM_CONFIRMED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DM_WRITE_QUORUM_FAILED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: DM_CLAIM_GENERATED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_QUORUM_INSUFFICIENT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_MODE_SWITCH_DENIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_INVALID_QUORUM_SIZE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-DUR-ENFORCE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-DUR-CLAIM-DETERMINISTIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-DUR-SWITCH-AUDITABLE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-DUR-QUORUM-FAIL-CLOSED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_local_label",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_quorum_label",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_local_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_quorum_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_validate_local",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_validate_quorum_valid",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_validate_quorum_zero_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_serde_roundtrip_local",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_mode_serde_roundtrip_quorum",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_outcome_local_is_success",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_outcome_quorum_acked_is_success",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_outcome_quorum_failed_is_not_success",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_claim_local_fsync",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_claim_quorum_acked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_claim_quorum_failed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_claim_determinism",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_claim_serde_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_default_policy_allows_upgrade",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_default_policy_denies_downgrade",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_default_policy_allows_downgrade_with_auth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_strict_policy_denies_upgrade_without_auth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_strict_policy_allows_with_auth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_same_mode_same_params_allowed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_quorum_size_increase_is_upgrade",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_quorum_size_decrease_is_downgrade",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_local_initialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_local_write",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_local_emits_events",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_quorum_initialization",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_quorum_write_success",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_quorum_write_excess_acks",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_quorum_write_fail_closed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_quorum_write_emits_events",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_controller_quorum_failure_emits_events",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_switch_local_to_quorum_default_policy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_switch_quorum_to_local_denied_without_auth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_switch_quorum_to_local_allowed_with_auth",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_switch_emits_mode_switch_event",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_switch_denied_emits_denial_event",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_local_write_in_quorum_mode_fails",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_quorum_write_in_local_mode_fails",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_claim_matrix_has_entries",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_claim_matrix_contains_local",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_claim_matrix_all_deterministic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_take_events_drains",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_invariant_constants_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_error_serde_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_switch_then_write_quorum",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_switch_then_write_local",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

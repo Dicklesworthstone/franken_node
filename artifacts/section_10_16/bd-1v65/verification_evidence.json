@@ -1,0 +1,36 @@
+{
+  "bead_id": "bd-1v65",
+  "section": "10.16",
+  "title": "sqlmodel_rust integration",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "verdict": "PASS",
+  "files": {
+    "typed_model_definitions": "crates/franken-node/src/storage/models.rs",
+    "conformance_tests": "tests/conformance/sqlmodel_contracts.rs",
+    "integration_csv": "artifacts/10.16/sqlmodel_integration_domains.csv",
+    "policy_matrix": "artifacts/10.16/sqlmodel_policy_matrix.json",
+    "spec_doc": "docs/specs/section_10_16/bd-1v65_contract.md",
+    "verification_script": "scripts/check_sqlmodel_integration.py",
+    "python_tests": "tests/test_check_sqlmodel_integration.py"
+  },
+  "metrics": {
+    "rust_conformance_tests": 42,
+    "python_verification_checks": 110,
+    "python_unit_tests": 27,
+    "total_models": 21,
+    "mandatory_models": 12,
+    "should_use_models": 7,
+    "optional_models": 2,
+    "drift_failures": 0,
+    "round_trip_failures": 0,
+    "event_codes": 5,
+    "invariants": 4,
+    "types": 8,
+    "methods": 12
+  },
+  "checks_summary": {
+    "passing": 110,
+    "failing": 0,
+    "total": 110
+  }
+}

@@ -1,0 +1,306 @@
+{
+  "checks": [
+    {
+      "check": "surface in test source: boundary_alert",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: boundary_alert",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: boundary_alert",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: boundary_table",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: boundary_table",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: boundary_table",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: cli_command_output",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: cli_command_output",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: cli_command_output",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: correctness_alert",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: correctness_alert",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: correctness_alert",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: evidence_status_bar",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: evidence_status_bar",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: evidence_status_bar",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: evidence_table",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: evidence_table",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: evidence_table",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: ledger_log_stream",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: ledger_log_stream",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: ledger_log_stream",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: main_panel_render",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: main_panel_render",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: main_panel_render",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: main_status_bar",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: main_status_bar",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: main_status_bar",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: main_table_render",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: main_table_render",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: main_table_render",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: replay_alert",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: replay_alert",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: replay_alert",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "surface in test source: replay_diff_panel",
+      "pass": true
+    },
+    {
+      "check": "baseline snapshot exists: replay_diff_panel",
+      "pass": true
+    },
+    {
+      "check": "snapshot status valid: replay_diff_panel",
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "interaction replay pass: navigation_cycle",
+      "final_snapshot_match": true,
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "interaction replay pass: confirmation_flow",
+      "final_snapshot_match": true,
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "interaction replay pass: cancellation_flow",
+      "final_snapshot_match": true,
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "interaction replay pass: scrolling_cycle",
+      "final_snapshot_match": true,
+      "pass": true,
+      "status": "pass"
+    },
+    {
+      "check": "mandatory interaction pattern coverage",
+      "missing_patterns": [],
+      "pass": true
+    },
+    {
+      "check": "summary snapshot_total matches",
+      "computed": 12,
+      "declared": 12,
+      "pass": true
+    }
+  ],
+  "errors": [],
+  "events": [
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "boundary_alert",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "boundary_table",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "cli_command_output",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "correctness_alert",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "evidence_status_bar",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "evidence_table",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "ledger_log_stream",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "main_panel_render",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "main_status_bar",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "main_table_render",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "replay_alert",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_SNAPSHOT_PASS",
+      "severity": "info",
+      "surface_name": "replay_diff_panel",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_INTERACTION_REPLAY_PASS",
+      "replay_name": "navigation_cycle",
+      "severity": "info",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_INTERACTION_REPLAY_PASS",
+      "replay_name": "confirmation_flow",
+      "severity": "info",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_INTERACTION_REPLAY_PASS",
+      "replay_name": "cancellation_flow",
+      "severity": "info",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    },
+    {
+      "event_code": "TUI_INTERACTION_REPLAY_PASS",
+      "replay_name": "scrolling_cycle",
+      "severity": "info",
+      "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+    }
+  ],
+  "interaction_replay_count": 4,
+  "inventory_count": 12,
+  "ok": true,
+  "patterns_seen": [
+    "cancellation",
+    "confirmation",
+    "navigation",
+    "scrolling"
+  ],
+  "snapshot_count": 12,
+  "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106",
+  "warnings": []
+}

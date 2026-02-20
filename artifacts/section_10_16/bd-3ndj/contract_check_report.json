@@ -1,0 +1,24 @@
+{
+  "bead_id": "bd-3ndj",
+  "checklist": "artifacts/10.16/fastapi_contract_checklist.json",
+  "contract": "docs/specs/fastapi_rust_integration_contract.md",
+  "error_registry": "crates/franken-node/src/connector/error_code_registry.rs",
+  "errors": [],
+  "events": [
+    {
+      "event_code": "FASTAPI_CONTRACT_LOADED",
+      "message": "Loaded fastapi integration checklist.",
+      "severity": "info",
+      "trace_correlation": "451a81dde9a5ea3fd110675f203cb74b4dc44df933c3dc319628df03b2104fbe"
+    }
+  ],
+  "mapped_error_code_count": 23,
+  "mapped_group_count": 3,
+  "missing_error_codes": [],
+  "missing_groups": [],
+  "ok": true,
+  "registry_error_code_count": 23,
+  "required_group_count": 3,
+  "trace_correlation": "451a81dde9a5ea3fd110675f203cb74b4dc44df933c3dc319628df03b2104fbe",
+  "warnings": []
+}

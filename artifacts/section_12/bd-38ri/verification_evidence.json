@@ -1,0 +1,90 @@
+{
+  "bead_id": "bd-38ri",
+  "title": "Risk Control — Scope Explosion",
+  "section": "12",
+  "status": "pass",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "summary": {
+    "passing": 15,
+    "failing": 0,
+    "total": 15
+  },
+  "checks": [
+    {
+      "name": "spec_exists",
+      "passed": true,
+      "detail": "Spec file found: docs/specs/section_12/bd-38ri_contract.md"
+    },
+    {
+      "name": "risk_policy_exists",
+      "passed": true,
+      "detail": "Risk policy found: docs/policy/risk_scope_explosion.md"
+    },
+    {
+      "name": "risk_documented",
+      "passed": true,
+      "detail": "Risk description, impact, and likelihood documented"
+    },
+    {
+      "name": "capability_gates",
+      "passed": true,
+      "detail": "Capability gates documented with limits and approval"
+    },
+    {
+      "name": "artifact_gates",
+      "passed": true,
+      "detail": "Artifact-gated delivery documented with full chain"
+    },
+    {
+      "name": "scope_budgets",
+      "passed": true,
+      "detail": "Scope budgets documented with 80% and 95% thresholds"
+    },
+    {
+      "name": "countermeasures",
+      "passed": true,
+      "detail": "All countermeasures documented"
+    },
+    {
+      "name": "event_codes",
+      "passed": true,
+      "detail": "All event codes present"
+    },
+    {
+      "name": "invariants",
+      "passed": true,
+      "detail": "All invariants present"
+    },
+    {
+      "name": "spec_keywords",
+      "passed": true,
+      "detail": "All spec keywords present"
+    },
+    {
+      "name": "escalation",
+      "passed": true,
+      "detail": "Escalation procedures documented"
+    },
+    {
+      "name": "evidence_requirements",
+      "passed": true,
+      "detail": "Evidence requirements for review documented"
+    },
+    {
+      "name": "monitoring",
+      "passed": true,
+      "detail": "Monitoring with dashboards and velocity metrics documented"
+    },
+    {
+      "name": "verification_evidence",
+      "passed": true,
+      "detail": "Evidence file valid"
+    },
+    {
+      "name": "verification_summary",
+      "passed": true,
+      "detail": "Summary file found: artifacts/section_12/bd-38ri/verification_summary.md"
+    }
+  ]
+}

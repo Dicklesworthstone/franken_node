@@ -3,7 +3,7 @@
   "bead": "bd-12q",
   "section": "10.4",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T17:53:45.608586+00:00",
+  "timestamp": "2026-02-20T23:02:53.252109+00:00",
   "checks": [
     {
       "id": "REV-SPEC",

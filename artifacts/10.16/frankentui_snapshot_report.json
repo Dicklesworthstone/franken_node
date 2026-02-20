@@ -1,0 +1,134 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-02-20T22:57:30Z",
+  "terminal": {
+    "width": 80,
+    "height": 24,
+    "seed": "bd-1719"
+  },
+  "snapshots": [
+    {
+      "surface_name": "cli_command_output",
+      "test_name": "snapshot_cli_command_output",
+      "baseline_path": "fixtures/tui/snapshots/cli_command_output.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "main_panel_render",
+      "test_name": "snapshot_main_panel_render",
+      "baseline_path": "fixtures/tui/snapshots/main_panel_render.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "main_table_render",
+      "test_name": "snapshot_main_table_render",
+      "baseline_path": "fixtures/tui/snapshots/main_table_render.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "main_status_bar",
+      "test_name": "snapshot_main_status_bar",
+      "baseline_path": "fixtures/tui/snapshots/main_status_bar.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "correctness_alert",
+      "test_name": "snapshot_correctness_alert",
+      "baseline_path": "fixtures/tui/snapshots/correctness_alert.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "boundary_alert",
+      "test_name": "snapshot_boundary_alert",
+      "baseline_path": "fixtures/tui/snapshots/boundary_alert.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "boundary_table",
+      "test_name": "snapshot_boundary_table",
+      "baseline_path": "fixtures/tui/snapshots/boundary_table.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "evidence_status_bar",
+      "test_name": "snapshot_evidence_status_bar",
+      "baseline_path": "fixtures/tui/snapshots/evidence_status_bar.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "evidence_table",
+      "test_name": "snapshot_evidence_table",
+      "baseline_path": "fixtures/tui/snapshots/evidence_table.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "ledger_log_stream",
+      "test_name": "snapshot_ledger_log_stream",
+      "baseline_path": "fixtures/tui/snapshots/ledger_log_stream.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "replay_diff_panel",
+      "test_name": "snapshot_replay_diff_panel",
+      "baseline_path": "fixtures/tui/snapshots/replay_diff_panel.snap",
+      "status": "pass",
+      "diff_path": null
+    },
+    {
+      "surface_name": "replay_alert",
+      "test_name": "snapshot_replay_alert",
+      "baseline_path": "fixtures/tui/snapshots/replay_alert.snap",
+      "status": "pass",
+      "diff_path": null
+    }
+  ],
+  "interaction_replays": [
+    {
+      "replay_name": "navigation_cycle",
+      "pattern": "navigation",
+      "steps_count": 4,
+      "status": "pass",
+      "final_snapshot_match": true
+    },
+    {
+      "replay_name": "confirmation_flow",
+      "pattern": "confirmation",
+      "steps_count": 2,
+      "status": "pass",
+      "final_snapshot_match": true
+    },
+    {
+      "replay_name": "cancellation_flow",
+      "pattern": "cancellation",
+      "steps_count": 2,
+      "status": "pass",
+      "final_snapshot_match": true
+    },
+    {
+      "replay_name": "scrolling_cycle",
+      "pattern": "scrolling",
+      "steps_count": 3,
+      "status": "pass",
+      "final_snapshot_match": true
+    }
+  ],
+  "summary": {
+    "snapshot_total": 12,
+    "snapshot_pass": 12,
+    "snapshot_fail": 0,
+    "snapshot_new": 0,
+    "replay_total": 4,
+    "replay_pass": 4,
+    "replay_fail": 0
+  }
+}

@@ -1,0 +1,13 @@
+module_path,surface_name,migration_status,frankentui_component,boundary_type,notes
+src/cli.rs,cli_command_output,complete,CommandSurface,surface_definition,Command schema and output mode selection
+src/main.rs,main_panel_render,complete,Panel,renderer,Primary Panel rendering
+src/main.rs,main_table_render,complete,Table,renderer,Table output for structured data
+src/main.rs,main_status_bar,complete,StatusBar,renderer,StatusBar for ongoing operations
+src/policy/correctness_envelope.rs,correctness_alert,complete,AlertBanner,diagnostic_renderer,Policy/correctness diagnostics
+src/policy/controller_boundary_checks.rs,boundary_alert,complete,AlertBanner,diagnostic_renderer,Boundary-check alert output
+src/policy/controller_boundary_checks.rs,boundary_table,complete,Table,diagnostic_renderer,Boundary-check summary table
+src/policy/evidence_emission.rs,evidence_status_bar,complete,StatusBar,diagnostic_renderer,Evidence emission progress
+src/policy/evidence_emission.rs,evidence_table,complete,Table,diagnostic_renderer,Evidence anomaly table
+src/observability/evidence_ledger.rs,ledger_log_stream,complete,LogStreamPanel,diagnostic_renderer,Audit/evidence stream visualization
+src/tools/evidence_replay_validator.rs,replay_diff_panel,complete,DiffPanel,diagnostic_renderer,Replay mismatch diff rendering
+src/tools/evidence_replay_validator.rs,replay_alert,complete,AlertBanner,diagnostic_renderer,Replay mismatch/match alert banner

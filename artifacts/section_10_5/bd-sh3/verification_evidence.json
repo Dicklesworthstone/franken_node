@@ -1,0 +1,175 @@
+{
+  "bead_id": "bd-sh3",
+  "section": "10.5",
+  "title": "Policy Change Approval Workflows with Cryptographic Audit Trail",
+  "timestamp": "2026-02-20T20:25:37.120263+00:00",
+  "overall_pass": true,
+  "checks": {
+    "files": {
+      "spec": {
+        "path": "docs/specs/section_10_5/bd-sh3_contract.md",
+        "exists": true,
+        "size_bytes": 2767
+      },
+      "rust_impl": {
+        "path": "crates/franken-node/src/policy/approval_workflow.rs",
+        "exists": true,
+        "size_bytes": 34841
+      },
+      "mod_rs": {
+        "path": "crates/franken-node/src/policy/mod.rs",
+        "exists": true,
+        "size_bytes": 414
+      }
+    },
+    "spec_invariants": {
+      "pass": true,
+      "found": [
+        "INV-POL-MULTI-PARTY",
+        "INV-POL-ROLE-SEP",
+        "INV-POL-HASH-CHAIN",
+        "INV-POL-ROLLBACK",
+        "INV-POL-EVIDENCE",
+        "INV-POL-JUSTIFICATION",
+        "INV-POL-ENVELOPE",
+        "INV-POL-LIFECYCLE"
+      ],
+      "missing": []
+    },
+    "rust_symbols": {
+      "pass": true,
+      "found": [
+        "pub enum RiskAssessment",
+        "pub struct PolicyDiffEntry",
+        "pub struct PolicyChangeProposal",
+        "pub enum ProposalState",
+        "pub struct ApprovalSignature",
+        "pub struct PolicyChangeAuditEntry",
+        "pub struct ProposalRecord",
+        "pub struct ChangeEvidencePackage",
+        "pub struct PolicyChangeEngine",
+        "pub struct PolicyChangeError"
+      ],
+      "missing": []
+    },
+    "event_codes": {
+      "pass": true,
+      "found": [
+        "POLICY_CHANGE_PROPOSED",
+        "POLICY_CHANGE_REVIEWED",
+        "POLICY_CHANGE_APPROVED",
+        "POLICY_CHANGE_REJECTED",
+        "POLICY_CHANGE_ACTIVATED",
+        "POLICY_CHANGE_ROLLED_BACK",
+        "AUDIT_CHAIN_VERIFIED",
+        "AUDIT_CHAIN_BROKEN"
+      ],
+      "missing": []
+    },
+    "error_codes": {
+      "pass": true,
+      "found": [
+        "ERR_PROPOSAL_NOT_FOUND",
+        "ERR_SOLE_APPROVER",
+        "ERR_INVALID_SIGNATURE",
+        "ERR_QUORUM_NOT_MET",
+        "ERR_INVALID_STATE_TRANSITION",
+        "ERR_AUDIT_CHAIN_BROKEN",
+        "ERR_JUSTIFICATION_TOO_SHORT"
+      ],
+      "missing": []
+    },
+    "engine_methods": {
+      "pass": true,
+      "found": [
+        "pub fn propose(",
+        "pub fn approve(",
+        "pub fn reject(",
+        "pub fn activate(",
+        "pub fn rollback(",
+        "pub fn get_proposal(",
+        "pub fn audit_ledger(",
+        "pub fn verify_audit_chain(",
+        "pub fn query_audit_by_proposal("
+      ],
+      "missing": []
+    },
+    "tests": {
+      "pass": true,
+      "found": [
+        "test_propose_policy_change",
+        "test_justification_minimum_length",
+        "test_required_approvers_not_empty",
+        "test_approval_transitions_to_under_review",
+        "test_quorum_approval",
+        "test_sole_approver_rejected",
+        "test_activate_approved_proposal",
+        "test_activate_without_approval_fails",
+        "test_reject_proposal",
+        "test_rollback_creates_inverse_proposal",
+        "test_rollback_without_applied_fails",
+        "test_audit_chain_integrity",
+        "test_audit_chain_tamper_detection",
+        "test_query_audit_by_proposal",
+        "test_rollback_command_stored",
+        "test_envelope_guarded_flag",
+        "test_risk_assessment_ordering",
+        "test_evidence_package_on_activation",
+        "test_proposal_state_machine_full_lifecycle",
+        "test_large_audit_chain_verification"
+      ],
+      "missing": []
+    },
+    "states": {
+      "pass": true,
+      "found": [
+        "Proposed",
+        "UnderReview",
+        "Approved",
+        "Rejected",
+        "Applied",
+        "RolledBack"
+      ],
+      "missing": []
+    },
+    "mod_registration": {
+      "pass": true,
+      "registered": true
+    },
+    "hash_chain": {
+      "pass": true,
+      "hash_chain": true,
+      "sha256": true,
+      "integrity_check": true
+    },
+    "role_separation": {
+      "pass": true,
+      "sole_approver_check": true,
+      "proposer_identity_check": true,
+      "non_proposer_counting": true
+    },
+    "rollback_mechanism": {
+      "pass": true,
+      "rollback_function": true,
+      "inverse_diff": true,
+      "rollback_reference": true,
+      "rollback_command": true
+    }
+  },
+  "verification_script": {
+    "path": "scripts/check_policy_change_workflow.py",
+    "checks": 88,
+    "passing": 88,
+    "verdict": "PASS"
+  },
+  "python_unit_tests": {
+    "path": "tests/test_check_policy_change_workflow.py",
+    "tests": 35,
+    "passing": 35
+  },
+  "summary": {
+    "total_checks": 12,
+    "passed": 12,
+    "failed": 0
+  }
+}

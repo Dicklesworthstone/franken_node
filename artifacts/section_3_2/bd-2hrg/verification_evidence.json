@@ -1,0 +1,27 @@
+{
+  "bead_id": "bd-2hrg",
+  "title": "Impossible-by-Default Capability Index",
+  "section": "3.2",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "python_checks": 53,
+  "python_unit_tests": 13,
+  "artifacts": {
+    "capabilities_doc": "docs/doctrine/impossible_by_default_capabilities.md",
+    "spec_contract": "docs/specs/section_3_2/bd-2hrg_contract.md",
+    "verification_script": "scripts/check_impossible_capabilities.py",
+    "test_file": "tests/test_check_impossible_capabilities.py"
+  },
+  "checks": [
+    {"group": "files", "count": 2, "pass": 2},
+    {"group": "ten_capabilities", "count": 10, "pass": 10},
+    {"group": "impossibility_rationale", "count": 1, "pass": 1},
+    {"group": "owner_tracks", "count": 13, "pass": 13},
+    {"group": "category_tests", "count": 3, "pass": 3},
+    {"group": "quantitative_targets", "count": 5, "pass": 5},
+    {"group": "event_codes", "count": 4, "pass": 4},
+    {"group": "invariants", "count": 4, "pass": 4},
+    {"group": "required_sections", "count": 5, "pass": 5},
+    {"group": "spec_contract", "count": 6, "pass": 6}
+  ]
+}

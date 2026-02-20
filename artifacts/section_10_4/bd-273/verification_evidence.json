@@ -1,0 +1,160 @@
+{
+  "bead_id": "bd-273",
+  "section": "10.4",
+  "title": "Extension Certification Levels Tied to Policy Controls",
+  "timestamp": "2026-02-20T23:02:53.425132+00:00",
+  "overall_pass": true,
+  "checks": {
+    "files": {
+      "spec": {
+        "path": "docs/specs/section_10_4/bd-273_contract.md",
+        "exists": true,
+        "size_bytes": 2269
+      },
+      "rust_impl": {
+        "path": "crates/franken-node/src/supply_chain/certification.rs",
+        "exists": true,
+        "size_bytes": 34138
+      },
+      "mod_rs": {
+        "path": "crates/franken-node/src/supply_chain/mod.rs",
+        "exists": true,
+        "size_bytes": 267
+      }
+    },
+    "spec_invariants": {
+      "pass": true,
+      "found": [
+        "INV-CERT-LEVELS",
+        "INV-CERT-DETERMINISTIC",
+        "INV-CERT-POLICY-MAP",
+        "INV-CERT-PROMOTION",
+        "INV-CERT-DEMOTION",
+        "INV-CERT-REGISTRY",
+        "INV-CERT-DEPLOYMENT",
+        "INV-CERT-AUDIT"
+      ],
+      "missing": []
+    },
+    "rust_symbols": {
+      "pass": true,
+      "found": [
+        "pub enum CertificationLevel",
+        "pub enum DeploymentContext",
+        "pub enum CapabilityCategory",
+        "pub struct CertificationInput",
+        "pub struct CertificationResult",
+        "pub struct CertificationRecord",
+        "pub struct CertificationRegistry",
+        "pub struct CertificationAuditEntry",
+        "pub enum CertificationAuditEvent",
+        "pub fn evaluate_certification",
+        "pub fn is_capability_allowed",
+        "pub fn capability_policy"
+      ],
+      "missing": []
+    },
+    "event_codes": {
+      "pass": true,
+      "found": [
+        "CERTIFICATION_EVALUATED",
+        "CERTIFICATION_ASSIGNED",
+        "CERTIFICATION_PROMOTED",
+        "CERTIFICATION_DEMOTED",
+        "CERTIFICATION_POLICY_ENFORCED",
+        "CERTIFICATION_GATE_PASS",
+        "CERTIFICATION_GATE_REJECT"
+      ],
+      "missing": []
+    },
+    "levels": {
+      "pass": true,
+      "found": [
+        "Uncertified",
+        "Basic",
+        "Standard",
+        "Verified",
+        "Audited"
+      ],
+      "missing": []
+    },
+    "capabilities": {
+      "pass": true,
+      "found": [
+        "FileRead",
+        "FileWrite",
+        "NetworkAccess",
+        "ProcessSpawn",
+        "CryptoOperations",
+        "SystemConfiguration"
+      ],
+      "missing": []
+    },
+    "registry_methods": {
+      "pass": true,
+      "found": [
+        "pub fn evaluate_and_register",
+        "pub fn promote",
+        "pub fn demote",
+        "pub fn check_deployment_gate",
+        "pub fn check_capability_gate",
+        "pub fn get_record",
+        "pub fn query_audit_trail",
+        "pub fn verify_audit_integrity"
+      ],
+      "missing": []
+    },
+    "tests": {
+      "pass": true,
+      "found": [
+        "test_uncertified_without_publisher",
+        "test_basic_with_publisher_and_manifest",
+        "test_standard_with_provenance_and_reputation",
+        "test_verified_with_build_and_coverage",
+        "test_audited_with_attestation",
+        "test_insufficient_coverage_blocks_verified",
+        "test_deterministic_evaluation",
+        "test_capability_policy_uncertified",
+        "test_capability_policy_standard",
+        "test_capability_policy_audited",
+        "test_deployment_gate_development",
+        "test_deployment_gate_production_rejects_basic",
+        "test_promotion_adjacent_only",
+        "test_demotion_on_trust_degradation",
+        "test_audit_trail_integrity",
+        "test_audit_query_by_extension",
+        "test_level_ordering",
+        "test_meets_minimum",
+        "test_evaluation_explanation_present"
+      ],
+      "missing": []
+    },
+    "mod_registration": {
+      "pass": true,
+      "registered": true
+    },
+    "policy_matrix": {
+      "pass": true,
+      "capability_check_fn": true,
+      "policy_fn": true,
+      "match_implementation": true
+    },
+    "deployment_gates": {
+      "pass": true,
+      "deployment_context_enum": true,
+      "minimum_certification": true,
+      "gate_check": true
+    },
+    "hash_chain": {
+      "pass": true,
+      "hash_chain": true,
+      "sha256": true,
+      "integrity_check": true
+    }
+  },
+  "summary": {
+    "total_checks": 12,
+    "passed": 12,
+    "failed": 0
+  }
+}

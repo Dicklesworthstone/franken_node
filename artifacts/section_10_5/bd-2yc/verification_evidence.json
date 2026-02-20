@@ -1,0 +1,135 @@
+{
+  "bead_id": "bd-2yc",
+  "section": "10.5",
+  "title": "Operator Copilot Action Recommendation API",
+  "timestamp": "2026-02-20T20:29:01.667085+00:00",
+  "overall_pass": true,
+  "checks": {
+    "files": {
+      "spec": {
+        "path": "docs/specs/section_10_5/bd-2yc_contract.md",
+        "exists": true,
+        "size_bytes": 2510
+      },
+      "rust_impl": {
+        "path": "crates/franken-node/src/security/copilot_engine.rs",
+        "exists": true,
+        "size_bytes": 27781
+      },
+      "mod_rs": {
+        "path": "crates/franken-node/src/security/mod.rs",
+        "exists": true,
+        "size_bytes": 334
+      }
+    },
+    "spec_invariants": {
+      "pass": true,
+      "found": [
+        "INV-COP-VOI-RANK",
+        "INV-COP-LOSS-VEC",
+        "INV-COP-UNCERTAINTY",
+        "INV-COP-ROLLBACK",
+        "INV-COP-DEGRADED",
+        "INV-COP-RATIONALE",
+        "INV-COP-AUDIT",
+        "INV-COP-TOP-K"
+      ],
+      "missing": []
+    },
+    "rust_symbols": {
+      "pass": true,
+      "found": [
+        "pub struct ExpectedLossVector",
+        "pub struct ConfidenceInterval",
+        "pub struct ConfidenceContext",
+        "pub struct ActionCandidate",
+        "pub struct SystemState",
+        "pub struct RecommendedAction",
+        "pub struct CopilotResponse",
+        "pub struct DegradedWarning",
+        "pub struct CopilotAuditEntry",
+        "pub struct ActionRecommendationEngine",
+        "pub fn compute_voi"
+      ],
+      "missing": []
+    },
+    "event_codes": {
+      "pass": true,
+      "found": [
+        "COPILOT_RECOMMENDATION_REQUESTED",
+        "COPILOT_RECOMMENDATION_SERVED",
+        "COPILOT_ROLLBACK_VALIDATED",
+        "COPILOT_DEGRADED_WARNING",
+        "COPILOT_STREAM_STARTED",
+        "COPILOT_STREAM_UPDATED"
+      ],
+      "missing": []
+    },
+    "loss_dimensions": {
+      "pass": true,
+      "found": [
+        "availability_loss",
+        "integrity_loss",
+        "confidentiality_loss",
+        "financial_loss",
+        "reputation_loss"
+      ],
+      "missing": []
+    },
+    "engine_methods": {
+      "pass": true,
+      "found": [
+        "pub fn recommend(",
+        "pub fn audit_trail(",
+        "pub fn total_served(",
+        "pub fn top_k("
+      ],
+      "missing": []
+    },
+    "tests": {
+      "pass": true,
+      "found": [
+        "test_compute_voi",
+        "test_voi_ranking_order",
+        "test_top_k_limiting",
+        "test_empty_candidates",
+        "test_degraded_mode_warning",
+        "test_degraded_confidence_annotation",
+        "test_normal_mode_no_degraded_flag",
+        "test_rationale_includes_dominant_dimension",
+        "test_rollback_command_included",
+        "test_audit_trail_recorded",
+        "test_expected_loss_vector_validation",
+        "test_expected_loss_total",
+        "test_confidence_interval_non_degenerate",
+        "test_dominant_dimension",
+        "test_tied_voi_stability",
+        "test_adjusted_uncertainty_widened",
+        "test_multiple_recommendations_served"
+      ],
+      "missing": []
+    },
+    "mod_registration": {
+      "pass": true,
+      "registered": true
+    },
+    "voi_formula": {
+      "pass": true,
+      "voi_function": true,
+      "loss_comparison": true,
+      "total_aggregation": true
+    },
+    "degraded_integration": {
+      "pass": true,
+      "degraded_mode_field": true,
+      "degraded_warning_struct": true,
+      "stale_inputs": true,
+      "adjusted_uncertainty": true
+    }
+  },
+  "summary": {
+    "total_checks": 10,
+    "passed": 10,
+    "failed": 0
+  }
+}

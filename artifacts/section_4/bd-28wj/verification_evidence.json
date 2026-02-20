@@ -1,0 +1,27 @@
+{
+  "bead_id": "bd-28wj",
+  "title": "Non-Negotiable Constraints — 13 hard guardrails",
+  "section": "4",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "python_checks": 84,
+  "python_unit_tests": 29,
+  "artifacts": {
+    "constraint_doc": "docs/governance/non_negotiable_constraints.md",
+    "waiver_registry": "docs/governance/waiver_registry.json",
+    "spec_contract": "docs/specs/section_4/bd-28wj_contract.md",
+    "verification_script": "scripts/check_non_negotiable_constraints.py",
+    "test_file": "tests/test_check_non_negotiable_constraints.py"
+  },
+  "checks": [
+    {"group": "files", "count": 3, "pass": 3},
+    {"group": "doc_sections", "count": 3, "pass": 3},
+    {"group": "constraints_documented", "count": 13, "pass": 13},
+    {"group": "keywords", "count": 34, "pass": 34},
+    {"group": "violation_codes", "count": 13, "pass": 13},
+    {"group": "severities", "count": 2, "pass": 2},
+    {"group": "enforcement", "count": 3, "pass": 3},
+    {"group": "waiver_registry", "count": 4, "pass": 4},
+    {"group": "spec_content", "count": 9, "pass": 9}
+  ]
+}

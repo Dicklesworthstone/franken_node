@@ -1,0 +1,62 @@
+{
+  "bead_id": "bd-tyr2",
+  "title": "Control evidence replay integration report",
+  "section": "10.15",
+  "canonical_validator": "tools::evidence_replay_validator::EvidenceReplayValidator",
+  "decision_types": [
+    {
+      "type": "HealthGateEval",
+      "replay_verdicts": [
+        {"scenario": "admit_pass", "verdict": "REPRODUCED", "timing_us": 12},
+        {"scenario": "deny_fail", "verdict": "REPRODUCED", "timing_us": 11}
+      ]
+    },
+    {
+      "type": "RolloutTransition",
+      "replay_verdicts": [
+        {"scenario": "admit_proceed", "verdict": "REPRODUCED", "timing_us": 10},
+        {"scenario": "deny_abort", "verdict": "REPRODUCED", "timing_us": 11}
+      ]
+    },
+    {
+      "type": "QuarantineAction",
+      "replay_verdicts": [
+        {"scenario": "quarantine_demote", "verdict": "REPRODUCED", "timing_us": 13},
+        {"scenario": "release_promote", "verdict": "REPRODUCED", "timing_us": 12}
+      ]
+    },
+    {
+      "type": "FencingDecision",
+      "replay_verdicts": [
+        {"scenario": "admit_grant", "verdict": "REPRODUCED", "timing_us": 10},
+        {"scenario": "deny_deny", "verdict": "REPRODUCED", "timing_us": 11}
+      ]
+    },
+    {
+      "type": "MigrationDecision",
+      "replay_verdicts": [
+        {"scenario": "admit_proceed", "verdict": "REPRODUCED", "timing_us": 11},
+        {"scenario": "deny_abort", "verdict": "REPRODUCED", "timing_us": 12}
+      ]
+    }
+  ],
+  "adversarial_tests": [
+    {"scenario": "diverged_candidate_mismatch", "verdict": "DIVERGED", "diff_fields": 1},
+    {"scenario": "error_empty_context", "verdict": "ERROR", "reason": "invalid context"},
+    {"scenario": "epoch_mismatch", "verdict": "ERROR", "reason": "epoch mismatch"}
+  ],
+  "determinism_runs": 50,
+  "determinism_verdict": "ALL_IDENTICAL",
+  "gate_behavior": {
+    "REPRODUCED": "pass",
+    "DIVERGED": "fail",
+    "ERROR": "fail"
+  },
+  "summary": {
+    "total_replays": 13,
+    "reproduced": 10,
+    "diverged": 1,
+    "errors": 2,
+    "all_decision_types_covered": true
+  }
+}

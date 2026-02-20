@@ -1,0 +1,90 @@
+{
+  "bead_id": "bd-2f43",
+  "section": "13",
+  "title": "Low-Risk Migration Pathways",
+  "generated_at": "2026-02-20T00:00:00Z",
+  "total_checks": 12,
+  "passed": 12,
+  "failed": 0,
+  "overall_passed": true,
+  "checks": [
+    {
+      "name": "spec_exists",
+      "passed": true,
+      "detail": "Spec file found: docs/specs/section_13/bd-2f43_contract.md"
+    },
+    {
+      "name": "policy_exists",
+      "passed": true,
+      "detail": "Policy file found: docs/policy/migration_pathways.md"
+    },
+    {
+      "name": "quantitative_targets",
+      "passed": true,
+      "detail": "All targets present"
+    },
+    {
+      "name": "pathway_requirements",
+      "passed": true,
+      "detail": "All requirements present"
+    },
+    {
+      "name": "risk_scoring",
+      "passed": true,
+      "detail": "Dimensions: 3/3, weights present: True"
+    },
+    {
+      "name": "rollout_stages",
+      "passed": true,
+      "detail": "Stages found: canary, progressive, full"
+    },
+    {
+      "name": "rollback_requirements",
+      "passed": true,
+      "detail": "Time constraint: True, zero-loss: True"
+    },
+    {
+      "name": "event_codes",
+      "passed": true,
+      "detail": "All event codes present"
+    },
+    {
+      "name": "invariants",
+      "passed": true,
+      "detail": "All invariants present"
+    },
+    {
+      "name": "evidence_artifacts",
+      "passed": true,
+      "detail": "evidence.json: True, summary.md: True"
+    },
+    {
+      "name": "cohort_strategy",
+      "passed": true,
+      "detail": "Node referenced: True, Bun referenced: True"
+    },
+    {
+      "name": "ci_gate",
+      "passed": true,
+      "detail": "CI gate section: True, --json flag: True"
+    }
+  ],
+  "invariants_verified": [
+    "INV-MIG-PATHWAY",
+    "INV-MIG-RISK",
+    "INV-MIG-ROLLBACK",
+    "INV-MIG-EVIDENCE"
+  ],
+  "event_codes_verified": [
+    "MIG-001",
+    "MIG-002",
+    "MIG-003",
+    "MIG-004"
+  ],
+  "quantitative_targets": {
+    "migration_success_rate": ">= 90%",
+    "rollback_time": "< 5 min",
+    "data_loss_guarantee": "zero",
+    "risk_score_threshold": "<= 0.30"
+  }
+}

@@ -1,0 +1,361 @@
+{
+  "gate": "section_10_4_comprehensive_gate",
+  "bead_id": "bd-261k",
+  "section": "10.4",
+  "gate_pass": true,
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T23:02:55.967005+00:00",
+  "beads_tested": [
+    "bd-1gx",
+    "bd-1ah",
+    "bd-12q",
+    "bd-2yh",
+    "bd-ml1",
+    "bd-1vm",
+    "bd-273",
+    "bd-phf"
+  ],
+  "per_bead_results": [
+    {
+      "bead_id": "bd-1gx",
+      "script_pass": true,
+      "unit_pass": true,
+      "integration_pass": true,
+      "log_events_validated": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1ah",
+      "script_pass": true,
+      "unit_pass": true,
+      "integration_pass": true,
+      "log_events_validated": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-12q",
+      "script_pass": true,
+      "unit_pass": true,
+      "integration_pass": true,
+      "log_events_validated": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-2yh",
+      "script_pass": true,
+      "unit_pass": true,
+      "integration_pass": true,
+      "log_events_validated": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-ml1",
+      "script_pass": true,
+      "unit_pass": true,
+      "integration_pass": true,
+      "log_events_validated": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-1vm",
+      "script_pass": true,
+      "unit_pass": true,
+      "integration_pass": true,
+      "log_events_validated": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-273",
+      "script_pass": true,
+      "unit_pass": true,
+      "integration_pass": true,
+      "log_events_validated": true,
+      "overall_pass": true
+    },
+    {
+      "bead_id": "bd-phf",
+      "script_pass": true,
+      "unit_pass": true,
+      "integration_pass": true,
+      "log_events_validated": true,
+      "overall_pass": true
+    }
+  ],
+  "overall_coverage_pct": 100.0,
+  "checks": [
+    {
+      "id": "GATE-SCRIPTS",
+      "status": "PASS",
+      "details": {
+        "total": 8,
+        "passing": 8,
+        "results": [
+          {
+            "bead": "bd-1gx",
+            "name": "Signed extension package manifest schema",
+            "script": "scripts/check_extension_manifest_schema.py",
+            "status": "PASS",
+            "exit_code": 0,
+            "verdict": "PASS",
+            "stderr": ""
+          },
+          {
+            "bead": "bd-1ah",
+            "name": "Provenance attestation verification chain",
+            "script": "scripts/check_provenance_attestation.py",
+            "status": "PASS",
+            "exit_code": 0,
+            "verdict": "PASS",
+            "stderr": ""
+          },
+          {
+            "bead": "bd-12q",
+            "name": "Revocation propagation with freshness checks",
+            "script": "scripts/check_revocation_integration.py",
+            "status": "PASS",
+            "exit_code": 0,
+            "verdict": "PASS",
+            "stderr": ""
+          },
+          {
+            "bead": "bd-2yh",
+            "name": "Extension trust-card API and CLI",
+            "script": "scripts/check_trust_card.py",
+            "status": "PASS",
+            "exit_code": 0,
+            "verdict": "PASS",
+            "stderr": ""
+          },
+          {
+            "bead": "bd-ml1",
+            "name": "Publisher reputation model",
+            "script": "scripts/check_publisher_reputation.py",
+            "status": "PASS",
+            "exit_code": 0,
+            "verdict": null,
+            "stderr": ""
+          },
+          {
+            "bead": "bd-1vm",
+            "name": "Quarantine and recall workflow",
+            "script": "scripts/check_quarantine_workflow.py",
+            "status": "PASS",
+            "exit_code": 0,
+            "verdict": null,
+            "stderr": ""
+          },
+          {
+            "bead": "bd-273",
+            "name": "Certification levels tied to policy controls",
+            "script": "scripts/check_certification_levels.py",
+            "status": "PASS",
+            "exit_code": 0,
+            "verdict": null,
+            "stderr": ""
+          },
+          {
+            "bead": "bd-phf",
+            "name": "Ecosystem telemetry for trust and adoption",
+            "script": "scripts/check_ecosystem_telemetry.py",
+            "status": "PASS",
+            "exit_code": 0,
+            "verdict": null,
+            "stderr": ""
+          }
+        ]
+      }
+    },
+    {
+      "id": "GATE-TESTS",
+      "status": "PASS",
+      "details": {
+        "results": [
+          {
+            "bead": "bd-1gx",
+            "test": "tests/test_check_extension_manifest_schema.py",
+            "status": "PASS",
+            "passed": 10,
+            "failed": 0,
+            "exit_code": 0
+          },
+          {
+            "bead": "bd-1ah",
+            "test": "tests/test_check_provenance_attestation.py",
+            "status": "PASS",
+            "passed": 11,
+            "failed": 0,
+            "exit_code": 0
+          },
+          {
+            "bead": "bd-12q",
+            "test": "tests/test_check_revocation_integration.py",
+            "status": "PASS",
+            "passed": 10,
+            "failed": 0,
+            "exit_code": 0
+          },
+          {
+            "bead": "bd-2yh",
+            "test": "tests/test_check_trust_card.py",
+            "status": "PASS",
+            "passed": 8,
+            "failed": 0,
+            "exit_code": 0
+          },
+          {
+            "bead": "bd-ml1",
+            "test": "tests/test_check_publisher_reputation.py",
+            "status": "PASS",
+            "passed": 28,
+            "failed": 0,
+            "exit_code": 0
+          },
+          {
+            "bead": "bd-1vm",
+            "test": "tests/test_check_quarantine_workflow.py",
+            "status": "PASS",
+            "passed": 29,
+            "failed": 0,
+            "exit_code": 0
+          },
+          {
+            "bead": "bd-273",
+            "test": "tests/test_check_certification_levels.py",
+            "status": "PASS",
+            "passed": 25,
+            "failed": 0,
+            "exit_code": 0
+          },
+          {
+            "bead": "bd-phf",
+            "test": "tests/test_check_ecosystem_telemetry.py",
+            "status": "PASS",
+            "passed": 32,
+            "failed": 0,
+            "exit_code": 0
+          }
+        ],
+        "total_passed": 153,
+        "total_failed": 0,
+        "companion_test_coverage_pct": 100.0,
+        "threshold_pct": 90.0,
+        "meets_threshold": true
+      }
+    },
+    {
+      "id": "GATE-EVIDENCE",
+      "status": "PASS",
+      "details": {
+        "results": [
+          {
+            "bead": "bd-1gx",
+            "path": "artifacts/section_10_4/bd-1gx/verification_evidence.json",
+            "status": "PASS",
+            "verdict": "PASS"
+          },
+          {
+            "bead": "bd-1ah",
+            "path": "artifacts/section_10_4/bd-1ah/verification_evidence.json",
+            "status": "PASS",
+            "verdict": "PASS"
+          },
+          {
+            "bead": "bd-12q",
+            "path": "artifacts/section_10_4/bd-12q/verification_evidence.json",
+            "status": "PASS",
+            "verdict": "PASS"
+          },
+          {
+            "bead": "bd-2yh",
+            "path": "artifacts/section_10_4/bd-2yh/verification_evidence.json",
+            "status": "PASS",
+            "verdict": "completed_with_known_repo_gate_failures"
+          },
+          {
+            "bead": "bd-ml1",
+            "path": "artifacts/section_10_4/bd-ml1/verification_evidence.json",
+            "status": "PASS",
+            "verdict": "PASS"
+          },
+          {
+            "bead": "bd-1vm",
+            "path": "artifacts/section_10_4/bd-1vm/verification_evidence.json",
+            "status": "PASS",
+            "verdict": "PASS"
+          },
+          {
+            "bead": "bd-273",
+            "path": "artifacts/section_10_4/bd-273/verification_evidence.json",
+            "status": "PASS",
+            "verdict": "PASS"
+          },
+          {
+            "bead": "bd-phf",
+            "path": "artifacts/section_10_4/bd-phf/verification_evidence.json",
+            "status": "PASS",
+            "verdict": "PASS"
+          }
+        ],
+        "missing": []
+      }
+    },
+    {
+      "id": "GATE-INTEGRATION",
+      "status": "PASS",
+      "details": {
+        "pipelines": [
+          {
+            "id": "PIPE-MANIFEST-PROVENANCE-TRUSTCARD",
+            "description": "manifest -> provenance -> trust-card pipeline",
+            "status": "PASS",
+            "missing_or_invalid": []
+          },
+          {
+            "id": "PIPE-REVOCATION-QUARANTINE-RECALL",
+            "description": "revocation -> quarantine -> recall pipeline",
+            "status": "PASS",
+            "missing_or_invalid": []
+          },
+          {
+            "id": "PIPE-REPUTATION-CERTIFICATION-POLICY",
+            "description": "reputation -> certification -> policy gate pipeline",
+            "status": "PASS",
+            "missing_or_invalid": []
+          }
+        ],
+        "passing": 3,
+        "total": 3
+      }
+    },
+    {
+      "id": "GATE-POLICY",
+      "status": "PASS",
+      "details": {
+        "results": [
+          {
+            "id": "POLICY-RCH",
+            "path": "artifacts/program/rch_execution_policy_report.json",
+            "status": "PASS",
+            "actual": "PASS"
+          },
+          {
+            "id": "POLICY-ARTIFACT-NAMESPACE",
+            "path": "artifacts/program/artifact_namespace_validation_report.json",
+            "status": "PASS",
+            "actual": "PASS"
+          }
+        ]
+      }
+    }
+  ],
+  "summary": {
+    "total_checks": 5,
+    "passing_checks": 5,
+    "failing_checks": 0,
+    "scripts_passing": 8,
+    "scripts_total": 8,
+    "integration_passing": 3,
+    "integration_total": 3
+  },
+  "content_hash": "bfc8efc3c0503f310487ca9579fd303594c83a2ac569134b14743159d6cf2696"
+}

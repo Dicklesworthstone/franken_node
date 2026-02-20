@@ -1,0 +1,35 @@
+{
+  "bead_id": "bd-1xwz",
+  "title": "Performance budget guard for asupersync integration overhead",
+  "section": "10.15",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "rust_tests": 55,
+  "conformance_tests": 20,
+  "python_checks": 142,
+  "python_unit_tests": 40,
+  "artifacts": {
+    "implementation": "crates/franken-node/src/connector/perf_budget_guard.rs",
+    "conformance_test": "tests/conformance/perf_budget_guard.rs",
+    "spec": "docs/specs/section_10_15/bd-1xwz_contract.md",
+    "overhead_csv": "artifacts/10.15/integration_overhead_report.csv",
+    "verification_script": "scripts/check_perf_budget_guard.py",
+    "test_file": "tests/test_check_perf_budget_guard.py"
+  },
+  "checks": [
+    {"group": "files", "count": 4, "pass": 4},
+    {"group": "module_registration", "count": 1, "pass": 1},
+    {"group": "impl_test_count", "count": 1, "pass": 1},
+    {"group": "conformance_test_count", "count": 1, "pass": 1},
+    {"group": "serde_derives", "count": 1, "pass": 1},
+    {"group": "types", "count": 8, "pass": 8},
+    {"group": "methods", "count": 20, "pass": 20},
+    {"group": "event_codes", "count": 5, "pass": 5},
+    {"group": "invariants", "count": 4, "pass": 4},
+    {"group": "hot_paths", "count": 4, "pass": 4},
+    {"group": "impl_tests", "count": 51, "pass": 51},
+    {"group": "conformance_tests", "count": 20, "pass": 20},
+    {"group": "overhead_csv", "count": 8, "pass": 8},
+    {"group": "spec_content", "count": 13, "pass": 13}
+  ]
+}

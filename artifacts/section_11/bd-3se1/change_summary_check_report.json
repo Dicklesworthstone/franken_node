@@ -1,0 +1,56 @@
+{
+  "bead_id": "bd-3se1",
+  "changed_file_count": 2,
+  "changed_files_source": "artifacts/section_11/bd-3se1/changed_files_for_validation.txt",
+  "errors": [],
+  "events": [
+    {
+      "event_code": "CONTRACT_CHANGE_SUMMARY_VALIDATED",
+      "message": "change summary validated: docs/change_summaries/example_change_summary.json",
+      "severity": "info",
+      "summary_file": "docs/change_summaries/example_change_summary.json",
+      "trace_correlation": "ca40d98878ee77b2fa2f7a8c3d966fcea5a8d0f1b81ff3b275b169d21f7554f0"
+    }
+  ],
+  "example": "docs/change_summaries/example_change_summary.json",
+  "ok": true,
+  "required_event_codes": [
+    "CONTRACT_CHANGE_SUMMARY_VALIDATED",
+    "CONTRACT_INCOMPLETE",
+    "CONTRACT_MISSING"
+  ],
+  "requires_change_summary": true,
+  "subsystem_change_count": 1,
+  "summary_directory": "docs/change_summaries",
+  "summary_files_checked": [
+    "docs/change_summaries/example_change_summary.json"
+  ],
+  "template": "docs/templates/change_summary_template.md",
+  "validated_summaries": [
+    {
+      "errors": [],
+      "events": [
+        {
+          "event_code": "CONTRACT_CHANGE_SUMMARY_VALIDATED",
+          "message": "change summary validated: docs/change_summaries/example_change_summary.json",
+          "severity": "info",
+          "summary_file": "docs/change_summaries/example_change_summary.json",
+          "trace_correlation": "ca40d98878ee77b2fa2f7a8c3d966fcea5a8d0f1b81ff3b275b169d21f7554f0"
+        }
+      ],
+      "modules": [
+        "crates/franken-node/src/connector/lease_coordinator.rs",
+        "crates/franken-node/src/connector/lease_service.rs"
+      ],
+      "ok": true,
+      "subsystems": [
+        "franken_node.connector",
+        "franken_node.control_plane"
+      ],
+      "summary_file": "docs/change_summaries/example_change_summary.json",
+      "trace_correlation": "ca40d98878ee77b2fa2f7a8c3d966fcea5a8d0f1b81ff3b275b169d21f7554f0",
+      "warnings": []
+    }
+  ],
+  "warnings": []
+}

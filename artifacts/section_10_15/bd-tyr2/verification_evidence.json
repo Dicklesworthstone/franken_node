@@ -1,0 +1,37 @@
+{
+  "bead_id": "bd-tyr2",
+  "title": "Evidence replay validator integration into control-plane gates",
+  "section": "10.15",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "rust_tests": 68,
+  "conformance_tests": 19,
+  "python_checks": 147,
+  "python_unit_tests": 43,
+  "artifacts": {
+    "implementation": "crates/franken-node/src/connector/control_evidence_replay.rs",
+    "conformance_test": "tests/conformance/control_evidence_replay.rs",
+    "spec": "docs/specs/section_10_15/bd-tyr2_contract.md",
+    "adoption_doc": "docs/integration/control_evidence_replay_adoption.md",
+    "replay_report": "artifacts/10.15/control_evidence_replay_report.json",
+    "verification_script": "scripts/check_control_evidence_replay.py",
+    "test_file": "tests/test_check_control_evidence_replay.py"
+  },
+  "checks": [
+    {"group": "files", "count": 7, "pass": 7},
+    {"group": "module_registration", "count": 1, "pass": 1},
+    {"group": "impl_test_count", "count": 1, "pass": 1},
+    {"group": "conformance_test_count", "count": 1, "pass": 1},
+    {"group": "serde_derives", "count": 1, "pass": 1},
+    {"group": "canonical_validator", "count": 1, "pass": 1},
+    {"group": "types", "count": 4, "pass": 4},
+    {"group": "methods", "count": 12, "pass": 12},
+    {"group": "event_codes", "count": 5, "pass": 5},
+    {"group": "invariants", "count": 4, "pass": 4},
+    {"group": "impl_tests", "count": 64, "pass": 64},
+    {"group": "conformance_tests", "count": 19, "pass": 19},
+    {"group": "adoption_doc", "count": 9, "pass": 9},
+    {"group": "spec_content", "count": 8, "pass": 8},
+    {"group": "replay_report", "count": 6, "pass": 6}
+  ]
+}

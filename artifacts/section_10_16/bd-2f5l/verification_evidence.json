@@ -1,0 +1,33 @@
+{
+  "bead_id": "bd-2f5l",
+  "section": "10.16",
+  "title": "fastapi_rust service skeleton",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "verdict": "PASS",
+  "files": {
+    "integration_tests": "tests/integration/fastapi_control_plane_endpoints.rs",
+    "endpoint_report": "artifacts/10.16/fastapi_endpoint_report.json",
+    "spec_doc": "docs/specs/section_10_16/bd-2f5l_contract.md",
+    "verification_script": "scripts/check_fastapi_skeleton.py",
+    "python_tests": "tests/test_check_fastapi_skeleton.py"
+  },
+  "metrics": {
+    "rust_conformance_tests": 38,
+    "python_verification_checks": 109,
+    "python_unit_tests": 29,
+    "total_endpoints": 10,
+    "operator_endpoints": 4,
+    "verifier_endpoints": 3,
+    "fleet_control_endpoints": 3,
+    "middleware_layers": 6,
+    "event_codes": 6,
+    "invariants": 4,
+    "types": 9,
+    "methods": 18
+  },
+  "checks_summary": {
+    "passing": 109,
+    "failing": 0,
+    "total": 109
+  }
+}

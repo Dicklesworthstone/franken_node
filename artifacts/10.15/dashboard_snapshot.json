@@ -1,0 +1,66 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-3gnh",
+  "generated_at": "2026-02-20T00:00:00Z",
+  "panels": [
+    {
+      "name": "Region Health",
+      "category": "region_health",
+      "metrics": [
+        {"name": "fn_region_open_total", "type": "counter", "labels": ["region_id"]},
+        {"name": "fn_region_close_total", "type": "counter", "labels": ["region_id", "outcome"]},
+        {"name": "fn_region_quiescence_failures", "type": "counter", "labels": ["region_id"]},
+        {"name": "fn_region_active_gauge", "type": "gauge", "labels": []}
+      ],
+      "queries": [
+        "fn_region_active_gauge",
+        "rate(fn_region_close_total[5m])",
+        "fn_region_quiescence_failures"
+      ]
+    },
+    {
+      "name": "Obligation Health",
+      "category": "obligation_health",
+      "metrics": [
+        {"name": "fn_obligation_reserved_total", "type": "counter", "labels": ["obligation_type"]},
+        {"name": "fn_obligation_committed_total", "type": "counter", "labels": ["obligation_type"]},
+        {"name": "fn_obligation_leaked_total", "type": "counter", "labels": ["obligation_type"]},
+        {"name": "fn_obligation_active_gauge", "type": "gauge", "labels": []}
+      ],
+      "queries": [
+        "fn_obligation_active_gauge",
+        "rate(fn_obligation_committed_total[1m])",
+        "fn_obligation_leaked_total"
+      ]
+    },
+    {
+      "name": "Lane Pressure",
+      "category": "lane_pressure",
+      "metrics": [
+        {"name": "fn_lane_task_count", "type": "gauge", "labels": ["lane_id"]},
+        {"name": "fn_lane_starvation_ticks", "type": "counter", "labels": ["lane_id"]},
+        {"name": "fn_lane_throughput", "type": "counter", "labels": ["lane_id"]}
+      ],
+      "queries": [
+        "fn_lane_task_count{lane_id=~\".*\"}",
+        "rate(fn_lane_starvation_ticks[5m]) by (lane_id)",
+        "rate(fn_lane_throughput[1m]) by (lane_id)"
+      ]
+    },
+    {
+      "name": "Cancel Latency",
+      "category": "cancel_latency",
+      "metrics": [
+        {"name": "fn_cancel_request_duration_ms", "type": "histogram", "labels": ["phase"]},
+        {"name": "fn_cancel_drain_duration_ms", "type": "histogram", "labels": ["phase"]},
+        {"name": "fn_cancel_finalize_duration_ms", "type": "histogram", "labels": ["phase"]},
+        {"name": "fn_cancel_total_duration_ms", "type": "histogram", "labels": ["workflow"]}
+      ],
+      "queries": [
+        "histogram_quantile(0.5, fn_cancel_total_duration_ms)",
+        "histogram_quantile(0.95, fn_cancel_total_duration_ms)",
+        "histogram_quantile(0.99, fn_cancel_total_duration_ms)"
+      ]
+    }
+  ]
+}

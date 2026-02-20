@@ -1,0 +1,5 @@
+hot_path,baseline_p50_us,baseline_p95_us,baseline_p99_us,integrated_p50_us,integrated_p95_us,integrated_p99_us,overhead_p95_pct,overhead_p99_pct,cold_start_ms,within_budget
+lifecycle_transition,85.2,110.4,125.3,90.1,120.8,138.7,9.42,10.69,32.1,true
+health_gate_evaluation,42.1,55.3,68.7,44.8,59.2,74.1,7.05,7.86,18.4,true
+rollout_state_change,120.5,155.2,178.9,128.3,167.4,195.2,7.86,9.11,28.7,true
+fencing_token_op,28.4,35.1,42.8,29.9,37.2,45.9,5.98,7.24,12.3,true

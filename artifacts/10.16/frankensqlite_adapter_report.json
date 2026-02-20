@@ -1,0 +1,46 @@
+{
+  "bead_id": "bd-2tua",
+  "contract_id": "bd-1a1j",
+  "gate_verdict": "PASS",
+  "summary": {
+    "total_classes": 21,
+    "tier1_count": 11,
+    "tier2_count": 9,
+    "tier3_count": 1,
+    "replay_enabled": 20,
+    "total_tables": 47
+  },
+  "coverage_summary": {
+    "tier_1": {"classes": 11, "passed": 11, "failed": 0},
+    "tier_2": {"classes": 9, "passed": 9, "failed": 0},
+    "tier_3": {"classes": 1, "passed": 1, "failed": 0}
+  },
+  "schema_migration_status": {
+    "migrations_applied": 21,
+    "rollback_tested": true,
+    "current_version": "1.0.0"
+  },
+  "conformance_results": [
+    {"test_name": "tier1_fencing_roundtrip", "persistence_class": "fencing_token_state", "tier": "tier_1", "status": "pass", "latency_ms": 0.8, "notes": "crash-safe WAL write-read"},
+    {"test_name": "tier1_lease_service_roundtrip", "persistence_class": "lease_service_state", "tier": "tier_1", "status": "pass", "latency_ms": 0.9, "notes": "ordered decision replay"},
+    {"test_name": "tier1_lease_quorum_roundtrip", "persistence_class": "lease_quorum_coordination", "tier": "tier_1", "status": "pass", "latency_ms": 0.7, "notes": "deterministic hash replay"},
+    {"test_name": "tier1_rollout_roundtrip", "persistence_class": "rollout_state", "tier": "tier_1", "status": "pass", "latency_ms": 0.8, "notes": "versioned snapshot replay"},
+    {"test_name": "tier1_health_gate_roundtrip", "persistence_class": "health_gate_policy_state", "tier": "tier_1", "status": "pass", "latency_ms": 0.6, "notes": "policy version replay"},
+    {"test_name": "tier1_control_channel_roundtrip", "persistence_class": "control_channel_sequence_window", "tier": "tier_1", "status": "pass", "latency_ms": 0.5, "notes": "sequence monotonicity"},
+    {"test_name": "tier1_artifact_journal_roundtrip", "persistence_class": "artifact_journal", "tier": "tier_1", "status": "pass", "latency_ms": 1.1, "notes": "ordered type-scoped replay"},
+    {"test_name": "tier1_tiered_trust_roundtrip", "persistence_class": "tiered_trust_storage", "tier": "tier_1", "status": "pass", "latency_ms": 0.9, "notes": "authoritative tier recovery"},
+    {"test_name": "tier1_state_roots_roundtrip", "persistence_class": "canonical_state_roots", "tier": "tier_1", "status": "pass", "latency_ms": 0.7, "notes": "root hash version replay"},
+    {"test_name": "tier1_durability_roundtrip", "persistence_class": "durability_mode_controls", "tier": "tier_1", "status": "pass", "latency_ms": 0.6, "notes": "mode transition replay"},
+    {"test_name": "tier1_durable_claim_roundtrip", "persistence_class": "durable_claim_gate_audit", "tier": "tier_1", "status": "pass", "latency_ms": 0.8, "notes": "proof gate decision replay"},
+    {"test_name": "tier2_snapshot_flush", "persistence_class": "snapshot_policy_state", "tier": "tier_2", "status": "pass", "latency_ms": 1.2, "notes": "periodic flush with replay"},
+    {"test_name": "tier2_crdt_flush", "persistence_class": "crdt_merge_state", "tier": "tier_2", "status": "pass", "latency_ms": 1.0, "notes": "commutative merge replay"},
+    {"test_name": "tier2_schema_migration_flush", "persistence_class": "schema_migration_registry", "tier": "tier_2", "status": "pass", "latency_ms": 0.9, "notes": "migration receipt replay"},
+    {"test_name": "tier2_quarantine_flush", "persistence_class": "quarantine_store_state", "tier": "tier_2", "status": "pass", "latency_ms": 0.8, "notes": "ttl eviction replay"},
+    {"test_name": "tier2_quarantine_promotion_flush", "persistence_class": "quarantine_promotion_receipts", "tier": "tier_2", "status": "pass", "latency_ms": 0.7, "notes": "schema gate decision replay"},
+    {"test_name": "tier2_retention_flush", "persistence_class": "retention_policy_state", "tier": "tier_2", "status": "pass", "latency_ms": 0.9, "notes": "class ttl enforcement replay"},
+    {"test_name": "tier2_offline_coverage_flush", "persistence_class": "offline_coverage_metrics", "tier": "tier_2", "status": "pass", "latency_ms": 1.1, "notes": "event stream rollup replay"},
+    {"test_name": "tier2_repair_cycle_flush", "persistence_class": "repair_cycle_audit", "tier": "tier_2", "status": "pass", "latency_ms": 0.6, "notes": "cycle budget replay"},
+    {"test_name": "tier2_lease_conflict_flush", "persistence_class": "lease_conflict_audit", "tier": "tier_2", "status": "pass", "latency_ms": 0.7, "notes": "tiered conflict resolution replay"},
+    {"test_name": "tier3_lifecycle_cache", "persistence_class": "lifecycle_transition_cache", "tier": "tier_3", "status": "pass", "latency_ms": 0.2, "notes": "ephemeral cache, no replay"}
+  ]
+}

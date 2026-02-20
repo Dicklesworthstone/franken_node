@@ -1,0 +1,130 @@
+{
+  "gate_verdict": "PASS",
+  "summary": {
+    "total_endpoints": 10,
+    "operator_count": 4,
+    "verifier_count": 3,
+    "fleet_control_count": 3,
+    "middleware_layers": 6
+  },
+  "endpoints": [
+    {
+      "group": "operator",
+      "path": "/v1/operator/status",
+      "method": "GET",
+      "auth_method": "api_key",
+      "policy_hook": "operator_read",
+      "lifecycle": "stable",
+      "status_codes": [200, 401, 403, 500],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "operator",
+      "path": "/v1/operator/health",
+      "method": "GET",
+      "auth_method": "api_key",
+      "policy_hook": "operator_read",
+      "lifecycle": "stable",
+      "status_codes": [200, 503],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "operator",
+      "path": "/v1/operator/config",
+      "method": "GET",
+      "auth_method": "api_key",
+      "policy_hook": "operator_read",
+      "lifecycle": "stable",
+      "status_codes": [200, 401, 403],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "operator",
+      "path": "/v1/operator/rollout",
+      "method": "GET",
+      "auth_method": "api_key",
+      "policy_hook": "operator_read",
+      "lifecycle": "stable",
+      "status_codes": [200, 401, 403, 404],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "verifier",
+      "path": "/v1/verifier/conformance",
+      "method": "POST",
+      "auth_method": "bearer_token",
+      "policy_hook": "verifier_trigger",
+      "lifecycle": "stable",
+      "status_codes": [200, 202, 401, 403, 500],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "verifier",
+      "path": "/v1/verifier/evidence",
+      "method": "GET",
+      "auth_method": "bearer_token",
+      "policy_hook": "verifier_read",
+      "lifecycle": "stable",
+      "status_codes": [200, 401, 403, 404],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "verifier",
+      "path": "/v1/verifier/audit-log",
+      "method": "GET",
+      "auth_method": "bearer_token",
+      "policy_hook": "verifier_read",
+      "lifecycle": "stable",
+      "status_codes": [200, 401, 403],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "fleet_control",
+      "path": "/v1/fleet/lease",
+      "method": "POST",
+      "auth_method": "mtls_cert",
+      "policy_hook": "fleet_mutate",
+      "lifecycle": "stable",
+      "status_codes": [200, 201, 401, 403, 409, 500],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "fleet_control",
+      "path": "/v1/fleet/fence",
+      "method": "POST",
+      "auth_method": "mtls_cert",
+      "policy_hook": "fleet_mutate",
+      "lifecycle": "stable",
+      "status_codes": [200, 401, 403, 409, 500],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    },
+    {
+      "group": "fleet_control",
+      "path": "/v1/fleet/coordinate",
+      "method": "POST",
+      "auth_method": "mtls_cert",
+      "policy_hook": "fleet_mutate",
+      "lifecycle": "stable",
+      "status_codes": [200, 202, 401, 403, 500],
+      "trace_propagation": true,
+      "conformance_status": "pass"
+    }
+  ],
+  "middleware_coverage": {
+    "trace_context": true,
+    "authentication": true,
+    "authorization": true,
+    "rate_limit": true,
+    "error_formatting": true,
+    "telemetry": true
+  }
+}

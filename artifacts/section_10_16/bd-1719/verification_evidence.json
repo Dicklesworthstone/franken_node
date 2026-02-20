@@ -1,0 +1,92 @@
+{
+  "bead_id": "bd-1719",
+  "section": "10.16",
+  "title": "Deterministic frankentui snapshot and interaction replay coverage",
+  "timestamp": "2026-02-20T23:02:19Z",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "commands": [
+    {
+      "command": "python3 scripts/check_frankentui_snapshots.py --self-test --json",
+      "exit_code": 0,
+      "output_path": "artifacts/section_10_16/bd-1719/check_self_test.json"
+    },
+    {
+      "command": "python3 scripts/check_frankentui_snapshots.py --json",
+      "exit_code": 0,
+      "output_path": "artifacts/section_10_16/bd-1719/check_report.json"
+    },
+    {
+      "command": "python3 -m unittest tests/test_check_frankentui_snapshots.py",
+      "exit_code": 0,
+      "summary": "Ran 6 tests in 0.015s (OK)",
+      "output_path": "artifacts/section_10_16/bd-1719/unit_tests.txt"
+    }
+  ],
+  "cargo_quality_gates": [
+    {
+      "command": "rch exec -- cargo check --all-targets",
+      "exit_code": 0,
+      "status": "pass"
+    },
+    {
+      "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+      "exit_code": 101,
+      "status": "fail",
+      "scope": "pre-existing repository-wide lint debt outside bd-1719 scope",
+      "examples": [
+        "crates/franken-node/src/config.rs: dead_code warnings escalated to errors",
+        "crates/franken-node/src/policy/evidence_emission.rs: unused imports / redundant field names",
+        "tests/conformance/replica_artifact_determinism.rs: clippy style violations"
+      ]
+    },
+    {
+      "command": "rch exec -- cargo fmt --check",
+      "exit_code": 1,
+      "status": "fail",
+      "scope": "pre-existing repository-wide formatting drift outside bd-1719 scope",
+      "examples": [
+        "crates/franken-node/src/connector/control_evidence.rs",
+        "crates/franken-node/src/connector/control_evidence_replay.rs",
+        "tests/conformance/replica_artifact_determinism.rs"
+      ]
+    }
+  ],
+  "snapshot_metrics": {
+    "inventory_surfaces": 12,
+    "surface_snapshots": 12,
+    "interaction_replays": 4,
+    "baseline_snapshots": 16,
+    "checks_total": 42,
+    "errors_total": 0,
+    "warnings_total": 0,
+    "events_total": 16,
+    "trace_correlation": "aff614c7b537486bfc46e93579528bd44fb471336ca4dba89a5cf40214ace106"
+  },
+  "delivered_artifacts": [
+    "tests/tui/frankentui_snapshots.rs",
+    "fixtures/tui/snapshots/cli_command_output.snap",
+    "fixtures/tui/snapshots/main_panel_render.snap",
+    "fixtures/tui/snapshots/main_table_render.snap",
+    "fixtures/tui/snapshots/main_status_bar.snap",
+    "fixtures/tui/snapshots/correctness_alert.snap",
+    "fixtures/tui/snapshots/boundary_alert.snap",
+    "fixtures/tui/snapshots/boundary_table.snap",
+    "fixtures/tui/snapshots/evidence_status_bar.snap",
+    "fixtures/tui/snapshots/evidence_table.snap",
+    "fixtures/tui/snapshots/ledger_log_stream.snap",
+    "fixtures/tui/snapshots/replay_diff_panel.snap",
+    "fixtures/tui/snapshots/replay_alert.snap",
+    "fixtures/tui/snapshots/replay_navigation_cycle.snap",
+    "fixtures/tui/snapshots/replay_confirmation_flow.snap",
+    "fixtures/tui/snapshots/replay_cancellation_flow.snap",
+    "fixtures/tui/snapshots/replay_scrolling_cycle.snap",
+    "artifacts/10.16/frankentui_snapshot_report.json",
+    "scripts/check_frankentui_snapshots.py",
+    "tests/test_check_frankentui_snapshots.py",
+    "artifacts/section_10_16/bd-1719/check_self_test.json",
+    "artifacts/section_10_16/bd-1719/check_report.json",
+    "artifacts/section_10_16/bd-1719/unit_tests.txt",
+    "artifacts/section_10_16/bd-1719/verification_summary.md"
+  ]
+}

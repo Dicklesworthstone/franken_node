@@ -1,0 +1,44 @@
+{
+  "bead_id": "bd-29yx",
+  "description": "Sample challenge flow transcripts showing state transitions",
+  "transcripts": [
+    {
+      "name": "happy_path_promotion",
+      "steps": [
+        {"state": "Pending", "action": "issue_challenge", "next_state": "ChallengeIssued", "event": "CHALLENGE_ISSUED"},
+        {"state": "ChallengeIssued", "action": "submit_proof", "next_state": "ProofReceived", "event": "CHALLENGE_PROOF_RECEIVED"},
+        {"state": "ProofReceived", "action": "verify_proof", "next_state": "ProofVerified", "event": "CHALLENGE_VERIFIED"},
+        {"state": "ProofVerified", "action": "promote", "next_state": "Promoted", "event": "CHALLENGE_PROMOTED"}
+      ]
+    },
+    {
+      "name": "denial_after_issue",
+      "steps": [
+        {"state": "Pending", "action": "issue_challenge", "next_state": "ChallengeIssued", "event": "CHALLENGE_ISSUED"},
+        {"state": "ChallengeIssued", "action": "deny", "next_state": "Denied", "event": "CHALLENGE_DENIED"}
+      ]
+    },
+    {
+      "name": "timeout_denial",
+      "steps": [
+        {"state": "Pending", "action": "issue_challenge", "next_state": "ChallengeIssued", "event": "CHALLENGE_ISSUED"},
+        {"state": "ChallengeIssued", "action": "enforce_timeouts", "next_state": "Denied", "event": "CHALLENGE_TIMED_OUT"}
+      ]
+    },
+    {
+      "name": "denial_after_proof_received",
+      "steps": [
+        {"state": "Pending", "action": "issue_challenge", "next_state": "ChallengeIssued", "event": "CHALLENGE_ISSUED"},
+        {"state": "ChallengeIssued", "action": "submit_proof", "next_state": "ProofReceived", "event": "CHALLENGE_PROOF_RECEIVED"},
+        {"state": "ProofReceived", "action": "deny", "next_state": "Denied", "event": "CHALLENGE_DENIED"}
+      ]
+    },
+    {
+      "name": "invalid_transition_rejected",
+      "steps": [
+        {"state": "Pending", "action": "issue_challenge", "next_state": "ChallengeIssued", "event": "CHALLENGE_ISSUED"},
+        {"state": "ChallengeIssued", "action": "promote", "next_state": "ERROR", "error": "ERR_INVALID_TRANSITION"}
+      ]
+    }
+  ]
+}

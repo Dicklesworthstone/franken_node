@@ -1,0 +1,418 @@
+{
+  "generated_on": "2026-02-20",
+  "findings": [
+    {
+      "module_path": "crates/franken-node/src/connector/durable_claim_gate.rs",
+      "ambient_api": "std::time::Instant",
+      "line": 232,
+      "callsite": "let start = Instant::now();",
+      "status": "allowlisted",
+      "allowlist_entry_id": "AAL-001",
+      "event_code": "AMB-003"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::fs",
+      "line": 294,
+      "callsite": "std::fs::write(&tmp_path, &json).map_err(|e| PersistError::IoError {",
+      "status": "allowlisted",
+      "allowlist_entry_id": "AAL-002",
+      "event_code": "AMB-003"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::fs",
+      "line": 297,
+      "callsite": "std::fs::rename(&tmp_path, path).map_err(|e| PersistError::IoError {",
+      "status": "allowlisted",
+      "allowlist_entry_id": "AAL-002",
+      "event_code": "AMB-003"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::fs",
+      "line": 306,
+      "callsite": "let content = std::fs::read_to_string(path).map_err(|e| PersistError::IoError {",
+      "status": "allowlisted",
+      "allowlist_entry_id": "AAL-002",
+      "event_code": "AMB-003"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::time::SystemTime",
+      "line": 350,
+      "callsite": "let duration = SystemTime::now()",
+      "status": "allowlisted",
+      "allowlist_entry_id": "AAL-003",
+      "event_code": "AMB-003"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::time::SystemTime",
+      "line": 351,
+      "callsite": ".duration_since(SystemTime::UNIX_EPOCH)",
+      "status": "allowlisted",
+      "allowlist_entry_id": "AAL-003",
+      "event_code": "AMB-003"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/state_model.rs",
+      "ambient_api": "std::time::SystemTime",
+      "line": 225,
+      "callsite": "let duration = SystemTime::now()",
+      "status": "allowlisted",
+      "allowlist_entry_id": "AAL-004",
+      "event_code": "AMB-003"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/state_model.rs",
+      "ambient_api": "std::time::SystemTime",
+      "line": 226,
+      "callsite": ".duration_since(SystemTime::UNIX_EPOCH)",
+      "status": "allowlisted",
+      "allowlist_entry_id": "AAL-004",
+      "event_code": "AMB-003"
+    }
+  ],
+  "violations": [],
+  "events": [
+    {
+      "module_path": "crates/franken-node/src/conformance/connector_method_validator.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/conformance/mod.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/conformance/protocol_harness.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/activation_pipeline.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/admission_budget.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/anti_amplification.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/artifact_persistence.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/conformance_profile.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/control_channel.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/crdt.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/device_profile.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/durability.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/durable_claim_gate.rs",
+      "ambient_api": "std::time::Instant",
+      "line": 232,
+      "event_code": "AMB-003",
+      "message": "allowlist exception AAL-001 applied"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/error_code_registry.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/execution_scorer.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/fencing.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/frame_parser.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/fuzz_corpus.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/golden_vectors.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/health_gate.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/high_assurance_promotion.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/interop_suite.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/lease_conflict.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/lease_coordinator.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/lease_service.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/lifecycle.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/manifest_negotiation.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/mod.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/offline_coverage.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/prestage_engine.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/quarantine_promotion.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/quarantine_store.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/repair_controller.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/retention_policy.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/retrievability_gate.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::fs",
+      "line": 294,
+      "event_code": "AMB-003",
+      "message": "allowlist exception AAL-002 applied"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::fs",
+      "line": 297,
+      "event_code": "AMB-003",
+      "message": "allowlist exception AAL-002 applied"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::fs",
+      "line": 306,
+      "event_code": "AMB-003",
+      "message": "allowlist exception AAL-002 applied"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::time::SystemTime",
+      "line": 350,
+      "event_code": "AMB-003",
+      "message": "allowlist exception AAL-003 applied"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/rollout_state.rs",
+      "ambient_api": "std::time::SystemTime",
+      "line": 351,
+      "event_code": "AMB-003",
+      "message": "allowlist exception AAL-003 applied"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/schema_migration.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/snapshot_policy.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/state_model.rs",
+      "ambient_api": "std::time::SystemTime",
+      "line": 225,
+      "event_code": "AMB-003",
+      "message": "allowlist exception AAL-004 applied"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/state_model.rs",
+      "ambient_api": "std::time::SystemTime",
+      "line": 226,
+      "event_code": "AMB-003",
+      "message": "allowlist exception AAL-004 applied"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/telemetry_namespace.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/tiered_trust_storage.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/trace_context.rs",
+      "ambient_api": null,
+      "line": null,
+      "event_code": "AMB-001",
+      "message": "module contains no ambient-authority calls"
+    }
+  ],
+  "summary": {
+    "modules_scanned": 42,
+    "findings_total": 8,
+    "violations": 0,
+    "allowlisted": 8,
+    "expired_allowlist": 0,
+    "invalid_allowlist": 0,
+    "clean_modules": 39
+  }
+}

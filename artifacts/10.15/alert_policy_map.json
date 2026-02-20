@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "bead_id": "bd-3gnh",
+  "alerts": [
+    {
+      "name": "RegionQuiescenceFailure",
+      "metric": "fn_region_quiescence_failures",
+      "condition": "increase > 0 in 5min",
+      "severity": "CRITICAL",
+      "category": "region_health",
+      "runbook": "bd-1f8m: region-quiescence-failure",
+      "description": "At least one region failed to reach quiescence within the timeout."
+    },
+    {
+      "name": "ObligationLeak",
+      "metric": "fn_obligation_leaked_total",
+      "condition": "increase > 0",
+      "severity": "CRITICAL",
+      "category": "obligation_health",
+      "runbook": "bd-1f8m: obligation-leak",
+      "description": "An obligation was reserved but never committed or released."
+    },
+    {
+      "name": "LaneStarvation",
+      "metric": "fn_lane_starvation_ticks",
+      "condition": "> 3 consecutive ticks in any lane",
+      "severity": "WARNING",
+      "category": "lane_pressure",
+      "runbook": "bd-1f8m: lane-starvation",
+      "description": "A scheduler lane has had zero task completions for 3+ consecutive ticks."
+    },
+    {
+      "name": "CancelLatencyBudgetExceeded",
+      "metric": "fn_cancel_total_duration_ms",
+      "condition": "p99 > budget_ms",
+      "severity": "WARNING",
+      "category": "cancel_latency",
+      "runbook": "bd-1f8m: cancel-timeout",
+      "description": "Cancellation end-to-end p99 latency exceeds the configured budget."
+    },
+    {
+      "name": "HighObligationCount",
+      "metric": "fn_obligation_active_gauge",
+      "condition": "> configured threshold",
+      "severity": "WARNING",
+      "category": "obligation_health",
+      "runbook": "bd-1f8m: obligation-accumulation",
+      "description": "Active obligation count exceeds the configured accumulation threshold."
+    },
+    {
+      "name": "RegionCloseFailureRate",
+      "metric": "fn_region_close_total",
+      "condition": "rate(fn_region_close_total{outcome='failure'}[5m]) > 0.01",
+      "severity": "WARNING",
+      "category": "region_health",
+      "runbook": "bd-1f8m: region-close-failure",
+      "description": "Region close failure rate exceeds 1%."
+    }
+  ]
+}

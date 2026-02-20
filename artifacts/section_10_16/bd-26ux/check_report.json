@@ -1,0 +1,1045 @@
+{
+  "bead_id": "bd-26ux",
+  "title": "Migration path from interim/local stores to frankensqlite",
+  "section": "10.16",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 12,
+  "summary": {
+    "passing": 206,
+    "failing": 0,
+    "total": 206
+  },
+  "checks": [
+    {
+      "check": "file: migration doc",
+      "pass": true,
+      "detail": "exists: docs/migration/to_frankensqlite.md"
+    },
+    {
+      "check": "file: migration test",
+      "pass": true,
+      "detail": "exists: tests/migration/frankensqlite_migration_idempotence.rs"
+    },
+    {
+      "check": "file: migration report",
+      "pass": true,
+      "detail": "exists: artifacts/10.16/frankensqlite_migration_report.json"
+    },
+    {
+      "check": "doc: exists",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: section ## Migration inventory",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: section ## Migration strategy per domain",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: section ## Rollback path",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: section ## Idempotency guarantee",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain state_model",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/state_model.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain fencing_token_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/fencing.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain lease_coordination_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/lease_coordinator.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain lease_service_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/lease_service.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain lease_conflict_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/lease_conflict.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain snapshot_policy_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/snapshot_policy.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain quarantine_store_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/quarantine_store.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain retention_policy_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/retention_policy.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: domain artifact_persistence_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "doc: module crates/franken-node/src/connector/artifact_persistence.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "report: exists",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "report: valid json",
+      "pass": true,
+      "detail": "valid"
+    },
+    {
+      "check": "report: key domains",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: key idempotency_results",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: key rollback_results",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: domain count",
+      "pass": true,
+      "detail": "9 domains (expected 9)"
+    },
+    {
+      "check": "report: domain state_model",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: state_model field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: state_model field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: state_model field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: state_model field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: state_model field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: state_model field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: state_model field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: state_model source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/state_model.rs"
+    },
+    {
+      "check": "report: state_model source type",
+      "pass": true,
+      "detail": "in_memory_state_root_structs"
+    },
+    {
+      "check": "report: state_model migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: state_model rows migrated",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "report: state_model invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: state_model rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: state_model primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: domain fencing_token_state",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: fencing_token_state field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: fencing_token_state field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: fencing_token_state field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: fencing_token_state field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: fencing_token_state field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: fencing_token_state field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: fencing_token_state field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: fencing_token_state source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/fencing.rs"
+    },
+    {
+      "check": "report: fencing_token_state source type",
+      "pass": true,
+      "detail": "in_memory_fence_state_and_lease_tokens"
+    },
+    {
+      "check": "report: fencing_token_state migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: fencing_token_state rows migrated",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "report: fencing_token_state invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: fencing_token_state rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: fencing_token_state primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: domain lease_coordination_state",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_coordination_state field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_coordination_state field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_coordination_state field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_coordination_state field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_coordination_state field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_coordination_state field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_coordination_state field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_coordination_state source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/lease_coordinator.rs"
+    },
+    {
+      "check": "report: lease_coordination_state source type",
+      "pass": true,
+      "detail": "in_memory_candidate_and_quorum_material"
+    },
+    {
+      "check": "report: lease_coordination_state migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: lease_coordination_state rows migrated",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "report: lease_coordination_state invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: lease_coordination_state rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: lease_coordination_state primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: domain lease_service_state",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_service_state field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_service_state field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_service_state field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_service_state field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_service_state field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_service_state field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_service_state field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_service_state source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/lease_service.rs"
+    },
+    {
+      "check": "report: lease_service_state source type",
+      "pass": true,
+      "detail": "in_memory_lease_map_and_decision_log"
+    },
+    {
+      "check": "report: lease_service_state migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: lease_service_state rows migrated",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "report: lease_service_state invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: lease_service_state rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: lease_service_state primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: domain lease_conflict_state",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_conflict_state field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_conflict_state field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_conflict_state field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_conflict_state field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_conflict_state field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_conflict_state field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_conflict_state field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: lease_conflict_state source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/lease_conflict.rs"
+    },
+    {
+      "check": "report: lease_conflict_state source type",
+      "pass": true,
+      "detail": "in_memory_overlap_resolution_logs"
+    },
+    {
+      "check": "report: lease_conflict_state migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: lease_conflict_state rows migrated",
+      "pass": true,
+      "detail": "1"
+    },
+    {
+      "check": "report: lease_conflict_state invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: lease_conflict_state rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: lease_conflict_state primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: domain snapshot_policy_state",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: snapshot_policy_state field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: snapshot_policy_state field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: snapshot_policy_state field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: snapshot_policy_state field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: snapshot_policy_state field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: snapshot_policy_state field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: snapshot_policy_state field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: snapshot_policy_state source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/snapshot_policy.rs"
+    },
+    {
+      "check": "report: snapshot_policy_state source type",
+      "pass": true,
+      "detail": "in_memory_snapshot_tracker_and_policy_audit"
+    },
+    {
+      "check": "report: snapshot_policy_state migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: snapshot_policy_state rows migrated",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "report: snapshot_policy_state invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: snapshot_policy_state rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: snapshot_policy_state primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: domain quarantine_store_state",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: quarantine_store_state field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: quarantine_store_state field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: quarantine_store_state field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: quarantine_store_state field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: quarantine_store_state field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: quarantine_store_state field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: quarantine_store_state field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: quarantine_store_state source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/quarantine_store.rs"
+    },
+    {
+      "check": "report: quarantine_store_state source type",
+      "pass": true,
+      "detail": "in_memory_quarantine_map_and_eviction_counters"
+    },
+    {
+      "check": "report: quarantine_store_state migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: quarantine_store_state rows migrated",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "report: quarantine_store_state invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: quarantine_store_state rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: quarantine_store_state primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: domain retention_policy_state",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: retention_policy_state field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: retention_policy_state field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: retention_policy_state field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: retention_policy_state field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: retention_policy_state field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: retention_policy_state field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: retention_policy_state field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: retention_policy_state source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/retention_policy.rs"
+    },
+    {
+      "check": "report: retention_policy_state source type",
+      "pass": true,
+      "detail": "in_memory_policy_registry_and_message_store"
+    },
+    {
+      "check": "report: retention_policy_state migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: retention_policy_state rows migrated",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "report: retention_policy_state invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: retention_policy_state rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: retention_policy_state primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: domain artifact_persistence_state",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: artifact_persistence_state field name",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: artifact_persistence_state field source_module",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: artifact_persistence_state field source_type",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: artifact_persistence_state field migration_status",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: artifact_persistence_state field rows_migrated",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: artifact_persistence_state field invariants_verified",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: artifact_persistence_state field rollback_tested",
+      "pass": true,
+      "detail": "present"
+    },
+    {
+      "check": "report: artifact_persistence_state source module",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/artifact_persistence.rs"
+    },
+    {
+      "check": "report: artifact_persistence_state source type",
+      "pass": true,
+      "detail": "in_memory_artifact_map_and_sequence_index"
+    },
+    {
+      "check": "report: artifact_persistence_state migration status",
+      "pass": true,
+      "detail": "migrated"
+    },
+    {
+      "check": "report: artifact_persistence_state rows migrated",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "report: artifact_persistence_state invariants verified",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: artifact_persistence_state rollback tested",
+      "pass": true,
+      "detail": "True"
+    },
+    {
+      "check": "report: artifact_persistence_state primary persistence",
+      "pass": true,
+      "detail": "frankensqlite"
+    },
+    {
+      "check": "report: idempotency state_model",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: idempotency fencing_token_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: idempotency lease_coordination_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: idempotency lease_service_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: idempotency lease_conflict_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: idempotency snapshot_policy_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: idempotency quarantine_store_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: idempotency retention_policy_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: idempotency artifact_persistence_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback state_model",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback fencing_token_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback lease_coordination_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback lease_service_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback lease_conflict_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback snapshot_policy_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback quarantine_store_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback retention_policy_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: rollback artifact_persistence_state",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "report: partial failure recovery",
+      "pass": true,
+      "detail": "pass"
+    },
+    {
+      "check": "migration test: exists",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: test count",
+      "pass": true,
+      "detail": "12 tests (minimum 12)"
+    },
+    {
+      "check": "migration test: event code MIGRATION_DOMAIN_START",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: event code MIGRATION_DOMAIN_COMPLETE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: event code MIGRATION_DOMAIN_FAIL",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: event code MIGRATION_ROLLBACK_START",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: event code MIGRATION_ROLLBACK_COMPLETE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: event code MIGRATION_IDEMPOTENCY_VERIFIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: state_model_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: fencing_token_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: lease_coordination_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: lease_service_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: lease_conflict_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: snapshot_policy_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: quarantine_store_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: retention_policy_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: artifact_persistence_migration_is_idempotent",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: rollback_restores_interim_state",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: partial_failure_is_atomic_and_recoverable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "migration test: migrated_data_preserves_source_invariants",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

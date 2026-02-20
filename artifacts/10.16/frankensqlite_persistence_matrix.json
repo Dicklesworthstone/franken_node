@@ -1,0 +1,336 @@
+{
+  "contract_id": "bd-1a1j",
+  "schema_version": "1.0.0",
+  "generated_at": "2026-02-20T20:20:00Z",
+  "durability_modes": {
+    "tier_1": {
+      "durability_mode": "wal_full",
+      "journal_mode": "WAL",
+      "synchronous": "FULL",
+      "acid_guarantee": "crash_safe"
+    },
+    "tier_2": {
+      "durability_mode": "wal_normal",
+      "journal_mode": "WAL",
+      "synchronous": "NORMAL",
+      "acid_guarantee": "durable_periodic_flush"
+    },
+    "tier_3": {
+      "durability_mode": "memory",
+      "journal_mode": "MEMORY",
+      "synchronous": "OFF",
+      "acid_guarantee": "best_effort_ephemeral"
+    }
+  },
+  "mode_catalog": {
+    "wal_full": {
+      "journal_mode": "WAL",
+      "synchronous": "FULL"
+    },
+    "wal_normal": {
+      "journal_mode": "WAL",
+      "synchronous": "NORMAL"
+    },
+    "memory": {
+      "journal_mode": "MEMORY",
+      "synchronous": "OFF"
+    }
+  },
+  "concurrency_model": {
+    "pool_size": 16,
+    "isolation_level": "serializable_tier1_read_committed_tier2",
+    "conflict_resolution": "fencing_then_retry_with_backoff"
+  },
+  "persistence_classes": [
+    {
+      "domain": "fencing_token_state",
+      "owner_module": "crates/franken-node/src/connector/fencing.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "fencing_leases",
+        "fencing_state_tokens",
+        "fencing_epoch_scope_log"
+      ],
+      "replay_support": true,
+      "replay_strategy": "wal_replay_with_epoch_window_validation"
+    },
+    {
+      "domain": "lease_service_state",
+      "owner_module": "crates/franken-node/src/connector/lease_service.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "lease_service_records",
+        "lease_service_decisions"
+      ],
+      "replay_support": true,
+      "replay_strategy": "ordered_decision_replay_by_lease_id"
+    },
+    {
+      "domain": "lease_quorum_coordination",
+      "owner_module": "crates/franken-node/src/connector/lease_coordinator.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "lease_quorum_selection",
+        "lease_quorum_verification"
+      ],
+      "replay_support": true,
+      "replay_strategy": "deterministic_weighted_hash_replay"
+    },
+    {
+      "domain": "rollout_state",
+      "owner_module": "crates/franken-node/src/connector/rollout_state.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "rollout_state_snapshots",
+        "rollout_epoch_events"
+      ],
+      "replay_support": true,
+      "replay_strategy": "versioned_snapshot_replay"
+    },
+    {
+      "domain": "health_gate_policy_state",
+      "owner_module": "crates/franken-node/src/connector/health_gate.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "health_gate_policies",
+        "health_gate_results"
+      ],
+      "replay_support": true,
+      "replay_strategy": "policy_version_plus_epoch_replay"
+    },
+    {
+      "domain": "control_channel_sequence_window",
+      "owner_module": "crates/franken-node/src/connector/control_channel.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "control_channel_state",
+        "control_channel_audit_log"
+      ],
+      "replay_support": true,
+      "replay_strategy": "sequence_monotonicity_replay"
+    },
+    {
+      "domain": "artifact_journal",
+      "owner_module": "crates/franken-node/src/connector/artifact_persistence.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "artifact_journal",
+        "artifact_replay_index"
+      ],
+      "replay_support": true,
+      "replay_strategy": "ordered_type_scoped_replay_index"
+    },
+    {
+      "domain": "tiered_trust_storage",
+      "owner_module": "crates/franken-node/src/connector/tiered_trust_storage.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "tiered_trust_artifacts",
+        "tier_authority_map",
+        "tier_recovery_events"
+      ],
+      "replay_support": true,
+      "replay_strategy": "authoritative_tier_first_recovery_replay"
+    },
+    {
+      "domain": "canonical_state_roots",
+      "owner_module": "crates/franken-node/src/connector/state_model.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "state_roots",
+        "state_divergence_events"
+      ],
+      "replay_support": true,
+      "replay_strategy": "root_hash_and_version_replay"
+    },
+    {
+      "domain": "durability_mode_controls",
+      "owner_module": "crates/franken-node/src/connector/durability.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "durability_mode_assignments",
+        "durability_events"
+      ],
+      "replay_support": true,
+      "replay_strategy": "mode_transition_replay"
+    },
+    {
+      "domain": "durable_claim_gate_audit",
+      "owner_module": "crates/franken-node/src/connector/durable_claim_gate.rs",
+      "safety_tier": "tier_1",
+      "durability_mode": "wal_full",
+      "tables": [
+        "durable_claim_events",
+        "durable_claim_evidence"
+      ],
+      "replay_support": true,
+      "replay_strategy": "proof_gate_decision_replay"
+    },
+    {
+      "domain": "snapshot_policy_state",
+      "owner_module": "crates/franken-node/src/connector/snapshot_policy.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "snapshot_policies",
+        "snapshot_records",
+        "snapshot_policy_audit"
+      ],
+      "replay_support": true,
+      "replay_strategy": "snapshot_plus_mutation_distance_replay"
+    },
+    {
+      "domain": "crdt_merge_state",
+      "owner_module": "crates/franken-node/src/connector/crdt.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "crdt_replica_state",
+        "crdt_merge_events"
+      ],
+      "replay_support": true,
+      "replay_strategy": "commutative_merge_replay"
+    },
+    {
+      "domain": "schema_migration_registry",
+      "owner_module": "crates/franken-node/src/connector/schema_migration.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "schema_versions",
+        "migration_hints",
+        "migration_receipts"
+      ],
+      "replay_support": true,
+      "replay_strategy": "migration_path_and_receipt_replay"
+    },
+    {
+      "domain": "quarantine_store_state",
+      "owner_module": "crates/franken-node/src/connector/quarantine_store.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "quarantine_entries",
+        "quarantine_evictions"
+      ],
+      "replay_support": true,
+      "replay_strategy": "ttl_then_quota_eviction_replay"
+    },
+    {
+      "domain": "quarantine_promotion_receipts",
+      "owner_module": "crates/franken-node/src/connector/quarantine_promotion.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "quarantine_promotion_receipts",
+        "quarantine_promotion_rejections"
+      ],
+      "replay_support": true,
+      "replay_strategy": "schema_gate_decision_replay"
+    },
+    {
+      "domain": "retention_policy_state",
+      "owner_module": "crates/franken-node/src/connector/retention_policy.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "retention_policies",
+        "retention_messages",
+        "retention_decisions"
+      ],
+      "replay_support": true,
+      "replay_strategy": "class_then_ttl_enforcement_replay"
+    },
+    {
+      "domain": "offline_coverage_metrics",
+      "owner_module": "crates/franken-node/src/connector/offline_coverage.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "coverage_events",
+        "coverage_scope_metrics",
+        "coverage_slo_alerts"
+      ],
+      "replay_support": true,
+      "replay_strategy": "event_stream_to_metric_rollup_replay"
+    },
+    {
+      "domain": "repair_cycle_audit",
+      "owner_module": "crates/franken-node/src/connector/repair_controller.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "repair_cycles",
+        "repair_allocations"
+      ],
+      "replay_support": true,
+      "replay_strategy": "cycle_budget_replay"
+    },
+    {
+      "domain": "lease_conflict_audit",
+      "owner_module": "crates/franken-node/src/connector/lease_conflict.rs",
+      "safety_tier": "tier_2",
+      "durability_mode": "wal_normal",
+      "tables": [
+        "lease_conflicts",
+        "lease_conflict_actions"
+      ],
+      "replay_support": true,
+      "replay_strategy": "tiered_conflict_resolution_replay"
+    },
+    {
+      "domain": "lifecycle_transition_cache",
+      "owner_module": "crates/franken-node/src/connector/lifecycle.rs",
+      "safety_tier": "tier_3",
+      "durability_mode": "memory",
+      "tables": [
+        "lifecycle_transition_cache"
+      ],
+      "replay_support": false,
+      "replay_strategy": "recomputed_from_transition_rules"
+    }
+  ],
+  "event_codes": [
+    "PERSISTENCE_CONTRACT_LOADED",
+    "PERSISTENCE_CLASS_UNMAPPED",
+    "PERSISTENCE_TIER_INVALID",
+    "PERSISTENCE_REPLAY_UNSUPPORTED"
+  ],
+  "checklist": [
+    {
+      "requirement": "connector_stateful_modules_mapped",
+      "status": "defined",
+      "detail": "All detected stateful connector modules are mapped to a persistence class."
+    },
+    {
+      "requirement": "durability_modes_are_valid_frankensqlite_configs",
+      "status": "defined",
+      "detail": "Only WAL/FULL, WAL/NORMAL, MEMORY/OFF configurations are used."
+    },
+    {
+      "requirement": "schema_ownership_unique",
+      "status": "defined",
+      "detail": "Each table name is owned by exactly one module."
+    },
+    {
+      "requirement": "tier1_tier2_replay_semantics_defined",
+      "status": "defined",
+      "detail": "All tier_1 and tier_2 classes declare replay support and strategy."
+    },
+    {
+      "requirement": "concurrency_model_defined",
+      "status": "defined",
+      "detail": "Pool size, isolation level, and conflict resolution are explicit."
+    }
+  ]
+}

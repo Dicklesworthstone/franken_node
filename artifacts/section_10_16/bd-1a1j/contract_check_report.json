@@ -1,0 +1,22 @@
+{
+  "bead_id": "bd-1a1j",
+  "contract": "docs/specs/frankensqlite_persistence_contract.md",
+  "detected_stateful_module_count": 21,
+  "errors": [],
+  "events": [
+    {
+      "event_code": "PERSISTENCE_CONTRACT_LOADED",
+      "message": "Loaded frankensqlite persistence contract matrix.",
+      "severity": "info",
+      "trace_correlation": "ced233fc337368de1525c6099d201928f7c66b53b4b18c9f39b94819fb3dba9d"
+    }
+  ],
+  "mapped_module_count": 21,
+  "matrix": "artifacts/10.16/frankensqlite_persistence_matrix.json",
+  "module_root": "crates/franken-node/src/connector",
+  "ok": true,
+  "table_count": 47,
+  "trace_correlation": "ced233fc337368de1525c6099d201928f7c66b53b4b18c9f39b94819fb3dba9d",
+  "unmapped_stateful_modules": [],
+  "warnings": []
+}

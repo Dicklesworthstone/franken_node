@@ -1,0 +1,28 @@
+{
+  "bead_id": "bd-1f8m",
+  "title": "Invariant-breach runbooks for asupersync incidents",
+  "section": "10.15",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "python_checks": 69,
+  "python_unit_tests": 50,
+  "artifacts": {
+    "region_runbook": "docs/runbooks/region_quiescence_breach.md",
+    "obligation_runbook": "docs/runbooks/obligation_leak_incident.md",
+    "cancel_runbook": "docs/runbooks/cancel_timeout_incident.md",
+    "verification_script": "scripts/check_runbook_links.py",
+    "test_file": "tests/test_check_runbook_links.py"
+  },
+  "checks": [
+    {"group": "files", "count": 5, "pass": 5},
+    {"group": "required_sections", "count": 12, "pass": 12},
+    {"group": "metrics", "count": 11, "pass": 11},
+    {"group": "event_codes", "count": 4, "pass": 4},
+    {"group": "cross_refs", "count": 11, "pass": 11},
+    {"group": "alert_references", "count": 3, "pass": 3},
+    {"group": "severity", "count": 3, "pass": 3},
+    {"group": "lab_replay", "count": 3, "pass": 3},
+    {"group": "metrics_in_dashboard", "count": 11, "pass": 11},
+    {"group": "alert_map_refs", "count": 6, "pass": 6}
+  ]
+}

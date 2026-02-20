@@ -1,0 +1,22 @@
+{
+  "bead_id": "bd-bt82",
+  "classified_domain_count": 21,
+  "errors": [],
+  "events": [
+    {
+      "event_code": "SQLMODEL_POLICY_LOADED",
+      "message": "Loaded sqlmodel policy matrix.",
+      "severity": "info",
+      "trace_correlation": "3c73fd9f20a89b5aae8ff0ff55664b16d9171a81b0a4cf7bda437e665c910b4b"
+    }
+  ],
+  "expected_domain_count": 21,
+  "missing_domains": [],
+  "model_count": 21,
+  "ok": true,
+  "policy_doc": "docs/specs/sqlmodel_rust_usage_policy.md",
+  "policy_matrix": "artifacts/10.16/sqlmodel_policy_matrix.json",
+  "source_persistence_matrix": "artifacts/10.16/frankensqlite_persistence_matrix.json",
+  "trace_correlation": "3c73fd9f20a89b5aae8ff0ff55664b16d9171a81b0a4cf7bda437e665c910b4b",
+  "warnings": []
+}

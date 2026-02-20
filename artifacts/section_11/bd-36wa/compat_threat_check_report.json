@@ -1,0 +1,58 @@
+{
+  "bead_id": "bd-36wa",
+  "changed_file_count": 2,
+  "changed_files_source": "artifacts/section_11/bd-36wa/changed_files_for_validation.txt",
+  "errors": [],
+  "events": [
+    {
+      "event_code": "CONTRACT_COMPAT_THREAT_VALIDATED",
+      "message": "compatibility/threat evidence validated: docs/change_summaries/example_change_summary.json",
+      "severity": "info",
+      "summary_file": "docs/change_summaries/example_change_summary.json",
+      "trace_correlation": "833cb8cf9cd4524cc28ecabe995da8985158130912a0ad70bfcfbb256db8e4ac"
+    }
+  ],
+  "example": "docs/change_summaries/example_change_summary.json",
+  "ok": true,
+  "required_event_codes": [
+    "CONTRACT_COMPAT_THREAT_INCOMPLETE",
+    "CONTRACT_COMPAT_THREAT_MISSING",
+    "CONTRACT_COMPAT_THREAT_VALIDATED"
+  ],
+  "requires_contract": true,
+  "subsystem_change_count": 1,
+  "summary_directory": "docs/change_summaries",
+  "summary_files_checked": [
+    "docs/change_summaries/example_change_summary.json"
+  ],
+  "template": "docs/templates/change_summary_template.md",
+  "validated_summaries": [
+    {
+      "api_families": [
+        "POST /v1/fleet/lease/validate",
+        "fn finalize_lease(...) -> Result<LeaseFinalizeReceipt, LeaseError>"
+      ],
+      "errors": [],
+      "events": [
+        {
+          "event_code": "CONTRACT_COMPAT_THREAT_VALIDATED",
+          "message": "compatibility/threat evidence validated: docs/change_summaries/example_change_summary.json",
+          "severity": "info",
+          "summary_file": "docs/change_summaries/example_change_summary.json",
+          "trace_correlation": "833cb8cf9cd4524cc28ecabe995da8985158130912a0ad70bfcfbb256db8e4ac"
+        }
+      ],
+      "ok": true,
+      "summary_file": "docs/change_summaries/example_change_summary.json",
+      "threat_vectors": [
+        "data_exfiltration",
+        "denial_of_service",
+        "privilege_escalation"
+      ],
+      "trace_correlation": "833cb8cf9cd4524cc28ecabe995da8985158130912a0ad70bfcfbb256db8e4ac",
+      "validated_suite_count": 2,
+      "warnings": []
+    }
+  ],
+  "warnings": []
+}

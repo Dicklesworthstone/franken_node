@@ -1,0 +1,30 @@
+{
+  "bead_id": "bd-15j6",
+  "title": "Mandatory evidence emission for policy-influenced control decisions",
+  "section": "10.15",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "rust_tests": 51,
+  "python_checks": 94,
+  "python_unit_tests": 31,
+  "artifacts": {
+    "implementation": "crates/franken-node/src/connector/control_evidence.rs",
+    "spec": "docs/integration/control_evidence_contract.md",
+    "samples": "artifacts/10.15/control_evidence_samples.jsonl",
+    "verification_script": "scripts/check_control_evidence.py",
+    "test_file": "tests/test_check_control_evidence.py"
+  },
+  "checks": [
+    {"group": "files", "count": 3, "pass": 3},
+    {"group": "samples_jsonl", "count": 3, "pass": 3},
+    {"group": "spec_content", "count": 5, "pass": 5},
+    {"group": "module_registration", "count": 1, "pass": 1},
+    {"group": "test_count", "count": 1, "pass": 1},
+    {"group": "serde_derives", "count": 1, "pass": 1},
+    {"group": "types", "count": 7, "pass": 7},
+    {"group": "methods", "count": 13, "pass": 13},
+    {"group": "event_codes", "count": 5, "pass": 5},
+    {"group": "invariants", "count": 4, "pass": 4},
+    {"group": "required_tests", "count": 51, "pass": 51}
+  ]
+}

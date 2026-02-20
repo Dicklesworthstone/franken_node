@@ -1,0 +1,525 @@
+{
+  "bead_id": "bd-29yx",
+  "title": "Suspicious-artifact challenge flow",
+  "section": "10.14",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "test_count": 42,
+  "summary": {
+    "passing": 102,
+    "failing": 0,
+    "total": 102
+  },
+  "checks": [
+    {
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/security/challenge_flow.rs"
+    },
+    {
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-29yx_contract.md"
+    },
+    {
+      "check": "file: challenge transcript artifact",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/challenge_flow_transcript.json"
+    },
+    {
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ChallengeId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ArtifactId",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum SuspicionReason",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum RequiredProofType",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub enum ChallengeState",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ProofSubmission",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ChallengeConfig",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ChallengeAuditEntry",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ChallengeError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ChallengeMetrics",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct Challenge",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "type: pub struct ChallengeFlowController",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "state: Pending",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "state: ChallengeIssued",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "state: ProofReceived",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "state: ProofVerified",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "state: Denied",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "state: Promoted",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason: UnexpectedProvenance",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason: AgeAnomaly",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason: FormatDeviation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason: OperatorOverride",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "reason: PolicyRule",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn issue_challenge(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn submit_proof(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn verify_proof(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn promote(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn deny(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn enforce_timeouts(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn audit_query(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn challenge_audit(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn get_challenge(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn active_challenges(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn metrics(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn audit_log(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_terminal(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn valid_transitions(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn can_transition_to(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "method: fn is_timed_out(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: CHALLENGE_ISSUED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: CHALLENGE_PROOF_RECEIVED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: CHALLENGE_VERIFIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: CHALLENGE_TIMED_OUT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: CHALLENGE_DENIED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "event_code: CHALLENGE_PROMOTED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_INVALID_TRANSITION",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_CHALLENGE_ACTIVE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "error_code: ERR_NO_ACTIVE_CHALLENGE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-CHALLENGE-DEFER",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-CHALLENGE-TIMEOUT-DENY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-CHALLENGE-AUDIT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "invariant: INV-CHALLENGE-VALID-TRANSITIONS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "serde derives",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "SHA-256 for audit chain",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_pending_valid_transitions",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_issued_valid_transitions",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_received_valid_transitions",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verified_valid_transitions",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_denied_is_terminal",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_promoted_is_terminal",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_denied_to_promoted_invalid",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_promoted_to_denied_invalid",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_state_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_issue_challenge",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_issue_increments_metrics",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_duplicate_challenge_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_can_issue_after_resolved",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_full_happy_path",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_deny_from_issued",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_deny_from_proof_received",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_deny_from_verified",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_promote_from_issued_fails",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_promote_from_proof_received_fails",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_verify_from_issued_fails",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_submit_proof_to_denied_fails",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_timeout_denies_challenge",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_no_timeout_before_deadline",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_timeout_does_not_affect_terminal",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_timeout_disabled",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_audit_log_populated",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_audit_query_by_artifact",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_audit_query_by_challenge",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_audit_hash_chain",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_audit_first_entry_has_zero_prev_hash",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_active_challenges",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_active_challenges_excludes_terminal",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_suspicion_reason_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_required_proof_type_labels",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_event_codes_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_invariant_tags_defined",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_error_display",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_error_serde_roundtrip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_challenge_is_timed_out",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_metrics_after_full_flow",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_challenge_state_serde",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "test: test_challenge_metrics_serde",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit test count",
+      "pass": true,
+      "detail": "42 tests (minimum 35)"
+    },
+    {
+      "check": "transcript has entries",
+      "pass": true,
+      "detail": "5 transcripts (minimum 3)"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+{
+  "bead_id": "bd-2tua",
+  "section": "10.16",
+  "title": "Frankensqlite adapter layer",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "verdict": "PASS",
+  "files": {
+    "conformance_tests": "tests/integration/frankensqlite_adapter_conformance.rs",
+    "adapter_report": "artifacts/10.16/frankensqlite_adapter_report.json",
+    "persistence_matrix": "artifacts/10.16/frankensqlite_persistence_matrix.json",
+    "spec_doc": "docs/specs/section_10_16/bd-2tua_contract.md",
+    "verification_script": "scripts/check_frankensqlite_adapter.py",
+    "python_tests": "tests/test_check_frankensqlite_adapter.py"
+  },
+  "metrics": {
+    "rust_conformance_tests": 48,
+    "python_verification_checks": 127,
+    "python_unit_tests": 35,
+    "persistence_classes": 21,
+    "tier1_classes": 11,
+    "tier2_classes": 9,
+    "tier3_classes": 1,
+    "total_tables": 47,
+    "replay_enabled": 20,
+    "event_codes": 6,
+    "invariants": 4,
+    "types": 9,
+    "methods": 19
+  },
+  "checks_summary": {
+    "passing": 127,
+    "failing": 0,
+    "total": 127
+  }
+}

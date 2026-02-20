@@ -1,0 +1,29 @@
+{
+  "bead_id": "bd-2vl5",
+  "title": "Performance and Developer Velocity Doctrine",
+  "section": "7",
+  "verdict": "PASS",
+  "timestamp": "2026-02-20T00:00:00Z",
+  "python_checks": 54,
+  "python_unit_tests": 16,
+  "artifacts": {
+    "doctrine_doc": "docs/doctrine/performance_and_velocity.md",
+    "spec_contract": "docs/specs/section_7/bd-2vl5_contract.md",
+    "verification_script": "scripts/check_performance_doctrine.py",
+    "test_file": "tests/test_check_performance_doctrine.py"
+  },
+  "checks": [
+    {"group": "files", "count": 2, "pass": 2},
+    {"group": "core_principles", "count": 4, "pass": 4},
+    {"group": "quantitative_targets", "count": 3, "pass": 3},
+    {"group": "optimization_levers", "count": 5, "pass": 5},
+    {"group": "lever_details", "count": 3, "pass": 3},
+    {"group": "required_artifacts", "count": 5, "pass": 5},
+    {"group": "artifact_contents", "count": 8, "pass": 8},
+    {"group": "implementation_mapping", "count": 3, "pass": 3},
+    {"group": "event_codes", "count": 5, "pass": 5},
+    {"group": "invariants", "count": 4, "pass": 4},
+    {"group": "required_sections", "count": 6, "pass": 6},
+    {"group": "spec_contract", "count": 6, "pass": 6}
+  ]
+}

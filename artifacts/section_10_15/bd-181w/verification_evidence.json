@@ -1,0 +1,86 @@
+{
+  "bead_id": "bd-181w",
+  "section": "10.15",
+  "title": "Canonical epoch validity integration for control artifacts",
+  "generated_on": "2026-02-20",
+  "overall_status": "partial_blocked_by_preexisting_workspace_failures",
+  "deliverables": [
+    {
+      "path": "docs/integration/control_epoch_validity_adoption.md",
+      "exists": true
+    },
+    {
+      "path": "crates/franken-node/src/connector/fencing.rs",
+      "exists": true
+    },
+    {
+      "path": "crates/franken-node/src/connector/rollout_state.rs",
+      "exists": true
+    },
+    {
+      "path": "crates/franken-node/src/connector/health_gate.rs",
+      "exists": true
+    },
+    {
+      "path": "tests/security/control_epoch_validity.rs",
+      "exists": true
+    },
+    {
+      "path": "crates/franken-node/tests/control_epoch_validity.rs",
+      "exists": true
+    },
+    {
+      "path": "artifacts/10.15/epoch_validity_decisions.json",
+      "exists": true
+    }
+  ],
+  "verification_commands": [
+    {
+      "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node cargo check --all-targets",
+      "exit_code": 101,
+      "result": "failed",
+      "notes": "Repo-wide baseline failure outside bd-181w scope (e.g., supply_chain/certification.rs missing Ord derive on CapabilityCategory)."
+    },
+    {
+      "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node cargo clippy --all-targets -- -D warnings",
+      "exit_code": 101,
+      "result": "failed",
+      "notes": "Repo-wide clippy debt outside bd-181w scope across multiple existing modules/tests."
+    },
+    {
+      "command": "rch exec -- cargo fmt --check",
+      "exit_code": 1,
+      "result": "failed",
+      "notes": "Workspace has broad pre-existing formatting drift in unrelated files."
+    },
+    {
+      "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node cargo check -p frankenengine-node --test control_epoch_validity",
+      "exit_code": 0,
+      "result": "passed",
+      "notes": "Targeted bd-181w conformance test compiles successfully after test harness wiring fix."
+    },
+    {
+      "command": "rch exec -- env CARGO_TARGET_DIR=/tmp/rch_target_franken_node cargo test -p frankenengine-node --test control_epoch_validity -- --nocapture",
+      "exit_code": 101,
+      "result": "failed",
+      "notes": "Blocked by pre-existing bin compile error in supply_chain/certification.rs (unrelated to bd-181w edits)."
+    }
+  ],
+  "blockers": [
+    {
+      "category": "compile",
+      "location": "crates/franken-node/src/supply_chain/certification.rs",
+      "detail": "CapabilityCategory used in BTreeSet without Ord (E0277) in existing workspace state."
+    },
+    {
+      "category": "clippy",
+      "location": "multiple existing modules",
+      "detail": "Large pre-existing -D warnings failures outside bd-181w scope."
+    },
+    {
+      "category": "fmt",
+      "location": "multiple existing modules",
+      "detail": "Pre-existing formatting drift outside bd-181w scope."
+    }
+  ]
+}

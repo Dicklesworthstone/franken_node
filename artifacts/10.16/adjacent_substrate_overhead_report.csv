@@ -1,0 +1,9 @@
+substrate,operation,budget_ms,measured_p50_ms,measured_p95_ms,measured_p99_ms,status,baseline_p50_ms,regression_detected
+frankentui,render_status_panel,5.0,2.31,3.87,4.52,pass,2.28,false
+frankentui,render_tree_view,8.0,4.15,6.73,7.41,pass,4.09,false
+frankensqlite,fencing_token_write,10.0,3.82,7.14,8.93,pass,3.75,false
+frankensqlite,config_read,5.0,1.24,2.87,3.41,pass,1.21,false
+sqlmodel_rust,typed_model_serialize,1.0,0.18,0.42,0.67,pass,0.17,false
+sqlmodel_rust,typed_model_deserialize,1.0,0.21,0.48,0.73,pass,0.20,false
+fastapi_rust,middleware_pipeline,3.0,1.12,2.34,2.78,pass,1.08,false
+fastapi_rust,health_check_endpoint,2.0,0.53,1.21,1.58,pass,0.51,false

@@ -1,0 +1,340 @@
+{
+  "contract_id": "bd-bt82",
+  "schema_version": "1.0.0",
+  "generated_at": "2026-02-20T20:28:00Z",
+  "source_persistence_matrix": "artifacts/10.16/frankensqlite_persistence_matrix.json",
+  "domains": [
+    {
+      "name": "fencing_token_state",
+      "owner_module": "crates/franken-node/src/connector/fencing.rs",
+      "classification": "mandatory",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "FencingLeaseRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "lease_service_state",
+      "owner_module": "crates/franken-node/src/connector/lease_service.rs",
+      "classification": "mandatory",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "LeaseServiceRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "lease_quorum_coordination",
+      "owner_module": "crates/franken-node/src/connector/lease_coordinator.rs",
+      "classification": "mandatory",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "LeaseQuorumRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "rollout_state",
+      "owner_module": "crates/franken-node/src/connector/rollout_state.rs",
+      "classification": "mandatory",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "RolloutStateRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "health_gate_policy_state",
+      "owner_module": "crates/franken-node/src/connector/health_gate.rs",
+      "classification": "mandatory",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "HealthGatePolicyRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "control_channel_sequence_window",
+      "owner_module": "crates/franken-node/src/connector/control_channel.rs",
+      "classification": "mandatory",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "ControlChannelStateRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "artifact_journal",
+      "owner_module": "crates/franken-node/src/connector/artifact_persistence.rs",
+      "classification": "mandatory",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "ArtifactJournalRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "tiered_trust_storage",
+      "owner_module": "crates/franken-node/src/connector/tiered_trust_storage.rs",
+      "classification": "mandatory",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "TieredTrustArtifactRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "canonical_state_roots",
+      "owner_module": "crates/franken-node/src/connector/state_model.rs",
+      "classification": "mandatory",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "CanonicalStateRootRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "durability_mode_controls",
+      "owner_module": "crates/franken-node/src/connector/durability.rs",
+      "classification": "mandatory",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "DurabilityModeRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "durable_claim_gate_audit",
+      "owner_module": "crates/franken-node/src/connector/durable_claim_gate.rs",
+      "classification": "mandatory",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "DurableClaimAuditRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "snapshot_policy_state",
+      "owner_module": "crates/franken-node/src/connector/snapshot_policy.rs",
+      "classification": "should_use",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "SnapshotPolicyRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "crdt_merge_state",
+      "owner_module": "crates/franken-node/src/connector/crdt.rs",
+      "classification": "should_use",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "CrdtMergeStateRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "schema_migration_registry",
+      "owner_module": "crates/franken-node/src/connector/schema_migration.rs",
+      "classification": "mandatory",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "SchemaMigrationRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "quarantine_store_state",
+      "owner_module": "crates/franken-node/src/connector/quarantine_store.rs",
+      "classification": "should_use",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "QuarantineEntryRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "quarantine_promotion_receipts",
+      "owner_module": "crates/franken-node/src/connector/quarantine_promotion.rs",
+      "classification": "should_use",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "QuarantinePromotionRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "retention_policy_state",
+      "owner_module": "crates/franken-node/src/connector/retention_policy.rs",
+      "classification": "should_use",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "RetentionPolicyRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "offline_coverage_metrics",
+      "owner_module": "crates/franken-node/src/connector/offline_coverage.rs",
+      "classification": "optional",
+      "model_source": "codegen",
+      "version": "1.0.0",
+      "model_name": "OfflineCoverageMetricRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "repair_cycle_audit",
+      "owner_module": "crates/franken-node/src/connector/repair_controller.rs",
+      "classification": "should_use",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "RepairCycleAuditRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "lease_conflict_audit",
+      "owner_module": "crates/franken-node/src/connector/lease_conflict.rs",
+      "classification": "should_use",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "LeaseConflictAuditRecord",
+      "typed_model_defined": true
+    },
+    {
+      "name": "lifecycle_transition_cache",
+      "owner_module": "crates/franken-node/src/connector/lifecycle.rs",
+      "classification": "optional",
+      "model_source": "hand_authored",
+      "version": "1.0.0",
+      "model_name": "LifecycleTransitionCacheRecord",
+      "typed_model_defined": true
+    }
+  ],
+  "ownership_rules": {
+    "module_to_models": {
+      "crates/franken-node/src/connector/fencing.rs": [
+        "FencingLeaseRecord"
+      ],
+      "crates/franken-node/src/connector/lease_service.rs": [
+        "LeaseServiceRecord"
+      ],
+      "crates/franken-node/src/connector/lease_coordinator.rs": [
+        "LeaseQuorumRecord"
+      ],
+      "crates/franken-node/src/connector/rollout_state.rs": [
+        "RolloutStateRecord"
+      ],
+      "crates/franken-node/src/connector/health_gate.rs": [
+        "HealthGatePolicyRecord"
+      ],
+      "crates/franken-node/src/connector/control_channel.rs": [
+        "ControlChannelStateRecord"
+      ],
+      "crates/franken-node/src/connector/artifact_persistence.rs": [
+        "ArtifactJournalRecord"
+      ],
+      "crates/franken-node/src/connector/tiered_trust_storage.rs": [
+        "TieredTrustArtifactRecord"
+      ],
+      "crates/franken-node/src/connector/state_model.rs": [
+        "CanonicalStateRootRecord"
+      ],
+      "crates/franken-node/src/connector/durability.rs": [
+        "DurabilityModeRecord"
+      ],
+      "crates/franken-node/src/connector/durable_claim_gate.rs": [
+        "DurableClaimAuditRecord"
+      ],
+      "crates/franken-node/src/connector/snapshot_policy.rs": [
+        "SnapshotPolicyRecord"
+      ],
+      "crates/franken-node/src/connector/crdt.rs": [
+        "CrdtMergeStateRecord"
+      ],
+      "crates/franken-node/src/connector/schema_migration.rs": [
+        "SchemaMigrationRecord"
+      ],
+      "crates/franken-node/src/connector/quarantine_store.rs": [
+        "QuarantineEntryRecord"
+      ],
+      "crates/franken-node/src/connector/quarantine_promotion.rs": [
+        "QuarantinePromotionRecord"
+      ],
+      "crates/franken-node/src/connector/retention_policy.rs": [
+        "RetentionPolicyRecord"
+      ],
+      "crates/franken-node/src/connector/offline_coverage.rs": [
+        "OfflineCoverageMetricRecord"
+      ],
+      "crates/franken-node/src/connector/repair_controller.rs": [
+        "RepairCycleAuditRecord"
+      ],
+      "crates/franken-node/src/connector/lease_conflict.rs": [
+        "LeaseConflictAuditRecord"
+      ],
+      "crates/franken-node/src/connector/lifecycle.rs": [
+        "LifecycleTransitionCacheRecord"
+      ]
+    },
+    "model_to_module": {
+      "FencingLeaseRecord": "crates/franken-node/src/connector/fencing.rs",
+      "LeaseServiceRecord": "crates/franken-node/src/connector/lease_service.rs",
+      "LeaseQuorumRecord": "crates/franken-node/src/connector/lease_coordinator.rs",
+      "RolloutStateRecord": "crates/franken-node/src/connector/rollout_state.rs",
+      "HealthGatePolicyRecord": "crates/franken-node/src/connector/health_gate.rs",
+      "ControlChannelStateRecord": "crates/franken-node/src/connector/control_channel.rs",
+      "ArtifactJournalRecord": "crates/franken-node/src/connector/artifact_persistence.rs",
+      "TieredTrustArtifactRecord": "crates/franken-node/src/connector/tiered_trust_storage.rs",
+      "CanonicalStateRootRecord": "crates/franken-node/src/connector/state_model.rs",
+      "DurabilityModeRecord": "crates/franken-node/src/connector/durability.rs",
+      "DurableClaimAuditRecord": "crates/franken-node/src/connector/durable_claim_gate.rs",
+      "SnapshotPolicyRecord": "crates/franken-node/src/connector/snapshot_policy.rs",
+      "CrdtMergeStateRecord": "crates/franken-node/src/connector/crdt.rs",
+      "SchemaMigrationRecord": "crates/franken-node/src/connector/schema_migration.rs",
+      "QuarantineEntryRecord": "crates/franken-node/src/connector/quarantine_store.rs",
+      "QuarantinePromotionRecord": "crates/franken-node/src/connector/quarantine_promotion.rs",
+      "RetentionPolicyRecord": "crates/franken-node/src/connector/retention_policy.rs",
+      "OfflineCoverageMetricRecord": "crates/franken-node/src/connector/offline_coverage.rs",
+      "RepairCycleAuditRecord": "crates/franken-node/src/connector/repair_controller.rs",
+      "LeaseConflictAuditRecord": "crates/franken-node/src/connector/lease_conflict.rs",
+      "LifecycleTransitionCacheRecord": "crates/franken-node/src/connector/lifecycle.rs"
+    }
+  },
+  "codegen_config": {
+    "generation_strategy": "hybrid",
+    "schema_source": "frankensqlite tables plus schema_migration hints",
+    "generated_artifacts": [
+      "row_structs",
+      "query_contracts",
+      "field_type_mappings"
+    ],
+    "stale_model_policy": {
+      "warning_event": "SQLMODEL_CODEGEN_STALE",
+      "max_schema_lag_major": 0,
+      "max_schema_lag_minor": 1,
+      "enforcement": "warn_then_gate_on_major_divergence"
+    },
+    "versioning_rules": {
+      "semver_required": true,
+      "breaking_change_requires_major": true,
+      "registry_source_of_truth": "artifacts/10.16/sqlmodel_policy_matrix.json"
+    }
+  },
+  "event_codes": [
+    "SQLMODEL_POLICY_LOADED",
+    "SQLMODEL_DOMAIN_UNCLASSIFIED",
+    "SQLMODEL_OWNERSHIP_CONFLICT",
+    "SQLMODEL_CODEGEN_STALE"
+  ],
+  "checklist": [
+    {
+      "requirement": "all_persistence_domains_classified",
+      "status": "defined",
+      "detail": "Every persistence domain from bd-1a1j has mandatory/should_use/optional classification."
+    },
+    {
+      "requirement": "mandatory_domains_have_typed_models",
+      "status": "defined",
+      "detail": "Mandatory domains have typed_model_defined=true, model_name, and explicit version."
+    },
+    {
+      "requirement": "ownership_uniqueness_enforced",
+      "status": "defined",
+      "detail": "No model is assigned to more than one owner module."
+    },
+    {
+      "requirement": "codegen_and_versioning_rules_declared",
+      "status": "defined",
+      "detail": "Generation strategy, stale policy, and semver bump rules are explicit."
+    },
+    {
+      "requirement": "sqlmodel_frankensqlite_boundary_documented",
+      "status": "defined",
+      "detail": "Typed model plane vs storage engine plane boundary is explicitly documented in policy."
+    }
+  ]
+}

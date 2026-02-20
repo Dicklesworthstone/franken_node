@@ -1,0 +1,21 @@
+{
+  "bead_id": "bd-34ll",
+  "contract": "docs/specs/frankentui_integration_contract.md",
+  "checklist": "artifacts/10.16/frankentui_contract_checklist.json",
+  "module_root": "crates/franken-node/src",
+  "ok": true,
+  "trace_correlation": "dd8d17a04d577fb60461e7d859a1065ca82319259f3bd778ecd06292a962e3cf",
+  "mapped_component_count": 7,
+  "discovered_output_module_count": 6,
+  "unmapped_output_modules": [],
+  "errors": [],
+  "warnings": [],
+  "events": [
+    {
+      "event_code": "FRANKENTUI_CONTRACT_LOADED",
+      "severity": "info",
+      "trace_correlation": "dd8d17a04d577fb60461e7d859a1065ca82319259f3bd778ecd06292a962e3cf",
+      "message": "Loaded frankentui integration contract checklist."
+    }
+  ]
+}

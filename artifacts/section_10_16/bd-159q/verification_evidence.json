@@ -1,0 +1,33 @@
+{
+  "bead_id": "bd-159q",
+  "section": "10.16",
+  "title": "Waiver workflow for adjacent substrate exceptions",
+  "overall_pass": true,
+  "verdict": "PASS",
+  "commands": [
+    {
+      "command": "python3 scripts/check_waiver_workflow.py --self-test --json",
+      "exit_code": 0,
+      "output_path": "artifacts/section_10_16/bd-159q/check_self_test.json"
+    },
+    {
+      "command": "python3 scripts/check_waiver_workflow.py --json",
+      "exit_code": 0,
+      "output_path": "artifacts/section_10_16/bd-159q/check_report.json"
+    },
+    {
+      "command": "pytest -q tests/test_check_waiver_workflow.py",
+      "exit_code": 0,
+      "summary": "9 passed in 0.04s"
+    }
+  ],
+  "delivered_artifacts": [
+    "docs/policy/adjacent_substrate_waiver_process.md",
+    "artifacts/10.16/waiver_registry.json",
+    "scripts/check_waiver_workflow.py",
+    "tests/test_check_waiver_workflow.py",
+    "artifacts/section_10_16/bd-159q/check_report.json",
+    "artifacts/section_10_16/bd-159q/check_self_test.json",
+    "artifacts/section_10_16/bd-159q/verification_summary.md"
+  ]
+}

@@ -1,0 +1,171 @@
+{
+  "bead_id": "bd-ml1",
+  "section": "10.4",
+  "title": "Publisher Reputation Model with Explainable Transitions",
+  "timestamp": "2026-02-20T23:02:53.342257+00:00",
+  "overall_pass": true,
+  "checks": {
+    "files": {
+      "spec": {
+        "path": "docs/specs/section_10_4/bd-ml1_contract.md",
+        "exists": true,
+        "size_bytes": 5350
+      },
+      "rust_impl": {
+        "path": "crates/franken-node/src/supply_chain/reputation.rs",
+        "exists": true,
+        "size_bytes": 41726
+      },
+      "mod_rs": {
+        "path": "crates/franken-node/src/supply_chain/mod.rs",
+        "exists": true,
+        "size_bytes": 267
+      }
+    },
+    "spec_invariants": {
+      "pass": true,
+      "found": [
+        "INV-REP-DETERMINISTIC",
+        "INV-REP-EXPLAINABLE",
+        "INV-REP-DECAY",
+        "INV-REP-TIERS",
+        "INV-REP-FREEZE",
+        "INV-REP-RECOVERY",
+        "INV-REP-AUDIT",
+        "INV-REP-EVENTS"
+      ],
+      "missing": []
+    },
+    "rust_symbols": {
+      "pass": true,
+      "found": [
+        "pub enum ReputationTier",
+        "pub enum SignalKind",
+        "pub struct ReputationSignal",
+        "pub struct DecayConfig",
+        "pub struct TransitionExplanation",
+        "pub struct AuditEntry",
+        "pub enum AuditEvent",
+        "pub struct PublisherReputation",
+        "pub struct ReputationRegistry",
+        "pub struct RecoveryAction",
+        "pub fn deterministic_score",
+        "pub fn recovery_actions_for_tier"
+      ],
+      "missing": []
+    },
+    "event_codes": {
+      "pass": true,
+      "found": [
+        "REPUTATION_COMPUTED",
+        "REPUTATION_TRANSITION",
+        "REPUTATION_FROZEN",
+        "REPUTATION_UNFROZEN",
+        "REPUTATION_DECAY_APPLIED",
+        "REPUTATION_SIGNAL_INGESTED",
+        "REPUTATION_RECOVERY_STARTED",
+        "REPUTATION_AUDIT_QUERIED"
+      ],
+      "missing": []
+    },
+    "tiers": {
+      "pass": true,
+      "found": [
+        "Suspended",
+        "Untrusted",
+        "Provisional",
+        "Established",
+        "Trusted"
+      ],
+      "missing": []
+    },
+    "signal_kinds": {
+      "pass": true,
+      "found": [
+        "ProvenanceConsistency",
+        "VulnerabilityResponseTime",
+        "RevocationEvent",
+        "ExtensionQuality",
+        "CommunityReport",
+        "CertificationAdherence",
+        "CertificationLapse",
+        "QuarantineEvent",
+        "QuarantineResolution"
+      ],
+      "missing": []
+    },
+    "registry_methods": {
+      "pass": true,
+      "found": [
+        "pub fn register_publisher",
+        "pub fn get_reputation",
+        "pub fn query_audit_trail",
+        "pub fn query_audit_trail_range",
+        "pub fn ingest_signal",
+        "pub fn apply_decay",
+        "pub fn freeze",
+        "pub fn unfreeze",
+        "pub fn start_recovery",
+        "pub fn verify_audit_integrity",
+        "pub fn publisher_count",
+        "pub fn audit_trail_len",
+        "pub fn list_publishers"
+      ],
+      "missing": []
+    },
+    "tests": {
+      "pass": true,
+      "found": [
+        "test_tier_from_score",
+        "test_new_publisher_starts_provisional",
+        "test_ingest_positive_signal",
+        "test_ingest_negative_signal",
+        "test_score_clamped_to_range",
+        "test_duplicate_signal_rejected",
+        "test_frozen_rejects_signals",
+        "test_freeze_unfreeze_cycle",
+        "test_decay_reduces_score_toward_baseline",
+        "test_decay_skipped_below_min_interval",
+        "test_audit_trail_integrity",
+        "test_deterministic_scoring",
+        "test_tier_transitions_across_boundaries",
+        "test_recovery_actions_for_tiers",
+        "test_multiple_publishers_isolated",
+        "test_weight_override",
+        "test_audit_query_by_publisher",
+        "test_frozen_rejects_decay"
+      ],
+      "missing": []
+    },
+    "mod_registration": {
+      "pass": true,
+      "registered": true
+    },
+    "determinism": {
+      "pass": true,
+      "deterministic_fn": true,
+      "score_clamped": true,
+      "ordered_collections": true
+    },
+    "hash_chain": {
+      "pass": true,
+      "prev_hash_field": true,
+      "entry_hash_field": true,
+      "sha256_hashing": true,
+      "integrity_verification": true
+    },
+    "freeze_semantics": {
+      "pass": true,
+      "freeze_method": true,
+      "unfreeze_method": true,
+      "frozen_state_field": true,
+      "suspended_tier": true,
+      "frozen_signal_rejection": true
+    }
+  },
+  "summary": {
+    "total_checks": 12,
+    "passed": 12,
+    "failed": 0
+  }
+}

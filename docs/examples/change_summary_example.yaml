@@ -1,0 +1,43 @@
+summary_id: chg-20260220-control-lease-gate
+contract_version: "1.0"
+change_summary:
+  intent: "Add lease guard validation before control-plane finalize."
+  scope:
+    subsystems:
+      - franken_node.connector
+      - franken_node.control_plane
+    modules:
+      - crates/franken-node/src/connector/lease_coordinator.rs
+      - crates/franken-node/src/connector/lease_service.rs
+  surface_area_delta:
+    new_apis:
+      - "POST /v1/fleet/lease/validate"
+    removed_apis: []
+    changed_signatures:
+      - "fn finalize_lease(...) -> Result<LeaseFinalizeReceipt, LeaseError>"
+  affected_contracts:
+    beads:
+      - bd-3se1
+      - bd-c781
+    documents:
+      - docs/specs/fastapi_rust_integration_contract.md
+      - docs/specs/frankentui_integration_contract.md
+  operational_impact:
+    operator_notes: "Lease validation now blocks finalize when stale fencing evidence is detected."
+    required_actions:
+      - "Run lease conformance checks before canary promotion."
+      - "Update runbook escalation path for lease validation failures."
+    rollout_notes: "Enable in canary environment first, then expand fleet-wide."
+  risk_delta:
+    previous_tier: high
+    new_tier: medium
+    rationale: "Pre-finalize validation removes a class of stale-state lease approvals."
+  compatibility:
+    backward_compatibility: compatible
+    forward_compatibility: enables
+    details: "No removed runtime surfaces; this adds stricter validation with explicit failure receipts."
+  dependency_changes:
+    added: []
+    removed: []
+    updated:
+      - "tokio: 1.44.0 -> 1.45.0"
