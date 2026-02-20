@@ -1,0 +1,45 @@
+{
+  "gate": "error_code_registry_verification",
+  "bead": "bd-novi",
+  "section": "10.13",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "id": "ECR-IMPL",
+      "description": "Implementation with all required types",
+      "status": "PASS"
+    },
+    {
+      "id": "ECR-ERRORS",
+      "description": "All 5 error codes present",
+      "status": "PASS",
+      "details": "found 5/5"
+    },
+    {
+      "id": "ECR-CATALOG",
+      "description": "Error code registry fixture",
+      "status": "PASS"
+    },
+    {
+      "id": "ECR-INTEG",
+      "description": "Integration tests cover all 4 invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "ECR-TESTS",
+      "description": "Rust unit tests pass",
+      "status": "PASS",
+      "details": "17 tests passed"
+    },
+    {
+      "id": "ECR-SPEC",
+      "description": "Specification with invariants and types",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total_checks": 6,
+    "passing_checks": 6,
+    "failing_checks": 0
+  }
+}

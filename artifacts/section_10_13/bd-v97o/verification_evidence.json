@@ -1,0 +1,45 @@
+{
+  "gate": "control_channel_verification",
+  "bead": "bd-v97o",
+  "section": "10.13",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "id": "ACC-IMPL",
+      "description": "Implementation with all required types",
+      "status": "PASS"
+    },
+    {
+      "id": "ACC-ERRORS",
+      "description": "All 5 error codes present",
+      "status": "PASS",
+      "details": "found 5/5"
+    },
+    {
+      "id": "ACC-VECTORS",
+      "description": "Control channel replay vectors",
+      "status": "PASS"
+    },
+    {
+      "id": "ACC-INTEG",
+      "description": "Integration tests cover all 4 invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "ACC-TESTS",
+      "description": "Rust unit tests pass",
+      "status": "PASS",
+      "details": "15 tests passed"
+    },
+    {
+      "id": "ACC-SPEC",
+      "description": "Specification with invariants and types",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total_checks": 6,
+    "passing_checks": 6,
+    "failing_checks": 0
+  }
+}

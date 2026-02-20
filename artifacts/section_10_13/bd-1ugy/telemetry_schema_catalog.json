@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "planes": ["protocol", "capability", "egress", "security"],
+  "metrics": [
+    {
+      "name": "franken.protocol.messages_received_total",
+      "plane": "protocol",
+      "type": "counter",
+      "labels": ["peer_id", "message_type"],
+      "version": 1,
+      "frozen": true,
+      "deprecated": false
+    },
+    {
+      "name": "franken.protocol.messages_sent_total",
+      "plane": "protocol",
+      "type": "counter",
+      "labels": ["peer_id", "message_type"],
+      "version": 1,
+      "frozen": true,
+      "deprecated": false
+    },
+    {
+      "name": "franken.protocol.handshake_duration_ms",
+      "plane": "protocol",
+      "type": "histogram",
+      "labels": ["peer_id"],
+      "version": 1,
+      "frozen": false,
+      "deprecated": false
+    },
+    {
+      "name": "franken.capability.invocations_total",
+      "plane": "capability",
+      "type": "counter",
+      "labels": ["capability_id", "result"],
+      "version": 1,
+      "frozen": true,
+      "deprecated": false
+    },
+    {
+      "name": "franken.capability.active_leases",
+      "plane": "capability",
+      "type": "gauge",
+      "labels": ["capability_id"],
+      "version": 1,
+      "frozen": true,
+      "deprecated": false
+    },
+    {
+      "name": "franken.egress.bytes_sent_total",
+      "plane": "egress",
+      "type": "counter",
+      "labels": ["destination", "protocol"],
+      "version": 1,
+      "frozen": true,
+      "deprecated": false
+    },
+    {
+      "name": "franken.egress.requests_total",
+      "plane": "egress",
+      "type": "counter",
+      "labels": ["destination", "status"],
+      "version": 1,
+      "frozen": true,
+      "deprecated": false
+    },
+    {
+      "name": "franken.security.auth_failures_total",
+      "plane": "security",
+      "type": "counter",
+      "labels": ["method", "reason"],
+      "version": 1,
+      "frozen": true,
+      "deprecated": false
+    },
+    {
+      "name": "franken.security.quarantine_entries",
+      "plane": "security",
+      "type": "gauge",
+      "labels": [],
+      "version": 1,
+      "frozen": true,
+      "deprecated": false
+    }
+  ]
+}

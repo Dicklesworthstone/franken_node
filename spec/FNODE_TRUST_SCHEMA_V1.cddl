@@ -1,0 +1,48 @@
+; FNODE_TRUST_SCHEMA_V1 — Normative CDDL schema for franken_node trust protocol
+; Version: 1
+; Categories: serialization, signature, control-frame
+
+; --- Serialization ---
+
+invoke-message = {
+  "type": "invoke",
+  "id": tstr,
+  "payload": tstr,
+}
+
+response-message = {
+  "type": "response",
+  "id": tstr,
+  "status": "ok" / "error",
+  ? "error_code": tstr,
+  ? "recovery_hint": tstr,
+}
+
+; --- Signatures ---
+
+signature-envelope = {
+  "message": tstr,
+  "key_id": tstr,
+  "algorithm": "ed25519" / "ecdsa-p256",
+  "signature": bstr,
+}
+
+; --- Control-channel frames ---
+
+control-frame = {
+  "frame_id": tstr,
+  "raw_bytes_len": uint,
+  "nesting_depth": uint,
+  "decode_cpu_ms": uint,
+}
+
+parser-config = {
+  "max_frame_bytes": uint,
+  "max_nesting_depth": uint,
+  "max_decode_cpu_ms": uint,
+}
+
+decode-verdict = {
+  "allowed": bool,
+  "violations": [* tstr],
+}

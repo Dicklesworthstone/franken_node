@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "profiles": {
+    "MVP": {
+      "required_capabilities": ["serialization", "auth", "lifecycle", "fencing", "frame_parsing"],
+      "count": 5
+    },
+    "Full": {
+      "required_capabilities": [
+        "serialization", "auth", "lifecycle", "fencing", "frame_parsing",
+        "crdt", "lease_coordination", "quarantine", "retention",
+        "anti_amplification", "trace_correlation", "telemetry", "error_codes"
+      ],
+      "count": 13
+    }
+  },
+  "sample_evaluation": {
+    "profile": "MVP",
+    "version": 1,
+    "results": [
+      {"capability": "serialization", "passed": true, "details": "ok"},
+      {"capability": "auth", "passed": true, "details": "ok"},
+      {"capability": "lifecycle", "passed": true, "details": "ok"},
+      {"capability": "fencing", "passed": true, "details": "ok"},
+      {"capability": "frame_parsing", "passed": true, "details": "ok"}
+    ],
+    "verdict": "PASS",
+    "can_publish": true,
+    "metadata": {
+      "profile_name": "MVP",
+      "version": 1,
+      "capabilities_passed": 5,
+      "capabilities_total": 5
+    }
+  }
+}

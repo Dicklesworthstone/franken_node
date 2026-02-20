@@ -1,0 +1,10 @@
+{
+  "config": {"max_frame_bytes": 1000000, "max_nesting_depth": 32, "max_decode_cpu_ms": 100},
+  "test_frames": [
+    {"frame_id": "f-normal", "raw_bytes_len": 5000, "nesting_depth": 3, "decode_cpu_ms": 10, "verdict": "ALLOW"},
+    {"frame_id": "f-oversized", "raw_bytes_len": 2000000, "nesting_depth": 3, "decode_cpu_ms": 10, "verdict": "BLOCK", "violation": "BPG_SIZE_EXCEEDED"},
+    {"frame_id": "f-deep", "raw_bytes_len": 5000, "nesting_depth": 50, "decode_cpu_ms": 10, "verdict": "BLOCK", "violation": "BPG_DEPTH_EXCEEDED"},
+    {"frame_id": "f-slow", "raw_bytes_len": 5000, "nesting_depth": 3, "decode_cpu_ms": 200, "verdict": "BLOCK", "violation": "BPG_CPU_EXCEEDED"},
+    {"frame_id": "f-multi", "raw_bytes_len": 2000000, "nesting_depth": 50, "decode_cpu_ms": 200, "verdict": "BLOCK", "violations": ["BPG_SIZE_EXCEEDED", "BPG_DEPTH_EXCEEDED", "BPG_CPU_EXCEEDED"]}
+  ]
+}

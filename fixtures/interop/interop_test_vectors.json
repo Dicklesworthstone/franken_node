@@ -1,0 +1,39 @@
+{
+  "test_vectors": [
+    {
+      "class": "serialization",
+      "case_id": "ser-roundtrip-01",
+      "input": "{\"type\":\"invoke\",\"id\":\"abc\"}",
+      "expected_output": "{\"type\":\"invoke\",\"id\":\"abc\"}",
+      "implementation": "reference"
+    },
+    {
+      "class": "object_id",
+      "case_id": "oid-deterministic-01",
+      "input": "sha256:abc123",
+      "expected_output": "sha256:abc123",
+      "implementation": "reference"
+    },
+    {
+      "class": "signature",
+      "case_id": "sig-cross-verify-01",
+      "input": "valid",
+      "expected_output": "valid",
+      "implementation": "reference"
+    },
+    {
+      "class": "revocation",
+      "case_id": "rev-agreement-01",
+      "input": "revoked",
+      "expected_output": "revoked",
+      "implementation": "reference"
+    },
+    {
+      "class": "source_diversity",
+      "case_id": "sd-threshold-01",
+      "input": "3",
+      "expected_output": "2",
+      "implementation": "reference"
+    }
+  ]
+}

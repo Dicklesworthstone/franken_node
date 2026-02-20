@@ -1,0 +1,50 @@
+{
+  "gate": "golden_vectors_verification",
+  "bead": "bd-3n2u",
+  "section": "10.13",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "id": "GSV-IMPL",
+      "description": "Implementation with all required types",
+      "status": "PASS"
+    },
+    {
+      "id": "GSV-ERRORS",
+      "description": "All 5 error codes present",
+      "status": "PASS",
+      "details": "found 5/5"
+    },
+    {
+      "id": "GSV-VECTORS",
+      "description": "Golden vector file",
+      "status": "PASS"
+    },
+    {
+      "id": "GSV-SCHEMA",
+      "description": "CDDL schema file exists",
+      "status": "PASS"
+    },
+    {
+      "id": "GSV-INTEG",
+      "description": "Integration tests cover all 4 invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "GSV-TESTS",
+      "description": "Rust unit tests pass",
+      "status": "PASS",
+      "details": "13 tests passed"
+    },
+    {
+      "id": "GSV-SPEC",
+      "description": "Specification with invariants and types",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total_checks": 7,
+    "passing_checks": 7,
+    "failing_checks": 0
+  }
+}

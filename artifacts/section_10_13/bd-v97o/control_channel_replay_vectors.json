@@ -1,0 +1,10 @@
+{
+  "vectors": [
+    {"name": "valid_send", "direction": "send", "sequence": 1, "auth_token": "valid", "expected": "ACCEPT"},
+    {"name": "valid_recv", "direction": "receive", "sequence": 1, "auth_token": "valid", "expected": "ACCEPT"},
+    {"name": "auth_failed", "direction": "send", "sequence": 2, "auth_token": "", "expected": "REJECT_AUTH"},
+    {"name": "sequence_regress", "direction": "send", "sequence": 0, "auth_token": "valid", "previous_seq": 5, "expected": "REJECT_SEQUENCE"},
+    {"name": "replay_detected", "direction": "send", "sequence": 1, "auth_token": "valid", "previous_seq": 1, "expected": "REJECT_REPLAY_OR_REGRESS"},
+    {"name": "independent_directions", "direction": "receive", "sequence": 1, "auth_token": "valid", "send_at": 100, "expected": "ACCEPT"}
+  ]
+}

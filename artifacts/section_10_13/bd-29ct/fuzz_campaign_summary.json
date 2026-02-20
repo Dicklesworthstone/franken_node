@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "min_seeds_per_target": 3,
+  "targets": [
+    {"name": "parser_fuzz", "category": "parser_input", "seeds": 4, "crashes": 0, "hangs": 0},
+    {"name": "handshake_fuzz", "category": "handshake_replay", "seeds": 3, "crashes": 0, "hangs": 0},
+    {"name": "token_fuzz", "category": "token_validation", "seeds": 3, "crashes": 0, "hangs": 0},
+    {"name": "dos_fuzz", "category": "decode_dos", "seeds": 3, "crashes": 0, "hangs": 0}
+  ],
+  "gate_verdict": "PASS",
+  "untriaged_crashes": [],
+  "total_seeds_run": 13,
+  "total_crashes": 0
+}

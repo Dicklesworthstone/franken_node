@@ -1,0 +1,14 @@
+{
+  "schema_version": 1,
+  "schemas_validated": 3,
+  "vectors_verified": 6,
+  "results": [
+    {"vector_id": "ser-invoke-01", "passed": true, "details": "match"},
+    {"vector_id": "ser-response-01", "passed": true, "details": "match"},
+    {"vector_id": "sig-ed25519-01", "passed": true, "details": "match"},
+    {"vector_id": "sig-verify-01", "passed": true, "details": "match"},
+    {"vector_id": "frame-normal-01", "passed": true, "details": "match"},
+    {"vector_id": "frame-oversized-01", "passed": true, "details": "match"}
+  ],
+  "verdict": "PASS"
+}

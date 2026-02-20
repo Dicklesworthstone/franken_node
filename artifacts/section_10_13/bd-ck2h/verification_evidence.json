@@ -1,0 +1,45 @@
+{
+  "gate": "conformance_profile_verification",
+  "bead": "bd-ck2h",
+  "section": "10.13",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "id": "CPM-IMPL",
+      "description": "Implementation with all required types",
+      "status": "PASS"
+    },
+    {
+      "id": "CPM-ERRORS",
+      "description": "All 5 error codes present",
+      "status": "PASS",
+      "details": "found 5/5"
+    },
+    {
+      "id": "CPM-REPORT",
+      "description": "Profile claim report fixture",
+      "status": "PASS"
+    },
+    {
+      "id": "CPM-INTEG",
+      "description": "Integration tests cover all 4 invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "CPM-TESTS",
+      "description": "Rust unit tests pass",
+      "status": "PASS",
+      "details": "13 tests passed"
+    },
+    {
+      "id": "CPM-SPEC",
+      "description": "Specification with invariants and types",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total_checks": 6,
+    "passing_checks": 6,
+    "failing_checks": 0
+  }
+}

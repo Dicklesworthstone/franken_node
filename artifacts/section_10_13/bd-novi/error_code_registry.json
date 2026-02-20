@@ -1,0 +1,66 @@
+{
+  "schema_version": 1,
+  "subsystems": ["PROTOCOL", "CAPABILITY", "EGRESS", "SECURITY", "CONNECTOR", "RUNTIME", "SUPPLY_CHAIN", "CONFORMANCE"],
+  "error_codes": [
+    {
+      "code": "FRANKEN_PROTOCOL_AUTH_FAILED",
+      "subsystem": "PROTOCOL",
+      "severity": "transient",
+      "retryable": true,
+      "retry_after_ms": 1000,
+      "recovery_hint": "Re-authenticate with fresh credentials",
+      "version": 1,
+      "frozen": true
+    },
+    {
+      "code": "FRANKEN_PROTOCOL_SEQUENCE_REGRESS",
+      "subsystem": "PROTOCOL",
+      "severity": "degraded",
+      "retryable": false,
+      "retry_after_ms": null,
+      "recovery_hint": "Reset channel and re-establish session",
+      "version": 1,
+      "frozen": true
+    },
+    {
+      "code": "FRANKEN_SECURITY_KEY_COMPROMISED",
+      "subsystem": "SECURITY",
+      "severity": "fatal",
+      "retryable": false,
+      "retry_after_ms": null,
+      "recovery_hint": "",
+      "version": 1,
+      "frozen": true
+    },
+    {
+      "code": "FRANKEN_EGRESS_TIMEOUT",
+      "subsystem": "EGRESS",
+      "severity": "transient",
+      "retryable": true,
+      "retry_after_ms": 2000,
+      "recovery_hint": "Retry with exponential backoff",
+      "version": 1,
+      "frozen": true
+    },
+    {
+      "code": "FRANKEN_CONNECTOR_LEASE_EXPIRED",
+      "subsystem": "CONNECTOR",
+      "severity": "transient",
+      "retryable": true,
+      "retry_after_ms": 5000,
+      "recovery_hint": "Re-negotiate lease with coordinator",
+      "version": 1,
+      "frozen": true
+    },
+    {
+      "code": "FRANKEN_CAPABILITY_NOT_AVAILABLE",
+      "subsystem": "CAPABILITY",
+      "severity": "degraded",
+      "retryable": false,
+      "retry_after_ms": null,
+      "recovery_hint": "Check capability registry and provider status",
+      "version": 1,
+      "frozen": true
+    }
+  ]
+}

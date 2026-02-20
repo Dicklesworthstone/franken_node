@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {
+      "category": "serialization",
+      "vector_id": "ser-invoke-01",
+      "input": {"type": "invoke", "id": "abc-123", "payload": "hello"},
+      "expected_output": "7b2274797065223a22696e766f6b65222c226964223a226162632d313233222c227061796c6f6164223a2268656c6c6f227d",
+      "description": "Canonical JSON serialization of invoke message"
+    },
+    {
+      "category": "serialization",
+      "vector_id": "ser-response-01",
+      "input": {"type": "response", "id": "abc-123", "status": "ok"},
+      "expected_output": "7b2274797065223a22726573706f6e7365222c226964223a226162632d313233222c22737461747573223a226f6b227d",
+      "description": "Canonical JSON serialization of response message"
+    },
+    {
+      "category": "signature",
+      "vector_id": "sig-ed25519-01",
+      "input": {"message": "hello", "key_id": "key-01"},
+      "expected_output": "e5564300c360ac729086e2cc806e828a84877f1eb8e5d974d873e065224901555fb8821590a33bacc61e39701cf9b46bd25bf5f0595bbe24655141438e7a100b",
+      "description": "Ed25519 signature over 'hello' with test key"
+    },
+    {
+      "category": "signature",
+      "vector_id": "sig-verify-01",
+      "input": {"message": "hello", "signature": "e5564300...", "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa3f4a18446b7"},
+      "expected_output": "valid",
+      "description": "Ed25519 signature verification"
+    },
+    {
+      "category": "control_frame",
+      "vector_id": "frame-normal-01",
+      "input": {"frame_id": "f1", "raw_bytes_len": 500, "nesting_depth": 3, "decode_cpu_ms": 10},
+      "expected_output": "ALLOW",
+      "description": "Normal frame within all limits"
+    },
+    {
+      "category": "control_frame",
+      "vector_id": "frame-oversized-01",
+      "input": {"frame_id": "f2", "raw_bytes_len": 2000000, "nesting_depth": 3, "decode_cpu_ms": 10},
+      "expected_output": "BLOCK:BPG_SIZE_EXCEEDED",
+      "description": "Oversized frame exceeding max_frame_bytes"
+    }
+  ],
+  "changelog": [
+    {"version": 1, "description": "Initial golden vector set for v1 schema"}
+  ]
+}

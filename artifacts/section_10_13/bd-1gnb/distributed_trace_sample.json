@@ -1,0 +1,38 @@
+{
+  "trace_id": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+  "spans": [
+    {
+      "span_id": "0000000000000001",
+      "parent_span_id": null,
+      "operation": "connector.invoke",
+      "timestamp": "2026-01-01T00:00:00.000Z",
+      "artifact_type": "invoke"
+    },
+    {
+      "span_id": "0000000000000002",
+      "parent_span_id": "0000000000000001",
+      "operation": "connector.auth_check",
+      "timestamp": "2026-01-01T00:00:00.010Z",
+      "artifact_type": "receipt"
+    },
+    {
+      "span_id": "0000000000000003",
+      "parent_span_id": "0000000000000001",
+      "operation": "connector.frame_decode",
+      "timestamp": "2026-01-01T00:00:00.020Z",
+      "artifact_type": "audit"
+    },
+    {
+      "span_id": "0000000000000004",
+      "parent_span_id": "0000000000000001",
+      "operation": "connector.response",
+      "timestamp": "2026-01-01T00:00:00.050Z",
+      "artifact_type": "response"
+    }
+  ],
+  "conformance": {
+    "total_artifacts": 4,
+    "violations": 0,
+    "verdict": "PASS"
+  }
+}

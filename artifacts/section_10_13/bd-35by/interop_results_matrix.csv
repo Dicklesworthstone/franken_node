@@ -1,0 +1,11 @@
+class,case_id,implementation,passed,details
+serialization,ser-roundtrip-01,reference,true,round-trip match
+serialization,ser-roundtrip-02,reference,true,round-trip match
+object_id,oid-deterministic-01,reference,true,deterministic
+object_id,oid-deterministic-02,reference,true,deterministic
+signature,sig-cross-verify-01,reference,true,cross-check valid
+signature,sig-cross-verify-02,reference,true,cross-check valid
+revocation,rev-agreement-01,reference,true,implementations agree
+revocation,rev-disagreement-01,reference,false,impl_a=true impl_b=false
+source_diversity,sd-threshold-01,reference,true,3/2 sources
+source_diversity,sd-insufficient-01,reference,false,1/3 sources
