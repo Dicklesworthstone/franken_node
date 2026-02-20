@@ -1,0 +1,14 @@
+{
+  "matrix": [
+    {"message_type": "invoke", "retention_class": "required", "ephemeral_ttl_seconds": null, "drop_allowed": false},
+    {"message_type": "response", "retention_class": "required", "ephemeral_ttl_seconds": null, "drop_allowed": false},
+    {"message_type": "receipt", "retention_class": "required", "ephemeral_ttl_seconds": null, "drop_allowed": false},
+    {"message_type": "approval", "retention_class": "required", "ephemeral_ttl_seconds": null, "drop_allowed": false},
+    {"message_type": "revocation", "retention_class": "required", "ephemeral_ttl_seconds": null, "drop_allowed": false},
+    {"message_type": "audit", "retention_class": "required", "ephemeral_ttl_seconds": null, "drop_allowed": false},
+    {"message_type": "heartbeat", "retention_class": "ephemeral", "ephemeral_ttl_seconds": 60, "drop_allowed": true},
+    {"message_type": "discovery", "retention_class": "ephemeral", "ephemeral_ttl_seconds": 300, "drop_allowed": true},
+    {"message_type": "gossip", "retention_class": "ephemeral", "ephemeral_ttl_seconds": 120, "drop_allowed": true},
+    {"message_type": "probe", "retention_class": "ephemeral", "ephemeral_ttl_seconds": 30, "drop_allowed": true}
+  ]
+}

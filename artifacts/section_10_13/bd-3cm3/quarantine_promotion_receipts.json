@@ -1,0 +1,44 @@
+{
+  "receipts": [
+    {
+      "object_id": "obj-001",
+      "promoted_at": "2026-02-20T10:00:00Z",
+      "requester_id": "admin-1",
+      "reason": "Schema validated and reachable",
+      "schema_version": "1.0",
+      "validator_id": "validator-primary",
+      "trace_id": "trace-001"
+    },
+    {
+      "object_id": "obj-003",
+      "promoted_at": "2026-02-20T10:05:00Z",
+      "requester_id": "admin-2",
+      "reason": "Pinned by operator",
+      "schema_version": "1.0",
+      "validator_id": "validator-primary",
+      "trace_id": "trace-003"
+    }
+  ],
+  "rejections": [
+    {
+      "object_id": "obj-002",
+      "requester_id": "anon-1",
+      "rejection_reasons": ["NotAuthenticated"],
+      "timestamp": "2026-02-20T10:02:00Z"
+    },
+    {
+      "object_id": "obj-004",
+      "requester_id": "admin-3",
+      "rejection_reasons": ["SchemaFailed"],
+      "schema_expected": "1.0",
+      "schema_got": "0.9",
+      "timestamp": "2026-02-20T10:07:00Z"
+    },
+    {
+      "object_id": "obj-005",
+      "requester_id": "admin-1",
+      "rejection_reasons": ["NotReachable"],
+      "timestamp": "2026-02-20T10:10:00Z"
+    }
+  ]
+}

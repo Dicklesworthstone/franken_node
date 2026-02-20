@@ -1,0 +1,45 @@
+{
+  "gate": "quarantine_promotion_verification",
+  "bead": "bd-3cm3",
+  "section": "10.13",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "id": "QPR-IMPL",
+      "description": "Implementation with all required types",
+      "status": "PASS"
+    },
+    {
+      "id": "QPR-ERRORS",
+      "description": "All 5 error codes present",
+      "status": "PASS",
+      "details": "found 5/5"
+    },
+    {
+      "id": "QPR-RECEIPTS",
+      "description": "Promotion receipts fixture",
+      "status": "PASS"
+    },
+    {
+      "id": "QPR-INTEG",
+      "description": "Integration tests cover all 4 invariants",
+      "status": "PASS"
+    },
+    {
+      "id": "QPR-TESTS",
+      "description": "Rust unit tests pass",
+      "status": "PASS",
+      "details": "16 tests passed"
+    },
+    {
+      "id": "QPR-SPEC",
+      "description": "Specification with invariants and types",
+      "status": "PASS"
+    }
+  ],
+  "summary": {
+    "total_checks": 6,
+    "passing_checks": 6,
+    "failing_checks": 0
+  }
+}
