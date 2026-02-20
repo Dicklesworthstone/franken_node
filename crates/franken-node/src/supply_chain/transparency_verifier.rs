@@ -90,10 +90,16 @@ impl fmt::Display for ProofFailure {
                 write!(f, "TLOG_ROOT_NOT_PINNED: {root_hash}")
             }
             Self::PathInvalid { computed, expected } => {
-                write!(f, "TLOG_PATH_INVALID: computed={computed}, expected={expected}")
+                write!(
+                    f,
+                    "TLOG_PATH_INVALID: computed={computed}, expected={expected}"
+                )
             }
             Self::LeafMismatch { expected, actual } => {
-                write!(f, "TLOG_LEAF_MISMATCH: expected={expected}, actual={actual}")
+                write!(
+                    f,
+                    "TLOG_LEAF_MISMATCH: expected={expected}, actual={actual}"
+                )
             }
         }
     }
@@ -233,10 +239,16 @@ impl fmt::Display for TransparencyError {
                 write!(f, "TLOG_ROOT_NOT_PINNED: {root_hash}")
             }
             Self::PathInvalid { computed, expected } => {
-                write!(f, "TLOG_PATH_INVALID: computed={computed}, expected={expected}")
+                write!(
+                    f,
+                    "TLOG_PATH_INVALID: computed={computed}, expected={expected}"
+                )
             }
             Self::LeafMismatch { expected, actual } => {
-                write!(f, "TLOG_LEAF_MISMATCH: expected={expected}, actual={actual}")
+                write!(
+                    f,
+                    "TLOG_LEAF_MISMATCH: expected={expected}, actual={actual}"
+                )
             }
         }
     }
@@ -367,8 +379,13 @@ mod tests {
         let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
         let policy = test_policy(&root);
         let receipt = verify_inclusion(
-            &policy, Some(&proofs[0]), &proofs[0].leaf_hash,
-            "conn-1", "art-1", "t1", "ts",
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "art-1",
+            "t1",
+            "ts",
         );
         assert!(receipt.verified);
         assert!(receipt.proof_valid);
@@ -381,10 +398,7 @@ mod tests {
             required: true,
             pinned_roots: vec![],
         };
-        let receipt = verify_inclusion(
-            &policy, None, "hash",
-            "conn-1", "art-1", "t2", "ts",
-        );
+        let receipt = verify_inclusion(&policy, None, "hash", "conn-1", "art-1", "t2", "ts");
         assert!(!receipt.verified);
         assert_eq!(receipt.failure_reason, Some(ProofFailure::ProofMissing));
     }
@@ -395,10 +409,7 @@ mod tests {
             required: false,
             pinned_roots: vec![],
         };
-        let receipt = verify_inclusion(
-            &policy, None, "hash",
-            "conn-1", "art-1", "t3", "ts",
-        );
+        let receipt = verify_inclusion(&policy, None, "hash", "conn-1", "art-1", "t3", "ts");
         assert!(receipt.verified);
     }
 
@@ -407,8 +418,13 @@ mod tests {
         let (_, proofs) = build_test_tree(&["a", "b", "c", "d"]);
         let policy = test_policy("wrong_root_hash");
         let receipt = verify_inclusion(
-            &policy, Some(&proofs[0]), &proofs[0].leaf_hash,
-            "conn-1", "art-1", "t4", "ts",
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "art-1",
+            "t4",
+            "ts",
         );
         assert!(!receipt.verified);
         assert!(matches!(
@@ -422,8 +438,13 @@ mod tests {
         let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
         let policy = test_policy(&root);
         let receipt = verify_inclusion(
-            &policy, Some(&proofs[0]), "wrong_leaf_hash",
-            "conn-1", "art-1", "t5", "ts",
+            &policy,
+            Some(&proofs[0]),
+            "wrong_leaf_hash",
+            "conn-1",
+            "art-1",
+            "t5",
+            "ts",
         );
         assert!(!receipt.verified);
         assert!(matches!(
@@ -441,8 +462,13 @@ mod tests {
             bad_proof.audit_path[0] = "tampered".into();
         }
         let receipt = verify_inclusion(
-            &policy, Some(&bad_proof), &bad_proof.leaf_hash,
-            "conn-1", "art-1", "t6", "ts",
+            &policy,
+            Some(&bad_proof),
+            &bad_proof.leaf_hash,
+            "conn-1",
+            "art-1",
+            "t6",
+            "ts",
         );
         assert!(!receipt.verified);
     }
@@ -452,12 +478,22 @@ mod tests {
         let (root, proofs) = build_test_tree(&["a", "b"]);
         let policy = test_policy(&root);
         let r1 = verify_inclusion(
-            &policy, Some(&proofs[0]), &proofs[0].leaf_hash,
-            "conn-1", "art-1", "t7a", "ts",
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "art-1",
+            "t7a",
+            "ts",
         );
         let r2 = verify_inclusion(
-            &policy, Some(&proofs[0]), &proofs[0].leaf_hash,
-            "conn-1", "art-1", "t7b", "ts",
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "art-1",
+            "t7b",
+            "ts",
         );
         assert_eq!(r1.verified, r2.verified);
         assert_eq!(r1.proof_valid, r2.proof_valid);
@@ -468,8 +504,13 @@ mod tests {
         let (root, proofs) = build_test_tree(&["a", "b"]);
         let policy = test_policy(&root);
         let receipt = verify_inclusion(
-            &policy, Some(&proofs[0]), &proofs[0].leaf_hash,
-            "conn-1", "art-1", "trace-xyz", "ts",
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "art-1",
+            "trace-xyz",
+            "ts",
         );
         assert_eq!(receipt.trace_id, "trace-xyz");
     }
@@ -508,13 +549,21 @@ mod tests {
         let e1 = TransparencyError::ProofMissing;
         assert!(e1.to_string().contains("TLOG_PROOF_MISSING"));
 
-        let e2 = TransparencyError::RootNotPinned { root_hash: "abc".into() };
+        let e2 = TransparencyError::RootNotPinned {
+            root_hash: "abc".into(),
+        };
         assert!(e2.to_string().contains("TLOG_ROOT_NOT_PINNED"));
 
-        let e3 = TransparencyError::PathInvalid { computed: "a".into(), expected: "b".into() };
+        let e3 = TransparencyError::PathInvalid {
+            computed: "a".into(),
+            expected: "b".into(),
+        };
         assert!(e3.to_string().contains("TLOG_PATH_INVALID"));
 
-        let e4 = TransparencyError::LeafMismatch { expected: "a".into(), actual: "b".into() };
+        let e4 = TransparencyError::LeafMismatch {
+            expected: "a".into(),
+            actual: "b".into(),
+        };
         assert!(e4.to_string().contains("TLOG_LEAF_MISMATCH"));
     }
 
@@ -522,8 +571,14 @@ mod tests {
 
     #[test]
     fn failure_display() {
-        assert!(ProofFailure::ProofMissing.to_string().contains("TLOG_PROOF_MISSING"));
-        let f = ProofFailure::RootNotPinned { root_hash: "x".into() };
+        assert!(
+            ProofFailure::ProofMissing
+                .to_string()
+                .contains("TLOG_PROOF_MISSING")
+        );
+        let f = ProofFailure::RootNotPinned {
+            root_hash: "x".into(),
+        };
         assert!(f.to_string().contains("TLOG_ROOT_NOT_PINNED"));
     }
 }

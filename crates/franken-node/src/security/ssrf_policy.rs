@@ -158,9 +158,9 @@ impl SsrfPolicyTemplate {
 
     /// Check if a host is in the allowlist.
     fn find_allowlist(&self, host: &str, port: u16) -> Option<&AllowlistEntry> {
-        self.allowlist.iter().find(|e| {
-            e.host == host && e.port.map_or(true, |p| p == port)
-        })
+        self.allowlist
+            .iter()
+            .find(|e| e.host == host && e.port.map_or(true, |p| p == port))
     }
 
     /// Evaluate a request against the SSRF policy.
@@ -178,7 +178,15 @@ impl SsrfPolicyTemplate {
                 self.emit_audit(host, port, Action::Allow, None, true, trace_id, timestamp);
                 return Ok(Action::Allow);
             }
-            self.emit_audit(host, port, Action::Deny, Some("::1/128"), false, trace_id, timestamp);
+            self.emit_audit(
+                host,
+                port,
+                Action::Deny,
+                Some("::1/128"),
+                false,
+                trace_id,
+                timestamp,
+            );
             return Err(SsrfError::SsrfDenied {
                 host: host.to_string(),
                 cidr: "::1/128".to_string(),
@@ -197,7 +205,9 @@ impl SsrfPolicyTemplate {
 
         // Check each blocked CIDR — collect the match first to avoid
         // borrowing self.blocked_cidrs while calling &mut self methods.
-        let matched_cidr = self.blocked_cidrs.iter()
+        let matched_cidr = self
+            .blocked_cidrs
+            .iter()
             .find(|cidr| cidr.contains(octets))
             .map(|cidr| cidr.to_string());
 
@@ -205,14 +215,24 @@ impl SsrfPolicyTemplate {
             // Check allowlist
             if self.find_allowlist(host, port).is_some() {
                 self.emit_audit(
-                    host, port, Action::Allow, Some(&cidr_str),
-                    true, trace_id, timestamp,
+                    host,
+                    port,
+                    Action::Allow,
+                    Some(&cidr_str),
+                    true,
+                    trace_id,
+                    timestamp,
                 );
                 return Ok(Action::Allow);
             }
             self.emit_audit(
-                host, port, Action::Deny, Some(&cidr_str),
-                false, trace_id, timestamp,
+                host,
+                port,
+                Action::Deny,
+                Some(&cidr_str),
+                false,
+                trace_id,
+                timestamp,
             );
             return Err(SsrfError::SsrfDenied {
                 host: host.to_string(),
@@ -548,9 +568,9 @@ mod tests {
     #[test]
     fn allowlist_permits_blocked_ip() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
-        let receipt = t.add_allowlist(
-            "10.0.0.5", Some(8080), "internal API", "t8", "ts",
-        ).unwrap();
+        let receipt = t
+            .add_allowlist("10.0.0.5", Some(8080), "internal API", "t8", "ts")
+            .unwrap();
         assert!(receipt.receipt_id.starts_with("rcpt-"));
 
         let result = t.check_ssrf("10.0.0.5", 8080, Protocol::Http, "t9", "ts");
@@ -567,9 +587,15 @@ mod tests {
     #[test]
     fn allowlist_receipt_has_fields() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
-        let receipt = t.add_allowlist(
-            "192.168.1.1", None, "needed for health checks", "trace-abc", "2026-01-01",
-        ).unwrap();
+        let receipt = t
+            .add_allowlist(
+                "192.168.1.1",
+                None,
+                "needed for health checks",
+                "trace-abc",
+                "2026-01-01",
+            )
+            .unwrap();
         assert_eq!(receipt.connector_id, "conn-1");
         assert_eq!(receipt.host, "192.168.1.1");
         assert_eq!(receipt.trace_id, "trace-abc");
@@ -638,10 +664,14 @@ mod tests {
         let e2 = SsrfError::SsrfInvalidIp { host: "bad".into() };
         assert!(e2.to_string().contains("SSRF_INVALID_IP"));
 
-        let e3 = SsrfError::SsrfReceiptMissing { detail: "missing".into() };
+        let e3 = SsrfError::SsrfReceiptMissing {
+            detail: "missing".into(),
+        };
         assert!(e3.to_string().contains("SSRF_RECEIPT_MISSING"));
 
-        let e4 = SsrfError::SsrfTemplateInvalid { reason: "empty".into() };
+        let e4 = SsrfError::SsrfTemplateInvalid {
+            reason: "empty".into(),
+        };
         assert!(e4.to_string().contains("SSRF_TEMPLATE_INVALID"));
     }
 }

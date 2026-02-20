@@ -110,8 +110,14 @@ impl fmt::Display for RegistryError {
 // ── Valid subsystems ────────────────────────────────────────────────────────
 
 const VALID_SUBSYSTEMS: &[&str] = &[
-    "PROTOCOL", "CAPABILITY", "EGRESS", "SECURITY",
-    "CONNECTOR", "RUNTIME", "SUPPLY_CHAIN", "CONFORMANCE",
+    "PROTOCOL",
+    "CAPABILITY",
+    "EGRESS",
+    "SECURITY",
+    "CONNECTOR",
+    "RUNTIME",
+    "SUPPLY_CHAIN",
+    "CONFORMANCE",
 ];
 
 /// Extract the subsystem from a FRANKEN_{SUBSYSTEM}_{REST} code.
@@ -144,11 +150,13 @@ impl ErrorCodeRegistry {
     /// Register a new error code.
     ///
     /// Enforces INV-ECR-NAMESPACED, INV-ECR-UNIQUE, INV-ECR-RECOVERY.
-    pub fn register(&mut self, reg: &ErrorCodeRegistration) -> Result<ErrorCodeEntry, RegistryError> {
+    pub fn register(
+        &mut self,
+        reg: &ErrorCodeRegistration,
+    ) -> Result<ErrorCodeEntry, RegistryError> {
         // INV-ECR-NAMESPACED
-        let subsystem = parse_subsystem(&reg.code).ok_or_else(|| {
-            RegistryError::InvalidNamespace(reg.code.clone())
-        })?;
+        let subsystem = parse_subsystem(&reg.code)
+            .ok_or_else(|| RegistryError::InvalidNamespace(reg.code.clone()))?;
 
         // INV-ECR-FROZEN — if already exists and frozen, check for conflict
         if let Some(existing) = self.entries.get(&reg.code) {
@@ -196,9 +204,10 @@ impl ErrorCodeRegistry {
 
     /// Freeze an error code so its semantics cannot change.
     pub fn freeze(&mut self, code: &str) -> Result<(), RegistryError> {
-        let entry = self.entries.get_mut(code).ok_or_else(|| {
-            RegistryError::NotFound(code.to_string())
-        })?;
+        let entry = self
+            .entries
+            .get_mut(code)
+            .ok_or_else(|| RegistryError::NotFound(code.to_string()))?;
         entry.frozen = true;
         Ok(())
     }
@@ -210,7 +219,11 @@ impl ErrorCodeRegistry {
 
     /// List all entries for a given subsystem.
     pub fn list_by_subsystem(&self, subsystem: &str) -> Vec<&ErrorCodeEntry> {
-        let mut out: Vec<_> = self.entries.values().filter(|e| e.subsystem == subsystem).collect();
+        let mut out: Vec<_> = self
+            .entries
+            .values()
+            .filter(|e| e.subsystem == subsystem)
+            .collect();
         out.sort_by(|a, b| a.code.cmp(&b.code));
         out
     }
@@ -259,12 +272,14 @@ mod tests {
     #[test]
     fn register_valid_transient() {
         let mut r = ErrorCodeRegistry::new();
-        let e = r.register(&reg(
-            "FRANKEN_PROTOCOL_AUTH_TIMEOUT",
-            Severity::Transient,
-            recovery(true, Some(1000), "retry with backoff"),
-            1,
-        )).unwrap();
+        let e = r
+            .register(&reg(
+                "FRANKEN_PROTOCOL_AUTH_TIMEOUT",
+                Severity::Transient,
+                recovery(true, Some(1000), "retry with backoff"),
+                1,
+            ))
+            .unwrap();
         assert_eq!(e.subsystem, "PROTOCOL");
         assert!(e.recovery.retryable);
     }
@@ -272,12 +287,14 @@ mod tests {
     #[test]
     fn register_valid_fatal() {
         let mut r = ErrorCodeRegistry::new();
-        let e = r.register(&reg(
-            "FRANKEN_SECURITY_KEY_COMPROMISED",
-            Severity::Fatal,
-            recovery(false, None, ""),
-            1,
-        )).unwrap();
+        let e = r
+            .register(&reg(
+                "FRANKEN_SECURITY_KEY_COMPROMISED",
+                Severity::Fatal,
+                recovery(false, None, ""),
+                1,
+            ))
+            .unwrap();
         assert!(e.severity.is_fatal());
         assert!(!e.recovery.retryable);
     }
@@ -285,24 +302,28 @@ mod tests {
     #[test]
     fn reject_invalid_namespace() {
         let mut r = ErrorCodeRegistry::new();
-        let err = r.register(&reg(
-            "BAD_PREFIX_FOO",
-            Severity::Transient,
-            recovery(true, None, "hint"),
-            1,
-        )).unwrap_err();
+        let err = r
+            .register(&reg(
+                "BAD_PREFIX_FOO",
+                Severity::Transient,
+                recovery(true, None, "hint"),
+                1,
+            ))
+            .unwrap_err();
         assert_eq!(err.code(), "ECR_INVALID_NAMESPACE");
     }
 
     #[test]
     fn reject_unknown_subsystem() {
         let mut r = ErrorCodeRegistry::new();
-        let err = r.register(&reg(
-            "FRANKEN_UNKNOWN_FOO",
-            Severity::Transient,
-            recovery(true, None, "hint"),
-            1,
-        )).unwrap_err();
+        let err = r
+            .register(&reg(
+                "FRANKEN_UNKNOWN_FOO",
+                Severity::Transient,
+                recovery(true, None, "hint"),
+                1,
+            ))
+            .unwrap_err();
         assert_eq!(err.code(), "ECR_INVALID_NAMESPACE");
     }
 
@@ -314,37 +335,44 @@ mod tests {
             Severity::Transient,
             recovery(true, None, "retry"),
             1,
-        )).unwrap();
-        let err = r.register(&reg(
-            "FRANKEN_PROTOCOL_DUP",
-            Severity::Transient,
-            recovery(true, None, "retry"),
-            1,
-        )).unwrap_err();
+        ))
+        .unwrap();
+        let err = r
+            .register(&reg(
+                "FRANKEN_PROTOCOL_DUP",
+                Severity::Transient,
+                recovery(true, None, "retry"),
+                1,
+            ))
+            .unwrap_err();
         assert_eq!(err.code(), "ECR_DUPLICATE_CODE");
     }
 
     #[test]
     fn reject_missing_recovery_hint_non_fatal() {
         let mut r = ErrorCodeRegistry::new();
-        let err = r.register(&reg(
-            "FRANKEN_EGRESS_TIMEOUT",
-            Severity::Degraded,
-            recovery(true, Some(500), ""),
-            1,
-        )).unwrap_err();
+        let err = r
+            .register(&reg(
+                "FRANKEN_EGRESS_TIMEOUT",
+                Severity::Degraded,
+                recovery(true, Some(500), ""),
+                1,
+            ))
+            .unwrap_err();
         assert_eq!(err.code(), "ECR_MISSING_RECOVERY");
     }
 
     #[test]
     fn reject_fatal_marked_retryable() {
         let mut r = ErrorCodeRegistry::new();
-        let err = r.register(&reg(
-            "FRANKEN_SECURITY_FATAL_BAD",
-            Severity::Fatal,
-            recovery(true, Some(100), "should not retry"),
-            1,
-        )).unwrap_err();
+        let err = r
+            .register(&reg(
+                "FRANKEN_SECURITY_FATAL_BAD",
+                Severity::Fatal,
+                recovery(true, Some(100), "should not retry"),
+                1,
+            ))
+            .unwrap_err();
         assert_eq!(err.code(), "ECR_MISSING_RECOVERY");
     }
 
@@ -356,25 +384,30 @@ mod tests {
             Severity::Transient,
             recovery(true, Some(2000), "renegotiate lease"),
             1,
-        )).unwrap();
+        ))
+        .unwrap();
         r.freeze("FRANKEN_CONNECTOR_LEASE_EXPIRED").unwrap();
 
         // Same shape — OK (version bump)
-        let e = r.register(&reg(
-            "FRANKEN_CONNECTOR_LEASE_EXPIRED",
-            Severity::Transient,
-            recovery(true, Some(2000), "renegotiate lease"),
-            2,
-        )).unwrap();
+        let e = r
+            .register(&reg(
+                "FRANKEN_CONNECTOR_LEASE_EXPIRED",
+                Severity::Transient,
+                recovery(true, Some(2000), "renegotiate lease"),
+                2,
+            ))
+            .unwrap();
         assert_eq!(e.version, 2);
 
         // Different severity — rejected
-        let err = r.register(&reg(
-            "FRANKEN_CONNECTOR_LEASE_EXPIRED",
-            Severity::Fatal,
-            recovery(false, None, ""),
-            3,
-        )).unwrap_err();
+        let err = r
+            .register(&reg(
+                "FRANKEN_CONNECTOR_LEASE_EXPIRED",
+                Severity::Fatal,
+                recovery(false, None, ""),
+                3,
+            ))
+            .unwrap_err();
         assert_eq!(err.code(), "ECR_FROZEN_CONFLICT");
     }
 
@@ -393,7 +426,8 @@ mod tests {
             Severity::Degraded,
             recovery(false, None, "check capability id"),
             1,
-        )).unwrap();
+        ))
+        .unwrap();
         let e = r.get("FRANKEN_CAPABILITY_NOT_FOUND").unwrap();
         assert_eq!(e.subsystem, "CAPABILITY");
     }
@@ -401,9 +435,27 @@ mod tests {
     #[test]
     fn list_by_subsystem() {
         let mut r = ErrorCodeRegistry::new();
-        r.register(&reg("FRANKEN_PROTOCOL_A", Severity::Transient, recovery(true, None, "a"), 1)).unwrap();
-        r.register(&reg("FRANKEN_PROTOCOL_B", Severity::Transient, recovery(true, None, "b"), 1)).unwrap();
-        r.register(&reg("FRANKEN_SECURITY_C", Severity::Fatal, recovery(false, None, ""), 1)).unwrap();
+        r.register(&reg(
+            "FRANKEN_PROTOCOL_A",
+            Severity::Transient,
+            recovery(true, None, "a"),
+            1,
+        ))
+        .unwrap();
+        r.register(&reg(
+            "FRANKEN_PROTOCOL_B",
+            Severity::Transient,
+            recovery(true, None, "b"),
+            1,
+        ))
+        .unwrap();
+        r.register(&reg(
+            "FRANKEN_SECURITY_C",
+            Severity::Fatal,
+            recovery(false, None, ""),
+            1,
+        ))
+        .unwrap();
         let protos = r.list_by_subsystem("PROTOCOL");
         assert_eq!(protos.len(), 2);
     }
@@ -411,8 +463,20 @@ mod tests {
     #[test]
     fn catalog_sorted() {
         let mut r = ErrorCodeRegistry::new();
-        r.register(&reg("FRANKEN_SECURITY_Z", Severity::Fatal, recovery(false, None, ""), 1)).unwrap();
-        r.register(&reg("FRANKEN_PROTOCOL_A", Severity::Transient, recovery(true, None, "a"), 1)).unwrap();
+        r.register(&reg(
+            "FRANKEN_SECURITY_Z",
+            Severity::Fatal,
+            recovery(false, None, ""),
+            1,
+        ))
+        .unwrap();
+        r.register(&reg(
+            "FRANKEN_PROTOCOL_A",
+            Severity::Transient,
+            recovery(true, None, "a"),
+            1,
+        ))
+        .unwrap();
         let cat = r.catalog();
         assert_eq!(cat[0].code, "FRANKEN_PROTOCOL_A");
         assert_eq!(cat[1].code, "FRANKEN_SECURITY_Z");
@@ -422,7 +486,13 @@ mod tests {
     fn len_and_is_empty() {
         let mut r = ErrorCodeRegistry::new();
         assert!(r.is_empty());
-        r.register(&reg("FRANKEN_RUNTIME_INIT", Severity::Fatal, recovery(false, None, ""), 1)).unwrap();
+        r.register(&reg(
+            "FRANKEN_RUNTIME_INIT",
+            Severity::Fatal,
+            recovery(false, None, ""),
+            1,
+        ))
+        .unwrap();
         assert_eq!(r.len(), 1);
         assert!(!r.is_empty());
     }
@@ -459,14 +529,32 @@ mod tests {
 
     #[test]
     fn subsystem_parsing() {
-        assert_eq!(parse_subsystem("FRANKEN_PROTOCOL_FOO"), Some("PROTOCOL".into()));
-        assert_eq!(parse_subsystem("FRANKEN_CAPABILITY_BAR"), Some("CAPABILITY".into()));
+        assert_eq!(
+            parse_subsystem("FRANKEN_PROTOCOL_FOO"),
+            Some("PROTOCOL".into())
+        );
+        assert_eq!(
+            parse_subsystem("FRANKEN_CAPABILITY_BAR"),
+            Some("CAPABILITY".into())
+        );
         assert_eq!(parse_subsystem("FRANKEN_EGRESS_BAZ"), Some("EGRESS".into()));
-        assert_eq!(parse_subsystem("FRANKEN_SECURITY_QUX"), Some("SECURITY".into()));
-        assert_eq!(parse_subsystem("FRANKEN_CONNECTOR_X"), Some("CONNECTOR".into()));
+        assert_eq!(
+            parse_subsystem("FRANKEN_SECURITY_QUX"),
+            Some("SECURITY".into())
+        );
+        assert_eq!(
+            parse_subsystem("FRANKEN_CONNECTOR_X"),
+            Some("CONNECTOR".into())
+        );
         assert_eq!(parse_subsystem("FRANKEN_RUNTIME_Y"), Some("RUNTIME".into()));
-        assert_eq!(parse_subsystem("FRANKEN_SUPPLY_CHAIN_Z"), Some("SUPPLY_CHAIN".into()));
-        assert_eq!(parse_subsystem("FRANKEN_CONFORMANCE_W"), Some("CONFORMANCE".into()));
+        assert_eq!(
+            parse_subsystem("FRANKEN_SUPPLY_CHAIN_Z"),
+            Some("SUPPLY_CHAIN".into())
+        );
+        assert_eq!(
+            parse_subsystem("FRANKEN_CONFORMANCE_W"),
+            Some("CONFORMANCE".into())
+        );
         assert_eq!(parse_subsystem("FRANKEN_INVALID_X"), None);
         assert_eq!(parse_subsystem("OTHER_PREFIX"), None);
     }

@@ -19,7 +19,11 @@ pub struct SemVer {
 
 impl SemVer {
     pub fn new(major: u32, minor: u32, patch: u32) -> Self {
-        Self { major, minor, patch }
+        Self {
+            major,
+            minor,
+            patch,
+        }
     }
 
     /// Parse from "major.minor.patch" string.
@@ -30,16 +34,26 @@ impl SemVer {
                 reason: format!("invalid semver: {s}"),
             });
         }
-        let major = parts[0].parse::<u32>().map_err(|_| ManifestError::ManifestInvalid {
-            reason: format!("invalid major: {}", parts[0]),
-        })?;
-        let minor = parts[1].parse::<u32>().map_err(|_| ManifestError::ManifestInvalid {
-            reason: format!("invalid minor: {}", parts[1]),
-        })?;
-        let patch = parts[2].parse::<u32>().map_err(|_| ManifestError::ManifestInvalid {
-            reason: format!("invalid patch: {}", parts[2]),
-        })?;
-        Ok(Self { major, minor, patch })
+        let major = parts[0]
+            .parse::<u32>()
+            .map_err(|_| ManifestError::ManifestInvalid {
+                reason: format!("invalid major: {}", parts[0]),
+            })?;
+        let minor = parts[1]
+            .parse::<u32>()
+            .map_err(|_| ManifestError::ManifestInvalid {
+                reason: format!("invalid minor: {}", parts[1]),
+            })?;
+        let patch = parts[2]
+            .parse::<u32>()
+            .map_err(|_| ManifestError::ManifestInvalid {
+                reason: format!("invalid patch: {}", parts[2]),
+            })?;
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
     }
 }
 
@@ -182,10 +196,7 @@ pub fn negotiate(
             ));
         }
         if !features_ok {
-            reasons.push(format!(
-                "MANIFEST_FEATURE_MISSING: {:?}",
-                missing_features
-            ));
+            reasons.push(format!("MANIFEST_FEATURE_MISSING: {:?}", missing_features));
         }
         if !transport_ok {
             reasons.push(format!(
@@ -257,9 +268,7 @@ mod tests {
         HostCapabilities {
             min_version: SemVer::new(1, 0, 0),
             max_version: SemVer::new(2, 99, 99),
-            available_features: vec![
-                "auth".into(), "streaming".into(), "batch".into(),
-            ],
+            available_features: vec!["auth".into(), "streaming".into(), "batch".into()],
             transport_caps: vec![TransportCap::Http1, TransportCap::Http2, TransportCap::Grpc],
         }
     }

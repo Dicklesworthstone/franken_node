@@ -137,14 +137,9 @@ pub struct ReportSummary {
 ///
 /// Takes the connector's declared methods and checks each against the
 /// pinned specification. Returns a machine-readable report.
-pub fn validate_contract(
-    connector_id: &str,
-    declarations: &[MethodDeclaration],
-) -> ContractReport {
-    let decl_map: HashMap<&str, &MethodDeclaration> = declarations
-        .iter()
-        .map(|d| (d.name.as_str(), d))
-        .collect();
+pub fn validate_contract(connector_id: &str, declarations: &[MethodDeclaration]) -> ContractReport {
+    let decl_map: HashMap<&str, &MethodDeclaration> =
+        declarations.iter().map(|d| (d.name.as_str(), d)).collect();
 
     let mut results = Vec::new();
 
@@ -200,12 +195,7 @@ pub fn validate_contract(
                 results.push(MethodValidationResult {
                     method: spec.name.to_string(),
                     required: spec.required,
-                    status: if errors.is_empty() {
-                        "PASS"
-                    } else {
-                        "FAIL"
-                    }
-                    .to_string(),
+                    status: if errors.is_empty() { "PASS" } else { "FAIL" }.to_string(),
                     version_expected: spec.version.to_string(),
                     version_found: Some(decl.version.clone()),
                     errors,
@@ -299,7 +289,10 @@ mod tests {
 
     #[test]
     fn simulate_is_optional() {
-        let sim = STANDARD_METHODS.iter().find(|m| m.name == "simulate").unwrap();
+        let sim = STANDARD_METHODS
+            .iter()
+            .find(|m| m.name == "simulate")
+            .unwrap();
         assert!(!sim.required);
     }
 
@@ -325,7 +318,11 @@ mod tests {
             .collect();
         let report = validate_contract("test-conn", &decls);
         assert_eq!(report.verdict, "FAIL");
-        let handshake = report.methods.iter().find(|m| m.method == "handshake").unwrap();
+        let handshake = report
+            .methods
+            .iter()
+            .find(|m| m.method == "handshake")
+            .unwrap();
         assert_eq!(handshake.status, "FAIL");
         assert_eq!(handshake.errors[0].code, MethodErrorCode::MethodMissing);
     }
@@ -336,11 +333,17 @@ mod tests {
         decls[0].version = "2.0.0".to_string(); // handshake pinned at 1.x
         let report = validate_contract("test-conn", &decls);
         assert_eq!(report.verdict, "FAIL");
-        let handshake = report.methods.iter().find(|m| m.method == "handshake").unwrap();
-        assert!(handshake
-            .errors
+        let handshake = report
+            .methods
             .iter()
-            .any(|e| e.code == MethodErrorCode::VersionIncompatible));
+            .find(|m| m.method == "handshake")
+            .unwrap();
+        assert!(
+            handshake
+                .errors
+                .iter()
+                .any(|e| e.code == MethodErrorCode::VersionIncompatible)
+        );
     }
 
     #[test]

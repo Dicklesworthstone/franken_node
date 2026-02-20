@@ -3,8 +3,8 @@
 //! Coordinator selection is deterministic via weighted hashing.
 //! Quorum thresholds vary by safety tier. Failures are classified.
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
+use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
 /// A candidate node for coordinator selection.
@@ -207,7 +207,10 @@ pub fn verify_quorum(
         });
     }
 
-    let passed = valid_count >= threshold && failures.iter().all(|f| !matches!(f, VerificationFailure::BelowQuorum { .. }));
+    let passed = valid_count >= threshold
+        && failures
+            .iter()
+            .all(|f| !matches!(f, VerificationFailure::BelowQuorum { .. }));
 
     QuorumVerification {
         lease_id: lease_id.to_string(),
@@ -236,9 +239,18 @@ mod tests {
 
     fn candidates() -> Vec<CoordinatorCandidate> {
         vec![
-            CoordinatorCandidate { node_id: "node-a".into(), weight: 10 },
-            CoordinatorCandidate { node_id: "node-b".into(), weight: 5 },
-            CoordinatorCandidate { node_id: "node-c".into(), weight: 8 },
+            CoordinatorCandidate {
+                node_id: "node-a".into(),
+                weight: 10,
+            },
+            CoordinatorCandidate {
+                node_id: "node-b".into(),
+                weight: 5,
+            },
+            CoordinatorCandidate {
+                node_id: "node-c".into(),
+                weight: 8,
+            },
         ]
     }
 
@@ -277,7 +289,10 @@ mod tests {
 
     #[test]
     fn single_candidate_selected() {
-        let cands = vec![CoordinatorCandidate { node_id: "only".into(), weight: 1 }];
+        let cands = vec![CoordinatorCandidate {
+            node_id: "only".into(),
+            weight: 1,
+        }];
         let s = select_coordinator(&cands, "lease-1", "tr").unwrap();
         assert_eq!(s.selected, "only");
     }
@@ -286,7 +301,16 @@ mod tests {
     fn quorum_passes_standard() {
         let known = vec!["s1".to_string()];
         let sigs = vec![valid_sig("s1", "hash1")];
-        let v = verify_quorum(&qconfig(), "l1", "Standard", &sigs, &known, "hash1", "tr", "ts");
+        let v = verify_quorum(
+            &qconfig(),
+            "l1",
+            "Standard",
+            &sigs,
+            &known,
+            "hash1",
+            "tr",
+            "ts",
+        );
         assert!(v.passed);
         assert_eq!(v.required, 1);
         assert_eq!(v.received, 1);
@@ -296,7 +320,16 @@ mod tests {
     fn quorum_passes_risky() {
         let known = vec!["s1".to_string(), "s2".to_string()];
         let sigs = vec![valid_sig("s1", "hash1"), valid_sig("s2", "hash1")];
-        let v = verify_quorum(&qconfig(), "l1", "Risky", &sigs, &known, "hash1", "tr", "ts");
+        let v = verify_quorum(
+            &qconfig(),
+            "l1",
+            "Risky",
+            &sigs,
+            &known,
+            "hash1",
+            "tr",
+            "ts",
+        );
         assert!(v.passed);
         assert_eq!(v.required, 2);
     }
@@ -305,9 +338,21 @@ mod tests {
     fn quorum_fails_below_threshold() {
         let known = vec!["s1".to_string()];
         let sigs = vec![valid_sig("s1", "hash1")];
-        let v = verify_quorum(&qconfig(), "l1", "Risky", &sigs, &known, "hash1", "tr", "ts");
+        let v = verify_quorum(
+            &qconfig(),
+            "l1",
+            "Risky",
+            &sigs,
+            &known,
+            "hash1",
+            "tr",
+            "ts",
+        );
         assert!(!v.passed);
-        let below = v.failures.iter().any(|f| matches!(f, VerificationFailure::BelowQuorum { .. }));
+        let below = v
+            .failures
+            .iter()
+            .any(|f| matches!(f, VerificationFailure::BelowQuorum { .. }));
         assert!(below);
     }
 
@@ -316,16 +361,25 @@ mod tests {
         let known = vec!["s1".to_string()];
         let sigs = vec![valid_sig("s1", "h"), valid_sig("unknown", "h")];
         let v = verify_quorum(&qconfig(), "l1", "Standard", &sigs, &known, "h", "tr", "ts");
-        let unknown = v.failures.iter().any(|f| matches!(f, VerificationFailure::UnknownSigner { .. }));
+        let unknown = v
+            .failures
+            .iter()
+            .any(|f| matches!(f, VerificationFailure::UnknownSigner { .. }));
         assert!(unknown);
     }
 
     #[test]
     fn invalid_signature_classified() {
         let known = vec!["s1".to_string()];
-        let sigs = vec![QuorumSignature { signer_id: "s1".into(), signature: "wrong".into() }];
+        let sigs = vec![QuorumSignature {
+            signer_id: "s1".into(),
+            signature: "wrong".into(),
+        }];
         let v = verify_quorum(&qconfig(), "l1", "Standard", &sigs, &known, "h", "tr", "ts");
-        let invalid = v.failures.iter().any(|f| matches!(f, VerificationFailure::InvalidSignature { .. }));
+        let invalid = v
+            .failures
+            .iter()
+            .any(|f| matches!(f, VerificationFailure::InvalidSignature { .. }));
         assert!(invalid);
     }
 
@@ -333,7 +387,16 @@ mod tests {
     fn dangerous_requires_three() {
         let known = vec!["s1".to_string(), "s2".to_string()];
         let sigs = vec![valid_sig("s1", "h"), valid_sig("s2", "h")];
-        let v = verify_quorum(&qconfig(), "l1", "Dangerous", &sigs, &known, "h", "tr", "ts");
+        let v = verify_quorum(
+            &qconfig(),
+            "l1",
+            "Dangerous",
+            &sigs,
+            &known,
+            "h",
+            "tr",
+            "ts",
+        );
         assert!(!v.passed);
         assert_eq!(v.required, 3);
     }
@@ -341,8 +404,21 @@ mod tests {
     #[test]
     fn dangerous_passes_with_three() {
         let known = vec!["s1".to_string(), "s2".to_string(), "s3".to_string()];
-        let sigs = vec![valid_sig("s1", "h"), valid_sig("s2", "h"), valid_sig("s3", "h")];
-        let v = verify_quorum(&qconfig(), "l1", "Dangerous", &sigs, &known, "h", "tr", "ts");
+        let sigs = vec![
+            valid_sig("s1", "h"),
+            valid_sig("s2", "h"),
+            valid_sig("s3", "h"),
+        ];
+        let v = verify_quorum(
+            &qconfig(),
+            "l1",
+            "Dangerous",
+            &sigs,
+            &known,
+            "h",
+            "tr",
+            "ts",
+        );
         assert!(v.passed);
         assert_eq!(v.received, 3);
     }
@@ -367,15 +443,43 @@ mod tests {
     fn verification_has_trace() {
         let known = vec!["s1".to_string()];
         let sigs = vec![valid_sig("s1", "h")];
-        let v = verify_quorum(&qconfig(), "l1", "Standard", &sigs, &known, "h", "trace-x", "ts");
+        let v = verify_quorum(
+            &qconfig(),
+            "l1",
+            "Standard",
+            &sigs,
+            &known,
+            "h",
+            "trace-x",
+            "ts",
+        );
         assert_eq!(v.trace_id, "trace-x");
     }
 
     #[test]
     fn failure_codes_correct() {
-        assert_eq!(VerificationFailure::BelowQuorum { required: 0, received: 0 }.code(), "LC_BELOW_QUORUM");
-        assert_eq!(VerificationFailure::InvalidSignature { signer_id: "x".into() }.code(), "LC_INVALID_SIGNATURE");
-        assert_eq!(VerificationFailure::UnknownSigner { signer_id: "x".into() }.code(), "LC_UNKNOWN_SIGNER");
+        assert_eq!(
+            VerificationFailure::BelowQuorum {
+                required: 0,
+                received: 0
+            }
+            .code(),
+            "LC_BELOW_QUORUM"
+        );
+        assert_eq!(
+            VerificationFailure::InvalidSignature {
+                signer_id: "x".into()
+            }
+            .code(),
+            "LC_INVALID_SIGNATURE"
+        );
+        assert_eq!(
+            VerificationFailure::UnknownSigner {
+                signer_id: "x".into()
+            }
+            .code(),
+            "LC_UNKNOWN_SIGNER"
+        );
     }
 
     #[test]

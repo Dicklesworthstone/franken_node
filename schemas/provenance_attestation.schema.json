@@ -1,0 +1,145 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://franken-node.dev/schemas/provenance_attestation.schema.json",
+  "title": "Franken Node Provenance Attestation",
+  "description": "Canonical provenance attestation envelope for extension artifact admission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source_repository_url",
+    "build_system_identifier",
+    "builder_identity",
+    "builder_version",
+    "vcs_commit_sha",
+    "build_timestamp_epoch",
+    "reproducibility_hash",
+    "input_hash",
+    "output_hash",
+    "slsa_level_claim",
+    "envelope_format",
+    "links"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "source_repository_url": {
+      "type": "string",
+      "format": "uri",
+      "minLength": 1
+    },
+    "build_system_identifier": {
+      "type": "string",
+      "minLength": 1
+    },
+    "builder_identity": {
+      "type": "string",
+      "minLength": 1
+    },
+    "builder_version": {
+      "type": "string",
+      "minLength": 1
+    },
+    "vcs_commit_sha": {
+      "type": "string",
+      "pattern": "^[A-Fa-f0-9]{12,64}$"
+    },
+    "build_timestamp_epoch": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "reproducibility_hash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "input_hash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "output_hash": {
+      "type": "string",
+      "minLength": 1
+    },
+    "slsa_level_claim": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 4
+    },
+    "envelope_format": {
+      "type": "string",
+      "enum": [
+        "in_toto",
+        "franken_node_envelope_v1"
+      ]
+    },
+    "links": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/attestation_link"
+      }
+    },
+    "custom_claims": {
+      "type": "object",
+      "default": {},
+      "additionalProperties": {
+        "type": "string"
+      }
+    }
+  },
+  "$defs": {
+    "attestation_link": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "role",
+        "signer_id",
+        "signer_version",
+        "signature",
+        "signed_payload_hash",
+        "issued_at_epoch",
+        "expires_at_epoch",
+        "revoked"
+      ],
+      "properties": {
+        "role": {
+          "type": "string",
+          "enum": [
+            "publisher",
+            "build_system",
+            "source_vcs"
+          ]
+        },
+        "signer_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signer_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[A-Fa-f0-9]{64}$"
+        },
+        "signed_payload_hash": {
+          "type": "string",
+          "minLength": 1
+        },
+        "issued_at_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "expires_at_epoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "revoked": {
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

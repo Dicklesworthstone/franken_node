@@ -66,11 +66,24 @@ pub struct PromotionResult {
 /// Errors from promotion operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PromotionError {
-    SchemaFailed { object_id: String, expected: String, got: String },
-    NotAuthenticated { object_id: String, requester_id: String },
-    NotReachable { object_id: String },
-    NotPinned { object_id: String },
-    InvalidRule { reason: String },
+    SchemaFailed {
+        object_id: String,
+        expected: String,
+        got: String,
+    },
+    NotAuthenticated {
+        object_id: String,
+        requester_id: String,
+    },
+    NotReachable {
+        object_id: String,
+    },
+    NotPinned {
+        object_id: String,
+    },
+    InvalidRule {
+        reason: String,
+    },
 }
 
 impl PromotionError {
@@ -88,16 +101,24 @@ impl PromotionError {
 impl std::fmt::Display for PromotionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SchemaFailed { object_id, expected, got } =>
-                write!(f, "QPR_SCHEMA_FAILED: {object_id} expected={expected} got={got}"),
-            Self::NotAuthenticated { object_id, requester_id } =>
-                write!(f, "QPR_NOT_AUTHENTICATED: {object_id} requester={requester_id}"),
-            Self::NotReachable { object_id } =>
-                write!(f, "QPR_NOT_REACHABLE: {object_id}"),
-            Self::NotPinned { object_id } =>
-                write!(f, "QPR_NOT_PINNED: {object_id}"),
-            Self::InvalidRule { reason } =>
-                write!(f, "QPR_INVALID_RULE: {reason}"),
+            Self::SchemaFailed {
+                object_id,
+                expected,
+                got,
+            } => write!(
+                f,
+                "QPR_SCHEMA_FAILED: {object_id} expected={expected} got={got}"
+            ),
+            Self::NotAuthenticated {
+                object_id,
+                requester_id,
+            } => write!(
+                f,
+                "QPR_NOT_AUTHENTICATED: {object_id} requester={requester_id}"
+            ),
+            Self::NotReachable { object_id } => write!(f, "QPR_NOT_REACHABLE: {object_id}"),
+            Self::NotPinned { object_id } => write!(f, "QPR_NOT_PINNED: {object_id}"),
+            Self::InvalidRule { reason } => write!(f, "QPR_INVALID_RULE: {reason}"),
         }
     }
 }
@@ -236,7 +257,11 @@ mod tests {
         let r = req("obj1", false, "1.0", true, false);
         let result = evaluate_promotion(&r, &rule(), "v1", "tr", "ts").unwrap();
         assert!(!result.promoted);
-        assert!(result.rejection_reasons.contains(&RejectionReason::NotAuthenticated));
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&RejectionReason::NotAuthenticated)
+        );
     }
 
     #[test]
@@ -244,7 +269,12 @@ mod tests {
         let r = req("obj1", true, "2.0", true, false);
         let result = evaluate_promotion(&r, &rule(), "v1", "tr", "ts").unwrap();
         assert!(!result.promoted);
-        assert!(result.rejection_reasons.iter().any(|r| matches!(r, RejectionReason::SchemaFailed { .. })));
+        assert!(
+            result
+                .rejection_reasons
+                .iter()
+                .any(|r| matches!(r, RejectionReason::SchemaFailed { .. }))
+        );
     }
 
     #[test]
@@ -252,7 +282,11 @@ mod tests {
         let r = req("obj1", true, "1.0", false, false);
         let result = evaluate_promotion(&r, &rule(), "v1", "tr", "ts").unwrap();
         assert!(!result.promoted);
-        assert!(result.rejection_reasons.contains(&RejectionReason::NotReachable));
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&RejectionReason::NotReachable)
+        );
     }
 
     #[test]
@@ -262,7 +296,11 @@ mod tests {
         let r = req("obj1", true, "1.0", true, false);
         let result = evaluate_promotion(&r, &rl, "v1", "tr", "ts").unwrap();
         assert!(!result.promoted);
-        assert!(result.rejection_reasons.contains(&RejectionReason::NotPinned));
+        assert!(
+            result
+                .rejection_reasons
+                .contains(&RejectionReason::NotPinned)
+        );
     }
 
     #[test]
@@ -285,7 +323,8 @@ mod tests {
     #[test]
     fn receipt_has_provenance() {
         let r = req("obj1", true, "1.0", true, false);
-        let result = evaluate_promotion(&r, &rule(), "validator-1", "trace-x", "2026-01-01").unwrap();
+        let result =
+            evaluate_promotion(&r, &rule(), "validator-1", "trace-x", "2026-01-01").unwrap();
         let receipt = result.receipt.unwrap();
         assert_eq!(receipt.object_id, "obj1");
         assert_eq!(receipt.requester_id, "admin");
@@ -313,9 +352,9 @@ mod tests {
     #[test]
     fn batch_evaluation() {
         let requests = vec![
-            req("obj1", true, "1.0", true, false),    // should pass
-            req("obj2", false, "1.0", true, false),   // fail auth
-            req("obj3", true, "1.0", true, false),    // should pass
+            req("obj1", true, "1.0", true, false),  // should pass
+            req("obj2", false, "1.0", true, false), // fail auth
+            req("obj3", true, "1.0", true, false),  // should pass
         ];
         let results = evaluate_batch(&requests, &rule(), "v1", "tr", "ts").unwrap();
         assert_eq!(results.len(), 3);
@@ -347,16 +386,50 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(PromotionError::SchemaFailed { object_id: "".into(), expected: "".into(), got: "".into() }.code(), "QPR_SCHEMA_FAILED");
-        assert_eq!(PromotionError::NotAuthenticated { object_id: "".into(), requester_id: "".into() }.code(), "QPR_NOT_AUTHENTICATED");
-        assert_eq!(PromotionError::NotReachable { object_id: "".into() }.code(), "QPR_NOT_REACHABLE");
-        assert_eq!(PromotionError::NotPinned { object_id: "".into() }.code(), "QPR_NOT_PINNED");
-        assert_eq!(PromotionError::InvalidRule { reason: "".into() }.code(), "QPR_INVALID_RULE");
+        assert_eq!(
+            PromotionError::SchemaFailed {
+                object_id: "".into(),
+                expected: "".into(),
+                got: "".into()
+            }
+            .code(),
+            "QPR_SCHEMA_FAILED"
+        );
+        assert_eq!(
+            PromotionError::NotAuthenticated {
+                object_id: "".into(),
+                requester_id: "".into()
+            }
+            .code(),
+            "QPR_NOT_AUTHENTICATED"
+        );
+        assert_eq!(
+            PromotionError::NotReachable {
+                object_id: "".into()
+            }
+            .code(),
+            "QPR_NOT_REACHABLE"
+        );
+        assert_eq!(
+            PromotionError::NotPinned {
+                object_id: "".into()
+            }
+            .code(),
+            "QPR_NOT_PINNED"
+        );
+        assert_eq!(
+            PromotionError::InvalidRule { reason: "".into() }.code(),
+            "QPR_INVALID_RULE"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = PromotionError::SchemaFailed { object_id: "obj1".into(), expected: "1.0".into(), got: "2.0".into() };
+        let e = PromotionError::SchemaFailed {
+            object_id: "obj1".into(),
+            expected: "1.0".into(),
+            got: "2.0".into(),
+        };
         assert!(e.to_string().contains("QPR_SCHEMA_FAILED"));
     }
 

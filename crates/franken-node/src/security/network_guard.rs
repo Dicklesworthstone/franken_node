@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::security::remote_cap::{CapabilityGate, RemoteCap, RemoteOperation};
+
 /// Network protocol for egress rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,10 +58,10 @@ impl EgressRule {
         if self.protocol != protocol {
             return false;
         }
-        if let Some(rule_port) = self.port {
-            if rule_port != port {
-                return false;
-            }
+        if let Some(rule_port) = self.port
+            && rule_port != port
+        {
+            return false;
         }
         host_matches(&self.host, host)
     }
@@ -149,14 +151,44 @@ impl NetworkGuard {
     }
 
     /// Process an egress request and emit an audit event.
+    #[allow(clippy::too_many_arguments)]
     pub fn process_egress(
         &mut self,
         host: &str,
         port: u16,
         protocol: Protocol,
+        remote_cap: Option<&RemoteCap>,
+        capability_gate: &mut CapabilityGate,
         trace_id: &str,
         timestamp: &str,
+        now_epoch_secs: u64,
     ) -> Result<Action, GuardError> {
+        let endpoint = format!("{protocol}://{host}:{port}");
+        if let Err(err) = capability_gate.authorize_network(
+            remote_cap,
+            RemoteOperation::NetworkEgress,
+            &endpoint,
+            now_epoch_secs,
+            trace_id,
+        ) {
+            let event = AuditEvent {
+                connector_id: self.policy.connector_id.clone(),
+                timestamp: timestamp.to_string(),
+                protocol,
+                host: host.to_string(),
+                port,
+                action: Action::Deny,
+                rule_matched: None,
+                trace_id: trace_id.to_string(),
+            };
+            self.audit_log.push(event);
+            return Err(GuardError::RemoteCapDenied {
+                code: err.code().to_string(),
+                compatibility_code: err.compatibility_code().map(ToString::to_string),
+                detail: err.to_string(),
+            });
+        }
+
         let (action, rule_idx) = self.policy.evaluate(host, port, protocol);
 
         let event = AuditEvent {
@@ -202,6 +234,12 @@ pub enum GuardError {
     },
     #[serde(rename = "GUARD_AUDIT_FAILED")]
     AuditFailed { reason: String },
+    #[serde(rename = "GUARD_REMOTE_CAP_DENIED")]
+    RemoteCapDenied {
+        code: String,
+        compatibility_code: Option<String>,
+        detail: String,
+    },
 }
 
 impl fmt::Display for GuardError {
@@ -220,6 +258,17 @@ impl fmt::Display for GuardError {
             Self::AuditFailed { reason } => {
                 write!(f, "GUARD_AUDIT_FAILED: {reason}")
             }
+            Self::RemoteCapDenied {
+                code,
+                compatibility_code,
+                detail,
+            } => {
+                if let Some(alias) = compatibility_code {
+                    write!(f, "GUARD_REMOTE_CAP_DENIED: {code} ({alias}) {detail}")
+                } else {
+                    write!(f, "GUARD_REMOTE_CAP_DENIED: {code} {detail}")
+                }
+            }
         }
     }
 }
@@ -229,6 +278,9 @@ impl std::error::Error for GuardError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::security::remote_cap::{
+        CapabilityGate, CapabilityProvider, RemoteOperation, RemoteScope,
+    };
 
     fn sample_policy() -> EgressPolicy {
         let mut policy = EgressPolicy::new("conn-1".into(), Action::Deny);
@@ -251,6 +303,30 @@ mod tests {
             protocol: Protocol::Http,
         });
         policy
+    }
+
+    fn egress_scope() -> RemoteScope {
+        RemoteScope::new(
+            vec![RemoteOperation::NetworkEgress],
+            vec!["http://".to_string(), "tcp://".to_string()],
+        )
+    }
+
+    fn gate_and_cap(single_use: bool) -> (CapabilityGate, RemoteCap) {
+        let provider = CapabilityProvider::new("guard-secret");
+        let (cap, _) = provider
+            .issue(
+                "network-guard-tests",
+                egress_scope(),
+                1_700_000_000,
+                3_600,
+                true,
+                single_use,
+                "trace-cap-issue",
+            )
+            .expect("issue remote cap");
+        let gate = CapabilityGate::new("guard-secret");
+        (gate, cap)
     }
 
     // === Host matching ===
@@ -359,8 +435,16 @@ mod tests {
     #[test]
     fn guard_allows_matching_request() {
         let mut guard = NetworkGuard::new(sample_policy());
+        let (mut gate, cap) = gate_and_cap(false);
         let result = guard.process_egress(
-            "api.example.com", 443, Protocol::Http, "trace-1", "t",
+            "api.example.com",
+            443,
+            Protocol::Http,
+            Some(&cap),
+            &mut gate,
+            "trace-1",
+            "t",
+            1_700_000_010,
         );
         assert!(result.is_ok());
         assert_eq!(guard.audit_log.len(), 1);
@@ -370,8 +454,16 @@ mod tests {
     #[test]
     fn guard_denies_unmatched_request() {
         let mut guard = NetworkGuard::new(sample_policy());
+        let (mut gate, cap) = gate_and_cap(false);
         let result = guard.process_egress(
-            "unknown.com", 80, Protocol::Http, "trace-2", "t",
+            "unknown.com",
+            80,
+            Protocol::Http,
+            Some(&cap),
+            &mut gate,
+            "trace-2",
+            "t",
+            1_700_000_011,
         );
         assert!(result.is_err());
         assert_eq!(guard.audit_log.len(), 1);
@@ -381,17 +473,78 @@ mod tests {
     #[test]
     fn guard_always_audits() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let _ = guard.process_egress("api.example.com", 443, Protocol::Http, "t1", "t");
-        let _ = guard.process_egress("unknown.com", 80, Protocol::Http, "t2", "t");
-        let _ = guard.process_egress("evil.com", 80, Protocol::Http, "t3", "t");
+        let (mut gate, cap) = gate_and_cap(false);
+        let _ = guard.process_egress(
+            "api.example.com",
+            443,
+            Protocol::Http,
+            Some(&cap),
+            &mut gate,
+            "t1",
+            "t",
+            1_700_000_020,
+        );
+        let _ = guard.process_egress(
+            "unknown.com",
+            80,
+            Protocol::Http,
+            Some(&cap),
+            &mut gate,
+            "t2",
+            "t",
+            1_700_000_021,
+        );
+        let _ = guard.process_egress(
+            "evil.com",
+            80,
+            Protocol::Http,
+            Some(&cap),
+            &mut gate,
+            "t3",
+            "t",
+            1_700_000_022,
+        );
         assert_eq!(guard.audit_log.len(), 3);
     }
 
     #[test]
     fn audit_event_has_trace_id() {
         let mut guard = NetworkGuard::new(sample_policy());
-        let _ = guard.process_egress("api.example.com", 443, Protocol::Http, "trace-abc", "t");
+        let (mut gate, cap) = gate_and_cap(false);
+        let _ = guard.process_egress(
+            "api.example.com",
+            443,
+            Protocol::Http,
+            Some(&cap),
+            &mut gate,
+            "trace-abc",
+            "t",
+            1_700_000_030,
+        );
         assert_eq!(guard.audit_log[0].trace_id, "trace-abc");
+    }
+
+    #[test]
+    fn missing_remote_cap_is_denied() {
+        let mut guard = NetworkGuard::new(sample_policy());
+        let mut gate = CapabilityGate::new("guard-secret");
+        let err = guard
+            .process_egress(
+                "api.example.com",
+                443,
+                Protocol::Http,
+                None,
+                &mut gate,
+                "trace-missing-cap",
+                "t",
+                1_700_000_040,
+            )
+            .expect_err("missing cap should fail");
+
+        match err {
+            GuardError::RemoteCapDenied { code, .. } => assert_eq!(code, "REMOTECAP_MISSING"),
+            other => panic!("expected RemoteCapDenied, got {other:?}"),
+        }
     }
 
     // === Policy validation ===
@@ -438,7 +591,9 @@ mod tests {
 
     #[test]
     fn error_display_messages() {
-        let e1 = GuardError::PolicyInvalid { reason: "bad".into() };
+        let e1 = GuardError::PolicyInvalid {
+            reason: "bad".into(),
+        };
         assert!(e1.to_string().contains("GUARD_POLICY_INVALID"));
 
         let e2 = GuardError::EgressDenied {
@@ -448,7 +603,16 @@ mod tests {
         };
         assert!(e2.to_string().contains("GUARD_EGRESS_DENIED"));
 
-        let e3 = GuardError::AuditFailed { reason: "io".into() };
+        let e3 = GuardError::AuditFailed {
+            reason: "io".into(),
+        };
         assert!(e3.to_string().contains("GUARD_AUDIT_FAILED"));
+
+        let e4 = GuardError::RemoteCapDenied {
+            code: "REMOTECAP_MISSING".into(),
+            compatibility_code: Some("ERR_REMOTE_CAP_REQUIRED".into()),
+            detail: "missing capability token".into(),
+        };
+        assert!(e4.to_string().contains("GUARD_REMOTE_CAP_DENIED"));
     }
 }

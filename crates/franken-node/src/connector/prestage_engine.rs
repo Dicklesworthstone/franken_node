@@ -187,7 +187,10 @@ pub fn evaluate_candidates(
         decisions.push(PrestageDecision {
             artifact_id: candidate.artifact_id.clone(),
             staged: true,
-            reason: format!("probability {:.2} >= threshold", candidate.predicted_probability),
+            reason: format!(
+                "probability {:.2} >= threshold",
+                candidate.predicted_probability
+            ),
             budget_remaining: config.max_bytes - budget_used,
         });
     }
@@ -208,10 +211,7 @@ pub fn evaluate_candidates(
 /// Measure prediction quality against actual needed artifacts.
 ///
 /// INV-PSE-QUALITY: precision and recall are computed and reported.
-pub fn measure_quality(
-    decisions: &[PrestageDecision],
-    actual_needed: &[String],
-) -> QualityMetrics {
+pub fn measure_quality(decisions: &[PrestageDecision], actual_needed: &[String]) -> QualityMetrics {
     let staged: Vec<&str> = decisions
         .iter()
         .filter(|d| d.staged)
@@ -293,10 +293,7 @@ mod tests {
 
     #[test]
     fn budget_limit_respected() {
-        let candidates = vec![
-            cand("a1", 600, 0.9),
-            cand("a2", 600, 0.8),
-        ];
+        let candidates = vec![cand("a1", 600, 0.9), cand("a2", 600, 0.8)];
         let (decisions, report) = evaluate_candidates(&candidates, &config(), "tr", "ts").unwrap();
         assert!(decisions[0].staged);
         assert!(!decisions[1].staged);
@@ -339,7 +336,11 @@ mod tests {
         ];
         let (decisions, _) = evaluate_candidates(&candidates, &config(), "tr", "ts").unwrap();
         // First staged should be the highest probability
-        let staged: Vec<&str> = decisions.iter().filter(|d| d.staged).map(|d| d.artifact_id.as_str()).collect();
+        let staged: Vec<&str> = decisions
+            .iter()
+            .filter(|d| d.staged)
+            .map(|d| d.artifact_id.as_str())
+            .collect();
         assert_eq!(staged[0], "high");
     }
 
@@ -351,30 +352,42 @@ mod tests {
 
     #[test]
     fn invalid_config_zero_budget() {
-        let cfg = PrestageConfig { max_bytes: 0, ..config() };
+        let cfg = PrestageConfig {
+            max_bytes: 0,
+            ..config()
+        };
         let err = evaluate_candidates(&[cand("a", 10, 0.9)], &cfg, "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "PSE_INVALID_CONFIG");
     }
 
     #[test]
     fn invalid_config_zero_max_artifacts() {
-        let cfg = PrestageConfig { max_artifacts_per_cycle: 0, ..config() };
+        let cfg = PrestageConfig {
+            max_artifacts_per_cycle: 0,
+            ..config()
+        };
         let err = evaluate_candidates(&[cand("a", 10, 0.9)], &cfg, "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "PSE_INVALID_CONFIG");
     }
 
     #[test]
     fn threshold_out_of_range() {
-        let cfg = PrestageConfig { probability_threshold: 1.5, ..config() };
+        let cfg = PrestageConfig {
+            probability_threshold: 1.5,
+            ..config()
+        };
         let err = evaluate_candidates(&[cand("a", 10, 0.9)], &cfg, "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "PSE_THRESHOLD_INVALID");
     }
 
     #[test]
     fn quality_perfect() {
-        let decisions = vec![
-            PrestageDecision { artifact_id: "a1".into(), staged: true, reason: "".into(), budget_remaining: 0 },
-        ];
+        let decisions = vec![PrestageDecision {
+            artifact_id: "a1".into(),
+            staged: true,
+            reason: "".into(),
+            budget_remaining: 0,
+        }];
         let actual = vec!["a1".to_string()];
         let q = measure_quality(&decisions, &actual);
         assert!((q.precision - 1.0).abs() < 1e-10);
@@ -383,9 +396,12 @@ mod tests {
 
     #[test]
     fn quality_no_overlap() {
-        let decisions = vec![
-            PrestageDecision { artifact_id: "a1".into(), staged: true, reason: "".into(), budget_remaining: 0 },
-        ];
+        let decisions = vec![PrestageDecision {
+            artifact_id: "a1".into(),
+            staged: true,
+            reason: "".into(),
+            budget_remaining: 0,
+        }];
         let actual = vec!["a2".to_string()];
         let q = measure_quality(&decisions, &actual);
         assert!((q.precision - 0.0).abs() < 1e-10);
@@ -395,13 +411,23 @@ mod tests {
     #[test]
     fn quality_partial() {
         let decisions = vec![
-            PrestageDecision { artifact_id: "a1".into(), staged: true, reason: "".into(), budget_remaining: 0 },
-            PrestageDecision { artifact_id: "a2".into(), staged: true, reason: "".into(), budget_remaining: 0 },
+            PrestageDecision {
+                artifact_id: "a1".into(),
+                staged: true,
+                reason: "".into(),
+                budget_remaining: 0,
+            },
+            PrestageDecision {
+                artifact_id: "a2".into(),
+                staged: true,
+                reason: "".into(),
+                budget_remaining: 0,
+            },
         ];
         let actual = vec!["a1".to_string(), "a3".to_string()];
         let q = measure_quality(&decisions, &actual);
         assert!((q.precision - 0.5).abs() < 1e-10); // 1/2 staged were needed
-        assert!((q.recall - 0.5).abs() < 1e-10);    // 1/2 needed were staged
+        assert!((q.recall - 0.5).abs() < 1e-10); // 1/2 needed were staged
     }
 
     #[test]
@@ -421,15 +447,27 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(PrestageError::BudgetExceeded { used: 0, limit: 0 }.code(), "PSE_BUDGET_EXCEEDED");
-        assert_eq!(PrestageError::InvalidConfig { reason: "".into() }.code(), "PSE_INVALID_CONFIG");
+        assert_eq!(
+            PrestageError::BudgetExceeded { used: 0, limit: 0 }.code(),
+            "PSE_BUDGET_EXCEEDED"
+        );
+        assert_eq!(
+            PrestageError::InvalidConfig { reason: "".into() }.code(),
+            "PSE_INVALID_CONFIG"
+        );
         assert_eq!(PrestageError::NoCandidates.code(), "PSE_NO_CANDIDATES");
-        assert_eq!(PrestageError::ThresholdInvalid { value: 0.0 }.code(), "PSE_THRESHOLD_INVALID");
+        assert_eq!(
+            PrestageError::ThresholdInvalid { value: 0.0 }.code(),
+            "PSE_THRESHOLD_INVALID"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = PrestageError::BudgetExceeded { used: 100, limit: 50 };
+        let e = PrestageError::BudgetExceeded {
+            used: 100,
+            limit: 50,
+        };
         assert!(e.to_string().contains("PSE_BUDGET_EXCEEDED"));
     }
 
@@ -448,7 +486,13 @@ mod tests {
             cand("a3", 100, 0.3),
         ];
         let (_, report) = evaluate_candidates(&candidates, &config(), "tr", "ts").unwrap();
-        assert!(report.staged_count > 0, "INV-PSE-COVERAGE: must stage something");
-        assert!(report.staged_count < report.total_candidates, "Not all staged (threshold filters)");
+        assert!(
+            report.staged_count > 0,
+            "INV-PSE-COVERAGE: must stage something"
+        );
+        assert!(
+            report.staged_count < report.total_candidates,
+            "Not all staged (threshold filters)"
+        );
     }
 }

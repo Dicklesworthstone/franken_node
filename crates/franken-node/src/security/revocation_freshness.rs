@@ -34,8 +34,8 @@ pub struct FreshnessPolicy {
 impl FreshnessPolicy {
     pub fn default_policy() -> Self {
         Self {
-            risky_max_age_secs: 3600,      // 1 hour
-            dangerous_max_age_secs: 300,    // 5 minutes
+            risky_max_age_secs: 3600,    // 1 hour
+            dangerous_max_age_secs: 300, // 5 minutes
         }
     }
 
@@ -105,9 +105,18 @@ pub struct FreshnessDecision {
 /// - `RF_POLICY_INVALID`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FreshnessError {
-    StaleFrontier { tier: String, age_secs: u64, max_age_secs: u64 },
-    OverrideRequired { tier: String, age_secs: u64 },
-    PolicyInvalid { reason: String },
+    StaleFrontier {
+        tier: String,
+        age_secs: u64,
+        max_age_secs: u64,
+    },
+    OverrideRequired {
+        tier: String,
+        age_secs: u64,
+    },
+    PolicyInvalid {
+        reason: String,
+    },
 }
 
 impl FreshnessError {
@@ -123,11 +132,21 @@ impl FreshnessError {
 impl std::fmt::Display for FreshnessError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StaleFrontier { tier, age_secs, max_age_secs } => {
-                write!(f, "RF_STALE_FRONTIER: {tier} action denied, age {age_secs}s > max {max_age_secs}s")
+            Self::StaleFrontier {
+                tier,
+                age_secs,
+                max_age_secs,
+            } => {
+                write!(
+                    f,
+                    "RF_STALE_FRONTIER: {tier} action denied, age {age_secs}s > max {max_age_secs}s"
+                )
             }
             Self::OverrideRequired { tier, age_secs } => {
-                write!(f, "RF_OVERRIDE_REQUIRED: {tier} action needs override, age {age_secs}s")
+                write!(
+                    f,
+                    "RF_OVERRIDE_REQUIRED: {tier} action needs override, age {age_secs}s"
+                )
             }
             Self::PolicyInvalid { reason } => {
                 write!(f, "RF_POLICY_INVALID: {reason}")
@@ -238,34 +257,39 @@ mod tests {
 
     #[test]
     fn standard_always_passes() {
-        let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 999999), None).unwrap();
+        let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 999999), None)
+            .unwrap();
         assert!(d.allowed);
         assert!(d.max_age_secs.is_none());
     }
 
     #[test]
     fn risky_fresh_passes() {
-        let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 1000), None).unwrap();
+        let d =
+            evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 1000), None).unwrap();
         assert!(d.allowed);
         assert_eq!(d.max_age_secs, Some(3600));
     }
 
     #[test]
     fn risky_stale_denied() {
-        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 5000), None).unwrap_err();
+        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 5000), None)
+            .unwrap_err();
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 
     #[test]
     fn dangerous_fresh_passes() {
-        let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Dangerous, 100), None).unwrap();
+        let d =
+            evaluate_freshness(&policy(), &check_action(SafetyTier::Dangerous, 100), None).unwrap();
         assert!(d.allowed);
         assert_eq!(d.max_age_secs, Some(300));
     }
 
     #[test]
     fn dangerous_stale_denied() {
-        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Dangerous, 500), None).unwrap_err();
+        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Dangerous, 500), None)
+            .unwrap_err();
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 
@@ -275,7 +299,8 @@ mod tests {
             &policy(),
             &check_action(SafetyTier::Risky, 5000),
             Some(&override_receipt()),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(d.allowed);
         assert!(d.override_receipt.is_some());
     }
@@ -286,7 +311,8 @@ mod tests {
             &policy(),
             &check_action(SafetyTier::Dangerous, 500),
             Some(&override_receipt()),
-        ).unwrap();
+        )
+        .unwrap();
         assert!(d.allowed);
         assert!(d.override_receipt.is_some());
         assert!(d.reason.contains("override accepted"));
@@ -298,20 +324,23 @@ mod tests {
             &policy(),
             &check_action(SafetyTier::Risky, 5000),
             Some(&override_receipt()),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(d.override_receipt.as_ref().unwrap().actor, "admin");
     }
 
     #[test]
     fn at_boundary_passes() {
         // Age exactly at max_age should pass (<= check)
-        let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3600), None).unwrap();
+        let d =
+            evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3600), None).unwrap();
         assert!(d.allowed);
     }
 
     #[test]
     fn just_over_boundary_denied() {
-        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3601), None).unwrap_err();
+        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3601), None)
+            .unwrap_err();
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 
@@ -347,7 +376,8 @@ mod tests {
 
     #[test]
     fn decision_has_trace_id() {
-        let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 0), None).unwrap();
+        let d =
+            evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 0), None).unwrap();
         assert_eq!(d.trace_id, "tr-1");
     }
 
@@ -361,7 +391,9 @@ mod tests {
     #[test]
     fn error_display() {
         let e = FreshnessError::StaleFrontier {
-            tier: "Risky".into(), age_secs: 5000, max_age_secs: 3600,
+            tier: "Risky".into(),
+            age_secs: 5000,
+            max_age_secs: 3600,
         };
         assert!(e.to_string().contains("RF_STALE_FRONTIER"));
     }
@@ -369,11 +401,20 @@ mod tests {
     #[test]
     fn error_codes_all_present() {
         assert_eq!(
-            FreshnessError::StaleFrontier { tier: "x".into(), age_secs: 0, max_age_secs: 0 }.code(),
+            FreshnessError::StaleFrontier {
+                tier: "x".into(),
+                age_secs: 0,
+                max_age_secs: 0
+            }
+            .code(),
             "RF_STALE_FRONTIER"
         );
         assert_eq!(
-            FreshnessError::OverrideRequired { tier: "x".into(), age_secs: 0 }.code(),
+            FreshnessError::OverrideRequired {
+                tier: "x".into(),
+                age_secs: 0
+            }
+            .code(),
             "RF_OVERRIDE_REQUIRED"
         );
         assert_eq!(

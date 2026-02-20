@@ -201,6 +201,14 @@ pub struct TrustListArgs {
 pub struct TrustRevokeArgs {
     /// Extension identifier with optional version.
     pub extension_id: String,
+
+    /// Optional path to export signed decision receipts (JSON or `.cbor`).
+    #[arg(long)]
+    pub receipt_out: Option<PathBuf>,
+
+    /// Optional path to export human-readable receipt summary markdown.
+    #[arg(long)]
+    pub receipt_summary_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -208,6 +216,14 @@ pub struct TrustQuarantineArgs {
     /// Artifact hash to quarantine.
     #[arg(long)]
     pub artifact: String,
+
+    /// Optional path to export signed decision receipts (JSON or `.cbor`).
+    #[arg(long)]
+    pub receipt_out: Option<PathBuf>,
+
+    /// Optional path to export human-readable receipt summary markdown.
+    #[arg(long)]
+    pub receipt_summary_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -278,6 +294,14 @@ pub struct IncidentBundleArgs {
     /// Verify bundle integrity.
     #[arg(long)]
     pub verify: bool,
+
+    /// Optional path to export signed decision receipts (JSON or `.cbor`).
+    #[arg(long)]
+    pub receipt_out: Option<PathBuf>,
+
+    /// Optional path to export human-readable receipt summary markdown.
+    #[arg(long)]
+    pub receipt_summary_out: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]

@@ -32,18 +32,24 @@ impl SchemaVersion {
                 reason: "expected major.minor.patch".to_string(),
             });
         }
-        let major = parts[0].parse::<u32>().map_err(|_| MigrationError::SchemaVersionInvalid {
-            version: s.to_string(),
-            reason: "invalid major version".to_string(),
-        })?;
-        let minor = parts[1].parse::<u32>().map_err(|_| MigrationError::SchemaVersionInvalid {
-            version: s.to_string(),
-            reason: "invalid minor version".to_string(),
-        })?;
-        let patch = parts[2].parse::<u32>().map_err(|_| MigrationError::SchemaVersionInvalid {
-            version: s.to_string(),
-            reason: "invalid patch version".to_string(),
-        })?;
+        let major = parts[0]
+            .parse::<u32>()
+            .map_err(|_| MigrationError::SchemaVersionInvalid {
+                version: s.to_string(),
+                reason: "invalid major version".to_string(),
+            })?;
+        let minor = parts[1]
+            .parse::<u32>()
+            .map_err(|_| MigrationError::SchemaVersionInvalid {
+                version: s.to_string(),
+                reason: "invalid minor version".to_string(),
+            })?;
+        let patch = parts[2]
+            .parse::<u32>()
+            .map_err(|_| MigrationError::SchemaVersionInvalid {
+                version: s.to_string(),
+                reason: "invalid patch version".to_string(),
+            })?;
         Ok(Self::new(major, minor, patch))
     }
 
@@ -304,10 +310,7 @@ impl fmt::Display for MigrationError {
                 write!(f, "MIGRATION_ALREADY_APPLIED: version {version}")
             }
             Self::MigrationRollbackFailed { version, reason } => {
-                write!(
-                    f,
-                    "MIGRATION_ROLLBACK_FAILED: version {version}: {reason}"
-                )
+                write!(f, "MIGRATION_ROLLBACK_FAILED: version {version}: {reason}")
             }
             Self::SchemaVersionInvalid { version, reason } => {
                 write!(f, "SCHEMA_VERSION_INVALID: '{version}': {reason}")

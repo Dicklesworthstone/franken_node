@@ -82,11 +82,29 @@ pub struct AmplificationAuditEntry {
 /// Errors from anti-amplification operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AmplificationError {
-    ResponseTooLarge { request_id: String, actual: u64, limit: u64 },
-    RatioExceeded { request_id: String, ratio: f64, max_ratio: f64 },
-    UnauthLimit { request_id: String, actual: u64, limit: u64 },
-    ItemsExceeded { request_id: String, actual: u32, limit: u32 },
-    InvalidPolicy { reason: String },
+    ResponseTooLarge {
+        request_id: String,
+        actual: u64,
+        limit: u64,
+    },
+    RatioExceeded {
+        request_id: String,
+        ratio: f64,
+        max_ratio: f64,
+    },
+    UnauthLimit {
+        request_id: String,
+        actual: u64,
+        limit: u64,
+    },
+    ItemsExceeded {
+        request_id: String,
+        actual: u32,
+        limit: u32,
+    },
+    InvalidPolicy {
+        reason: String,
+    },
 }
 
 impl AmplificationError {
@@ -104,16 +122,39 @@ impl AmplificationError {
 impl std::fmt::Display for AmplificationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ResponseTooLarge { request_id, actual, limit } =>
-                write!(f, "AAR_RESPONSE_TOO_LARGE: req={request_id} actual={actual} limit={limit}"),
-            Self::RatioExceeded { request_id, ratio, max_ratio } =>
-                write!(f, "AAR_RATIO_EXCEEDED: req={request_id} ratio={ratio:.2} max={max_ratio:.2}"),
-            Self::UnauthLimit { request_id, actual, limit } =>
-                write!(f, "AAR_UNAUTH_LIMIT: req={request_id} actual={actual} limit={limit}"),
-            Self::ItemsExceeded { request_id, actual, limit } =>
-                write!(f, "AAR_ITEMS_EXCEEDED: req={request_id} actual={actual} limit={limit}"),
-            Self::InvalidPolicy { reason } =>
-                write!(f, "AAR_INVALID_POLICY: {reason}"),
+            Self::ResponseTooLarge {
+                request_id,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "AAR_RESPONSE_TOO_LARGE: req={request_id} actual={actual} limit={limit}"
+            ),
+            Self::RatioExceeded {
+                request_id,
+                ratio,
+                max_ratio,
+            } => write!(
+                f,
+                "AAR_RATIO_EXCEEDED: req={request_id} ratio={ratio:.2} max={max_ratio:.2}"
+            ),
+            Self::UnauthLimit {
+                request_id,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "AAR_UNAUTH_LIMIT: req={request_id} actual={actual} limit={limit}"
+            ),
+            Self::ItemsExceeded {
+                request_id,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "AAR_ITEMS_EXCEEDED: req={request_id} actual={actual} limit={limit}"
+            ),
+            Self::InvalidPolicy { reason } => write!(f, "AAR_INVALID_POLICY: {reason}"),
         }
     }
 }
@@ -151,7 +192,11 @@ pub fn validate_policy(policy: &AmplificationPolicy) -> Result<(), Amplification
 /// Compute the enforced byte limit for a request given policy and auth status.
 ///
 /// INV-AAR-UNAUTH-STRICT: unauth limit <= auth limit.
-pub fn enforced_limit(policy: &AmplificationPolicy, declared: &ResponseBound, authenticated: bool) -> u64 {
+pub fn enforced_limit(
+    policy: &AmplificationPolicy,
+    declared: &ResponseBound,
+    authenticated: bool,
+) -> u64 {
     let auth_cap = if authenticated {
         policy.auth_max_bytes
     } else {
@@ -209,7 +254,10 @@ pub fn check_response_bound(
     }
 
     // Check 4: items per response
-    let items_limit = request.declared_bound.max_items.min(policy.max_items_per_response);
+    let items_limit = request
+        .declared_bound
+        .max_items
+        .min(policy.max_items_per_response);
     if request.actual_items > items_limit {
         violations.push(BoundViolation::ItemsExceeded {
             actual: request.actual_items,
@@ -236,7 +284,11 @@ pub fn check_response_bound(
         actual_bytes: request.actual_response_bytes,
         enforced_limit: limit,
         ratio,
-        verdict: if allowed { "ALLOW".to_string() } else { "BLOCK".to_string() },
+        verdict: if allowed {
+            "ALLOW".to_string()
+        } else {
+            "BLOCK".to_string()
+        },
     };
 
     Ok((verdict, audit))
@@ -274,10 +326,21 @@ mod tests {
     }
 
     fn bound(bytes: u64, items: u32) -> ResponseBound {
-        ResponseBound { max_bytes: bytes, max_items: items }
+        ResponseBound {
+            max_bytes: bytes,
+            max_items: items,
+        }
     }
 
-    fn req(id: &str, peer: &str, auth: bool, req_bytes: u64, declared_bytes: u64, actual_bytes: u64, items: u32) -> BoundCheckRequest {
+    fn req(
+        id: &str,
+        peer: &str,
+        auth: bool,
+        req_bytes: u64,
+        declared_bytes: u64,
+        actual_bytes: u64,
+        items: u32,
+    ) -> BoundCheckRequest {
         BoundCheckRequest {
             request_id: id.into(),
             peer_id: peer.into(),
@@ -303,7 +366,11 @@ mod tests {
         let r = req("r1", "p1", true, 100, 5000, 6000, 10);
         let (v, _) = check_response_bound(&r, &policy(), "tr", "ts").unwrap();
         assert!(!v.allowed);
-        assert!(v.violations.iter().any(|v| matches!(v, BoundViolation::ResponseTooLarge { .. })));
+        assert!(
+            v.violations
+                .iter()
+                .any(|v| matches!(v, BoundViolation::ResponseTooLarge { .. }))
+        );
     }
 
     #[test]
@@ -311,7 +378,11 @@ mod tests {
         let r = req("r1", "p1", true, 10, 10000, 200, 10);
         let (v, _) = check_response_bound(&r, &policy(), "tr", "ts").unwrap();
         assert!(!v.allowed);
-        assert!(v.violations.iter().any(|v| matches!(v, BoundViolation::RatioExceeded { .. })));
+        assert!(
+            v.violations
+                .iter()
+                .any(|v| matches!(v, BoundViolation::RatioExceeded { .. }))
+        );
     }
 
     #[test]
@@ -319,7 +390,11 @@ mod tests {
         let r = req("r1", "p1", false, 100, 5000, 1500, 10);
         let (v, _) = check_response_bound(&r, &policy(), "tr", "ts").unwrap();
         assert!(!v.allowed);
-        assert!(v.violations.iter().any(|v| matches!(v, BoundViolation::UnauthLimit { .. })));
+        assert!(
+            v.violations
+                .iter()
+                .any(|v| matches!(v, BoundViolation::UnauthLimit { .. }))
+        );
     }
 
     #[test]
@@ -336,7 +411,11 @@ mod tests {
         r.declared_bound.max_items = 50;
         let (v, _) = check_response_bound(&r, &policy(), "tr", "ts").unwrap();
         assert!(!v.allowed);
-        assert!(v.violations.iter().any(|v| matches!(v, BoundViolation::ItemsExceeded { .. })));
+        assert!(
+            v.violations
+                .iter()
+                .any(|v| matches!(v, BoundViolation::ItemsExceeded { .. }))
+        );
     }
 
     #[test]
@@ -455,16 +534,55 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(AmplificationError::ResponseTooLarge { request_id: "".into(), actual: 0, limit: 0 }.code(), "AAR_RESPONSE_TOO_LARGE");
-        assert_eq!(AmplificationError::RatioExceeded { request_id: "".into(), ratio: 0.0, max_ratio: 0.0 }.code(), "AAR_RATIO_EXCEEDED");
-        assert_eq!(AmplificationError::UnauthLimit { request_id: "".into(), actual: 0, limit: 0 }.code(), "AAR_UNAUTH_LIMIT");
-        assert_eq!(AmplificationError::ItemsExceeded { request_id: "".into(), actual: 0, limit: 0 }.code(), "AAR_ITEMS_EXCEEDED");
-        assert_eq!(AmplificationError::InvalidPolicy { reason: "".into() }.code(), "AAR_INVALID_POLICY");
+        assert_eq!(
+            AmplificationError::ResponseTooLarge {
+                request_id: "".into(),
+                actual: 0,
+                limit: 0
+            }
+            .code(),
+            "AAR_RESPONSE_TOO_LARGE"
+        );
+        assert_eq!(
+            AmplificationError::RatioExceeded {
+                request_id: "".into(),
+                ratio: 0.0,
+                max_ratio: 0.0
+            }
+            .code(),
+            "AAR_RATIO_EXCEEDED"
+        );
+        assert_eq!(
+            AmplificationError::UnauthLimit {
+                request_id: "".into(),
+                actual: 0,
+                limit: 0
+            }
+            .code(),
+            "AAR_UNAUTH_LIMIT"
+        );
+        assert_eq!(
+            AmplificationError::ItemsExceeded {
+                request_id: "".into(),
+                actual: 0,
+                limit: 0
+            }
+            .code(),
+            "AAR_ITEMS_EXCEEDED"
+        );
+        assert_eq!(
+            AmplificationError::InvalidPolicy { reason: "".into() }.code(),
+            "AAR_INVALID_POLICY"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = AmplificationError::ResponseTooLarge { request_id: "r1".into(), actual: 5000, limit: 1000 };
+        let e = AmplificationError::ResponseTooLarge {
+            request_id: "r1".into(),
+            actual: 5000,
+            limit: 1000,
+        };
         assert!(e.to_string().contains("AAR_RESPONSE_TOO_LARGE"));
         assert!(e.to_string().contains("r1"));
     }

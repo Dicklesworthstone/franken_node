@@ -73,10 +73,22 @@ pub struct CrashLoopIncident {
 /// - `CLD_COOLDOWN_ACTIVE`
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CrashLoopError {
-    ThresholdExceeded { connector_id: String, count: u32, window_secs: u64 },
-    NoKnownGood { connector_id: String },
-    PinUntrusted { connector_id: String, version: String },
-    CooldownActive { connector_id: String, remaining_secs: u64 },
+    ThresholdExceeded {
+        connector_id: String,
+        count: u32,
+        window_secs: u64,
+    },
+    NoKnownGood {
+        connector_id: String,
+    },
+    PinUntrusted {
+        connector_id: String,
+        version: String,
+    },
+    CooldownActive {
+        connector_id: String,
+        remaining_secs: u64,
+    },
 }
 
 impl CrashLoopError {
@@ -93,17 +105,36 @@ impl CrashLoopError {
 impl std::fmt::Display for CrashLoopError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::ThresholdExceeded { connector_id, count, window_secs } => {
-                write!(f, "CLD_THRESHOLD_EXCEEDED: {connector_id} crashed {count} times in {window_secs}s")
+            Self::ThresholdExceeded {
+                connector_id,
+                count,
+                window_secs,
+            } => {
+                write!(
+                    f,
+                    "CLD_THRESHOLD_EXCEEDED: {connector_id} crashed {count} times in {window_secs}s"
+                )
             }
             Self::NoKnownGood { connector_id } => {
                 write!(f, "CLD_NO_KNOWN_GOOD: no known-good pin for {connector_id}")
             }
-            Self::PinUntrusted { connector_id, version } => {
-                write!(f, "CLD_PIN_UNTRUSTED: pin {version} for {connector_id} is untrusted")
+            Self::PinUntrusted {
+                connector_id,
+                version,
+            } => {
+                write!(
+                    f,
+                    "CLD_PIN_UNTRUSTED: pin {version} for {connector_id} is untrusted"
+                )
             }
-            Self::CooldownActive { connector_id, remaining_secs } => {
-                write!(f, "CLD_COOLDOWN_ACTIVE: {connector_id} in cooldown for {remaining_secs}s")
+            Self::CooldownActive {
+                connector_id,
+                remaining_secs,
+            } => {
+                write!(
+                    f,
+                    "CLD_COOLDOWN_ACTIVE: {connector_id} in cooldown for {remaining_secs}s"
+                )
             }
         }
     }
@@ -431,7 +462,8 @@ mod tests {
             det.record_crash(&ev, 100 + i);
         }
         let events: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom")).collect();
-        det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1").unwrap();
+        det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1")
+            .unwrap();
 
         // After cooldown
         for i in 0..3 {
@@ -475,7 +507,8 @@ mod tests {
             det.record_crash(&ev, 100 + i);
         }
         let events: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom")).collect();
-        det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1").unwrap();
+        det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1")
+            .unwrap();
         assert_eq!(det.incidents.len(), 1);
         assert_eq!(det.incidents[0].trace_id, "tr1");
     }
@@ -488,7 +521,8 @@ mod tests {
             det.record_crash(&ev, 100 + i);
         }
         let events: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom")).collect();
-        det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1").unwrap();
+        det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1")
+            .unwrap();
         // After rollback, crash window should be cleared
         assert_eq!(det.crashes_in_window(103), 0);
     }
@@ -504,7 +538,9 @@ mod tests {
     #[test]
     fn error_display() {
         let e = CrashLoopError::ThresholdExceeded {
-            connector_id: "c1".into(), count: 5, window_secs: 60,
+            connector_id: "c1".into(),
+            count: 5,
+            window_secs: 60,
         };
         assert!(e.to_string().contains("CLD_THRESHOLD_EXCEEDED"));
         assert!(e.to_string().contains("c1"));
@@ -513,19 +549,35 @@ mod tests {
     #[test]
     fn error_codes_all_present() {
         assert_eq!(
-            CrashLoopError::ThresholdExceeded { connector_id: "x".into(), count: 0, window_secs: 0 }.code(),
+            CrashLoopError::ThresholdExceeded {
+                connector_id: "x".into(),
+                count: 0,
+                window_secs: 0
+            }
+            .code(),
             "CLD_THRESHOLD_EXCEEDED"
         );
         assert_eq!(
-            CrashLoopError::NoKnownGood { connector_id: "x".into() }.code(),
+            CrashLoopError::NoKnownGood {
+                connector_id: "x".into()
+            }
+            .code(),
             "CLD_NO_KNOWN_GOOD"
         );
         assert_eq!(
-            CrashLoopError::PinUntrusted { connector_id: "x".into(), version: "v".into() }.code(),
+            CrashLoopError::PinUntrusted {
+                connector_id: "x".into(),
+                version: "v".into()
+            }
+            .code(),
             "CLD_PIN_UNTRUSTED"
         );
         assert_eq!(
-            CrashLoopError::CooldownActive { connector_id: "x".into(), remaining_secs: 10 }.code(),
+            CrashLoopError::CooldownActive {
+                connector_id: "x".into(),
+                remaining_secs: 10
+            }
+            .code(),
             "CLD_COOLDOWN_ACTIVE"
         );
     }
@@ -550,7 +602,9 @@ mod tests {
             det.record_crash(&ev, 100 + i);
         }
         let events: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom")).collect();
-        let decision = det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1").unwrap();
+        let decision = det
+            .evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1")
+            .unwrap();
         assert!(decision.rollback_target.is_some());
         assert_eq!(decision.rollback_target.unwrap().version, "1.0.0");
     }

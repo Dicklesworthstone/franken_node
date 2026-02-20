@@ -69,10 +69,20 @@ pub struct LeaseDecision {
 /// Error codes: `LS_EXPIRED`, `LS_STALE_USE`, `LS_ALREADY_REVOKED`, `LS_PURPOSE_MISMATCH`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseError {
-    Expired { lease_id: String },
-    StaleUse { lease_id: String },
-    AlreadyRevoked { lease_id: String },
-    PurposeMismatch { lease_id: String, expected: String, actual: String },
+    Expired {
+        lease_id: String,
+    },
+    StaleUse {
+        lease_id: String,
+    },
+    AlreadyRevoked {
+        lease_id: String,
+    },
+    PurposeMismatch {
+        lease_id: String,
+        expected: String,
+        actual: String,
+    },
 }
 
 impl LeaseError {
@@ -92,8 +102,15 @@ impl std::fmt::Display for LeaseError {
             Self::Expired { lease_id } => write!(f, "LS_EXPIRED: {lease_id}"),
             Self::StaleUse { lease_id } => write!(f, "LS_STALE_USE: {lease_id}"),
             Self::AlreadyRevoked { lease_id } => write!(f, "LS_ALREADY_REVOKED: {lease_id}"),
-            Self::PurposeMismatch { lease_id, expected, actual } => {
-                write!(f, "LS_PURPOSE_MISMATCH: {lease_id} expected {expected}, got {actual}")
+            Self::PurposeMismatch {
+                lease_id,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "LS_PURPOSE_MISMATCH: {lease_id} expected {expected}, got {actual}"
+                )
             }
         }
     }
@@ -161,9 +178,12 @@ impl LeaseService {
         trace_id: &str,
         timestamp: &str,
     ) -> Result<Lease, LeaseError> {
-        let lease = self.leases.get(lease_id).ok_or_else(|| LeaseError::Expired {
-            lease_id: lease_id.to_string(),
-        })?;
+        let lease = self
+            .leases
+            .get(lease_id)
+            .ok_or_else(|| LeaseError::Expired {
+                lease_id: lease_id.to_string(),
+            })?;
 
         if lease.revoked {
             self.decisions.push(LeaseDecision {
@@ -174,7 +194,9 @@ impl LeaseService {
                 trace_id: trace_id.to_string(),
                 timestamp: timestamp.to_string(),
             });
-            return Err(LeaseError::AlreadyRevoked { lease_id: lease_id.to_string() });
+            return Err(LeaseError::AlreadyRevoked {
+                lease_id: lease_id.to_string(),
+            });
         }
 
         if lease.is_expired(now) {
@@ -186,7 +208,9 @@ impl LeaseService {
                 trace_id: trace_id.to_string(),
                 timestamp: timestamp.to_string(),
             });
-            return Err(LeaseError::Expired { lease_id: lease_id.to_string() });
+            return Err(LeaseError::Expired {
+                lease_id: lease_id.to_string(),
+            });
         }
 
         let lease = self.leases.get_mut(lease_id).unwrap();
@@ -216,9 +240,12 @@ impl LeaseService {
         trace_id: &str,
         timestamp: &str,
     ) -> Result<LeaseDecision, LeaseError> {
-        let lease = self.leases.get(lease_id).ok_or_else(|| LeaseError::StaleUse {
-            lease_id: lease_id.to_string(),
-        })?;
+        let lease = self
+            .leases
+            .get(lease_id)
+            .ok_or_else(|| LeaseError::StaleUse {
+                lease_id: lease_id.to_string(),
+            })?;
 
         if lease.revoked {
             let d = LeaseDecision {
@@ -230,7 +257,9 @@ impl LeaseService {
                 timestamp: timestamp.to_string(),
             };
             self.decisions.push(d.clone());
-            return Err(LeaseError::StaleUse { lease_id: lease_id.to_string() });
+            return Err(LeaseError::StaleUse {
+                lease_id: lease_id.to_string(),
+            });
         }
 
         if lease.is_expired(now) {
@@ -243,7 +272,9 @@ impl LeaseService {
                 timestamp: timestamp.to_string(),
             };
             self.decisions.push(d.clone());
-            return Err(LeaseError::StaleUse { lease_id: lease_id.to_string() });
+            return Err(LeaseError::StaleUse {
+                lease_id: lease_id.to_string(),
+            });
         }
 
         // INV-LS-PURPOSE
@@ -252,7 +283,10 @@ impl LeaseService {
                 lease_id: lease_id.to_string(),
                 action: "use".into(),
                 allowed: false,
-                reason: format!("purpose mismatch: expected {required_purpose}, got {}", lease.purpose),
+                reason: format!(
+                    "purpose mismatch: expected {required_purpose}, got {}",
+                    lease.purpose
+                ),
                 trace_id: trace_id.to_string(),
                 timestamp: timestamp.to_string(),
             };
@@ -283,12 +317,17 @@ impl LeaseService {
         trace_id: &str,
         timestamp: &str,
     ) -> Result<(), LeaseError> {
-        let lease = self.leases.get_mut(lease_id).ok_or_else(|| LeaseError::Expired {
-            lease_id: lease_id.to_string(),
-        })?;
+        let lease = self
+            .leases
+            .get_mut(lease_id)
+            .ok_or_else(|| LeaseError::Expired {
+                lease_id: lease_id.to_string(),
+            })?;
 
         if lease.revoked {
-            return Err(LeaseError::AlreadyRevoked { lease_id: lease_id.to_string() });
+            return Err(LeaseError::AlreadyRevoked {
+                lease_id: lease_id.to_string(),
+            });
         }
 
         lease.revoked = true;
@@ -333,7 +372,7 @@ mod tests {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::Operation, 60, 100, "tr", "ts");
         assert!(!l.is_expired(160)); // at TTL boundary
-        assert!(l.is_expired(161));  // past TTL
+        assert!(l.is_expired(161)); // past TTL
     }
 
     #[test]
@@ -366,7 +405,9 @@ mod tests {
     fn use_active_lease_ok() {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::StateWrite, 60, 100, "tr", "ts");
-        let d = svc.use_lease(&l.lease_id, LeasePurpose::StateWrite, 110, "tr2", "ts2").unwrap();
+        let d = svc
+            .use_lease(&l.lease_id, LeasePurpose::StateWrite, 110, "tr2", "ts2")
+            .unwrap();
         assert!(d.allowed);
     }
 
@@ -374,7 +415,9 @@ mod tests {
     fn use_expired_lease_rejected() {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::StateWrite, 60, 100, "tr", "ts");
-        let err = svc.use_lease(&l.lease_id, LeasePurpose::StateWrite, 200, "tr2", "ts2").unwrap_err();
+        let err = svc
+            .use_lease(&l.lease_id, LeasePurpose::StateWrite, 200, "tr2", "ts2")
+            .unwrap_err();
         assert_eq!(err.code(), "LS_STALE_USE");
     }
 
@@ -383,7 +426,9 @@ mod tests {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::StateWrite, 60, 100, "tr", "ts");
         svc.revoke(&l.lease_id, "tr", "ts").unwrap();
-        let err = svc.use_lease(&l.lease_id, LeasePurpose::StateWrite, 110, "tr2", "ts2").unwrap_err();
+        let err = svc
+            .use_lease(&l.lease_id, LeasePurpose::StateWrite, 110, "tr2", "ts2")
+            .unwrap_err();
         assert_eq!(err.code(), "LS_STALE_USE");
     }
 
@@ -391,7 +436,15 @@ mod tests {
     fn use_wrong_purpose_rejected() {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::Operation, 60, 100, "tr", "ts");
-        let err = svc.use_lease(&l.lease_id, LeasePurpose::MigrationHandoff, 110, "tr2", "ts2").unwrap_err();
+        let err = svc
+            .use_lease(
+                &l.lease_id,
+                LeasePurpose::MigrationHandoff,
+                110,
+                "tr2",
+                "ts2",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "LS_PURPOSE_MISMATCH");
     }
 
@@ -434,22 +487,50 @@ mod tests {
     fn purpose_display() {
         assert_eq!(LeasePurpose::Operation.to_string(), "Operation");
         assert_eq!(LeasePurpose::StateWrite.to_string(), "StateWrite");
-        assert_eq!(LeasePurpose::MigrationHandoff.to_string(), "MigrationHandoff");
+        assert_eq!(
+            LeasePurpose::MigrationHandoff.to_string(),
+            "MigrationHandoff"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = LeaseError::Expired { lease_id: "l1".into() };
+        let e = LeaseError::Expired {
+            lease_id: "l1".into(),
+        };
         assert!(e.to_string().contains("LS_EXPIRED"));
     }
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(LeaseError::Expired { lease_id: "x".into() }.code(), "LS_EXPIRED");
-        assert_eq!(LeaseError::StaleUse { lease_id: "x".into() }.code(), "LS_STALE_USE");
-        assert_eq!(LeaseError::AlreadyRevoked { lease_id: "x".into() }.code(), "LS_ALREADY_REVOKED");
         assert_eq!(
-            LeaseError::PurposeMismatch { lease_id: "x".into(), expected: "a".into(), actual: "b".into() }.code(),
+            LeaseError::Expired {
+                lease_id: "x".into()
+            }
+            .code(),
+            "LS_EXPIRED"
+        );
+        assert_eq!(
+            LeaseError::StaleUse {
+                lease_id: "x".into()
+            }
+            .code(),
+            "LS_STALE_USE"
+        );
+        assert_eq!(
+            LeaseError::AlreadyRevoked {
+                lease_id: "x".into()
+            }
+            .code(),
+            "LS_ALREADY_REVOKED"
+        );
+        assert_eq!(
+            LeaseError::PurposeMismatch {
+                lease_id: "x".into(),
+                expected: "a".into(),
+                actual: "b".into()
+            }
+            .code(),
             "LS_PURPOSE_MISMATCH"
         );
     }
@@ -458,7 +539,8 @@ mod tests {
     fn decisions_recorded() {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::Operation, 60, 100, "tr", "ts");
-        svc.use_lease(&l.lease_id, LeasePurpose::Operation, 110, "tr2", "ts2").unwrap();
+        svc.use_lease(&l.lease_id, LeasePurpose::Operation, 110, "tr2", "ts2")
+            .unwrap();
         assert_eq!(svc.decisions.len(), 2);
         assert_eq!(svc.decisions[0].action, "grant");
         assert_eq!(svc.decisions[1].action, "use");
@@ -467,8 +549,23 @@ mod tests {
     #[test]
     fn migration_handoff_purpose() {
         let mut svc = LeaseService::new();
-        let l = svc.grant("migrator", LeasePurpose::MigrationHandoff, 120, 100, "tr", "ts");
-        let d = svc.use_lease(&l.lease_id, LeasePurpose::MigrationHandoff, 150, "tr2", "ts2").unwrap();
+        let l = svc.grant(
+            "migrator",
+            LeasePurpose::MigrationHandoff,
+            120,
+            100,
+            "tr",
+            "ts",
+        );
+        let d = svc
+            .use_lease(
+                &l.lease_id,
+                LeasePurpose::MigrationHandoff,
+                150,
+                "tr2",
+                "ts2",
+            )
+            .unwrap();
         assert!(d.allowed);
     }
 }

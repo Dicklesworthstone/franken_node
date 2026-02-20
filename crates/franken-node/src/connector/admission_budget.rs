@@ -103,12 +103,34 @@ pub struct BudgetCheckRecord {
 /// Errors from admission budget operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AdmissionError {
-    BytesExceeded { peer_id: String, used: u64, limit: u64 },
-    SymbolsExceeded { peer_id: String, used: u64, limit: u64 },
-    AuthExceeded { peer_id: String, count: u32, limit: u32 },
-    InflightExceeded { peer_id: String, count: u32, limit: u32 },
-    CpuExceeded { peer_id: String, used: u64, limit: u64 },
-    InvalidBudget { reason: String },
+    BytesExceeded {
+        peer_id: String,
+        used: u64,
+        limit: u64,
+    },
+    SymbolsExceeded {
+        peer_id: String,
+        used: u64,
+        limit: u64,
+    },
+    AuthExceeded {
+        peer_id: String,
+        count: u32,
+        limit: u32,
+    },
+    InflightExceeded {
+        peer_id: String,
+        count: u32,
+        limit: u32,
+    },
+    CpuExceeded {
+        peer_id: String,
+        used: u64,
+        limit: u64,
+    },
+    InvalidBudget {
+        reason: String,
+    },
 }
 
 impl AdmissionError {
@@ -127,18 +149,47 @@ impl AdmissionError {
 impl std::fmt::Display for AdmissionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::BytesExceeded { peer_id, used, limit } =>
-                write!(f, "PAB_BYTES_EXCEEDED: peer={peer_id} used={used} limit={limit}"),
-            Self::SymbolsExceeded { peer_id, used, limit } =>
-                write!(f, "PAB_SYMBOLS_EXCEEDED: peer={peer_id} used={used} limit={limit}"),
-            Self::AuthExceeded { peer_id, count, limit } =>
-                write!(f, "PAB_AUTH_EXCEEDED: peer={peer_id} count={count} limit={limit}"),
-            Self::InflightExceeded { peer_id, count, limit } =>
-                write!(f, "PAB_INFLIGHT_EXCEEDED: peer={peer_id} count={count} limit={limit}"),
-            Self::CpuExceeded { peer_id, used, limit } =>
-                write!(f, "PAB_CPU_EXCEEDED: peer={peer_id} used={used} limit={limit}"),
-            Self::InvalidBudget { reason } =>
-                write!(f, "PAB_INVALID_BUDGET: {reason}"),
+            Self::BytesExceeded {
+                peer_id,
+                used,
+                limit,
+            } => write!(
+                f,
+                "PAB_BYTES_EXCEEDED: peer={peer_id} used={used} limit={limit}"
+            ),
+            Self::SymbolsExceeded {
+                peer_id,
+                used,
+                limit,
+            } => write!(
+                f,
+                "PAB_SYMBOLS_EXCEEDED: peer={peer_id} used={used} limit={limit}"
+            ),
+            Self::AuthExceeded {
+                peer_id,
+                count,
+                limit,
+            } => write!(
+                f,
+                "PAB_AUTH_EXCEEDED: peer={peer_id} count={count} limit={limit}"
+            ),
+            Self::InflightExceeded {
+                peer_id,
+                count,
+                limit,
+            } => write!(
+                f,
+                "PAB_INFLIGHT_EXCEEDED: peer={peer_id} count={count} limit={limit}"
+            ),
+            Self::CpuExceeded {
+                peer_id,
+                used,
+                limit,
+            } => write!(
+                f,
+                "PAB_CPU_EXCEEDED: peer={peer_id} used={used} limit={limit}"
+            ),
+            Self::InvalidBudget { reason } => write!(f, "PAB_INVALID_BUDGET: {reason}"),
         }
     }
 }
@@ -236,7 +287,11 @@ impl AdmissionBudgetTracker {
         trace_id: &str,
         timestamp: &str,
     ) -> (AdmissionVerdict, Vec<BudgetCheckRecord>) {
-        let usage = self.peers.get(&request.peer_id).cloned().unwrap_or_default();
+        let usage = self
+            .peers
+            .get(&request.peer_id)
+            .cloned()
+            .unwrap_or_default();
         let mut violations = Vec::new();
         let mut records = Vec::new();
 
@@ -323,9 +378,18 @@ impl AdmissionBudgetTracker {
         let remaining = RemainingBudget {
             bytes_remaining: self.budget.max_bytes.saturating_sub(usage.bytes_used),
             symbols_remaining: self.budget.max_symbols.saturating_sub(usage.symbols_used),
-            failed_auth_remaining: self.budget.max_failed_auth.saturating_sub(usage.failed_auth_count),
-            inflight_decode_remaining: self.budget.max_inflight_decode.saturating_sub(usage.inflight_decode_count),
-            decode_cpu_remaining: self.budget.max_decode_cpu_ms.saturating_sub(usage.decode_cpu_ms),
+            failed_auth_remaining: self
+                .budget
+                .max_failed_auth
+                .saturating_sub(usage.failed_auth_count),
+            inflight_decode_remaining: self
+                .budget
+                .max_inflight_decode
+                .saturating_sub(usage.inflight_decode_count),
+            decode_cpu_remaining: self
+                .budget
+                .max_decode_cpu_ms
+                .saturating_sub(usage.decode_cpu_ms),
         };
 
         let verdict = AdmissionVerdict {
@@ -448,7 +512,11 @@ mod tests {
         let req = request("p1", 1001, 0, 0);
         let (verdict, _) = tracker.admit(&req, "tr", "ts");
         assert!(!verdict.admitted);
-        assert!(verdict.violated_dimensions.contains(&BudgetDimension::Bytes));
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::Bytes)
+        );
     }
 
     #[test]
@@ -457,7 +525,11 @@ mod tests {
         let req = request("p1", 0, 501, 0);
         let (verdict, _) = tracker.admit(&req, "tr", "ts");
         assert!(!verdict.admitted);
-        assert!(verdict.violated_dimensions.contains(&BudgetDimension::Symbols));
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::Symbols)
+        );
     }
 
     #[test]
@@ -466,7 +538,11 @@ mod tests {
         let req = request("p1", 0, 0, 2001);
         let (verdict, _) = tracker.admit(&req, "tr", "ts");
         assert!(!verdict.admitted);
-        assert!(verdict.violated_dimensions.contains(&BudgetDimension::DecodeCpu));
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::DecodeCpu)
+        );
     }
 
     #[test]
@@ -479,7 +555,11 @@ mod tests {
         let req = request("p1", 10, 10, 10);
         let (verdict, _) = tracker.check_admission(&req, "tr", "ts");
         assert!(!verdict.admitted);
-        assert!(verdict.violated_dimensions.contains(&BudgetDimension::FailedAuth));
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::FailedAuth)
+        );
     }
 
     #[test]
@@ -491,7 +571,11 @@ mod tests {
         let req = request("p1", 10, 10, 10);
         let (verdict, _) = tracker.check_admission(&req, "tr", "ts");
         assert!(!verdict.admitted);
-        assert!(verdict.violated_dimensions.contains(&BudgetDimension::InflightDecode));
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::InflightDecode)
+        );
     }
 
     #[test]
@@ -631,17 +715,64 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(AdmissionError::BytesExceeded { peer_id: "".into(), used: 0, limit: 0 }.code(), "PAB_BYTES_EXCEEDED");
-        assert_eq!(AdmissionError::SymbolsExceeded { peer_id: "".into(), used: 0, limit: 0 }.code(), "PAB_SYMBOLS_EXCEEDED");
-        assert_eq!(AdmissionError::AuthExceeded { peer_id: "".into(), count: 0, limit: 0 }.code(), "PAB_AUTH_EXCEEDED");
-        assert_eq!(AdmissionError::InflightExceeded { peer_id: "".into(), count: 0, limit: 0 }.code(), "PAB_INFLIGHT_EXCEEDED");
-        assert_eq!(AdmissionError::CpuExceeded { peer_id: "".into(), used: 0, limit: 0 }.code(), "PAB_CPU_EXCEEDED");
-        assert_eq!(AdmissionError::InvalidBudget { reason: "".into() }.code(), "PAB_INVALID_BUDGET");
+        assert_eq!(
+            AdmissionError::BytesExceeded {
+                peer_id: "".into(),
+                used: 0,
+                limit: 0
+            }
+            .code(),
+            "PAB_BYTES_EXCEEDED"
+        );
+        assert_eq!(
+            AdmissionError::SymbolsExceeded {
+                peer_id: "".into(),
+                used: 0,
+                limit: 0
+            }
+            .code(),
+            "PAB_SYMBOLS_EXCEEDED"
+        );
+        assert_eq!(
+            AdmissionError::AuthExceeded {
+                peer_id: "".into(),
+                count: 0,
+                limit: 0
+            }
+            .code(),
+            "PAB_AUTH_EXCEEDED"
+        );
+        assert_eq!(
+            AdmissionError::InflightExceeded {
+                peer_id: "".into(),
+                count: 0,
+                limit: 0
+            }
+            .code(),
+            "PAB_INFLIGHT_EXCEEDED"
+        );
+        assert_eq!(
+            AdmissionError::CpuExceeded {
+                peer_id: "".into(),
+                used: 0,
+                limit: 0
+            }
+            .code(),
+            "PAB_CPU_EXCEEDED"
+        );
+        assert_eq!(
+            AdmissionError::InvalidBudget { reason: "".into() }.code(),
+            "PAB_INVALID_BUDGET"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = AdmissionError::BytesExceeded { peer_id: "p1".into(), used: 1100, limit: 1000 };
+        let e = AdmissionError::BytesExceeded {
+            peer_id: "p1".into(),
+            used: 1100,
+            limit: 1000,
+        };
         assert!(e.to_string().contains("PAB_BYTES_EXCEEDED"));
         assert!(e.to_string().contains("p1"));
     }
@@ -672,11 +803,18 @@ mod tests {
 
     #[test]
     fn stateless_check() {
-        let usage = PeerUsage { bytes_used: 500, ..Default::default() };
+        let usage = PeerUsage {
+            bytes_used: 500,
+            ..Default::default()
+        };
         let req = request("p1", 600, 0, 0);
         let (verdict, _) = check_admission_stateless(&req, &usage, &budget(), "tr", "ts").unwrap();
         assert!(!verdict.admitted);
-        assert!(verdict.violated_dimensions.contains(&BudgetDimension::Bytes));
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::Bytes)
+        );
     }
 
     #[test]

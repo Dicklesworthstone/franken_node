@@ -166,7 +166,11 @@ pub fn verify_threshold(
         };
     }
 
-    let known_key_ids: HashSet<&str> = config.signer_keys.iter().map(|k| k.key_id.as_str()).collect();
+    let known_key_ids: HashSet<&str> = config
+        .signer_keys
+        .iter()
+        .map(|k| k.key_id.as_str())
+        .collect();
     let mut seen_signers = HashSet::new();
     let mut valid_count = 0u32;
     let mut first_failure: Option<FailureReason> = None;
@@ -286,7 +290,9 @@ mod tests {
     }
 
     fn signed_artifact(config: &ThresholdConfig, hash: &str, count: usize) -> PublicationArtifact {
-        let sigs: Vec<PartialSignature> = config.signer_keys.iter()
+        let sigs: Vec<PartialSignature> = config
+            .signer_keys
+            .iter()
             .take(count)
             .map(|key| sign(key, hash))
             .collect();
@@ -404,7 +410,9 @@ mod tests {
         let config = test_config(2, 3);
         let mut artifact = signed_artifact(&config, "hash-abc", 1);
         // Add same signer again
-        artifact.signatures.push(sign(&config.signer_keys[0], "hash-abc"));
+        artifact
+            .signatures
+            .push(sign(&config.signer_keys[0], "hash-abc"));
         let result = verify_threshold(&config, &artifact, "t7", "ts");
         assert!(!result.verified);
         assert_eq!(result.valid_signatures, 1);
@@ -465,13 +473,19 @@ mod tests {
         let e1 = ThresholdError::BelowQuorum { have: 1, need: 2 };
         assert!(e1.to_string().contains("THRESH_BELOW_QUORUM"));
 
-        let e2 = ThresholdError::UnknownSigner { signer_id: "x".into() };
+        let e2 = ThresholdError::UnknownSigner {
+            signer_id: "x".into(),
+        };
         assert!(e2.to_string().contains("THRESH_UNKNOWN_SIGNER"));
 
-        let e3 = ThresholdError::InvalidSignature { signer_id: "y".into() };
+        let e3 = ThresholdError::InvalidSignature {
+            signer_id: "y".into(),
+        };
         assert!(e3.to_string().contains("THRESH_INVALID_SIG"));
 
-        let e4 = ThresholdError::ConfigInvalid { reason: "bad".into() };
+        let e4 = ThresholdError::ConfigInvalid {
+            reason: "bad".into(),
+        };
         assert!(e4.to_string().contains("THRESH_CONFIG_INVALID"));
     }
 

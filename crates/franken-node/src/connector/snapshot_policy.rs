@@ -187,8 +187,18 @@ impl SnapshotTracker {
     }
 
     /// Build a replay target from current tracker state.
-    pub fn replay_target(&self, current_version: u64, max_ops: u64, max_bytes: u64) -> ReplayTarget {
-        ReplayTarget::new(max_ops, max_bytes, self.last_snapshot_version, current_version)
+    pub fn replay_target(
+        &self,
+        current_version: u64,
+        max_ops: u64,
+        max_bytes: u64,
+    ) -> ReplayTarget {
+        ReplayTarget::new(
+            max_ops,
+            max_bytes,
+            self.last_snapshot_version,
+            current_version,
+        )
     }
 
     /// Check that the replay bound is not exceeded.
@@ -363,7 +373,9 @@ mod tests {
         for _ in 0..100 {
             t.record_mutation(100);
         }
-        let record = t.take_snapshot(5, "abc123".into(), "2026-01-01T00:00:00Z".into()).unwrap();
+        let record = t
+            .take_snapshot(5, "abc123".into(), "2026-01-01T00:00:00Z".into())
+            .unwrap();
         assert_eq!(record.ops_since_last, 100);
         assert_eq!(record.bytes_since_last, 10000);
         assert_eq!(t.ops_since_snapshot, 0);
@@ -456,7 +468,11 @@ mod tests {
         let mut t = default_tracker();
         let new = SnapshotPolicy::new(50, 32768);
         let audit = t
-            .update_policy(new.clone(), "tighter bounds".into(), "2026-01-01T00:00:00Z".into())
+            .update_policy(
+                new.clone(),
+                "tighter bounds".into(),
+                "2026-01-01T00:00:00Z".into(),
+            )
             .unwrap();
         assert_eq!(audit.old_policy.every_updates, 100);
         assert_eq!(audit.new_policy.every_updates, 50);

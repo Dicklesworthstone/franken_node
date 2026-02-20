@@ -73,10 +73,21 @@ pub struct ChannelAuditEntry {
 /// Errors from control channel operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ChannelError {
-    AuthFailed { message_id: String },
-    SequenceRegress { message_id: String, expected_min: u64, got: u64 },
-    ReplayDetected { message_id: String, sequence: u64 },
-    InvalidConfig { reason: String },
+    AuthFailed {
+        message_id: String,
+    },
+    SequenceRegress {
+        message_id: String,
+        expected_min: u64,
+        got: u64,
+    },
+    ReplayDetected {
+        message_id: String,
+        sequence: u64,
+    },
+    InvalidConfig {
+        reason: String,
+    },
     ChannelClosed,
 }
 
@@ -95,16 +106,21 @@ impl ChannelError {
 impl std::fmt::Display for ChannelError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AuthFailed { message_id } =>
-                write!(f, "ACC_AUTH_FAILED: {message_id}"),
-            Self::SequenceRegress { message_id, expected_min, got } =>
-                write!(f, "ACC_SEQUENCE_REGRESS: {message_id} expected>={expected_min} got={got}"),
-            Self::ReplayDetected { message_id, sequence } =>
-                write!(f, "ACC_REPLAY_DETECTED: {message_id} seq={sequence}"),
-            Self::InvalidConfig { reason } =>
-                write!(f, "ACC_INVALID_CONFIG: {reason}"),
-            Self::ChannelClosed =>
-                write!(f, "ACC_CHANNEL_CLOSED"),
+            Self::AuthFailed { message_id } => write!(f, "ACC_AUTH_FAILED: {message_id}"),
+            Self::SequenceRegress {
+                message_id,
+                expected_min,
+                got,
+            } => write!(
+                f,
+                "ACC_SEQUENCE_REGRESS: {message_id} expected>={expected_min} got={got}"
+            ),
+            Self::ReplayDetected {
+                message_id,
+                sequence,
+            } => write!(f, "ACC_REPLAY_DETECTED: {message_id} seq={sequence}"),
+            Self::InvalidConfig { reason } => write!(f, "ACC_INVALID_CONFIG: {reason}"),
+            Self::ChannelClosed => write!(f, "ACC_CHANNEL_CLOSED"),
         }
     }
 }
@@ -225,7 +241,9 @@ impl ControlChannel {
         }
 
         // Step 2: Replay window check (INV-ACC-REPLAY-WINDOW)
-        let replay_clean = !self.replay_window(msg.direction).contains(&msg.sequence_number);
+        let replay_clean = !self
+            .replay_window(msg.direction)
+            .contains(&msg.sequence_number);
         if !replay_clean {
             let audit = ChannelAuditEntry {
                 message_id: msg.message_id.clone(),
@@ -386,13 +404,18 @@ mod tests {
     fn monotonic_per_direction() {
         let mut ch = ControlChannel::new(config()).unwrap();
         // Send seq 5
-        ch.process_message(&msg("m1", Direction::Send, 5, "tok"), "ts").unwrap();
+        ch.process_message(&msg("m1", Direction::Send, 5, "tok"), "ts")
+            .unwrap();
         // Recv seq 1 should work (different direction)
-        ch.process_message(&msg("m2", Direction::Receive, 1, "tok"), "ts").unwrap();
+        ch.process_message(&msg("m2", Direction::Receive, 1, "tok"), "ts")
+            .unwrap();
         // Recv seq 2 should work
-        ch.process_message(&msg("m3", Direction::Receive, 2, "tok"), "ts").unwrap();
+        ch.process_message(&msg("m3", Direction::Receive, 2, "tok"), "ts")
+            .unwrap();
         // Send seq 4 should fail (regress)
-        let err = ch.process_message(&msg("m4", Direction::Send, 4, "tok"), "ts").unwrap_err();
+        let err = ch
+            .process_message(&msg("m4", Direction::Send, 4, "tok"), "ts")
+            .unwrap_err();
         assert_eq!(err.code(), "ACC_SEQUENCE_REGRESS");
     }
 
@@ -400,14 +423,17 @@ mod tests {
     fn channel_closed() {
         let mut ch = ControlChannel::new(config()).unwrap();
         ch.close();
-        let err = ch.process_message(&msg("m1", Direction::Send, 1, "tok"), "ts").unwrap_err();
+        let err = ch
+            .process_message(&msg("m1", Direction::Send, 1, "tok"), "ts")
+            .unwrap_err();
         assert_eq!(err.code(), "ACC_CHANNEL_CLOSED");
     }
 
     #[test]
     fn audit_log_recorded() {
         let mut ch = ControlChannel::new(config()).unwrap();
-        ch.process_message(&msg("m1", Direction::Send, 1, "tok"), "ts").unwrap();
+        ch.process_message(&msg("m1", Direction::Send, 1, "tok"), "ts")
+            .unwrap();
         let _ = ch.process_message(&msg("m2", Direction::Send, 1, ""), "ts"); // auth fail
         assert!(ch.audit_log().len() >= 2);
     }
@@ -436,16 +462,42 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(ChannelError::AuthFailed { message_id: "".into() }.code(), "ACC_AUTH_FAILED");
-        assert_eq!(ChannelError::SequenceRegress { message_id: "".into(), expected_min: 0, got: 0 }.code(), "ACC_SEQUENCE_REGRESS");
-        assert_eq!(ChannelError::ReplayDetected { message_id: "".into(), sequence: 0 }.code(), "ACC_REPLAY_DETECTED");
-        assert_eq!(ChannelError::InvalidConfig { reason: "".into() }.code(), "ACC_INVALID_CONFIG");
+        assert_eq!(
+            ChannelError::AuthFailed {
+                message_id: "".into()
+            }
+            .code(),
+            "ACC_AUTH_FAILED"
+        );
+        assert_eq!(
+            ChannelError::SequenceRegress {
+                message_id: "".into(),
+                expected_min: 0,
+                got: 0
+            }
+            .code(),
+            "ACC_SEQUENCE_REGRESS"
+        );
+        assert_eq!(
+            ChannelError::ReplayDetected {
+                message_id: "".into(),
+                sequence: 0
+            }
+            .code(),
+            "ACC_REPLAY_DETECTED"
+        );
+        assert_eq!(
+            ChannelError::InvalidConfig { reason: "".into() }.code(),
+            "ACC_INVALID_CONFIG"
+        );
         assert_eq!(ChannelError::ChannelClosed.code(), "ACC_CHANNEL_CLOSED");
     }
 
     #[test]
     fn error_display() {
-        let e = ChannelError::AuthFailed { message_id: "m1".into() };
+        let e = ChannelError::AuthFailed {
+            message_id: "m1".into(),
+        };
         assert!(e.to_string().contains("ACC_AUTH_FAILED"));
     }
 
@@ -464,7 +516,8 @@ mod tests {
     fn first_message_any_sequence() {
         let mut ch = ControlChannel::new(config()).unwrap();
         // First message can have any sequence
-        ch.process_message(&msg("m1", Direction::Send, 100, "tok"), "ts").unwrap();
+        ch.process_message(&msg("m1", Direction::Send, 100, "tok"), "ts")
+            .unwrap();
     }
 
     #[test]

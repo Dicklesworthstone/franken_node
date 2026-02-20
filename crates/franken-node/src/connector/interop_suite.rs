@@ -55,15 +55,27 @@ pub struct InteropResult {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InteropError {
     /// IOP_SERIALIZATION_MISMATCH
-    SerializationMismatch { case_id: String, expected: String, actual: String },
+    SerializationMismatch {
+        case_id: String,
+        expected: String,
+        actual: String,
+    },
     /// IOP_OBJECT_ID_MISMATCH
-    ObjectIdMismatch { case_id: String, expected: String, actual: String },
+    ObjectIdMismatch {
+        case_id: String,
+        expected: String,
+        actual: String,
+    },
     /// IOP_SIGNATURE_INVALID
     SignatureInvalid { case_id: String, details: String },
     /// IOP_REVOCATION_DISAGREEMENT
     RevocationDisagreement { case_id: String, details: String },
     /// IOP_SOURCE_DIVERSITY_INSUFFICIENT
-    SourceDiversityInsufficient { case_id: String, required: usize, actual: usize },
+    SourceDiversityInsufficient {
+        case_id: String,
+        required: usize,
+        actual: usize,
+    },
 }
 
 impl InteropError {
@@ -81,11 +93,25 @@ impl InteropError {
 impl fmt::Display for InteropError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            InteropError::SerializationMismatch { case_id, expected, actual } => {
-                write!(f, "IOP_SERIALIZATION_MISMATCH: {case_id} expected={expected} actual={actual}")
+            InteropError::SerializationMismatch {
+                case_id,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "IOP_SERIALIZATION_MISMATCH: {case_id} expected={expected} actual={actual}"
+                )
             }
-            InteropError::ObjectIdMismatch { case_id, expected, actual } => {
-                write!(f, "IOP_OBJECT_ID_MISMATCH: {case_id} expected={expected} actual={actual}")
+            InteropError::ObjectIdMismatch {
+                case_id,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "IOP_OBJECT_ID_MISMATCH: {case_id} expected={expected} actual={actual}"
+                )
             }
             InteropError::SignatureInvalid { case_id, details } => {
                 write!(f, "IOP_SIGNATURE_INVALID: {case_id} {details}")
@@ -93,8 +119,15 @@ impl fmt::Display for InteropError {
             InteropError::RevocationDisagreement { case_id, details } => {
                 write!(f, "IOP_REVOCATION_DISAGREEMENT: {case_id} {details}")
             }
-            InteropError::SourceDiversityInsufficient { case_id, required, actual } => {
-                write!(f, "IOP_SOURCE_DIVERSITY_INSUFFICIENT: {case_id} need={required} have={actual}")
+            InteropError::SourceDiversityInsufficient {
+                case_id,
+                required,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "IOP_SOURCE_DIVERSITY_INSUFFICIENT: {case_id} need={required} have={actual}"
+                )
             }
         }
     }
@@ -103,7 +136,12 @@ impl fmt::Display for InteropError {
 // ── Interop functions ───────────────────────────────────────────────────────
 
 /// Check serialization round-trip (INV-IOP-SERIALIZATION).
-pub fn check_serialization(case_id: &str, input: &str, output: &str, expected: &str) -> InteropResult {
+pub fn check_serialization(
+    case_id: &str,
+    input: &str,
+    output: &str,
+    expected: &str,
+) -> InteropResult {
     if output == expected {
         InteropResult {
             class: InteropClass::Serialization,
@@ -118,7 +156,9 @@ pub fn check_serialization(case_id: &str, input: &str, output: &str, expected: &
             case_id: case_id.to_string(),
             passed: false,
             details: format!("expected={expected}, actual={output}"),
-            reproducer: Some(format!("{{\"input\":\"{input}\",\"expected\":\"{expected}\",\"actual\":\"{output}\"}}")),
+            reproducer: Some(format!(
+                "{{\"input\":\"{input}\",\"expected\":\"{expected}\",\"actual\":\"{output}\"}}"
+            )),
         }
     }
 }
@@ -154,7 +194,9 @@ pub fn check_signature(case_id: &str, sig_valid: bool, details: &str) -> Interop
         reproducer: if sig_valid {
             None
         } else {
-            Some(format!("{{\"case\":\"{case_id}\",\"error\":\"{details}\"}}"))
+            Some(format!(
+                "{{\"case\":\"{case_id}\",\"error\":\"{details}\"}}"
+            ))
         },
     }
 }
@@ -211,9 +253,11 @@ pub fn run_suite(cases: &[InteropTestCase]) -> Vec<InteropResult> {
                 InteropClass::Signature => {
                     check_signature(&tc.case_id, tc.input == tc.expected_output, "cross-check")
                 }
-                InteropClass::Revocation => {
-                    check_revocation(&tc.case_id, tc.input == "revoked", tc.expected_output == "revoked")
-                }
+                InteropClass::Revocation => check_revocation(
+                    &tc.case_id,
+                    tc.input == "revoked",
+                    tc.expected_output == "revoked",
+                ),
                 InteropClass::SourceDiversity => {
                     let sources: usize = tc.input.parse().unwrap_or(0);
                     let required: usize = tc.expected_output.parse().unwrap_or(0);
@@ -349,7 +393,10 @@ mod tests {
         assert_eq!(InteropClass::ObjectId.to_string(), "object_id");
         assert_eq!(InteropClass::Signature.to_string(), "signature");
         assert_eq!(InteropClass::Revocation.to_string(), "revocation");
-        assert_eq!(InteropClass::SourceDiversity.to_string(), "source_diversity");
+        assert_eq!(
+            InteropClass::SourceDiversity.to_string(),
+            "source_diversity"
+        );
     }
 
     #[test]
@@ -365,11 +412,29 @@ mod tests {
     #[test]
     fn all_error_codes_present() {
         let errors = vec![
-            InteropError::SerializationMismatch { case_id: "x".into(), expected: "".into(), actual: "".into() },
-            InteropError::ObjectIdMismatch { case_id: "x".into(), expected: "".into(), actual: "".into() },
-            InteropError::SignatureInvalid { case_id: "x".into(), details: "".into() },
-            InteropError::RevocationDisagreement { case_id: "x".into(), details: "".into() },
-            InteropError::SourceDiversityInsufficient { case_id: "x".into(), required: 3, actual: 1 },
+            InteropError::SerializationMismatch {
+                case_id: "x".into(),
+                expected: "".into(),
+                actual: "".into(),
+            },
+            InteropError::ObjectIdMismatch {
+                case_id: "x".into(),
+                expected: "".into(),
+                actual: "".into(),
+            },
+            InteropError::SignatureInvalid {
+                case_id: "x".into(),
+                details: "".into(),
+            },
+            InteropError::RevocationDisagreement {
+                case_id: "x".into(),
+                details: "".into(),
+            },
+            InteropError::SourceDiversityInsufficient {
+                case_id: "x".into(),
+                required: 3,
+                actual: 1,
+            },
         ];
         let codes: Vec<_> = errors.iter().map(|e| e.code()).collect();
         assert!(codes.contains(&"IOP_SERIALIZATION_MISMATCH"));

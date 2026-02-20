@@ -48,7 +48,8 @@ impl RetentionRegistry {
                 reason: "message_type must not be empty".into(),
             });
         }
-        if policy.retention_class == RetentionClass::Ephemeral && policy.ephemeral_ttl_seconds == 0 {
+        if policy.retention_class == RetentionClass::Ephemeral && policy.ephemeral_ttl_seconds == 0
+        {
             return Err(RetentionError::InvalidPolicy {
                 reason: "ephemeral_ttl_seconds must be > 0 for ephemeral class".into(),
             });
@@ -58,9 +59,11 @@ impl RetentionRegistry {
     }
 
     pub fn classify(&self, message_type: &str) -> Result<&RetentionPolicy, RetentionError> {
-        self.policies.get(message_type).ok_or_else(|| RetentionError::Unclassified {
-            message_type: message_type.to_string(),
-        })
+        self.policies
+            .get(message_type)
+            .ok_or_else(|| RetentionError::Unclassified {
+                message_type: message_type.to_string(),
+            })
     }
 
     pub fn policy_count(&self) -> usize {
@@ -114,16 +117,14 @@ impl RetentionError {
 impl std::fmt::Display for RetentionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Unclassified { message_type } =>
-                write!(f, "CPR_UNCLASSIFIED: {message_type}"),
-            Self::DropRequired { message_id } =>
-                write!(f, "CPR_DROP_REQUIRED: {message_id}"),
-            Self::InvalidPolicy { reason } =>
-                write!(f, "CPR_INVALID_POLICY: {reason}"),
-            Self::StorageFull { current_bytes, max_bytes } =>
-                write!(f, "CPR_STORAGE_FULL: {current_bytes}/{max_bytes}"),
-            Self::NotFound { message_id } =>
-                write!(f, "CPR_NOT_FOUND: {message_id}"),
+            Self::Unclassified { message_type } => write!(f, "CPR_UNCLASSIFIED: {message_type}"),
+            Self::DropRequired { message_id } => write!(f, "CPR_DROP_REQUIRED: {message_id}"),
+            Self::InvalidPolicy { reason } => write!(f, "CPR_INVALID_POLICY: {reason}"),
+            Self::StorageFull {
+                current_bytes,
+                max_bytes,
+            } => write!(f, "CPR_STORAGE_FULL: {current_bytes}/{max_bytes}"),
+            Self::NotFound { message_id } => write!(f, "CPR_NOT_FOUND: {message_id}"),
         }
     }
 }
@@ -206,9 +207,12 @@ impl RetentionStore {
     ///
     /// INV-CPR-REQUIRED-DURABLE: required messages cannot be dropped.
     pub fn drop_message(&mut self, message_id: &str, now: u64) -> Result<(), RetentionError> {
-        let msg = self.messages.get(message_id).ok_or_else(|| RetentionError::NotFound {
-            message_id: message_id.to_string(),
-        })?;
+        let msg = self
+            .messages
+            .get(message_id)
+            .ok_or_else(|| RetentionError::NotFound {
+                message_id: message_id.to_string(),
+            })?;
 
         if msg.retention_class == RetentionClass::Required {
             return Err(RetentionError::DropRequired {
@@ -297,17 +301,20 @@ mod tests {
             message_type: "invoke".into(),
             retention_class: RetentionClass::Required,
             ephemeral_ttl_seconds: 0,
-        }).unwrap();
+        })
+        .unwrap();
         reg.register(RetentionPolicy {
             message_type: "heartbeat".into(),
             retention_class: RetentionClass::Ephemeral,
             ephemeral_ttl_seconds: 60,
-        }).unwrap();
+        })
+        .unwrap();
         reg.register(RetentionPolicy {
             message_type: "audit".into(),
             retention_class: RetentionClass::Required,
             ephemeral_ttl_seconds: 0,
-        }).unwrap();
+        })
+        .unwrap();
         reg
     }
 
@@ -402,7 +409,12 @@ mod tests {
         store.store("m1", "invoke", 100, 1000).unwrap();
         store.store("m2", "heartbeat", 50, 1000).unwrap();
         assert!(store.decisions().len() >= 2);
-        assert!(store.decisions().iter().any(|d| d.action == "store" && d.message_id == "m1"));
+        assert!(
+            store
+                .decisions()
+                .iter()
+                .any(|d| d.action == "store" && d.message_id == "m1")
+        );
     }
 
     #[test]
@@ -418,22 +430,26 @@ mod tests {
     #[test]
     fn invalid_policy_empty_type() {
         let mut reg = RetentionRegistry::new();
-        let err = reg.register(RetentionPolicy {
-            message_type: "".into(),
-            retention_class: RetentionClass::Required,
-            ephemeral_ttl_seconds: 0,
-        }).unwrap_err();
+        let err = reg
+            .register(RetentionPolicy {
+                message_type: "".into(),
+                retention_class: RetentionClass::Required,
+                ephemeral_ttl_seconds: 0,
+            })
+            .unwrap_err();
         assert_eq!(err.code(), "CPR_INVALID_POLICY");
     }
 
     #[test]
     fn invalid_policy_ephemeral_zero_ttl() {
         let mut reg = RetentionRegistry::new();
-        let err = reg.register(RetentionPolicy {
-            message_type: "test".into(),
-            retention_class: RetentionClass::Ephemeral,
-            ephemeral_ttl_seconds: 0,
-        }).unwrap_err();
+        let err = reg
+            .register(RetentionPolicy {
+                message_type: "test".into(),
+                retention_class: RetentionClass::Ephemeral,
+                ephemeral_ttl_seconds: 0,
+            })
+            .unwrap_err();
         assert_eq!(err.code(), "CPR_INVALID_POLICY");
     }
 
@@ -445,16 +461,46 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(RetentionError::Unclassified { message_type: "".into() }.code(), "CPR_UNCLASSIFIED");
-        assert_eq!(RetentionError::DropRequired { message_id: "".into() }.code(), "CPR_DROP_REQUIRED");
-        assert_eq!(RetentionError::InvalidPolicy { reason: "".into() }.code(), "CPR_INVALID_POLICY");
-        assert_eq!(RetentionError::StorageFull { current_bytes: 0, max_bytes: 0 }.code(), "CPR_STORAGE_FULL");
-        assert_eq!(RetentionError::NotFound { message_id: "".into() }.code(), "CPR_NOT_FOUND");
+        assert_eq!(
+            RetentionError::Unclassified {
+                message_type: "".into()
+            }
+            .code(),
+            "CPR_UNCLASSIFIED"
+        );
+        assert_eq!(
+            RetentionError::DropRequired {
+                message_id: "".into()
+            }
+            .code(),
+            "CPR_DROP_REQUIRED"
+        );
+        assert_eq!(
+            RetentionError::InvalidPolicy { reason: "".into() }.code(),
+            "CPR_INVALID_POLICY"
+        );
+        assert_eq!(
+            RetentionError::StorageFull {
+                current_bytes: 0,
+                max_bytes: 0
+            }
+            .code(),
+            "CPR_STORAGE_FULL"
+        );
+        assert_eq!(
+            RetentionError::NotFound {
+                message_id: "".into()
+            }
+            .code(),
+            "CPR_NOT_FOUND"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = RetentionError::DropRequired { message_id: "m1".into() };
+        let e = RetentionError::DropRequired {
+            message_id: "m1".into(),
+        };
         assert!(e.to_string().contains("CPR_DROP_REQUIRED"));
     }
 

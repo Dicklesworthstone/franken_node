@@ -54,30 +54,47 @@ impl std::fmt::Display for AuditError {
 /// INV-DM-SCHEMA-COMPLETE: all fields must be non-empty.
 pub fn validate_schema(event: &DegradedModeEvent) -> Result<(), AuditError> {
     if event.event_type.is_empty() {
-        return Err(AuditError::MissingField { field: "event_type".into() });
+        return Err(AuditError::MissingField {
+            field: "event_type".into(),
+        });
     }
     if event.event_type != "degraded_mode_override" {
         return Err(AuditError::SchemaViolation {
-            reason: format!("event_type must be 'degraded_mode_override', got '{}'", event.event_type),
+            reason: format!(
+                "event_type must be 'degraded_mode_override', got '{}'",
+                event.event_type
+            ),
         });
     }
     if event.action_id.is_empty() {
-        return Err(AuditError::MissingField { field: "action_id".into() });
+        return Err(AuditError::MissingField {
+            field: "action_id".into(),
+        });
     }
     if event.actor.is_empty() {
-        return Err(AuditError::MissingField { field: "actor".into() });
+        return Err(AuditError::MissingField {
+            field: "actor".into(),
+        });
     }
     if event.tier.is_empty() {
-        return Err(AuditError::MissingField { field: "tier".into() });
+        return Err(AuditError::MissingField {
+            field: "tier".into(),
+        });
     }
     if event.override_reason.is_empty() {
-        return Err(AuditError::MissingField { field: "override_reason".into() });
+        return Err(AuditError::MissingField {
+            field: "override_reason".into(),
+        });
     }
     if event.trace_id.is_empty() {
-        return Err(AuditError::MissingField { field: "trace_id".into() });
+        return Err(AuditError::MissingField {
+            field: "trace_id".into(),
+        });
     }
     if event.timestamp.is_empty() {
-        return Err(AuditError::MissingField { field: "timestamp".into() });
+        return Err(AuditError::MissingField {
+            field: "timestamp".into(),
+        });
     }
     Ok(())
 }
@@ -108,21 +125,29 @@ impl DegradedModeAuditLog {
     ///
     /// INV-DM-CORRELATION: correlate by action_id.
     pub fn find_by_action(&self, action_id: &str) -> Vec<&DegradedModeEvent> {
-        self.events.iter().filter(|e| e.action_id == action_id).collect()
+        self.events
+            .iter()
+            .filter(|e| e.action_id == action_id)
+            .collect()
     }
 
     /// Find events by trace_id.
     ///
     /// INV-DM-CORRELATION: correlate by trace_id.
     pub fn find_by_trace(&self, trace_id: &str) -> Vec<&DegradedModeEvent> {
-        self.events.iter().filter(|e| e.trace_id == trace_id).collect()
+        self.events
+            .iter()
+            .filter(|e| e.trace_id == trace_id)
+            .collect()
     }
 
     /// Assert that an event exists for a given action_id.
     /// Returns error if not found (for conformance testing).
     pub fn assert_event_exists(&self, action_id: &str) -> Result<(), AuditError> {
         if self.find_by_action(action_id).is_empty() {
-            return Err(AuditError::EventNotFound { action_id: action_id.into() });
+            return Err(AuditError::EventNotFound {
+                action_id: action_id.into(),
+            });
         }
         Ok(())
     }
@@ -174,7 +199,10 @@ mod tests {
     fn schema_rejects_wrong_event_type() {
         let mut e = valid_event();
         e.event_type = "wrong".into();
-        assert_eq!(validate_schema(&e).unwrap_err().code(), "DM_SCHEMA_VIOLATION");
+        assert_eq!(
+            validate_schema(&e).unwrap_err().code(),
+            "DM_SCHEMA_VIOLATION"
+        );
     }
 
     #[test]
@@ -249,7 +277,10 @@ mod tests {
     #[test]
     fn assert_event_missing_errors() {
         let log = DegradedModeAuditLog::new();
-        assert_eq!(log.assert_event_exists("act-1").unwrap_err().code(), "DM_EVENT_NOT_FOUND");
+        assert_eq!(
+            log.assert_event_exists("act-1").unwrap_err().code(),
+            "DM_EVENT_NOT_FOUND"
+        );
     }
 
     #[test]
@@ -282,15 +313,29 @@ mod tests {
 
     #[test]
     fn error_display() {
-        let e = AuditError::MissingField { field: "actor".into() };
+        let e = AuditError::MissingField {
+            field: "actor".into(),
+        };
         assert!(e.to_string().contains("DM_MISSING_FIELD"));
     }
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(AuditError::MissingField { field: "x".into() }.code(), "DM_MISSING_FIELD");
-        assert_eq!(AuditError::EventNotFound { action_id: "x".into() }.code(), "DM_EVENT_NOT_FOUND");
-        assert_eq!(AuditError::SchemaViolation { reason: "x".into() }.code(), "DM_SCHEMA_VIOLATION");
+        assert_eq!(
+            AuditError::MissingField { field: "x".into() }.code(),
+            "DM_MISSING_FIELD"
+        );
+        assert_eq!(
+            AuditError::EventNotFound {
+                action_id: "x".into()
+            }
+            .code(),
+            "DM_EVENT_NOT_FOUND"
+        );
+        assert_eq!(
+            AuditError::SchemaViolation { reason: "x".into() }.code(),
+            "DM_SCHEMA_VIOLATION"
+        );
     }
 
     #[test]

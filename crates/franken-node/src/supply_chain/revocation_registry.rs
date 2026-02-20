@@ -22,9 +22,17 @@ pub struct RevocationHead {
 /// Error codes: `REV_STALE_HEAD`, `REV_ZONE_NOT_FOUND`, `REV_RECOVERY_FAILED`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RevocationError {
-    StaleHead { zone_id: String, offered: u64, current: u64 },
-    ZoneNotFound { zone_id: String },
-    RecoveryFailed { reason: String },
+    StaleHead {
+        zone_id: String,
+        offered: u64,
+        current: u64,
+    },
+    ZoneNotFound {
+        zone_id: String,
+    },
+    RecoveryFailed {
+        reason: String,
+    },
 }
 
 impl RevocationError {
@@ -40,8 +48,15 @@ impl RevocationError {
 impl std::fmt::Display for RevocationError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::StaleHead { zone_id, offered, current } => {
-                write!(f, "REV_STALE_HEAD: zone {zone_id} offered seq {offered} <= current {current}")
+            Self::StaleHead {
+                zone_id,
+                offered,
+                current,
+            } => {
+                write!(
+                    f,
+                    "REV_STALE_HEAD: zone {zone_id} offered seq {offered} <= current {current}"
+                )
             }
             Self::ZoneNotFound { zone_id } => {
                 write!(f, "REV_ZONE_NOT_FOUND: zone {zone_id}")
@@ -94,9 +109,12 @@ impl RevocationRegistry {
 
     /// Get the current head sequence for a zone.
     pub fn current_head(&self, zone_id: &str) -> Result<u64, RevocationError> {
-        self.heads.get(zone_id).copied().ok_or_else(|| RevocationError::ZoneNotFound {
-            zone_id: zone_id.to_string(),
-        })
+        self.heads
+            .get(zone_id)
+            .copied()
+            .ok_or_else(|| RevocationError::ZoneNotFound {
+                zone_id: zone_id.to_string(),
+            })
     }
 
     /// Advance the revocation head for a zone.
@@ -146,9 +164,12 @@ impl RevocationRegistry {
 
     /// Check if an artifact is revoked in a given zone.
     pub fn is_revoked(&self, zone_id: &str, artifact: &str) -> Result<bool, RevocationError> {
-        let entries = self.revoked.get(zone_id).ok_or_else(|| RevocationError::ZoneNotFound {
-            zone_id: zone_id.to_string(),
-        })?;
+        let entries = self
+            .revoked
+            .get(zone_id)
+            .ok_or_else(|| RevocationError::ZoneNotFound {
+                zone_id: zone_id.to_string(),
+            })?;
         Ok(entries.iter().any(|a| a == artifact))
     }
 
@@ -295,7 +316,10 @@ mod tests {
     #[test]
     fn is_revoked_unknown_zone() {
         let reg = RevocationRegistry::new();
-        assert_eq!(reg.is_revoked("ghost", "x").unwrap_err().code(), "REV_ZONE_NOT_FOUND");
+        assert_eq!(
+            reg.is_revoked("ghost", "x").unwrap_err().code(),
+            "REV_ZONE_NOT_FOUND"
+        );
     }
 
     #[test]
@@ -321,10 +345,7 @@ mod tests {
 
     #[test]
     fn recover_non_monotonic_fails() {
-        let log = vec![
-            head("zone-a", 2, "art-1"),
-            head("zone-a", 1, "art-2"),
-        ];
+        let log = vec![head("zone-a", 2, "art-1"), head("zone-a", 1, "art-2")];
         let result = RevocationRegistry::recover_from_log(&log);
         assert_eq!(result.unwrap_err().code(), "REV_RECOVERY_FAILED");
     }
@@ -377,7 +398,9 @@ mod tests {
     #[test]
     fn error_display() {
         let e = RevocationError::StaleHead {
-            zone_id: "z1".into(), offered: 2, current: 5,
+            zone_id: "z1".into(),
+            offered: 2,
+            current: 5,
         };
         assert!(e.to_string().contains("REV_STALE_HEAD"));
     }
@@ -385,11 +408,19 @@ mod tests {
     #[test]
     fn error_codes_all_present() {
         assert_eq!(
-            RevocationError::StaleHead { zone_id: "x".into(), offered: 0, current: 0 }.code(),
+            RevocationError::StaleHead {
+                zone_id: "x".into(),
+                offered: 0,
+                current: 0
+            }
+            .code(),
             "REV_STALE_HEAD"
         );
         assert_eq!(
-            RevocationError::ZoneNotFound { zone_id: "x".into() }.code(),
+            RevocationError::ZoneNotFound {
+                zone_id: "x".into()
+            }
+            .code(),
             "REV_ZONE_NOT_FOUND"
         );
         assert_eq!(

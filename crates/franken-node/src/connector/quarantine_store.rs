@@ -53,11 +53,24 @@ pub struct EvictionRecord {
 /// Errors from quarantine operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum QuarantineError {
-    QuotaExceeded { current_bytes: u64, max_bytes: u64 },
-    TtlExpired { object_id: String, age: u64, ttl: u64 },
-    Duplicate { object_id: String },
-    NotFound { object_id: String },
-    InvalidConfig { reason: String },
+    QuotaExceeded {
+        current_bytes: u64,
+        max_bytes: u64,
+    },
+    TtlExpired {
+        object_id: String,
+        age: u64,
+        ttl: u64,
+    },
+    Duplicate {
+        object_id: String,
+    },
+    NotFound {
+        object_id: String,
+    },
+    InvalidConfig {
+        reason: String,
+    },
 }
 
 impl QuarantineError {
@@ -75,16 +88,18 @@ impl QuarantineError {
 impl std::fmt::Display for QuarantineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::QuotaExceeded { current_bytes, max_bytes } =>
-                write!(f, "QDS_QUOTA_EXCEEDED: {current_bytes}/{max_bytes} bytes"),
-            Self::TtlExpired { object_id, age, ttl } =>
-                write!(f, "QDS_TTL_EXPIRED: {object_id} age={age}s ttl={ttl}s"),
-            Self::Duplicate { object_id } =>
-                write!(f, "QDS_DUPLICATE: {object_id}"),
-            Self::NotFound { object_id } =>
-                write!(f, "QDS_NOT_FOUND: {object_id}"),
-            Self::InvalidConfig { reason } =>
-                write!(f, "QDS_INVALID_CONFIG: {reason}"),
+            Self::QuotaExceeded {
+                current_bytes,
+                max_bytes,
+            } => write!(f, "QDS_QUOTA_EXCEEDED: {current_bytes}/{max_bytes} bytes"),
+            Self::TtlExpired {
+                object_id,
+                age,
+                ttl,
+            } => write!(f, "QDS_TTL_EXPIRED: {object_id} age={age}s ttl={ttl}s"),
+            Self::Duplicate { object_id } => write!(f, "QDS_DUPLICATE: {object_id}"),
+            Self::NotFound { object_id } => write!(f, "QDS_NOT_FOUND: {object_id}"),
+            Self::InvalidConfig { reason } => write!(f, "QDS_INVALID_CONFIG: {reason}"),
         }
     }
 }
@@ -168,11 +183,7 @@ impl QuarantineStore {
             let oldest_id = self
                 .entries
                 .iter()
-                .min_by(|a, b| {
-                    a.1.ingested_at
-                        .cmp(&b.1.ingested_at)
-                        .then(a.0.cmp(b.0))
-                })
+                .min_by(|a, b| a.1.ingested_at.cmp(&b.1.ingested_at).then(a.0.cmp(b.0)))
                 .map(|(id, _)| id.clone());
 
             if let Some(id) = oldest_id {
@@ -338,7 +349,9 @@ mod tests {
     fn quota_count_eviction() {
         let mut store = QuarantineStore::new(config()).unwrap();
         for i in 0..5 {
-            store.ingest(&format!("obj{i}"), 10, "peer1", 1000 + i as u64).unwrap();
+            store
+                .ingest(&format!("obj{i}"), 10, "peer1", 1000 + i as u64)
+                .unwrap();
         }
         // 6th object triggers quota eviction
         let evictions = store.ingest("obj5", 10, "peer1", 1010).unwrap();
@@ -447,16 +460,49 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(QuarantineError::QuotaExceeded { current_bytes: 0, max_bytes: 0 }.code(), "QDS_QUOTA_EXCEEDED");
-        assert_eq!(QuarantineError::TtlExpired { object_id: "".into(), age: 0, ttl: 0 }.code(), "QDS_TTL_EXPIRED");
-        assert_eq!(QuarantineError::Duplicate { object_id: "".into() }.code(), "QDS_DUPLICATE");
-        assert_eq!(QuarantineError::NotFound { object_id: "".into() }.code(), "QDS_NOT_FOUND");
-        assert_eq!(QuarantineError::InvalidConfig { reason: "".into() }.code(), "QDS_INVALID_CONFIG");
+        assert_eq!(
+            QuarantineError::QuotaExceeded {
+                current_bytes: 0,
+                max_bytes: 0
+            }
+            .code(),
+            "QDS_QUOTA_EXCEEDED"
+        );
+        assert_eq!(
+            QuarantineError::TtlExpired {
+                object_id: "".into(),
+                age: 0,
+                ttl: 0
+            }
+            .code(),
+            "QDS_TTL_EXPIRED"
+        );
+        assert_eq!(
+            QuarantineError::Duplicate {
+                object_id: "".into()
+            }
+            .code(),
+            "QDS_DUPLICATE"
+        );
+        assert_eq!(
+            QuarantineError::NotFound {
+                object_id: "".into()
+            }
+            .code(),
+            "QDS_NOT_FOUND"
+        );
+        assert_eq!(
+            QuarantineError::InvalidConfig { reason: "".into() }.code(),
+            "QDS_INVALID_CONFIG"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = QuarantineError::QuotaExceeded { current_bytes: 500, max_bytes: 400 };
+        let e = QuarantineError::QuotaExceeded {
+            current_bytes: 500,
+            max_bytes: 400,
+        };
         assert!(e.to_string().contains("QDS_QUOTA_EXCEEDED"));
     }
 

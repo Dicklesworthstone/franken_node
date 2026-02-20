@@ -209,7 +209,7 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::health_gate::{standard_checks, HealthGateResult};
+    use crate::connector::health_gate::{HealthGateResult, standard_checks};
     use tempfile::TempDir;
 
     fn sample_state() -> RolloutState {

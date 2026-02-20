@@ -42,9 +42,7 @@ pub fn verify_hash(
     }
 
     // Validate hash format
-    if expected.hash_hex.len() != 16
-        || !expected.hash_hex.chars().all(|c| c.is_ascii_hexdigit())
-    {
+    if expected.hash_hex.len() != 16 || !expected.hash_hex.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(RejectionCode::MalformedHash);
     }
 
@@ -161,7 +159,9 @@ impl AdmissionTelemetry {
 
     /// Get rejection distribution as sorted Vec for deterministic output.
     pub fn rejection_counts(&self) -> Vec<(RejectionCode, u64)> {
-        let mut counts: Vec<_> = self.rejection_distribution.iter()
+        let mut counts: Vec<_> = self
+            .rejection_distribution
+            .iter()
             .map(|(k, v)| (*k, *v))
             .collect();
         counts.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
@@ -188,10 +188,16 @@ impl fmt::Display for InterfaceHashError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::HashMismatch { expected, computed } => {
-                write!(f, "IFACE_HASH_MISMATCH: expected={expected}, computed={computed}")
+                write!(
+                    f,
+                    "IFACE_HASH_MISMATCH: expected={expected}, computed={computed}"
+                )
             }
             Self::DomainMismatch { expected, actual } => {
-                write!(f, "IFACE_DOMAIN_MISMATCH: expected={expected}, actual={actual}")
+                write!(
+                    f,
+                    "IFACE_DOMAIN_MISMATCH: expected={expected}, actual={actual}"
+                )
             }
             Self::HashExpired { hash_hex } => {
                 write!(f, "IFACE_HASH_EXPIRED: {hash_hex}")
@@ -344,7 +350,10 @@ mod tests {
 
         assert_eq!(tel.total_rejected, 3);
         assert_eq!(tel.rejection_distribution[&RejectionCode::HashMismatch], 2);
-        assert_eq!(tel.rejection_distribution[&RejectionCode::DomainMismatch], 1);
+        assert_eq!(
+            tel.rejection_distribution[&RejectionCode::DomainMismatch],
+            1
+        );
     }
 
     #[test]
@@ -403,19 +412,25 @@ mod tests {
     #[test]
     fn error_display_messages() {
         let e1 = InterfaceHashError::HashMismatch {
-            expected: "aaa".into(), computed: "bbb".into(),
+            expected: "aaa".into(),
+            computed: "bbb".into(),
         };
         assert!(e1.to_string().contains("IFACE_HASH_MISMATCH"));
 
         let e2 = InterfaceHashError::DomainMismatch {
-            expected: "a".into(), actual: "b".into(),
+            expected: "a".into(),
+            actual: "b".into(),
         };
         assert!(e2.to_string().contains("IFACE_DOMAIN_MISMATCH"));
 
-        let e3 = InterfaceHashError::HashExpired { hash_hex: "abc".into() };
+        let e3 = InterfaceHashError::HashExpired {
+            hash_hex: "abc".into(),
+        };
         assert!(e3.to_string().contains("IFACE_HASH_EXPIRED"));
 
-        let e4 = InterfaceHashError::HashMalformed { hash_hex: "xxx".into() };
+        let e4 = InterfaceHashError::HashMalformed {
+            hash_hex: "xxx".into(),
+        };
         assert!(e4.to_string().contains("IFACE_HASH_MALFORMED"));
     }
 
@@ -423,9 +438,18 @@ mod tests {
 
     #[test]
     fn rejection_code_display() {
-        assert_eq!(RejectionCode::HashMismatch.to_string(), "IFACE_HASH_MISMATCH");
-        assert_eq!(RejectionCode::DomainMismatch.to_string(), "IFACE_DOMAIN_MISMATCH");
+        assert_eq!(
+            RejectionCode::HashMismatch.to_string(),
+            "IFACE_HASH_MISMATCH"
+        );
+        assert_eq!(
+            RejectionCode::DomainMismatch.to_string(),
+            "IFACE_DOMAIN_MISMATCH"
+        );
         assert_eq!(RejectionCode::ExpiredHash.to_string(), "IFACE_HASH_EXPIRED");
-        assert_eq!(RejectionCode::MalformedHash.to_string(), "IFACE_HASH_MALFORMED");
+        assert_eq!(
+            RejectionCode::MalformedHash.to_string(),
+            "IFACE_HASH_MALFORMED"
+        );
     }
 }

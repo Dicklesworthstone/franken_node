@@ -37,7 +37,10 @@ impl fmt::Display for CrdtType {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CrdtError {
     #[serde(rename = "CRDT_TYPE_MISMATCH")]
-    TypeMismatch { expected: CrdtType, actual: CrdtType },
+    TypeMismatch {
+        expected: CrdtType,
+        actual: CrdtType,
+    },
 }
 
 impl fmt::Display for CrdtError {

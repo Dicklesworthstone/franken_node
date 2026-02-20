@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 use super::connector_method_validator::{
-    validate_contract, ContractReport, MethodDeclaration, MethodErrorCode,
+    ContractReport, MethodDeclaration, MethodErrorCode, validate_contract,
 };
 
 /// A policy override that allows publication despite failures.
@@ -203,7 +203,10 @@ pub fn run_harness(
         ));
     }
 
-    let passed = results.iter().filter(|r| r.gate_decision == "ALLOW").count();
+    let passed = results
+        .iter()
+        .filter(|r| r.gate_decision == "ALLOW")
+        .count();
     let overridden = results
         .iter()
         .filter(|r| r.gate_decision == "ALLOW_OVERRIDE")
@@ -261,7 +264,12 @@ mod tests {
 
     #[test]
     fn passing_connector_allowed() {
-        let result = check_publication("test-conn", &full_declarations(), None, "2026-01-01T00:00:00Z");
+        let result = check_publication(
+            "test-conn",
+            &full_declarations(),
+            None,
+            "2026-01-01T00:00:00Z",
+        );
         assert_eq!(result.gate_decision, "ALLOW");
         assert!(!result.override_applied);
     }
@@ -304,10 +312,12 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         assert_eq!(result.gate_decision, "BLOCK");
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.code == GateErrorCode::OverrideExpired));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::OverrideExpired)
+        );
     }
 
     #[test]
@@ -323,10 +333,12 @@ mod tests {
             "2026-01-01T00:00:00Z",
         );
         assert_eq!(result.gate_decision, "BLOCK");
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.code == GateErrorCode::OverrideScopeMismatch));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::OverrideScopeMismatch)
+        );
     }
 
     #[test]

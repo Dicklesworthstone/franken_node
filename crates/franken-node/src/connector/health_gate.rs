@@ -28,10 +28,7 @@ impl HealthGateResult {
     ///
     /// The gate passes if and only if all required checks pass.
     pub fn evaluate(checks: Vec<HealthCheck>) -> Self {
-        let gate_passed = checks
-            .iter()
-            .filter(|c| c.required)
-            .all(|c| c.passed);
+        let gate_passed = checks.iter().filter(|c| c.required).all(|c| c.passed);
         Self {
             checks,
             gate_passed,

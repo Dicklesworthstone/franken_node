@@ -114,10 +114,19 @@ pub struct GateDecision {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateFailure {
-    MissingAttestation { types: Vec<AttestationType> },
-    InsufficientAssurance { have: BuildAssurance, need: BuildAssurance },
-    UntrustedBuilder { builder_id: String },
-    PolicyInvalid { reason: String },
+    MissingAttestation {
+        types: Vec<AttestationType>,
+    },
+    InsufficientAssurance {
+        have: BuildAssurance,
+        need: BuildAssurance,
+    },
+    UntrustedBuilder {
+        builder_id: String,
+    },
+    PolicyInvalid {
+        reason: String,
+    },
 }
 
 impl fmt::Display for GateFailure {
@@ -149,12 +158,16 @@ pub fn evaluate_gate(
     timestamp: &str,
 ) -> GateDecision {
     // Check attestations
-    let missing: Vec<AttestationType> = policy.required_attestations.iter()
+    let missing: Vec<AttestationType> = policy
+        .required_attestations
+        .iter()
         .filter(|req| !provenance.attestations.contains(req))
         .cloned()
         .collect();
 
-    let assurance_ok = provenance.build_assurance.meets_minimum(policy.min_build_assurance);
+    let assurance_ok = provenance
+        .build_assurance
+        .meets_minimum(policy.min_build_assurance);
     let builder_trusted = policy.trusted_builders.contains(&provenance.builder_id);
 
     let passed = missing.is_empty() && assurance_ok && builder_trusted;
@@ -162,7 +175,9 @@ pub fn evaluate_gate(
     let failure_reason = if passed {
         None
     } else if !missing.is_empty() {
-        Some(GateFailure::MissingAttestation { types: missing.clone() })
+        Some(GateFailure::MissingAttestation {
+            types: missing.clone(),
+        })
     } else if !assurance_ok {
         Some(GateFailure::InsufficientAssurance {
             have: provenance.build_assurance,
@@ -329,7 +344,10 @@ mod tests {
         assert_eq!(AttestationType::Slsa.to_string(), "slsa");
         assert_eq!(AttestationType::Sigstore.to_string(), "sigstore");
         assert_eq!(AttestationType::InToto.to_string(), "in_toto");
-        assert_eq!(AttestationType::Custom("foo".into()).to_string(), "custom:foo");
+        assert_eq!(
+            AttestationType::Custom("foo".into()).to_string(),
+            "custom:foo"
+        );
     }
 
     // === Policy validation ===
@@ -397,16 +415,25 @@ mod tests {
 
     #[test]
     fn error_display_messages() {
-        let e1 = ProvenanceError::AttestMissing { types: vec!["slsa".into()] };
+        let e1 = ProvenanceError::AttestMissing {
+            types: vec!["slsa".into()],
+        };
         assert!(e1.to_string().contains("PROV_ATTEST_MISSING"));
 
-        let e2 = ProvenanceError::AssuranceLow { have: "basic".into(), need: "verified".into() };
+        let e2 = ProvenanceError::AssuranceLow {
+            have: "basic".into(),
+            need: "verified".into(),
+        };
         assert!(e2.to_string().contains("PROV_ASSURANCE_LOW"));
 
-        let e3 = ProvenanceError::BuilderUntrusted { builder_id: "x".into() };
+        let e3 = ProvenanceError::BuilderUntrusted {
+            builder_id: "x".into(),
+        };
         assert!(e3.to_string().contains("PROV_BUILDER_UNTRUSTED"));
 
-        let e4 = ProvenanceError::PolicyInvalid { reason: "bad".into() };
+        let e4 = ProvenanceError::PolicyInvalid {
+            reason: "bad".into(),
+        };
         assert!(e4.to_string().contains("PROV_POLICY_INVALID"));
     }
 }

@@ -31,10 +31,7 @@ pub enum FencingError {
     #[serde(rename = "WRITE_UNFENCED")]
     WriteUnfenced,
     #[serde(rename = "WRITE_STALE_FENCE")]
-    WriteStaleFence {
-        write_seq: u64,
-        current_seq: u64,
-    },
+    WriteStaleFence { write_seq: u64, current_seq: u64 },
     #[serde(rename = "LEASE_EXPIRED")]
     LeaseExpired {
         expires_at: String,
@@ -177,9 +174,17 @@ mod tests {
     #[test]
     fn acquire_lease_increments_seq() {
         let mut fs = FenceState::new("obj-1".into());
-        let l1 = fs.acquire_lease("writer-a".into(), "2026-01-01T00:00:00Z".into(), "2026-12-31T00:00:00Z".into());
+        let l1 = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2026-12-31T00:00:00Z".into(),
+        );
         assert_eq!(l1.lease_seq, 1);
-        let l2 = fs.acquire_lease("writer-b".into(), "2026-01-02T00:00:00Z".into(), "2026-12-31T00:00:00Z".into());
+        let l2 = fs.acquire_lease(
+            "writer-b".into(),
+            "2026-01-02T00:00:00Z".into(),
+            "2026-12-31T00:00:00Z".into(),
+        );
         assert_eq!(l2.lease_seq, 2);
         assert_eq!(fs.current_seq, 2);
     }
@@ -187,66 +192,101 @@ mod tests {
     #[test]
     fn valid_fenced_write_accepted() {
         let mut fs = FenceState::new("obj-1".into());
-        let lease = fs.acquire_lease("writer-a".into(), "2026-01-01T00:00:00Z".into(), "2030-01-01T00:00:00Z".into());
+        let lease = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
         let write = FencedWrite {
             fence_seq: Some(1),
             target_object_id: "obj-1".into(),
             payload: json!({"data": "test"}),
         };
-        assert!(fs.validate_write(&write, &lease, "2026-06-01T00:00:00Z").is_ok());
+        assert!(
+            fs.validate_write(&write, &lease, "2026-06-01T00:00:00Z")
+                .is_ok()
+        );
     }
 
     #[test]
     fn unfenced_write_rejected() {
         let mut fs = FenceState::new("obj-1".into());
-        let lease = fs.acquire_lease("writer-a".into(), "2026-01-01T00:00:00Z".into(), "2030-01-01T00:00:00Z".into());
+        let lease = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
         let write = FencedWrite {
             fence_seq: None,
             target_object_id: "obj-1".into(),
             payload: json!({}),
         };
-        let err = fs.validate_write(&write, &lease, "2026-06-01T00:00:00Z").unwrap_err();
+        let err = fs
+            .validate_write(&write, &lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
         assert_eq!(err, FencingError::WriteUnfenced);
     }
 
     #[test]
     fn stale_fenced_write_rejected() {
         let mut fs = FenceState::new("obj-1".into());
-        let _l1 = fs.acquire_lease("writer-a".into(), "2026-01-01T00:00:00Z".into(), "2030-01-01T00:00:00Z".into());
-        let l2 = fs.acquire_lease("writer-b".into(), "2026-01-02T00:00:00Z".into(), "2030-01-01T00:00:00Z".into());
+        let _l1 = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let l2 = fs.acquire_lease(
+            "writer-b".into(),
+            "2026-01-02T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
         // Try to write with old seq=1, current is 2
         let write = FencedWrite {
             fence_seq: Some(1),
             target_object_id: "obj-1".into(),
             payload: json!({}),
         };
-        let err = fs.validate_write(&write, &l2, "2026-06-01T00:00:00Z").unwrap_err();
+        let err = fs
+            .validate_write(&write, &l2, "2026-06-01T00:00:00Z")
+            .unwrap_err();
         assert!(matches!(err, FencingError::WriteStaleFence { .. }));
     }
 
     #[test]
     fn expired_lease_rejected() {
         let mut fs = FenceState::new("obj-1".into());
-        let lease = fs.acquire_lease("writer-a".into(), "2026-01-01T00:00:00Z".into(), "2026-02-01T00:00:00Z".into());
+        let lease = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2026-02-01T00:00:00Z".into(),
+        );
         let write = FencedWrite {
             fence_seq: Some(1),
             target_object_id: "obj-1".into(),
             payload: json!({}),
         };
-        let err = fs.validate_write(&write, &lease, "2026-06-01T00:00:00Z").unwrap_err();
+        let err = fs
+            .validate_write(&write, &lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
         assert!(matches!(err, FencingError::LeaseExpired { .. }));
     }
 
     #[test]
     fn object_mismatch_rejected() {
         let mut fs = FenceState::new("obj-1".into());
-        let lease = fs.acquire_lease("writer-a".into(), "2026-01-01T00:00:00Z".into(), "2030-01-01T00:00:00Z".into());
+        let lease = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
         let write = FencedWrite {
             fence_seq: Some(1),
             target_object_id: "obj-DIFFERENT".into(),
             payload: json!({}),
         };
-        let err = fs.validate_write(&write, &lease, "2026-06-01T00:00:00Z").unwrap_err();
+        let err = fs
+            .validate_write(&write, &lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
         assert!(matches!(err, FencingError::LeaseObjectMismatch { .. }));
     }
 

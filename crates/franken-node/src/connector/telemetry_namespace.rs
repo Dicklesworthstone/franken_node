@@ -158,9 +158,8 @@ impl SchemaRegistry {
     /// Enforces INV-TNS-NAMESPACE, INV-TNS-VERSIONED, and INV-TNS-FROZEN.
     pub fn register(&mut self, reg: &MetricRegistration) -> Result<MetricSchema, NamespaceError> {
         // INV-TNS-NAMESPACE
-        let plane = Plane::from_name(&reg.name).ok_or_else(|| {
-            NamespaceError::InvalidNamespace(reg.name.clone())
-        })?;
+        let plane = Plane::from_name(&reg.name)
+            .ok_or_else(|| NamespaceError::InvalidNamespace(reg.name.clone()))?;
 
         // INV-TNS-VERSIONED
         if reg.version == 0 {
@@ -200,9 +199,10 @@ impl SchemaRegistry {
 
     /// Freeze a metric so its shape cannot change.
     pub fn freeze(&mut self, name: &str) -> Result<(), NamespaceError> {
-        let schema = self.schemas.get_mut(name).ok_or_else(|| {
-            NamespaceError::NotFound(name.to_string())
-        })?;
+        let schema = self
+            .schemas
+            .get_mut(name)
+            .ok_or_else(|| NamespaceError::NotFound(name.to_string()))?;
         schema.frozen = true;
         Ok(())
     }
@@ -216,9 +216,10 @@ impl SchemaRegistry {
         reason: &str,
         at_version: u32,
     ) -> Result<(), NamespaceError> {
-        let schema = self.schemas.get_mut(name).ok_or_else(|| {
-            NamespaceError::NotFound(name.to_string())
-        })?;
+        let schema = self
+            .schemas
+            .get_mut(name)
+            .ok_or_else(|| NamespaceError::NotFound(name.to_string()))?;
         if schema.deprecated {
             return Err(NamespaceError::AlreadyDeprecated(name.to_string()));
         }
@@ -271,7 +272,14 @@ mod tests {
     #[test]
     fn register_valid_metric() {
         let mut r = SchemaRegistry::new();
-        let s = r.register(&reg("franken.protocol.msgs_total", MetricType::Counter, &["peer"], 1)).unwrap();
+        let s = r
+            .register(&reg(
+                "franken.protocol.msgs_total",
+                MetricType::Counter,
+                &["peer"],
+                1,
+            ))
+            .unwrap();
         assert_eq!(s.plane, Plane::Protocol);
         assert_eq!(s.version, 1);
         assert!(!s.frozen);
@@ -280,41 +288,79 @@ mod tests {
     #[test]
     fn reject_invalid_namespace() {
         let mut r = SchemaRegistry::new();
-        let err = r.register(&reg("bad.prefix.foo", MetricType::Counter, &[], 1)).unwrap_err();
+        let err = r
+            .register(&reg("bad.prefix.foo", MetricType::Counter, &[], 1))
+            .unwrap_err();
         assert_eq!(err.code(), "TNS_INVALID_NAMESPACE");
     }
 
     #[test]
     fn reject_version_zero() {
         let mut r = SchemaRegistry::new();
-        let err = r.register(&reg("franken.protocol.foo", MetricType::Counter, &[], 0)).unwrap_err();
+        let err = r
+            .register(&reg("franken.protocol.foo", MetricType::Counter, &[], 0))
+            .unwrap_err();
         assert_eq!(err.code(), "TNS_VERSION_MISSING");
     }
 
     #[test]
     fn freeze_prevents_shape_change() {
         let mut r = SchemaRegistry::new();
-        r.register(&reg("franken.security.auth_total", MetricType::Counter, &["method"], 1)).unwrap();
+        r.register(&reg(
+            "franken.security.auth_total",
+            MetricType::Counter,
+            &["method"],
+            1,
+        ))
+        .unwrap();
         r.freeze("franken.security.auth_total").unwrap();
 
         // Same shape — OK
-        let s = r.register(&reg("franken.security.auth_total", MetricType::Counter, &["method"], 2)).unwrap();
+        let s = r
+            .register(&reg(
+                "franken.security.auth_total",
+                MetricType::Counter,
+                &["method"],
+                2,
+            ))
+            .unwrap();
         assert_eq!(s.version, 2);
 
         // Different type — rejected
-        let err = r.register(&reg("franken.security.auth_total", MetricType::Gauge, &["method"], 3)).unwrap_err();
+        let err = r
+            .register(&reg(
+                "franken.security.auth_total",
+                MetricType::Gauge,
+                &["method"],
+                3,
+            ))
+            .unwrap_err();
         assert_eq!(err.code(), "TNS_FROZEN_CONFLICT");
 
         // Different labels — rejected
-        let err = r.register(&reg("franken.security.auth_total", MetricType::Counter, &["method", "extra"], 3)).unwrap_err();
+        let err = r
+            .register(&reg(
+                "franken.security.auth_total",
+                MetricType::Counter,
+                &["method", "extra"],
+                3,
+            ))
+            .unwrap_err();
         assert_eq!(err.code(), "TNS_FROZEN_CONFLICT");
     }
 
     #[test]
     fn deprecate_keeps_metric_queryable() {
         let mut r = SchemaRegistry::new();
-        r.register(&reg("franken.egress.bytes_total", MetricType::Counter, &[], 1)).unwrap();
-        r.deprecate("franken.egress.bytes_total", "replaced by v2", 2).unwrap();
+        r.register(&reg(
+            "franken.egress.bytes_total",
+            MetricType::Counter,
+            &[],
+            1,
+        ))
+        .unwrap();
+        r.deprecate("franken.egress.bytes_total", "replaced by v2", 2)
+            .unwrap();
         let s = r.get("franken.egress.bytes_total").unwrap();
         assert!(s.deprecated);
         assert_eq!(s.deprecation_reason.as_deref(), Some("replaced by v2"));
@@ -324,16 +370,27 @@ mod tests {
     #[test]
     fn double_deprecate_rejected() {
         let mut r = SchemaRegistry::new();
-        r.register(&reg("franken.capability.inv_total", MetricType::Counter, &[], 1)).unwrap();
-        r.deprecate("franken.capability.inv_total", "reason", 2).unwrap();
-        let err = r.deprecate("franken.capability.inv_total", "again", 3).unwrap_err();
+        r.register(&reg(
+            "franken.capability.inv_total",
+            MetricType::Counter,
+            &[],
+            1,
+        ))
+        .unwrap();
+        r.deprecate("franken.capability.inv_total", "reason", 2)
+            .unwrap();
+        let err = r
+            .deprecate("franken.capability.inv_total", "again", 3)
+            .unwrap_err();
         assert_eq!(err.code(), "TNS_ALREADY_DEPRECATED");
     }
 
     #[test]
     fn deprecate_not_found() {
         let mut r = SchemaRegistry::new();
-        let err = r.deprecate("franken.protocol.no_such", "reason", 1).unwrap_err();
+        let err = r
+            .deprecate("franken.protocol.no_such", "reason", 1)
+            .unwrap_err();
         assert_eq!(err.code(), "TNS_NOT_FOUND");
     }
 
@@ -346,10 +403,22 @@ mod tests {
 
     #[test]
     fn validate_name_good() {
-        assert_eq!(SchemaRegistry::validate_name("franken.protocol.x").unwrap(), Plane::Protocol);
-        assert_eq!(SchemaRegistry::validate_name("franken.capability.x").unwrap(), Plane::Capability);
-        assert_eq!(SchemaRegistry::validate_name("franken.egress.x").unwrap(), Plane::Egress);
-        assert_eq!(SchemaRegistry::validate_name("franken.security.x").unwrap(), Plane::Security);
+        assert_eq!(
+            SchemaRegistry::validate_name("franken.protocol.x").unwrap(),
+            Plane::Protocol
+        );
+        assert_eq!(
+            SchemaRegistry::validate_name("franken.capability.x").unwrap(),
+            Plane::Capability
+        );
+        assert_eq!(
+            SchemaRegistry::validate_name("franken.egress.x").unwrap(),
+            Plane::Egress
+        );
+        assert_eq!(
+            SchemaRegistry::validate_name("franken.security.x").unwrap(),
+            Plane::Security
+        );
     }
 
     #[test]
@@ -360,9 +429,12 @@ mod tests {
     #[test]
     fn list_by_plane() {
         let mut r = SchemaRegistry::new();
-        r.register(&reg("franken.protocol.a", MetricType::Counter, &[], 1)).unwrap();
-        r.register(&reg("franken.protocol.b", MetricType::Gauge, &[], 1)).unwrap();
-        r.register(&reg("franken.security.c", MetricType::Counter, &[], 1)).unwrap();
+        r.register(&reg("franken.protocol.a", MetricType::Counter, &[], 1))
+            .unwrap();
+        r.register(&reg("franken.protocol.b", MetricType::Gauge, &[], 1))
+            .unwrap();
+        r.register(&reg("franken.security.c", MetricType::Counter, &[], 1))
+            .unwrap();
         let protos = r.list_by_plane(Plane::Protocol);
         assert_eq!(protos.len(), 2);
         assert_eq!(protos[0].name, "franken.protocol.a");
@@ -371,8 +443,10 @@ mod tests {
     #[test]
     fn catalog_returns_sorted() {
         let mut r = SchemaRegistry::new();
-        r.register(&reg("franken.security.z", MetricType::Counter, &[], 1)).unwrap();
-        r.register(&reg("franken.protocol.a", MetricType::Counter, &[], 1)).unwrap();
+        r.register(&reg("franken.security.z", MetricType::Counter, &[], 1))
+            .unwrap();
+        r.register(&reg("franken.protocol.a", MetricType::Counter, &[], 1))
+            .unwrap();
         let cat = r.catalog();
         assert_eq!(cat.len(), 2);
         assert_eq!(cat[0].name, "franken.protocol.a");
@@ -382,8 +456,11 @@ mod tests {
     #[test]
     fn re_register_unfrozen_overwrites() {
         let mut r = SchemaRegistry::new();
-        r.register(&reg("franken.protocol.x", MetricType::Counter, &["a"], 1)).unwrap();
-        let s = r.register(&reg("franken.protocol.x", MetricType::Gauge, &["b"], 2)).unwrap();
+        r.register(&reg("franken.protocol.x", MetricType::Counter, &["a"], 1))
+            .unwrap();
+        let s = r
+            .register(&reg("franken.protocol.x", MetricType::Gauge, &["b"], 2))
+            .unwrap();
         assert_eq!(s.metric_type, MetricType::Gauge);
         assert_eq!(s.labels, vec!["b".to_string()]);
         assert_eq!(s.version, 2);

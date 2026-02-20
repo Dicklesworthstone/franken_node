@@ -53,11 +53,7 @@ pub struct StateRoot {
 
 impl StateRoot {
     /// Create a new state root with computed hash.
-    pub fn new(
-        connector_id: String,
-        state_model: StateModelType,
-        head: serde_json::Value,
-    ) -> Self {
+    pub fn new(connector_id: String, state_model: StateModelType, head: serde_json::Value) -> Self {
         let root_hash = compute_hash(&head);
         Self {
             connector_id,
@@ -130,10 +126,7 @@ pub enum StateModelError {
     #[serde(rename = "STATE_MODEL_MISSING")]
     StateModelMissing { connector_id: String },
     #[serde(rename = "ROOT_HASH_MISMATCH")]
-    RootHashMismatch {
-        expected: String,
-        actual: String,
-    },
+    RootHashMismatch { expected: String, actual: String },
     #[serde(rename = "CACHE_STALE")]
     CacheStale {
         local_version: u64,
@@ -150,16 +143,34 @@ impl fmt::Display for StateModelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::StateModelMissing { connector_id } => {
-                write!(f, "STATE_MODEL_MISSING: connector '{connector_id}' has no declared state model")
+                write!(
+                    f,
+                    "STATE_MODEL_MISSING: connector '{connector_id}' has no declared state model"
+                )
             }
             Self::RootHashMismatch { expected, actual } => {
-                write!(f, "ROOT_HASH_MISMATCH: expected '{expected}', got '{actual}'")
+                write!(
+                    f,
+                    "ROOT_HASH_MISMATCH: expected '{expected}', got '{actual}'"
+                )
             }
-            Self::CacheStale { local_version, canonical_version } => {
-                write!(f, "CACHE_STALE: local v{local_version} < canonical v{canonical_version}")
+            Self::CacheStale {
+                local_version,
+                canonical_version,
+            } => {
+                write!(
+                    f,
+                    "CACHE_STALE: local v{local_version} < canonical v{canonical_version}"
+                )
             }
-            Self::CacheSplitBrain { local_version, canonical_version } => {
-                write!(f, "CACHE_SPLIT_BRAIN: local v{local_version} > canonical v{canonical_version}")
+            Self::CacheSplitBrain {
+                local_version,
+                canonical_version,
+            } => {
+                write!(
+                    f,
+                    "CACHE_SPLIT_BRAIN: local v{local_version} > canonical v{canonical_version}"
+                )
             }
         }
     }
@@ -229,13 +240,21 @@ mod tests {
 
     #[test]
     fn new_root_has_version_1() {
-        let root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"key": "val"}));
+        let root = StateRoot::new(
+            "conn-1".into(),
+            StateModelType::Document,
+            json!({"key": "val"}),
+        );
         assert_eq!(root.version, 1);
     }
 
     #[test]
     fn new_root_hash_computed() {
-        let root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"key": "val"}));
+        let root = StateRoot::new(
+            "conn-1".into(),
+            StateModelType::Document,
+            json!({"key": "val"}),
+        );
         assert!(!root.root_hash.is_empty());
     }
 

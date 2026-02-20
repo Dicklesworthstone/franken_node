@@ -332,7 +332,11 @@ pub fn process_conflicts(
     trace_id: &str,
     action_id: &str,
     timestamp: &str,
-) -> (Vec<ConflictResolution>, Vec<ForkLogEntry>, Vec<ConflictError>) {
+) -> (
+    Vec<ConflictResolution>,
+    Vec<ForkLogEntry>,
+    Vec<ConflictError>,
+) {
     let conflicts = detect_conflicts(leases, resource, now);
     let mut resolutions = Vec::new();
     let mut logs = Vec::new();
@@ -364,7 +368,14 @@ pub fn process_conflicts(
 mod tests {
     use super::*;
 
-    fn lease(id: &str, resource: &str, purpose: &str, granted: u64, ttl: u64, tier: &str) -> ActiveLease {
+    fn lease(
+        id: &str,
+        resource: &str,
+        purpose: &str,
+        granted: u64,
+        ttl: u64,
+        tier: &str,
+    ) -> ActiveLease {
         ActiveLease {
             lease_id: id.into(),
             holder: format!("holder-{id}"),
@@ -620,15 +631,40 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(ConflictError::DangerousHalt { resource: "r".into() }.code(), "OLC_DANGEROUS_HALT");
-        assert_eq!(ConflictError::BothActive { lease_a: "a".into(), lease_b: "b".into() }.code(), "OLC_BOTH_ACTIVE");
-        assert_eq!(ConflictError::NoWinner { lease_a: "a".into(), lease_b: "b".into() }.code(), "OLC_NO_WINNER");
-        assert_eq!(ConflictError::ForkLogIncomplete { field: "f".into() }.code(), "OLC_FORK_LOG_INCOMPLETE");
+        assert_eq!(
+            ConflictError::DangerousHalt {
+                resource: "r".into()
+            }
+            .code(),
+            "OLC_DANGEROUS_HALT"
+        );
+        assert_eq!(
+            ConflictError::BothActive {
+                lease_a: "a".into(),
+                lease_b: "b".into()
+            }
+            .code(),
+            "OLC_BOTH_ACTIVE"
+        );
+        assert_eq!(
+            ConflictError::NoWinner {
+                lease_a: "a".into(),
+                lease_b: "b".into()
+            }
+            .code(),
+            "OLC_NO_WINNER"
+        );
+        assert_eq!(
+            ConflictError::ForkLogIncomplete { field: "f".into() }.code(),
+            "OLC_FORK_LOG_INCOMPLETE"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = ConflictError::DangerousHalt { resource: "r".into() };
+        let e = ConflictError::DangerousHalt {
+            resource: "r".into(),
+        };
         assert!(e.to_string().contains("OLC_DANGEROUS_HALT"));
     }
 

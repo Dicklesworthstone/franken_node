@@ -316,13 +316,11 @@ mod tests {
 
     #[test]
     fn conformance_pass() {
-        let arts = vec![
-            TracedArtifact {
-                artifact_id: "a1".into(),
-                artifact_type: "invoke".into(),
-                trace_context: Some(ctx(None)),
-            },
-        ];
+        let arts = vec![TracedArtifact {
+            artifact_id: "a1".into(),
+            artifact_type: "invoke".into(),
+            trace_context: Some(ctx(None)),
+        }];
         let report = TraceStore::check_conformance(&arts);
         assert_eq!(report.verdict, "PASS");
         assert!(report.violations.is_empty());
@@ -330,13 +328,11 @@ mod tests {
 
     #[test]
     fn conformance_fail_missing() {
-        let arts = vec![
-            TracedArtifact {
-                artifact_id: "a1".into(),
-                artifact_type: "invoke".into(),
-                trace_context: None,
-            },
-        ];
+        let arts = vec![TracedArtifact {
+            artifact_id: "a1".into(),
+            artifact_type: "invoke".into(),
+            trace_context: None,
+        }];
         let report = TraceStore::check_conformance(&arts);
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.violations.len(), 1);
@@ -347,13 +343,11 @@ mod tests {
     fn conformance_fail_invalid() {
         let mut bad = ctx(None);
         bad.trace_id = "short".into();
-        let arts = vec![
-            TracedArtifact {
-                artifact_id: "a2".into(),
-                artifact_type: "receipt".into(),
-                trace_context: Some(bad),
-            },
-        ];
+        let arts = vec![TracedArtifact {
+            artifact_id: "a2".into(),
+            artifact_type: "receipt".into(),
+            trace_context: Some(bad),
+        }];
         let report = TraceStore::check_conformance(&arts);
         assert_eq!(report.verdict, "FAIL");
     }

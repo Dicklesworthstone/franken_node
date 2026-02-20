@@ -72,11 +72,28 @@ pub struct DecodeAuditEntry {
 /// Errors from parser operations.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParserError {
-    SizeExceeded { frame_id: String, actual: u64, limit: u64 },
-    DepthExceeded { frame_id: String, actual: u32, limit: u32 },
-    CpuExceeded { frame_id: String, actual: u64, limit: u64 },
-    InvalidConfig { reason: String },
-    MalformedFrame { frame_id: String, reason: String },
+    SizeExceeded {
+        frame_id: String,
+        actual: u64,
+        limit: u64,
+    },
+    DepthExceeded {
+        frame_id: String,
+        actual: u32,
+        limit: u32,
+    },
+    CpuExceeded {
+        frame_id: String,
+        actual: u64,
+        limit: u64,
+    },
+    InvalidConfig {
+        reason: String,
+    },
+    MalformedFrame {
+        frame_id: String,
+        reason: String,
+    },
 }
 
 impl ParserError {
@@ -94,16 +111,34 @@ impl ParserError {
 impl std::fmt::Display for ParserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SizeExceeded { frame_id, actual, limit } =>
-                write!(f, "BPG_SIZE_EXCEEDED: {frame_id} actual={actual} limit={limit}"),
-            Self::DepthExceeded { frame_id, actual, limit } =>
-                write!(f, "BPG_DEPTH_EXCEEDED: {frame_id} actual={actual} limit={limit}"),
-            Self::CpuExceeded { frame_id, actual, limit } =>
-                write!(f, "BPG_CPU_EXCEEDED: {frame_id} actual={actual}ms limit={limit}ms"),
-            Self::InvalidConfig { reason } =>
-                write!(f, "BPG_INVALID_CONFIG: {reason}"),
-            Self::MalformedFrame { frame_id, reason } =>
-                write!(f, "BPG_MALFORMED_FRAME: {frame_id} {reason}"),
+            Self::SizeExceeded {
+                frame_id,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "BPG_SIZE_EXCEEDED: {frame_id} actual={actual} limit={limit}"
+            ),
+            Self::DepthExceeded {
+                frame_id,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "BPG_DEPTH_EXCEEDED: {frame_id} actual={actual} limit={limit}"
+            ),
+            Self::CpuExceeded {
+                frame_id,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "BPG_CPU_EXCEEDED: {frame_id} actual={actual}ms limit={limit}ms"
+            ),
+            Self::InvalidConfig { reason } => write!(f, "BPG_INVALID_CONFIG: {reason}"),
+            Self::MalformedFrame { frame_id, reason } => {
+                write!(f, "BPG_MALFORMED_FRAME: {frame_id} {reason}")
+            }
         }
     }
 }
@@ -195,7 +230,11 @@ pub fn check_frame(
         size_limit: config.max_frame_bytes,
         depth_limit: config.max_nesting_depth,
         cpu_limit: config.max_decode_cpu_ms,
-        verdict: if allowed { "ALLOW".to_string() } else { "BLOCK".to_string() },
+        verdict: if allowed {
+            "ALLOW".to_string()
+        } else {
+            "BLOCK".to_string()
+        },
         timestamp: timestamp.to_string(),
     };
 
@@ -252,7 +291,11 @@ mod tests {
         let f = frame("f1", 1001, 5, 20);
         let (v, _) = check_frame(&f, &config(), "ts").unwrap();
         assert!(!v.allowed);
-        assert!(v.violations.iter().any(|v| matches!(v, GuardrailViolation::SizeExceeded { .. })));
+        assert!(
+            v.violations
+                .iter()
+                .any(|v| matches!(v, GuardrailViolation::SizeExceeded { .. }))
+        );
     }
 
     #[test]
@@ -260,7 +303,11 @@ mod tests {
         let f = frame("f1", 500, 11, 20);
         let (v, _) = check_frame(&f, &config(), "ts").unwrap();
         assert!(!v.allowed);
-        assert!(v.violations.iter().any(|v| matches!(v, GuardrailViolation::DepthExceeded { .. })));
+        assert!(
+            v.violations
+                .iter()
+                .any(|v| matches!(v, GuardrailViolation::DepthExceeded { .. }))
+        );
     }
 
     #[test]
@@ -268,7 +315,11 @@ mod tests {
         let f = frame("f1", 500, 5, 51);
         let (v, _) = check_frame(&f, &config(), "ts").unwrap();
         assert!(!v.allowed);
-        assert!(v.violations.iter().any(|v| matches!(v, GuardrailViolation::CpuExceeded { .. })));
+        assert!(
+            v.violations
+                .iter()
+                .any(|v| matches!(v, GuardrailViolation::CpuExceeded { .. }))
+        );
     }
 
     #[test]
@@ -309,9 +360,9 @@ mod tests {
     #[test]
     fn batch_check() {
         let frames = vec![
-            frame("f1", 500, 5, 20),   // ok
-            frame("f2", 1001, 5, 20),  // size exceeded
-            frame("f3", 500, 5, 20),   // ok
+            frame("f1", 500, 5, 20),  // ok
+            frame("f2", 1001, 5, 20), // size exceeded
+            frame("f3", 500, 5, 20),  // ok
         ];
         let results = check_batch(&frames, &config(), "ts").unwrap();
         assert_eq!(results.len(), 3);
@@ -355,16 +406,54 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(ParserError::SizeExceeded { frame_id: "".into(), actual: 0, limit: 0 }.code(), "BPG_SIZE_EXCEEDED");
-        assert_eq!(ParserError::DepthExceeded { frame_id: "".into(), actual: 0, limit: 0 }.code(), "BPG_DEPTH_EXCEEDED");
-        assert_eq!(ParserError::CpuExceeded { frame_id: "".into(), actual: 0, limit: 0 }.code(), "BPG_CPU_EXCEEDED");
-        assert_eq!(ParserError::InvalidConfig { reason: "".into() }.code(), "BPG_INVALID_CONFIG");
-        assert_eq!(ParserError::MalformedFrame { frame_id: "".into(), reason: "".into() }.code(), "BPG_MALFORMED_FRAME");
+        assert_eq!(
+            ParserError::SizeExceeded {
+                frame_id: "".into(),
+                actual: 0,
+                limit: 0
+            }
+            .code(),
+            "BPG_SIZE_EXCEEDED"
+        );
+        assert_eq!(
+            ParserError::DepthExceeded {
+                frame_id: "".into(),
+                actual: 0,
+                limit: 0
+            }
+            .code(),
+            "BPG_DEPTH_EXCEEDED"
+        );
+        assert_eq!(
+            ParserError::CpuExceeded {
+                frame_id: "".into(),
+                actual: 0,
+                limit: 0
+            }
+            .code(),
+            "BPG_CPU_EXCEEDED"
+        );
+        assert_eq!(
+            ParserError::InvalidConfig { reason: "".into() }.code(),
+            "BPG_INVALID_CONFIG"
+        );
+        assert_eq!(
+            ParserError::MalformedFrame {
+                frame_id: "".into(),
+                reason: "".into()
+            }
+            .code(),
+            "BPG_MALFORMED_FRAME"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = ParserError::SizeExceeded { frame_id: "f1".into(), actual: 2000, limit: 1000 };
+        let e = ParserError::SizeExceeded {
+            frame_id: "f1".into(),
+            actual: 2000,
+            limit: 1000,
+        };
         assert!(e.to_string().contains("BPG_SIZE_EXCEEDED"));
     }
 

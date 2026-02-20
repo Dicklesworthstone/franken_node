@@ -1,20 +1,79 @@
 #![forbid(unsafe_code)]
 
 mod cli;
-pub mod conformance;
 mod config;
+pub mod conformance;
 pub mod connector;
+pub mod control_plane;
+pub mod encoding;
+pub mod observability;
+pub mod policy;
+#[path = "control_plane/root_pointer.rs"]
+pub mod root_pointer;
 pub mod runtime;
 pub mod security;
 pub mod supply_chain;
+pub mod tools;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
+use std::path::Path;
 
 use cli::{
     BenchCommand, Cli, Command, FleetCommand, IncidentCommand, MigrateCommand, RegistryCommand,
     TrustCommand, VerifyCommand,
 };
+use security::decision_receipt::{
+    Decision, Receipt, ReceiptQuery, append_signed_receipt, demo_signing_key,
+    export_receipts_to_path, write_receipts_markdown,
+};
+
+fn maybe_export_demo_receipts(
+    action_name: &str,
+    actor_identity: &str,
+    rationale: &str,
+    receipt_out: Option<&Path>,
+    receipt_summary_out: Option<&Path>,
+) -> Result<()> {
+    if receipt_out.is_none() && receipt_summary_out.is_none() {
+        return Ok(());
+    }
+
+    let mut chain = Vec::new();
+    let key = demo_signing_key();
+
+    let receipt = Receipt::new(
+        action_name,
+        actor_identity,
+        &serde_json::json!({
+            "command": action_name,
+            "actor": actor_identity,
+        }),
+        &serde_json::json!({
+            "status": "accepted",
+            "receipt_exported": true,
+        }),
+        Decision::Approved,
+        rationale,
+        vec!["ledger:pending-10.14".to_string()],
+        vec!["policy.rule.high-impact-receipt".to_string()],
+        0.93,
+        "franken-node trust sync --force",
+    )?;
+    append_signed_receipt(&mut chain, receipt, &key)?;
+
+    let filter = ReceiptQuery::default();
+    if let Some(path) = receipt_out {
+        export_receipts_to_path(&chain, &filter, path)
+            .with_context(|| format!("failed writing receipt export to {}", path.display()))?;
+    }
+    if let Some(path) = receipt_summary_out {
+        write_receipts_markdown(&chain, path)
+            .with_context(|| format!("failed writing receipt summary to {}", path.display()))?;
+    }
+
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -89,10 +148,24 @@ async fn main() -> Result<()> {
             }
             TrustCommand::Revoke(args) => {
                 eprintln!("franken-node trust revoke: extension={}", args.extension_id);
+                maybe_export_demo_receipts(
+                    "revocation",
+                    "trust-control-plane",
+                    "Revocation decision exported for audit traceability",
+                    args.receipt_out.as_deref(),
+                    args.receipt_summary_out.as_deref(),
+                )?;
                 eprintln!("[not yet implemented]");
             }
             TrustCommand::Quarantine(args) => {
                 eprintln!("franken-node trust quarantine: artifact={}", args.artifact);
+                maybe_export_demo_receipts(
+                    "quarantine",
+                    "trust-control-plane",
+                    "Quarantine decision exported for incident forensics",
+                    args.receipt_out.as_deref(),
+                    args.receipt_summary_out.as_deref(),
+                )?;
                 eprintln!("[not yet implemented]");
             }
             TrustCommand::Sync(args) => {
@@ -125,6 +198,13 @@ async fn main() -> Result<()> {
                     "franken-node incident bundle: id={} verify={}",
                     args.id, args.verify
                 );
+                maybe_export_demo_receipts(
+                    "incident_bundle",
+                    "incident-control-plane",
+                    "Incident bundle receipt export for deterministic replay evidence",
+                    args.receipt_out.as_deref(),
+                    args.receipt_summary_out.as_deref(),
+                )?;
                 eprintln!("[not yet implemented]");
             }
             IncidentCommand::Replay(args) => {

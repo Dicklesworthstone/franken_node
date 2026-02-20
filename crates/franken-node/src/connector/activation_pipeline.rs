@@ -164,10 +164,7 @@ impl StageExecutor for DefaultExecutor {
 /// Stages run in fixed order. On failure, ephemeral secrets are cleaned up
 /// (INV-ACT-NO-SECRET-LEAK) and the transcript records the failure point.
 /// Same inputs always produce the same transcript (INV-ACT-DETERMINISTIC).
-pub fn activate(
-    input: &ActivationInput,
-    executor: &dyn StageExecutor,
-) -> ActivationTranscript {
+pub fn activate(input: &ActivationInput, executor: &dyn StageExecutor) -> ActivationTranscript {
     let mut stages = Vec::new();
     let mut tracker = EphemeralSecretTracker::default();
 
@@ -366,9 +363,15 @@ mod tests {
         fn create_sandbox(&self, _: &str) -> Result<(), String> {
             Err("no cgroup".into())
         }
-        fn mount_secrets(&self, r: &[String]) -> Result<Vec<String>, String> { Ok(r.to_vec()) }
-        fn issue_capabilities(&self, _: &[String]) -> Result<(), String> { Ok(()) }
-        fn health_check(&self) -> Result<(), String> { Ok(()) }
+        fn mount_secrets(&self, r: &[String]) -> Result<Vec<String>, String> {
+            Ok(r.to_vec())
+        }
+        fn issue_capabilities(&self, _: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+        fn health_check(&self) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -377,17 +380,26 @@ mod tests {
         assert!(!t.completed);
         assert_eq!(t.stages.len(), 1);
         assert!(!t.stages[0].success);
-        assert_eq!(t.stages[0].error.as_ref().unwrap().code(), "ACT_SANDBOX_FAILED");
+        assert_eq!(
+            t.stages[0].error.as_ref().unwrap().code(),
+            "ACT_SANDBOX_FAILED"
+        );
     }
 
     struct FailSecretMount;
     impl StageExecutor for FailSecretMount {
-        fn create_sandbox(&self, _: &str) -> Result<(), String> { Ok(()) }
+        fn create_sandbox(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
         fn mount_secrets(&self, _: &[String]) -> Result<Vec<String>, String> {
             Err("vault sealed".into())
         }
-        fn issue_capabilities(&self, _: &[String]) -> Result<(), String> { Ok(()) }
-        fn health_check(&self) -> Result<(), String> { Ok(()) }
+        fn issue_capabilities(&self, _: &[String]) -> Result<(), String> {
+            Ok(())
+        }
+        fn health_check(&self) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -397,17 +409,26 @@ mod tests {
         assert_eq!(t.stages.len(), 2);
         assert!(t.stages[0].success);
         assert!(!t.stages[1].success);
-        assert_eq!(t.stages[1].error.as_ref().unwrap().code(), "ACT_SECRET_MOUNT_FAILED");
+        assert_eq!(
+            t.stages[1].error.as_ref().unwrap().code(),
+            "ACT_SECRET_MOUNT_FAILED"
+        );
     }
 
     struct FailCapability;
     impl StageExecutor for FailCapability {
-        fn create_sandbox(&self, _: &str) -> Result<(), String> { Ok(()) }
-        fn mount_secrets(&self, r: &[String]) -> Result<Vec<String>, String> { Ok(r.to_vec()) }
+        fn create_sandbox(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn mount_secrets(&self, r: &[String]) -> Result<Vec<String>, String> {
+            Ok(r.to_vec())
+        }
         fn issue_capabilities(&self, _: &[String]) -> Result<(), String> {
             Err("capability denied".into())
         }
-        fn health_check(&self) -> Result<(), String> { Ok(()) }
+        fn health_check(&self) -> Result<(), String> {
+            Ok(())
+        }
     }
 
     #[test]
@@ -418,14 +439,23 @@ mod tests {
         assert!(t.stages[0].success);
         assert!(t.stages[1].success);
         assert!(!t.stages[2].success);
-        assert_eq!(t.stages[2].error.as_ref().unwrap().code(), "ACT_CAPABILITY_FAILED");
+        assert_eq!(
+            t.stages[2].error.as_ref().unwrap().code(),
+            "ACT_CAPABILITY_FAILED"
+        );
     }
 
     struct FailHealth;
     impl StageExecutor for FailHealth {
-        fn create_sandbox(&self, _: &str) -> Result<(), String> { Ok(()) }
-        fn mount_secrets(&self, r: &[String]) -> Result<Vec<String>, String> { Ok(r.to_vec()) }
-        fn issue_capabilities(&self, _: &[String]) -> Result<(), String> { Ok(()) }
+        fn create_sandbox(&self, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+        fn mount_secrets(&self, r: &[String]) -> Result<Vec<String>, String> {
+            Ok(r.to_vec())
+        }
+        fn issue_capabilities(&self, _: &[String]) -> Result<(), String> {
+            Ok(())
+        }
         fn health_check(&self) -> Result<(), String> {
             Err("probe timeout".into())
         }
@@ -440,7 +470,10 @@ mod tests {
         assert!(t.stages[1].success);
         assert!(t.stages[2].success);
         assert!(!t.stages[3].success);
-        assert_eq!(t.stages[3].error.as_ref().unwrap().code(), "ACT_HEALTH_FAILED");
+        assert_eq!(
+            t.stages[3].error.as_ref().unwrap().code(),
+            "ACT_HEALTH_FAILED"
+        );
     }
 
     #[test]
@@ -492,15 +525,29 @@ mod tests {
 
     #[test]
     fn error_codes_correct() {
-        assert_eq!(StageError::SandboxFailed { reason: "x".into() }.code(), "ACT_SANDBOX_FAILED");
-        assert_eq!(StageError::SecretMountFailed { reason: "x".into() }.code(), "ACT_SECRET_MOUNT_FAILED");
-        assert_eq!(StageError::CapabilityFailed { reason: "x".into() }.code(), "ACT_CAPABILITY_FAILED");
-        assert_eq!(StageError::HealthCheckFailed { reason: "x".into() }.code(), "ACT_HEALTH_FAILED");
+        assert_eq!(
+            StageError::SandboxFailed { reason: "x".into() }.code(),
+            "ACT_SANDBOX_FAILED"
+        );
+        assert_eq!(
+            StageError::SecretMountFailed { reason: "x".into() }.code(),
+            "ACT_SECRET_MOUNT_FAILED"
+        );
+        assert_eq!(
+            StageError::CapabilityFailed { reason: "x".into() }.code(),
+            "ACT_CAPABILITY_FAILED"
+        );
+        assert_eq!(
+            StageError::HealthCheckFailed { reason: "x".into() }.code(),
+            "ACT_HEALTH_FAILED"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = StageError::SandboxFailed { reason: "oom".into() };
+        let e = StageError::SandboxFailed {
+            reason: "oom".into(),
+        };
         assert_eq!(e.to_string(), "ACT_SANDBOX_FAILED: oom");
     }
 

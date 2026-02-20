@@ -71,7 +71,11 @@ pub enum SchemaError {
     /// GSV_MISSING_VECTOR
     MissingVector(String),
     /// GSV_VECTOR_MISMATCH
-    VectorMismatch { vector_id: String, expected: String, actual: String },
+    VectorMismatch {
+        vector_id: String,
+        expected: String,
+        actual: String,
+    },
     /// GSV_NO_CHANGELOG
     NoChangelog(String),
     /// GSV_INVALID_VERSION
@@ -95,8 +99,15 @@ impl fmt::Display for SchemaError {
         match self {
             SchemaError::MissingSchema(c) => write!(f, "GSV_MISSING_SCHEMA: {c}"),
             SchemaError::MissingVector(c) => write!(f, "GSV_MISSING_VECTOR: {c}"),
-            SchemaError::VectorMismatch { vector_id, expected, actual } => {
-                write!(f, "GSV_VECTOR_MISMATCH: {vector_id} expected={expected} actual={actual}")
+            SchemaError::VectorMismatch {
+                vector_id,
+                expected,
+                actual,
+            } => {
+                write!(
+                    f,
+                    "GSV_VECTOR_MISMATCH: {vector_id} expected={expected} actual={actual}"
+                )
             }
             SchemaError::NoChangelog(c) => write!(f, "GSV_NO_CHANGELOG: {c}"),
             SchemaError::InvalidVersion(c) => write!(f, "GSV_INVALID_VERSION: {c}"),
@@ -228,9 +239,14 @@ mod tests {
 
     fn populated_registry() -> SchemaRegistry {
         let mut r = SchemaRegistry::new();
-        for cat in [SchemaCategory::Serialization, SchemaCategory::Signature, SchemaCategory::ControlFrame] {
+        for cat in [
+            SchemaCategory::Serialization,
+            SchemaCategory::Signature,
+            SchemaCategory::ControlFrame,
+        ] {
             r.register_schema(make_spec(cat, 1)).unwrap();
-            r.add_vector(make_vector(cat, &format!("{cat}_v1"))).unwrap();
+            r.add_vector(make_vector(cat, &format!("{cat}_v1")))
+                .unwrap();
         }
         r
     }
@@ -238,14 +254,17 @@ mod tests {
     #[test]
     fn register_valid_schema() {
         let mut r = SchemaRegistry::new();
-        r.register_schema(make_spec(SchemaCategory::Serialization, 1)).unwrap();
+        r.register_schema(make_spec(SchemaCategory::Serialization, 1))
+            .unwrap();
         assert_eq!(r.schema_count(), 1);
     }
 
     #[test]
     fn reject_version_zero() {
         let mut r = SchemaRegistry::new();
-        let err = r.register_schema(make_spec(SchemaCategory::Serialization, 0)).unwrap_err();
+        let err = r
+            .register_schema(make_spec(SchemaCategory::Serialization, 0))
+            .unwrap_err();
         assert_eq!(err.code(), "GSV_INVALID_VERSION");
     }
 
@@ -265,7 +284,9 @@ mod tests {
     #[test]
     fn add_vector_requires_schema() {
         let mut r = SchemaRegistry::new();
-        let err = r.add_vector(make_vector(SchemaCategory::Serialization, "v1")).unwrap_err();
+        let err = r
+            .add_vector(make_vector(SchemaCategory::Serialization, "v1"))
+            .unwrap_err();
         assert_eq!(err.code(), "GSV_MISSING_SCHEMA");
     }
 
@@ -278,8 +299,10 @@ mod tests {
     #[test]
     fn validate_missing_schema() {
         let mut r = SchemaRegistry::new();
-        r.register_schema(make_spec(SchemaCategory::Serialization, 1)).unwrap();
-        r.add_vector(make_vector(SchemaCategory::Serialization, "v1")).unwrap();
+        r.register_schema(make_spec(SchemaCategory::Serialization, 1))
+            .unwrap();
+        r.add_vector(make_vector(SchemaCategory::Serialization, "v1"))
+            .unwrap();
         let err = r.validate().unwrap_err();
         assert_eq!(err.code(), "GSV_MISSING_SCHEMA");
     }
@@ -287,7 +310,11 @@ mod tests {
     #[test]
     fn validate_missing_vectors() {
         let mut r = SchemaRegistry::new();
-        for cat in [SchemaCategory::Serialization, SchemaCategory::Signature, SchemaCategory::ControlFrame] {
+        for cat in [
+            SchemaCategory::Serialization,
+            SchemaCategory::Signature,
+            SchemaCategory::ControlFrame,
+        ] {
             r.register_schema(make_spec(cat, 1)).unwrap();
         }
         // No vectors added
@@ -336,7 +363,11 @@ mod tests {
         let errors = vec![
             SchemaError::MissingSchema("x".into()),
             SchemaError::MissingVector("x".into()),
-            SchemaError::VectorMismatch { vector_id: "x".into(), expected: "a".into(), actual: "b".into() },
+            SchemaError::VectorMismatch {
+                vector_id: "x".into(),
+                expected: "a".into(),
+                actual: "b".into(),
+            },
             SchemaError::NoChangelog("x".into()),
             SchemaError::InvalidVersion("x".into()),
         ];

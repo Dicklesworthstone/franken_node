@@ -7,7 +7,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use super::sandbox_policy_compiler::{compile_policy, AccessLevel, CompiledPolicy, SandboxProfile};
+use super::sandbox_policy_compiler::{AccessLevel, CompiledPolicy, SandboxProfile, compile_policy};
 
 /// Available isolation backends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -161,9 +161,7 @@ pub fn select_backend(caps: &PlatformCapabilities) -> Result<BackendSelection, I
 }
 
 /// Verify that a backend can enforce the required policy.
-pub fn verify_policy_enforcement(
-    selection: &BackendSelection,
-) -> Result<(), IsolationError> {
+pub fn verify_policy_enforcement(selection: &BackendSelection) -> Result<(), IsolationError> {
     // strict_plus requires all capabilities to be denied
     for grant in &selection.policy.grants {
         if grant.access != AccessLevel::Deny {
@@ -251,15 +249,21 @@ mod tests {
     }
 
     fn macos_caps() -> PlatformCapabilities {
-        PlatformCapabilities::from_values("macos", "aarch64", false, false, false, false, true, false)
+        PlatformCapabilities::from_values(
+            "macos", "aarch64", false, false, false, false, true, false,
+        )
     }
 
     fn oci_only_caps() -> PlatformCapabilities {
-        PlatformCapabilities::from_values("freebsd", "x86_64", false, false, false, false, false, true)
+        PlatformCapabilities::from_values(
+            "freebsd", "x86_64", false, false, false, false, false, true,
+        )
     }
 
     fn no_caps() -> PlatformCapabilities {
-        PlatformCapabilities::from_values("unknown", "unknown", false, false, false, false, false, false)
+        PlatformCapabilities::from_values(
+            "unknown", "unknown", false, false, false, false, false, false,
+        )
     }
 
     // === Backend selection ===

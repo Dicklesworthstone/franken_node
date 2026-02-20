@@ -77,7 +77,10 @@ impl std::fmt::Display for RegistryError {
             Self::SchemaInvalid { device_id, field } => {
                 write!(f, "DPR_SCHEMA_INVALID: {device_id} field {field}")
             }
-            Self::StaleProfile { device_id, age_secs } => {
+            Self::StaleProfile {
+                device_id,
+                age_secs,
+            } => {
                 write!(f, "DPR_STALE_PROFILE: {device_id} age {age_secs}s")
             }
             Self::InvalidConstraint { reason } => {
@@ -222,7 +225,10 @@ impl DeviceProfileRegistry {
                 rejected.push(DeviceMatch {
                     device_id: profile.device_id.clone(),
                     matched: false,
-                    reason: format!("stale: age {}s > max {}s", age, policy.freshness_max_age_secs),
+                    reason: format!(
+                        "stale: age {}s > max {}s",
+                        age, policy.freshness_max_age_secs
+                    ),
                     score: 0,
                 });
                 continue;
@@ -250,7 +256,8 @@ impl DeviceProfileRegistry {
                     && tier_rank(&profile.tier) < tier_rank(&constraint.min_tier)
                 {
                     failed = true;
-                    fail_reason = format!("tier {} below min {}", profile.tier, constraint.min_tier);
+                    fail_reason =
+                        format!("tier {} below min {}", profile.tier, constraint.min_tier);
                     break;
                 }
 
@@ -313,7 +320,12 @@ mod tests {
         }
     }
 
-    fn constraint(caps: &[&str], region: &str, min_tier: &str, max_latency: u64) -> PlacementConstraint {
+    fn constraint(
+        caps: &[&str],
+        region: &str,
+        min_tier: &str,
+        max_latency: u64,
+    ) -> PlacementConstraint {
         PlacementConstraint {
             required_capabilities: caps.iter().map(|c| c.to_string()).collect(),
             preferred_region: region.into(),
@@ -358,7 +370,10 @@ mod tests {
         let mut reg = DeviceProfileRegistry::new();
         let p = prof("d1", &[], "us", "Standard", 100);
         // Override caps to empty
-        let p2 = DeviceProfile { capabilities: vec![], ..p };
+        let p2 = DeviceProfile {
+            capabilities: vec![],
+            ..p
+        };
         let err = reg.register(p2).unwrap_err();
         assert_eq!(err.code(), "DPR_SCHEMA_INVALID");
     }
@@ -396,7 +411,8 @@ mod tests {
     #[test]
     fn deregister_existing() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu"], "us", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
         assert!(reg.deregister("d1"));
         assert_eq!(reg.count(), 0);
     }
@@ -410,7 +426,8 @@ mod tests {
     #[test]
     fn placement_matches_capable_device() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu", "tpu"], "us-east", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu", "tpu"], "us-east", "Standard", 100))
+            .unwrap();
         let p = policy(vec![constraint(&["gpu"], "us-east", "", 100)], 3600);
         let result = reg.evaluate_placement(&p, 200, "ts").unwrap();
         assert_eq!(result.matched.len(), 1);
@@ -420,7 +437,8 @@ mod tests {
     #[test]
     fn placement_rejects_missing_capability() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu"], "us", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
         let p = policy(vec![constraint(&["tpu"], "us", "", 100)], 3600);
         let err = reg.evaluate_placement(&p, 200, "ts").unwrap_err();
         assert_eq!(err.code(), "DPR_NO_MATCH");
@@ -429,7 +447,8 @@ mod tests {
     #[test]
     fn placement_rejects_stale_profile() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu"], "us", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
         let p = policy(vec![constraint(&["gpu"], "us", "", 100)], 50);
         // now=200, registered=100 → age=100 > max_age=50
         let err = reg.evaluate_placement(&p, 200, "ts").unwrap_err();
@@ -439,7 +458,8 @@ mod tests {
     #[test]
     fn placement_rejects_below_min_tier() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu"], "us", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
         let p = policy(vec![constraint(&["gpu"], "us", "Risky", 100)], 3600);
         let err = reg.evaluate_placement(&p, 200, "ts").unwrap_err();
         assert_eq!(err.code(), "DPR_NO_MATCH");
@@ -448,8 +468,10 @@ mod tests {
     #[test]
     fn placement_deterministic() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu"], "us", "Standard", 100)).unwrap();
-        reg.register(prof("d2", &["gpu"], "eu", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
+        reg.register(prof("d2", &["gpu"], "eu", "Standard", 100))
+            .unwrap();
         let p = policy(vec![constraint(&["gpu"], "us", "", 100)], 3600);
         let r1 = reg.evaluate_placement(&p, 200, "ts").unwrap();
         let r2 = reg.evaluate_placement(&p, 200, "ts").unwrap();
@@ -461,8 +483,10 @@ mod tests {
     #[test]
     fn placement_region_preferred_scores_higher() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu"], "eu", "Standard", 100)).unwrap();
-        reg.register(prof("d2", &["gpu"], "us", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu"], "eu", "Standard", 100))
+            .unwrap();
+        reg.register(prof("d2", &["gpu"], "us", "Standard", 100))
+            .unwrap();
         let p = policy(vec![constraint(&["gpu"], "us", "", 100)], 3600);
         let result = reg.evaluate_placement(&p, 200, "ts").unwrap();
         assert_eq!(result.matched[0].device_id, "d2"); // us region preferred
@@ -498,22 +522,43 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(RegistryError::SchemaInvalid { device_id: "x".into(), field: "y".into() }.code(), "DPR_SCHEMA_INVALID");
-        assert_eq!(RegistryError::StaleProfile { device_id: "x".into(), age_secs: 0 }.code(), "DPR_STALE_PROFILE");
-        assert_eq!(RegistryError::InvalidConstraint { reason: "x".into() }.code(), "DPR_INVALID_CONSTRAINT");
+        assert_eq!(
+            RegistryError::SchemaInvalid {
+                device_id: "x".into(),
+                field: "y".into()
+            }
+            .code(),
+            "DPR_SCHEMA_INVALID"
+        );
+        assert_eq!(
+            RegistryError::StaleProfile {
+                device_id: "x".into(),
+                age_secs: 0
+            }
+            .code(),
+            "DPR_STALE_PROFILE"
+        );
+        assert_eq!(
+            RegistryError::InvalidConstraint { reason: "x".into() }.code(),
+            "DPR_INVALID_CONSTRAINT"
+        );
         assert_eq!(RegistryError::NoMatch.code(), "DPR_NO_MATCH");
     }
 
     #[test]
     fn error_display() {
-        let e = RegistryError::SchemaInvalid { device_id: "d1".into(), field: "region".into() };
+        let e = RegistryError::SchemaInvalid {
+            device_id: "d1".into(),
+            field: "region".into(),
+        };
         assert!(e.to_string().contains("DPR_SCHEMA_INVALID"));
     }
 
     #[test]
     fn get_profile() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu"], "us", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
         assert!(reg.get("d1").is_some());
         assert!(reg.get("d2").is_none());
     }
@@ -521,7 +566,8 @@ mod tests {
     #[test]
     fn result_has_trace() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu"], "us", "Standard", 100)).unwrap();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
         let p = policy(vec![constraint(&["gpu"], "", "", 100)], 3600);
         let result = reg.evaluate_placement(&p, 200, "ts").unwrap();
         assert_eq!(result.trace_id, "tr-test");
@@ -530,7 +576,8 @@ mod tests {
     #[test]
     fn multiple_constraints_all_must_match() {
         let mut reg = DeviceProfileRegistry::new();
-        reg.register(prof("d1", &["gpu", "tpu"], "us", "Risky", 100)).unwrap();
+        reg.register(prof("d1", &["gpu", "tpu"], "us", "Risky", 100))
+            .unwrap();
         let p = policy(
             vec![
                 constraint(&["gpu"], "us", "", 100),

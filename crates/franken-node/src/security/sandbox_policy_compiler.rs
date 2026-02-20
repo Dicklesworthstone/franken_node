@@ -384,9 +384,17 @@ mod tests {
     #[test]
     fn moderate_mixed_access() {
         let policy = compile_policy(SandboxProfile::Moderate);
-        let net = policy.grants.iter().find(|g| g.capability == "network_access").unwrap();
+        let net = policy
+            .grants
+            .iter()
+            .find(|g| g.capability == "network_access")
+            .unwrap();
         assert_eq!(net.access, AccessLevel::Filtered);
-        let fsw = policy.grants.iter().find(|g| g.capability == "fs_write").unwrap();
+        let fsw = policy
+            .grants
+            .iter()
+            .find(|g| g.capability == "fs_write")
+            .unwrap();
         assert_eq!(fsw.access, AccessLevel::Deny);
     }
 
@@ -437,7 +445,12 @@ mod tests {
     fn tracker_upgrade_allowed() {
         let mut t = ProfileTracker::new("conn-1".into(), SandboxProfile::Strict);
         let audit = t
-            .change_profile(SandboxProfile::Moderate, "needs network".into(), "t".into(), false)
+            .change_profile(
+                SandboxProfile::Moderate,
+                "needs network".into(),
+                "t".into(),
+                false,
+            )
             .unwrap();
         assert_eq!(audit.new_profile, SandboxProfile::Moderate);
         assert_eq!(t.current_profile, SandboxProfile::Moderate);
@@ -448,7 +461,12 @@ mod tests {
     fn tracker_downgrade_blocked() {
         let mut t = ProfileTracker::new("conn-1".into(), SandboxProfile::Moderate);
         let err = t
-            .change_profile(SandboxProfile::Strict, "lock down".into(), "t".into(), false)
+            .change_profile(
+                SandboxProfile::Strict,
+                "lock down".into(),
+                "t".into(),
+                false,
+            )
             .unwrap_err();
         assert!(matches!(err, SandboxError::DowngradeBlocked { .. }));
         assert_eq!(t.current_profile, SandboxProfile::Moderate); // unchanged
@@ -467,7 +485,10 @@ mod tests {
     #[test]
     fn tracker_capability_check() {
         let t = ProfileTracker::new("conn-1".into(), SandboxProfile::Moderate);
-        assert_eq!(t.is_capability_allowed("network_access"), AccessLevel::Filtered);
+        assert_eq!(
+            t.is_capability_allowed("network_access"),
+            AccessLevel::Filtered
+        );
         assert_eq!(t.is_capability_allowed("fs_write"), AccessLevel::Deny);
         assert_eq!(t.is_capability_allowed("unknown"), AccessLevel::Deny);
     }

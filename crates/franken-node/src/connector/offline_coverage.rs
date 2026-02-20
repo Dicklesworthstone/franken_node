@@ -55,10 +55,20 @@ pub struct DashboardSnapshot {
 /// Errors from coverage tracking.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CoverageError {
-    SloBreach { slo_name: String, actual: f64, threshold: f64 },
-    InvalidEvent { reason: String },
-    NoEvents { scope: String },
-    ScopeUnknown { scope: String },
+    SloBreach {
+        slo_name: String,
+        actual: f64,
+        threshold: f64,
+    },
+    InvalidEvent {
+        reason: String,
+    },
+    NoEvents {
+        scope: String,
+    },
+    ScopeUnknown {
+        scope: String,
+    },
 }
 
 impl CoverageError {
@@ -75,7 +85,11 @@ impl CoverageError {
 impl std::fmt::Display for CoverageError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::SloBreach { slo_name, actual, threshold } => {
+            Self::SloBreach {
+                slo_name,
+                actual,
+                threshold,
+            } => {
                 write!(f, "OCT_SLO_BREACH: {slo_name} {actual:.2} < {threshold:.2}")
             }
             Self::InvalidEvent { reason } => write!(f, "OCT_INVALID_EVENT: {reason}"),
@@ -128,7 +142,9 @@ impl OfflineCoverageTracker {
     pub fn record_event(&mut self, event: CoverageEvent) -> Result<(), CoverageError> {
         validate_event(&event)?;
         let scope = self.scopes.entry(event.scope.clone()).or_default();
-        scope.artifacts.insert(event.artifact_id.clone(), event.available);
+        scope
+            .artifacts
+            .insert(event.artifact_id.clone(), event.available);
         scope.event_count += 1;
         self.all_events.push(event);
         Ok(())
@@ -138,9 +154,12 @@ impl OfflineCoverageTracker {
     ///
     /// INV-OCT-DETERMINISTIC: same events → same metrics.
     pub fn compute_metrics(&self, scope: &str) -> Result<CoverageMetrics, CoverageError> {
-        let state = self.scopes.get(scope).ok_or_else(|| CoverageError::ScopeUnknown {
-            scope: scope.into(),
-        })?;
+        let state = self
+            .scopes
+            .get(scope)
+            .ok_or_else(|| CoverageError::ScopeUnknown {
+                scope: scope.into(),
+            })?;
 
         if state.artifacts.is_empty() {
             return Err(CoverageError::NoEvents {
@@ -210,11 +229,7 @@ impl OfflineCoverageTracker {
     /// Generate a dashboard snapshot.
     ///
     /// INV-OCT-TRACEABLE: snapshot includes event count for traceability.
-    pub fn dashboard_snapshot(
-        &self,
-        trace_id: &str,
-        timestamp: &str,
-    ) -> DashboardSnapshot {
+    pub fn dashboard_snapshot(&self, trace_id: &str, timestamp: &str) -> DashboardSnapshot {
         let mut metrics = Vec::new();
         let mut scope_names: Vec<&String> = self.scopes.keys().collect();
         scope_names.sort(); // deterministic ordering
@@ -384,15 +399,36 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(CoverageError::SloBreach { slo_name: "x".into(), actual: 0.0, threshold: 0.0 }.code(), "OCT_SLO_BREACH");
-        assert_eq!(CoverageError::InvalidEvent { reason: "x".into() }.code(), "OCT_INVALID_EVENT");
-        assert_eq!(CoverageError::NoEvents { scope: "x".into() }.code(), "OCT_NO_EVENTS");
-        assert_eq!(CoverageError::ScopeUnknown { scope: "x".into() }.code(), "OCT_SCOPE_UNKNOWN");
+        assert_eq!(
+            CoverageError::SloBreach {
+                slo_name: "x".into(),
+                actual: 0.0,
+                threshold: 0.0
+            }
+            .code(),
+            "OCT_SLO_BREACH"
+        );
+        assert_eq!(
+            CoverageError::InvalidEvent { reason: "x".into() }.code(),
+            "OCT_INVALID_EVENT"
+        );
+        assert_eq!(
+            CoverageError::NoEvents { scope: "x".into() }.code(),
+            "OCT_NO_EVENTS"
+        );
+        assert_eq!(
+            CoverageError::ScopeUnknown { scope: "x".into() }.code(),
+            "OCT_SCOPE_UNKNOWN"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = CoverageError::SloBreach { slo_name: "cov".into(), actual: 0.5, threshold: 0.9 };
+        let e = CoverageError::SloBreach {
+            slo_name: "cov".into(),
+            actual: 0.5,
+            threshold: 0.9,
+        };
         assert!(e.to_string().contains("OCT_SLO_BREACH"));
     }
 

@@ -1,0 +1,9 @@
+pub mod bayesian_diagnostics;
+pub mod controller_boundary_checks;
+pub mod correctness_envelope;
+pub mod decision_engine;
+pub mod evidence_emission;
+pub mod guardrail_monitor;
+pub mod hardening_auto_trigger;
+pub mod hardening_clamps;
+pub mod hardening_state_machine;

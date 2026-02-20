@@ -107,7 +107,10 @@ impl fmt::Display for LifecycleError {
                 )
             }
             Self::SelfTransition { state } => {
-                write!(f, "SELF_TRANSITION: cannot transition from {state} to itself")
+                write!(
+                    f,
+                    "SELF_TRANSITION: cannot transition from {state} to itself"
+                )
             }
         }
     }

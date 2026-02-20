@@ -91,7 +91,11 @@ pub enum FuzzError {
     /// FCG_MISSING_TARGET
     MissingTarget(String),
     /// FCG_INSUFFICIENT_CORPUS
-    InsufficientCorpus { target: String, have: usize, need: usize },
+    InsufficientCorpus {
+        target: String,
+        have: usize,
+        need: usize,
+    },
     /// FCG_REGRESSION
     Regression { target: String, seed: String },
     /// FCG_UNTRIAGED_CRASH
@@ -117,7 +121,10 @@ impl fmt::Display for FuzzError {
         match self {
             FuzzError::MissingTarget(t) => write!(f, "FCG_MISSING_TARGET: {t}"),
             FuzzError::InsufficientCorpus { target, have, need } => {
-                write!(f, "FCG_INSUFFICIENT_CORPUS: {target} have={have} need={need}")
+                write!(
+                    f,
+                    "FCG_INSUFFICIENT_CORPUS: {target} have={have} need={need}"
+                )
             }
             FuzzError::Regression { target, seed } => {
                 write!(f, "FCG_REGRESSION: {target} seed={seed}")
@@ -210,8 +217,10 @@ impl FuzzCorpus {
                         target: target_name.clone(),
                         seed_input: seed.input_data.clone(),
                         error: "simulated crash".into(),
-                        reproducer: format!("{{\"target\":\"{target_name}\",\"input\":\"{}\"}}",
-                                           seed.input_data),
+                        reproducer: format!(
+                            "{{\"target\":\"{target_name}\",\"input\":\"{}\"}}",
+                            seed.input_data
+                        ),
                     });
                 }
             }
@@ -277,7 +286,12 @@ mod tests {
 
         for target in ["parser_fuzz", "handshake_fuzz", "token_fuzz", "dos_fuzz"] {
             for i in 0..3 {
-                c.add_seed(make_seed(target, &format!("input_{i}"), SeedOutcome::Handled)).unwrap();
+                c.add_seed(make_seed(
+                    target,
+                    &format!("input_{i}"),
+                    SeedOutcome::Handled,
+                ))
+                .unwrap();
             }
         }
         c
@@ -306,7 +320,8 @@ mod tests {
         c.add_target(make_target("token_fuzz", FuzzCategory::TokenValidation));
         c.add_target(make_target("dos_fuzz", FuzzCategory::DecodeDos));
         // Only 1 seed for parser_fuzz
-        c.add_seed(make_seed("parser_fuzz", "x", SeedOutcome::Handled)).unwrap();
+        c.add_seed(make_seed("parser_fuzz", "x", SeedOutcome::Handled))
+            .unwrap();
         let err = c.validate().unwrap_err();
         assert_eq!(err.code(), "FCG_INSUFFICIENT_CORPUS");
     }
@@ -317,7 +332,9 @@ mod tests {
         let err = c.seeds.get("no_such").is_none();
         assert!(err);
         let mut c2 = FuzzCorpus::new(3);
-        let err = c2.add_seed(make_seed("no_such", "x", SeedOutcome::Handled)).unwrap_err();
+        let err = c2
+            .add_seed(make_seed("no_such", "x", SeedOutcome::Handled))
+            .unwrap_err();
         assert_eq!(err.code(), "FCG_MISSING_TARGET");
     }
 
@@ -332,7 +349,12 @@ mod tests {
     #[test]
     fn gate_fail_with_crash() {
         let mut c = populated_corpus();
-        c.add_seed(make_seed("parser_fuzz", "crash_input", SeedOutcome::Rejected)).unwrap();
+        c.add_seed(make_seed(
+            "parser_fuzz",
+            "crash_input",
+            SeedOutcome::Rejected,
+        ))
+        .unwrap();
         let verdict = c.run_gate();
         assert_eq!(verdict.verdict, "FAIL");
         assert!(!verdict.untriaged.is_empty());
@@ -349,8 +371,14 @@ mod tests {
     #[test]
     fn category_display() {
         assert_eq!(FuzzCategory::ParserInput.to_string(), "parser_input");
-        assert_eq!(FuzzCategory::HandshakeReplay.to_string(), "handshake_replay");
-        assert_eq!(FuzzCategory::TokenValidation.to_string(), "token_validation");
+        assert_eq!(
+            FuzzCategory::HandshakeReplay.to_string(),
+            "handshake_replay"
+        );
+        assert_eq!(
+            FuzzCategory::TokenValidation.to_string(),
+            "token_validation"
+        );
         assert_eq!(FuzzCategory::DecodeDos.to_string(), "decode_dos");
     }
 
@@ -364,9 +392,19 @@ mod tests {
     fn all_error_codes_present() {
         let errors = vec![
             FuzzError::MissingTarget("x".into()),
-            FuzzError::InsufficientCorpus { target: "x".into(), have: 1, need: 3 },
-            FuzzError::Regression { target: "x".into(), seed: "s".into() },
-            FuzzError::UntriagedCrash { target: "x".into(), seed: "s".into() },
+            FuzzError::InsufficientCorpus {
+                target: "x".into(),
+                have: 1,
+                need: 3,
+            },
+            FuzzError::Regression {
+                target: "x".into(),
+                seed: "s".into(),
+            },
+            FuzzError::UntriagedCrash {
+                target: "x".into(),
+                seed: "s".into(),
+            },
             FuzzError::GateFailed("x".into()),
         ];
         let codes: Vec<_> = errors.iter().map(|e| e.code()).collect();

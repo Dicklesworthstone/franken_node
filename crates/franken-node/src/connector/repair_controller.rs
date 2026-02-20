@@ -169,7 +169,10 @@ pub fn run_cycle(
             if fairness_remaining == 0 || total_used >= config.max_units_per_cycle {
                 break;
             }
-            let can_use = item.size_units.min(fairness_remaining).min(config.max_units_per_cycle - total_used);
+            let can_use = item
+                .size_units
+                .min(fairness_remaining)
+                .min(config.max_units_per_cycle - total_used);
             if can_use > 0 {
                 tenant_alloc.items_allocated.push(item.item_id.clone());
                 tenant_alloc.units_used += can_use;
@@ -194,9 +197,7 @@ pub fn run_cycle(
                 }
             }
         }
-        remaining_items.sort_by(|a, b| {
-            b.priority.cmp(&a.priority).then(a.item_id.cmp(&b.item_id))
-        });
+        remaining_items.sort_by(|a, b| b.priority.cmp(&a.priority).then(a.item_id.cmp(&b.item_id)));
 
         for item in remaining_items {
             if total_used >= config.max_units_per_cycle {
@@ -215,7 +216,10 @@ pub fn run_cycle(
     let mut result: Vec<RepairAllocation> = allocations.into_values().collect();
     result.sort_by(|a, b| a.tenant_id.cmp(&b.tenant_id));
 
-    let tenants_served = result.iter().filter(|a| !a.items_allocated.is_empty()).count();
+    let tenants_served = result
+        .iter()
+        .filter(|a| !a.items_allocated.is_empty())
+        .count();
 
     let audit = RepairCycleAudit {
         cycle_id: cycle_id.to_string(),
@@ -280,7 +284,11 @@ mod tests {
         ];
         let (allocs, _) = run_cycle(&items, &config(), "c1", "tr", "ts").unwrap();
         for alloc in &allocs {
-            assert!(!alloc.items_allocated.is_empty(), "tenant {} got no work", alloc.tenant_id);
+            assert!(
+                !alloc.items_allocated.is_empty(),
+                "tenant {} got no work",
+                alloc.tenant_id
+            );
         }
     }
 
@@ -316,21 +324,30 @@ mod tests {
 
     #[test]
     fn invalid_config_zero_cap() {
-        let cfg = RepairConfig { max_units_per_cycle: 0, ..config() };
+        let cfg = RepairConfig {
+            max_units_per_cycle: 0,
+            ..config()
+        };
         let err = run_cycle(&[item("r1", "t1", 5, 10)], &cfg, "c1", "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "BRC_INVALID_CONFIG");
     }
 
     #[test]
     fn invalid_config_zero_fairness() {
-        let cfg = RepairConfig { fairness_minimum: 0, ..config() };
+        let cfg = RepairConfig {
+            fairness_minimum: 0,
+            ..config()
+        };
         let err = run_cycle(&[item("r1", "t1", 5, 10)], &cfg, "c1", "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "BRC_INVALID_CONFIG");
     }
 
     #[test]
     fn invalid_config_zero_tenants() {
-        let cfg = RepairConfig { max_tenants_per_cycle: 0, ..config() };
+        let cfg = RepairConfig {
+            max_tenants_per_cycle: 0,
+            ..config()
+        };
         let err = run_cycle(&[item("r1", "t1", 5, 10)], &cfg, "c1", "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "BRC_INVALID_CONFIG");
     }
@@ -351,10 +368,7 @@ mod tests {
 
     #[test]
     fn priority_ordering() {
-        let items = vec![
-            item("low", "t1", 1, 5),
-            item("high", "t1", 10, 5),
-        ];
+        let items = vec![item("low", "t1", 1, 5), item("high", "t1", 10, 5)];
         let mut cfg = config();
         cfg.max_units_per_cycle = 8; // only room for one + fairness
         let (allocs, _) = run_cycle(&items, &cfg, "c1", "tr", "ts").unwrap();
@@ -364,15 +378,30 @@ mod tests {
 
     #[test]
     fn error_codes_all_present() {
-        assert_eq!(RepairError::CapExceeded { used: 0, cap: 0 }.code(), "BRC_CAP_EXCEEDED");
-        assert_eq!(RepairError::InvalidConfig { reason: "".into() }.code(), "BRC_INVALID_CONFIG");
+        assert_eq!(
+            RepairError::CapExceeded { used: 0, cap: 0 }.code(),
+            "BRC_CAP_EXCEEDED"
+        );
+        assert_eq!(
+            RepairError::InvalidConfig { reason: "".into() }.code(),
+            "BRC_INVALID_CONFIG"
+        );
         assert_eq!(RepairError::NoPending.code(), "BRC_NO_PENDING");
-        assert_eq!(RepairError::Starvation { tenant_id: "".into() }.code(), "BRC_STARVATION");
+        assert_eq!(
+            RepairError::Starvation {
+                tenant_id: "".into()
+            }
+            .code(),
+            "BRC_STARVATION"
+        );
     }
 
     #[test]
     fn error_display() {
-        let e = RepairError::CapExceeded { used: 110, cap: 100 };
+        let e = RepairError::CapExceeded {
+            used: 110,
+            cap: 100,
+        };
         assert!(e.to_string().contains("BRC_CAP_EXCEEDED"));
     }
 
@@ -383,20 +412,14 @@ mod tests {
 
     #[test]
     fn audit_tenants_served_count() {
-        let items = vec![
-            item("r1", "t1", 5, 5),
-            item("r2", "t2", 5, 5),
-        ];
+        let items = vec![item("r1", "t1", 5, 5), item("r2", "t2", 5, 5)];
         let (_, audit) = run_cycle(&items, &config(), "c1", "tr", "ts").unwrap();
         assert_eq!(audit.tenants_served, 2);
     }
 
     #[test]
     fn allocation_sorted_by_tenant() {
-        let items = vec![
-            item("r1", "z-tenant", 5, 5),
-            item("r2", "a-tenant", 5, 5),
-        ];
+        let items = vec![item("r1", "z-tenant", 5, 5), item("r2", "a-tenant", 5, 5)];
         let (allocs, _) = run_cycle(&items, &config(), "c1", "tr", "ts").unwrap();
         assert_eq!(allocs[0].tenant_id, "a-tenant");
         assert_eq!(allocs[1].tenant_id, "z-tenant");
