@@ -7,6 +7,9 @@
 
 This roadmap is a supporting summary. If any content here conflicts with either canonical plan, the canonical plan wins.
 
+- Product charter and scope boundaries: [`PRODUCT_CHARTER.md`](PRODUCT_CHARTER.md)
+- Engine split contract: [`ENGINE_SPLIT_CONTRACT.md`](ENGINE_SPLIT_CONTRACT.md)
+
 ## Context And Purpose
 FrankenEngine is an offgrowth of `pi_agent_rust`.
 

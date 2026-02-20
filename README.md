@@ -68,6 +68,10 @@ franken-node run ./my-app --policy strict
 franken-node incident replay --bundle ./incidents/INC-2026-0007.fnbundle
 ```
 
+## Charter
+
+See the [Product Charter](docs/PRODUCT_CHARTER.md) for scope boundaries, governance model, and decision rules. The charter defines what franken_node is, what it is not, and how direction changes are authorized.
+
 ## Design Philosophy
 
 1. Compatibility is a wedge, not the destination.  
