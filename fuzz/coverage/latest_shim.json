@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-02-20T12:00:00Z",
+  "target": "shim_type_coercion",
+  "corpus_size": 50,
+  "lines_covered": 134,
+  "lines_total": 170,
+  "coverage_pct": 78.8,
+  "new_paths_found": 2,
+  "crashes_found": 0,
+  "event_code": "FZT-004"
+}

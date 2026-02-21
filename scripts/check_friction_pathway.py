@@ -47,7 +47,7 @@ def check_spec_exists() -> dict:
     return {
         "check": "spec_exists",
         "passed": ok,
-        "detail": f"Spec file {'found' if ok else 'missing'} at {SPEC_PATH.relative_to(ROOT)}",
+        "detail": f"Spec file {'found' if ok else 'missing'} at {SPEC_PATH.relative_to(ROOT) if str(SPEC_PATH).startswith(str(ROOT)) else SPEC_PATH}",
     }
 
 
@@ -57,7 +57,7 @@ def check_policy_exists() -> dict:
     return {
         "check": "policy_exists",
         "passed": ok,
-        "detail": f"Policy file {'found' if ok else 'missing'} at {POLICY_PATH.relative_to(ROOT)}",
+        "detail": f"Policy file {'found' if ok else 'missing'} at {POLICY_PATH.relative_to(ROOT) if str(POLICY_PATH).startswith(str(ROOT)) else POLICY_PATH}",
     }
 
 

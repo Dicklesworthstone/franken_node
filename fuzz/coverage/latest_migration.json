@@ -1,0 +1,11 @@
+{
+  "timestamp": "2026-02-20T12:00:00Z",
+  "target": "migration_dependency_resolve",
+  "corpus_size": 51,
+  "lines_covered": 198,
+  "lines_total": 250,
+  "coverage_pct": 79.2,
+  "new_paths_found": 3,
+  "crashes_found": 0,
+  "event_code": "FZT-004"
+}

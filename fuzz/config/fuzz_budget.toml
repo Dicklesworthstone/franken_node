@@ -1,0 +1,10 @@
+# Fuzz budget configuration for bd-1ul
+# Controls minimum fuzz time per target for CI gate enforcement.
+
+[migration]
+min_seconds_per_target = 60
+targets = ["directory_scan", "package_parse", "dependency_resolve"]
+
+[shim]
+min_seconds_per_target = 60
+targets = ["api_translation", "type_coercion"]
