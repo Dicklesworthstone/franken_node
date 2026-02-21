@@ -1,5 +1,6 @@
 pub mod challenge_flow;
 pub mod copilot_engine;
+pub mod impossible_default;
 pub mod decision_receipt;
 pub mod degraded_mode_audit;
 pub mod degraded_mode_policy;
@@ -11,3 +12,5 @@ pub mod revocation_freshness;
 pub mod sandbox_policy_compiler;
 pub mod ssrf_policy;
 pub mod threshold_sig;
+pub mod sybil_defense;
+pub mod trust_complexity;

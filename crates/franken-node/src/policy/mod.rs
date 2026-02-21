@@ -1,5 +1,7 @@
 pub mod approval_workflow;
 pub mod bayesian_diagnostics;
+pub mod compat_gates;
+pub mod compatibility_gate;
 pub mod controller_boundary_checks;
 pub mod correctness_envelope;
 pub mod decision_engine;

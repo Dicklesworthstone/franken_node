@@ -148,6 +148,10 @@ pub struct MigrateValidateArgs {
 pub enum VerifyCommand {
     /// Compare behavior across runtimes in lockstep.
     Lockstep(VerifyLockstepArgs),
+
+    /// Verify release artifact signatures and checksums.
+    #[command(name = "release")]
+    Release(VerifyReleaseArgs),
 }
 
 #[derive(Debug, Parser)]
@@ -162,6 +166,20 @@ pub struct VerifyLockstepArgs {
     /// Emit divergence fixtures for failing comparisons.
     #[arg(long)]
     pub emit_fixtures: bool,
+}
+
+#[derive(Debug, Parser)]
+pub struct VerifyReleaseArgs {
+    /// Path to the release directory containing artifacts, .sig files, and SHA256SUMS manifest.
+    pub release_path: PathBuf,
+
+    /// Directory containing trusted public keys (current and rotated).
+    #[arg(long)]
+    pub key_dir: Option<PathBuf>,
+
+    /// Emit structured JSON output instead of human-readable text.
+    #[arg(long)]
+    pub json: bool,
 }
 
 // -- trust --

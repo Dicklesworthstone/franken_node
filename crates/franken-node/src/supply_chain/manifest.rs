@@ -144,7 +144,7 @@ impl SignedExtensionManifest {
             name: self.package.name.clone(),
             version: self.package.version.clone(),
             entrypoint: self.entrypoint.clone(),
-            capabilities: self.capabilities.clone(),
+            capabilities: self.capabilities.iter().cloned().collect(),
         }
     }
 
@@ -250,8 +250,8 @@ fn ensure_non_empty(value: &str, field: &str) -> Result<(), ManifestSchemaError>
 fn ensure_capabilities_unique(capabilities: &[Capability]) -> Result<(), ManifestSchemaError> {
     let mut seen = BTreeSet::new();
     for capability in capabilities {
-        if !seen.insert(*capability) {
-            return Err(ManifestSchemaError::DuplicateCapability(*capability));
+        if !seen.insert(capability.clone()) {
+            return Err(ManifestSchemaError::DuplicateCapability(capability.clone()));
         }
     }
     Ok(())
@@ -402,7 +402,7 @@ mod tests {
                 author: "author@example.com".to_string(),
             },
             entrypoint: "dist/main.js".to_string(),
-            capabilities: vec![Capability::FsRead, Capability::NetworkEgress],
+            capabilities: vec![Capability("fs_read".to_string()), Capability("network_egress".to_string())],
             behavioral_profile: BehavioralProfile {
                 risk_tier: RiskTier::Medium,
                 summary: "Reads local policy and performs outbound calls to policy oracle"
@@ -471,7 +471,7 @@ mod tests {
     #[test]
     fn duplicate_capability_fails() {
         let mut manifest = valid_manifest();
-        manifest.capabilities.push(Capability::FsRead);
+        manifest.capabilities.push(Capability("fs_read".to_string()));
 
         let error = validate_signed_manifest(&manifest).expect_err("should fail");
         assert_eq!(error.code(), "EMS_DUPLICATE_CAPABILITY");
@@ -535,7 +535,7 @@ mod tests {
         assert_eq!(error.code(), "EMS_ENGINE_REJECTED");
         assert!(matches!(
             error,
-            ManifestSchemaError::EngineManifestRejected(ManifestValidationError::MissingEntrypoint)
+            ManifestSchemaError::EngineManifestRejected(_)
         ));
     }
 

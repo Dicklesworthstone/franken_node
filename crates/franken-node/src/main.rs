@@ -17,6 +17,7 @@ pub mod security;
 pub mod storage;
 pub mod supply_chain;
 pub mod tools;
+pub mod verifier_economy;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -28,7 +29,7 @@ use api::trust_card_routes::{
 };
 use cli::{
     BenchCommand, Cli, Command, FleetCommand, IncidentCommand, MigrateCommand, RegistryCommand,
-    TrustCardCommand, TrustCommand, VerifyCommand,
+    TrustCardCommand, TrustCommand, VerifyCommand, VerifyReleaseArgs,
 };
 use security::decision_receipt::{
     Decision, Receipt, ReceiptQuery, append_signed_receipt, demo_signing_key,
@@ -146,6 +147,53 @@ fn render_trust_card_list(cards: &[TrustCard]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+fn handle_verify_release(args: &VerifyReleaseArgs) {
+    use supply_chain::artifact_signing::{
+        AuditLogEntry, ASV_002_VERIFICATION_OK, ASV_003_VERIFICATION_FAILED,
+    };
+
+    let release_dir = &args.release_path;
+    eprintln!(
+        "franken-node verify release: path={} key_dir={:?}",
+        release_dir.display(),
+        args.key_dir
+    );
+
+    // In a full implementation, this would:
+    // 1. Read SHA256SUMS manifest and its .sig from release_dir.
+    // 2. Load public keys from key_dir.
+    // 3. Verify the manifest signature.
+    // 4. Iterate manifest entries, verify each checksum and .sig file.
+    // 5. Output structured JSON (--json) or human-readable report.
+    //
+    // Placeholder emits a structured stub so CLI wiring can be tested.
+    let stub_result = serde_json::json!({
+        "release_path": release_dir.display().to_string(),
+        "manifest_signature_ok": false,
+        "results": [],
+        "overall_pass": false,
+        "error": "release directory verification not yet wired to filesystem I/O"
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&stub_result).unwrap_or_default());
+    } else {
+        eprintln!("[verify-release stub] — filesystem I/O not yet wired.");
+        eprintln!("  Use the library API `supply_chain::artifact_signing::verify_release` for full verification.");
+    }
+
+    let _log = AuditLogEntry::now(
+        ASV_003_VERIFICATION_FAILED,
+        &release_dir.display().to_string(),
+        "none",
+        "verify-release",
+        "stub",
+    );
+
+    // Suppress unused-import warnings for the success event code.
+    let _ = ASV_002_VERIFICATION_OK;
 }
 
 fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
@@ -296,6 +344,9 @@ async fn main() -> Result<()> {
                     args.runtimes
                 );
                 eprintln!("[not yet implemented]");
+            }
+            VerifyCommand::Release(args) => {
+                handle_verify_release(&args);
             }
         },
 

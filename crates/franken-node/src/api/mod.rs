@@ -1,3 +1,4 @@
+pub mod compat_gate;
 pub mod error;
 pub mod fleet_control_routes;
 pub mod middleware;
