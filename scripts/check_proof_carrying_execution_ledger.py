@@ -117,11 +117,25 @@ def _primary_bead_dir(artifact_dirs: dict[str, list[Path]], bead_id: str) -> Pat
     candidates = artifact_dirs.get(bead_id, [])
     if not candidates:
         return None
-    return candidates[0]
+    ranked = sorted(
+        candidates,
+        key=lambda candidate: (
+            not (
+                (candidate / "verification_evidence.json").is_file()
+                and (candidate / "verification_summary.md").is_file()
+            ),
+            not (
+                (candidate / "verification_evidence.json").is_file()
+                or (candidate / "verification_summary.md").is_file()
+            ),
+            _safe_rel(candidate),
+        ),
+    )
+    return ranked[0]
 
 
 def _leaf_hash(canonical_leaf_json: str) -> str:
-    return _sha256_hex(hashlib.sha256(LEAF_DOMAIN + canonical_leaf_json.encode("utf-8")).digest())
+    return _sha256_hex(LEAF_DOMAIN + canonical_leaf_json.encode("utf-8"))
 
 
 def _merkle_root_hex(leaf_hashes: list[str]) -> tuple[str, int]:
@@ -195,23 +209,39 @@ def _build_bead_entry(
 
     if entry["evidence_exists"]:
         try:
-            payload = json.loads(evidence_path.read_text(encoding="utf-8"))
-            if isinstance(payload, dict):
-                entry["evidence_valid_json"] = True
-                canonical = _canonical_json(payload)
-                entry["evidence_sha256"] = _sha256_hex(canonical.encode("utf-8"))
-            else:
-                entry["checks"].append({
-                    "check": "verification_evidence_is_object",
-                    "passed": False,
-                    "detail": "verification_evidence.json root must be object",
-                })
-        except json.JSONDecodeError as exc:
+            evidence_text = evidence_path.read_text(encoding="utf-8")
             entry["checks"].append({
-                "check": "verification_evidence_json_parse",
-                "passed": False,
-                "detail": f"JSON decode error: {exc}",
+                "check": "verification_evidence_utf8",
+                "passed": True,
+                "detail": "readable UTF-8",
             })
+        except (OSError, UnicodeDecodeError) as exc:
+            entry["checks"].append({
+                "check": "verification_evidence_utf8",
+                "passed": False,
+                "detail": f"failed to read UTF-8 evidence: {exc}",
+            })
+            evidence_text = None
+
+        if evidence_text is not None:
+            try:
+                payload = json.loads(evidence_text)
+                if isinstance(payload, dict):
+                    entry["evidence_valid_json"] = True
+                    canonical = _canonical_json(payload)
+                    entry["evidence_sha256"] = _sha256_hex(canonical.encode("utf-8"))
+                else:
+                    entry["checks"].append({
+                        "check": "verification_evidence_is_object",
+                        "passed": False,
+                        "detail": "verification_evidence.json root must be object",
+                    })
+            except json.JSONDecodeError as exc:
+                entry["checks"].append({
+                    "check": "verification_evidence_json_parse",
+                    "passed": False,
+                    "detail": f"JSON decode error: {exc}",
+                })
 
     if entry["evidence_exists"] and entry["evidence_valid_json"]:
         entry["checks"].append({
@@ -221,8 +251,24 @@ def _build_bead_entry(
         })
 
     if entry["summary_exists"]:
-        normalized_summary = _normalize_text(summary_path.read_text(encoding="utf-8"))
-        entry["summary_sha256"] = _sha256_hex(normalized_summary.encode("utf-8"))
+        try:
+            summary_text = summary_path.read_text(encoding="utf-8")
+            entry["checks"].append({
+                "check": "verification_summary_utf8",
+                "passed": True,
+                "detail": "readable UTF-8",
+            })
+        except (OSError, UnicodeDecodeError) as exc:
+            entry["checks"].append({
+                "check": "verification_summary_utf8",
+                "passed": False,
+                "detail": f"failed to read UTF-8 summary: {exc}",
+            })
+            summary_text = None
+
+        if summary_text is not None:
+            normalized_summary = _normalize_text(summary_text)
+            entry["summary_sha256"] = _sha256_hex(normalized_summary.encode("utf-8"))
 
     leaf_payload = {
         "bead_id": bead_id,
@@ -240,16 +286,24 @@ def _compute_dependency_closure(
     entries: list[dict[str, Any]],
     issue_index: dict[str, dict[str, Any]],
     scope_ids: set[str],
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     by_id = {entry["bead_id"]: entry for entry in entries}
 
     missing: list[dict[str, Any]] = []
     out_of_scope_closed: list[dict[str, Any]] = []
+    unresolved: list[dict[str, Any]] = []
 
     for entry in entries:
         bead_id = entry["bead_id"]
         for dep_id in entry.get("dependencies", []):
-            dep_issue = issue_index.get(dep_id, {})
+            dep_issue = issue_index.get(dep_id)
+            if dep_issue is None:
+                unresolved.append({
+                    "bead_id": bead_id,
+                    "missing_dependency": dep_id,
+                    "reason": "dependency id not present in issues index",
+                })
+                continue
             dep_closed = str(dep_issue.get("status", "")) == "closed"
             if not dep_closed:
                 continue
@@ -284,7 +338,11 @@ def _compute_dependency_closure(
         out_of_scope_closed,
         key=lambda item: (item["bead_id"], item["missing_dependency"]),
     )
-    return missing, out_of_scope_closed
+    unresolved = sorted(
+        unresolved,
+        key=lambda item: (item["bead_id"], item["missing_dependency"]),
+    )
+    return missing, out_of_scope_closed, unresolved
 
 
 def run_all(
@@ -302,12 +360,15 @@ def run_all(
         for issue_id, payload in issue_index.items()
         if str(payload.get("status", "")) == "closed"
     )
+    scoped_closed_issue_ids = [issue_id for issue_id in closed_issue_ids if issue_id != BEAD_ID]
 
     if include_all_closed:
-        selected_ids = closed_issue_ids
+        selected_ids = scoped_closed_issue_ids
         scope_label = "all_closed"
     else:
-        selected_ids = [issue_id for issue_id in closed_issue_ids if issue_id.startswith(bead_prefix)]
+        selected_ids = [
+            issue_id for issue_id in scoped_closed_issue_ids if issue_id.startswith(bead_prefix)
+        ]
         scope_label = f"prefix:{bead_prefix}"
 
     entries = [
@@ -320,7 +381,11 @@ def run_all(
     ]
 
     selected_scope_ids = {entry["bead_id"] for entry in entries}
-    missing_dependency_proofs, out_of_scope_closed_dependencies = _compute_dependency_closure(
+    (
+        missing_dependency_proofs,
+        out_of_scope_closed_dependencies,
+        unresolved_dependency_references,
+    ) = _compute_dependency_closure(
         entries=entries,
         issue_index=issue_index,
         scope_ids=selected_scope_ids,
@@ -373,6 +438,18 @@ def run_all(
             "detail": f"missing_dependency_proofs={len(missing_dependency_proofs)}",
         },
         {
+            "id": "PCEL-DEP-SCOPE-COMPLETE",
+            "check": "closed dependencies are fully represented inside selected ledger scope",
+            "passed": len(out_of_scope_closed_dependencies) == 0,
+            "detail": f"out_of_scope_closed_dependencies={len(out_of_scope_closed_dependencies)}",
+        },
+        {
+            "id": "PCEL-DEP-RESOLVED",
+            "check": "all dependency ids resolve in .beads/issues.jsonl",
+            "passed": len(unresolved_dependency_references) == 0,
+            "detail": f"unresolved_dependency_references={len(unresolved_dependency_references)}",
+        },
+        {
             "id": "PCEL-MERKLE-ROOT",
             "check": "deterministic Merkle root computed for selected scope",
             "passed": len(merkle_leaf_hashes) > 0 and bool(merkle_root),
@@ -419,6 +496,7 @@ def run_all(
         "dependency_closure": {
             "missing_dependency_proofs": missing_dependency_proofs,
             "out_of_scope_closed_dependencies": out_of_scope_closed_dependencies,
+            "unresolved_dependency_references": unresolved_dependency_references,
         },
         "merkle": {
             "algorithm": "sha256",
@@ -510,12 +588,23 @@ def write_report(report: dict[str, Any], ledger_path: Path = DEFAULT_LEDGER_PATH
     if report["dependency_closure"]["out_of_scope_closed_dependencies"]:
         lines.extend([
             "",
-            "## Out-of-Scope Closed Dependencies (Informational)",
+            "## Out-of-Scope Closed Dependencies",
             "",
         ])
         for item in report["dependency_closure"]["out_of_scope_closed_dependencies"]:
             lines.append(
                 f"- `{item['bead_id']}` references `{item['missing_dependency']}` ({item['reason']})"
+            )
+
+    if report["dependency_closure"]["unresolved_dependency_references"]:
+        lines.extend([
+            "",
+            "## Unresolved Dependency References",
+            "",
+        ])
+        for item in report["dependency_closure"]["unresolved_dependency_references"]:
+            lines.append(
+                f"- `{item['bead_id']}` references unknown `{item['missing_dependency']}` ({item['reason']})"
             )
 
     lines.append("")

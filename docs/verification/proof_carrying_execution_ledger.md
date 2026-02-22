@@ -21,6 +21,8 @@ PCEL turns per-bead evidence into a reproducible proof chain:
 ## Scope Selection
 
 Default scope is closed beads with prefix `bd-2hqd`.
+The PCEL gate bead (`bd-2hqd.4`) is excluded from scope selection to avoid
+self-referential closure checks.
 
 - Default: `--bead-prefix bd-2hqd`
 - Full closed-bead sweep: `--include-all-closed`
@@ -46,8 +48,10 @@ For each selected closed bead, PCEL verifies:
 1. evidence file exists
 2. summary file exists
 3. evidence JSON parses and canonicalizes
-4. dependency closure holds for closed dependencies within selected scope
-5. Merkle root is computable
+4. dependency closure holds for closed dependencies
+5. closed dependencies are represented inside the selected scope
+6. dependency IDs resolve in `.beads/issues.jsonl`
+7. Merkle root is computable
 
 Gate verdict is `PASS` only when every check passes.
 

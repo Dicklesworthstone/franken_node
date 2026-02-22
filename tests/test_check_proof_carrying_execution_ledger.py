@@ -68,6 +68,11 @@ class TestHelpers(TestCase):
         self.assertEqual(root, "")
         self.assertEqual(depth, 0)
 
+    def test_leaf_hash_matches_domain_separated_sha256(self) -> None:
+        payload = mod._canonical_json({"bead_id": "a", "closed_at": "2026-02-22T00:00:00Z"})
+        expected = mod._sha256_hex(mod.LEAF_DOMAIN + payload.encode("utf-8"))
+        self.assertEqual(mod._leaf_hash(payload), expected)
+
 
 class TestRunAll(TestCase):
     def test_default_scope_passes(self) -> None:
@@ -83,6 +88,7 @@ class TestRunAll(TestCase):
         self.assertIn("bd-2hqd.1", bead_ids)
         self.assertIn("bd-2hqd.2", bead_ids)
         self.assertIn("bd-2hqd.3", bead_ids)
+        self.assertNotIn("bd-2hqd.4", bead_ids)
 
     def test_full_proof_count_matches_selected_for_default_scope(self) -> None:
         report = mod.run_all()
@@ -110,10 +116,24 @@ class TestDependencyClosure(TestCase):
         entries = [
             {"bead_id": "bd-a", "dependencies": ["bd-b"], "evidence_sha256": "x", "summary_sha256": "y"},
         ]
-        missing, out_scope = mod._compute_dependency_closure(entries, issue_index, {"bd-a"})
+        missing, out_scope, unresolved = mod._compute_dependency_closure(entries, issue_index, {"bd-a"})
         self.assertEqual(len(missing), 0)
         self.assertEqual(len(out_scope), 1)
         self.assertEqual(out_scope[0]["missing_dependency"], "bd-b")
+        self.assertEqual(len(unresolved), 0)
+
+    def test_unresolved_dependency_detected(self) -> None:
+        issue_index = {
+            "bd-a": {"status": "closed"},
+        }
+        entries = [
+            {"bead_id": "bd-a", "dependencies": ["bd-missing"], "evidence_sha256": "x", "summary_sha256": "y"},
+        ]
+        missing, out_scope, unresolved = mod._compute_dependency_closure(entries, issue_index, {"bd-a"})
+        self.assertEqual(len(missing), 0)
+        self.assertEqual(len(out_scope), 0)
+        self.assertEqual(len(unresolved), 1)
+        self.assertEqual(unresolved[0]["missing_dependency"], "bd-missing")
 
 
 class TestWriteReport(TestCase):
