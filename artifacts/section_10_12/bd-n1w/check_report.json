@@ -1,0 +1,351 @@
+{
+  "name": "Frontier Demo Gates with External Reproducibility",
+  "bead_id": "bd-n1w",
+  "title": "Frontier Demo Gates with External Reproducibility Requirements",
+  "section": "10.12",
+  "verdict": "PASS",
+  "total": 61,
+  "passed": 61,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "Rust module exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/tools/frontier_demo_gate.rs"
+    },
+    {
+      "check": "Wired into tools/mod.rs",
+      "passed": true,
+      "detail": "frontier_demo_gate in mod.rs"
+    },
+    {
+      "check": "Spec contract exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/section_10_12/bd-n1w_contract.md"
+    },
+    {
+      "check": "Demo manifest artifact exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/10.12/frontier_demo_manifest.json"
+    },
+    {
+      "check": "Test file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_frontier_demo_gates.py"
+    },
+    {
+      "check": "Evidence exists with PASS verdict",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_10_12/bd-n1w/verification_evidence.json"
+    },
+    {
+      "check": "Verification summary exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_10_12/bd-n1w/verification_summary.md"
+    },
+    {
+      "check": "FrontierDemoGate trait defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "DemoGateRunner struct defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "ReproducibilityManifest struct defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "FrontierProgram enum defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "FrontierProgram::MigrationSingularity variant defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "FrontierProgram::TrustFabric variant defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "FrontierProgram::VerifierEconomy variant defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "FrontierProgram::OperatorIntelligence variant defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "FrontierProgram::EcosystemNetworkEffects variant defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "DemoGateResult struct defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "ExternalVerifierBootstrap struct defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Trait method 'fn input_corpus(' defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Trait method 'fn execute(' defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Trait method 'fn output_schema(' defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Trait method 'fn attestation(' defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Event code DEMO_GATE_START defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Event code DEMO_GATE_PASS defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Event code DEMO_GATE_FAIL defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Event code MANIFEST_GENERATED defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Event code EXTERNAL_VERIFY_START defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Event code EXTERNAL_VERIFY_MATCH defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Event code EXTERNAL_VERIFY_MISMATCH defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Error code ERR_DEMO_GATE_NOT_FOUND defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Error code ERR_DEMO_EXECUTION_FAILED defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Error code ERR_DEMO_FINGERPRINT_MISMATCH defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Error code ERR_DEMO_MANIFEST_INVALID defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Error code ERR_DEMO_BOOTSTRAP_FAILED defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Error code ERR_DEMO_ISOLATION_VIOLATED defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Error code ERR_DEMO_SCHEMA_MISMATCH defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Invariant INV_DEMO_DETERMINISTIC defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Invariant INV_DEMO_ISOLATED defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Invariant INV_DEMO_FINGERPRINTED defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Invariant INV_DEMO_REPRODUCIBLE defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Invariant INV_DEMO_MANIFEST_COMPLETE defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Invariant INV_DEMO_SCHEMA_VERSIONED defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Schema version demo-v1.0",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "BTreeMap usage for determinism",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Serialize/Deserialize derives",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Rust unit tests (56 >= 40)",
+      "passed": true,
+      "detail": "56 tests found"
+    },
+    {
+      "check": "Struct DemoGateResult defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Struct ResourceMetrics defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Struct ReproducibilityManifest defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Struct ExternalVerifierBootstrap defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Struct DemoGateRunner defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Struct DemoEvent defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Struct DefaultDemoGate defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Manifest contains all 5 frontier programs",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Manifest has manifest_fingerprint field",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Manifest has git_commit_hash field",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Manifest has timing data",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "Manifest has environment field",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "event_codes module defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "error_codes module defined",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "invariants module defined",
+      "passed": true,
+      "detail": "ok"
+    }
+  ],
+  "events": [
+    {
+      "code": "DEMO_GATE_START",
+      "status": "defined"
+    },
+    {
+      "code": "DEMO_GATE_PASS",
+      "status": "defined"
+    },
+    {
+      "code": "DEMO_GATE_FAIL",
+      "status": "defined"
+    },
+    {
+      "code": "MANIFEST_GENERATED",
+      "status": "defined"
+    },
+    {
+      "code": "EXTERNAL_VERIFY_START",
+      "status": "defined"
+    },
+    {
+      "code": "EXTERNAL_VERIFY_MATCH",
+      "status": "defined"
+    },
+    {
+      "code": "EXTERNAL_VERIFY_MISMATCH",
+      "status": "defined"
+    }
+  ],
+  "summary": "bd-n1w: Frontier Demo Gates with External Reproducibility
+Checks: 61/61 passing
+Verdict: PASS",
+  "timestamp": "2026-02-22T08:45:19.567510+00:00"
+}

@@ -1,0 +1,30 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/projects/franken_node
+plugins: typeguard-4.4.2, anyio-4.8.0
+collecting ... collected 21 items
+
+tests/test_check_ecosystem_apis.py::TestSelfTest::test_self_test_passes PASSED [  4%]
+tests/test_check_ecosystem_apis.py::TestFileChecks::test_contract_exists PASSED [  9%]
+tests/test_check_ecosystem_apis.py::TestFileChecks::test_schema_exists PASSED [ 14%]
+tests/test_check_ecosystem_apis.py::TestFileChecks::test_registry_module_exists PASSED [ 19%]
+tests/test_check_ecosystem_apis.py::TestFileChecks::test_reputation_module_exists PASSED [ 23%]
+tests/test_check_ecosystem_apis.py::TestFileChecks::test_compliance_module_exists PASSED [ 28%]
+tests/test_check_ecosystem_apis.py::TestContractCoverage::test_contract_invariants_present PASSED [ 33%]
+tests/test_check_ecosystem_apis.py::TestApiSchemaCoverage::test_schema_endpoints_present PASSED [ 38%]
+tests/test_check_ecosystem_apis.py::TestApiSchemaCoverage::test_endpoint_coverage_threshold PASSED [ 42%]
+tests/test_check_ecosystem_apis.py::TestApiSchemaCoverage::test_auth_and_pagination_terms_present PASSED [ 47%]
+tests/test_check_ecosystem_apis.py::TestRustSymbolCoverage::test_registry_symbols_present PASSED [ 52%]
+tests/test_check_ecosystem_apis.py::TestRustSymbolCoverage::test_reputation_symbols_present PASSED [ 57%]
+tests/test_check_ecosystem_apis.py::TestRustSymbolCoverage::test_compliance_symbols_present PASSED [ 61%]
+tests/test_check_ecosystem_apis.py::TestBehaviorChecks::test_event_codes_present PASSED [ 66%]
+tests/test_check_ecosystem_apis.py::TestBehaviorChecks::test_anti_gaming_markers_present PASSED [ 71%]
+tests/test_check_ecosystem_apis.py::TestBehaviorChecks::test_cross_program_evidence_tests_present PASSED [ 76%]
+tests/test_check_ecosystem_apis.py::TestBehaviorChecks::test_mod_registration PASSED [ 80%]
+tests/test_check_ecosystem_apis.py::TestFullEvidence::test_run_all_checks_shape PASSED [ 85%]
+tests/test_check_ecosystem_apis.py::TestFullEvidence::test_overall_pass PASSED [ 90%]
+tests/test_check_ecosystem_apis.py::TestFullEvidence::test_summary_counts PASSED [ 95%]
+tests/test_check_ecosystem_apis.py::TestFullEvidence::test_json_serializable PASSED [100%]
+
+============================== 21 passed in 0.09s ==============================

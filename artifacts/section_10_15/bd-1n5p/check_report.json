@@ -1,0 +1,433 @@
+{
+  "bead_id": "bd-1n5p",
+  "section": "10.15",
+  "title": "Obligation-Tracked Two-Phase Channels",
+  "checks": [
+    {
+      "name": "SOURCE_EXISTS",
+      "passed": true,
+      "detail": "crates/franken-node/src/connector/obligation_tracker.rs exists"
+    },
+    {
+      "name": "EVENT_CODE:OBL-001",
+      "passed": true,
+      "detail": "OBL-001 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:OBL-002",
+      "passed": true,
+      "detail": "OBL-002 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:OBL-003",
+      "passed": true,
+      "detail": "OBL-003 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:OBL-004",
+      "passed": true,
+      "detail": "OBL-004 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:OBL-005",
+      "passed": true,
+      "detail": "OBL-005 found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-OBL-TWO-PHASE",
+      "passed": true,
+      "detail": "INV-OBL-TWO-PHASE found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-OBL-NO-LEAK",
+      "passed": true,
+      "detail": "INV-OBL-NO-LEAK found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-OBL-BUDGET-BOUND",
+      "passed": true,
+      "detail": "INV-OBL-BUDGET-BOUND found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-OBL-DROP-SAFE",
+      "passed": true,
+      "detail": "INV-OBL-DROP-SAFE found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-OBL-ATOMIC-COMMIT",
+      "passed": true,
+      "detail": "INV-OBL-ATOMIC-COMMIT found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-OBL-ROLLBACK-SAFE",
+      "passed": true,
+      "detail": "INV-OBL-ROLLBACK-SAFE found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-OBL-AUDIT-COMPLETE",
+      "passed": true,
+      "detail": "INV-OBL-AUDIT-COMPLETE found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-OBL-SCAN-PERIODIC",
+      "passed": true,
+      "detail": "INV-OBL-SCAN-PERIODIC found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_OBL_ALREADY_COMMITTED",
+      "passed": true,
+      "detail": "ERR_OBL_ALREADY_COMMITTED found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_OBL_ALREADY_ROLLED_BACK",
+      "passed": true,
+      "detail": "ERR_OBL_ALREADY_ROLLED_BACK found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_OBL_NOT_FOUND",
+      "passed": true,
+      "detail": "ERR_OBL_NOT_FOUND found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_OBL_LEAK_TIMEOUT",
+      "passed": true,
+      "detail": "ERR_OBL_LEAK_TIMEOUT found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_OBL_DUPLICATE_RESERVE",
+      "passed": true,
+      "detail": "ERR_OBL_DUPLICATE_RESERVE found in Rust"
+    },
+    {
+      "name": "CORE_TYPE:ObligationTracker",
+      "passed": true,
+      "detail": "ObligationTracker defined"
+    },
+    {
+      "name": "CORE_TYPE:ObligationId",
+      "passed": true,
+      "detail": "ObligationId defined"
+    },
+    {
+      "name": "CORE_TYPE:ObligationFlow",
+      "passed": true,
+      "detail": "ObligationFlow defined"
+    },
+    {
+      "name": "CORE_TYPE:ObligationState",
+      "passed": true,
+      "detail": "ObligationState defined"
+    },
+    {
+      "name": "CORE_TYPE:Obligation",
+      "passed": true,
+      "detail": "Obligation defined"
+    },
+    {
+      "name": "CORE_TYPE:ObligationAuditRecord",
+      "passed": true,
+      "detail": "ObligationAuditRecord defined"
+    },
+    {
+      "name": "CORE_TYPE:LeakScanResult",
+      "passed": true,
+      "detail": "LeakScanResult defined"
+    },
+    {
+      "name": "CORE_TYPE:LeakOracleReport",
+      "passed": true,
+      "detail": "LeakOracleReport defined"
+    },
+    {
+      "name": "CORE_TYPE:FlowObligationCounts",
+      "passed": true,
+      "detail": "FlowObligationCounts defined"
+    },
+    {
+      "name": "CORE_TYPE:ObligationGuard",
+      "passed": true,
+      "detail": "ObligationGuard defined"
+    },
+    {
+      "name": "TRACKED_FLOW:publish",
+      "passed": true,
+      "detail": "publish flow tracked"
+    },
+    {
+      "name": "TRACKED_FLOW:revoke",
+      "passed": true,
+      "detail": "revoke flow tracked"
+    },
+    {
+      "name": "TRACKED_FLOW:quarantine",
+      "passed": true,
+      "detail": "quarantine flow tracked"
+    },
+    {
+      "name": "TRACKED_FLOW:migration",
+      "passed": true,
+      "detail": "migration flow tracked"
+    },
+    {
+      "name": "TRACKED_FLOW:fencing",
+      "passed": true,
+      "detail": "fencing flow tracked"
+    },
+    {
+      "name": "METHOD:reserve",
+      "passed": true,
+      "detail": "reserve implemented"
+    },
+    {
+      "name": "METHOD:commit",
+      "passed": true,
+      "detail": "commit implemented"
+    },
+    {
+      "name": "METHOD:rollback",
+      "passed": true,
+      "detail": "rollback implemented"
+    },
+    {
+      "name": "METHOD:run_leak_scan",
+      "passed": true,
+      "detail": "run_leak_scan implemented"
+    },
+    {
+      "name": "METHOD:get_obligation",
+      "passed": true,
+      "detail": "get_obligation implemented"
+    },
+    {
+      "name": "METHOD:count_in_state",
+      "passed": true,
+      "detail": "count_in_state implemented"
+    },
+    {
+      "name": "METHOD:total_obligations",
+      "passed": true,
+      "detail": "total_obligations implemented"
+    },
+    {
+      "name": "METHOD:export_audit_log_jsonl",
+      "passed": true,
+      "detail": "export_audit_log_jsonl implemented"
+    },
+    {
+      "name": "METHOD:generate_leak_oracle_report",
+      "passed": true,
+      "detail": "generate_leak_oracle_report implemented"
+    },
+    {
+      "name": "METHOD:export_leak_oracle_report_json",
+      "passed": true,
+      "detail": "export_leak_oracle_report_json implemented"
+    },
+    {
+      "name": "SCHEMA_VERSION",
+      "passed": true,
+      "detail": "obl-v1.0 declared"
+    },
+    {
+      "name": "SERDE_DERIVES",
+      "passed": true,
+      "detail": "Serialize/Deserialize present"
+    },
+    {
+      "name": "TEST_COVERAGE",
+      "passed": true,
+      "detail": "42 tests (>= 15 required)"
+    },
+    {
+      "name": "MODULE_REGISTERED",
+      "passed": true,
+      "detail": "obligation_tracker registered in connector/mod.rs"
+    },
+    {
+      "name": "SPEC_EXISTS",
+      "passed": true,
+      "detail": "docs/specs/section_10_15/bd-1n5p_contract.md exists"
+    },
+    {
+      "name": "TWO_PHASE_SPEC_EXISTS",
+      "passed": true,
+      "detail": "docs/specs/two_phase_effects.md exists"
+    },
+    {
+      "name": "SPEC_EVENT:OBL-001",
+      "passed": true,
+      "detail": "OBL-001 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:OBL-002",
+      "passed": true,
+      "detail": "OBL-002 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:OBL-003",
+      "passed": true,
+      "detail": "OBL-003 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:OBL-004",
+      "passed": true,
+      "detail": "OBL-004 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:OBL-005",
+      "passed": true,
+      "detail": "OBL-005 in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-OBL-TWO-PHASE",
+      "passed": true,
+      "detail": "INV-OBL-TWO-PHASE in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-OBL-NO-LEAK",
+      "passed": true,
+      "detail": "INV-OBL-NO-LEAK in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-OBL-BUDGET-BOUND",
+      "passed": true,
+      "detail": "INV-OBL-BUDGET-BOUND in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-OBL-DROP-SAFE",
+      "passed": true,
+      "detail": "INV-OBL-DROP-SAFE in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-OBL-ATOMIC-COMMIT",
+      "passed": true,
+      "detail": "INV-OBL-ATOMIC-COMMIT in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-OBL-ROLLBACK-SAFE",
+      "passed": true,
+      "detail": "INV-OBL-ROLLBACK-SAFE in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-OBL-AUDIT-COMPLETE",
+      "passed": true,
+      "detail": "INV-OBL-AUDIT-COMPLETE in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-OBL-SCAN-PERIODIC",
+      "passed": true,
+      "detail": "INV-OBL-SCAN-PERIODIC in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_OBL_ALREADY_COMMITTED",
+      "passed": true,
+      "detail": "ERR_OBL_ALREADY_COMMITTED in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_OBL_ALREADY_ROLLED_BACK",
+      "passed": true,
+      "detail": "ERR_OBL_ALREADY_ROLLED_BACK in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_OBL_NOT_FOUND",
+      "passed": true,
+      "detail": "ERR_OBL_NOT_FOUND in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_OBL_LEAK_TIMEOUT",
+      "passed": true,
+      "detail": "ERR_OBL_LEAK_TIMEOUT in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_OBL_DUPLICATE_RESERVE",
+      "passed": true,
+      "detail": "ERR_OBL_DUPLICATE_RESERVE in spec"
+    },
+    {
+      "name": "SPEC_TYPE:ObligationTracker",
+      "passed": true,
+      "detail": "ObligationTracker in spec"
+    },
+    {
+      "name": "SPEC_TYPE:ObligationId",
+      "passed": true,
+      "detail": "ObligationId in spec"
+    },
+    {
+      "name": "SPEC_TYPE:ObligationFlow",
+      "passed": true,
+      "detail": "ObligationFlow in spec"
+    },
+    {
+      "name": "SPEC_TYPE:ObligationState",
+      "passed": true,
+      "detail": "ObligationState in spec"
+    },
+    {
+      "name": "SPEC_TYPE:Obligation",
+      "passed": true,
+      "detail": "Obligation in spec"
+    },
+    {
+      "name": "SPEC_TYPE:ObligationAuditRecord",
+      "passed": true,
+      "detail": "ObligationAuditRecord in spec"
+    },
+    {
+      "name": "SPEC_TYPE:LeakScanResult",
+      "passed": true,
+      "detail": "LeakScanResult in spec"
+    },
+    {
+      "name": "SPEC_TYPE:LeakOracleReport",
+      "passed": true,
+      "detail": "LeakOracleReport in spec"
+    },
+    {
+      "name": "SPEC_TYPE:FlowObligationCounts",
+      "passed": true,
+      "detail": "FlowObligationCounts in spec"
+    },
+    {
+      "name": "SPEC_TYPE:ObligationGuard",
+      "passed": true,
+      "detail": "ObligationGuard in spec"
+    },
+    {
+      "name": "ORACLE_REPORT_EXISTS",
+      "passed": true,
+      "detail": "obligation_leak_oracle_report.json exists"
+    },
+    {
+      "name": "ORACLE_REPORT_VALID_JSON",
+      "passed": true,
+      "detail": "oracle report is valid JSON"
+    },
+    {
+      "name": "ORACLE_REPORT_VERDICT",
+      "passed": true,
+      "detail": "verdict=PASS"
+    },
+    {
+      "name": "TEST_FILE_EXISTS",
+      "passed": true,
+      "detail": "tests/test_check_obligation_tracking.py exists"
+    },
+    {
+      "name": "EVIDENCE_EXISTS",
+      "passed": true,
+      "detail": "evidence JSON exists"
+    },
+    {
+      "name": "SUMMARY_EXISTS",
+      "passed": true,
+      "detail": "verification summary exists"
+    }
+  ],
+  "passed": 84,
+  "failed": 0,
+  "total": 84,
+  "verdict": "PASS",
+  "all_passed": true,
+  "status": "pass"
+}

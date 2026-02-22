@@ -1,0 +1,358 @@
+{
+  "schema_version": "nvo-v1.0",
+  "bead_id": "bd-al8i",
+  "section": "10.17",
+  "title": "L2 engine-boundary N-version semantic oracle",
+  "verdict": "PASS",
+  "total": 61,
+  "passed": 61,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "Spec file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/section_10_17/bd-al8i_contract.md"
+    },
+    {
+      "check": "Implementation file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/runtime/nversion_oracle.rs"
+    },
+    {
+      "check": "Runtime module wired",
+      "passed": true,
+      "detail": "pub mod nversion_oracle; in runtime/mod.rs"
+    },
+    {
+      "check": "Python checker unit test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_nversion_oracle.py"
+    },
+    {
+      "check": "CSV divergence matrix exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/10.17/semantic_oracle_divergence_matrix.csv"
+    },
+    {
+      "check": "Impl token 'struct RuntimeOracle'",
+      "passed": true,
+      "detail": "struct RuntimeOracle"
+    },
+    {
+      "check": "Impl token 'struct SemanticDivergence'",
+      "passed": true,
+      "detail": "struct SemanticDivergence"
+    },
+    {
+      "check": "Impl token 'struct CrossRuntimeCheck'",
+      "passed": true,
+      "detail": "struct CrossRuntimeCheck"
+    },
+    {
+      "check": "Impl token 'struct VotingResult'",
+      "passed": true,
+      "detail": "struct VotingResult"
+    },
+    {
+      "check": "Impl token 'enum RiskTier'",
+      "passed": true,
+      "detail": "enum RiskTier"
+    },
+    {
+      "check": "Impl token 'struct PolicyReceipt'",
+      "passed": true,
+      "detail": "struct PolicyReceipt"
+    },
+    {
+      "check": "Impl token 'enum OracleVerdict'",
+      "passed": true,
+      "detail": "enum OracleVerdict"
+    },
+    {
+      "check": "Impl token 'struct RuntimeEntry'",
+      "passed": true,
+      "detail": "struct RuntimeEntry"
+    },
+    {
+      "check": "Impl token 'struct L1LinkageProof'",
+      "passed": true,
+      "detail": "struct L1LinkageProof"
+    },
+    {
+      "check": "Impl token 'struct DivergenceReport'",
+      "passed": true,
+      "detail": "struct DivergenceReport"
+    },
+    {
+      "check": "Impl token 'enum CheckOutcome'",
+      "passed": true,
+      "detail": "enum CheckOutcome"
+    },
+    {
+      "check": "Impl token 'enum BoundaryScope'",
+      "passed": true,
+      "detail": "enum BoundaryScope"
+    },
+    {
+      "check": "Impl token 'fn register_runtime'",
+      "passed": true,
+      "detail": "fn register_runtime"
+    },
+    {
+      "check": "Impl token 'fn remove_runtime'",
+      "passed": true,
+      "detail": "fn remove_runtime"
+    },
+    {
+      "check": "Impl token 'fn run_cross_check'",
+      "passed": true,
+      "detail": "fn run_cross_check"
+    },
+    {
+      "check": "Impl token 'fn classify_divergence'",
+      "passed": true,
+      "detail": "fn classify_divergence"
+    },
+    {
+      "check": "Impl token 'fn vote'",
+      "passed": true,
+      "detail": "fn vote"
+    },
+    {
+      "check": "Impl token 'fn tally_votes'",
+      "passed": true,
+      "detail": "fn tally_votes"
+    },
+    {
+      "check": "Impl token 'fn issue_policy_receipt'",
+      "passed": true,
+      "detail": "fn issue_policy_receipt"
+    },
+    {
+      "check": "Impl token 'fn verify_l1_linkage'",
+      "passed": true,
+      "detail": "fn verify_l1_linkage"
+    },
+    {
+      "check": "Impl token 'fn generate_report'",
+      "passed": true,
+      "detail": "fn generate_report"
+    },
+    {
+      "check": "Impl token 'fn check_release_gate'",
+      "passed": true,
+      "detail": "fn check_release_gate"
+    },
+    {
+      "check": "Impl token 'fn resolve_divergence'",
+      "passed": true,
+      "detail": "fn resolve_divergence"
+    },
+    {
+      "check": "Event code FN-NV-001",
+      "passed": true,
+      "detail": "FN-NV-001"
+    },
+    {
+      "check": "Event code FN-NV-002",
+      "passed": true,
+      "detail": "FN-NV-002"
+    },
+    {
+      "check": "Event code FN-NV-003",
+      "passed": true,
+      "detail": "FN-NV-003"
+    },
+    {
+      "check": "Event code FN-NV-004",
+      "passed": true,
+      "detail": "FN-NV-004"
+    },
+    {
+      "check": "Event code FN-NV-005",
+      "passed": true,
+      "detail": "FN-NV-005"
+    },
+    {
+      "check": "Event code FN-NV-006",
+      "passed": true,
+      "detail": "FN-NV-006"
+    },
+    {
+      "check": "Event code FN-NV-007",
+      "passed": true,
+      "detail": "FN-NV-007"
+    },
+    {
+      "check": "Event code FN-NV-008",
+      "passed": true,
+      "detail": "FN-NV-008"
+    },
+    {
+      "check": "Event code FN-NV-009",
+      "passed": true,
+      "detail": "FN-NV-009"
+    },
+    {
+      "check": "Event code FN-NV-010",
+      "passed": true,
+      "detail": "FN-NV-010"
+    },
+    {
+      "check": "Event code FN-NV-011",
+      "passed": true,
+      "detail": "FN-NV-011"
+    },
+    {
+      "check": "Event code FN-NV-012",
+      "passed": true,
+      "detail": "FN-NV-012"
+    },
+    {
+      "check": "Error code ERR_NVO_NO_RUNTIMES",
+      "passed": true,
+      "detail": "ERR_NVO_NO_RUNTIMES"
+    },
+    {
+      "check": "Error code ERR_NVO_QUORUM_FAILED",
+      "passed": true,
+      "detail": "ERR_NVO_QUORUM_FAILED"
+    },
+    {
+      "check": "Error code ERR_NVO_RUNTIME_NOT_FOUND",
+      "passed": true,
+      "detail": "ERR_NVO_RUNTIME_NOT_FOUND"
+    },
+    {
+      "check": "Error code ERR_NVO_CHECK_ALREADY_RUNNING",
+      "passed": true,
+      "detail": "ERR_NVO_CHECK_ALREADY_RUNNING"
+    },
+    {
+      "check": "Error code ERR_NVO_DIVERGENCE_UNRESOLVED",
+      "passed": true,
+      "detail": "ERR_NVO_DIVERGENCE_UNRESOLVED"
+    },
+    {
+      "check": "Error code ERR_NVO_POLICY_MISSING",
+      "passed": true,
+      "detail": "ERR_NVO_POLICY_MISSING"
+    },
+    {
+      "check": "Error code ERR_NVO_INVALID_RECEIPT",
+      "passed": true,
+      "detail": "ERR_NVO_INVALID_RECEIPT"
+    },
+    {
+      "check": "Error code ERR_NVO_L1_LINKAGE_BROKEN",
+      "passed": true,
+      "detail": "ERR_NVO_L1_LINKAGE_BROKEN"
+    },
+    {
+      "check": "Error code ERR_NVO_VOTING_TIMEOUT",
+      "passed": true,
+      "detail": "ERR_NVO_VOTING_TIMEOUT"
+    },
+    {
+      "check": "Error code ERR_NVO_DUPLICATE_RUNTIME",
+      "passed": true,
+      "detail": "ERR_NVO_DUPLICATE_RUNTIME"
+    },
+    {
+      "check": "Invariant INV-NVO-QUORUM",
+      "passed": true,
+      "detail": "INV-NVO-QUORUM"
+    },
+    {
+      "check": "Invariant INV-NVO-RISK-TIERED",
+      "passed": true,
+      "detail": "INV-NVO-RISK-TIERED"
+    },
+    {
+      "check": "Invariant INV-NVO-BLOCK-HIGH",
+      "passed": true,
+      "detail": "INV-NVO-BLOCK-HIGH"
+    },
+    {
+      "check": "Invariant INV-NVO-POLICY-RECEIPT",
+      "passed": true,
+      "detail": "INV-NVO-POLICY-RECEIPT"
+    },
+    {
+      "check": "Invariant INV-NVO-L1-LINKAGE",
+      "passed": true,
+      "detail": "INV-NVO-L1-LINKAGE"
+    },
+    {
+      "check": "Invariant INV-NVO-DETERMINISTIC",
+      "passed": true,
+      "detail": "INV-NVO-DETERMINISTIC"
+    },
+    {
+      "check": "Rust unit tests >= 25",
+      "passed": true,
+      "detail": "found 35"
+    },
+    {
+      "check": "Schema version nvo-v1.0",
+      "passed": true,
+      "detail": "SCHEMA_VERSION = nvo-v1.0"
+    },
+    {
+      "check": "BTreeMap used for determinism",
+      "passed": true,
+      "detail": "INV-NVO-DETERMINISTIC enforced via BTreeMap"
+    },
+    {
+      "check": "blocks_release method present",
+      "passed": true,
+      "detail": "blocks_release()"
+    },
+    {
+      "check": "requires_receipt method present",
+      "passed": true,
+      "detail": "requires_receipt()"
+    }
+  ],
+  "event_codes": [
+    "FN-NV-001",
+    "FN-NV-002",
+    "FN-NV-003",
+    "FN-NV-004",
+    "FN-NV-005",
+    "FN-NV-006",
+    "FN-NV-007",
+    "FN-NV-008",
+    "FN-NV-009",
+    "FN-NV-010",
+    "FN-NV-011",
+    "FN-NV-012"
+  ],
+  "error_codes": [
+    "ERR_NVO_NO_RUNTIMES",
+    "ERR_NVO_QUORUM_FAILED",
+    "ERR_NVO_RUNTIME_NOT_FOUND",
+    "ERR_NVO_CHECK_ALREADY_RUNNING",
+    "ERR_NVO_DIVERGENCE_UNRESOLVED",
+    "ERR_NVO_POLICY_MISSING",
+    "ERR_NVO_INVALID_RECEIPT",
+    "ERR_NVO_L1_LINKAGE_BROKEN",
+    "ERR_NVO_VOTING_TIMEOUT",
+    "ERR_NVO_DUPLICATE_RUNTIME"
+  ],
+  "invariants": [
+    "INV-NVO-QUORUM",
+    "INV-NVO-RISK-TIERED",
+    "INV-NVO-BLOCK-HIGH",
+    "INV-NVO-POLICY-RECEIPT",
+    "INV-NVO-L1-LINKAGE",
+    "INV-NVO-DETERMINISTIC"
+  ],
+  "release_gate_semantics": {
+    "critical_blocks": true,
+    "high_blocks": true,
+    "medium_warns": true,
+    "low_requires_receipt": true,
+    "info_no_action": true
+  }
+}

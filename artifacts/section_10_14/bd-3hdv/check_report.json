@@ -1,0 +1,355 @@
+{
+  "bead": "bd-3hdv",
+  "title": "Monotonic control epoch in canonical manifest state",
+  "section": "10.14",
+  "verdict": "PASS",
+  "summary": {
+    "passing_checks": 57,
+    "failing_checks": 0,
+    "total_checks": 57
+  },
+  "checks": [
+    {
+      "id": "CEP-FILE-IMPLEMENTATION",
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/control_plane/control_epoch.rs"
+    },
+    {
+      "id": "CEP-FILE-SPEC-CONTRACT",
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-3hdv_contract.md"
+    },
+    {
+      "id": "CEP-MOD-REG",
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TYPE-PUB-STRUCT-CONTROLEPOCH",
+      "check": "type: pub struct ControlEpoch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TYPE-PUB-STRUCT-EPOCHTRANSITION",
+      "check": "type: pub struct EpochTransition",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TYPE-PUB-STRUCT-EPOCHSTORE",
+      "check": "type: pub struct EpochStore",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TYPE-PUB-ENUM-EPOCHERROR",
+      "check": "type: pub enum EpochError",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-METHOD-FN-EPOCH_ADVANCE",
+      "check": "method: fn epoch_advance(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-METHOD-FN-EPOCH_READ",
+      "check": "method: fn epoch_read(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-METHOD-FN-EPOCH_SET",
+      "check": "method: fn epoch_set(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-METHOD-FN-RECOVER",
+      "check": "method: fn recover(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-METHOD-FN-COMMITTED_EPOCH",
+      "check": "method: fn committed_epoch(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-METHOD-FN-VERIFY",
+      "check": "method: fn verify(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-METHOD-FN-NEXT",
+      "check": "method: fn next(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-ERROR_CODE-EPOCH_REGRESSION",
+      "check": "error_code: EPOCH_REGRESSION",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-ERROR_CODE-EPOCH_OVERFLOW",
+      "check": "error_code: EPOCH_OVERFLOW",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-ERROR_CODE-EPOCH_INVALID_MANIFEST",
+      "check": "error_code: EPOCH_INVALID_MANIFEST",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-EVENT_CODE-EPOCH_ADVANCED",
+      "check": "event_code: EPOCH_ADVANCED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-EVENT_CODE-EPOCH_REGRESSION_REJECTED",
+      "check": "event_code: EPOCH_REGRESSION_REJECTED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-EVENT_CODE-EPOCH_READ",
+      "check": "event_code: EPOCH_READ",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-EVENT_CODE-EPOCH_RECOVERED",
+      "check": "event_code: EPOCH_RECOVERED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-INVARIANT-INV-EPOCH-MONOTONIC",
+      "check": "invariant: INV-EPOCH-MONOTONIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-INVARIANT-INV-EPOCH-DURABLE",
+      "check": "invariant: INV-EPOCH-DURABLE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-INVARIANT-INV-EPOCH-SIGNED-EVENT",
+      "check": "invariant: INV-EPOCH-SIGNED-EVENT",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-INVARIANT-INV-EPOCH-NO-GAP",
+      "check": "invariant: INV-EPOCH-NO-GAP",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TRAIT-COPY",
+      "check": "trait: Copy",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TRAIT-ORD",
+      "check": "trait: Ord",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TRAIT-HASH",
+      "check": "trait: Hash",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TRAIT-PARTIALEQ",
+      "check": "trait: PartialEq",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TRAIT-EQ",
+      "check": "trait: Eq",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-COUNT",
+      "check": "unit test count",
+      "pass": true,
+      "detail": "39 tests (minimum 20)"
+    },
+    {
+      "id": "CEP-TEST-EPOCH_GENESIS_IS_ZERO",
+      "check": "test: epoch_genesis_is_zero",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-EPOCH_NEXT",
+      "check": "test: epoch_next",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-EPOCH_NEXT_OVERFLOW",
+      "check": "test: epoch_next_overflow",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-EPOCH_ORDERING",
+      "check": "test: epoch_ordering",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-SINGLE_ADVANCE",
+      "check": "test: single_advance",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-SEQUENTIAL_ADVANCES",
+      "check": "test: sequential_advances",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-THOUSAND_ADVANCES_MONOTONIC",
+      "check": "test: thousand_advances_monotonic",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-REGRESSION_SAME_VALUE_REJECTED",
+      "check": "test: regression_same_value_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-REGRESSION_LOWER_VALUE_REJECTE",
+      "check": "test: regression_lower_value_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-TRANSITION_EVENT_VERIFIABLE",
+      "check": "test: transition_event_verifiable",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-TRANSITION_EVENT_TAMPER_DETECT",
+      "check": "test: transition_event_tamper_detected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-CRASH_RECOVERY_PRESERVES_COMMI",
+      "check": "test: crash_recovery_preserves_committed",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-ADVANCE_AFTER_RECOVERY",
+      "check": "test: advance_after_recovery",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-EMPTY_MANIFEST_HASH_REJECTED",
+      "check": "test: empty_manifest_hash_rejected",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-EPOCH_AT_MAX_OVERFLOWS_ON_ADVA",
+      "check": "test: epoch_at_max_overflows_on_advance",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-ERROR_DISPLAY_ALL_VARIANTS",
+      "check": "test: error_display_all_variants",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-SAME_INPUTS_PRODUCE_SAME_MAC",
+      "check": "test: same_inputs_produce_same_mac",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-TEST-DIFFERENT_INPUTS_PRODUCE_DIFFE",
+      "check": "test: different_inputs_produce_different_mac",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-SPEC-CONTROLEPOCH",
+      "check": "spec: ControlEpoch",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-SPEC-EPOCHTRANSITION",
+      "check": "spec: EpochTransition",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-SPEC-EPOCHSTORE",
+      "check": "spec: EpochStore",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-SPEC-INV-EPOCH-MONOTONIC",
+      "check": "spec: INV-EPOCH-MONOTONIC",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-SPEC-INV-EPOCH-DURABLE",
+      "check": "spec: INV-EPOCH-DURABLE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-SPEC-EPOCH_ADVANCE",
+      "check": "spec: epoch_advance",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-SPEC-EPOCH_READ",
+      "check": "spec: epoch_read",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CEP-SPEC-CRASH-RECOVERY",
+      "check": "spec: crash recovery",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

@@ -1,0 +1,451 @@
+{
+  "bead": "bd-bq4p",
+  "title": "Controller boundary checks rejecting correctness-semantic mutations",
+  "section": "10.14",
+  "verdict": "PASS",
+  "summary": {
+    "passing_checks": 73,
+    "failing_checks": 0,
+    "total_checks": 73
+  },
+  "checks": [
+    {
+      "id": "CBC-FILE-IMPLEMENTATION",
+      "check": "file: implementation",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/controller_boundary_checks.rs"
+    },
+    {
+      "id": "CBC-FILE-SPEC-CONTRACT",
+      "check": "file: spec contract",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_14/bd-bq4p_contract.md"
+    },
+    {
+      "id": "CBC-FILE-UPSTREAM-ENVELOPE",
+      "check": "file: upstream envelope",
+      "pass": true,
+      "detail": "exists: crates/franken-node/src/policy/correctness_envelope.rs"
+    },
+    {
+      "id": "CBC-MOD-REG",
+      "check": "module registered in mod.rs",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-UPSTREAM-DEP",
+      "check": "imports from correctness_envelope (bd-sddz)",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-ENVELOPE-API",
+      "check": "calls is_within_envelope from CorrectnessEnvelope",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-SERDE",
+      "check": "Serialize+Deserialize derives on public types",
+      "pass": true,
+      "detail": "4 derive blocks (minimum 4)"
+    },
+    {
+      "id": "CBC-TYPE-PUB-ENUM-ERRORCLASS",
+      "check": "type: pub enum ErrorClass",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TYPE-PUB-STRUCT-BOUNDARYVIOLATION",
+      "check": "type: pub struct BoundaryViolation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TYPE-PUB-STRUCT-REJECTEDMUTATIONREC",
+      "check": "type: pub struct RejectedMutationRecord",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TYPE-PUB-STRUCT-CONTROLLERBOUNDARYC",
+      "check": "type: pub struct ControllerBoundaryChecker",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-ERROR_CLASS-CORRECTNESSSEMANTICMUTATION",
+      "check": "error_class: CorrectnessSemanticMutation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-ERROR_CLASS-ENVELOPEBYPASS",
+      "check": "error_class: EnvelopeBypass",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-ERROR_CLASS-UNKNOWNINVARIANTTARGET",
+      "check": "error_class: UnknownInvariantTarget",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-VIOLATION_FIELD-VIOLATED_INVARIANT",
+      "check": "violation_field: violated_invariant",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-VIOLATION_FIELD-PROPOSAL_SUMMARY",
+      "check": "violation_field: proposal_summary",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-VIOLATION_FIELD-REJECTION_REASON",
+      "check": "violation_field: rejection_reason",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-VIOLATION_FIELD-STABLE_ERROR_CLASS",
+      "check": "violation_field: stable_error_class",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-RECORD_FIELD-TIMESTAMP",
+      "check": "record_field: timestamp",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-RECORD_FIELD-PROPOSAL_SUMMARY",
+      "check": "record_field: proposal_summary",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-RECORD_FIELD-VIOLATED_INVARIANT",
+      "check": "record_field: violated_invariant",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-RECORD_FIELD-CONTROLLER_ID",
+      "check": "record_field: controller_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-RECORD_FIELD-ERROR_CLASS",
+      "check": "record_field: error_class",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-RECORD_FIELD-EPOCH_ID",
+      "check": "record_field: epoch_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-CHECK_PROPOSAL",
+      "check": "method: fn check_proposal(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-REJECTED_MUTATIONS",
+      "check": "method: fn rejected_mutations(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-REJECTION_COUNT",
+      "check": "method: fn rejection_count(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-REJECTION_REPORT",
+      "check": "method: fn rejection_report(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-RECORD_REJECTION",
+      "check": "method: fn record_rejection(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-CHECKS_PASSED",
+      "check": "method: fn checks_passed(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-CHECKS_REJECTED",
+      "check": "method: fn checks_rejected(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-SERIALIZE_AUDIT_TRAIL",
+      "check": "method: fn serialize_audit_trail(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-METHOD-FN-RESTORE_AUDIT_TRAIL",
+      "check": "method: fn restore_audit_trail(",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-EVENT_CODE-EVD-BOUNDARY-001",
+      "check": "event_code: EVD-BOUNDARY-001",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-EVENT_CODE-EVD-BOUNDARY-002",
+      "check": "event_code: EVD-BOUNDARY-002",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-EVENT_CODE-EVD-BOUNDARY-003",
+      "check": "event_code: EVD-BOUNDARY-003",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-EVENT_CODE-EVD-BOUNDARY-004",
+      "check": "event_code: EVD-BOUNDARY-004",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INVARIANT-INV-BOUNDARY-MANDATORY",
+      "check": "invariant: INV-BOUNDARY-MANDATORY",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INVARIANT-INV-BOUNDARY-AUDITABLE",
+      "check": "invariant: INV-BOUNDARY-AUDITABLE",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INVARIANT-INV-BOUNDARY-STABLE-ERRORS",
+      "check": "invariant: INV-BOUNDARY-STABLE-ERRORS",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INVARIANT-INV-BOUNDARY-FAIL-CLOSED",
+      "check": "invariant: INV-BOUNDARY-FAIL-CLOSED",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-COUNT",
+      "check": "unit test count",
+      "pass": true,
+      "detail": "38 tests (minimum 30)"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_HARDENING_DIRECTION_MU",
+      "check": "inv_test: rejects_hardening_direction_mutation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_EVIDENCE_SUPPRESSION",
+      "check": "inv_test: rejects_evidence_suppression",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_SEED_ALGORITHM_CHANGE",
+      "check": "inv_test: rejects_seed_algorithm_change",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_INTEGRITY_BYPASS",
+      "check": "inv_test: rejects_integrity_bypass",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_RING_BUFFER_OVERFLOW_C",
+      "check": "inv_test: rejects_ring_buffer_overflow_change",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_EPOCH_DECREMENT",
+      "check": "inv_test: rejects_epoch_decrement",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_WITNESS_HASH_CHANGE",
+      "check": "inv_test: rejects_witness_hash_change",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_GUARDRAIL_PRECEDENCE_O",
+      "check": "inv_test: rejects_guardrail_precedence_override",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_OBJECT_CLASS_MUTATION",
+      "check": "inv_test: rejects_object_class_mutation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_NETWORK_BYPASS",
+      "check": "inv_test: rejects_network_bypass",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_MARKER_STREAM_REWRITE",
+      "check": "inv_test: rejects_marker_stream_rewrite",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-INV_TEST-REJECTS_RECEIPT_CHAIN_TRUNCATI",
+      "check": "inv_test: rejects_receipt_chain_truncation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-CHECKER_STARTS_EMPTY",
+      "check": "test: checker_starts_empty",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-VALID_PROPOSAL_PASSES_CHECK",
+      "check": "test: valid_proposal_passes_check",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-REJECTS_EMPTY_PROPOSAL",
+      "check": "test: rejects_empty_proposal",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-REJECTS_MALFORMED_PROPOSAL_EMP",
+      "check": "test: rejects_malformed_proposal_empty_id",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-REJECTION_CREATES_AUDIT_RECORD",
+      "check": "test: rejection_creates_audit_record",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-MULTIPLE_REJECTIONS_ACCUMULATE",
+      "check": "test: multiple_rejections_accumulate_in_audit_trail",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-VALID_PROPOSALS_DO_NOT_ADD_TO_",
+      "check": "test: valid_proposals_do_not_add_to_audit_trail",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-MIXED_PROPOSALS_TRACK_BOTH_COU",
+      "check": "test: mixed_proposals_track_both_counts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-REJECTION_REPORT_CONTAINS_PER_",
+      "check": "test: rejection_report_contains_per_invariant_counts",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-REJECTION_REPORT_CONTAINS_ERRO",
+      "check": "test: rejection_report_contains_error_class_distribution",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-ERROR_CLASS_LABEL_ROUND_TRIP",
+      "check": "test: error_class_label_round_trip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-BOUNDARY_VIOLATION_SERIALIZATI",
+      "check": "test: boundary_violation_serialization_round_trip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-REJECTED_MUTATION_RECORD_SERIA",
+      "check": "test: rejected_mutation_record_serialization_round_trip",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-AUDIT_TRAIL_SERIALIZE_AND_REST",
+      "check": "test: audit_trail_serialize_and_restore",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-RAPID_SEQUENTIAL_SUBMISSIONS_A",
+      "check": "test: rapid_sequential_submissions_all_tracked",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-MIXED_CHANGES_PROPOSAL_REJECTE",
+      "check": "test: mixed_changes_proposal_rejected_on_first_violation",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-REJECTS_SUB_FIELD_OF_IMMUTABLE",
+      "check": "test: rejects_sub_field_of_immutable_prefix",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-FULL_LIFECYCLE_CHECK_REJECT_CH",
+      "check": "test: full_lifecycle_check_reject_check_report",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "id": "CBC-TEST-DEFAULT_CREATES_EMPTY_CHECKER",
+      "check": "test: default_creates_empty_checker",
+      "pass": true,
+      "detail": "found"
+    }
+  ]
+}

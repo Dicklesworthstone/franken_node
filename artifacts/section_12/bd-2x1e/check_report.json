@@ -5,7 +5,7 @@
   "title": "Section-wide verification gate: comprehensive unit+e2e+logging",
   "gate_pass": true,
   "verdict": "PASS",
-  "timestamp": "2026-02-21T01:04:36.375965+00:00",
+  "timestamp": "2026-02-22T08:33:15.058848+00:00",
   "trace_id": "trace-bd-2x1e-section-gate",
   "beads_tested": [
     "bd-s4cu",
@@ -28,8 +28,8 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 1,
-      "scenario_source": "verification_evidence_fallback",
+      "scenario_passes": 2,
+      "scenario_source": "artifacts/section_12/bd-s4cu/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
     },
@@ -39,8 +39,8 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 1,
-      "scenario_source": "verification_evidence_fallback",
+      "scenario_passes": 3,
+      "scenario_source": "artifacts/section_12/bd-38ri/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
     },
@@ -50,8 +50,8 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 1,
-      "scenario_source": "verification_evidence_fallback",
+      "scenario_passes": 4,
+      "scenario_source": "artifacts/section_12/bd-kiqr/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
     },
@@ -61,7 +61,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 6,
+      "scenario_passes": 10,
       "scenario_source": "artifacts/section_12/bd-3jc1/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -72,7 +72,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 8,
+      "scenario_passes": 17,
       "scenario_source": "artifacts/section_12/bd-2w4u/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -83,7 +83,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 8,
+      "scenario_passes": 15,
       "scenario_source": "artifacts/section_12/bd-1nab/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -94,8 +94,8 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 1,
-      "scenario_source": "verification_evidence_fallback",
+      "scenario_passes": 5,
+      "scenario_source": "artifacts/section_12/bd-13yn/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
     },
@@ -105,7 +105,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 8,
+      "scenario_passes": 9,
       "scenario_source": "artifacts/section_12/bd-1n1t/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -116,7 +116,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 8,
+      "scenario_passes": 21,
       "scenario_source": "artifacts/section_12/bd-paui/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -127,7 +127,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 8,
+      "scenario_passes": 14,
       "scenario_source": "artifacts/section_12/bd-v4ps/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -138,7 +138,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 8,
+      "scenario_passes": 16,
       "scenario_source": "artifacts/section_12/bd-1rff/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -149,7 +149,7 @@
       "script_pass": true,
       "unit_pass": true,
       "evidence_pass": true,
-      "scenario_passes": 10,
+      "scenario_passes": 16,
       "scenario_source": "artifacts/section_12/bd-35m7/check_report.json",
       "overall_pass": true,
       "risk_status": "mitigated"
@@ -485,73 +485,73 @@
         "results": [
           {
             "bead": "bd-s4cu",
-            "scenario_passes": 1,
-            "source": "verification_evidence_fallback",
+            "scenario_passes": 2,
+            "source": "artifacts/section_12/bd-s4cu/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-38ri",
-            "scenario_passes": 1,
-            "source": "verification_evidence_fallback",
+            "scenario_passes": 3,
+            "source": "artifacts/section_12/bd-38ri/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-kiqr",
-            "scenario_passes": 1,
-            "source": "verification_evidence_fallback",
+            "scenario_passes": 4,
+            "source": "artifacts/section_12/bd-kiqr/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-3jc1",
-            "scenario_passes": 6,
+            "scenario_passes": 10,
             "source": "artifacts/section_12/bd-3jc1/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-2w4u",
-            "scenario_passes": 8,
+            "scenario_passes": 17,
             "source": "artifacts/section_12/bd-2w4u/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-1nab",
-            "scenario_passes": 8,
+            "scenario_passes": 15,
             "source": "artifacts/section_12/bd-1nab/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-13yn",
-            "scenario_passes": 1,
-            "source": "verification_evidence_fallback",
+            "scenario_passes": 5,
+            "source": "artifacts/section_12/bd-13yn/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-1n1t",
-            "scenario_passes": 8,
+            "scenario_passes": 9,
             "source": "artifacts/section_12/bd-1n1t/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-paui",
-            "scenario_passes": 8,
+            "scenario_passes": 21,
             "source": "artifacts/section_12/bd-paui/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-v4ps",
-            "scenario_passes": 8,
+            "scenario_passes": 14,
             "source": "artifacts/section_12/bd-v4ps/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-1rff",
-            "scenario_passes": 8,
+            "scenario_passes": 16,
             "source": "artifacts/section_12/bd-1rff/check_report.json",
             "status": "PASS"
           },
           {
             "bead": "bd-35m7",
-            "scenario_passes": 10,
+            "scenario_passes": 16,
             "source": "artifacts/section_12/bd-35m7/check_report.json",
             "status": "PASS"
           }
@@ -564,7 +564,7 @@
       "event": "GATE_12_EVALUATION_STARTED",
       "trace_id": "trace-bd-2x1e-section-gate",
       "section": "12",
-      "timestamp": "2026-02-21T01:04:35.064583+00:00"
+      "timestamp": "2026-02-22T08:33:13.727853+00:00"
     },
     {
       "event": "GATE_12_BEAD_CHECKED",
@@ -651,5 +651,5 @@
       "status": "PASS"
     }
   ],
-  "content_hash": "8e9be4d6f34e9f0c9c8f98b31b5753b8af8c0cdfaddf1d0e699b5d958824369c"
+  "content_hash": "df5f1d2d6850037e9acefaec3e3995cd422c4dfcd9509ad5a2971d8c126f2425"
 }

@@ -1,0 +1,308 @@
+{
+  "bead_id": "bd-3h63",
+  "section": "10.15",
+  "title": "Saga Wrappers with Deterministic Compensations",
+  "checks": [
+    {
+      "name": "SOURCE_EXISTS",
+      "passed": true,
+      "detail": "crates/franken-node/src/connector/saga.rs exists"
+    },
+    {
+      "name": "EVENT_CODE:SAG-001",
+      "passed": true,
+      "detail": "SAG-001 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:SAG-002",
+      "passed": true,
+      "detail": "SAG-002 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:SAG-003",
+      "passed": true,
+      "detail": "SAG-003 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:SAG-004",
+      "passed": true,
+      "detail": "SAG-004 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:SAG-005",
+      "passed": true,
+      "detail": "SAG-005 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:SAG-006",
+      "passed": true,
+      "detail": "SAG-006 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:SAG-007",
+      "passed": true,
+      "detail": "SAG-007 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:SAG-008",
+      "passed": true,
+      "detail": "SAG-008 found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-SAGA-TERMINAL",
+      "passed": true,
+      "detail": "INV-SAGA-TERMINAL found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-SAGA-REVERSE-COMP",
+      "passed": true,
+      "detail": "INV-SAGA-REVERSE-COMP found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-SAGA-IDEMPOTENT-COMP",
+      "passed": true,
+      "detail": "INV-SAGA-IDEMPOTENT-COMP found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-SAGA-DETERMINISTIC",
+      "passed": true,
+      "detail": "INV-SAGA-DETERMINISTIC found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-SAGA-AUDITABLE",
+      "passed": true,
+      "detail": "INV-SAGA-AUDITABLE found in Rust"
+    },
+    {
+      "name": "CORE_TYPE:SagaExecutor",
+      "passed": true,
+      "detail": "SagaExecutor defined"
+    },
+    {
+      "name": "CORE_TYPE:SagaInstance",
+      "passed": true,
+      "detail": "SagaInstance defined"
+    },
+    {
+      "name": "CORE_TYPE:SagaStepDef",
+      "passed": true,
+      "detail": "SagaStepDef defined"
+    },
+    {
+      "name": "CORE_TYPE:StepOutcome",
+      "passed": true,
+      "detail": "StepOutcome defined"
+    },
+    {
+      "name": "CORE_TYPE:CompensationTrace",
+      "passed": true,
+      "detail": "CompensationTrace defined"
+    },
+    {
+      "name": "CORE_TYPE:SagaState",
+      "passed": true,
+      "detail": "SagaState defined"
+    },
+    {
+      "name": "METHOD:create_saga",
+      "passed": true,
+      "detail": "create_saga implemented"
+    },
+    {
+      "name": "METHOD:execute_step",
+      "passed": true,
+      "detail": "execute_step implemented"
+    },
+    {
+      "name": "METHOD:commit",
+      "passed": true,
+      "detail": "commit implemented"
+    },
+    {
+      "name": "METHOD:compensate",
+      "passed": true,
+      "detail": "compensate implemented"
+    },
+    {
+      "name": "METHOD:get_saga",
+      "passed": true,
+      "detail": "get_saga implemented"
+    },
+    {
+      "name": "METHOD:export_trace",
+      "passed": true,
+      "detail": "export_trace implemented"
+    },
+    {
+      "name": "METHOD:export_audit_log_jsonl",
+      "passed": true,
+      "detail": "export_audit_log_jsonl implemented"
+    },
+    {
+      "name": "METHOD:content_hash",
+      "passed": true,
+      "detail": "content_hash implemented"
+    },
+    {
+      "name": "METHOD:saga_count",
+      "passed": true,
+      "detail": "saga_count implemented"
+    },
+    {
+      "name": "COMPENSATION_REVERSE",
+      "passed": true,
+      "detail": "compensate method with reverse iteration found"
+    },
+    {
+      "name": "TERMINAL_STATE:Committed",
+      "passed": true,
+      "detail": "Committed defined"
+    },
+    {
+      "name": "TERMINAL_STATE:Compensated",
+      "passed": true,
+      "detail": "Compensated defined"
+    },
+    {
+      "name": "TRACE_EXPORT",
+      "passed": true,
+      "detail": "export_trace and CompensationTrace found"
+    },
+    {
+      "name": "AUDIT_TRAIL",
+      "passed": true,
+      "detail": "export_audit_log_jsonl found"
+    },
+    {
+      "name": "TEST_COVERAGE",
+      "passed": true,
+      "detail": "22 tests (>= 12 required)"
+    },
+    {
+      "name": "MODULE_REGISTERED",
+      "passed": true,
+      "detail": "saga registered in connector/mod.rs"
+    },
+    {
+      "name": "SPEC_EXISTS",
+      "passed": true,
+      "detail": "docs/specs/section_10_15/bd-3h63_contract.md exists"
+    },
+    {
+      "name": "SPEC_EVENT:SAG-001",
+      "passed": true,
+      "detail": "SAG-001 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:SAG-002",
+      "passed": true,
+      "detail": "SAG-002 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:SAG-003",
+      "passed": true,
+      "detail": "SAG-003 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:SAG-004",
+      "passed": true,
+      "detail": "SAG-004 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:SAG-005",
+      "passed": true,
+      "detail": "SAG-005 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:SAG-006",
+      "passed": true,
+      "detail": "SAG-006 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:SAG-007",
+      "passed": true,
+      "detail": "SAG-007 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:SAG-008",
+      "passed": true,
+      "detail": "SAG-008 in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-SAGA-TERMINAL",
+      "passed": true,
+      "detail": "INV-SAGA-TERMINAL in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-SAGA-REVERSE-COMP",
+      "passed": true,
+      "detail": "INV-SAGA-REVERSE-COMP in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-SAGA-IDEMPOTENT-COMP",
+      "passed": true,
+      "detail": "INV-SAGA-IDEMPOTENT-COMP in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-SAGA-DETERMINISTIC",
+      "passed": true,
+      "detail": "INV-SAGA-DETERMINISTIC in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-SAGA-AUDITABLE",
+      "passed": true,
+      "detail": "INV-SAGA-AUDITABLE in spec"
+    },
+    {
+      "name": "SPEC_TYPE:SagaExecutor",
+      "passed": true,
+      "detail": "SagaExecutor in spec"
+    },
+    {
+      "name": "SPEC_TYPE:SagaInstance",
+      "passed": true,
+      "detail": "SagaInstance in spec"
+    },
+    {
+      "name": "SPEC_TYPE:SagaStepDef",
+      "passed": true,
+      "detail": "SagaStepDef in spec"
+    },
+    {
+      "name": "SPEC_TYPE:StepOutcome",
+      "passed": true,
+      "detail": "StepOutcome in spec"
+    },
+    {
+      "name": "SPEC_TYPE:CompensationTrace",
+      "passed": true,
+      "detail": "CompensationTrace in spec"
+    },
+    {
+      "name": "SPEC_TYPE:SagaState",
+      "passed": true,
+      "detail": "SagaState in spec"
+    },
+    {
+      "name": "TEST_FILE_EXISTS",
+      "passed": true,
+      "detail": "tests/test_check_saga_wrappers.py exists"
+    },
+    {
+      "name": "EVIDENCE_EXISTS",
+      "passed": true,
+      "detail": "evidence JSON exists"
+    },
+    {
+      "name": "SUMMARY_EXISTS",
+      "passed": true,
+      "detail": "verification summary exists"
+    }
+  ],
+  "passed": 59,
+  "failed": 0,
+  "total": 59,
+  "verdict": "PASS",
+  "all_passed": true,
+  "status": "pass"
+}

@@ -228,10 +228,20 @@ def scenario_effectiveness(entry: SectionEntry, evidence_result: dict[str, Any])
         try:
             payload = json.loads(check_report.read_text(encoding="utf-8"))
             checks = payload.get("checks", [])
+            # Count checks that demonstrate risk-mitigation effectiveness.
+            # Some beads name these "scenario …", others use domain terms
+            # like "countermeasure", "mitigation", "gate", "control", etc.
+            _EFFECTIVENESS_KEYWORDS = (
+                "scenario", "countermeasure", "mitigation", "gate",
+                "control", "threshold", "replay", "degraded",
+            )
             scenario_passes = sum(
                 1
                 for check in checks
-                if "scenario" in str(check.get("check", check.get("name", ""))).lower()
+                if any(
+                    kw in str(check.get("check", check.get("name", ""))).lower()
+                    for kw in _EFFECTIVENESS_KEYWORDS
+                )
                 and bool(check.get("pass", check.get("passed", False)))
             )
             return {

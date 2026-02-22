@@ -1,0 +1,453 @@
+{
+  "bead_id": "bd-5si",
+  "section": "10.12",
+  "title": "Trust Fabric Convergence Protocol",
+  "checks": [
+    {
+      "name": "spec_exists",
+      "passed": true,
+      "detail": "docs/specs/section_10_12/bd-5si_contract.md exists"
+    },
+    {
+      "name": "spec_event:TFC-001",
+      "passed": true,
+      "detail": "TFC-001 found in spec"
+    },
+    {
+      "name": "spec_event:TFC-002",
+      "passed": true,
+      "detail": "TFC-002 found in spec"
+    },
+    {
+      "name": "spec_event:TFC-003",
+      "passed": true,
+      "detail": "TFC-003 found in spec"
+    },
+    {
+      "name": "spec_event:TFC-004",
+      "passed": true,
+      "detail": "TFC-004 found in spec"
+    },
+    {
+      "name": "spec_event:TFC-005",
+      "passed": true,
+      "detail": "TFC-005 found in spec"
+    },
+    {
+      "name": "spec_event:TFC-006",
+      "passed": true,
+      "detail": "TFC-006 found in spec"
+    },
+    {
+      "name": "spec_event:TFC-007",
+      "passed": true,
+      "detail": "TFC-007 found in spec"
+    },
+    {
+      "name": "spec_event:TFC-008",
+      "passed": true,
+      "detail": "TFC-008 found in spec"
+    },
+    {
+      "name": "spec_invariant:INV-TFC-MONOTONIC",
+      "passed": true,
+      "detail": "INV-TFC-MONOTONIC found in spec"
+    },
+    {
+      "name": "spec_invariant:INV-TFC-REVOKE-FIRST",
+      "passed": true,
+      "detail": "INV-TFC-REVOKE-FIRST found in spec"
+    },
+    {
+      "name": "spec_invariant:INV-TFC-DEGRADED-DENY",
+      "passed": true,
+      "detail": "INV-TFC-DEGRADED-DENY found in spec"
+    },
+    {
+      "name": "spec_invariant:INV-TFC-CONVERGENCE",
+      "passed": true,
+      "detail": "INV-TFC-CONVERGENCE found in spec"
+    },
+    {
+      "name": "spec_error:ERR_TFC_INVALID_CONFIG",
+      "passed": true,
+      "detail": "ERR_TFC_INVALID_CONFIG found in spec"
+    },
+    {
+      "name": "spec_error:ERR_TFC_STALE_STATE",
+      "passed": true,
+      "detail": "ERR_TFC_STALE_STATE found in spec"
+    },
+    {
+      "name": "spec_error:ERR_TFC_DIGEST_MISMATCH",
+      "passed": true,
+      "detail": "ERR_TFC_DIGEST_MISMATCH found in spec"
+    },
+    {
+      "name": "spec_error:ERR_TFC_DEGRADED_REJECT",
+      "passed": true,
+      "detail": "ERR_TFC_DEGRADED_REJECT found in spec"
+    },
+    {
+      "name": "spec_error:ERR_TFC_ESCALATION_TIMEOUT",
+      "passed": true,
+      "detail": "ERR_TFC_ESCALATION_TIMEOUT found in spec"
+    },
+    {
+      "name": "spec_error:ERR_TFC_PARTITION_DETECTED",
+      "passed": true,
+      "detail": "ERR_TFC_PARTITION_DETECTED found in spec"
+    },
+    {
+      "name": "spec_type:TrustFabricConfig",
+      "passed": true,
+      "detail": "TrustFabricConfig referenced in spec"
+    },
+    {
+      "name": "spec_type:TrustStateVector",
+      "passed": true,
+      "detail": "TrustStateVector referenced in spec"
+    },
+    {
+      "name": "spec_type:TrustStateDelta",
+      "passed": true,
+      "detail": "TrustStateDelta referenced in spec"
+    },
+    {
+      "name": "spec_type:TrustFabricNode",
+      "passed": true,
+      "detail": "TrustFabricNode referenced in spec"
+    },
+    {
+      "name": "spec_type:TrustFabricFleet",
+      "passed": true,
+      "detail": "TrustFabricFleet referenced in spec"
+    },
+    {
+      "name": "spec_type:TrustFabricEvent",
+      "passed": true,
+      "detail": "TrustFabricEvent referenced in spec"
+    },
+    {
+      "name": "spec_type:TrustFabricError",
+      "passed": true,
+      "detail": "TrustFabricError referenced in spec"
+    },
+    {
+      "name": "rust_exists",
+      "passed": true,
+      "detail": "crates/franken-node/src/connector/trust_fabric.rs exists"
+    },
+    {
+      "name": "rust_event:TFC-001",
+      "passed": true,
+      "detail": "TFC-001 constant in Rust"
+    },
+    {
+      "name": "rust_event:TFC-002",
+      "passed": true,
+      "detail": "TFC-002 constant in Rust"
+    },
+    {
+      "name": "rust_event:TFC-003",
+      "passed": true,
+      "detail": "TFC-003 constant in Rust"
+    },
+    {
+      "name": "rust_event:TFC-004",
+      "passed": true,
+      "detail": "TFC-004 constant in Rust"
+    },
+    {
+      "name": "rust_event:TFC-005",
+      "passed": true,
+      "detail": "TFC-005 constant in Rust"
+    },
+    {
+      "name": "rust_event:TFC-006",
+      "passed": true,
+      "detail": "TFC-006 constant in Rust"
+    },
+    {
+      "name": "rust_event:TFC-007",
+      "passed": true,
+      "detail": "TFC-007 constant in Rust"
+    },
+    {
+      "name": "rust_event:TFC-008",
+      "passed": true,
+      "detail": "TFC-008 constant in Rust"
+    },
+    {
+      "name": "rust_error:ERR_TFC_INVALID_CONFIG",
+      "passed": true,
+      "detail": "ERR_TFC_INVALID_CONFIG constant in Rust"
+    },
+    {
+      "name": "rust_error:ERR_TFC_STALE_STATE",
+      "passed": true,
+      "detail": "ERR_TFC_STALE_STATE constant in Rust"
+    },
+    {
+      "name": "rust_error:ERR_TFC_DIGEST_MISMATCH",
+      "passed": true,
+      "detail": "ERR_TFC_DIGEST_MISMATCH constant in Rust"
+    },
+    {
+      "name": "rust_error:ERR_TFC_DEGRADED_REJECT",
+      "passed": true,
+      "detail": "ERR_TFC_DEGRADED_REJECT constant in Rust"
+    },
+    {
+      "name": "rust_error:ERR_TFC_ESCALATION_TIMEOUT",
+      "passed": true,
+      "detail": "ERR_TFC_ESCALATION_TIMEOUT constant in Rust"
+    },
+    {
+      "name": "rust_error:ERR_TFC_PARTITION_DETECTED",
+      "passed": true,
+      "detail": "ERR_TFC_PARTITION_DETECTED constant in Rust"
+    },
+    {
+      "name": "rust_invariant:INV-TFC-MONOTONIC",
+      "passed": true,
+      "detail": "INV-TFC-MONOTONIC in Rust"
+    },
+    {
+      "name": "rust_invariant:INV-TFC-REVOKE-FIRST",
+      "passed": true,
+      "detail": "INV-TFC-REVOKE-FIRST in Rust"
+    },
+    {
+      "name": "rust_invariant:INV-TFC-DEGRADED-DENY",
+      "passed": true,
+      "detail": "INV-TFC-DEGRADED-DENY in Rust"
+    },
+    {
+      "name": "rust_invariant:INV-TFC-CONVERGENCE",
+      "passed": true,
+      "detail": "INV-TFC-CONVERGENCE in Rust"
+    },
+    {
+      "name": "rust_type:TrustFabricConfig",
+      "passed": true,
+      "detail": "TrustFabricConfig defined"
+    },
+    {
+      "name": "rust_type:TrustStateVector",
+      "passed": true,
+      "detail": "TrustStateVector defined"
+    },
+    {
+      "name": "rust_type:TrustStateDelta",
+      "passed": true,
+      "detail": "TrustStateDelta defined"
+    },
+    {
+      "name": "rust_type:TrustFabricNode",
+      "passed": true,
+      "detail": "TrustFabricNode defined"
+    },
+    {
+      "name": "rust_type:TrustFabricFleet",
+      "passed": true,
+      "detail": "TrustFabricFleet defined"
+    },
+    {
+      "name": "rust_type:TrustFabricEvent",
+      "passed": true,
+      "detail": "TrustFabricEvent defined"
+    },
+    {
+      "name": "rust_type:TrustFabricError",
+      "passed": true,
+      "detail": "TrustFabricError defined"
+    },
+    {
+      "name": "rust_method:add_trust_card",
+      "passed": true,
+      "detail": "add_trust_card implemented"
+    },
+    {
+      "name": "rust_method:add_extension",
+      "passed": true,
+      "detail": "add_extension implemented"
+    },
+    {
+      "name": "rust_method:apply_revocation",
+      "passed": true,
+      "detail": "apply_revocation implemented"
+    },
+    {
+      "name": "rust_method:receive_gossip",
+      "passed": true,
+      "detail": "receive_gossip implemented"
+    },
+    {
+      "name": "rust_method:check_convergence",
+      "passed": true,
+      "detail": "check_convergence implemented"
+    },
+    {
+      "name": "rust_method:confirm_convergence",
+      "passed": true,
+      "detail": "confirm_convergence implemented"
+    },
+    {
+      "name": "rust_method:anti_entropy_sweep",
+      "passed": true,
+      "detail": "anti_entropy_sweep implemented"
+    },
+    {
+      "name": "rust_method:partition_heal",
+      "passed": true,
+      "detail": "partition_heal implemented"
+    },
+    {
+      "name": "rust_method:convergence_lag",
+      "passed": true,
+      "detail": "convergence_lag implemented"
+    },
+    {
+      "name": "rust_method:gossip_round",
+      "passed": true,
+      "detail": "gossip_round implemented"
+    },
+    {
+      "name": "rust_method:is_converged",
+      "passed": true,
+      "detail": "is_converged implemented"
+    },
+    {
+      "name": "rust_method:delta_from",
+      "passed": true,
+      "detail": "delta_from implemented"
+    },
+    {
+      "name": "rust_method:compute_digest",
+      "passed": true,
+      "detail": "compute_digest implemented"
+    },
+    {
+      "name": "rust_test_count",
+      "passed": true,
+      "detail": "34 tests (>= 30 required)"
+    },
+    {
+      "name": "rust_config_tests",
+      "passed": true,
+      "detail": "config_tests present"
+    },
+    {
+      "name": "rust_state_tests",
+      "passed": true,
+      "detail": "state_tests present"
+    },
+    {
+      "name": "rust_delta_tests",
+      "passed": true,
+      "detail": "delta_tests present"
+    },
+    {
+      "name": "rust_gossip_tests",
+      "passed": true,
+      "detail": "gossip_tests present"
+    },
+    {
+      "name": "rust_degraded_tests",
+      "passed": true,
+      "detail": "degraded_tests present"
+    },
+    {
+      "name": "rust_convergence_tests",
+      "passed": true,
+      "detail": "convergence_tests present"
+    },
+    {
+      "name": "rust_anti_entropy_tests",
+      "passed": true,
+      "detail": "anti_entropy_tests present"
+    },
+    {
+      "name": "rust_partition_tests",
+      "passed": true,
+      "detail": "partition_tests present"
+    },
+    {
+      "name": "rust_error_tests",
+      "passed": true,
+      "detail": "error_tests present"
+    },
+    {
+      "name": "rust_event_tests",
+      "passed": true,
+      "detail": "event_tests present"
+    },
+    {
+      "name": "mod_registered",
+      "passed": true,
+      "detail": "trust_fabric registered in connector/mod.rs"
+    },
+    {
+      "name": "policy_exists",
+      "passed": true,
+      "detail": "docs/policy/trust_fabric_convergence.md exists"
+    },
+    {
+      "name": "policy_topic:degraded_mode",
+      "passed": true,
+      "detail": "'degraded_mode' covered in policy"
+    },
+    {
+      "name": "policy_topic:revocation_first",
+      "passed": true,
+      "detail": "'revocation_first' covered in policy"
+    },
+    {
+      "name": "policy_topic:anti_entropy",
+      "passed": true,
+      "detail": "'anti_entropy' covered in policy"
+    },
+    {
+      "name": "policy_topic:partition_healing",
+      "passed": true,
+      "detail": "'partition_healing' covered in policy"
+    },
+    {
+      "name": "policy_topic:gossip",
+      "passed": true,
+      "detail": "'gossip' covered in policy"
+    },
+    {
+      "name": "policy_topic:convergence_lag",
+      "passed": true,
+      "detail": "'convergence_lag' covered in policy"
+    },
+    {
+      "name": "policy_topic:max_degraded",
+      "passed": true,
+      "detail": "'max_degraded' covered in policy"
+    },
+    {
+      "name": "test_file_exists",
+      "passed": true,
+      "detail": "tests/test_check_trust_fabric.py exists"
+    },
+    {
+      "name": "evidence_exists",
+      "passed": true,
+      "detail": "evidence JSON exists"
+    },
+    {
+      "name": "summary_exists",
+      "passed": true,
+      "detail": "verification summary exists"
+    }
+  ],
+  "passed": 88,
+  "failed": 0,
+  "total": 88,
+  "verdict": "PASS",
+  "all_passed": true,
+  "status": "pass"
+}

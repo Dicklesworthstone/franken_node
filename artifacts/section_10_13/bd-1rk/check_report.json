@@ -1,0 +1,81 @@
+{
+  "gate": "health_gate_verification",
+  "section": "10.13",
+  "verdict": "FAIL",
+  "timestamp": "2026-02-22T08:45:20.576664+00:00",
+  "checks": [
+    {
+      "id": "HEALTH-SPEC",
+      "status": "PASS",
+      "details": {
+        "required": [
+          "liveness",
+          "readiness",
+          "config_valid"
+        ],
+        "optional": [
+          "resource_ok"
+        ]
+      }
+    },
+    {
+      "id": "HEALTH-IMPL",
+      "status": "PASS",
+      "details": {
+        "missing_symbols": []
+      }
+    },
+    {
+      "id": "ROLLOUT-IMPL",
+      "status": "PASS",
+      "details": {
+        "missing_symbols": []
+      }
+    },
+    {
+      "id": "ROLLOUT-PHASES",
+      "status": "PASS",
+      "details": {
+        "missing_phases": []
+      }
+    },
+    {
+      "id": "HEALTH-ERRORS",
+      "status": "PASS",
+      "details": {
+        "missing_codes": []
+      }
+    },
+    {
+      "id": "HEALTH-TESTS",
+      "status": "FAIL",
+      "details": {
+        "summary": "test result: FAILED. 2074 passed; 3 failed; 0 ignored; 0 measured; 4732 filtered out; finished in 0.42s",
+        "returncode": 101
+      }
+    },
+    {
+      "id": "HEALTH-REPLAY",
+      "status": "PASS"
+    },
+    {
+      "id": "HEALTH-SPEC-DOC",
+      "status": "PASS",
+      "details": {
+        "missing_sections": []
+      }
+    },
+    {
+      "id": "HEALTH-INTEGRATION",
+      "status": "PASS",
+      "details": {
+        "missing_tests": []
+      }
+    }
+  ],
+  "summary": {
+    "total_checks": 9,
+    "passing_checks": 8,
+    "failing_checks": 1
+  }
+}
