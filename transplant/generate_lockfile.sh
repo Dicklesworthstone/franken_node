@@ -145,6 +145,11 @@ if [ "$ENTRY_COUNT" -eq 0 ]; then
   exit 2
 fi
 
+if [ "$MISSING_COUNT" -gt 0 ]; then
+  echo "ERROR: Manifest references $MISSING_COUNT missing file(s); refusing partial lockfile generation." >&2
+  exit 2
+fi
+
 {
   printf '# TRANSPLANT LOCKFILE (sha256)\n'
   printf '# source_root: %s\n' "$SOURCE_ROOT"
@@ -155,8 +160,4 @@ fi
   cat "$tmp_entries"
 } > "$OUTPUT"
 
-if [ "$MISSING_COUNT" -gt 0 ]; then
-  echo "Generated lockfile: $OUTPUT ($ENTRY_COUNT entries, $MISSING_COUNT missing paths skipped)"
-else
-  echo "Generated lockfile: $OUTPUT ($ENTRY_COUNT entries)"
-fi
+echo "Generated lockfile: $OUTPUT ($ENTRY_COUNT entries)"

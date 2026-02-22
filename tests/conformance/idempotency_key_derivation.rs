@@ -14,6 +14,24 @@ use idempotency::IdempotencyKeyDeriver;
 use remote::computation_registry::{ComputationEntry, ComputationRegistry, RequiredCapability};
 use serde::Deserialize;
 use std::fs;
+use std::path::Path;
+
+const VECTOR_REL: &str = "artifacts/10.14/idempotency_vectors.json";
+
+fn vector_path() -> std::path::PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut root = manifest.to_path_buf();
+    loop {
+        let candidate = root.join(VECTOR_REL);
+        if candidate.exists() {
+            return candidate;
+        }
+        if !root.pop() {
+            break;
+        }
+    }
+    std::path::PathBuf::from(VECTOR_REL)
+}
 
 #[derive(Debug, Deserialize)]
 struct VectorBundle {
@@ -54,7 +72,7 @@ fn demo_registry() -> ComputationRegistry {
 
 #[test]
 fn published_idempotency_vectors_match_derivation() {
-    let raw = fs::read_to_string("artifacts/10.14/idempotency_vectors.json")
+    let raw = fs::read_to_string(vector_path())
         .expect("idempotency vectors artifact must exist");
     let bundle: VectorBundle = serde_json::from_str(&raw).expect("vector json must parse");
     assert!(

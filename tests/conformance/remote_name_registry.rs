@@ -18,9 +18,27 @@ use computation_registry::{
 };
 use security::remote_cap::{CapabilityGate, CapabilityProvider, RemoteOperation, RemoteScope};
 use std::fs;
+use std::path::Path;
+
+const CATALOG_REL: &str = "artifacts/10.14/remote_registry_catalog.json";
+
+fn catalog_path() -> std::path::PathBuf {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut root = manifest.to_path_buf();
+    loop {
+        let candidate = root.join(CATALOG_REL);
+        if candidate.exists() {
+            return candidate;
+        }
+        if !root.pop() {
+            break;
+        }
+    }
+    std::path::PathBuf::from(CATALOG_REL)
+}
 
 fn load_registry() -> ComputationRegistry {
-    let raw = fs::read_to_string("artifacts/10.14/remote_registry_catalog.json")
+    let raw = fs::read_to_string(catalog_path())
         .expect("registry catalog artifact must exist");
     let catalog: RegistryCatalog = serde_json::from_str(&raw).expect("catalog json must parse");
     ComputationRegistry::from_catalog(catalog, "trace-catalog-load")

@@ -162,6 +162,35 @@ class TransplantLockfileScriptsTests(unittest.TestCase):
         self.assertIn("--generated-utc must be ISO-8601 UTC", result.stderr)
         self.assertFalse(output.exists())
 
+    def test_generate_fails_when_manifest_lists_missing_file(self) -> None:
+        output = self.work / "partial_lockfile.sha256"
+        missing_manifest = self.work / "manifest_with_missing.txt"
+        missing_manifest.write_text(
+            "alpha.txt\nmissing.txt\n",
+            encoding="utf-8",
+        )
+
+        result = subprocess.run(
+            [
+                str(GENERATE_SCRIPT),
+                "--snapshot-dir",
+                str(self.snapshot),
+                "--manifest",
+                str(missing_manifest),
+                "--source-root",
+                "/tmp/upstream",
+                "--output",
+                str(output),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("refusing partial lockfile generation", result.stderr)
+        self.assertFalse(output.exists())
+
     def test_verify_reports_parse_error_for_malformed_entry(self) -> None:
         lockfile = self.work / "lockfile_parse_fail.sha256"
         self._run_generate(lockfile)
