@@ -962,4 +962,103 @@ mod tests {
         assert_eq!(report.summary.violations, 1);
         assert_eq!(report.violations[0].ambient_api, API_STD_PROCESS_COMMAND);
     }
+
+    #[test]
+    fn marks_clean_module_with_amb_001_event() {
+        let (_tmp, config) = setup_repo(
+            &[(
+                "crates/franken-node/src/connector/sample.rs",
+                "pub fn stable_math(a: u64, b: u64) -> u64 {\n    a.saturating_add(b)\n}\n",
+            )],
+            "exceptions = []\n",
+        );
+
+        let report = run_gate(&config, NaiveDate::from_ymd_opt(2026, 2, 20).expect("date"))
+            .expect("gate runs");
+        assert_eq!(report.summary.findings_total, 0);
+        assert_eq!(report.summary.violations, 0);
+        assert_eq!(report.summary.clean_modules, 1);
+        assert_eq!(report.events.len(), 1);
+        assert_eq!(report.events[0].event_code, EVENT_MODULE_CLEAN);
+    }
+
+    #[test]
+    fn detects_tokio_spawn_without_allowlist() {
+        let (_tmp, config) = setup_repo(
+            &[(
+                "crates/franken-node/src/connector/sample.rs",
+                "pub async fn launch() {\n    let _handle = tokio::spawn(async move {\n        42usize\n    });\n}\n",
+            )],
+            "exceptions = []\n",
+        );
+
+        let report = run_gate(&config, NaiveDate::from_ymd_opt(2026, 2, 20).expect("date"))
+            .expect("gate runs");
+        assert_eq!(report.summary.violations, 1);
+        assert_eq!(report.summary.allowlisted, 0);
+        assert_eq!(report.violations[0].ambient_api, API_TOKIO_SPAWN);
+        assert_eq!(report.violations[0].event_code, EVENT_VIOLATION);
+    }
+
+    #[test]
+    fn cx_bound_timeout_call_is_not_flagged() {
+        let (_tmp, config) = setup_repo(
+            &[(
+                "crates/franken-node/src/connector/sample.rs",
+                "pub async fn wait(cx: &Cx) {\n    let _ = tokio::time::timeout(cx.deadline(), async { 1usize }).await;\n}\n",
+            )],
+            "exceptions = []\n",
+        );
+
+        let report = run_gate(&config, NaiveDate::from_ymd_opt(2026, 2, 20).expect("date"))
+            .expect("gate runs");
+        assert_eq!(report.summary.findings_total, 0);
+        assert_eq!(report.summary.violations, 0);
+        assert_eq!(report.summary.clean_modules, 1);
+    }
+
+    #[test]
+    fn timeout_without_cx_context_is_flagged() {
+        let (_tmp, config) = setup_repo(
+            &[(
+                "crates/franken-node/src/connector/sample.rs",
+                "pub async fn wait() {\n    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), async { 1usize }).await;\n}\n",
+            )],
+            "exceptions = []\n",
+        );
+
+        let report = run_gate(&config, NaiveDate::from_ymd_opt(2026, 2, 20).expect("date"))
+            .expect("gate runs");
+        assert_eq!(report.summary.violations, 1);
+        assert_eq!(report.summary.allowlisted, 0);
+        assert_eq!(report.violations[0].ambient_api, API_TOKIO_TIME_TIMEOUT);
+        assert_eq!(report.violations[0].event_code, EVENT_VIOLATION);
+    }
+
+    #[test]
+    fn forged_tokio_spawn_allowlist_signature_is_rejected() {
+        let allowlist = "[[exceptions]]\n\
+             id = \"AAL-004\"\n\
+             module_path = \"crates/franken-node/src/connector/sample.rs\"\n\
+             ambient_api = \"tokio::spawn\"\n\
+             justification = \"legacy scheduler bridge\"\n\
+             signer = \"GateTester\"\n\
+             expires_on = \"2099-12-31\"\n\
+             signature = \"sha256:forged\"\n";
+
+        let (_tmp, config) = setup_repo(
+            &[(
+                "crates/franken-node/src/connector/sample.rs",
+                "pub async fn launch() {\n    let _h = tokio::spawn(async move { 1usize });\n}\n",
+            )],
+            allowlist,
+        );
+
+        let report = run_gate(&config, NaiveDate::from_ymd_opt(2026, 2, 20).expect("date"))
+            .expect("gate runs");
+        assert_eq!(report.summary.violations, 1);
+        assert_eq!(report.summary.invalid_allowlist, 1);
+        assert_eq!(report.violations[0].ambient_api, API_TOKIO_SPAWN);
+        assert_eq!(report.violations[0].event_code, EVENT_ALLOWLIST_INVALID);
+    }
 }

@@ -28,3 +28,4 @@ pub mod migration_validation_cohorts;
 pub mod safe_extension_onboarding;
 pub mod security_ops_case_studies;
 pub mod verifier_toolkit;
+pub mod frontier_demo_gate;

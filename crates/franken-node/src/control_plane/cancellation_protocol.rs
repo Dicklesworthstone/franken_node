@@ -367,26 +367,28 @@ impl CancellationProtocol {
         timestamp_ms: u64,
         trace_id: &str,
     ) -> Result<&CancellationRecord, CancelProtocolError> {
-        // Check if we already have a record for this workflow
-        if let Some(record) = self.records.iter_mut().find(|r| r.workflow_id == workflow_id) {
+        // Check if we already have a record for this workflow (use position to avoid prolonged borrow)
+        let existing_idx = self.records.iter().position(|r| r.workflow_id == workflow_id);
+        if let Some(idx) = existing_idx {
             // INV-CANP-IDEMPOTENT: absorb duplicate requests
-            if record.current_phase == CancelPhase::CancelRequested {
-                return Ok(record);
+            let phase = self.records[idx].current_phase;
+            if phase == CancelPhase::CancelRequested {
+                return Ok(&self.records[idx]);
             }
-            if record.current_phase == CancelPhase::Finalized {
+            if phase == CancelPhase::Finalized {
                 return Err(CancelProtocolError::AlreadyFinal {
                     workflow_id: workflow_id.to_string(),
                 });
             }
-            if record.current_phase != CancelPhase::Idle {
+            if phase != CancelPhase::Idle {
                 return Err(CancelProtocolError::InvalidPhase {
-                    from: record.current_phase,
+                    from: phase,
                     to: CancelPhase::CancelRequested,
                 });
             }
-            record.current_phase = CancelPhase::CancelRequested;
-            record.request_timestamp_ms = Some(timestamp_ms);
-            record.in_flight_count = in_flight_count;
+            self.records[idx].current_phase = CancelPhase::CancelRequested;
+            self.records[idx].request_timestamp_ms = Some(timestamp_ms);
+            self.records[idx].in_flight_count = in_flight_count;
 
             self.audit_log.push(CancelAuditEvent::new(
                 event_codes::CAN_001,
@@ -398,7 +400,7 @@ impl CancellationProtocol {
                 &format!("cancel requested, {} in-flight", in_flight_count),
             ));
 
-            return Ok(record);
+            return Ok(&self.records[idx]);
         }
 
         // Create new record
@@ -433,18 +435,18 @@ impl CancellationProtocol {
         timestamp_ms: u64,
         trace_id: &str,
     ) -> Result<&CancellationRecord, CancelProtocolError> {
-        let record = self.find_record_mut(workflow_id)?;
+        let idx = self.find_record_index(workflow_id)?;
+        let from = self.records[idx].current_phase;
 
-        if !record.current_phase.can_transition_to(&CancelPhase::Draining) {
+        if !from.can_transition_to(&CancelPhase::Draining) {
             return Err(CancelProtocolError::InvalidPhase {
-                from: record.current_phase,
+                from,
                 to: CancelPhase::Draining,
             });
         }
 
-        let from = record.current_phase;
-        record.current_phase = CancelPhase::Draining;
-        record.drain_start_ms = Some(timestamp_ms);
+        self.records[idx].current_phase = CancelPhase::Draining;
+        self.records[idx].drain_start_ms = Some(timestamp_ms);
 
         self.audit_log.push(CancelAuditEvent::new(
             event_codes::CAN_002,
@@ -456,7 +458,7 @@ impl CancellationProtocol {
             "drain started",
         ));
 
-        Ok(self.records.iter().find(|r| r.workflow_id == workflow_id).unwrap())
+        Ok(&self.records[idx])
     }
 
     /// Phase 2b: DRAIN complete — all in-flight operations finished.
@@ -468,23 +470,25 @@ impl CancellationProtocol {
         timestamp_ms: u64,
         trace_id: &str,
     ) -> Result<&CancellationRecord, CancelProtocolError> {
-        let record = self.find_record_mut(workflow_id)?;
+        let idx = self.find_record_index(workflow_id)?;
+        let from = self.records[idx].current_phase;
 
-        if !record.current_phase.can_transition_to(&CancelPhase::DrainComplete) {
+        if !from.can_transition_to(&CancelPhase::DrainComplete) {
             return Err(CancelProtocolError::InvalidPhase {
-                from: record.current_phase,
+                from,
                 to: CancelPhase::DrainComplete,
             });
         }
 
-        let drain_start = record.drain_start_ms.unwrap_or(timestamp_ms);
+        let drain_start = self.records[idx].drain_start_ms.unwrap_or(timestamp_ms);
         let elapsed = timestamp_ms.saturating_sub(drain_start);
-        let timeout = record.drain_config.timeout_ms;
+        let timeout = self.records[idx].drain_config.timeout_ms;
+        let force = self.records[idx].drain_config.force_on_timeout;
 
         // INV-CANP-DRAIN-BOUNDED: check timeout
         if elapsed > timeout {
-            record.drain_timed_out = true;
-            record.drain_complete_ms = Some(timestamp_ms);
+            self.records[idx].drain_timed_out = true;
+            self.records[idx].drain_complete_ms = Some(timestamp_ms);
 
             self.audit_log.push(CancelAuditEvent::new(
                 event_codes::CAN_004,
@@ -496,7 +500,7 @@ impl CancellationProtocol {
                 &format!("drain timeout after {}ms (limit {}ms)", elapsed, timeout),
             ));
 
-            if !record.drain_config.force_on_timeout {
+            if !force {
                 return Err(CancelProtocolError::DrainTimeout {
                     workflow_id: workflow_id.to_string(),
                     elapsed_ms: elapsed,
@@ -504,7 +508,7 @@ impl CancellationProtocol {
                 });
             }
         } else {
-            record.drain_complete_ms = Some(timestamp_ms);
+            self.records[idx].drain_complete_ms = Some(timestamp_ms);
 
             self.audit_log.push(CancelAuditEvent::new(
                 event_codes::CAN_003,
@@ -517,10 +521,10 @@ impl CancellationProtocol {
             ));
         }
 
-        record.current_phase = CancelPhase::DrainComplete;
-        record.in_flight_count = 0;
+        self.records[idx].current_phase = CancelPhase::DrainComplete;
+        self.records[idx].in_flight_count = 0;
 
-        Ok(self.records.iter().find(|r| r.workflow_id == workflow_id).unwrap())
+        Ok(&self.records[idx])
     }
 
     /// Phase 3: FINALIZE — release resources and commit to terminal state.
@@ -533,27 +537,28 @@ impl CancellationProtocol {
         timestamp_ms: u64,
         trace_id: &str,
     ) -> Result<&CancellationRecord, CancelProtocolError> {
-        let record = self.find_record_mut(workflow_id)?;
+        let idx = self.find_record_index(workflow_id)?;
+        let phase = self.records[idx].current_phase;
 
-        if record.current_phase == CancelPhase::Finalized {
+        if phase == CancelPhase::Finalized {
             return Err(CancelProtocolError::AlreadyFinal {
                 workflow_id: workflow_id.to_string(),
             });
         }
 
-        if !record.current_phase.can_transition_to(&CancelPhase::Finalizing) {
+        if !phase.can_transition_to(&CancelPhase::Finalizing) {
             return Err(CancelProtocolError::InvalidPhase {
-                from: record.current_phase,
+                from: phase,
                 to: CancelPhase::Finalizing,
             });
         }
 
-        record.current_phase = CancelPhase::Finalizing;
+        self.records[idx].current_phase = CancelPhase::Finalizing;
 
         // INV-CANP-FINALIZE-CLEAN: check for resource leaks
         if !resources.is_clean() {
             let leaks = resources.leaked_resources();
-            record.resource_leaks = leaks.clone();
+            self.records[idx].resource_leaks = leaks.clone();
 
             self.audit_log.push(CancelAuditEvent::new(
                 event_codes::CAN_006,
@@ -565,8 +570,8 @@ impl CancellationProtocol {
                 &format!("resource leak detected: {}", leaks.join(", ")),
             ));
 
-            record.current_phase = CancelPhase::Finalized;
-            record.finalize_ms = Some(timestamp_ms);
+            self.records[idx].current_phase = CancelPhase::Finalized;
+            self.records[idx].finalize_ms = Some(timestamp_ms);
 
             return Err(CancelProtocolError::ResourceLeak {
                 workflow_id: workflow_id.to_string(),
@@ -574,8 +579,8 @@ impl CancellationProtocol {
             });
         }
 
-        record.current_phase = CancelPhase::Finalized;
-        record.finalize_ms = Some(timestamp_ms);
+        self.records[idx].current_phase = CancelPhase::Finalized;
+        self.records[idx].finalize_ms = Some(timestamp_ms);
 
         self.audit_log.push(CancelAuditEvent::new(
             event_codes::CAN_005,
@@ -587,7 +592,7 @@ impl CancellationProtocol {
             "finalize completed cleanly",
         ));
 
-        Ok(self.records.iter().find(|r| r.workflow_id == workflow_id).unwrap())
+        Ok(&self.records[idx])
     }
 
     /// Get the current phase for a workflow.
@@ -638,10 +643,10 @@ impl CancellationProtocol {
             .count()
     }
 
-    fn find_record_mut(&mut self, workflow_id: &str) -> Result<&mut CancellationRecord, CancelProtocolError> {
+    fn find_record_index(&self, workflow_id: &str) -> Result<usize, CancelProtocolError> {
         self.records
-            .iter_mut()
-            .find(|r| r.workflow_id == workflow_id)
+            .iter()
+            .position(|r| r.workflow_id == workflow_id)
             .ok_or_else(|| CancelProtocolError::InvalidPhase {
                 from: CancelPhase::Idle,
                 to: CancelPhase::CancelRequested,
