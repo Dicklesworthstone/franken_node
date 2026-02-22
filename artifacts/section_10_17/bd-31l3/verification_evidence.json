@@ -1,0 +1,43 @@
+{
+  "bead": "bd-31l3",
+  "summary": "Exploratory deep code audit with targeted bug fixes",
+  "changes": [
+    {
+      "file": "crates/franken-node/src/security/interface_hash.rs",
+      "fixes": [
+        "Accept uppercase hex hashes during verification (case-insensitive compare)",
+        "Reject interface hash metadata/data length mismatch",
+        "Correct stale hashing implementation comment",
+        "Added tests for uppercase hash acceptance and data_len mismatch rejection"
+      ]
+    },
+    {
+      "file": "crates/franken-node/src/runtime/optimization_governor.rs",
+      "fixes": [
+        "Reject proposals targeting knobs not configured in governor state",
+        "Reject proposals with stale old_value baseline",
+        "Avoid silent no-op approval path when knob state is missing",
+        "Added tests for unknown knob and stale old_value rejection"
+      ]
+    }
+  ],
+  "verification": {
+    "rch_cargo_fmt_check": {
+      "exit_code": 1,
+      "note": "Fails due pre-existing formatting drift outside touched files"
+    },
+    "rch_cargo_check_all_targets": {
+      "exit_code": 0,
+      "log_has_error_prefix": false
+    },
+    "rch_cargo_test_interface_hash": {
+      "exit_code": 0,
+      "tests_ok_marker": true
+    },
+    "rch_direct_test_runtime_optimization_governor_stale_old_value": {
+      "exit_code": 0,
+      "tests_ok_marker": true,
+      "note": "Observed from direct rch command output: running 1 test; passed"
+    }
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "bead_id": "bd-3vp7",
+  "status": "pass",
+  "fix": {
+    "file": "crates/franken-node/src/policy/evidence_emission.rs",
+    "summary": "Moved LedgerCapacity import into #[cfg(test)] module to resolve E0433 where make_ledger() uses LedgerCapacity::new(...)"
+  },
+  "commands": [
+    {
+      "cmd": "rch exec -- cargo test -p frankenengine-node interface_hash::tests:: -- --nocapture",
+      "phase": "pre_fix_baseline",
+      "exit_code": 101,
+      "key_error": "E0433 cannot find type `LedgerCapacity` in this scope at crates/franken-node/src/policy/evidence_emission.rs:494"
+    },
+    {
+      "cmd": "rch exec -- cargo check -p frankenengine-node --all-targets",
+      "phase": "post_fix_validation_1",
+      "exit_code": 0,
+      "notes": "Warnings present in unrelated files"
+    },
+    {
+      "cmd": "rch exec -- cargo check -p frankenengine-node --all-targets",
+      "phase": "post_fix_validation_2",
+      "exit_code": 0,
+      "notes": "Re-check after import placement cleanup"
+    }
+  ]
+}

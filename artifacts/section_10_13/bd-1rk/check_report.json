@@ -1,8 +1,8 @@
 {
   "gate": "health_gate_verification",
   "section": "10.13",
-  "verdict": "FAIL",
-  "timestamp": "2026-02-22T08:45:20.576664+00:00",
+  "verdict": "PASS",
+  "timestamp": "2026-02-22T18:18:27.479086+00:00",
   "checks": [
     {
       "id": "HEALTH-SPEC",
@@ -48,10 +48,10 @@
     },
     {
       "id": "HEALTH-TESTS",
-      "status": "FAIL",
+      "status": "PASS",
       "details": {
-        "summary": "test result: FAILED. 2074 passed; 3 failed; 0 ignored; 0 measured; 4732 filtered out; finished in 0.42s",
-        "returncode": 101
+        "summary": "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s",
+        "returncode": 0
       }
     },
     {
@@ -75,7 +75,7 @@
   ],
   "summary": {
     "total_checks": 9,
-    "passing_checks": 8,
-    "failing_checks": 1
+    "passing_checks": 9,
+    "failing_checks": 0
   }
 }

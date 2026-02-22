@@ -1,0 +1,26 @@
+{
+  "bead_id": "bd-2w0v.1",
+  "support_for": "bd-2w0v",
+  "objective": "Independent verification of SessionError::InvalidState compile regression status",
+  "code_changes_applied": false,
+  "search_checks": [
+    {
+      "command": "rg -n \"InvalidState\"",
+      "matches_found": 0
+    }
+  ],
+  "verification": [
+    {
+      "name": "cargo-check-all-targets",
+      "command": "rch exec -- env CARGO_TARGET_DIR=target/rch_bd2hqd1_fix1 cargo check -p frankenengine-node --all-targets",
+      "offloaded_with_rch": true,
+      "exit_code": 0,
+      "log_path": "artifacts/section_10_17/bd-2w0v.1/rch_cargo_check_all_targets.log",
+      "exit_path": "artifacts/section_10_17/bd-2w0v.1/rch_cargo_check_all_targets.exit",
+      "highlights": [
+        "Remote command finished: exit=0 in 120096ms",
+        "Post-command rch warning: no artifacts retrieved (0 files, 0 bytes)"
+      ]
+    }
+  ]
+}

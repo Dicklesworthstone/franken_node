@@ -1,0 +1,32 @@
+{
+  "bead_id": "bd-2hqd.1",
+  "change": {
+    "file": "crates/franken-node/src/policy/decision_engine.rs",
+    "summary": "Import MemoryBudgetGuardrail into test module to resolve missing type usage in test_decide_single_monitor_blocks"
+  },
+  "verification": [
+    {
+      "name": "cargo-check-all-targets",
+      "command": "rch exec -- env CARGO_TARGET_DIR=target/rch_bd2hqd1_fix1 cargo check -p frankenengine-node --all-targets",
+      "offloaded_with_rch": true,
+      "exit_code": 0,
+      "log_path": "artifacts/section_10_17/bd-2hqd.1/rch_cargo_check_all_targets.log",
+      "exit_path": "artifacts/section_10_17/bd-2hqd.1/rch_cargo_check_all_targets.exit",
+      "highlights": [
+        "Finished `dev` profile [unoptimized + debuginfo] target(s) in 4m 27s",
+        "Remote command finished: exit=0 in 269456ms",
+        "Post-build artifact retrieval warning occurred but did not change command exit status"
+      ]
+    },
+    {
+      "name": "targeted-decision-engine-test-attempt",
+      "command": "rch exec -- env CARGO_TARGET_DIR=target/rch_bd2hqd1_fix2 cargo test -p frankenengine-node test_decide_single_monitor_blocks -- --nocapture",
+      "offloaded_with_rch": true,
+      "exit_code": null,
+      "log_path": "artifacts/section_10_17/bd-2hqd.1/rch_cargo_test_decision_engine_single_monitor.log",
+      "exit_path": null,
+      "status": "aborted_local_run",
+      "reason": "non-gating targeted run cancelled after prolonged remote full-target test compilation"
+    }
+  ]
+}

@@ -1,0 +1,9 @@
+# TRANSPLANT LOCKFILE (sha256)
+# source_root: /fixture/source
+# manifest: artifacts/section_bootstrap/bd-2zl.5/fixture_manifest.txt
+# entries: 2
+# generated_utc: 1970-01-01T00:00:00Z
+
+e834f165105c796bdb1a3182e119a7550fee3463df0b60ee456b5dd8269fd742  alpha.txt
+ae5e8ac1a719c880768d1e6a5068334bceb65f7454b48845cbef759e8275b345  nested/beta.txt
+this is not a valid lockfile entry

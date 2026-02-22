@@ -1,0 +1,35 @@
+{
+  "bead": "bd-2zl.5",
+  "scope": "verification-only",
+  "fixture_snapshot": "artifacts/section_bootstrap/bd-2zl.5/fixture_snapshot",
+  "checks": {
+    "default_invocation_environment": {
+      "verify_exit_code": 2,
+      "verify_stderr": "ERROR: Snapshot directory not found: /data/projects/franken_node/transplant/pi_agent_rust",
+      "generate_exit_code": 2,
+      "generate_stderr": "ERROR: Snapshot directory not found: /data/projects/franken_node/transplant/pi_agent_rust"
+    },
+    "fixture_baseline": {
+      "exit_code": 0,
+      "verdict": "PASS"
+    },
+    "determinism": {
+      "cmp_exit_code": 0,
+      "sha256_values": [
+        "35b2a285cccf19b2c6f1b74573b3f38c6af9cee835676ed2f143b6626a67556d",
+        "35b2a285cccf19b2c6f1b74573b3f38c6af9cee835676ed2f143b6626a67556d"
+      ],
+      "identical": true
+    },
+    "parse_failure_classification": {
+      "exit_code": 1,
+      "verdict": "FAIL:PARSE",
+      "parse_errors": 1
+    },
+    "count_failure_classification": {
+      "exit_code": 1,
+      "verdict": "FAIL:COUNT",
+      "count_mismatch": 1
+    }
+  }
+}

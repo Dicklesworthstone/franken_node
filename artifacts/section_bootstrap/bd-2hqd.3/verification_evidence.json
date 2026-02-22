@@ -1,0 +1,20 @@
+{
+  "bead_id": "bd-2hqd.3",
+  "timestamp_utc": "2026-02-22T18:51:01Z",
+  "changes": [
+    "transplant/generate_lockfile.sh fail-closed on missing manifest entries",
+    "tests/test_transplant_lockfile_scripts.py regression for missing manifest entries"
+  ],
+  "validation": [
+    {
+      "command": "python3 -m unittest tests/test_transplant_lockfile_scripts.py -v",
+      "exit_code": 0,
+      "log": "unittest_transplant_lockfile_scripts.log"
+    },
+    {
+      "command": "python3 -m unittest tests/test_check_foundation_e2e_bundle.py -v",
+      "exit_code": 0,
+      "log": "unittest_foundation_e2e_bundle.log"
+    }
+  ]
+}

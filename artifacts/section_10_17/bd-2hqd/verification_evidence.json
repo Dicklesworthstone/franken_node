@@ -1,0 +1,33 @@
+{
+  "bead_id": "bd-2hqd",
+  "timestamp_utc": "2026-02-22T19:08:00Z",
+  "changes": [
+    "crates/franken-node/src/api/mod.rs",
+    "crates/franken-node/src/api/fleet_control_routes.rs",
+    "crates/franken-node/src/api/verifier_routes.rs",
+    "crates/franken-node/src/api/middleware.rs",
+    "crates/franken-node/src/api/fleet_quarantine.rs",
+    "crates/franken-node/src/connector/claim_compiler.rs"
+  ],
+  "validations": [
+    {
+      "command": "rch exec -- cargo check -p frankenengine-node --all-targets",
+      "exit_code": 0,
+      "status": "pass"
+    },
+    {
+      "command": "rch exec -- cargo test -p frankenengine-node handles_unicode -- --nocapture",
+      "exit_code": 0,
+      "status": "pass"
+    },
+    {
+      "command": "rch exec -- env CARGO_TARGET_DIR=target/rch_bd2hqd_claim cargo test -p frankenengine-node publish_batch_summary_truncation_handles_unicode -- --nocapture",
+      "exit_code": 0,
+      "status": "pass"
+    }
+  ],
+  "notes": [
+    "Unicode-safe prefix helper centralized in api/mod.rs.",
+    "Claim compiler summary truncation now uses UTF-8-safe char boundary slicing."
+  ]
+}
