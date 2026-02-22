@@ -105,9 +105,18 @@ pub struct RepairProof {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VerificationResult {
     Valid,
-    InvalidFragmentHash { index: usize, expected: String, actual: String },
-    UnknownAlgorithm { algorithm_id: AlgorithmId },
-    OutputHashMismatch { expected: String, actual: String },
+    InvalidFragmentHash {
+        index: usize,
+        expected: String,
+        actual: String,
+    },
+    UnknownAlgorithm {
+        algorithm_id: AlgorithmId,
+    },
+    OutputHashMismatch {
+        expected: String,
+        actual: String,
+    },
     InvalidSignature,
     MissingProof,
 }
@@ -267,10 +276,8 @@ impl ProofCarryingDecoder {
         }
 
         // Compute fragment hashes
-        let input_fragment_hashes: Vec<String> = fragments
-            .iter()
-            .map(|f| hex::encode(f.hash()))
-            .collect();
+        let input_fragment_hashes: Vec<String> =
+            fragments.iter().map(|f| hex::encode(f.hash())).collect();
 
         // Compute output hash
         let output_hash = {
@@ -499,8 +506,14 @@ mod tests {
 
     #[test]
     fn test_fragment_hash_different_data() {
-        let f1 = Fragment { fragment_id: "f-1".to_string(), data: vec![0x00; 16] };
-        let f2 = Fragment { fragment_id: "f-2".to_string(), data: vec![0xFF; 16] };
+        let f1 = Fragment {
+            fragment_id: "f-1".to_string(),
+            data: vec![0x00; 16],
+        };
+        let f2 = Fragment {
+            fragment_id: "f-2".to_string(),
+            data: vec![0xFF; 16],
+        };
         assert_ne!(f1.hash(), f2.hash());
     }
 
@@ -519,9 +532,15 @@ mod tests {
     fn test_decode_success() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         assert_eq!(result.object_id, "obj-001");
         assert!(!result.output_data.is_empty());
         assert!(result.proof.is_some());
@@ -531,9 +550,15 @@ mod tests {
     fn test_decode_emits_proof() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let proof = result.proof.unwrap();
         assert_eq!(proof.object_id, "obj-001");
         assert_eq!(proof.fragment_count, 3);
@@ -546,7 +571,14 @@ mod tests {
     fn test_decode_audit_event() {
         let mut dec = decoder();
         let frags = test_fragments();
-        dec.decode("obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1").unwrap();
+        dec.decode(
+            "obj-001",
+            &frags,
+            &AlgorithmId::new("simple_concat"),
+            1000,
+            "t-1",
+        )
+        .unwrap();
         assert_eq!(dec.audit_log().len(), 1);
         assert_eq!(dec.audit_log()[0].event_code, REPAIR_PROOF_EMITTED);
     }
@@ -555,18 +587,30 @@ mod tests {
     fn test_decode_unregistered_algorithm() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let err = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("unknown_algo"), 1000, "t-1"
-        ).unwrap_err();
+        let err = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("unknown_algo"),
+                1000,
+                "t-1",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "RECONSTRUCTION_FAILED");
     }
 
     #[test]
     fn test_decode_empty_fragments() {
         let mut dec = decoder();
-        let err = dec.decode(
-            "obj-001", &[], &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap_err();
+        let err = dec
+            .decode(
+                "obj-001",
+                &[],
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap_err();
         assert_eq!(err.code(), "RECONSTRUCTION_FAILED");
     }
 
@@ -574,12 +618,24 @@ mod tests {
     fn test_decode_output_is_concatenation() {
         let mut dec = decoder();
         let frags = vec![
-            Fragment { fragment_id: "a".into(), data: vec![1, 2, 3] },
-            Fragment { fragment_id: "b".into(), data: vec![4, 5, 6] },
+            Fragment {
+                fragment_id: "a".into(),
+                data: vec![1, 2, 3],
+            },
+            Fragment {
+                fragment_id: "b".into(),
+                data: vec![4, 5, 6],
+            },
         ];
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         assert_eq!(result.output_data, vec![1, 2, 3, 4, 5, 6]);
     }
 
@@ -587,9 +643,15 @@ mod tests {
     fn test_decode_proof_id_format() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let proof = result.proof.unwrap();
         assert!(proof.proof_id.starts_with("rp-"));
     }
@@ -598,9 +660,15 @@ mod tests {
     fn test_decode_timestamp_propagated() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 9999, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                9999,
+                "t-1",
+            )
+            .unwrap();
         assert_eq!(result.proof.unwrap().timestamp_epoch_secs, 9999);
     }
 
@@ -608,9 +676,15 @@ mod tests {
     fn test_decode_trace_id_propagated() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "trace-xyz"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "trace-xyz",
+            )
+            .unwrap();
         assert_eq!(result.proof.unwrap().trace_id, "trace-xyz");
     }
 
@@ -660,9 +734,15 @@ mod tests {
     fn test_verify_valid_proof() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let proof = result.proof.unwrap();
 
         let api = verification_api();
@@ -681,13 +761,20 @@ mod tests {
     fn test_verify_tampered_fragment_hash() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let proof = result.proof.unwrap();
 
         let api = verification_api();
-        let mut original_hashes: Vec<String> = frags.iter().map(|f| hex::encode(f.hash())).collect();
+        let mut original_hashes: Vec<String> =
+            frags.iter().map(|f| hex::encode(f.hash())).collect();
         original_hashes[0] = "tampered_hash".to_string();
 
         let v = api.verify(&proof, &original_hashes, &proof.output_hash);
@@ -699,9 +786,15 @@ mod tests {
     fn test_verify_wrong_algorithm() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let mut proof = result.proof.unwrap();
         proof.algorithm_id = AlgorithmId::new("nonexistent_algo");
 
@@ -715,9 +808,15 @@ mod tests {
     fn test_verify_output_hash_mismatch() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let proof = result.proof.unwrap();
 
         let api = verification_api();
@@ -730,9 +829,15 @@ mod tests {
     fn test_verify_invalid_signature() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let mut proof = result.proof.unwrap();
         proof.attestation.signature = "forged".to_string();
 
@@ -754,22 +859,27 @@ mod tests {
     fn test_presence_mandatory_with_proof() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let api = verification_api();
-        let check = api.check_proof_presence(
-            result.proof.as_ref(), ProofMode::Mandatory, "obj-001"
-        );
+        let check =
+            api.check_proof_presence(result.proof.as_ref(), ProofMode::Mandatory, "obj-001");
         assert!(check.is_ok());
     }
 
     #[test]
     fn test_presence_mandatory_without_proof() {
         let api = verification_api();
-        let err = api.check_proof_presence(
-            None, ProofMode::Mandatory, "obj-001"
-        ).unwrap_err();
+        let err = api
+            .check_proof_presence(None, ProofMode::Mandatory, "obj-001")
+            .unwrap_err();
         assert_eq!(err.code(), "PROOF_MISSING_MANDATORY");
     }
 
@@ -784,8 +894,14 @@ mod tests {
 
     #[test]
     fn test_verification_result_event_codes() {
-        assert_eq!(VerificationResult::Valid.event_code(), REPAIR_PROOF_VERIFIED);
-        assert_eq!(VerificationResult::MissingProof.event_code(), REPAIR_PROOF_MISSING);
+        assert_eq!(
+            VerificationResult::Valid.event_code(),
+            REPAIR_PROOF_VERIFIED
+        );
+        assert_eq!(
+            VerificationResult::MissingProof.event_code(),
+            REPAIR_PROOF_MISSING
+        );
         let inv = VerificationResult::InvalidSignature;
         assert_eq!(inv.event_code(), REPAIR_PROOF_INVALID);
     }
@@ -796,9 +912,15 @@ mod tests {
     fn test_repair_proof_roundtrip() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let proof = result.proof.unwrap();
         let json = serde_json::to_string(&proof).unwrap();
         let parsed: RepairProof = serde_json::from_str(&json).unwrap();
@@ -810,9 +932,15 @@ mod tests {
     fn test_decode_result_roundtrip() {
         let mut dec = decoder();
         let frags = test_fragments();
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let json = serde_json::to_string(&result).unwrap();
         let parsed: DecodeResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.object_id, "obj-001");
@@ -860,8 +988,24 @@ mod tests {
         let frags = test_fragments();
         let mut dec1 = decoder();
         let mut dec2 = decoder();
-        let r1 = dec1.decode("obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1").unwrap();
-        let r2 = dec2.decode("obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1").unwrap();
+        let r1 = dec1
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
+        let r2 = dec2
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         let p1 = r1.proof.unwrap();
         let p2 = r2.proof.unwrap();
         assert_eq!(p1.output_hash, p2.output_hash);
@@ -874,8 +1018,22 @@ mod tests {
     fn test_multiple_decodes_audit_log() {
         let mut dec = decoder();
         let frags = test_fragments();
-        dec.decode("obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1").unwrap();
-        dec.decode("obj-002", &frags, &AlgorithmId::new("simple_concat"), 1001, "t-2").unwrap();
+        dec.decode(
+            "obj-001",
+            &frags,
+            &AlgorithmId::new("simple_concat"),
+            1000,
+            "t-1",
+        )
+        .unwrap();
+        dec.decode(
+            "obj-002",
+            &frags,
+            &AlgorithmId::new("simple_concat"),
+            1001,
+            "t-2",
+        )
+        .unwrap();
         assert_eq!(dec.audit_log().len(), 2);
     }
 
@@ -884,10 +1042,19 @@ mod tests {
     #[test]
     fn test_decode_single_fragment() {
         let mut dec = decoder();
-        let frags = vec![Fragment { fragment_id: "single".into(), data: vec![0xFF; 8] }];
-        let result = dec.decode(
-            "obj-001", &frags, &AlgorithmId::new("simple_concat"), 1000, "t-1"
-        ).unwrap();
+        let frags = vec![Fragment {
+            fragment_id: "single".into(),
+            data: vec![0xFF; 8],
+        }];
+        let result = dec
+            .decode(
+                "obj-001",
+                &frags,
+                &AlgorithmId::new("simple_concat"),
+                1000,
+                "t-1",
+            )
+            .unwrap();
         assert_eq!(result.output_data, vec![0xFF; 8]);
         assert_eq!(result.proof.unwrap().fragment_count, 1);
     }

@@ -308,32 +308,17 @@ pub struct DivergenceExplanation {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TimeTravelError {
     /// Replay attempted on an empty trace.
-    EmptyTrace {
-        code: String,
-    },
+    EmptyTrace { code: String },
     /// Replayed decision diverges from captured decision.
-    Divergence {
-        explanation: DivergenceExplanation,
-    },
+    Divergence { explanation: DivergenceExplanation },
     /// Deterministic clock moved backwards.
-    ClockRegression {
-        current: u64,
-        attempted: u64,
-    },
+    ClockRegression { current: u64, attempted: u64 },
     /// Step index out of bounds.
-    StepOutOfBounds {
-        requested: u64,
-        total_frames: u64,
-    },
+    StepOutOfBounds { requested: u64, total_frames: u64 },
     /// Snapshot integrity check failed.
-    SnapshotCorrupt {
-        detail: String,
-    },
+    SnapshotCorrupt { detail: String },
     /// Replay seed does not match capture seed.
-    SeedMismatch {
-        capture_seed: u64,
-        replay_seed: u64,
-    },
+    SeedMismatch { capture_seed: u64, replay_seed: u64 },
 }
 
 impl TimeTravelError {
@@ -490,6 +475,7 @@ impl CaptureSession {
 /// A replay session that steps through a captured workflow snapshot.
 ///
 /// INV-TTR-STEP-NAVIGATION: supports both forward and backward stepping.
+#[derive(Debug)]
 pub struct ReplaySession {
     snapshot: WorkflowSnapshot,
     cursor: u64,
@@ -591,10 +577,7 @@ impl ReplaySession {
     ///
     /// INV-TTR-DIVERGENCE-DETECTED: returns a [`DivergenceExplanation`] on mismatch.
     /// INV-TTR-DETERMINISTIC: identical seed + input => matching digest.
-    pub fn verify_decision(
-        &mut self,
-        replayed: &ControlDecision,
-    ) -> Result<(), TimeTravelError> {
+    pub fn verify_decision(&mut self, replayed: &ControlDecision) -> Result<(), TimeTravelError> {
         let frame = &self.snapshot.frames[self.cursor as usize];
         let expected_digest = frame.decision.digest();
         let actual_digest = replayed.digest();
@@ -675,26 +658,23 @@ impl TimeTravelRuntime {
         snapshot_id: &str,
         seed: u64,
     ) -> Result<ReplaySession, TimeTravelError> {
-        let snapshot = self
-            .snapshots
-            .get(snapshot_id)
-            .ok_or_else(|| TimeTravelError::EmptyTrace {
-                code: error_codes::ERR_TTR_EMPTY_TRACE.to_string(),
-            })?;
+        let snapshot =
+            self.snapshots
+                .get(snapshot_id)
+                .ok_or_else(|| TimeTravelError::EmptyTrace {
+                    code: error_codes::ERR_TTR_EMPTY_TRACE.to_string(),
+                })?;
         ReplaySession::start(snapshot.clone(), seed)
     }
 
     /// Serialize a snapshot to JSON bytes (event TTR_007).
-    pub fn serialize_snapshot(
-        &self,
-        snapshot_id: &str,
-    ) -> Result<Vec<u8>, TimeTravelError> {
-        let snap = self
-            .snapshots
-            .get(snapshot_id)
-            .ok_or_else(|| TimeTravelError::SnapshotCorrupt {
-                detail: format!("snapshot '{snapshot_id}' not found"),
-            })?;
+    pub fn serialize_snapshot(&self, snapshot_id: &str) -> Result<Vec<u8>, TimeTravelError> {
+        let snap =
+            self.snapshots
+                .get(snapshot_id)
+                .ok_or_else(|| TimeTravelError::SnapshotCorrupt {
+                    detail: format!("snapshot '{snapshot_id}' not found"),
+                })?;
         snap.to_json_bytes()
     }
 
@@ -770,7 +750,9 @@ mod tests {
         let mut session = CaptureSession::start("snap-test", seed);
         for (i, input) in inputs.iter().enumerate() {
             let decision = deterministic_decision(seed, i as u64 + 1, input);
-            session.capture_frame(i as u64 + 1, input, decision).unwrap();
+            session
+                .capture_frame(i as u64 + 1, input, decision)
+                .unwrap();
         }
         session.finalize()
     }
@@ -1034,8 +1016,12 @@ mod tests {
 
         // Every frame must have identical decision digests
         for (f1, f2) in snap1.frames.iter().zip(snap2.frames.iter()) {
-            assert_eq!(f1.decision.digest(), f2.decision.digest(),
-                       "frame {} diverged", f1.frame_index);
+            assert_eq!(
+                f1.decision.digest(),
+                f2.decision.digest(),
+                "frame {} diverged",
+                f1.frame_index
+            );
         }
 
         // Replay against captured snapshot must verify all frames

@@ -70,9 +70,7 @@ pub mod invariants {
 // ---------------------------------------------------------------------------
 // IsolationRailLevel: ordered from least to most strict
 // ---------------------------------------------------------------------------
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IsolationRailLevel {
     /// Default shared-memory rail -- lowest isolation.
@@ -174,10 +172,7 @@ impl ElevationPolicy {
         if !current_level.can_elevate_to(target_level) {
             if target_level == current_level {
                 return Err(MeshError::ElevationDenied {
-                    reason: format!(
-                        "already at level {}",
-                        current_level.as_str()
-                    ),
+                    reason: format!("already at level {}", current_level.as_str()),
                 });
             }
             return Err(MeshError::DemotionForbidden {
@@ -226,14 +221,33 @@ pub struct MeshEvent {
 // ---------------------------------------------------------------------------
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MeshError {
-    UnknownRail { rail_id: String },
-    UnknownWorkload { workload_id: String },
-    ElevationDenied { reason: String },
-    DemotionForbidden { current: IsolationRailLevel, requested: IsolationRailLevel },
-    LatencyExceeded { budget_us: u64, actual_us: u64 },
-    RailAtCapacity { rail_id: String, capacity: usize },
-    DuplicateWorkload { workload_id: String },
-    InvalidTopology { detail: String },
+    UnknownRail {
+        rail_id: String,
+    },
+    UnknownWorkload {
+        workload_id: String,
+    },
+    ElevationDenied {
+        reason: String,
+    },
+    DemotionForbidden {
+        current: IsolationRailLevel,
+        requested: IsolationRailLevel,
+    },
+    LatencyExceeded {
+        budget_us: u64,
+        actual_us: u64,
+    },
+    RailAtCapacity {
+        rail_id: String,
+        capacity: usize,
+    },
+    DuplicateWorkload {
+        workload_id: String,
+    },
+    InvalidTopology {
+        detail: String,
+    },
 }
 
 impl MeshError {
@@ -284,11 +298,7 @@ impl fmt::Display for MeshError {
                 )
             }
             Self::RailAtCapacity { rail_id, capacity } => {
-                write!(
-                    f,
-                    "{}: rail_id={rail_id} capacity={capacity}",
-                    self.code()
-                )
+                write!(f, "{}: rail_id={rail_id} capacity={capacity}", self.code())
             }
             Self::DuplicateWorkload { workload_id } => {
                 write!(f, "{}: workload_id={workload_id}", self.code())
@@ -373,10 +383,7 @@ impl MeshTopology {
         for (id, rail) in &self.rails {
             if id != &rail.rail_id {
                 return Err(MeshError::InvalidTopology {
-                    detail: format!(
-                        "rail_id mismatch: key={id} value={}",
-                        rail.rail_id
-                    ),
+                    detail: format!("rail_id mismatch: key={id} value={}", rail.rail_id),
                 });
             }
             if rail.capacity == 0 {
@@ -457,11 +464,13 @@ impl IsolationMesh {
         now_ms: u64,
     ) -> Result<WorkloadPlacement, MeshError> {
         // Fail-closed: unknown rail
-        let rail = self.topology.rails.get(rail_id).ok_or_else(|| {
-            MeshError::UnknownRail {
+        let rail = self
+            .topology
+            .rails
+            .get(rail_id)
+            .ok_or_else(|| MeshError::UnknownRail {
                 rail_id: rail_id.to_string(),
-            }
-        })?;
+            })?;
 
         // Duplicate workload
         if self.workloads.contains_key(workload_id) {
@@ -471,11 +480,12 @@ impl IsolationMesh {
         }
 
         // Rail capacity
-        let state = self.rail_states.get(rail_id).ok_or_else(|| {
-            MeshError::UnknownRail {
+        let state = self
+            .rail_states
+            .get(rail_id)
+            .ok_or_else(|| MeshError::UnknownRail {
                 rail_id: rail_id.to_string(),
-            }
-        })?;
+            })?;
         if state.active_count >= rail.capacity {
             return Err(MeshError::RailAtCapacity {
                 rail_id: rail_id.to_string(),
@@ -524,22 +534,23 @@ impl IsolationMesh {
     ) -> Result<WorkloadPlacement, MeshError> {
         // Fail-closed: unknown target rail
         let target_rail =
-            self.topology.rails.get(target_rail_id).ok_or_else(|| {
-                MeshError::UnknownRail {
+            self.topology
+                .rails
+                .get(target_rail_id)
+                .ok_or_else(|| MeshError::UnknownRail {
                     rail_id: target_rail_id.to_string(),
-                }
-            })?;
+                })?;
         let target_level = target_rail.level;
         let target_latency = target_rail.latency_overhead_us;
         let target_capacity = target_rail.capacity;
 
         // Fail-closed: unknown workload
         let placement =
-            self.workloads.get(workload_id).ok_or_else(|| {
-                MeshError::UnknownWorkload {
+            self.workloads
+                .get(workload_id)
+                .ok_or_else(|| MeshError::UnknownWorkload {
                     workload_id: workload_id.to_string(),
-                }
-            })?;
+                })?;
         let current_level = placement.current_level;
         let old_rail_id = placement.current_rail_id.clone();
 
@@ -564,11 +575,11 @@ impl IsolationMesh {
         }
 
         // Policy check
-        if let Err(e) = placement.policy.permits_elevation(
-            &current_level,
-            &target_level,
-            target_latency,
-        ) {
+        if let Err(e) =
+            placement
+                .policy
+                .permits_elevation(&current_level, &target_level, target_latency)
+        {
             let event_code = match &e {
                 MeshError::LatencyExceeded { .. } => event_codes::MESH_004,
                 _ => event_codes::MESH_003,
@@ -584,11 +595,12 @@ impl IsolationMesh {
         }
 
         // Target rail capacity
-        let target_state = self.rail_states.get(target_rail_id).ok_or_else(|| {
-            MeshError::UnknownRail {
-                rail_id: target_rail_id.to_string(),
-            }
-        })?;
+        let target_state =
+            self.rail_states
+                .get(target_rail_id)
+                .ok_or_else(|| MeshError::UnknownRail {
+                    rail_id: target_rail_id.to_string(),
+                })?;
         if target_state.active_count >= target_capacity {
             return Err(MeshError::RailAtCapacity {
                 rail_id: target_rail_id.to_string(),
@@ -612,19 +624,22 @@ impl IsolationMesh {
         new_state.total_elevated_in = new_state.total_elevated_in.saturating_add(1);
 
         // Update workload placement -- INV-MESH-POLICY-CONTINUITY: policy preserved
-        let placement = self
-            .workloads
-            .get_mut(workload_id)
-            .expect("workload must exist");
-        placement.elevation_history.push(ElevationRecord {
-            from_rail_id: old_rail_id,
-            from_level: current_level,
-            to_rail_id: target_rail_id.to_string(),
-            to_level: target_level,
-            at_ms: now_ms,
-        });
-        placement.current_rail_id = target_rail_id.to_string();
-        placement.current_level = target_level;
+        let updated_placement = {
+            let placement = self
+                .workloads
+                .get_mut(workload_id)
+                .expect("workload must exist");
+            placement.elevation_history.push(ElevationRecord {
+                from_rail_id: old_rail_id,
+                from_level: current_level,
+                to_rail_id: target_rail_id.to_string(),
+                to_level: target_level,
+                at_ms: now_ms,
+            });
+            placement.current_rail_id = target_rail_id.to_string();
+            placement.current_level = target_level;
+            placement.clone()
+        };
 
         self.push_event(
             event_codes::MESH_002,
@@ -638,7 +653,7 @@ impl IsolationMesh {
             ),
         );
 
-        Ok(placement.clone())
+        Ok(updated_placement)
     }
 
     // -----------------------------------------------------------------------
@@ -649,11 +664,12 @@ impl IsolationMesh {
         workload_id: &str,
         now_ms: u64,
     ) -> Result<WorkloadPlacement, MeshError> {
-        let placement = self.workloads.remove(workload_id).ok_or_else(|| {
-            MeshError::UnknownWorkload {
-                workload_id: workload_id.to_string(),
-            }
-        })?;
+        let placement =
+            self.workloads
+                .remove(workload_id)
+                .ok_or_else(|| MeshError::UnknownWorkload {
+                    workload_id: workload_id.to_string(),
+                })?;
 
         if let Some(rs) = self.rail_states.get_mut(&placement.current_rail_id) {
             rs.active_count = rs.active_count.saturating_sub(1);
@@ -939,9 +955,7 @@ mod tests {
         mesh.place_workload("w1", "shared-1", permissive_policy(), 1)
             .expect("place");
         mesh.elevate_workload("w1", "proc-1", 2).expect("step 1");
-        let p = mesh
-            .elevate_workload("w1", "sandbox-1", 3)
-            .expect("step 2");
+        let p = mesh.elevate_workload("w1", "sandbox-1", 3).expect("step 2");
         assert_eq!(p.elevation_history.len(), 2);
         assert_eq!(p.current_level, IsolationRailLevel::SandboxIsolated);
     }
@@ -1037,9 +1051,7 @@ mod tests {
         mesh.place_workload("w2", "shared-1", permissive_policy(), 2)
             .expect("place w2");
         mesh.elevate_workload("w1", "hw-1", 3).expect("w1 to hw");
-        let err = mesh
-            .elevate_workload("w2", "hw-1", 4)
-            .expect_err("hw full");
+        let err = mesh.elevate_workload("w2", "hw-1", 4).expect_err("hw full");
         assert_eq!(err.code(), error_codes::ERR_MESH_RAIL_AT_CAPACITY);
     }
 
@@ -1111,7 +1123,11 @@ mod tests {
         mesh.elevate_workload("w1", "proc-1", 2).expect("elevate");
         mesh.remove_workload("w1", 3).expect("remove");
 
-        let codes: Vec<&str> = mesh.events().iter().map(|e| e.event_code.as_str()).collect();
+        let codes: Vec<&str> = mesh
+            .events()
+            .iter()
+            .map(|e| e.event_code.as_str())
+            .collect();
         assert!(codes.contains(&event_codes::MESH_001));
         assert!(codes.contains(&event_codes::MESH_002));
         assert!(codes.contains(&event_codes::MESH_005));

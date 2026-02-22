@@ -107,7 +107,8 @@ pub mod error_codes {
     /// ERR_GOVERNOR_BENEFIT_BELOW_THRESHOLD: proposed change has no net benefit.
     pub const ERR_GOVERNOR_BENEFIT_BELOW_THRESHOLD: &str = "ERR_GOVERNOR_BENEFIT_BELOW_THRESHOLD";
     /// ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION: attempt to adjust engine-core internals.
-    pub const ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION: &str = "ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION";
+    pub const ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION: &str =
+        "ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION";
     /// ERR_GOVERNOR_REVERT_FAILED: auto-revert of an applied policy did not succeed.
     pub const ERR_GOVERNOR_REVERT_FAILED: &str = "ERR_GOVERNOR_REVERT_FAILED";
     /// ERR_GOVERNOR_KNOB_READONLY: target knob is read-only or locked.
@@ -848,10 +849,10 @@ mod tests {
             old_value: 128,
             new_value: 512,
             predicted: PredictedMetrics {
-                latency_ms: 800,       // exceeds 500ms cap
-                throughput_rps: 50,    // below 100 floor
-                error_rate_pct: 2.0,   // exceeds 1.0%
-                memory_mb: 5000,       // exceeds 4096MB
+                latency_ms: 800,     // exceeds 500ms cap
+                throughput_rps: 50,  // below 100 floor
+                error_rate_pct: 2.0, // exceeds 1.0%
+                memory_mb: 5000,     // exceeds 4096MB
             },
             rationale: "Aggressive batch size".to_string(),
             trace_id: format!("trace-{id}"),
@@ -1133,14 +1134,20 @@ mod tests {
         let mut gov = OptimizationGovernor::with_defaults();
         gov.submit(unsafe_proposal("p1"));
         let rec = &gov.decision_log()[0];
-        assert!(rec.evidence.is_some(), "rejected proposal must have evidence");
+        assert!(
+            rec.evidence.is_some(),
+            "rejected proposal must have evidence"
+        );
     }
 
     // --- RuntimeKnob display ---
 
     #[test]
     fn test_runtime_knob_display() {
-        assert_eq!(RuntimeKnob::ConcurrencyLimit.to_string(), "concurrency_limit");
+        assert_eq!(
+            RuntimeKnob::ConcurrencyLimit.to_string(),
+            "concurrency_limit"
+        );
         assert_eq!(RuntimeKnob::BatchSize.to_string(), "batch_size");
         assert_eq!(RuntimeKnob::CacheCapacity.to_string(), "cache_capacity");
         assert_eq!(RuntimeKnob::DrainTimeoutMs.to_string(), "drain_timeout_ms");

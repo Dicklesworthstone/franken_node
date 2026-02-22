@@ -351,10 +351,14 @@ impl AdversaryGraph {
         trace_id: &str,
     ) -> Result<(), String> {
         if !self.nodes.contains_key(&from) {
-            return Err(format!("{ERR_ADV_DANGLING_EDGE}: source node {from} not found"));
+            return Err(format!(
+                "{ERR_ADV_DANGLING_EDGE}: source node {from} not found"
+            ));
         }
         if !self.nodes.contains_key(&to) {
-            return Err(format!("{ERR_ADV_DANGLING_EDGE}: target node {to} not found"));
+            return Err(format!(
+                "{ERR_ADV_DANGLING_EDGE}: target node {to} not found"
+            ));
         }
         self.edges.push(TrustEdge {
             from: from.clone(),
@@ -547,15 +551,19 @@ mod tests {
     #[test]
     fn duplicate_node_rejected() {
         let mut g = make_graph();
-        g.add_node("n1".into(), EntityType::Publisher, 0, "t").unwrap();
-        let err = g.add_node("n1".into(), EntityType::Publisher, 1, "t").unwrap_err();
+        g.add_node("n1".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
+        let err = g
+            .add_node("n1".into(), EntityType::Publisher, 1, "t")
+            .unwrap_err();
         assert!(err.contains(ERR_ADV_DUPLICATE_NODE));
     }
 
     #[test]
     fn dangling_edge_rejected() {
         let mut g = make_graph();
-        g.add_node("n1".into(), EntityType::Publisher, 0, "t").unwrap();
+        g.add_node("n1".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
         let err = g
             .add_edge("n1".into(), "n2".into(), "trusts".into(), 1, "t")
             .unwrap_err();
@@ -565,7 +573,8 @@ mod tests {
     #[test]
     fn invalid_evidence_weight_rejected() {
         let mut g = make_graph();
-        g.add_node("n1".into(), EntityType::Extension, 0, "t").unwrap();
+        g.add_node("n1".into(), EntityType::Extension, 0, "t")
+            .unwrap();
         // NaN is not in [0, 1]
         let ev = EvidenceEvent {
             trace_id: "t".into(),
@@ -581,7 +590,8 @@ mod tests {
     #[test]
     fn evidence_count_is_monotonic() {
         let mut g = make_graph();
-        g.add_node("n1".into(), EntityType::Dependency, 0, "t").unwrap();
+        g.add_node("n1".into(), EntityType::Dependency, 0, "t")
+            .unwrap();
         assert_eq!(g.get_node("n1").unwrap().evidence_count, 0);
         let ev1 = EvidenceEvent {
             trace_id: "t".into(),
@@ -614,7 +624,8 @@ mod tests {
     #[test]
     fn threshold_crossing_emits_log_entry() {
         let mut g = make_graph();
-        g.add_node("n1".into(), EntityType::Publisher, 0, "t").unwrap();
+        g.add_node("n1".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
         // Pump posterior above throttle threshold (0.3) with many adverse events
         for i in 1..=20 {
             let ev = EvidenceEvent {
@@ -631,14 +642,19 @@ mod tests {
             .iter()
             .filter(|e| e.event_code == ADV_004_THRESHOLD_CROSSED)
             .collect();
-        assert!(!threshold_events.is_empty(), "expected threshold crossing events");
+        assert!(
+            !threshold_events.is_empty(),
+            "expected threshold crossing events"
+        );
     }
 
     #[test]
     fn state_snapshot_is_serializable() {
         let mut g = make_graph();
-        g.add_node("n1".into(), EntityType::Publisher, 0, "t").unwrap();
-        g.add_node("n2".into(), EntityType::Extension, 0, "t").unwrap();
+        g.add_node("n1".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
+        g.add_node("n2".into(), EntityType::Extension, 0, "t")
+            .unwrap();
         g.add_edge("n1".into(), "n2".into(), "publishes".into(), 0, "t")
             .unwrap();
         let snap = g.state_snapshot();
@@ -650,9 +666,12 @@ mod tests {
     #[test]
     fn edge_addition_logged() {
         let mut g = make_graph();
-        g.add_node("a".into(), EntityType::Publisher, 0, "t").unwrap();
-        g.add_node("b".into(), EntityType::Extension, 0, "t").unwrap();
-        g.add_edge("a".into(), "b".into(), "trusts".into(), 1, "t").unwrap();
+        g.add_node("a".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
+        g.add_node("b".into(), EntityType::Extension, 0, "t")
+            .unwrap();
+        g.add_edge("a".into(), "b".into(), "trusts".into(), 1, "t")
+            .unwrap();
         let edge_logs: Vec<_> = g
             .log_entries()
             .iter()
@@ -664,16 +683,15 @@ mod tests {
     #[test]
     fn replay_evidence_populates_snapshot() {
         let mut g = make_graph();
-        g.add_node("x".into(), EntityType::Maintainer, 0, "t").unwrap();
-        let events = vec![
-            EvidenceEvent {
-                trace_id: "t".into(),
-                entity_id: "x".into(),
-                adverse_weight: 0.5,
-                source: "s".into(),
-                timestamp: 1,
-            },
-        ];
+        g.add_node("x".into(), EntityType::Maintainer, 0, "t")
+            .unwrap();
+        let events = vec![EvidenceEvent {
+            trace_id: "t".into(),
+            entity_id: "x".into(),
+            adverse_weight: 0.5,
+            source: "s".into(),
+            timestamp: 1,
+        }];
         let snap = g.replay_evidence(&events, "replay").unwrap();
         assert!(snap.contains_key("x"));
         let replay_logs: Vec<_> = g

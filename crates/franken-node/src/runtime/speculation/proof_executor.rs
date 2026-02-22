@@ -197,8 +197,7 @@ impl ProofExecutor {
             };
         }
 
-        if !self.config.accepted_signers.contains(&receipt.signer_id)
-            || !verify_signature(receipt)
+        if !self.config.accepted_signers.contains(&receipt.signer_id) || !verify_signature(receipt)
         {
             return ActivationDecision::Degraded {
                 reason: GuardFailureReason::SignatureInvalid,
@@ -266,10 +265,7 @@ fn verify_signature(receipt: &ProofReceipt) -> bool {
     let expected = digest_bytes(
         format!(
             "{}|{}|{}|{}",
-            receipt.receipt_id,
-            receipt.proof_hash,
-            receipt.signer_id,
-            receipt.expires_epoch_ms
+            receipt.receipt_id, receipt.proof_hash, receipt.signer_id, receipt.expires_epoch_ms
         )
         .as_bytes(),
     );
@@ -510,6 +506,9 @@ mod tests {
             true,
             b"safe-baseline",
         );
-        assert_eq!(out.output_digest, deterministic_baseline_digest(b"safe-baseline"));
+        assert_eq!(
+            out.output_digest,
+            deterministic_baseline_digest(b"safe-baseline")
+        );
     }
 }

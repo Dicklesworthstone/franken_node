@@ -320,10 +320,7 @@ impl DeterministicSeedDeriver {
                     new_seed_hex: seed.to_hex(),
                     old_version: config.version.saturating_sub(1),
                     new_version: config.version,
-                    bump_reason: format!(
-                        "Config hash changed for domain '{}'",
-                        domain.label()
-                    ),
+                    bump_reason: format!("Config hash changed for domain '{}'", domain.label()),
                     timestamp: chrono::Utc::now().to_rfc3339(),
                 };
 
@@ -373,7 +370,11 @@ impl Default for DeterministicSeedDeriver {
 
 /// Same derivation as `derive_seed` but takes a raw config hash instead of
 /// a ScheduleConfig. Used internally for version bump old-seed computation.
-fn derive_seed_raw(domain: &DomainTag, content_hash: &ContentHash, config_hash: &[u8; 32]) -> [u8; 32] {
+fn derive_seed_raw(
+    domain: &DomainTag,
+    content_hash: &ContentHash,
+    config_hash: &[u8; 32],
+) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain.prefix().as_bytes());
     hasher.update(&[0x00]);
@@ -466,18 +467,29 @@ mod tests {
         let cfg = test_config_v1();
         let s1 = derive_seed(&DomainTag::Encoding, &ch, &cfg);
         let s2 = derive_seed(&DomainTag::Encoding, &ch, &cfg);
-        assert_eq!(s1.bytes, s2.bytes, "INV-SEED-STABLE: identical inputs → identical seeds");
+        assert_eq!(
+            s1.bytes, s2.bytes,
+            "INV-SEED-STABLE: identical inputs → identical seeds"
+        );
     }
 
     #[test]
     fn test_derive_seed_is_32_bytes() {
-        let s = derive_seed(&DomainTag::Encoding, &test_content_hash(), &test_config_v1());
+        let s = derive_seed(
+            &DomainTag::Encoding,
+            &test_content_hash(),
+            &test_config_v1(),
+        );
         assert_eq!(s.bytes.len(), 32);
     }
 
     #[test]
     fn test_derive_seed_nonzero() {
-        let s = derive_seed(&DomainTag::Encoding, &test_content_hash(), &test_config_v1());
+        let s = derive_seed(
+            &DomainTag::Encoding,
+            &test_content_hash(),
+            &test_config_v1(),
+        );
         assert_ne!(s.bytes, [0u8; 32], "seed should not be all zeros");
     }
 
@@ -489,7 +501,10 @@ mod tests {
         let cfg = test_config_v1();
         let s_enc = derive_seed(&DomainTag::Encoding, &ch, &cfg);
         let s_rep = derive_seed(&DomainTag::Repair, &ch, &cfg);
-        assert_ne!(s_enc.bytes, s_rep.bytes, "INV-SEED-DOMAIN-SEP: different domains → different seeds");
+        assert_ne!(
+            s_enc.bytes, s_rep.bytes,
+            "INV-SEED-DOMAIN-SEP: different domains → different seeds"
+        );
     }
 
     #[test]
@@ -558,7 +573,10 @@ mod tests {
         h2[31] = 1; // single bit flip
         let s1 = derive_seed(&DomainTag::Encoding, &ContentHash(h1), &cfg);
         let s2 = derive_seed(&DomainTag::Encoding, &ContentHash(h2), &cfg);
-        assert_ne!(s1.bytes, s2.bytes, "single-bit change in content must change seed");
+        assert_ne!(
+            s1.bytes, s2.bytes,
+            "single-bit change in content must change seed"
+        );
     }
 
     // -- Config sensitivity -------------------------------------------------
@@ -610,7 +628,10 @@ mod tests {
     fn test_empty_content_hash() {
         let ch = ContentHash([0u8; 32]);
         let s = derive_seed(&DomainTag::Encoding, &ch, &test_config_v1());
-        assert_ne!(s.bytes, [0u8; 32], "zero content hash still produces non-zero seed");
+        assert_ne!(
+            s.bytes, [0u8; 32],
+            "zero content hash still produces non-zero seed"
+        );
     }
 
     #[test]
@@ -659,13 +680,21 @@ mod tests {
 
     #[test]
     fn test_seed_to_hex_length() {
-        let s = derive_seed(&DomainTag::Encoding, &test_content_hash(), &test_config_v1());
+        let s = derive_seed(
+            &DomainTag::Encoding,
+            &test_content_hash(),
+            &test_config_v1(),
+        );
         assert_eq!(s.to_hex().len(), 64);
     }
 
     #[test]
     fn test_seed_prefix_hex() {
-        let s = derive_seed(&DomainTag::Encoding, &test_content_hash(), &test_config_v1());
+        let s = derive_seed(
+            &DomainTag::Encoding,
+            &test_content_hash(),
+            &test_config_v1(),
+        );
         assert_eq!(s.prefix_hex().len(), 8);
     }
 
@@ -686,7 +715,11 @@ mod tests {
 
     #[test]
     fn test_seed_serialization_roundtrip() {
-        let s = derive_seed(&DomainTag::Encoding, &test_content_hash(), &test_config_v1());
+        let s = derive_seed(
+            &DomainTag::Encoding,
+            &test_content_hash(),
+            &test_config_v1(),
+        );
         let json = serde_json::to_string(&s).unwrap();
         let s2: DeterministicSeed = serde_json::from_str(&json).unwrap();
         assert_eq!(s.bytes, s2.bytes);
@@ -742,7 +775,11 @@ mod tests {
     #[test]
     fn test_deriver_first_call_no_bump() {
         let mut d = DeterministicSeedDeriver::new();
-        let (seed, bump) = d.derive_seed(&DomainTag::Encoding, &test_content_hash(), &test_config_v1());
+        let (seed, bump) = d.derive_seed(
+            &DomainTag::Encoding,
+            &test_content_hash(),
+            &test_config_v1(),
+        );
         assert!(bump.is_none(), "first call should not produce a bump");
         assert_eq!(seed.domain, DomainTag::Encoding);
         assert_eq!(d.tracked_domains(), 1);
@@ -854,7 +891,9 @@ mod tests {
     #[test]
     fn test_golden_vector_encoding_seq_v2() {
         let mut h = [0u8; 32];
-        for (i, b) in h.iter_mut().enumerate() { *b = i as u8; }
+        for (i, b) in h.iter_mut().enumerate() {
+            *b = i as u8;
+        }
         let ch = ContentHash(h);
         let cfg = ScheduleConfig::new(2)
             .with_param("chunk_size", "131072")

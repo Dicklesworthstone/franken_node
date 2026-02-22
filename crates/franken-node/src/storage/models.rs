@@ -1179,11 +1179,7 @@ mod tests {
     #[test]
     fn all_models_have_nonempty_columns() {
         for m in all_model_metadata() {
-            assert!(
-                !m.columns.is_empty(),
-                "model {} has no columns",
-                m.name
-            );
+            assert!(!m.columns.is_empty(), "model {} has no columns", m.name);
         }
     }
 
@@ -1281,15 +1277,8 @@ mod tests {
     fn owner_module_uniqueness_per_model() {
         let meta = all_model_metadata();
         for m in &meta {
-            let count = meta
-                .iter()
-                .filter(|other| other.name == m.name)
-                .count();
-            assert_eq!(
-                count, 1,
-                "model {} appears {} times",
-                m.name, count
-            );
+            let count = meta.iter().filter(|other| other.name == m.name).count();
+            assert_eq!(count, 1, "model {} appears {} times", m.name, count);
         }
     }
 }

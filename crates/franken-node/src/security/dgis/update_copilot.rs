@@ -114,7 +114,8 @@ impl RiskDelta {
         );
         per_metric.insert(
             "transitive_dependency_count".to_string(),
-            f64::from(post.transitive_dependency_count) - f64::from(pre.transitive_dependency_count),
+            f64::from(post.transitive_dependency_count)
+                - f64::from(pre.transitive_dependency_count),
         );
 
         Self {
@@ -579,10 +580,7 @@ impl UpdateCopilot {
             });
         }
 
-        let mut monitoring = vec![
-            "error_rate_5m".to_string(),
-            "latency_p99".to_string(),
-        ];
+        let mut monitoring = vec!["error_rate_5m".to_string(), "latency_p99".to_string()];
         if delta.risk_increased {
             monitoring.push("dependency_health_score".to_string());
             monitoring.push("trust_degradation_events".to_string());
@@ -824,8 +822,16 @@ mod tests {
         assert!(delta.risk_delta > 0.0);
         assert_eq!(delta.package_name, "pkg");
         assert!(delta.per_metric_deltas.contains_key("fan_out"));
-        assert!(delta.per_metric_deltas.contains_key("betweenness_centrality"));
-        assert!(delta.per_metric_deltas.contains_key("trust_bottleneck_score"));
+        assert!(
+            delta
+                .per_metric_deltas
+                .contains_key("betweenness_centrality")
+        );
+        assert!(
+            delta
+                .per_metric_deltas
+                .contains_key("trust_bottleneck_score")
+        );
     }
 
     #[test]
@@ -885,7 +891,12 @@ mod tests {
         let proposal = make_high_risk_proposal();
         let rec = copilot.evaluate_proposal(&proposal, &make_trace_id());
 
-        assert!(!rec.containment.blast_radius.directly_affected_nodes.is_empty());
+        assert!(
+            !rec.containment
+                .blast_radius
+                .directly_affected_nodes
+                .is_empty()
+        );
         assert!(rec.containment.blast_radius.critical_path_affected);
     }
 
@@ -1024,7 +1035,10 @@ mod tests {
             .iter()
             .map(|p| p.phase_name.as_str())
             .collect();
-        assert_eq!(phase_names, vec!["canary", "limited", "progressive", "general"]);
+        assert_eq!(
+            phase_names,
+            vec!["canary", "limited", "progressive", "general"]
+        );
     }
 
     #[test]

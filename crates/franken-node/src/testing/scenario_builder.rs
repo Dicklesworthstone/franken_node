@@ -118,7 +118,11 @@ pub struct VirtualNode {
 
 impl fmt::Display for VirtualNode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "VirtualNode(id={}, name={}, role={})", self.id, self.name, self.role)
+        write!(
+            f,
+            "VirtualNode(id={}, name={}, role={})",
+            self.id, self.name, self.role
+        )
     }
 }
 
@@ -166,19 +170,11 @@ pub enum ScenarioAssertion {
         within_ticks: u64,
     },
     /// A network partition is detected by the specified node within a tick budget.
-    PartitionDetected {
-        by_node: String,
-        within_ticks: u64,
-    },
+    PartitionDetected { by_node: String, within_ticks: u64 },
     /// An epoch transition completes within a tick budget.
-    EpochTransitionCompleted {
-        epoch: u64,
-        within_ticks: u64,
-    },
+    EpochTransitionCompleted { epoch: u64, within_ticks: u64 },
     /// No deadlock is detected within a tick budget.
-    NoDeadlock {
-        within_ticks: u64,
-    },
+    NoDeadlock { within_ticks: u64 },
 }
 
 impl fmt::Display for ScenarioAssertion {
@@ -189,15 +185,24 @@ impl fmt::Display for ScenarioAssertion {
                 from,
                 to,
                 within_ticks,
-            } => write!(f, "MessageDelivered({from}->{to} within {within_ticks} ticks)"),
+            } => write!(
+                f,
+                "MessageDelivered({from}->{to} within {within_ticks} ticks)"
+            ),
             Self::PartitionDetected {
                 by_node,
                 within_ticks,
-            } => write!(f, "PartitionDetected(by={by_node} within {within_ticks} ticks)"),
+            } => write!(
+                f,
+                "PartitionDetected(by={by_node} within {within_ticks} ticks)"
+            ),
             Self::EpochTransitionCompleted {
                 epoch,
                 within_ticks,
-            } => write!(f, "EpochTransitionCompleted(epoch={epoch} within {within_ticks} ticks)"),
+            } => write!(
+                f,
+                "EpochTransitionCompleted(epoch={epoch} within {within_ticks} ticks)"
+            ),
             Self::NoDeadlock { within_ticks } => {
                 write!(f, "NoDeadlock(within {within_ticks} ticks)")
             }
@@ -257,10 +262,16 @@ impl fmt::Display for ScenarioBuilderError {
             }
             Self::NoSeed => write!(f, "{ERR_SB_NO_SEED}: seed must be nonzero"),
             Self::DuplicateNode { node_id } => {
-                write!(f, "{ERR_SB_DUPLICATE_NODE}: node '{node_id}' already exists")
+                write!(
+                    f,
+                    "{ERR_SB_DUPLICATE_NODE}: node '{node_id}' already exists"
+                )
             }
             Self::DuplicateLink { link_id } => {
-                write!(f, "{ERR_SB_DUPLICATE_LINK}: link '{link_id}' already exists")
+                write!(
+                    f,
+                    "{ERR_SB_DUPLICATE_LINK}: link '{link_id}' already exists"
+                )
             }
             Self::EmptyName => write!(f, "{ERR_SB_EMPTY_NAME}: scenario name must not be empty"),
         }
@@ -596,11 +607,7 @@ mod tests {
         let mut builder = minimal_builder();
         for i in 0..MAX_NODES {
             builder = builder
-                .add_node(
-                    format!("n{i}"),
-                    format!("Node {i}"),
-                    NodeRole::Participant,
-                )
+                .add_node(format!("n{i}"), format!("Node {i}"), NodeRole::Participant)
                 .unwrap();
         }
         let scenario = builder.build().unwrap();
@@ -739,10 +746,7 @@ mod tests {
             .build();
 
         assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ScenarioBuilderError::NoSeed
-        ));
+        assert!(matches!(result.unwrap_err(), ScenarioBuilderError::NoSeed));
     }
 
     // ---------------------------------------------------------------
@@ -790,11 +794,7 @@ mod tests {
         let mut builder = minimal_builder();
         for i in 0..=MAX_NODES {
             builder = builder
-                .add_node(
-                    format!("n{i}"),
-                    format!("Node {i}"),
-                    NodeRole::Participant,
-                )
+                .add_node(format!("n{i}"), format!("Node {i}"), NodeRole::Participant)
                 .unwrap();
         }
         let result = builder.build();
@@ -802,7 +802,10 @@ mod tests {
         let err = result.unwrap_err();
         assert!(matches!(
             err,
-            ScenarioBuilderError::TooManyNodes { count: 11, maximum: 10 }
+            ScenarioBuilderError::TooManyNodes {
+                count: 11,
+                maximum: 10
+            }
         ));
         assert!(err.to_string().contains(ERR_SB_TOO_MANY_NODES));
     }
@@ -1095,8 +1098,7 @@ mod tests {
             .contains("epoch=5")
         );
         assert!(
-            format!("{}", ScenarioAssertion::NoDeadlock { within_ticks: 50 })
-                .contains("50 ticks")
+            format!("{}", ScenarioAssertion::NoDeadlock { within_ticks: 50 }).contains("50 ticks")
         );
     }
 
@@ -1285,8 +1287,7 @@ mod tests {
 
     #[test]
     fn test_error_is_std_error() {
-        let e: Box<dyn std::error::Error> =
-            Box::new(ScenarioBuilderError::NoSeed);
+        let e: Box<dyn std::error::Error> = Box::new(ScenarioBuilderError::NoSeed);
         assert!(!e.to_string().is_empty());
     }
 }

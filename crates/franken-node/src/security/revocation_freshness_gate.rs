@@ -593,9 +593,7 @@ mod tests {
         g.check(&p, 100, true, false, "act-1", "tr-1").unwrap();
         // Same nonce again
         let p2 = proof(SafetyTier::Advisory, 100, "same-nonce");
-        let err = g
-            .check(&p2, 100, true, false, "act-2", "tr-2")
-            .unwrap_err();
+        let err = g.check(&p2, 100, true, false, "act-2", "tr-2").unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_REPLAY");
     }
 
@@ -616,9 +614,7 @@ mod tests {
         let mut g = gate();
         let mut p = proof(SafetyTier::Advisory, 100, "n1");
         p.signature = "bad-sig".to_string();
-        let err = g
-            .check(&p, 100, true, false, "act-1", "tr-1")
-            .unwrap_err();
+        let err = g.check(&p, 100, true, false, "act-1", "tr-1").unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_TAMPERED");
     }
 
@@ -628,9 +624,7 @@ mod tests {
     fn unauthenticated_rejected() {
         let mut g = gate();
         let p = proof(SafetyTier::Advisory, 100, "n1");
-        let err = g
-            .check(&p, 100, false, false, "act-1", "tr-1")
-            .unwrap_err();
+        let err = g.check(&p, 100, false, false, "act-1", "tr-1").unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_UNAUTHENTICATED");
     }
 
@@ -714,7 +708,10 @@ mod tests {
             .code(),
             "ERR_RFG_REPLAY"
         );
-        assert_eq!(FreshnessError::Unauthenticated.code(), "ERR_RFG_UNAUTHENTICATED");
+        assert_eq!(
+            FreshnessError::Unauthenticated.code(),
+            "ERR_RFG_UNAUTHENTICATED"
+        );
     }
 
     // --- GateDecision fields ---
@@ -792,9 +789,7 @@ mod tests {
     fn very_large_epoch() {
         let mut g = gate();
         let p = proof(SafetyTier::Advisory, u64::MAX - 5, "n-large");
-        let d = g
-            .check(&p, u64::MAX - 5, true, false, "act", "tr")
-            .unwrap();
+        let d = g.check(&p, u64::MAX - 5, true, false, "act", "tr").unwrap();
         assert!(d.allowed);
     }
 }

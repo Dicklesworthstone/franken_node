@@ -284,7 +284,10 @@ impl FrankensqliteAdapter {
         adapter.emit_event(
             event_codes::FRANKENSQLITE_ADAPTER_INIT,
             "all",
-            format!("Adapter initialized: pool_size={}", adapter.config.pool_size),
+            format!(
+                "Adapter initialized: pool_size={}",
+                adapter.config.pool_size
+            ),
         );
         adapter
     }
@@ -299,8 +302,7 @@ impl FrankensqliteAdapter {
         let start = Instant::now();
         let tier = class.tier();
 
-        self.store
-            .insert((class, key.to_string()), value.to_vec());
+        self.store.insert((class, key.to_string()), value.to_vec());
         *self.writes_by_tier.entry(tier).or_insert(0) += 1;
         self.write_count += 1;
 
@@ -326,11 +328,7 @@ impl FrankensqliteAdapter {
     }
 
     /// Read a value by persistence class and key.
-    pub fn read(
-        &mut self,
-        class: PersistenceClass,
-        key: &str,
-    ) -> ReadResult {
+    pub fn read(&mut self, class: PersistenceClass, key: &str) -> ReadResult {
         self.read_count += 1;
         let tier = class.tier();
         let entry = self.store.get(&(class, key.to_string()));
@@ -392,9 +390,7 @@ impl FrankensqliteAdapter {
 
     /// Current schema version.
     pub fn schema_version(&self) -> u32 {
-        self.schema_versions
-            .last()
-            .map_or(0, |v| v.version)
+        self.schema_versions.last().map_or(0, |v| v.version)
     }
 
     /// Apply a schema migration.
@@ -543,7 +539,10 @@ mod tests {
 
     #[test]
     fn test_class_display() {
-        assert_eq!(format!("{}", PersistenceClass::ControlState), "control_state");
+        assert_eq!(
+            format!("{}", PersistenceClass::ControlState),
+            "control_state"
+        );
     }
 
     #[test]
@@ -728,10 +727,12 @@ mod tests {
             .unwrap();
         let _ = adapter.take_events(); // clear init + write events
         adapter.replay();
-        assert!(adapter
-            .events()
-            .iter()
-            .any(|e| e.code == event_codes::FRANKENSQLITE_REPLAY_START));
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|e| e.code == event_codes::FRANKENSQLITE_REPLAY_START)
+        );
     }
 
     // -- Crash recovery tests --
@@ -757,10 +758,12 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         let _ = adapter.take_events();
         adapter.crash_recovery();
-        assert!(adapter
-            .events()
-            .iter()
-            .any(|e| e.code == event_codes::FRANKENSQLITE_CRASH_RECOVERY));
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|e| e.code == event_codes::FRANKENSQLITE_CRASH_RECOVERY)
+        );
     }
 
     // -- Schema migration tests --
@@ -810,9 +813,7 @@ mod tests {
         adapter
             .write(PersistenceClass::ControlState, "k1", b"v")
             .unwrap();
-        adapter
-            .write(PersistenceClass::Cache, "k2", b"v")
-            .unwrap();
+        adapter.write(PersistenceClass::Cache, "k2", b"v").unwrap();
         adapter.read(PersistenceClass::ControlState, "k1");
         let summary = adapter.summary();
         assert_eq!(summary.total_writes, 2);
@@ -826,9 +827,7 @@ mod tests {
         adapter
             .write(PersistenceClass::ControlState, "k", b"v")
             .unwrap();
-        adapter
-            .write(PersistenceClass::Cache, "k", b"v")
-            .unwrap();
+        adapter.write(PersistenceClass::Cache, "k", b"v").unwrap();
         let summary = adapter.summary();
         assert!(summary.writes_by_tier.contains_key("tier1_wal_crash_safe"));
         assert!(summary.writes_by_tier.contains_key("tier3_ephemeral"));
@@ -839,10 +838,12 @@ mod tests {
     #[test]
     fn test_init_emits_event() {
         let adapter = FrankensqliteAdapter::default();
-        assert!(adapter
-            .events()
-            .iter()
-            .any(|e| e.code == event_codes::FRANKENSQLITE_ADAPTER_INIT));
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|e| e.code == event_codes::FRANKENSQLITE_ADAPTER_INIT)
+        );
     }
 
     #[test]
@@ -852,10 +853,12 @@ mod tests {
         adapter
             .write(PersistenceClass::ControlState, "k", b"v")
             .unwrap();
-        assert!(adapter
-            .events()
-            .iter()
-            .any(|e| e.code == event_codes::FRANKENSQLITE_WRITE_SUCCESS));
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|e| e.code == event_codes::FRANKENSQLITE_WRITE_SUCCESS)
+        );
     }
 
     #[test]

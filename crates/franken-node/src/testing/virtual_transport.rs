@@ -207,15 +207,9 @@ pub enum TransportEvent {
         bits_flipped: usize,
     },
     /// A partition was activated on a link.
-    PartitionActivated {
-        event_code: String,
-        link_id: String,
-    },
+    PartitionActivated { event_code: String, link_id: String },
     /// A partition was healed on a link.
-    PartitionHealed {
-        event_code: String,
-        link_id: String,
-    },
+    PartitionHealed { event_code: String, link_id: String },
 }
 
 impl TransportEvent {
@@ -375,7 +369,11 @@ impl VirtualTransportLayer {
 
     /// Return a snapshot of transport statistics.
     pub fn stats(&self) -> TransportStats {
-        let active_links = self.links.values().filter(|l| l.active && !l.config.partition).count();
+        let active_links = self
+            .links
+            .values()
+            .filter(|l| l.active && !l.config.partition)
+            .count();
         let partitioned_links = self.links.values().filter(|l| l.config.partition).count();
         let delivered = self.total_messages - self.dropped_messages;
         TransportStats {
@@ -415,12 +413,12 @@ impl VirtualTransportLayer {
 
     /// Destroy a link, returning any buffered messages.
     pub fn destroy_link(&mut self, link_id: &str) -> Result<Vec<Message>, VirtualTransportError> {
-        let state = self
-            .links
-            .remove(link_id)
-            .ok_or_else(|| VirtualTransportError::LinkNotFound {
-                link_id: link_id.to_string(),
-            })?;
+        let state =
+            self.links
+                .remove(link_id)
+                .ok_or_else(|| VirtualTransportError::LinkNotFound {
+                    link_id: link_id.to_string(),
+                })?;
         self.event_log.push(TransportEvent::MessageSent {
             event_code: event_codes::VT_008.to_string(),
             message_id: 0,
@@ -431,12 +429,12 @@ impl VirtualTransportLayer {
 
     /// Activate a partition on the given link.
     pub fn activate_partition(&mut self, link_id: &str) -> Result<(), VirtualTransportError> {
-        let link = self
-            .links
-            .get_mut(link_id)
-            .ok_or_else(|| VirtualTransportError::LinkNotFound {
-                link_id: link_id.to_string(),
-            })?;
+        let link =
+            self.links
+                .get_mut(link_id)
+                .ok_or_else(|| VirtualTransportError::LinkNotFound {
+                    link_id: link_id.to_string(),
+                })?;
         link.config.partition = true;
         self.event_log.push(TransportEvent::PartitionActivated {
             event_code: event_codes::VT_005.to_string(),
@@ -447,12 +445,12 @@ impl VirtualTransportLayer {
 
     /// Heal a partition on the given link.
     pub fn heal_partition(&mut self, link_id: &str) -> Result<(), VirtualTransportError> {
-        let link = self
-            .links
-            .get_mut(link_id)
-            .ok_or_else(|| VirtualTransportError::LinkNotFound {
-                link_id: link_id.to_string(),
-            })?;
+        let link =
+            self.links
+                .get_mut(link_id)
+                .ok_or_else(|| VirtualTransportError::LinkNotFound {
+                    link_id: link_id.to_string(),
+                })?;
         link.config.partition = false;
         self.event_log.push(TransportEvent::PartitionHealed {
             event_code: event_codes::VT_006.to_string(),
@@ -478,12 +476,12 @@ impl VirtualTransportLayer {
         let link_id = format!("{}->{}", source, target);
         // Check link exists and is not partitioned.
         {
-            let link = self
-                .links
-                .get(&link_id)
-                .ok_or_else(|| VirtualTransportError::LinkNotFound {
-                    link_id: link_id.clone(),
-                })?;
+            let link =
+                self.links
+                    .get(&link_id)
+                    .ok_or_else(|| VirtualTransportError::LinkNotFound {
+                        link_id: link_id.clone(),
+                    })?;
             if link.config.partition {
                 return Err(VirtualTransportError::Partitioned {
                     link_id: link_id.clone(),
@@ -582,12 +580,12 @@ impl VirtualTransportLayer {
         &mut self,
         link_id: &str,
     ) -> Result<Option<Message>, VirtualTransportError> {
-        let link = self
-            .links
-            .get_mut(link_id)
-            .ok_or_else(|| VirtualTransportError::LinkNotFound {
-                link_id: link_id.to_string(),
-            })?;
+        let link =
+            self.links
+                .get_mut(link_id)
+                .ok_or_else(|| VirtualTransportError::LinkNotFound {
+                    link_id: link_id.to_string(),
+                })?;
 
         if link.config.partition {
             return Err(VirtualTransportError::Partitioned {
@@ -619,10 +617,7 @@ impl VirtualTransportLayer {
     }
 
     /// Deliver all eligible messages from a link.
-    pub fn deliver_all(
-        &mut self,
-        link_id: &str,
-    ) -> Result<Vec<Message>, VirtualTransportError> {
+    pub fn deliver_all(&mut self, link_id: &str) -> Result<Vec<Message>, VirtualTransportError> {
         let mut delivered = Vec::new();
         loop {
             match self.deliver_next(link_id)? {
@@ -656,12 +651,12 @@ impl VirtualTransportLayer {
         config: LinkFaultConfig,
     ) -> Result<(), VirtualTransportError> {
         config.validate()?;
-        let link = self
-            .links
-            .get_mut(link_id)
-            .ok_or_else(|| VirtualTransportError::LinkNotFound {
-                link_id: link_id.to_string(),
-            })?;
+        let link =
+            self.links
+                .get_mut(link_id)
+                .ok_or_else(|| VirtualTransportError::LinkNotFound {
+                    link_id: link_id.to_string(),
+                })?;
         link.config = config;
         Ok(())
     }
@@ -807,9 +802,7 @@ mod tests {
         };
         vt.create_link("a", "b", config).unwrap();
 
-        let err = vt
-            .send_message("a", "b", b"blocked".to_vec())
-            .unwrap_err();
+        let err = vt.send_message("a", "b", b"blocked".to_vec()).unwrap_err();
         assert!(matches!(err, VirtualTransportError::Partitioned { .. }));
         let msg = format!("{}", err);
         assert!(msg.contains("ERR_VT_PARTITIONED"));
@@ -916,7 +909,10 @@ mod tests {
 
         let run1 = run_scenario(12345);
         let run2 = run_scenario(12345);
-        assert_eq!(run1, run2, "INV-VT-DETERMINISTIC violated: same seed must produce same results");
+        assert_eq!(
+            run1, run2,
+            "INV-VT-DETERMINISTIC violated: same seed must produce same results"
+        );
     }
 
     // -- Test 13: different seeds produce different results
@@ -939,7 +935,10 @@ mod tests {
         let d2 = run_with_seed(999);
         // With 100 messages at 50% drop, different seeds should yield different drop counts.
         // This is probabilistic but extremely unlikely to fail.
-        assert_ne!(d1, d2, "Different seeds should produce different fault patterns");
+        assert_ne!(
+            d1, d2,
+            "Different seeds should produce different fault patterns"
+        );
     }
 
     // -- Test 14: invalid drop probability rejected
@@ -965,10 +964,14 @@ mod tests {
         let mut vt = VirtualTransportLayer::new(42);
         vt.create_link("a", "b", LinkFaultConfig::no_faults())
             .unwrap();
-        vt.create_link("b", "c", LinkFaultConfig {
-            partition: true,
-            ..Default::default()
-        })
+        vt.create_link(
+            "b",
+            "c",
+            LinkFaultConfig {
+                partition: true,
+                ..Default::default()
+            },
+        )
         .unwrap();
 
         vt.send_message("a", "b", b"msg1".to_vec()).unwrap();

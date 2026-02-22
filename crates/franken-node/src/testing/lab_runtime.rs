@@ -95,7 +95,10 @@ pub enum LabError {
     /// DPOR exploration budget exceeded.
     BudgetExceeded { explored: u64, budget: u64 },
     /// Replay produced a different outcome.
-    ReplayDivergence { expected_events: usize, actual_events: usize },
+    ReplayDivergence {
+        expected_events: usize,
+        actual_events: usize,
+    },
 }
 
 impl fmt::Display for LabError {
@@ -103,16 +106,25 @@ impl fmt::Display for LabError {
         match self {
             Self::NoSeed => write!(f, "{ERR_LB_NO_SEED}: no seed provided"),
             Self::TickOverflow { current, delta } => {
-                write!(f, "{ERR_LB_TICK_OVERFLOW}: current={current}, delta={delta}")
+                write!(
+                    f,
+                    "{ERR_LB_TICK_OVERFLOW}: current={current}, delta={delta}"
+                )
             }
             Self::LinkNotFound { source, target } => {
                 write!(f, "{ERR_LB_LINK_NOT_FOUND}: {source} -> {target}")
             }
             Self::FaultRange { field, value } => {
-                write!(f, "{ERR_LB_FAULT_RANGE}: {field}={value}, must be in [0.0, 1.0]")
+                write!(
+                    f,
+                    "{ERR_LB_FAULT_RANGE}: {field}={value}, must be in [0.0, 1.0]"
+                )
             }
             Self::BudgetExceeded { explored, budget } => {
-                write!(f, "{ERR_LB_BUDGET_EXCEEDED}: explored={explored}, budget={budget}")
+                write!(
+                    f,
+                    "{ERR_LB_BUDGET_EXCEEDED}: explored={explored}, budget={budget}"
+                )
             }
             Self::ReplayDivergence {
                 expected_events,
@@ -264,7 +276,11 @@ pub struct LabEvent {
 
 impl fmt::Display for LabEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[tick={}] {}: {}", self.tick, self.event_code, self.payload)
+        write!(
+            f,
+            "[tick={}] {}: {}",
+            self.tick, self.event_code, self.payload
+        )
     }
 }
 
@@ -430,7 +446,10 @@ pub enum MessageOutcome {
     /// Message was corrupted (bit-flip).
     Corrupted { delay_ticks: u64 },
     /// Message was reordered (placed in reorder buffer).
-    Reordered { buffer_position: usize, delay_ticks: u64 },
+    Reordered {
+        buffer_position: usize,
+        delay_ticks: u64,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -547,7 +566,10 @@ impl LabRuntime {
             rng,
             reorder_buffers: Vec::new(),
         };
-        runtime.emit(EVT_LAB_INITIALIZED, format!("seed={seed}, schema={SCHEMA_VERSION}"));
+        runtime.emit(
+            EVT_LAB_INITIALIZED,
+            format!("seed={seed}, schema={SCHEMA_VERSION}"),
+        );
         Ok(runtime)
     }
 
@@ -557,8 +579,10 @@ impl LabRuntime {
         let idx = self.virtual_links.len();
         self.emit(
             EVT_VIRTUAL_LINK_CREATED,
-            format!("{} -> {} (drop={}, corrupt={}, delay={})",
-                link.source, link.target,
+            format!(
+                "{} -> {} (drop={}, corrupt={}, delay={})",
+                link.source,
+                link.target,
                 link.fault_profile.drop_pct,
                 link.fault_profile.corrupt_probability,
                 link.fault_profile.delay_ticks,
@@ -588,12 +612,13 @@ impl LabRuntime {
         link_idx: usize,
         message: &str,
     ) -> Result<MessageOutcome, LabError> {
-        let link = self.virtual_links.get(link_idx).ok_or_else(|| {
-            LabError::LinkNotFound {
+        let link = self
+            .virtual_links
+            .get(link_idx)
+            .ok_or_else(|| LabError::LinkNotFound {
                 source: format!("idx={link_idx}"),
                 target: "unknown".into(),
-            }
-        })?;
+            })?;
         let profile = link.fault_profile.clone();
         let source = link.source.clone();
         let target = link.target.clone();
@@ -601,10 +626,7 @@ impl LabRuntime {
         // Determine outcome using the deterministic PRNG.
         let roll_drop = self.rng.next_f64();
         if roll_drop < profile.drop_pct {
-            self.emit(
-                EVT_FAULT_INJECTED,
-                format!("dropped on {source}->{target}"),
-            );
+            self.emit(EVT_FAULT_INJECTED, format!("dropped on {source}->{target}"));
             return Ok(MessageOutcome::Dropped);
         }
 
@@ -1059,7 +1081,9 @@ mod tests {
             ..Default::default()
         };
         let err = p.validate().unwrap_err();
-        assert!(matches!(err, LabError::FaultRange { field, .. } if field == "corrupt_probability"));
+        assert!(
+            matches!(err, LabError::FaultRange { field, .. } if field == "corrupt_probability")
+        );
     }
 
     #[test]
@@ -1139,7 +1163,9 @@ mod tests {
     #[test]
     fn test_lab_runtime_add_link() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
-        let idx = rt.add_link(make_link("node-a", "node-b", FaultProfile::default())).unwrap();
+        let idx = rt
+            .add_link(make_link("node-a", "node-b", FaultProfile::default()))
+            .unwrap();
         assert_eq!(idx, 0);
         assert_eq!(rt.link_count(), 1);
     }
@@ -1147,7 +1173,8 @@ mod tests {
     #[test]
     fn test_lab_runtime_find_link() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
-        rt.add_link(make_link("x", "y", FaultProfile::default())).unwrap();
+        rt.add_link(make_link("x", "y", FaultProfile::default()))
+            .unwrap();
         assert_eq!(rt.find_link("x", "y").unwrap(), 0);
         assert!(rt.find_link("a", "b").is_err());
     }
@@ -1162,7 +1189,10 @@ mod tests {
         let profile = FaultProfile::default(); // no faults.
         rt.add_link(make_link("a", "b", profile)).unwrap();
         let outcome = rt.send_message(0, "hello").unwrap();
-        assert!(matches!(outcome, MessageOutcome::Delivered { delay_ticks: 0 }));
+        assert!(matches!(
+            outcome,
+            MessageOutcome::Delivered { delay_ticks: 0 }
+        ));
     }
 
     #[test]
@@ -1208,7 +1238,10 @@ mod tests {
         rt.add_link(make_link("a", "b", profile)).unwrap();
         for _ in 0..100 {
             let outcome = rt.send_message(0, "msg").unwrap();
-            assert!(matches!(outcome, MessageOutcome::Corrupted { delay_ticks: 3 }));
+            assert!(matches!(
+                outcome,
+                MessageOutcome::Corrupted { delay_ticks: 3 }
+            ));
         }
     }
 
@@ -1261,9 +1294,7 @@ mod tests {
     #[test]
     fn test_run_scenario_pass() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
-        let result = rt
-            .run_scenario(&|_rt| Ok(true))
-            .unwrap();
+        let result = rt.run_scenario(&|_rt| Ok(true)).unwrap();
         assert!(result.passed);
         assert_eq!(result.bugs_found, 0);
         assert!(result.repro_bundle.is_none());
@@ -1272,9 +1303,7 @@ mod tests {
     #[test]
     fn test_run_scenario_fail() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
-        let result = rt
-            .run_scenario(&|_rt| Ok(false))
-            .unwrap();
+        let result = rt.run_scenario(&|_rt| Ok(false)).unwrap();
         assert!(!result.passed);
         assert_eq!(result.bugs_found, 1);
         assert!(result.repro_bundle.is_some());
@@ -1283,18 +1312,14 @@ mod tests {
     #[test]
     fn test_run_scenario_error_treated_as_fail() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
-        let result = rt
-            .run_scenario(&|_rt| Err(LabError::NoSeed))
-            .unwrap();
+        let result = rt.run_scenario(&|_rt| Err(LabError::NoSeed)).unwrap();
         assert!(!result.passed);
     }
 
     #[test]
     fn test_scenario_events_contain_started_and_completed() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
-        let result = rt
-            .run_scenario(&|_rt| Ok(true))
-            .unwrap();
+        let result = rt.run_scenario(&|_rt| Ok(true)).unwrap();
         let codes: Vec<&str> = result
             .events
             .iter()
@@ -1339,10 +1364,8 @@ mod tests {
             enable_dpor: true,
         };
         // Scenario that fails when seed is even.
-        let result = LabRuntime::run_scenario_dpor(&config, &[], &|rt| {
-            Ok(rt.seed % 2 != 0)
-        })
-        .unwrap();
+        let result =
+            LabRuntime::run_scenario_dpor(&config, &[], &|rt| Ok(rt.seed % 2 != 0)).unwrap();
 
         assert!(!result.passed);
         assert!(result.bugs_found > 0);
@@ -1359,9 +1382,30 @@ mod tests {
             enable_dpor: true,
         };
         let links = vec![
-            make_link("task-0", "task-1", FaultProfile { delay_ticks: 1, ..Default::default() }),
-            make_link("task-1", "task-2", FaultProfile { delay_ticks: 2, ..Default::default() }),
-            make_link("task-2", "task-0", FaultProfile { delay_ticks: 1, ..Default::default() }),
+            make_link(
+                "task-0",
+                "task-1",
+                FaultProfile {
+                    delay_ticks: 1,
+                    ..Default::default()
+                },
+            ),
+            make_link(
+                "task-1",
+                "task-2",
+                FaultProfile {
+                    delay_ticks: 2,
+                    ..Default::default()
+                },
+            ),
+            make_link(
+                "task-2",
+                "task-0",
+                FaultProfile {
+                    delay_ticks: 1,
+                    ..Default::default()
+                },
+            ),
         ];
 
         let result = LabRuntime::run_scenario_dpor(&config, &links, &|rt| {
@@ -1385,7 +1429,8 @@ mod tests {
     #[test]
     fn test_repro_bundle_export_json_round_trip() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
-        rt.add_link(make_link("a", "b", FaultProfile::default())).unwrap();
+        rt.add_link(make_link("a", "b", FaultProfile::default()))
+            .unwrap();
         let bundle = rt.export_repro_bundle(false);
 
         let json = bundle.to_json();
@@ -1406,12 +1451,14 @@ mod tests {
         rt.add_link(make_link("x", "y", lossy_profile())).unwrap();
 
         // Run scenario that sends messages.
-        let _result = rt.run_scenario(&|rt| {
-            for _ in 0..10 {
-                rt.send_message(0, "ping")?;
-            }
-            Ok(false) // deliberate fail
-        }).unwrap();
+        let _result = rt
+            .run_scenario(&|rt| {
+                for _ in 0..10 {
+                    rt.send_message(0, "ping")?;
+                }
+                Ok(false) // deliberate fail
+            })
+            .unwrap();
 
         let bundle = rt.export_repro_bundle(false);
 
@@ -1421,7 +1468,8 @@ mod tests {
                 rt.send_message(0, "ping")?;
             }
             Ok(false) // same outcome
-        }).unwrap();
+        })
+        .unwrap();
 
         assert!(!replay_result.passed);
     }
@@ -1455,7 +1503,8 @@ mod tests {
     #[test]
     fn test_integrated_clock_and_faults() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
-        rt.add_link(make_link("sender", "receiver", lossy_profile())).unwrap();
+        rt.add_link(make_link("sender", "receiver", lossy_profile()))
+            .unwrap();
 
         // Schedule timers.
         rt.schedule_timer(10, "check-1").unwrap();

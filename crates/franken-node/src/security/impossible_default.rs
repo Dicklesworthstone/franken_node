@@ -119,16 +119,26 @@ impl ImpossibleCapability {
     /// Actionable description used in error messages.
     pub fn description(&self) -> &'static str {
         match self {
-            Self::FsAccess => "Arbitrary file system access outside project root is blocked. \
-                               Obtain a signed CapabilityToken with FsAccess scope to proceed.",
-            Self::OutboundNetwork => "Outbound network to non-allowlisted hosts is blocked. \
-                                      Obtain a signed CapabilityToken with OutboundNetwork scope to proceed.",
-            Self::ChildProcessSpawn => "Spawning child processes without sandbox is blocked. \
-                                        Obtain a signed CapabilityToken with ChildProcessSpawn scope to proceed.",
-            Self::UnsignedExtension => "Loading unsigned extensions is blocked. \
-                                        Obtain a signed CapabilityToken with UnsignedExtension scope to proceed.",
-            Self::DisableHardening => "Disabling hardening profiles is blocked. \
-                                       Obtain a signed CapabilityToken with DisableHardening scope to proceed.",
+            Self::FsAccess => {
+                "Arbitrary file system access outside project root is blocked. \
+                               Obtain a signed CapabilityToken with FsAccess scope to proceed."
+            }
+            Self::OutboundNetwork => {
+                "Outbound network to non-allowlisted hosts is blocked. \
+                                      Obtain a signed CapabilityToken with OutboundNetwork scope to proceed."
+            }
+            Self::ChildProcessSpawn => {
+                "Spawning child processes without sandbox is blocked. \
+                                        Obtain a signed CapabilityToken with ChildProcessSpawn scope to proceed."
+            }
+            Self::UnsignedExtension => {
+                "Loading unsigned extensions is blocked. \
+                                        Obtain a signed CapabilityToken with UnsignedExtension scope to proceed."
+            }
+            Self::DisableHardening => {
+                "Disabling hardening profiles is blocked. \
+                                       Obtain a signed CapabilityToken with DisableHardening scope to proceed."
+            }
         }
     }
 }
@@ -234,7 +244,9 @@ impl EnforcementError {
             code: ERR_IBD_TOKEN_EXPIRED.to_string(),
             message: format!(
                 "[{}] CapabilityToken '{}' for '{}' has expired. Request a new token to continue.",
-                ERR_IBD_TOKEN_EXPIRED, token_id, capability.label()
+                ERR_IBD_TOKEN_EXPIRED,
+                token_id,
+                capability.label()
             ),
             capability,
         }
@@ -245,7 +257,9 @@ impl EnforcementError {
             code: ERR_IBD_INVALID_SIGNATURE.to_string(),
             message: format!(
                 "[{}] CapabilityToken '{}' for '{}' has an invalid signature. The token cannot be trusted.",
-                ERR_IBD_INVALID_SIGNATURE, token_id, capability.label()
+                ERR_IBD_INVALID_SIGNATURE,
+                token_id,
+                capability.label()
             ),
             capability,
         }
@@ -452,7 +466,11 @@ impl CapabilityEnforcer {
                     capability,
                     actor,
                     current_time_ms,
-                    &format!("Token '{}' for '{}' has expired", token_id, capability.label()),
+                    &format!(
+                        "Token '{}' for '{}' has expired",
+                        token_id,
+                        capability.label()
+                    ),
                     Some(&token_id),
                 );
 
@@ -505,11 +523,15 @@ impl CapabilityEnforcer {
                 current_time_ms,
                 &format!(
                     "Invalid signature on token '{}' for '{}'",
-                    token.token_id, capability.label()
+                    token.token_id,
+                    capability.label()
                 ),
                 Some(&token.token_id),
             );
-            return Err(EnforcementError::invalid_signature(capability, &token.token_id));
+            return Err(EnforcementError::invalid_signature(
+                capability,
+                &token.token_id,
+            ));
         }
 
         // Check expiry.
@@ -522,7 +544,8 @@ impl CapabilityEnforcer {
                 current_time_ms,
                 &format!(
                     "Token '{}' for '{}' is already expired at presentation",
-                    token.token_id, capability.label()
+                    token.token_id,
+                    capability.label()
                 ),
                 Some(&token.token_id),
             );
@@ -800,18 +823,38 @@ mod tests {
     #[test]
     fn test_capability_labels() {
         assert_eq!(ImpossibleCapability::FsAccess.label(), "fs_access");
-        assert_eq!(ImpossibleCapability::OutboundNetwork.label(), "outbound_network");
-        assert_eq!(ImpossibleCapability::ChildProcessSpawn.label(), "child_process_spawn");
-        assert_eq!(ImpossibleCapability::UnsignedExtension.label(), "unsigned_extension");
-        assert_eq!(ImpossibleCapability::DisableHardening.label(), "disable_hardening");
+        assert_eq!(
+            ImpossibleCapability::OutboundNetwork.label(),
+            "outbound_network"
+        );
+        assert_eq!(
+            ImpossibleCapability::ChildProcessSpawn.label(),
+            "child_process_spawn"
+        );
+        assert_eq!(
+            ImpossibleCapability::UnsignedExtension.label(),
+            "unsigned_extension"
+        );
+        assert_eq!(
+            ImpossibleCapability::DisableHardening.label(),
+            "disable_hardening"
+        );
     }
 
     #[test]
     fn test_capability_descriptions_actionable() {
         for &cap in ImpossibleCapability::ALL {
             let desc = cap.description();
-            assert!(desc.contains("blocked"), "desc for {} should mention 'blocked'", cap);
-            assert!(desc.contains("CapabilityToken"), "desc for {} should mention CapabilityToken", cap);
+            assert!(
+                desc.contains("blocked"),
+                "desc for {} should mention 'blocked'",
+                cap
+            );
+            assert!(
+                desc.contains("CapabilityToken"),
+                "desc for {} should mention CapabilityToken",
+                cap
+            );
         }
     }
 
@@ -870,9 +913,11 @@ mod tests {
         let mut enforcer = make_enforcer();
         let token = make_token(ImpossibleCapability::OutboundNetwork, 10_000);
         enforcer.opt_in(token, "admin", 2000).unwrap();
-        assert!(enforcer
-            .enforce(ImpossibleCapability::OutboundNetwork, "user", 3000)
-            .is_ok());
+        assert!(
+            enforcer
+                .enforce(ImpossibleCapability::OutboundNetwork, "user", 3000)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -897,9 +942,11 @@ mod tests {
         let token = make_token(ImpossibleCapability::ChildProcessSpawn, 5000);
         enforcer.opt_in(token, "admin", 2000).unwrap();
         // Before expiry: ok.
-        assert!(enforcer
-            .enforce(ImpossibleCapability::ChildProcessSpawn, "user", 4000)
-            .is_ok());
+        assert!(
+            enforcer
+                .enforce(ImpossibleCapability::ChildProcessSpawn, "user", 4000)
+                .is_ok()
+        );
         // After expiry: blocked.
         let err = enforcer
             .enforce(ImpossibleCapability::ChildProcessSpawn, "user", 6000)
@@ -1049,7 +1096,10 @@ mod tests {
         let mut enforcer = make_enforcer();
         let _ = enforcer.enforce(ImpossibleCapability::FsAccess, "user", 1000);
         assert_eq!(enforcer.audit_log().len(), 1);
-        assert_eq!(enforcer.audit_log()[0].event_code, IBD_001_CAPABILITY_BLOCKED);
+        assert_eq!(
+            enforcer.audit_log()[0].event_code,
+            IBD_001_CAPABILITY_BLOCKED
+        );
     }
 
     #[test]
@@ -1260,26 +1310,34 @@ mod tests {
         // 2. Opt-in for FsAccess.
         let token = make_token(ImpossibleCapability::FsAccess, 10_000);
         enforcer.opt_in(token, "admin", 2000).unwrap();
-        assert!(enforcer
-            .enforce(ImpossibleCapability::FsAccess, "user", 3000)
-            .is_ok());
+        assert!(
+            enforcer
+                .enforce(ImpossibleCapability::FsAccess, "user", 3000)
+                .is_ok()
+        );
 
         // 3. Other capabilities still blocked.
-        assert!(enforcer
-            .enforce(ImpossibleCapability::OutboundNetwork, "user", 3000)
-            .is_err());
+        assert!(
+            enforcer
+                .enforce(ImpossibleCapability::OutboundNetwork, "user", 3000)
+                .is_err()
+        );
 
         // 4. Token expires.
         let expired = enforcer.expire_tokens(11_000);
         assert_eq!(expired.len(), 1);
-        assert!(enforcer
-            .enforce(ImpossibleCapability::FsAccess, "user", 12_000)
-            .is_err());
+        assert!(
+            enforcer
+                .enforce(ImpossibleCapability::FsAccess, "user", 12_000)
+                .is_err()
+        );
 
         // 5. Silent disable attempt.
-        assert!(enforcer
-            .attempt_silent_disable(ImpossibleCapability::FsAccess, "rogue", 13_000)
-            .is_err());
+        assert!(
+            enforcer
+                .attempt_silent_disable(ImpossibleCapability::FsAccess, "rogue", 13_000)
+                .is_err()
+        );
 
         // 6. Verify audit completeness.
         let log = enforcer.audit_log();

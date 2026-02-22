@@ -317,10 +317,7 @@ impl SecurityCriticalInventory {
 
         inv.add_module(SecurityCriticalModule {
             module_path: "crate::supply_chain::artifact_signing".to_string(),
-            required_capabilities: vec![
-                "key_access".to_string(),
-                "artifact_signing".to_string(),
-            ],
+            required_capabilities: vec!["key_access".to_string(), "artifact_signing".to_string()],
             risk_level: "critical".to_string(),
             description: "Cryptographic artifact signing".to_string(),
         });
@@ -614,16 +611,8 @@ impl AuthorityAuditGuard {
     ///
     /// # INV-AA-AUDIT-COMPLETE
     /// Covers every module in the inventory.
-    pub fn audit_all(
-        &mut self,
-        context: &CapabilityContext,
-    ) -> AuditReport {
-        let module_paths: Vec<String> = self
-            .inventory
-            .modules
-            .keys()
-            .cloned()
-            .collect();
+    pub fn audit_all(&mut self, context: &CapabilityContext) -> AuditReport {
+        let module_paths: Vec<String> = self.inventory.modules.keys().cloned().collect();
 
         let mut module_results: BTreeMap<String, ModuleAuditResult> = BTreeMap::new();
 
@@ -733,10 +722,7 @@ impl AuditReport {
 // ---------------------------------------------------------------------------
 
 /// Run a full audit with the default inventory and a given capability context.
-pub fn generate_audit_report(
-    context: &CapabilityContext,
-    strict_mode: bool,
-) -> AuditReport {
+pub fn generate_audit_report(context: &CapabilityContext, strict_mode: bool) -> AuditReport {
     let mut guard = AuthorityAuditGuard::with_default_inventory(strict_mode);
     guard.audit_all(context)
 }
@@ -767,10 +753,22 @@ mod tests {
 
     #[test]
     fn test_error_codes_defined() {
-        assert_eq!(error_codes::ERR_AA_MISSING_CAPABILITY, "ERR_AA_MISSING_CAPABILITY");
-        assert_eq!(error_codes::ERR_AA_AMBIENT_DETECTED, "ERR_AA_AMBIENT_DETECTED");
-        assert_eq!(error_codes::ERR_AA_INVENTORY_STALE, "ERR_AA_INVENTORY_STALE");
-        assert_eq!(error_codes::ERR_AA_AUDIT_INCOMPLETE, "ERR_AA_AUDIT_INCOMPLETE");
+        assert_eq!(
+            error_codes::ERR_AA_MISSING_CAPABILITY,
+            "ERR_AA_MISSING_CAPABILITY"
+        );
+        assert_eq!(
+            error_codes::ERR_AA_AMBIENT_DETECTED,
+            "ERR_AA_AMBIENT_DETECTED"
+        );
+        assert_eq!(
+            error_codes::ERR_AA_INVENTORY_STALE,
+            "ERR_AA_INVENTORY_STALE"
+        );
+        assert_eq!(
+            error_codes::ERR_AA_AUDIT_INCOMPLETE,
+            "ERR_AA_AUDIT_INCOMPLETE"
+        );
         assert_eq!(error_codes::ERR_AA_GUARD_BYPASSED, "ERR_AA_GUARD_BYPASSED");
     }
 
@@ -781,7 +779,10 @@ mod tests {
         assert_eq!(invariants::INV_AA_NO_AMBIENT, "INV-AA-NO-AMBIENT");
         assert_eq!(invariants::INV_AA_GUARD_ENFORCED, "INV-AA-GUARD-ENFORCED");
         assert_eq!(invariants::INV_AA_AUDIT_COMPLETE, "INV-AA-AUDIT-COMPLETE");
-        assert_eq!(invariants::INV_AA_INVENTORY_CURRENT, "INV-AA-INVENTORY-CURRENT");
+        assert_eq!(
+            invariants::INV_AA_INVENTORY_CURRENT,
+            "INV-AA-INVENTORY-CURRENT"
+        );
         assert_eq!(invariants::INV_AA_DETERMINISTIC, "INV-AA-DETERMINISTIC");
     }
 
@@ -882,11 +883,7 @@ mod tests {
 
     #[test]
     fn test_capability_context_missing() {
-        let ctx = CapabilityContext::new(
-            &[Capability::KeyAccess],
-            "trace-1",
-            "agent-1",
-        );
+        let ctx = CapabilityContext::new(&[Capability::KeyAccess], "trace-1", "agent-1");
         let missing = ctx.missing_capabilities(&[
             Capability::KeyAccess,
             Capability::NetworkEgress,
@@ -899,11 +896,7 @@ mod tests {
 
     #[test]
     fn test_capability_context_serde() {
-        let ctx = CapabilityContext::new(
-            &[Capability::KeyAccess],
-            "trace-1",
-            "agent-1",
-        );
+        let ctx = CapabilityContext::new(&[Capability::KeyAccess], "trace-1", "agent-1");
         let json = serde_json::to_string(&ctx).unwrap();
         let parsed: CapabilityContext = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.trace_id, "trace-1");
@@ -1043,11 +1036,7 @@ mod tests {
     #[test]
     fn test_guard_check_context_fail_strict() {
         let mut guard = AuthorityAuditGuard::with_default_inventory(true);
-        let ctx = CapabilityContext::new(
-            &[Capability::NetworkEgress],
-            "t1",
-            "p1",
-        );
+        let ctx = CapabilityContext::new(&[Capability::NetworkEgress], "t1", "p1");
         let result = guard.check_context("crate::security::network_guard", &ctx);
         assert!(result.is_err());
         assert_eq!(guard.violations.len(), 1);
@@ -1060,11 +1049,7 @@ mod tests {
     #[test]
     fn test_guard_check_context_fail_advisory() {
         let mut guard = AuthorityAuditGuard::with_default_inventory(false);
-        let ctx = CapabilityContext::new(
-            &[Capability::NetworkEgress],
-            "t1",
-            "p1",
-        );
+        let ctx = CapabilityContext::new(&[Capability::NetworkEgress], "t1", "p1");
         let result = guard.check_context("crate::security::network_guard", &ctx);
         // Advisory mode: returns Ok even on violation.
         assert!(result.is_ok());
@@ -1089,7 +1074,11 @@ mod tests {
         );
         let _ = guard.check_context("crate::security::network_guard", &ctx);
         assert!(!guard.events().is_empty());
-        let codes: Vec<&str> = guard.events().iter().map(|e| e.event_code.as_str()).collect();
+        let codes: Vec<&str> = guard
+            .events()
+            .iter()
+            .map(|e| e.event_code.as_str())
+            .collect();
         assert!(codes.contains(&event_codes::FN_AA_001));
         assert!(codes.contains(&event_codes::FN_AA_004));
         assert!(codes.contains(&event_codes::FN_AA_008));
@@ -1100,7 +1089,11 @@ mod tests {
         let mut guard = AuthorityAuditGuard::with_default_inventory(true);
         let ctx = CapabilityContext::new(&[], "t1", "p1");
         let _ = guard.check_context("crate::security::network_guard", &ctx);
-        let codes: Vec<&str> = guard.events().iter().map(|e| e.event_code.as_str()).collect();
+        let codes: Vec<&str> = guard
+            .events()
+            .iter()
+            .map(|e| e.event_code.as_str())
+            .collect();
         assert!(codes.contains(&event_codes::FN_AA_003));
     }
 

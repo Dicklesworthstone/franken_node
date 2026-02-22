@@ -132,8 +132,8 @@ impl VefDegradedModeConfig {
         ProofLagSlo {
             max_proof_lag_secs: (self.quarantine_slo.max_proof_lag_secs as f64
                 * self.halt_multiplier) as u64,
-            max_backlog_depth: (self.quarantine_slo.max_backlog_depth as f64
-                * self.halt_multiplier) as u64,
+            max_backlog_depth: (self.quarantine_slo.max_backlog_depth as f64 * self.halt_multiplier)
+                as u64,
             max_error_rate: self.halt_error_rate,
         }
     }
@@ -401,10 +401,7 @@ impl VefDegradedModeEngine {
             VefMode::Halt => match action_risk {
                 ActionRisk::HealthCheck => (
                     true,
-                    Some(format!(
-                        "vef_halt: health-check {} permitted",
-                        action_name
-                    )),
+                    Some(format!("vef_halt: health-check {} permitted", action_name)),
                 ),
                 _ => (
                     false,
@@ -455,24 +452,20 @@ impl VefDegradedModeEngine {
             }));
 
         // Emit mode transition event
-        self.audit_log
-            .push(VefDegradedModeEvent::ModeTransition(
-                VefModeTransitionEvent {
-                    event_code: VEF_DEGRADE_001.to_string(),
-                    timestamp_secs: now_secs,
-                    current_mode: self.mode,
-                    target_mode: target,
-                    triggering_metric: triggering_metric.to_string(),
-                    metric_value,
-                    slo_threshold,
-                    correlation_id: correlation_id.to_string(),
-                },
-            ));
+        self.audit_log.push(VefDegradedModeEvent::ModeTransition(
+            VefModeTransitionEvent {
+                event_code: VEF_DEGRADE_001.to_string(),
+                timestamp_secs: now_secs,
+                current_mode: self.mode,
+                target_mode: target,
+                triggering_metric: triggering_metric.to_string(),
+                metric_value,
+                slo_threshold,
+                correlation_id: correlation_id.to_string(),
+            },
+        ));
 
-        let prev_actions = self
-            .context
-            .as_ref()
-            .map_or(0, |ctx| ctx.actions_affected);
+        let prev_actions = self.context.as_ref().map_or(0, |ctx| ctx.actions_affected);
 
         self.mode = target;
         self.context = Some(DegradedContext {
@@ -557,19 +550,18 @@ impl VefDegradedModeEngine {
                         0.0_f64,
                         self.config.stabilization_window_secs as f64,
                     );
-                    self.audit_log
-                        .push(VefDegradedModeEvent::ModeTransition(
-                            VefModeTransitionEvent {
-                                event_code: VEF_DEGRADE_001.to_string(),
-                                timestamp_secs: now_secs,
-                                current_mode: self.mode,
-                                target_mode: next_down,
-                                triggering_metric: triggering_metric.to_string(),
-                                metric_value,
-                                slo_threshold,
-                                correlation_id: correlation_id.to_string(),
-                            },
-                        ));
+                    self.audit_log.push(VefDegradedModeEvent::ModeTransition(
+                        VefModeTransitionEvent {
+                            event_code: VEF_DEGRADE_001.to_string(),
+                            timestamp_secs: now_secs,
+                            current_mode: self.mode,
+                            target_mode: next_down,
+                            triggering_metric: triggering_metric.to_string(),
+                            metric_value,
+                            slo_threshold,
+                            correlation_id: correlation_id.to_string(),
+                        },
+                    ));
 
                     self.mode = next_down;
                     if next_down == VefMode::Normal {
@@ -978,10 +970,7 @@ mod tests {
         engine.observe_metrics(&good, 1170, "corr-receipt");
 
         let codes: Vec<&str> = engine.audit_log().iter().map(|e| e.code()).collect();
-        assert!(
-            codes.contains(&VEF_DEGRADE_003),
-            "recovery initiated event"
-        );
+        assert!(codes.contains(&VEF_DEGRADE_003), "recovery initiated event");
         assert!(
             codes.contains(&VEF_DEGRADE_004),
             "recovery complete receipt"

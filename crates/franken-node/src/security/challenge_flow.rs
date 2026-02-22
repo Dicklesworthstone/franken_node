@@ -214,7 +214,7 @@ pub struct ChallengeConfig {
 impl Default for ChallengeConfig {
     fn default() -> Self {
         Self {
-            timeout_ms: 30_000,  // 30 seconds
+            timeout_ms: 30_000, // 30 seconds
             deny_on_timeout: true,
         }
     }
@@ -357,7 +357,10 @@ impl ChallengeFlowController {
             if ch.artifact_id == artifact_id && !ch.state.is_terminal() {
                 return Err(ChallengeError::new(
                     ERR_CHALLENGE_ACTIVE,
-                    format!("Active challenge {} already exists for artifact {}", ch.challenge_id, artifact_id),
+                    format!(
+                        "Active challenge {} already exists for artifact {}",
+                        ch.challenge_id, artifact_id
+                    ),
                 ));
             }
         }
@@ -402,11 +405,15 @@ impl ChallengeFlowController {
         actor_id: &str,
         timestamp_ms: u64,
     ) -> Result<(), ChallengeError> {
-        let challenge = self.challenges.get_mut(challenge_id).ok_or_else(|| {
-            ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found")
-        })?;
+        let challenge = self
+            .challenges
+            .get_mut(challenge_id)
+            .ok_or_else(|| ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found"))?;
 
-        if !challenge.state.can_transition_to(ChallengeState::ProofReceived) {
+        if !challenge
+            .state
+            .can_transition_to(ChallengeState::ProofReceived)
+        {
             return Err(ChallengeError::invalid_transition(
                 challenge.state,
                 ChallengeState::ProofReceived,
@@ -439,11 +446,15 @@ impl ChallengeFlowController {
         actor_id: &str,
         timestamp_ms: u64,
     ) -> Result<(), ChallengeError> {
-        let challenge = self.challenges.get_mut(challenge_id).ok_or_else(|| {
-            ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found")
-        })?;
+        let challenge = self
+            .challenges
+            .get_mut(challenge_id)
+            .ok_or_else(|| ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found"))?;
 
-        if !challenge.state.can_transition_to(ChallengeState::ProofVerified) {
+        if !challenge
+            .state
+            .can_transition_to(ChallengeState::ProofVerified)
+        {
             return Err(ChallengeError::invalid_transition(
                 challenge.state,
                 ChallengeState::ProofVerified,
@@ -475,9 +486,10 @@ impl ChallengeFlowController {
         actor_id: &str,
         timestamp_ms: u64,
     ) -> Result<(), ChallengeError> {
-        let challenge = self.challenges.get_mut(challenge_id).ok_or_else(|| {
-            ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found")
-        })?;
+        let challenge = self
+            .challenges
+            .get_mut(challenge_id)
+            .ok_or_else(|| ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found"))?;
 
         if !challenge.state.can_transition_to(ChallengeState::Promoted) {
             return Err(ChallengeError::invalid_transition(
@@ -514,9 +526,10 @@ impl ChallengeFlowController {
         timestamp_ms: u64,
         reason: &str,
     ) -> Result<(), ChallengeError> {
-        let challenge = self.challenges.get_mut(challenge_id).ok_or_else(|| {
-            ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found")
-        })?;
+        let challenge = self
+            .challenges
+            .get_mut(challenge_id)
+            .ok_or_else(|| ChallengeError::new(ERR_NO_ACTIVE_CHALLENGE, "Challenge not found"))?;
 
         if !challenge.state.can_transition_to(ChallengeState::Denied) {
             return Err(ChallengeError::invalid_transition(
@@ -546,10 +559,7 @@ impl ChallengeFlowController {
     }
 
     /// Check for timed-out challenges and deny them.
-    pub fn enforce_timeouts(
-        &mut self,
-        current_time_ms: u64,
-    ) -> Vec<ChallengeId> {
+    pub fn enforce_timeouts(&mut self, current_time_ms: u64) -> Vec<ChallengeId> {
         if !self.config.deny_on_timeout {
             return Vec::new();
         }
@@ -610,7 +620,10 @@ impl ChallengeFlowController {
 
     /// Get all active (non-terminal) challenges.
     pub fn active_challenges(&self) -> Vec<&Challenge> {
-        self.challenges.values().filter(|ch| !ch.state.is_terminal()).collect()
+        self.challenges
+            .values()
+            .filter(|ch| !ch.state.is_terminal())
+            .collect()
     }
 
     /// Current metrics snapshot.
@@ -801,13 +814,15 @@ mod tests {
         let cid = issue_basic(&mut ctrl, 1000);
         ctrl.deny(&cid, "op", 2000, "test").unwrap();
         // Now should allow a new challenge on same artifact
-        let cid2 = ctrl.issue_challenge(
-            ArtifactId::new("art-1"),
-            SuspicionReason::FormatDeviation,
-            vec![],
-            "op",
-            3000,
-        ).unwrap();
+        let cid2 = ctrl
+            .issue_challenge(
+                ArtifactId::new("art-1"),
+                SuspicionReason::FormatDeviation,
+                vec![],
+                "op",
+                3000,
+            )
+            .unwrap();
         assert_ne!(cid, cid2);
     }
 
@@ -818,14 +833,24 @@ mod tests {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
 
-        ctrl.submit_proof(&cid, make_proof(2000), "prover-1", 2000).unwrap();
-        assert_eq!(ctrl.get_challenge(&cid).unwrap().state, ChallengeState::ProofReceived);
+        ctrl.submit_proof(&cid, make_proof(2000), "prover-1", 2000)
+            .unwrap();
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::ProofReceived
+        );
 
         ctrl.verify_proof(&cid, "verifier-1", 3000).unwrap();
-        assert_eq!(ctrl.get_challenge(&cid).unwrap().state, ChallengeState::ProofVerified);
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::ProofVerified
+        );
 
         ctrl.promote(&cid, "operator-1", 4000).unwrap();
-        assert_eq!(ctrl.get_challenge(&cid).unwrap().state, ChallengeState::Promoted);
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::Promoted
+        );
 
         assert_eq!(ctrl.metrics().challenges_promoted_total, 1);
         assert_eq!(ctrl.metrics().challenges_resolved_total, 1);
@@ -838,7 +863,10 @@ mod tests {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
         ctrl.deny(&cid, "op", 2000, "manual denial").unwrap();
-        assert_eq!(ctrl.get_challenge(&cid).unwrap().state, ChallengeState::Denied);
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::Denied
+        );
         assert_eq!(ctrl.metrics().challenges_denied_total, 1);
     }
 
@@ -846,19 +874,27 @@ mod tests {
     fn test_deny_from_proof_received() {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
-        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000).unwrap();
+        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000)
+            .unwrap();
         ctrl.deny(&cid, "op", 3000, "proof invalid").unwrap();
-        assert_eq!(ctrl.get_challenge(&cid).unwrap().state, ChallengeState::Denied);
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::Denied
+        );
     }
 
     #[test]
     fn test_deny_from_verified() {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
-        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000).unwrap();
+        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000)
+            .unwrap();
         ctrl.verify_proof(&cid, "v", 3000).unwrap();
         ctrl.deny(&cid, "op", 4000, "operator override").unwrap();
-        assert_eq!(ctrl.get_challenge(&cid).unwrap().state, ChallengeState::Denied);
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::Denied
+        );
     }
 
     // -- Invalid transitions --
@@ -875,7 +911,8 @@ mod tests {
     fn test_promote_from_proof_received_fails() {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
-        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000).unwrap();
+        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000)
+            .unwrap();
         let err = ctrl.promote(&cid, "op", 3000).unwrap_err();
         assert_eq!(err.code, ERR_INVALID_TRANSITION);
     }
@@ -893,7 +930,9 @@ mod tests {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
         ctrl.deny(&cid, "op", 2000, "x").unwrap();
-        let err = ctrl.submit_proof(&cid, make_proof(3000), "p", 3000).unwrap_err();
+        let err = ctrl
+            .submit_proof(&cid, make_proof(3000), "p", 3000)
+            .unwrap_err();
         assert_eq!(err.code, ERR_INVALID_TRANSITION);
     }
 
@@ -906,7 +945,10 @@ mod tests {
         let denied = ctrl.enforce_timeouts(32_000);
         assert_eq!(denied.len(), 1);
         assert_eq!(denied[0], cid);
-        assert_eq!(ctrl.get_challenge(&cid).unwrap().state, ChallengeState::Denied);
+        assert_eq!(
+            ctrl.get_challenge(&cid).unwrap().state,
+            ChallengeState::Denied
+        );
         assert_eq!(ctrl.metrics().challenges_timed_out_total, 1);
     }
 
@@ -945,7 +987,8 @@ mod tests {
     fn test_audit_log_populated() {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
-        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000).unwrap();
+        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000)
+            .unwrap();
         assert!(ctrl.audit_log().len() >= 2);
     }
 
@@ -953,7 +996,8 @@ mod tests {
     fn test_audit_query_by_artifact() {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
-        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000).unwrap();
+        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000)
+            .unwrap();
         let entries = ctrl.audit_query(&ArtifactId::new("art-1"));
         assert_eq!(entries.len(), 2);
     }
@@ -971,7 +1015,8 @@ mod tests {
     fn test_audit_hash_chain() {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
-        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000).unwrap();
+        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000)
+            .unwrap();
         let log = ctrl.audit_log();
         // Second entry should reference first entry's hash
         assert_eq!(log[1].prev_hash, log[0].hash());
@@ -1006,21 +1051,39 @@ mod tests {
 
     #[test]
     fn test_suspicion_reason_labels() {
-        assert_eq!(SuspicionReason::UnexpectedProvenance.label(), "unexpected_provenance");
+        assert_eq!(
+            SuspicionReason::UnexpectedProvenance.label(),
+            "unexpected_provenance"
+        );
         assert_eq!(SuspicionReason::AgeAnomaly.label(), "age_anomaly");
         assert_eq!(SuspicionReason::FormatDeviation.label(), "format_deviation");
-        assert_eq!(SuspicionReason::OperatorOverride.label(), "operator_override");
-        assert_eq!(SuspicionReason::PolicyRule("x".into()).label(), "policy_rule");
+        assert_eq!(
+            SuspicionReason::OperatorOverride.label(),
+            "operator_override"
+        );
+        assert_eq!(
+            SuspicionReason::PolicyRule("x".into()).label(),
+            "policy_rule"
+        );
     }
 
     // -- RequiredProofType --
 
     #[test]
     fn test_required_proof_type_labels() {
-        assert_eq!(RequiredProofType::ProvenanceAttestation.label(), "provenance_attestation");
+        assert_eq!(
+            RequiredProofType::ProvenanceAttestation.label(),
+            "provenance_attestation"
+        );
         assert_eq!(RequiredProofType::IntegrityProof.label(), "integrity_proof");
-        assert_eq!(RequiredProofType::EpochBoundaryProof.label(), "epoch_boundary_proof");
-        assert_eq!(RequiredProofType::OriginSignature.label(), "origin_signature");
+        assert_eq!(
+            RequiredProofType::EpochBoundaryProof.label(),
+            "epoch_boundary_proof"
+        );
+        assert_eq!(
+            RequiredProofType::OriginSignature.label(),
+            "origin_signature"
+        );
         assert_eq!(RequiredProofType::Custom("x".into()).label(), "custom");
     }
 
@@ -1050,10 +1113,8 @@ mod tests {
 
     #[test]
     fn test_error_display() {
-        let err = ChallengeError::invalid_transition(
-            ChallengeState::Denied,
-            ChallengeState::Promoted,
-        );
+        let err =
+            ChallengeError::invalid_transition(ChallengeState::Denied, ChallengeState::Promoted);
         let s = format!("{}", err);
         assert!(s.contains("Invalid transition"));
     }
@@ -1092,7 +1153,8 @@ mod tests {
     fn test_metrics_after_full_flow() {
         let mut ctrl = make_controller();
         let cid = issue_basic(&mut ctrl, 1000);
-        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000).unwrap();
+        ctrl.submit_proof(&cid, make_proof(2000), "p", 2000)
+            .unwrap();
         ctrl.verify_proof(&cid, "v", 3000).unwrap();
         ctrl.promote(&cid, "op", 4000).unwrap();
 

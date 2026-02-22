@@ -53,7 +53,9 @@ pub enum BarrierError {
     },
     #[error("sandbox escalation failed: {0}")]
     SandboxEscalation(String),
-    #[error("composition firewall violation: capability '{capability}' leaked across boundary '{boundary}'")]
+    #[error(
+        "composition firewall violation: capability '{capability}' leaked across boundary '{boundary}'"
+    )]
     FirewallViolation {
         capability: String,
         boundary: String,
@@ -619,7 +621,10 @@ impl BarrierEngine {
                     }
 
                     // Check denied capabilities
-                    if cfg.denied_capabilities.contains(&requested_capability.to_string()) {
+                    if cfg
+                        .denied_capabilities
+                        .contains(&requested_capability.to_string())
+                    {
                         let receipt = BarrierAuditReceipt::new(
                             event_codes::BARRIER_CHECK_DENIED,
                             barrier,
@@ -800,7 +805,10 @@ impl BarrierEngine {
             self.audit_log.push(receipt);
             return Err(BarrierError::RolloutFenceBlocked {
                 phase: format!("{}", state.current_phase),
-                reason: format!("requires phase {required_phase}, currently at {}", state.current_phase),
+                reason: format!(
+                    "requires phase {required_phase}, currently at {}",
+                    state.current_phase
+                ),
             });
         }
 
@@ -835,12 +843,14 @@ impl BarrierEngine {
             .get_mut(barrier_id)
             .ok_or_else(|| BarrierError::NotFound(format!("rollout state for {barrier_id}")))?;
 
-        let next_phase = state.current_phase.next().ok_or_else(|| {
-            BarrierError::RolloutFenceBlocked {
-                phase: format!("{}", state.current_phase),
-                reason: "already at final phase".to_string(),
-            }
-        })?;
+        let next_phase =
+            state
+                .current_phase
+                .next()
+                .ok_or_else(|| BarrierError::RolloutFenceBlocked {
+                    phase: format!("{}", state.current_phase),
+                    reason: "already at final phase".to_string(),
+                })?;
 
         let old_phase = state.current_phase;
         state.current_phase = next_phase;
@@ -928,11 +938,7 @@ impl BarrierEngine {
     pub fn get_node_barriers(&self, node_id: &str) -> Vec<&Barrier> {
         self.node_barriers
             .get(node_id)
-            .map(|ids| {
-                ids.iter()
-                    .filter_map(|id| self.barriers.get(id))
-                    .collect()
-            })
+            .map(|ids| ids.iter().filter_map(|id| self.barriers.get(id)).collect())
             .unwrap_or_default()
     }
 
@@ -970,10 +976,7 @@ impl BarrierEngine {
     // -----------------------------------------------------------------------
 
     fn get_node_barrier_ids(&self, node_id: &str) -> Vec<String> {
-        self.node_barriers
-            .get(node_id)
-            .cloned()
-            .unwrap_or_default()
+        self.node_barriers.get(node_id).cloned().unwrap_or_default()
     }
 
     /// Check that a new barrier does not conflict with existing barriers on the same node.
@@ -1154,8 +1157,12 @@ mod tests {
         let trace = make_trace_id();
         engine.apply_barrier(barrier, &trace).unwrap();
 
-        let result =
-            engine.check_sandbox_escalation("node-a", "network_http", SandboxTier::Moderate, &trace);
+        let result = engine.check_sandbox_escalation(
+            "node-a",
+            "network_http",
+            SandboxTier::Moderate,
+            &trace,
+        );
         assert!(result.is_err());
         match result.unwrap_err() {
             BarrierError::SandboxEscalation(msg) => {
@@ -1197,8 +1204,12 @@ mod tests {
         let trace = make_trace_id();
         engine.apply_barrier(barrier, &trace).unwrap();
 
-        let result =
-            engine.check_sandbox_escalation("node-d", "network_http", SandboxTier::Moderate, &trace);
+        let result = engine.check_sandbox_escalation(
+            "node-d",
+            "network_http",
+            SandboxTier::Moderate,
+            &trace,
+        );
         assert!(result.is_ok());
     }
 
@@ -1342,9 +1353,15 @@ mod tests {
         let trace = make_trace_id();
         engine.apply_barrier(barrier, &trace).unwrap();
 
-        engine.record_rollout_observation(&barrier_id, true).unwrap();
-        engine.record_rollout_observation(&barrier_id, true).unwrap();
-        engine.record_rollout_observation(&barrier_id, false).unwrap();
+        engine
+            .record_rollout_observation(&barrier_id, true)
+            .unwrap();
+        engine
+            .record_rollout_observation(&barrier_id, true)
+            .unwrap();
+        engine
+            .record_rollout_observation(&barrier_id, false)
+            .unwrap();
 
         let state = engine.get_rollout_state(&barrier_id).unwrap();
         assert_eq!(state.success_count, 2);
@@ -1544,12 +1561,20 @@ mod tests {
         let mut engine = BarrierEngine::new();
         let trace = make_trace_id();
 
-        let result =
-            engine.check_sandbox_escalation("unbarriered-node", "anything", SandboxTier::Permissive, &trace);
+        let result = engine.check_sandbox_escalation(
+            "unbarriered-node",
+            "anything",
+            SandboxTier::Permissive,
+            &trace,
+        );
         assert!(result.is_ok());
 
-        let result =
-            engine.check_composition_firewall("unbarriered-node", "exec_child", "any-boundary", &trace);
+        let result = engine.check_composition_firewall(
+            "unbarriered-node",
+            "exec_child",
+            "any-boundary",
+            &trace,
+        );
         assert!(result.is_ok());
 
         let result = engine.check_fork_pin("unbarriered-node", "any-digest", &trace);

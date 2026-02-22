@@ -353,12 +353,7 @@ impl TrustComplexityGate {
     }
 
     /// Enter degraded mode.
-    pub fn enter_degraded_mode(
-        &mut self,
-        reason: &str,
-        cached_caps: Vec<String>,
-        timestamp: &str,
-    ) {
+    pub fn enter_degraded_mode(&mut self, reason: &str, cached_caps: Vec<String>, timestamp: &str) {
         self.degraded_state.activate(reason, cached_caps, timestamp);
     }
 
@@ -425,7 +420,11 @@ impl TrustComplexityGate {
             .filter(|d| d.outcome == TrustOutcome::Degraded)
             .count() as u64;
 
-        let replay_verified = self.replay_results.iter().filter(|r| r.deterministic).count() as u64;
+        let replay_verified = self
+            .replay_results
+            .iter()
+            .filter(|r| r.deterministic)
+            .count() as u64;
         let replay_diverged = self
             .replay_results
             .iter()
@@ -690,7 +689,11 @@ mod tests {
     #[test]
     fn degraded_mode_activate_sets_fields() {
         let mut state = DegradedModeState::new(300);
-        state.activate("epoch service down", vec!["read".into()], "2026-01-01T00:00:00Z");
+        state.activate(
+            "epoch service down",
+            vec!["read".into()],
+            "2026-01-01T00:00:00Z",
+        );
         assert!(state.active);
         assert_eq!(state.reason, "epoch service down");
         assert!(state.is_capability_cached("read"));
@@ -745,7 +748,11 @@ mod tests {
         let mut gate = TrustComplexityGate::new(ComplexityBudget::new(2), 300);
         let decision = make_decision("d1", TrustOutcome::Grant, 3);
         let _ = gate.record_decision(decision);
-        assert!(gate.events().iter().any(|e| e.code == RTC_004_BUDGET_EXCEEDED));
+        assert!(
+            gate.events()
+                .iter()
+                .any(|e| e.code == RTC_004_BUDGET_EXCEEDED)
+        );
     }
 
     #[test]
@@ -753,7 +760,11 @@ mod tests {
         let mut gate = TrustComplexityGate::default();
         let decision = make_decision("d1", TrustOutcome::Degraded, 1);
         gate.record_decision(decision).unwrap();
-        assert!(gate.events().iter().any(|e| e.code == RTC_003_DEGRADED_MODE));
+        assert!(
+            gate.events()
+                .iter()
+                .any(|e| e.code == RTC_003_DEGRADED_MODE)
+        );
     }
 
     // ── Gate: replay verification ─────────────────────────────────────────
@@ -767,7 +778,11 @@ mod tests {
         let ctx = make_context("d1", 2);
         let result = gate.verify_replay(&ctx, |_| TrustOutcome::Grant);
         assert!(result.deterministic);
-        assert!(gate.events().iter().any(|e| e.code == RTC_001_REPLAY_VERIFIED));
+        assert!(
+            gate.events()
+                .iter()
+                .any(|e| e.code == RTC_001_REPLAY_VERIFIED)
+        );
     }
 
     #[test]
@@ -779,7 +794,11 @@ mod tests {
         let ctx = make_context("d1", 2);
         let result = gate.verify_replay(&ctx, |_| TrustOutcome::Deny);
         assert!(!result.deterministic);
-        assert!(gate.events().iter().any(|e| e.code == RTC_002_REPLAY_DIVERGED));
+        assert!(
+            gate.events()
+                .iter()
+                .any(|e| e.code == RTC_002_REPLAY_DIVERGED)
+        );
     }
 
     // ── Gate: gate_pass ───────────────────────────────────────────────────
@@ -835,10 +854,14 @@ mod tests {
     #[test]
     fn summary_counts_outcomes_correctly() {
         let mut gate = TrustComplexityGate::default();
-        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1)).unwrap();
-        gate.record_decision(make_decision("d2", TrustOutcome::Deny, 1)).unwrap();
-        gate.record_decision(make_decision("d3", TrustOutcome::Escalate, 1)).unwrap();
-        gate.record_decision(make_decision("d4", TrustOutcome::Degraded, 1)).unwrap();
+        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1))
+            .unwrap();
+        gate.record_decision(make_decision("d2", TrustOutcome::Deny, 1))
+            .unwrap();
+        gate.record_decision(make_decision("d3", TrustOutcome::Escalate, 1))
+            .unwrap();
+        gate.record_decision(make_decision("d4", TrustOutcome::Degraded, 1))
+            .unwrap();
 
         let s = gate.summary();
         assert_eq!(s.total_decisions, 4);
@@ -851,8 +874,10 @@ mod tests {
     #[test]
     fn summary_avg_chain_depth_correct() {
         let mut gate = TrustComplexityGate::default();
-        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 2)).unwrap();
-        gate.record_decision(make_decision("d2", TrustOutcome::Grant, 4)).unwrap();
+        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 2))
+            .unwrap();
+        gate.record_decision(make_decision("d2", TrustOutcome::Grant, 4))
+            .unwrap();
         let s = gate.summary();
         assert!((s.avg_chain_depth - 3.0).abs() < f64::EPSILON);
     }
@@ -860,7 +885,8 @@ mod tests {
     #[test]
     fn summary_replay_rate_100_when_all_deterministic() {
         let mut gate = TrustComplexityGate::default();
-        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1)).unwrap();
+        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1))
+            .unwrap();
         let ctx = make_context("d1", 1);
         gate.verify_replay(&ctx, |_| TrustOutcome::Grant);
         let s = gate.summary();
@@ -870,7 +896,8 @@ mod tests {
     #[test]
     fn summary_replay_rate_0_when_all_diverged() {
         let mut gate = TrustComplexityGate::default();
-        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1)).unwrap();
+        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1))
+            .unwrap();
         let ctx = make_context("d1", 1);
         gate.verify_replay(&ctx, |_| TrustOutcome::Deny);
         let s = gate.summary();
@@ -896,7 +923,8 @@ mod tests {
     #[test]
     fn report_verdict_pass_when_clean() {
         let mut gate = TrustComplexityGate::default();
-        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1)).unwrap();
+        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1))
+            .unwrap();
         let ctx = make_context("d1", 1);
         gate.verify_replay(&ctx, |_| TrustOutcome::Grant);
         let report = gate.to_report();
@@ -906,7 +934,8 @@ mod tests {
     #[test]
     fn report_verdict_fail_when_divergence() {
         let mut gate = TrustComplexityGate::default();
-        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1)).unwrap();
+        gate.record_decision(make_decision("d1", TrustOutcome::Grant, 1))
+            .unwrap();
         let ctx = make_context("d1", 1);
         gate.verify_replay(&ctx, |_| TrustOutcome::Deny);
         let report = gate.to_report();
@@ -918,7 +947,8 @@ mod tests {
     #[test]
     fn take_events_drains() {
         let mut gate = TrustComplexityGate::default();
-        gate.record_decision(make_decision("d1", TrustOutcome::Degraded, 1)).unwrap();
+        gate.record_decision(make_decision("d1", TrustOutcome::Degraded, 1))
+            .unwrap();
         let events = gate.take_events();
         assert!(!events.is_empty());
         assert!(gate.events().is_empty());
@@ -984,7 +1014,8 @@ mod tests {
     fn determinism_same_input_same_report() {
         let build = || {
             let mut gate = TrustComplexityGate::default();
-            gate.record_decision(make_decision("det", TrustOutcome::Grant, 2)).unwrap();
+            gate.record_decision(make_decision("det", TrustOutcome::Grant, 2))
+                .unwrap();
             let ctx = make_context("det", 2);
             gate.verify_replay(&ctx, |_| TrustOutcome::Grant);
             gate

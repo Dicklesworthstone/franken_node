@@ -139,10 +139,10 @@ impl IsolationRail {
     /// Default latency budget (microseconds) for this rail.
     pub fn default_latency_budget_us(self) -> u64 {
         match self {
-            Self::Standard => 10_000,      // 10 ms
-            Self::Elevated => 5_000,       // 5 ms
-            Self::HighAssurance => 2_000,  // 2 ms
-            Self::Critical => 500,         // 0.5 ms
+            Self::Standard => 10_000,     // 10 ms
+            Self::Elevated => 5_000,      // 5 ms
+            Self::HighAssurance => 2_000, // 2 ms
+            Self::Critical => 500,        // 0.5 ms
         }
     }
 }
@@ -230,7 +230,8 @@ pub struct Placement {
 
 impl Placement {
     pub fn remaining_budget_us(&self) -> u64 {
-        self.latency_budget_us.saturating_sub(self.latency_consumed_us)
+        self.latency_budget_us
+            .saturating_sub(self.latency_consumed_us)
     }
 
     pub fn budget_exceeded(&self) -> bool {
@@ -276,7 +277,10 @@ pub enum RailRouterError {
         consumed_us: u64,
     },
     /// ERR_ISOLATION_MESH_PARTITION
-    MeshPartition { rail_a: IsolationRail, rail_b: IsolationRail },
+    MeshPartition {
+        rail_a: IsolationRail,
+        rail_b: IsolationRail,
+    },
     /// ERR_ISOLATION_WORKLOAD_REJECTED
     WorkloadRejected { workload_id: String, reason: String },
 }
@@ -285,28 +289,51 @@ impl fmt::Display for RailRouterError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::RailUnavailable { rail } => {
-                write!(f, "{ERR_ISOLATION_RAIL_UNAVAILABLE}: rail {rail} is not available")
+                write!(
+                    f,
+                    "{ERR_ISOLATION_RAIL_UNAVAILABLE}: rail {rail} is not available"
+                )
             }
             Self::ElevationDenied { from, to, reason } => {
-                write!(f, "{ERR_ISOLATION_ELEVATION_DENIED}: {from} -> {to}: {reason}")
+                write!(
+                    f,
+                    "{ERR_ISOLATION_ELEVATION_DENIED}: {from} -> {to}: {reason}"
+                )
             }
-            Self::PolicyBreak { rule_name, from_rail, to_rail } => {
+            Self::PolicyBreak {
+                rule_name,
+                from_rail,
+                to_rail,
+            } => {
                 write!(
                     f,
                     "{ERR_ISOLATION_POLICY_BREAK}: rule '{rule_name}' lost moving {from_rail} -> {to_rail}"
                 )
             }
-            Self::BudgetExceeded { workload_id, budget_us, consumed_us } => {
+            Self::BudgetExceeded {
+                workload_id,
+                budget_us,
+                consumed_us,
+            } => {
                 write!(
                     f,
                     "{ERR_ISOLATION_BUDGET_EXCEEDED}: workload {workload_id}: consumed {consumed_us}us > budget {budget_us}us"
                 )
             }
             Self::MeshPartition { rail_a, rail_b } => {
-                write!(f, "{ERR_ISOLATION_MESH_PARTITION}: partition between {rail_a} and {rail_b}")
+                write!(
+                    f,
+                    "{ERR_ISOLATION_MESH_PARTITION}: partition between {rail_a} and {rail_b}"
+                )
             }
-            Self::WorkloadRejected { workload_id, reason } => {
-                write!(f, "{ERR_ISOLATION_WORKLOAD_REJECTED}: workload {workload_id}: {reason}")
+            Self::WorkloadRejected {
+                workload_id,
+                reason,
+            } => {
+                write!(
+                    f,
+                    "{ERR_ISOLATION_WORKLOAD_REJECTED}: workload {workload_id}: {reason}"
+                )
             }
         }
     }
@@ -453,7 +480,8 @@ impl RailRouter {
             elevation_count: 0,
         };
 
-        self.placements.insert(workload.id.clone(), placement.clone());
+        self.placements
+            .insert(workload.id.clone(), placement.clone());
         self.events.push(RailEvent {
             event_code: ISOLATION_RAIL_ASSIGNED.to_string(),
             workload_id: workload.id.clone(),
@@ -479,12 +507,13 @@ impl RailRouter {
         workload_id: &str,
         target_rail: IsolationRail,
     ) -> Result<Placement, RailRouterError> {
-        let placement = self.placements.get(workload_id).ok_or_else(|| {
-            RailRouterError::WorkloadRejected {
-                workload_id: workload_id.to_string(),
-                reason: "workload not found".to_string(),
-            }
-        })?;
+        let placement =
+            self.placements
+                .get(workload_id)
+                .ok_or_else(|| RailRouterError::WorkloadRejected {
+                    workload_id: workload_id.to_string(),
+                    reason: "workload not found".to_string(),
+                })?;
 
         let current_rail = placement.rail;
 
@@ -646,11 +675,7 @@ impl RailRouter {
             .available_rails
             .iter()
             .map(|rail| {
-                let workload_count = self
-                    .placements
-                    .values()
-                    .filter(|p| p.rail == *rail)
-                    .count();
+                let workload_count = self.placements.values().filter(|p| p.rail == *rail).count();
                 let policy_rule_count = self
                     .config
                     .rail_policies
@@ -748,10 +773,22 @@ mod tests {
 
     #[test]
     fn trust_profile_minimum_rail() {
-        assert_eq!(TrustProfile::Untrusted.minimum_rail(), IsolationRail::Standard);
-        assert_eq!(TrustProfile::Verified.minimum_rail(), IsolationRail::Elevated);
-        assert_eq!(TrustProfile::HighAssurance.minimum_rail(), IsolationRail::HighAssurance);
-        assert_eq!(TrustProfile::PlatformCritical.minimum_rail(), IsolationRail::Critical);
+        assert_eq!(
+            TrustProfile::Untrusted.minimum_rail(),
+            IsolationRail::Standard
+        );
+        assert_eq!(
+            TrustProfile::Verified.minimum_rail(),
+            IsolationRail::Elevated
+        );
+        assert_eq!(
+            TrustProfile::HighAssurance.minimum_rail(),
+            IsolationRail::HighAssurance
+        );
+        assert_eq!(
+            TrustProfile::PlatformCritical.minimum_rail(),
+            IsolationRail::Critical
+        );
     }
 
     // === Workload assignment ===
@@ -811,7 +848,9 @@ mod tests {
         let mut router = RailRouter::default_router();
         let wl = test_workload("wl-elev", TrustProfile::Untrusted, false);
         router.assign_workload(&wl).unwrap();
-        let p = router.hot_elevate("wl-elev", IsolationRail::Elevated).unwrap();
+        let p = router
+            .hot_elevate("wl-elev", IsolationRail::Elevated)
+            .unwrap();
         assert_eq!(p.rail, IsolationRail::Elevated);
         assert_eq!(p.elevation_count, 1);
     }
@@ -821,7 +860,9 @@ mod tests {
         let mut router = RailRouter::default_router();
         let wl = test_workload("wl-cont", TrustProfile::Untrusted, false);
         router.assign_workload(&wl).unwrap();
-        let p = router.hot_elevate("wl-cont", IsolationRail::Elevated).unwrap();
+        let p = router
+            .hot_elevate("wl-cont", IsolationRail::Elevated)
+            .unwrap();
         assert_eq!(p.rail, IsolationRail::Elevated);
         let policy_events: Vec<_> = router
             .events()
@@ -836,7 +877,9 @@ mod tests {
         let mut router = RailRouter::default_router();
         let wl = test_workload("wl-ev3", TrustProfile::Untrusted, false);
         router.assign_workload(&wl).unwrap();
-        router.hot_elevate("wl-ev3", IsolationRail::Elevated).unwrap();
+        router
+            .hot_elevate("wl-ev3", IsolationRail::Elevated)
+            .unwrap();
         // 1 assign + 3 elevation events (start, policy_preserved, complete)
         assert_eq!(router.events().len(), 4);
         assert_eq!(router.events()[1].event_code, ISOLATION_ELEVATION_START);
@@ -876,9 +919,15 @@ mod tests {
         let mut router = RailRouter::default_router();
         let wl = test_workload("wl-hop", TrustProfile::Untrusted, false);
         router.assign_workload(&wl).unwrap();
-        router.hot_elevate("wl-hop", IsolationRail::Elevated).unwrap();
-        router.hot_elevate("wl-hop", IsolationRail::HighAssurance).unwrap();
-        router.hot_elevate("wl-hop", IsolationRail::Critical).unwrap();
+        router
+            .hot_elevate("wl-hop", IsolationRail::Elevated)
+            .unwrap();
+        router
+            .hot_elevate("wl-hop", IsolationRail::HighAssurance)
+            .unwrap();
+        router
+            .hot_elevate("wl-hop", IsolationRail::Critical)
+            .unwrap();
         let p = router.get_placement("wl-hop").unwrap();
         assert_eq!(p.rail, IsolationRail::Critical);
         assert_eq!(p.elevation_count, 3);
@@ -1145,6 +1194,9 @@ mod tests {
             latency_budget_us: 0,
         };
         let p = router.assign_workload(&wl).unwrap();
-        assert_eq!(p.latency_budget_us, IsolationRail::Standard.default_latency_budget_us());
+        assert_eq!(
+            p.latency_budget_us,
+            IsolationRail::Standard.default_latency_budget_us()
+        );
     }
 }

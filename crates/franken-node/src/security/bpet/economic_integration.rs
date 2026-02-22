@@ -84,8 +84,7 @@ impl PhenotypeTrajectory {
 
         let activity_trend = earlier.maintainer_activity_score - recent.maintainer_activity_score;
         let velocity_trend = earlier.commit_velocity - recent.commit_velocity;
-        let response_trend =
-            recent.issue_response_time_hours - earlier.issue_response_time_hours;
+        let response_trend = recent.issue_response_time_hours - earlier.issue_response_time_hours;
         let diversity_trend =
             earlier.contributor_diversity_index - recent.contributor_diversity_index;
 
@@ -312,7 +311,11 @@ pub fn match_motifs(
         }
     }
 
-    matches.sort_by(|a, b| b.match_score.partial_cmp(&a.match_score).unwrap_or(std::cmp::Ordering::Equal));
+    matches.sort_by(|a, b| {
+        b.match_score
+            .partial_cmp(&a.match_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     matches
 }
 
@@ -414,10 +417,8 @@ impl BpetEconomicEngine {
         let pricing = CompromisePricing::compute(trajectory, expected_loss, confidence)?;
         let motif_matches = match_motifs(trajectory, &self.motif_library);
 
-        let interventions = self.compute_intervention_options(
-            &pricing,
-            trajectory.compromise_propensity(),
-        );
+        let interventions =
+            self.compute_intervention_options(&pricing, trajectory.compromise_propensity());
 
         let urgency = self.determine_urgency(&pricing, &motif_matches);
         let playbook = self.generate_playbook(&pricing, &motif_matches, urgency);
@@ -531,9 +532,7 @@ impl BpetEconomicEngine {
         pricing: &CompromisePricing,
         motif_matches: &[MotifMatch],
     ) -> PlaybookUrgency {
-        let has_high_match = motif_matches
-            .iter()
-            .any(|m| m.match_score >= 0.8);
+        let has_high_match = motif_matches.iter().any(|m| m.match_score >= 0.8);
 
         if pricing.compromise_propensity >= 0.8 || has_high_match {
             PlaybookUrgency::Critical
@@ -843,13 +842,19 @@ mod tests {
     #[test]
     fn high_roi_is_strongly_recommended() {
         let roi = InterventionRoi::compute("cheap-fix", 100.0, 0.5, 100_000.0).unwrap();
-        assert_eq!(roi.recommendation, InterventionRecommendation::StronglyRecommended);
+        assert_eq!(
+            roi.recommendation,
+            InterventionRecommendation::StronglyRecommended
+        );
     }
 
     #[test]
     fn low_roi_is_not_recommended() {
         let roi = InterventionRoi::compute("expensive-fix", 200_000.0, 0.1, 100_000.0).unwrap();
-        assert_eq!(roi.recommendation, InterventionRecommendation::NotRecommended);
+        assert_eq!(
+            roi.recommendation,
+            InterventionRecommendation::NotRecommended
+        );
     }
 
     // === Motif matching ===
@@ -898,7 +903,9 @@ mod tests {
     fn engine_generates_guidance_for_healthy_pkg() {
         let mut engine = BpetEconomicEngine::default();
         let traj = make_healthy_trajectory();
-        let guidance = engine.generate_guidance(&traj, 50_000.0, 0.8, &make_trace()).unwrap();
+        let guidance = engine
+            .generate_guidance(&traj, 50_000.0, 0.8, &make_trace())
+            .unwrap();
 
         assert_eq!(guidance.package_name, "healthy-pkg");
         assert!(!guidance.top_interventions.is_empty());
@@ -909,7 +916,9 @@ mod tests {
     fn engine_generates_critical_playbook_for_declining() {
         let mut engine = BpetEconomicEngine::default();
         let traj = make_declining_trajectory();
-        let guidance = engine.generate_guidance(&traj, 500_000.0, 0.7, &make_trace()).unwrap();
+        let guidance = engine
+            .generate_guidance(&traj, 500_000.0, 0.7, &make_trace())
+            .unwrap();
 
         assert!(guidance.playbook.urgency >= PlaybookUrgency::Elevated);
         assert!(!guidance.playbook.recommended_actions.is_empty());
@@ -919,20 +928,28 @@ mod tests {
     fn engine_logs_guidance_interaction() {
         let mut engine = BpetEconomicEngine::default();
         let traj = make_healthy_trajectory();
-        engine.generate_guidance(&traj, 50_000.0, 0.8, &make_trace()).unwrap();
+        engine
+            .generate_guidance(&traj, 50_000.0, 0.8, &make_trace())
+            .unwrap();
 
         assert_eq!(engine.audit_log().len(), 1);
-        assert_eq!(engine.audit_log()[0].event_code, event_codes::BPET_GUIDANCE_SERVED);
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::BPET_GUIDANCE_SERVED
+        );
     }
 
     #[test]
     fn engine_exports_jsonl() {
         let mut engine = BpetEconomicEngine::default();
         let traj = make_healthy_trajectory();
-        engine.generate_guidance(&traj, 50_000.0, 0.8, &make_trace()).unwrap();
+        engine
+            .generate_guidance(&traj, 50_000.0, 0.8, &make_trace())
+            .unwrap();
 
         let jsonl = engine.export_audit_log_jsonl().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(parsed["event_code"], event_codes::BPET_GUIDANCE_SERVED);
     }
 
@@ -942,7 +959,9 @@ mod tests {
     fn routine_urgency_for_low_risk() {
         let mut engine = BpetEconomicEngine::default();
         let traj = make_healthy_trajectory();
-        let guidance = engine.generate_guidance(&traj, 50_000.0, 0.8, &make_trace()).unwrap();
+        let guidance = engine
+            .generate_guidance(&traj, 50_000.0, 0.8, &make_trace())
+            .unwrap();
         assert_eq!(guidance.playbook.urgency, PlaybookUrgency::Routine);
     }
 
@@ -963,7 +982,9 @@ mod tests {
     fn summary_includes_package_name() {
         let mut engine = BpetEconomicEngine::default();
         let traj = make_declining_trajectory();
-        let guidance = engine.generate_guidance(&traj, 100_000.0, 0.7, &make_trace()).unwrap();
+        let guidance = engine
+            .generate_guidance(&traj, 100_000.0, 0.7, &make_trace())
+            .unwrap();
         assert!(guidance.summary.contains("declining-pkg"));
     }
 }

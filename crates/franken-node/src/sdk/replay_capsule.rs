@@ -133,7 +133,10 @@ impl std::fmt::Display for CapsuleError {
         match self {
             Self::EmptyId => write!(f, "capsule_id is empty"),
             Self::UnsupportedVersion(v) => {
-                write!(f, "unsupported format_version={v} (min={MIN_FORMAT_VERSION})")
+                write!(
+                    f,
+                    "unsupported format_version={v} (min={MIN_FORMAT_VERSION})"
+                )
             }
             Self::NonMonotonicInputSequence => {
                 write!(f, "input sequence numbers are not strictly increasing")
@@ -385,8 +388,16 @@ mod tests {
     #[test]
     fn test_create_capsule_non_monotonic() {
         let inputs = vec![
-            CapsuleInput { seq: 5, data: b"a".to_vec(), metadata: BTreeMap::new() },
-            CapsuleInput { seq: 3, data: b"b".to_vec(), metadata: BTreeMap::new() },
+            CapsuleInput {
+                seq: 5,
+                data: b"a".to_vec(),
+                metadata: BTreeMap::new(),
+            },
+            CapsuleInput {
+                seq: 3,
+                data: b"b".to_vec(),
+                metadata: BTreeMap::new(),
+            },
         ];
         let err = create_capsule("cap", inputs, test_env()).unwrap_err();
         assert_eq!(err, CapsuleError::NonMonotonicInputSequence);
@@ -677,9 +688,11 @@ mod tests {
         meta.insert("source".to_string(), "test".to_string());
         meta.insert("priority".to_string(), "high".to_string());
 
-        let inputs = vec![
-            CapsuleInput { seq: 0, data: b"data".to_vec(), metadata: meta.clone() },
-        ];
+        let inputs = vec![CapsuleInput {
+            seq: 0,
+            data: b"data".to_vec(),
+            metadata: meta.clone(),
+        }];
         let cap = create_capsule("cap-meta", inputs, test_env()).unwrap();
         assert_eq!(cap.inputs[0].metadata.len(), 2);
         assert_eq!(cap.inputs[0].metadata.get("source").unwrap(), "test");
@@ -690,7 +703,8 @@ mod tests {
     #[test]
     fn test_environment_with_properties() {
         let mut env = test_env();
-        env.properties.insert("feature_flag".to_string(), "enabled".to_string());
+        env.properties
+            .insert("feature_flag".to_string(), "enabled".to_string());
         let cap = create_capsule("cap-env", test_inputs(), env).unwrap();
         assert_eq!(
             cap.environment.properties.get("feature_flag").unwrap(),
@@ -702,9 +716,11 @@ mod tests {
 
     #[test]
     fn test_single_input_capsule() {
-        let inputs = vec![
-            CapsuleInput { seq: 0, data: b"only".to_vec(), metadata: BTreeMap::new() },
-        ];
+        let inputs = vec![CapsuleInput {
+            seq: 0,
+            data: b"only".to_vec(),
+            metadata: BTreeMap::new(),
+        }];
         let cap = create_capsule("cap-single", inputs, test_env()).unwrap();
         assert!(validate_capsule(&cap).is_ok());
         assert!(replay_and_verify(&cap).unwrap());

@@ -63,9 +63,18 @@ pub enum EpochTransitionError {
     NoActiveTransition,
     Barrier(BarrierError),
     Epoch(EpochError),
-    EpochAdvanceMismatch { expected: u64, actual: u64 },
-    StaleEpochRejected { presented_epoch: u64, current_epoch: u64 },
-    FutureEpochRejected { presented_epoch: u64, current_epoch: u64 },
+    EpochAdvanceMismatch {
+        expected: u64,
+        actual: u64,
+    },
+    StaleEpochRejected {
+        presented_epoch: u64,
+        current_epoch: u64,
+    },
+    FutureEpochRejected {
+        presented_epoch: u64,
+        current_epoch: u64,
+    },
 }
 
 impl EpochTransitionError {
@@ -547,9 +556,7 @@ fn manifest_hash_for_transition(
     reason: &str,
     target_epoch: u64,
 ) -> String {
-    let canonical = format!(
-        "epoch-manifest|{transition_id}|{initiator}|{reason}|{target_epoch}"
-    );
+    let canonical = format!("epoch-manifest|{transition_id}|{initiator}|{reason}|{target_epoch}");
     let digest = Sha256::digest(canonical.as_bytes());
     format!("{digest:x}")
 }
@@ -658,7 +665,12 @@ mod tests {
             coordinator.register_service(service_id);
         }
         let proposal = coordinator
-            .propose_transition("operator-1", "planned-rotation", 10_000, "trace-five-propose")
+            .propose_transition(
+                "operator-1",
+                "planned-rotation",
+                10_000,
+                "trace-five-propose",
+            )
             .expect("proposal succeeds");
         assert_eq!(proposal.pre_epoch, 30);
         assert_eq!(proposal.target_epoch, 31);

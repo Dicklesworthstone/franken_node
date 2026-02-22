@@ -187,10 +187,19 @@ pub struct RegionEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegionTreeError {
-    RegionNotFound { region_id: String },
-    RegionAlreadyClosed { region_id: String },
-    ParentNotFound { parent_id: String },
-    BudgetExceeded { region_id: String, remaining_tasks: usize },
+    RegionNotFound {
+        region_id: String,
+    },
+    RegionAlreadyClosed {
+        region_id: String,
+    },
+    ParentNotFound {
+        parent_id: String,
+    },
+    BudgetExceeded {
+        region_id: String,
+        remaining_tasks: usize,
+    },
 }
 
 impl RegionTreeError {
@@ -217,7 +226,10 @@ impl fmt::Display for RegionTreeError {
             Self::ParentNotFound { parent_id } => {
                 write!(f, "{}: parent {} not found", self.code(), parent_id)
             }
-            Self::BudgetExceeded { region_id, remaining_tasks } => {
+            Self::BudgetExceeded {
+                region_id,
+                remaining_tasks,
+            } => {
                 write!(
                     f,
                     "{}: region {} budget exceeded, {} tasks force-terminated",
@@ -480,11 +492,12 @@ impl RegionTree {
         region_id: &RegionId,
         timestamp_ms: u64,
     ) -> Result<Vec<RegionEvent>, RegionTreeError> {
-        let node = self.nodes.get(region_id.as_str()).ok_or_else(|| {
-            RegionTreeError::RegionNotFound {
-                region_id: region_id.as_str().to_string(),
-            }
-        })?;
+        let node =
+            self.nodes
+                .get(region_id.as_str())
+                .ok_or_else(|| RegionTreeError::RegionNotFound {
+                    region_id: region_id.as_str().to_string(),
+                })?;
 
         if node.state == RegionState::Closed {
             return Err(RegionTreeError::RegionAlreadyClosed {
@@ -525,7 +538,10 @@ impl RegionTree {
             event_code: event_codes::REG_003.to_string(),
             region_id: region_id.as_str().to_string(),
             parent_id: parent_id_str.clone(),
-            detail: format!("drain started, {} tasks, budget {}ms", task_count, drain_budget_ms),
+            detail: format!(
+                "drain started, {} tasks, budget {}ms",
+                task_count, drain_budget_ms
+            ),
             child_count: children.len(),
             task_count,
             timestamp_ms,
@@ -655,12 +671,16 @@ impl RegionTree {
 
     /// Get the parent of a region.
     pub fn parent_of(&self, region_id: &RegionId) -> Option<Option<&RegionId>> {
-        self.nodes.get(region_id.as_str()).map(|n| n.parent.as_ref())
+        self.nodes
+            .get(region_id.as_str())
+            .map(|n| n.parent.as_ref())
     }
 
     /// Get the children of a region.
     pub fn children_of(&self, region_id: &RegionId) -> Option<&[RegionId]> {
-        self.nodes.get(region_id.as_str()).map(|n| n.children.as_slice())
+        self.nodes
+            .get(region_id.as_str())
+            .map(|n| n.children.as_slice())
     }
 
     /// Total number of regions in the tree.
@@ -748,10 +768,14 @@ mod tests {
     fn build_full_tree() -> RegionTree {
         let mut tree = RegionTree::new(1000);
         tree.open_region(&root_id(), 0).unwrap();
-        tree.open_child_region(&lifecycle_id(), &root_id(), 1).unwrap();
-        tree.open_child_region(&health_gate_id(), &lifecycle_id(), 2).unwrap();
-        tree.open_child_region(&rollout_id(), &lifecycle_id(), 3).unwrap();
-        tree.open_child_region(&fencing_id(), &lifecycle_id(), 4).unwrap();
+        tree.open_child_region(&lifecycle_id(), &root_id(), 1)
+            .unwrap();
+        tree.open_child_region(&health_gate_id(), &lifecycle_id(), 2)
+            .unwrap();
+        tree.open_child_region(&rollout_id(), &lifecycle_id(), 3)
+            .unwrap();
+        tree.open_child_region(&fencing_id(), &lifecycle_id(), 4)
+            .unwrap();
         tree
     }
 
@@ -788,7 +812,9 @@ mod tests {
     fn open_child_region_success() {
         let mut tree = RegionTree::new(1000);
         tree.open_region(&root_id(), 0).unwrap();
-        let event = tree.open_child_region(&lifecycle_id(), &root_id(), 1).unwrap();
+        let event = tree
+            .open_child_region(&lifecycle_id(), &root_id(), 1)
+            .unwrap();
         assert_eq!(event.event_code, event_codes::REG_007);
         assert_eq!(tree.child_count(&root_id()), Some(1));
     }
@@ -839,7 +865,8 @@ mod tests {
     #[test]
     fn deregister_task_succeeds() {
         let mut tree = build_full_tree();
-        tree.register_task(&rollout_id(), TaskId::new("task-1"), 10).unwrap();
+        tree.register_task(&rollout_id(), TaskId::new("task-1"), 10)
+            .unwrap();
         let event = tree
             .deregister_task(&rollout_id(), &TaskId::new("task-1"), 11)
             .unwrap();
@@ -865,7 +892,9 @@ mod tests {
     fn region_handle_deregister_task() {
         let mut tree = build_full_tree();
         let handle = tree.handle_for(&rollout_id()).unwrap();
-        handle.register_task(&mut tree, TaskId::new("h-task-1"), 10).unwrap();
+        handle
+            .register_task(&mut tree, TaskId::new("h-task-1"), 10)
+            .unwrap();
         let event = handle
             .deregister_task(&mut tree, &TaskId::new("h-task-1"), 11)
             .unwrap();
@@ -888,14 +917,19 @@ mod tests {
         assert!(events.iter().any(|e| e.event_code == event_codes::REG_003));
         assert!(events.iter().any(|e| e.event_code == event_codes::REG_004));
         assert!(events.iter().any(|e| e.event_code == event_codes::REG_006));
-        assert_eq!(tree.region_state(&health_gate_id()), Some(RegionState::Closed));
+        assert_eq!(
+            tree.region_state(&health_gate_id()),
+            Some(RegionState::Closed)
+        );
     }
 
     #[test]
     fn close_leaf_with_tasks_force_terminates() {
         let mut tree = build_full_tree();
-        tree.register_task(&rollout_id(), TaskId::new("task-1"), 10).unwrap();
-        tree.register_task(&rollout_id(), TaskId::new("task-2"), 11).unwrap();
+        tree.register_task(&rollout_id(), TaskId::new("task-1"), 10)
+            .unwrap();
+        tree.register_task(&rollout_id(), TaskId::new("task-2"), 11)
+            .unwrap();
 
         let events = tree.close(&rollout_id(), 100).unwrap();
         // Should see force-terminate event
@@ -908,8 +942,10 @@ mod tests {
     #[test]
     fn close_parent_closes_children_first() {
         let mut tree = build_full_tree();
-        tree.register_task(&health_gate_id(), TaskId::new("hg-1"), 5).unwrap();
-        tree.register_task(&rollout_id(), TaskId::new("ro-1"), 6).unwrap();
+        tree.register_task(&health_gate_id(), TaskId::new("hg-1"), 5)
+            .unwrap();
+        tree.register_task(&rollout_id(), TaskId::new("ro-1"), 6)
+            .unwrap();
 
         let events = tree.close(&lifecycle_id(), 100).unwrap();
 
@@ -933,8 +969,14 @@ mod tests {
 
         // All regions should be closed
         assert_eq!(tree.region_state(&root_id()), Some(RegionState::Closed));
-        assert_eq!(tree.region_state(&lifecycle_id()), Some(RegionState::Closed));
-        assert_eq!(tree.region_state(&health_gate_id()), Some(RegionState::Closed));
+        assert_eq!(
+            tree.region_state(&lifecycle_id()),
+            Some(RegionState::Closed)
+        );
+        assert_eq!(
+            tree.region_state(&health_gate_id()),
+            Some(RegionState::Closed)
+        );
         assert_eq!(tree.region_state(&rollout_id()), Some(RegionState::Closed));
         assert_eq!(tree.region_state(&fencing_id()), Some(RegionState::Closed));
 
@@ -966,7 +1008,8 @@ mod tests {
     #[test]
     fn force_terminate_clears_tasks() {
         let mut tree = build_full_tree();
-        tree.register_task(&rollout_id(), TaskId::new("task-1"), 10).unwrap();
+        tree.register_task(&rollout_id(), TaskId::new("task-1"), 10)
+            .unwrap();
         let event = tree.force_terminate(&rollout_id(), 50).unwrap();
         assert_eq!(event.event_code, event_codes::REG_005);
         assert_eq!(tree.task_count(&rollout_id()), Some(0));
@@ -999,7 +1042,8 @@ mod tests {
     fn event_log_records_operations() {
         let mut tree = RegionTree::new(1000);
         tree.open_region(&root_id(), 0).unwrap();
-        tree.register_task(&root_id(), TaskId::new("t1"), 1).unwrap();
+        tree.register_task(&root_id(), TaskId::new("t1"), 1)
+            .unwrap();
         assert!(tree.event_log().len() >= 2);
         assert_eq!(tree.event_log()[0].event_code, event_codes::REG_001);
         assert_eq!(tree.event_log()[1].event_code, event_codes::REG_002);
@@ -1036,12 +1080,7 @@ mod tests {
         ];
         for e in &errors {
             let s = e.to_string();
-            assert!(
-                s.contains(e.code()),
-                "{:?} should contain {}",
-                e,
-                e.code()
-            );
+            assert!(s.contains(e.code()), "{:?} should contain {}", e, e.code());
         }
     }
 
@@ -1066,7 +1105,10 @@ mod tests {
     fn invariant_constants_defined() {
         assert_eq!(INV_REGION_QUIESCENCE, "INV-REGION-QUIESCENCE");
         assert_eq!(INV_REGION_NO_OUTLIVE, "INV-REGION-NO-OUTLIVE");
-        assert_eq!(INV_REGION_DETERMINISTIC_CLOSE, "INV-REGION-DETERMINISTIC-CLOSE");
+        assert_eq!(
+            INV_REGION_DETERMINISTIC_CLOSE,
+            "INV-REGION-DETERMINISTIC-CLOSE"
+        );
     }
 
     // ---- Set drain budget ----
@@ -1076,7 +1118,8 @@ mod tests {
         let mut tree = build_full_tree();
         tree.set_drain_budget(&rollout_id(), 500).unwrap();
         // Verify by closing — the budget should be applied
-        tree.register_task(&rollout_id(), TaskId::new("t1"), 10).unwrap();
+        tree.register_task(&rollout_id(), TaskId::new("t1"), 10)
+            .unwrap();
         let events = tree.close(&rollout_id(), 100).unwrap();
         // Force-terminate event timestamp should reflect 500ms budget
         let force_event = events
@@ -1102,24 +1145,41 @@ mod tests {
         let mut tree = build_full_tree();
 
         // Register tasks across regions
-        tree.register_task(&health_gate_id(), TaskId::new("probe-1"), 10).unwrap();
-        tree.register_task(&rollout_id(), TaskId::new("deploy-1"), 11).unwrap();
-        tree.register_task(&rollout_id(), TaskId::new("deploy-2"), 12).unwrap();
-        tree.register_task(&fencing_id(), TaskId::new("fence-1"), 13).unwrap();
+        tree.register_task(&health_gate_id(), TaskId::new("probe-1"), 10)
+            .unwrap();
+        tree.register_task(&rollout_id(), TaskId::new("deploy-1"), 11)
+            .unwrap();
+        tree.register_task(&rollout_id(), TaskId::new("deploy-2"), 12)
+            .unwrap();
+        tree.register_task(&fencing_id(), TaskId::new("fence-1"), 13)
+            .unwrap();
 
         // Deregister some tasks before close
-        tree.deregister_task(&health_gate_id(), &TaskId::new("probe-1"), 20).unwrap();
+        tree.deregister_task(&health_gate_id(), &TaskId::new("probe-1"), 20)
+            .unwrap();
 
         // Close the entire tree
         let events = tree.close(&root_id(), 100).unwrap();
 
         // Verify all regions ended up closed
-        for region in &[root_id(), lifecycle_id(), health_gate_id(), rollout_id(), fencing_id()] {
+        for region in &[
+            root_id(),
+            lifecycle_id(),
+            health_gate_id(),
+            rollout_id(),
+            fencing_id(),
+        ] {
             assert_eq!(tree.region_state(region), Some(RegionState::Closed));
         }
 
         // Verify no tasks remain anywhere
-        for region in &[root_id(), lifecycle_id(), health_gate_id(), rollout_id(), fencing_id()] {
+        for region in &[
+            root_id(),
+            lifecycle_id(),
+            health_gate_id(),
+            rollout_id(),
+            fencing_id(),
+        ] {
             assert_eq!(tree.task_count(region), Some(0));
         }
 
@@ -1128,7 +1188,10 @@ mod tests {
             .iter()
             .filter(|e| e.event_code == event_codes::REG_005)
             .collect();
-        assert!(force_events.len() >= 2, "expected force-terminate for rollout and fencing");
+        assert!(
+            force_events.len() >= 2,
+            "expected force-terminate for rollout and fencing"
+        );
     }
 
     // ---- Open child under closed parent ----

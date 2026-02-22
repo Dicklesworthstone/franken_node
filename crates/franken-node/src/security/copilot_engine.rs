@@ -391,7 +391,12 @@ impl ActionRecommendationEngine {
             state.degraded_details.as_ref().map(|d| DegradedWarning {
                 message: format!("System in degraded mode: {}", d.reason),
                 stale_inputs: d.stale_inputs.clone(),
-                max_staleness_secs: d.stale_inputs.iter().map(|s| s.staleness_secs).max().unwrap_or(0),
+                max_staleness_secs: d
+                    .stale_inputs
+                    .iter()
+                    .map(|s| s.staleness_secs)
+                    .max()
+                    .unwrap_or(0),
             })
         } else {
             None
@@ -506,7 +511,8 @@ mod tests {
                     staleness_secs: 0,
                 }],
                 assumptions: vec!["Trust data is fresh".to_owned()],
-                sensitivity: "A 20% increase in trust staleness would change the ranking".to_owned(),
+                sensitivity: "A 20% increase in trust staleness would change the ranking"
+                    .to_owned(),
             },
         }
     }
@@ -525,12 +531,19 @@ mod tests {
         let mut engine = ActionRecommendationEngine::new(10);
         let state = make_state(false);
         let candidates = vec![
-            make_candidate("low-voi", 40.0, 50.0),    // VOI = 10
-            make_candidate("high-voi", 5.0, 100.0),   // VOI = 95
-            make_candidate("mid-voi", 20.0, 60.0),    // VOI = 40
+            make_candidate("low-voi", 40.0, 50.0),  // VOI = 10
+            make_candidate("high-voi", 5.0, 100.0), // VOI = 95
+            make_candidate("mid-voi", 20.0, 60.0),  // VOI = 40
         ];
 
-        let response = engine.recommend(&candidates, &state, "operator-1", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "operator-1",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
 
         assert_eq!(response.recommendations[0].action_id, "high-voi");
         assert_eq!(response.recommendations[1].action_id, "mid-voi");
@@ -541,9 +554,18 @@ mod tests {
     fn test_top_k_limiting() {
         let mut engine = ActionRecommendationEngine::new(2);
         let state = make_state(false);
-        let candidates: Vec<_> = (0..10).map(|i| make_candidate(&format!("a{i}"), 10.0, 50.0 + i as f64)).collect();
+        let candidates: Vec<_> = (0..10)
+            .map(|i| make_candidate(&format!("a{i}"), 10.0, 50.0 + i as f64))
+            .collect();
 
-        let response = engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
         assert_eq!(response.recommendations.len(), 2);
     }
 
@@ -551,7 +573,14 @@ mod tests {
     fn test_empty_candidates() {
         let mut engine = ActionRecommendationEngine::new(5);
         let state = make_state(false);
-        let response = engine.recommend(&[], &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        let response = engine.recommend(
+            &[],
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
         assert!(response.recommendations.is_empty());
     }
 
@@ -561,7 +590,14 @@ mod tests {
         let state = make_state(true);
         let candidates = vec![make_candidate("a1", 10.0, 50.0)];
 
-        let response = engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
         assert!(response.system_degraded);
         assert!(response.degraded_warning.is_some());
 
@@ -576,7 +612,14 @@ mod tests {
         let state = make_state(true);
         let candidates = vec![make_candidate("a1", 10.0, 50.0)];
 
-        let response = engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
         let rec = &response.recommendations[0];
         assert!(rec.degraded_confidence);
         assert!(rec.adjusted_uncertainty.is_some());
@@ -588,7 +631,14 @@ mod tests {
         let state = make_state(false);
         let candidates = vec![make_candidate("a1", 10.0, 50.0)];
 
-        let response = engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
         let rec = &response.recommendations[0];
         assert!(!rec.degraded_confidence);
         assert!(rec.adjusted_uncertainty.is_none());
@@ -602,8 +652,19 @@ mod tests {
         candidate.expected_loss_if_act.availability_loss = 100.0;
         let candidates = vec![candidate];
 
-        let response = engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
-        assert!(response.recommendations[0].rationale.contains("availability"));
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
+        assert!(
+            response.recommendations[0]
+                .rationale
+                .contains("availability")
+        );
     }
 
     #[test]
@@ -612,8 +673,19 @@ mod tests {
         let state = make_state(false);
         let candidates = vec![make_candidate("a1", 10.0, 50.0)];
 
-        let response = engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
-        assert!(response.recommendations[0].rollback_command.contains("rollback"));
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
+        assert!(
+            response.recommendations[0]
+                .rollback_command
+                .contains("rollback")
+        );
         assert!(response.recommendations[0].rollback_validated);
     }
 
@@ -623,7 +695,14 @@ mod tests {
         let state = make_state(false);
         let candidates = vec![make_candidate("a1", 10.0, 50.0)];
 
-        engine.recommend(&candidates, &state, "operator-1", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        engine.recommend(
+            &candidates,
+            &state,
+            "operator-1",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
 
         assert_eq!(engine.audit_trail().len(), 1);
         assert_eq!(engine.audit_trail()[0].operator_identity, "operator-1");
@@ -702,7 +781,14 @@ mod tests {
             make_candidate("a2", 10.0, 50.0),
         ];
 
-        let response = engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
         // Both have same VOI; should return both without crashing.
         assert_eq!(response.recommendations.len(), 2);
     }
@@ -713,7 +799,14 @@ mod tests {
         let state = make_state(true);
         let candidates = vec![make_candidate("a1", 10.0, 50.0)];
 
-        let response = engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
+        let response = engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
         let rec = &response.recommendations[0];
         let adj = rec.adjusted_uncertainty.as_ref().unwrap();
         let orig = &rec.uncertainty_band;
@@ -728,8 +821,22 @@ mod tests {
         let state = make_state(false);
         let candidates = vec![make_candidate("a1", 10.0, 50.0)];
 
-        engine.recommend(&candidates, &state, "op", "rec-001", "t-001", "2026-01-15T00:00:00Z");
-        engine.recommend(&candidates, &state, "op", "rec-002", "t-002", "2026-01-15T00:01:00Z");
+        engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
+        engine.recommend(
+            &candidates,
+            &state,
+            "op",
+            "rec-002",
+            "t-002",
+            "2026-01-15T00:01:00Z",
+        );
 
         assert_eq!(engine.total_served(), 2);
         assert_eq!(engine.audit_trail().len(), 2);

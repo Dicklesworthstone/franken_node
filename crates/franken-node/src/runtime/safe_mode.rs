@@ -83,10 +83,7 @@ pub enum SafeModeEntryReason {
         window_secs: u64,
     },
     /// Control epoch mismatch with federation peers.
-    EpochMismatch {
-        local_epoch: u64,
-        peer_epoch: u64,
-    },
+    EpochMismatch { local_epoch: u64, peer_epoch: u64 },
 }
 
 impl fmt::Display for SafeModeEntryReason {
@@ -96,10 +93,16 @@ impl fmt::Display for SafeModeEntryReason {
             Self::EnvironmentVariable => write!(f, "environment_variable"),
             Self::ConfigField => write!(f, "config_field"),
             Self::TrustCorruption => write!(f, "trust_corruption"),
-            Self::CrashLoop { crash_count, window_secs } => {
+            Self::CrashLoop {
+                crash_count,
+                window_secs,
+            } => {
                 write!(f, "crash_loop({crash_count} in {window_secs}s)")
             }
-            Self::EpochMismatch { local_epoch, peer_epoch } => {
+            Self::EpochMismatch {
+                local_epoch,
+                peer_epoch,
+            } => {
                 write!(f, "epoch_mismatch(local={local_epoch}, peer={peer_epoch})")
             }
         }
@@ -172,7 +175,9 @@ impl OperationFlags {
         if self.safe_mode && self.degraded {
             events.push(SafeModeEvent {
                 code: SMO_003_FLAG_CONFLICT.to_string(),
-                message: "safe-mode already restricts more than degraded mode; --degraded is redundant".to_string(),
+                message:
+                    "safe-mode already restricts more than degraded mode; --degraded is redundant"
+                        .to_string(),
                 severity: EventSeverity::Warn,
             });
         }
@@ -187,10 +192,18 @@ impl OperationFlags {
     /// Return the set of active flag names (sorted for determinism).
     pub fn active_flag_names(&self) -> Vec<String> {
         let mut names = Vec::new();
-        if self.safe_mode { names.push("--safe-mode".to_string()); }
-        if self.degraded { names.push("--degraded".to_string()); }
-        if self.read_only { names.push("--read-only".to_string()); }
-        if self.no_network { names.push("--no-network".to_string()); }
+        if self.safe_mode {
+            names.push("--safe-mode".to_string());
+        }
+        if self.degraded {
+            names.push("--degraded".to_string());
+        }
+        if self.read_only {
+            names.push("--read-only".to_string());
+        }
+        if self.no_network {
+            names.push("--no-network".to_string());
+        }
         names
     }
 }
@@ -274,10 +287,7 @@ pub struct SafeModeEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SafeModeError {
     /// Unknown CLI flag encountered.
-    UnknownFlag {
-        flag: String,
-        recovery_hint: String,
-    },
+    UnknownFlag { flag: String, recovery_hint: String },
     /// Attempted restricted operation in safe mode.
     CapabilityRestricted {
         capability: Capability,
@@ -298,16 +308,34 @@ pub enum SafeModeError {
 impl fmt::Display for SafeModeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnknownFlag { flag, recovery_hint } => {
+            Self::UnknownFlag {
+                flag,
+                recovery_hint,
+            } => {
                 write!(f, "unknown flag: {flag} (hint: {recovery_hint})")
             }
-            Self::CapabilityRestricted { capability, recovery_hint } => {
-                write!(f, "capability restricted: {capability} (hint: {recovery_hint})")
+            Self::CapabilityRestricted {
+                capability,
+                recovery_hint,
+            } => {
+                write!(
+                    f,
+                    "capability restricted: {capability} (hint: {recovery_hint})"
+                )
             }
-            Self::ExitPreconditionFailed { reason, recovery_hint } => {
-                write!(f, "exit precondition failed: {reason} (hint: {recovery_hint})")
+            Self::ExitPreconditionFailed {
+                reason,
+                recovery_hint,
+            } => {
+                write!(
+                    f,
+                    "exit precondition failed: {reason} (hint: {recovery_hint})"
+                )
             }
-            Self::TrustVerificationFailed { inconsistencies, recovery_hint } => {
+            Self::TrustVerificationFailed {
+                inconsistencies,
+                recovery_hint,
+            } => {
                 write!(
                     f,
                     "trust verification failed: {} inconsistencies (hint: {recovery_hint})",
@@ -543,20 +571,22 @@ impl SafeModeController {
 
         // INV-SMO-RESTRICTED: Apply capability restrictions.
         self.restricted_capabilities.clear();
-        self.restricted_capabilities.insert(Capability::ExtensionLoading);
-        self.restricted_capabilities.insert(Capability::TrustDelegations);
-        self.restricted_capabilities.insert(Capability::TrustLedgerWrites);
-        self.restricted_capabilities.insert(Capability::OutboundNetwork);
-        self.restricted_capabilities.insert(Capability::ScheduledTasks);
-        self.restricted_capabilities.insert(Capability::NonEssentialListeners);
+        self.restricted_capabilities
+            .insert(Capability::ExtensionLoading);
+        self.restricted_capabilities
+            .insert(Capability::TrustDelegations);
+        self.restricted_capabilities
+            .insert(Capability::TrustLedgerWrites);
+        self.restricted_capabilities
+            .insert(Capability::OutboundNetwork);
+        self.restricted_capabilities
+            .insert(Capability::ScheduledTasks);
+        self.restricted_capabilities
+            .insert(Capability::NonEssentialListeners);
 
         // Create entry receipt.
-        let receipt = SafeModeEntryReceipt::new(
-            timestamp,
-            reason.clone(),
-            trust_state_hash,
-            inconsistencies,
-        );
+        let receipt =
+            SafeModeEntryReceipt::new(timestamp, reason.clone(), trust_state_hash, inconsistencies);
         self.entry_receipt = Some(receipt);
 
         // Emit SMO-001 activation event.
@@ -618,7 +648,8 @@ impl SafeModeController {
             });
             return Err(SafeModeError::ExitPreconditionFailed {
                 reason: format!("Failed checks: {}", failed.join(", ")),
-                recovery_hint: "Resolve all failing preconditions before exiting safe mode".to_string(),
+                recovery_hint: "Resolve all failing preconditions before exiting safe mode"
+                    .to_string(),
             });
         }
 
@@ -719,7 +750,10 @@ impl SafeModeController {
             entry_timestamp: self.entry_timestamp.clone(),
             duration_seconds: duration,
             suspended_capabilities: self.suspended_capabilities(),
-            trust_state_hash: self.entry_receipt.as_ref().map(|r| r.trust_state_hash.clone()),
+            trust_state_hash: self
+                .entry_receipt
+                .as_ref()
+                .map(|r| r.trust_state_hash.clone()),
             unresolved_incidents: self.unresolved_incidents,
             active_flags: self.flags.active_flag_names(),
         }
@@ -934,8 +968,12 @@ mod tests {
     #[test]
     fn test_flags_parse_all() {
         let flags = OperationFlags::parse_args(&[
-            "--safe-mode", "--degraded", "--read-only", "--no-network",
-        ]).unwrap();
+            "--safe-mode",
+            "--degraded",
+            "--read-only",
+            "--no-network",
+        ])
+        .unwrap();
         assert!(flags.safe_mode);
         assert!(flags.degraded);
         assert!(flags.read_only);
@@ -946,7 +984,10 @@ mod tests {
     fn test_flags_parse_unknown_flag() {
         let err = OperationFlags::parse_args(&["--unknown"]).unwrap_err();
         match err {
-            SafeModeError::UnknownFlag { flag, recovery_hint } => {
+            SafeModeError::UnknownFlag {
+                flag,
+                recovery_hint,
+            } => {
                 assert_eq!(flag, "--unknown");
                 assert!(recovery_hint.contains("Valid flags"));
             }
@@ -1034,12 +1075,18 @@ mod tests {
         assert_eq!(Capability::TrustLedgerWrites.label(), "trust_ledger_writes");
         assert_eq!(Capability::OutboundNetwork.label(), "outbound_network");
         assert_eq!(Capability::ScheduledTasks.label(), "scheduled_tasks");
-        assert_eq!(Capability::NonEssentialListeners.label(), "non_essential_listeners");
+        assert_eq!(
+            Capability::NonEssentialListeners.label(),
+            "non_essential_listeners"
+        );
     }
 
     #[test]
     fn test_capability_display() {
-        assert_eq!(format!("{}", Capability::ExtensionLoading), "extension_loading");
+        assert_eq!(
+            format!("{}", Capability::ExtensionLoading),
+            "extension_loading"
+        );
     }
 
     #[test]
@@ -1054,27 +1101,48 @@ mod tests {
 
     #[test]
     fn test_entry_reason_display() {
-        assert_eq!(format!("{}", SafeModeEntryReason::ExplicitFlag), "explicit_flag");
-        assert_eq!(format!("{}", SafeModeEntryReason::EnvironmentVariable), "environment_variable");
-        assert_eq!(format!("{}", SafeModeEntryReason::ConfigField), "config_field");
-        assert_eq!(format!("{}", SafeModeEntryReason::TrustCorruption), "trust_corruption");
+        assert_eq!(
+            format!("{}", SafeModeEntryReason::ExplicitFlag),
+            "explicit_flag"
+        );
+        assert_eq!(
+            format!("{}", SafeModeEntryReason::EnvironmentVariable),
+            "environment_variable"
+        );
+        assert_eq!(
+            format!("{}", SafeModeEntryReason::ConfigField),
+            "config_field"
+        );
+        assert_eq!(
+            format!("{}", SafeModeEntryReason::TrustCorruption),
+            "trust_corruption"
+        );
     }
 
     #[test]
     fn test_entry_reason_crash_loop_display() {
-        let reason = SafeModeEntryReason::CrashLoop { crash_count: 5, window_secs: 60 };
+        let reason = SafeModeEntryReason::CrashLoop {
+            crash_count: 5,
+            window_secs: 60,
+        };
         assert_eq!(format!("{reason}"), "crash_loop(5 in 60s)");
     }
 
     #[test]
     fn test_entry_reason_epoch_mismatch_display() {
-        let reason = SafeModeEntryReason::EpochMismatch { local_epoch: 10, peer_epoch: 12 };
+        let reason = SafeModeEntryReason::EpochMismatch {
+            local_epoch: 10,
+            peer_epoch: 12,
+        };
         assert_eq!(format!("{reason}"), "epoch_mismatch(local=10, peer=12)");
     }
 
     #[test]
     fn test_entry_reason_serde_roundtrip() {
-        let reason = SafeModeEntryReason::CrashLoop { crash_count: 3, window_secs: 60 };
+        let reason = SafeModeEntryReason::CrashLoop {
+            crash_count: 3,
+            window_secs: 60,
+        };
         let json = serde_json::to_string(&reason).unwrap();
         let parsed: SafeModeEntryReason = serde_json::from_str(&json).unwrap();
         assert_eq!(reason, parsed);
@@ -1217,7 +1285,10 @@ mod tests {
     fn test_action_display() {
         assert_eq!(format!("{}", SafeModeAction::Enter), "enter");
         assert_eq!(format!("{}", SafeModeAction::Exit), "exit");
-        assert_eq!(format!("{}", SafeModeAction::CapabilityRestricted), "capability_restricted");
+        assert_eq!(
+            format!("{}", SafeModeAction::CapabilityRestricted),
+            "capability_restricted"
+        );
         assert_eq!(format!("{}", SafeModeAction::ExitDenied), "exit_denied");
     }
 
@@ -1302,7 +1373,10 @@ mod tests {
             Vec::new(),
         );
         assert!(ctrl.is_active());
-        assert_eq!(ctrl.entry_reason(), Some(&SafeModeEntryReason::ExplicitFlag));
+        assert_eq!(
+            ctrl.entry_reason(),
+            Some(&SafeModeEntryReason::ExplicitFlag)
+        );
     }
 
     #[test]
@@ -1314,7 +1388,11 @@ mod tests {
             "sha256:test",
             Vec::new(),
         );
-        assert!(ctrl.events().iter().any(|e| e.code == SMO_001_SAFE_MODE_ACTIVATED));
+        assert!(
+            ctrl.events()
+                .iter()
+                .any(|e| e.code == SMO_001_SAFE_MODE_ACTIVATED)
+        );
     }
 
     #[test]
@@ -1326,7 +1404,9 @@ mod tests {
             "sha256:test",
             Vec::new(),
         );
-        let smo002_count = ctrl.events().iter()
+        let smo002_count = ctrl
+            .events()
+            .iter()
             .filter(|e| e.code == SMO_002_CAPABILITY_RESTRICTED)
             .count();
         assert_eq!(smo002_count, 6); // All 6 capabilities restricted.
@@ -1394,7 +1474,8 @@ mod tests {
             evidence_ledger_intact: true,
             operator_confirmed: true,
         };
-        ctrl.exit_safe_mode(&verification, "operator-1", "2026-02-20T11:00:00Z").unwrap();
+        ctrl.exit_safe_mode(&verification, "operator-1", "2026-02-20T11:00:00Z")
+            .unwrap();
         assert!(!ctrl.is_active());
     }
 
@@ -1434,7 +1515,9 @@ mod tests {
             operator_confirmed: true,
         };
         let _ = ctrl.exit_safe_mode(&verification, "operator-1", "2026-02-20T11:00:00Z");
-        let denied_entries: Vec<_> = ctrl.audit_log().iter()
+        let denied_entries: Vec<_> = ctrl
+            .audit_log()
+            .iter()
             .filter(|e| e.action == SafeModeAction::ExitDenied)
             .collect();
         assert_eq!(denied_entries.len(), 1);
@@ -1524,7 +1607,9 @@ mod tests {
             operator_confirmed: true,
         };
         ctrl.exit_safe_mode(&verification, "op", "ts").unwrap();
-        let exit_entries: Vec<_> = ctrl.audit_log().iter()
+        let exit_entries: Vec<_> = ctrl
+            .audit_log()
+            .iter()
             .filter(|e| e.action == SafeModeAction::Exit)
             .collect();
         assert_eq!(exit_entries.len(), 1);
@@ -1540,18 +1625,17 @@ mod tests {
             read_only: false,
             no_network: false,
         });
-        assert!(ctrl.events().iter().any(|e| e.code == SMO_003_FLAG_CONFLICT));
+        assert!(
+            ctrl.events()
+                .iter()
+                .any(|e| e.code == SMO_003_FLAG_CONFLICT)
+        );
     }
 
     #[test]
     fn test_controller_take_events_drains() {
         let mut ctrl = SafeModeController::with_default_config();
-        ctrl.enter_safe_mode(
-            SafeModeEntryReason::ExplicitFlag,
-            "ts",
-            "hash",
-            Vec::new(),
-        );
+        ctrl.enter_safe_mode(SafeModeEntryReason::ExplicitFlag, "ts", "hash", Vec::new());
         let events = ctrl.take_events();
         assert!(!events.is_empty());
         assert!(ctrl.events().is_empty());
@@ -1561,11 +1645,18 @@ mod tests {
     fn test_controller_enter_degraded_state() {
         let mut ctrl = SafeModeController::with_default_config();
         ctrl.enter_degraded_state(
-            SafeModeEntryReason::CrashLoop { crash_count: 5, window_secs: 60 },
+            SafeModeEntryReason::CrashLoop {
+                crash_count: 5,
+                window_secs: 60,
+            },
             "2026-02-20T10:00:00Z",
         );
         assert!(ctrl.is_active());
-        assert!(ctrl.events().iter().any(|e| e.code == SMO_004_DEGRADED_STATE_ENTERED));
+        assert!(
+            ctrl.events()
+                .iter()
+                .any(|e| e.code == SMO_004_DEGRADED_STATE_ENTERED)
+        );
     }
 
     // -- Trigger evaluation tests -------------------------------------------
@@ -1640,7 +1731,11 @@ mod tests {
         let ctrl = SafeModeController::with_default_config();
         let reason = ctrl.check_crash_loop_trigger(3, 60);
         assert!(reason.is_some());
-        if let Some(SafeModeEntryReason::CrashLoop { crash_count, window_secs }) = reason {
+        if let Some(SafeModeEntryReason::CrashLoop {
+            crash_count,
+            window_secs,
+        }) = reason
+        {
             assert_eq!(crash_count, 3);
             assert_eq!(window_secs, 60);
         }
@@ -1741,10 +1836,7 @@ mod tests {
 
     #[test]
     fn test_verify_trust_state_pass() {
-        let receipt = SafeModeController::verify_trust_state(
-            "sha256:abc",
-            &["entry1", "entry2"],
-        );
+        let receipt = SafeModeController::verify_trust_state("sha256:abc", &["entry1", "entry2"]);
         assert!(receipt.pass);
         assert!(receipt.inconsistencies.is_empty());
     }
@@ -1801,8 +1893,14 @@ mod tests {
         assert!(ctrl.is_active());
 
         // Capabilities are restricted.
-        assert!(ctrl.check_capability(&Capability::ExtensionLoading).is_err());
-        assert!(ctrl.check_capability(&Capability::TrustDelegations).is_err());
+        assert!(
+            ctrl.check_capability(&Capability::ExtensionLoading)
+                .is_err()
+        );
+        assert!(
+            ctrl.check_capability(&Capability::TrustDelegations)
+                .is_err()
+        );
 
         // Receipt exists.
         assert!(ctrl.entry_receipt().is_some());
@@ -1824,7 +1922,8 @@ mod tests {
             evidence_ledger_intact: true,
             operator_confirmed: true,
         };
-        ctrl.exit_safe_mode(&good_verification, "operator-1", "2026-02-20T11:00:00Z").unwrap();
+        ctrl.exit_safe_mode(&good_verification, "operator-1", "2026-02-20T11:00:00Z")
+            .unwrap();
         assert!(!ctrl.is_active());
 
         // Capabilities restored.
@@ -1838,7 +1937,10 @@ mod tests {
             SafeModeEntryReason::TrustCorruption,
             "2026-02-20T10:00:00Z",
             "sha256:corrupted",
-            vec!["missing evidence entry 42".to_string(), "hash chain break at position 17".to_string()],
+            vec![
+                "missing evidence entry 42".to_string(),
+                "hash chain break at position 17".to_string(),
+            ],
         );
         assert!(ctrl.is_active());
         let receipt = ctrl.entry_receipt().unwrap();
@@ -1853,7 +1955,11 @@ mod tests {
         assert!(trigger.is_some());
         ctrl.enter_degraded_state(trigger.unwrap(), "2026-02-20T10:00:00Z");
         assert!(ctrl.is_active());
-        assert!(ctrl.events().iter().any(|e| e.code == SMO_004_DEGRADED_STATE_ENTERED));
+        assert!(
+            ctrl.events()
+                .iter()
+                .any(|e| e.code == SMO_004_DEGRADED_STATE_ENTERED)
+        );
     }
 
     #[test]
@@ -1868,7 +1974,11 @@ mod tests {
             Vec::new(),
         );
         assert!(ctrl.is_active());
-        if let Some(SafeModeEntryReason::EpochMismatch { local_epoch, peer_epoch }) = ctrl.entry_reason() {
+        if let Some(SafeModeEntryReason::EpochMismatch {
+            local_epoch,
+            peer_epoch,
+        }) = ctrl.entry_reason()
+        {
             assert_eq!(*local_epoch, 10);
             assert_eq!(*peer_epoch, 15);
         } else {
@@ -1880,12 +1990,7 @@ mod tests {
     fn test_set_unresolved_incidents() {
         let mut ctrl = SafeModeController::with_default_config();
         ctrl.set_unresolved_incidents(5);
-        ctrl.enter_safe_mode(
-            SafeModeEntryReason::ExplicitFlag,
-            "ts",
-            "hash",
-            Vec::new(),
-        );
+        ctrl.enter_safe_mode(SafeModeEntryReason::ExplicitFlag, "ts", "hash", Vec::new());
         let status = ctrl.status("ts");
         assert_eq!(status.unresolved_incidents, 5);
     }

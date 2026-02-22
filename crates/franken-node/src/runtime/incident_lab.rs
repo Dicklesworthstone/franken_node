@@ -435,10 +435,7 @@ impl IncidentLab {
 
     /// Verify that two replays of the same trace produce identical digests.
     /// INV-ILAB-DETERMINISTIC enforcement.
-    pub fn verify_deterministic_replay(
-        &self,
-        trace: &IncidentTrace,
-    ) -> Result<bool, LabError> {
+    pub fn verify_deterministic_replay(&self, trace: &IncidentTrace) -> Result<bool, LabError> {
         let replay_a = self.replay_trace(trace)?;
         let replay_b = self.replay_trace(trace)?;
         if replay_a.replay_digest != replay_b.replay_digest {
@@ -746,8 +743,7 @@ mod tests {
     #[test]
     fn test_evaluate_scenario_rejects_weak_mitigation() {
         let lab = lab();
-        let scenario =
-            make_test_scenario("t-e2e-2", "p-e2e-2", "validator-A", 0.01, 100.0, 10.0);
+        let scenario = make_test_scenario("t-e2e-2", "p-e2e-2", "validator-A", 0.01, 100.0, 10.0);
         let (_, synthesis, contract) = lab.evaluate_scenario(&scenario).unwrap();
         assert!(!synthesis.promoted);
         assert!(contract.is_none());

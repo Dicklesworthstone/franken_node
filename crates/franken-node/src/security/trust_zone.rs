@@ -376,7 +376,11 @@ impl ZoneSegmentationEngine {
     // -- Resource-to-zone resolution ----------------------------------------
 
     /// Register a resource-to-zone mapping.
-    pub fn register_resource(&mut self, resource_id: impl Into<String>, zone_id: impl Into<String>) {
+    pub fn register_resource(
+        &mut self,
+        resource_id: impl Into<String>,
+        zone_id: impl Into<String>,
+    ) {
         self.resource_zone_map
             .insert(resource_id.into(), zone_id.into());
     }
@@ -395,10 +399,7 @@ impl ZoneSegmentationEngine {
     pub fn bind_key_to_zone(&mut self, key_id: impl Into<String>, zone_id: impl Into<String>) {
         let key = key_id.into();
         let zone = zone_id.into();
-        self.key_zone_bindings
-            .entry(key)
-            .or_default()
-            .push(zone);
+        self.key_zone_bindings.entry(key).or_default().push(zone);
     }
 
     /// Check whether a key is bound to a specific zone.
@@ -410,11 +411,7 @@ impl ZoneSegmentationEngine {
 
     /// Validate that a key is authorized for a zone, returning KeyZoneMismatch
     /// if the key is not bound.
-    pub fn validate_key_zone(
-        &self,
-        key_id: &str,
-        zone_id: &str,
-    ) -> Result<(), SegmentationError> {
+    pub fn validate_key_zone(&self, key_id: &str, zone_id: &str) -> Result<(), SegmentationError> {
         if !self.is_key_bound_to_zone(key_id, zone_id) {
             return Err(SegmentationError::KeyZoneMismatch);
         }
@@ -459,10 +456,7 @@ impl ZoneSegmentationEngine {
         match source.isolation_level {
             IsolationLevel::Strict => {
                 // Strict: must have explicit cross-zone target listed.
-                if !source
-                    .allowed_cross_zone_targets
-                    .contains(&req.target_zone)
-                {
+                if !source.allowed_cross_zone_targets.contains(&req.target_zone) {
                     self.emit_event(
                         ZTS_004_ISOLATION_VIOLATION,
                         &req.source_zone,
@@ -480,10 +474,7 @@ impl ZoneSegmentationEngine {
             }
             IsolationLevel::Custom => {
                 // Custom: check allowed targets.
-                if !source
-                    .allowed_cross_zone_targets
-                    .contains(&req.target_zone)
-                {
+                if !source.allowed_cross_zone_targets.contains(&req.target_zone) {
                     self.emit_event(
                         ZTS_004_ISOLATION_VIOLATION,
                         &req.source_zone,
@@ -511,10 +502,7 @@ impl ZoneSegmentationEngine {
     // -- Isolation level query ----------------------------------------------
 
     /// Query the isolation level for a zone.
-    pub fn check_isolation(
-        &self,
-        zone_id: &str,
-    ) -> Result<IsolationLevel, SegmentationError> {
+    pub fn check_isolation(&self, zone_id: &str) -> Result<IsolationLevel, SegmentationError> {
         self.zones
             .get(zone_id)
             .map(|p| p.isolation_level)
@@ -973,7 +961,9 @@ mod tests {
         engine
             .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
             .unwrap();
-        engine.bind_tenant(make_binding("team-alpha", "prod")).unwrap();
+        engine
+            .bind_tenant(make_binding("team-alpha", "prod"))
+            .unwrap();
         assert_eq!(engine.event_count(ZTS_002_TENANT_BOUND), 1);
     }
 
@@ -990,7 +980,9 @@ mod tests {
         engine
             .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
             .unwrap();
-        engine.bind_tenant(make_binding("team-alpha", "prod")).unwrap();
+        engine
+            .bind_tenant(make_binding("team-alpha", "prod"))
+            .unwrap();
         let result = engine.bind_tenant(make_binding("team-alpha", "prod"));
         assert_eq!(result, Err(SegmentationError::DuplicateTenant));
     }
@@ -1001,7 +993,9 @@ mod tests {
         engine
             .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
             .unwrap();
-        engine.bind_tenant(make_binding("team-alpha", "prod")).unwrap();
+        engine
+            .bind_tenant(make_binding("team-alpha", "prod"))
+            .unwrap();
         assert_eq!(engine.tenant_zone("team-alpha").unwrap(), "prod");
     }
 
@@ -1227,9 +1221,11 @@ mod tests {
         engine
             .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
             .unwrap();
-        assert!(engine
-            .validate_zone_action("prod", "prod", "deploy", "user-1", "")
-            .is_ok());
+        assert!(
+            engine
+                .validate_zone_action("prod", "prod", "deploy", "user-1", "")
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1243,13 +1239,17 @@ mod tests {
             .unwrap();
 
         // Without proof
-        assert!(engine
-            .validate_zone_action("prod", "staging", "deploy", "user-1", "")
-            .is_err());
+        assert!(
+            engine
+                .validate_zone_action("prod", "staging", "deploy", "user-1", "")
+                .is_err()
+        );
         // With proof
-        assert!(engine
-            .validate_zone_action("prod", "staging", "deploy", "user-1", "bridge-token")
-            .is_ok());
+        assert!(
+            engine
+                .validate_zone_action("prod", "staging", "deploy", "user-1", "bridge-token")
+                .is_ok()
+        );
     }
 
     // ── Engine: events ────────────────────────────────────────────────────
@@ -1340,7 +1340,9 @@ mod tests {
 
         // Bind tenants.
         engine.bind_tenant(make_binding("team-a", "prod")).unwrap();
-        engine.bind_tenant(make_binding("team-b", "staging")).unwrap();
+        engine
+            .bind_tenant(make_binding("team-b", "staging"))
+            .unwrap();
         engine.bind_tenant(make_binding("team-c", "dev")).unwrap();
 
         // Cross-zone from staging to prod with bridge: should succeed.

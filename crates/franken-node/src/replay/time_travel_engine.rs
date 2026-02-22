@@ -154,9 +154,17 @@ pub enum TimeTravelError {
     /// The trace has no steps.
     EmptyTrace { trace_id: String },
     /// A sequence gap was detected in the trace steps.
-    SequenceGap { trace_id: String, expected: u64, found: u64 },
+    SequenceGap {
+        trace_id: String,
+        expected: u64,
+        found: u64,
+    },
     /// Trace digest does not match recomputed value.
-    DigestMismatch { trace_id: String, expected: String, found: String },
+    DigestMismatch {
+        trace_id: String,
+        expected: String,
+        found: String,
+    },
     /// Environment snapshot is missing required fields.
     EnvironmentMissing { trace_id: String, field: String },
     /// Replay execution failed.
@@ -173,16 +181,28 @@ impl fmt::Display for TimeTravelError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyTrace { trace_id } => {
-                write!(f, "[{0}] trace {trace_id} has no steps", error_codes::ERR_TTR_EMPTY_TRACE)
+                write!(
+                    f,
+                    "[{0}] trace {trace_id} has no steps",
+                    error_codes::ERR_TTR_EMPTY_TRACE
+                )
             }
-            Self::SequenceGap { trace_id, expected, found } => {
+            Self::SequenceGap {
+                trace_id,
+                expected,
+                found,
+            } => {
                 write!(
                     f,
                     "[{0}] trace {trace_id}: expected seq {expected}, found {found}",
                     error_codes::ERR_TTR_SEQ_GAP
                 )
             }
-            Self::DigestMismatch { trace_id, expected, found } => {
+            Self::DigestMismatch {
+                trace_id,
+                expected,
+                found,
+            } => {
                 write!(
                     f,
                     "[{0}] trace {trace_id}: expected digest {expected}, found {found}",
@@ -204,7 +224,11 @@ impl fmt::Display for TimeTravelError {
                 )
             }
             Self::DuplicateTrace { trace_id } => {
-                write!(f, "[{0}] trace {trace_id} already exists", error_codes::ERR_TTR_DUPLICATE_TRACE)
+                write!(
+                    f,
+                    "[{0}] trace {trace_id} already exists",
+                    error_codes::ERR_TTR_DUPLICATE_TRACE
+                )
             }
             Self::StepOrderViolation { trace_id, step_seq } => {
                 write!(
@@ -214,7 +238,11 @@ impl fmt::Display for TimeTravelError {
                 )
             }
             Self::TraceNotFound { trace_id } => {
-                write!(f, "[{0}] trace {trace_id} not found", error_codes::ERR_TTR_TRACE_NOT_FOUND)
+                write!(
+                    f,
+                    "[{0}] trace {trace_id} not found",
+                    error_codes::ERR_TTR_TRACE_NOT_FOUND
+                )
             }
         }
     }
@@ -259,7 +287,10 @@ pub struct SideEffect {
 
 impl SideEffect {
     pub fn new(kind: &str, payload: Vec<u8>) -> Self {
-        Self { kind: kind.to_string(), payload }
+        Self {
+            kind: kind.to_string(),
+            payload,
+        }
     }
 }
 
@@ -339,7 +370,13 @@ impl TraceStep {
         side_effects: Vec<SideEffect>,
         timestamp_ns: u64,
     ) -> Self {
-        Self { seq, input, output, side_effects, timestamp_ns }
+        Self {
+            seq,
+            input,
+            output,
+            side_effects,
+            timestamp_ns,
+        }
     }
 
     /// Compute a SHA-256 digest of the step's output for comparison.
@@ -398,7 +435,9 @@ impl WorkflowTrace {
     pub fn validate(&self) -> Result<(), TimeTravelError> {
         // INV-TTR-TRACE-COMPLETE: must have at least one step
         if self.steps.is_empty() {
-            return Err(TimeTravelError::EmptyTrace { trace_id: self.trace_id.clone() });
+            return Err(TimeTravelError::EmptyTrace {
+                trace_id: self.trace_id.clone(),
+            });
         }
 
         // INV-TTR-STEP-ORDER: verify strict sequential ordering
@@ -461,7 +500,10 @@ impl TraceBuilder {
         audit_log.push(AuditEntry::new(
             event_codes::TTR_008,
             trace_id,
-            &format!("Environment snapshot sealed: platform={}", environment.platform),
+            &format!(
+                "Environment snapshot sealed: platform={}",
+                environment.platform
+            ),
             now,
         ));
         Self {
@@ -485,7 +527,13 @@ impl TraceBuilder {
         timestamp_ns: u64,
     ) -> u64 {
         let seq = self.next_seq;
-        self.steps.push(TraceStep::new(seq, input, output, side_effects, timestamp_ns));
+        self.steps.push(TraceStep::new(
+            seq,
+            input,
+            output,
+            side_effects,
+            timestamp_ns,
+        ));
         self.audit_log.push(AuditEntry::new(
             event_codes::TTR_002,
             &self.trace_id,
@@ -521,7 +569,11 @@ impl TraceBuilder {
                 self.audit_log.push(AuditEntry::new(
                     event_codes::TTR_003,
                     &self.trace_id,
-                    &format!("Capture completed: {} steps, digest={}", trace.steps.len(), &trace_digest[..16]),
+                    &format!(
+                        "Capture completed: {} steps, digest={}",
+                        trace.steps.len(),
+                        &trace_digest[..16]
+                    ),
                     0,
                 ));
                 self.audit_log.push(AuditEntry::new(
@@ -713,9 +765,12 @@ impl ReplayEngine {
         trace_id: &str,
         replay_fn: ReplayFn,
     ) -> Result<ReplayResult, TimeTravelError> {
-        let trace = self.traces.get(trace_id).ok_or_else(|| TimeTravelError::TraceNotFound {
-            trace_id: trace_id.to_string(),
-        })?;
+        let trace = self
+            .traces
+            .get(trace_id)
+            .ok_or_else(|| TimeTravelError::TraceNotFound {
+                trace_id: trace_id.to_string(),
+            })?;
 
         // Emit TTR-004: Replay started
         self.audit_log.push(AuditEntry::new(
@@ -849,9 +904,7 @@ impl Default for ReplayEngine {
 pub fn build_demo_trace(trace_id: &str, workflow_name: &str, step_count: usize) -> WorkflowTrace {
     let env = EnvironmentSnapshot::new(
         1_000_000,
-        BTreeMap::from([
-            ("FRANKEN_NODE_PROFILE".to_string(), "balanced".to_string()),
-        ]),
+        BTreeMap::from([("FRANKEN_NODE_PROFILE".to_string(), "balanced".to_string())]),
         "linux-x86_64",
         "0.1.0",
     );
@@ -861,7 +914,13 @@ pub fn build_demo_trace(trace_id: &str, workflow_name: &str, step_count: usize) 
         let input = format!("input-{i}").into_bytes();
         let output = format!("output-{i}").into_bytes();
         let effects = vec![SideEffect::new("log", format!("effect-{i}").into_bytes())];
-        steps.push(TraceStep::new(i as u64, input, output, effects, (i as u64 + 1) * 1000));
+        steps.push(TraceStep::new(
+            i as u64,
+            input,
+            output,
+            effects,
+            (i as u64 + 1) * 1000,
+        ));
     }
 
     let trace_digest = WorkflowTrace::compute_digest(&steps);
@@ -961,14 +1020,18 @@ mod tests {
     fn env_snapshot_rejects_empty_platform() {
         let env = EnvironmentSnapshot::new(0, BTreeMap::new(), "", "0.1.0");
         let err = env.validate("test").unwrap_err();
-        assert!(matches!(err, TimeTravelError::EnvironmentMissing { field, .. } if field == "platform"));
+        assert!(
+            matches!(err, TimeTravelError::EnvironmentMissing { field, .. } if field == "platform")
+        );
     }
 
     #[test]
     fn env_snapshot_rejects_empty_runtime_version() {
         let env = EnvironmentSnapshot::new(0, BTreeMap::new(), "linux", "");
         let err = env.validate("test").unwrap_err();
-        assert!(matches!(err, TimeTravelError::EnvironmentMissing { field, .. } if field == "runtime_version"));
+        assert!(
+            matches!(err, TimeTravelError::EnvironmentMissing { field, .. } if field == "runtime_version")
+        );
     }
 
     // --- TraceStep digests ---
@@ -1027,7 +1090,14 @@ mod tests {
             schema_version: SCHEMA_VERSION.to_string(),
         };
         let err = trace.validate().unwrap_err();
-        assert!(matches!(err, TimeTravelError::SequenceGap { expected: 1, found: 2, .. }));
+        assert!(matches!(
+            err,
+            TimeTravelError::SequenceGap {
+                expected: 1,
+                found: 2,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -1189,13 +1259,22 @@ mod tests {
         let mut engine = ReplayEngine::new();
         engine.register_trace(one_step_trace("se-div")).unwrap();
 
-        fn bad_effects(_step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
-            (_step.output.clone(), vec![SideEffect::new("different", vec![99])])
+        fn bad_effects(
+            _step: &TraceStep,
+            _env: &EnvironmentSnapshot,
+        ) -> (Vec<u8>, Vec<SideEffect>) {
+            (
+                _step.output.clone(),
+                vec![SideEffect::new("different", vec![99])],
+            )
         }
 
         let result = engine.replay("se-div", bad_effects).unwrap();
         assert_eq!(result.verdict, ReplayVerdict::Diverged(1));
-        assert_eq!(result.divergences[0].kind, DivergenceKind::SideEffectMismatch);
+        assert_eq!(
+            result.divergences[0].kind,
+            DivergenceKind::SideEffectMismatch
+        );
     }
 
     #[test]
@@ -1221,7 +1300,12 @@ mod tests {
         }
 
         engine.replay("div-audit", bad_replay).unwrap();
-        assert!(engine.audit_log().iter().any(|e| e.event_code == event_codes::TTR_006));
+        assert!(
+            engine
+                .audit_log()
+                .iter()
+                .any(|e| e.event_code == event_codes::TTR_006)
+        );
     }
 
     // --- Replay error: trace not found ---
@@ -1321,7 +1405,9 @@ mod tests {
 
     #[test]
     fn error_display_includes_code() {
-        let err = TimeTravelError::EmptyTrace { trace_id: "t".to_string() };
+        let err = TimeTravelError::EmptyTrace {
+            trace_id: "t".to_string(),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("ERR_TTR_EMPTY_TRACE"));
     }
@@ -1329,7 +1415,9 @@ mod tests {
     #[test]
     fn error_display_sequence_gap() {
         let err = TimeTravelError::SequenceGap {
-            trace_id: "t".to_string(), expected: 1, found: 3,
+            trace_id: "t".to_string(),
+            expected: 1,
+            found: 3,
         };
         let msg = format!("{err}");
         assert!(msg.contains("ERR_TTR_SEQ_GAP"));
@@ -1338,7 +1426,9 @@ mod tests {
 
     #[test]
     fn error_display_duplicate_trace() {
-        let err = TimeTravelError::DuplicateTrace { trace_id: "dup".to_string() };
+        let err = TimeTravelError::DuplicateTrace {
+            trace_id: "dup".to_string(),
+        };
         let msg = format!("{err}");
         assert!(msg.contains("ERR_TTR_DUPLICATE_TRACE"));
     }
@@ -1355,8 +1445,14 @@ mod tests {
 
     #[test]
     fn divergence_kind_display() {
-        assert_eq!(format!("{}", DivergenceKind::OutputMismatch), "output_mismatch");
-        assert_eq!(format!("{}", DivergenceKind::SideEffectMismatch), "side_effect_mismatch");
+        assert_eq!(
+            format!("{}", DivergenceKind::OutputMismatch),
+            "output_mismatch"
+        );
+        assert_eq!(
+            format!("{}", DivergenceKind::SideEffectMismatch),
+            "side_effect_mismatch"
+        );
         assert_eq!(format!("{}", DivergenceKind::FullMismatch), "full_mismatch");
     }
 
@@ -1397,7 +1493,9 @@ mod tests {
     #[test]
     fn partial_divergence_detected() {
         let mut engine = ReplayEngine::new();
-        engine.register_trace(multi_step_trace("partial", 5)).unwrap();
+        engine
+            .register_trace(multi_step_trace("partial", 5))
+            .unwrap();
 
         // Only diverge on even steps
         fn even_bad(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {

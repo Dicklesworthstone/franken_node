@@ -348,10 +348,7 @@ impl RunnerConfig {
             mode: RunnerMode::OnDemand,
             sandbox_required: true,
             max_campaign_duration_ms: 30_000,
-            integration_targets: vec![
-                "adversary_graph".to_string(),
-                "trust_card".to_string(),
-            ],
+            integration_targets: vec!["adversary_graph".to_string(), "trust_card".to_string()],
             mutation_strategies_enabled: MutationStrategy::all().to_vec(),
         }
     }
@@ -547,7 +544,8 @@ pub fn build_default_corpus() -> CampaignCorpus {
             category: CampaignCategory::CredentialExfiltration,
             version: "1.0.0".to_string(),
             title: "Environment variable credential harvest".to_string(),
-            attack_vector: "Enumerate process.env for AWS_SECRET, DATABASE_URL, API_KEY patterns".to_string(),
+            attack_vector: "Enumerate process.env for AWS_SECRET, DATABASE_URL, API_KEY patterns"
+                .to_string(),
             target_component: "runtime_sandbox".to_string(),
             expected_defense: "env var access restricted to declared manifest scope".to_string(),
             severity: CampaignSeverity::Critical,
@@ -566,7 +564,8 @@ pub fn build_default_corpus() -> CampaignCorpus {
             category: CampaignCategory::PolicyEvasion,
             version: "1.0.0".to_string(),
             title: "TOCTOU race on trust policy check".to_string(),
-            attack_vector: "Request policy check then swap payload before execution gate".to_string(),
+            attack_vector: "Request policy check then swap payload before execution gate"
+                .to_string(),
             target_component: "trust_policy_engine".to_string(),
             expected_defense: "atomic check-and-execute prevents TOCTOU; audit logged".to_string(),
             severity: CampaignSeverity::High,
@@ -585,9 +584,12 @@ pub fn build_default_corpus() -> CampaignCorpus {
             category: CampaignCategory::DelayedPayloadActivation,
             version: "1.0.0".to_string(),
             title: "Time-delayed privilege escalation".to_string(),
-            attack_vector: "Extension passes initial trust check, activates restricted API after 5m".to_string(),
+            attack_vector:
+                "Extension passes initial trust check, activates restricted API after 5m"
+                    .to_string(),
             target_component: "extension_host".to_string(),
-            expected_defense: "continuous monitoring detects behavioral change; quarantine triggered".to_string(),
+            expected_defense:
+                "continuous monitoring detects behavioral change; quarantine triggered".to_string(),
             severity: CampaignSeverity::High,
             success_criteria: SuccessCriteria {
                 defense_held: true,
@@ -749,7 +751,10 @@ mod tests {
         assert!(!gate.overall_pass);
         assert_eq!(gate.verdict, "FAIL");
         assert_eq!(gate.defense_breached, 1);
-        assert!(gate.breached_campaign_ids.contains(&"CAMP-PEV-001".to_string()));
+        assert!(
+            gate.breached_campaign_ids
+                .contains(&"CAMP-PEV-001".to_string())
+        );
     }
 
     #[test]
@@ -805,10 +810,7 @@ mod tests {
             sandbox_verified: true,
             duration_ms: 80,
             severity_if_breached: CampaignSeverity::Critical,
-            integration_targets: vec![
-                "adversary_graph".to_string(),
-                "trust_card".to_string(),
-            ],
+            integration_targets: vec!["adversary_graph".to_string(), "trust_card".to_string()],
         }];
 
         let gate = runner.evaluate_results(&results);
@@ -854,7 +856,10 @@ mod tests {
     #[test]
     fn test_verdict_labels() {
         assert_eq!(ExecutionVerdict::DefenseHeld.label(), "defense_held");
-        assert_eq!(ExecutionVerdict::DefenseBreached.label(), "defense_breached");
+        assert_eq!(
+            ExecutionVerdict::DefenseBreached.label(),
+            "defense_breached"
+        );
         assert_eq!(ExecutionVerdict::Inconclusive.label(), "inconclusive");
     }
 

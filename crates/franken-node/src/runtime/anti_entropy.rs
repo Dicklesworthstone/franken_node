@@ -289,11 +289,7 @@ impl AntiEntropyReconciler {
 
     /// Compute the delta between local and remote states.
     /// INV-AE-DELTA: only processes O(delta) records.
-    pub fn compute_delta(
-        &self,
-        local: &TrustState,
-        remote: &TrustState,
-    ) -> Vec<TrustRecord> {
+    pub fn compute_delta(&self, local: &TrustState, remote: &TrustState) -> Vec<TrustRecord> {
         let local_ids = local.record_ids();
         let remote_ids = remote.record_ids();
 
@@ -307,11 +303,7 @@ impl AntiEntropyReconciler {
     }
 
     /// Detect fork: local and remote have same ID but different digests.
-    pub fn detect_fork(
-        &self,
-        local: &TrustState,
-        remote: &TrustState,
-    ) -> Option<String> {
+    pub fn detect_fork(&self, local: &TrustState, remote: &TrustState) -> Option<String> {
         let local_ids = local.record_ids();
         let remote_ids = remote.record_ids();
         let common = local_ids.intersection(&remote_ids);
@@ -414,7 +406,9 @@ impl AntiEntropyReconciler {
                     code: EVT_RECORD_REJECTED.to_string(),
                     detail: format!(
                         "epoch violation: record {} epoch={} > local={}",
-                        record.id, record.epoch, local.current_epoch()
+                        record.id,
+                        record.epoch,
+                        local.current_epoch()
                     ),
                     trace_id: trace_id.clone(),
                     epoch: local.current_epoch(),
@@ -663,7 +657,11 @@ mod tests {
         }
 
         let delta = reconciler.compute_delta(&local, &remote);
-        assert_eq!(delta.len(), 100, "Delta should be exactly the differing records");
+        assert_eq!(
+            delta.len(),
+            100,
+            "Delta should be exactly the differing records"
+        );
     }
 
     // -- Fork detection --
@@ -695,8 +693,7 @@ mod tests {
 
     #[test]
     fn test_reconcile_empty_to_populated() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         remote.insert(make_record("r1", 1));
@@ -713,8 +710,7 @@ mod tests {
     #[test]
     fn test_reconcile_epoch_rejection() {
         // INV-AE-EPOCH: future-epoch records rejected.
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(5);
         let mut remote = TrustState::new(10);
         remote.insert(make_record("future", 10)); // epoch 10 > local 5.
@@ -729,8 +725,7 @@ mod tests {
     #[test]
     fn test_reconcile_proof_rejection() {
         // INV-AE-PROOF: invalid proof rejected.
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         remote.insert(make_record_no_proof("bad_proof", 1));
@@ -743,8 +738,7 @@ mod tests {
 
     #[test]
     fn test_reconcile_fork_halts() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         local.insert(make_record("r1", 1));
@@ -753,20 +747,23 @@ mod tests {
         remote.insert(forked);
 
         let cancel = no_cancel();
-        let err = reconciler.reconcile(&mut local, &remote, &cancel).unwrap_err();
+        let err = reconciler
+            .reconcile(&mut local, &remote, &cancel)
+            .unwrap_err();
         assert!(matches!(err, ReconciliationError::ForkDetected(_)));
     }
 
     #[test]
     fn test_reconcile_cancellation() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         remote.insert(make_record("r1", 1));
 
         let cancel = with_cancel();
-        let err = reconciler.reconcile(&mut local, &remote, &cancel).unwrap_err();
+        let err = reconciler
+            .reconcile(&mut local, &remote, &cancel)
+            .unwrap_err();
         assert!(matches!(err, ReconciliationError::Cancelled));
         // INV-AE-ATOMIC: local state unchanged.
         assert!(local.is_empty());
@@ -775,8 +772,7 @@ mod tests {
     #[test]
     fn test_reconcile_idempotent_replay() {
         // Replay of already-reconciled records is idempotent.
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         local.insert(make_record("r1", 1));
         let mut remote = TrustState::new(1);
@@ -803,18 +799,19 @@ mod tests {
         }
 
         let cancel = no_cancel();
-        let err = reconciler.reconcile(&mut local, &remote, &cancel).unwrap_err();
+        let err = reconciler
+            .reconcile(&mut local, &remote, &cancel)
+            .unwrap_err();
         assert!(matches!(err, ReconciliationError::BatchExceeded { .. }));
     }
 
     #[test]
     fn test_reconcile_mixed_accept_reject() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(5);
         let mut remote = TrustState::new(5);
-        remote.insert(make_record("valid", 5));        // Valid: same epoch.
-        remote.insert(make_record("future", 10));       // Rejected: future epoch.
+        remote.insert(make_record("valid", 5)); // Valid: same epoch.
+        remote.insert(make_record("future", 10)); // Rejected: future epoch.
         remote.insert(make_record_no_proof("noproof", 5)); // Rejected: no proof.
 
         let cancel = no_cancel();
@@ -827,8 +824,7 @@ mod tests {
 
     #[test]
     fn test_events_recorded() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         remote.insert(make_record("r1", 1));
@@ -836,7 +832,11 @@ mod tests {
         let cancel = no_cancel();
         reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
 
-        let codes: Vec<&str> = reconciler.events().iter().map(|e| e.code.as_str()).collect();
+        let codes: Vec<&str> = reconciler
+            .events()
+            .iter()
+            .map(|e| e.code.as_str())
+            .collect();
         assert!(codes.contains(&EVT_CYCLE_STARTED));
         assert!(codes.contains(&EVT_DELTA_COMPUTED));
         assert!(codes.contains(&EVT_RECORD_ACCEPTED));
@@ -845,8 +845,7 @@ mod tests {
 
     #[test]
     fn test_events_have_trace_id() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         remote.insert(make_record("r1", 1));
@@ -861,8 +860,7 @@ mod tests {
 
     #[test]
     fn test_events_have_epoch() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(42);
         let remote = TrustState::new(42);
 
@@ -919,8 +917,7 @@ mod tests {
 
     #[test]
     fn test_reconciliation_count() {
-        let mut reconciler =
-            AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         assert_eq!(reconciler.reconciliation_count(), 0);
         let mut local = TrustState::new(1);
         let remote = TrustState::new(1);
@@ -944,6 +941,9 @@ mod tests {
 
         let cancel = no_cancel();
         let result = reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
-        assert_eq!(result.records_accepted, 1, "Should accept without proof when not required");
+        assert_eq!(
+            result.records_accepted, 1,
+            "Should accept without proof when not required"
+        );
     }
 }

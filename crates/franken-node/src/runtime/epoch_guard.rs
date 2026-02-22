@@ -35,7 +35,9 @@ pub struct EpochGuardEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EpochGuardError {
-    EpochUnavailable { detail: String },
+    EpochUnavailable {
+        detail: String,
+    },
     EpochMismatch {
         presented_epoch: ControlEpoch,
         current_epoch: ControlEpoch,
@@ -45,7 +47,9 @@ pub enum EpochGuardError {
         current_epoch: ControlEpoch,
     },
     ArtifactRejected(EpochRejection),
-    SignatureRejected { reason: String },
+    SignatureRejected {
+        reason: String,
+    },
 }
 
 impl EpochGuardError {
@@ -408,12 +412,22 @@ mod tests {
         let source = StaticEpochSource::available(ControlEpoch::new(10));
 
         let stale = guard
-            .validate_artifact_epoch("artifact-stale", ControlEpoch::new(7), &source, "trace-stale")
+            .validate_artifact_epoch(
+                "artifact-stale",
+                ControlEpoch::new(7),
+                &source,
+                "trace-stale",
+            )
             .expect_err("expired should reject");
         assert_eq!(stale.code(), STALE_EPOCH_REJECTED);
 
         let future = guard
-            .validate_artifact_epoch("artifact-future", ControlEpoch::new(11), &source, "trace-future")
+            .validate_artifact_epoch(
+                "artifact-future",
+                ControlEpoch::new(11),
+                &source,
+                "trace-future",
+            )
             .expect_err("future should reject");
         assert_eq!(future.code(), FUTURE_EPOCH_REJECTED);
     }
@@ -423,8 +437,12 @@ mod tests {
         let root = root_secret();
         let payload = b"artifact";
         let signature = sign_epoch_artifact(payload, ControlEpoch::new(5), "trust", &root).unwrap();
-        let verify = verify_epoch_signature(payload, &signature, ControlEpoch::new(6), "trust", &root);
-        assert!(verify.is_err(), "signature must fail under different epoch key");
+        let verify =
+            verify_epoch_signature(payload, &signature, ControlEpoch::new(6), "trust", &root);
+        assert!(
+            verify.is_err(),
+            "signature must fail under different epoch key"
+        );
     }
 
     #[test]

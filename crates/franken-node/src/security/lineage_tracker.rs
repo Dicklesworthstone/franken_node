@@ -201,7 +201,10 @@ impl TaintBoundary {
         if self.deny_all && !taint_set.is_empty() {
             return true;
         }
-        taint_set.labels.iter().any(|l| self.denied_labels.contains(l))
+        taint_set
+            .labels
+            .iter()
+            .any(|l| self.denied_labels.contains(l))
     }
 
     /// Validate that the boundary rule is well-formed.
@@ -289,7 +292,10 @@ impl SentinelConfig {
     pub fn validate(&self) -> Result<(), LineageError> {
         if self.max_graph_edges == 0 || self.max_graph_depth == 0 {
             return Err(LineageError::ConfigRejected {
-                detail: format!("{}: max_graph_edges and max_graph_depth must be > 0", ERR_IFL_CONFIG_REJECTED),
+                detail: format!(
+                    "{}: max_graph_edges and max_graph_depth must be > 0",
+                    ERR_IFL_CONFIG_REJECTED
+                ),
             });
         }
         if self.recall_threshold_pct > 100 || self.precision_threshold_pct > 100 {
@@ -299,7 +305,10 @@ impl SentinelConfig {
         }
         if self.schema_version.is_empty() {
             return Err(LineageError::ConfigRejected {
-                detail: format!("{}: schema_version must be non-empty", ERR_IFL_CONFIG_REJECTED),
+                detail: format!(
+                    "{}: schema_version must be non-empty",
+                    ERR_IFL_CONFIG_REJECTED
+                ),
             });
         }
         Ok(())
@@ -460,7 +469,10 @@ impl LineageGraph {
         let _inv = INV_LABEL_PERSIST;
         if !self.labels.contains_key(label_id) {
             return Err(LineageError::LabelNotFound {
-                detail: format!("{}: label '{}' not registered", ERR_IFL_LABEL_NOT_FOUND, label_id),
+                detail: format!(
+                    "{}: label '{}' not registered",
+                    ERR_IFL_LABEL_NOT_FOUND, label_id
+                ),
             });
         }
         let taint_set = self.datum_taints.entry(datum_id.to_string()).or_default();
@@ -496,7 +508,10 @@ impl LineageGraph {
 
         if self.edges.contains_key(&edge.edge_id) {
             return Err(LineageError::DuplicateEdge {
-                detail: format!("{}: edge '{}' already exists", ERR_IFL_DUPLICATE_EDGE, edge.edge_id),
+                detail: format!(
+                    "{}: edge '{}' already exists",
+                    ERR_IFL_DUPLICATE_EDGE, edge.edge_id
+                ),
             });
         }
 
@@ -624,14 +639,20 @@ impl LineageGraph {
         if let Some(edge) = self.edges.get_mut(edge_id) {
             if edge.quarantined {
                 return Err(LineageError::AlreadyQuarantined {
-                    detail: format!("{}: edge '{}' already quarantined", ERR_IFL_ALREADY_QUARANTINED, edge_id),
+                    detail: format!(
+                        "{}: edge '{}' already quarantined",
+                        ERR_IFL_ALREADY_QUARANTINED, edge_id
+                    ),
                 });
             }
             edge.quarantined = true;
             Ok(())
         } else {
             Err(LineageError::ContainmentFailed {
-                detail: format!("{}: edge '{}' not found", ERR_IFL_CONTAINMENT_FAILED, edge_id),
+                detail: format!(
+                    "{}: edge '{}' not found",
+                    ERR_IFL_CONTAINMENT_FAILED, edge_id
+                ),
             })
         }
     }
@@ -672,7 +693,8 @@ impl ExfiltrationSentinel {
     /// Register a taint boundary.
     pub fn add_boundary(&mut self, boundary: TaintBoundary) -> Result<(), LineageError> {
         boundary.validate()?;
-        self.boundaries.insert(boundary.boundary_id.clone(), boundary);
+        self.boundaries
+            .insert(boundary.boundary_id.clone(), boundary);
         Ok(())
     }
 
@@ -691,8 +713,8 @@ impl ExfiltrationSentinel {
 
         for boundary in self.boundaries.values() {
             // Check if this edge crosses this boundary
-            let crosses = edge.source.contains(&boundary.from_zone)
-                && edge.sink.contains(&boundary.to_zone);
+            let crosses =
+                edge.source.contains(&boundary.from_zone) && edge.sink.contains(&boundary.to_zone);
 
             if !crosses {
                 continue;
@@ -715,8 +737,10 @@ impl ExfiltrationSentinel {
                     timestamp_ms: edge.timestamp_ms,
                     detail: format!(
                         "Taint labels {:?} crossed boundary '{}' ({} -> {})",
-                        edge.taint_set.labels, boundary.boundary_id,
-                        boundary.from_zone, boundary.to_zone,
+                        edge.taint_set.labels,
+                        boundary.boundary_id,
+                        boundary.from_zone,
+                        boundary.to_zone,
                     ),
                 };
                 self.alerts.insert(alert_id, alert);
@@ -792,7 +816,10 @@ impl ExfiltrationSentinel {
     /// Run a sentinel scan across all edges in the graph.
     /// Event: SENTINEL_SCAN_START, SENTINEL_EXFIL_DETECTED, SENTINEL_CONTAINMENT_TRIGGERED.
     /// INV-SENTINEL-AUTO-CONTAIN: detected exfiltrations are auto-contained.
-    pub fn scan_graph(&mut self, graph: &mut LineageGraph) -> Result<SentinelScanResult, LineageError> {
+    pub fn scan_graph(
+        &mut self,
+        graph: &mut LineageGraph,
+    ) -> Result<SentinelScanResult, LineageError> {
         let _event_start = SENTINEL_SCAN_START;
         let _inv_auto = INV_SENTINEL_AUTO_CONTAIN;
 
@@ -925,7 +952,10 @@ impl ExfiltrationSentinel {
         let _inv = INV_LINEAGE_TAG_PERSISTENCE;
         if !graph.labels.contains_key(label_id) {
             return Err(LineageError::LabelNotFound {
-                detail: format!("{}: label '{}' not registered", ERR_LINEAGE_TAG_MISSING, label_id),
+                detail: format!(
+                    "{}: label '{}' not registered",
+                    ERR_LINEAGE_TAG_MISSING, label_id
+                ),
             });
         }
         graph.assign_taint(datum_id, label_id)
@@ -947,7 +977,10 @@ impl ExfiltrationSentinel {
         match edge {
             Some(e) => self.evaluate_edge(&e, graph),
             None => Err(LineageError::ContainmentFailed {
-                detail: format!("{}: flow edge lost after propagation", ERR_LINEAGE_FLOW_BROKEN),
+                detail: format!(
+                    "{}: flow edge lost after propagation",
+                    ERR_LINEAGE_FLOW_BROKEN
+                ),
             }),
         }
     }
@@ -1023,8 +1056,8 @@ pub mod invariants {
         boundaries: &BTreeMap<String, TaintBoundary>,
     ) -> FlowVerdict {
         for boundary in boundaries.values() {
-            let crosses = edge.source.contains(&boundary.from_zone)
-                && edge.sink.contains(&boundary.to_zone);
+            let crosses =
+                edge.source.contains(&boundary.from_zone) && edge.sink.contains(&boundary.to_zone);
             if crosses && boundary.is_violated_by(&edge.taint_set) {
                 return FlowVerdict::Quarantine;
             }
@@ -1213,7 +1246,9 @@ mod tests {
         let mut graph = LineageGraph::new(default_config());
         graph.register_label(make_label("PII", 10));
         graph.assign_taint("src", "PII").unwrap();
-        let edge_id = graph.propagate_taint("src", "dst", "transform", 100).unwrap();
+        let edge_id = graph
+            .propagate_taint("src", "dst", "transform", 100)
+            .unwrap();
         assert!(!edge_id.is_empty());
         let dst_taint = graph.get_taint_set("dst").unwrap();
         assert!(dst_taint.contains("PII"));
@@ -1607,7 +1642,11 @@ mod tests {
         let mut graph = LineageGraph::new(config.clone());
         let sentinel = ExfiltrationSentinel::new(config);
         graph.register_label(make_label("PII", 10));
-        assert!(sentinel.attach_lineage_tag(&mut graph, "datum-x", "PII").is_ok());
+        assert!(
+            sentinel
+                .attach_lineage_tag(&mut graph, "datum-x", "PII")
+                .is_ok()
+        );
         let ts = graph.get_taint_set("datum-x").unwrap();
         assert!(ts.contains("PII"));
     }
@@ -1617,7 +1656,9 @@ mod tests {
         let config = default_config();
         let mut graph = LineageGraph::new(config.clone());
         let sentinel = ExfiltrationSentinel::new(config);
-        let err = sentinel.attach_lineage_tag(&mut graph, "d1", "MISSING").unwrap_err();
+        let err = sentinel
+            .attach_lineage_tag(&mut graph, "d1", "MISSING")
+            .unwrap_err();
         assert!(err.to_string().contains(ERR_LINEAGE_TAG_MISSING));
     }
 
@@ -1628,7 +1669,9 @@ mod tests {
         let mut sentinel = ExfiltrationSentinel::new(config);
         graph.register_label(make_label("PUBLIC", 1));
         graph.assign_taint("src-node", "PUBLIC").unwrap();
-        let verdict = sentinel.track_flow(&mut graph, "src-node", "dst-node", "copy", 100).unwrap();
+        let verdict = sentinel
+            .track_flow(&mut graph, "src-node", "dst-node", "copy", 100)
+            .unwrap();
         assert_eq!(verdict, FlowVerdict::Pass);
     }
 
@@ -1637,12 +1680,14 @@ mod tests {
         let config = default_config();
         let mut graph = LineageGraph::new(config.clone());
         let mut sentinel = ExfiltrationSentinel::new(config);
-        sentinel.add_boundary(make_boundary("b1", "internal", "external", &["SECRET"])).unwrap();
+        sentinel
+            .add_boundary(make_boundary("b1", "internal", "external", &["SECRET"]))
+            .unwrap();
         graph.register_label(make_label("SECRET", 20));
         graph.assign_taint("internal-db", "SECRET").unwrap();
-        let verdict = sentinel.track_flow(
-            &mut graph, "internal-db", "external-api", "export", 200,
-        ).unwrap();
+        let verdict = sentinel
+            .track_flow(&mut graph, "internal-db", "external-api", "export", 200)
+            .unwrap();
         assert_eq!(verdict, FlowVerdict::Quarantine);
         assert_eq!(sentinel.alert_count(), 1);
     }
@@ -1652,7 +1697,9 @@ mod tests {
         let config = default_config();
         let mut graph = LineageGraph::new(config.clone());
         let mut sentinel = ExfiltrationSentinel::new(config);
-        sentinel.add_boundary(make_boundary("b1", "priv", "pub", &["PII"])).unwrap();
+        sentinel
+            .add_boundary(make_boundary("b1", "priv", "pub", &["PII"]))
+            .unwrap();
 
         let mut ts = TaintSet::new();
         ts.insert("PII");
@@ -1740,12 +1787,18 @@ mod tests {
 
     #[test]
     fn test_inv_sentinel_recall_threshold_constant() {
-        assert_eq!(INV_SENTINEL_RECALL_THRESHOLD, "INV-SENTINEL-RECALL-THRESHOLD");
+        assert_eq!(
+            INV_SENTINEL_RECALL_THRESHOLD,
+            "INV-SENTINEL-RECALL-THRESHOLD"
+        );
     }
 
     #[test]
     fn test_inv_sentinel_precision_threshold_constant() {
-        assert_eq!(INV_SENTINEL_PRECISION_THRESHOLD, "INV-SENTINEL-PRECISION-THRESHOLD");
+        assert_eq!(
+            INV_SENTINEL_PRECISION_THRESHOLD,
+            "INV-SENTINEL-PRECISION-THRESHOLD"
+        );
     }
 
     #[test]
@@ -1759,16 +1812,28 @@ mod tests {
         assert_eq!(LINEAGE_FLOW_TRACKED, "LINEAGE_FLOW_TRACKED");
         assert_eq!(SENTINEL_SCAN_START, "SENTINEL_SCAN_START");
         assert_eq!(SENTINEL_EXFIL_DETECTED, "SENTINEL_EXFIL_DETECTED");
-        assert_eq!(SENTINEL_CONTAINMENT_TRIGGERED, "SENTINEL_CONTAINMENT_TRIGGERED");
+        assert_eq!(
+            SENTINEL_CONTAINMENT_TRIGGERED,
+            "SENTINEL_CONTAINMENT_TRIGGERED"
+        );
     }
 
     #[test]
     fn test_canonical_error_codes_present() {
         assert_eq!(ERR_LINEAGE_TAG_MISSING, "ERR_LINEAGE_TAG_MISSING");
         assert_eq!(ERR_LINEAGE_FLOW_BROKEN, "ERR_LINEAGE_FLOW_BROKEN");
-        assert_eq!(ERR_SENTINEL_RECALL_BELOW_THRESHOLD, "ERR_SENTINEL_RECALL_BELOW_THRESHOLD");
-        assert_eq!(ERR_SENTINEL_PRECISION_BELOW_THRESHOLD, "ERR_SENTINEL_PRECISION_BELOW_THRESHOLD");
-        assert_eq!(ERR_SENTINEL_CONTAINMENT_FAILED, "ERR_SENTINEL_CONTAINMENT_FAILED");
+        assert_eq!(
+            ERR_SENTINEL_RECALL_BELOW_THRESHOLD,
+            "ERR_SENTINEL_RECALL_BELOW_THRESHOLD"
+        );
+        assert_eq!(
+            ERR_SENTINEL_PRECISION_BELOW_THRESHOLD,
+            "ERR_SENTINEL_PRECISION_BELOW_THRESHOLD"
+        );
+        assert_eq!(
+            ERR_SENTINEL_CONTAINMENT_FAILED,
+            "ERR_SENTINEL_CONTAINMENT_FAILED"
+        );
         assert_eq!(ERR_SENTINEL_COVERT_CHANNEL, "ERR_SENTINEL_COVERT_CHANNEL");
     }
 }

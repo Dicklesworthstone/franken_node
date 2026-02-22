@@ -122,7 +122,10 @@ impl ObligationStatus {
     /// Returns `true` when the status is a terminal state.
     #[must_use]
     pub fn is_terminal(&self) -> bool {
-        matches!(self, Self::Fulfilled | Self::Rejected | Self::TimedOut | Self::Cancelled)
+        matches!(
+            self,
+            Self::Fulfilled | Self::Rejected | Self::TimedOut | Self::Cancelled
+        )
     }
 }
 
@@ -151,7 +154,10 @@ impl fmt::Display for TimeoutPolicy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrepareResult {
     /// All obligations in the flow were successfully prepared.
-    Ready { flow_id: String, obligation_ids: Vec<String> },
+    Ready {
+        flow_id: String,
+        obligation_ids: Vec<String>,
+    },
     /// One or more obligations failed to prepare.
     Failed { flow_id: String, reason: String },
 }
@@ -160,7 +166,10 @@ pub enum PrepareResult {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CommitResult {
     /// All obligations committed successfully.
-    Committed { flow_id: String, obligation_ids: Vec<String> },
+    Committed {
+        flow_id: String,
+        obligation_ids: Vec<String>,
+    },
     /// Commit failed; rollback was executed.
     RolledBack { flow_id: String, reason: String },
 }
@@ -262,12 +271,7 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
 
     /// Send a message through the channel, creating a tracked obligation.
     /// INV-OCH-TRACKED, INV-OCH-DEADLINE
-    pub fn send(
-        &mut self,
-        message: T,
-        now_ms: u64,
-        trace_id: &str,
-    ) -> String {
+    pub fn send(&mut self, message: T, now_ms: u64, trace_id: &str) -> String {
         let obligation_id = format!("och-{}-{}", self.channel_id, self.next_id);
         self.next_id += 1;
 
@@ -461,7 +465,10 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
     /// Count obligations by status.
     #[must_use]
     pub fn count_by_status(&self, status: ObligationStatus) -> usize {
-        self.queue.iter().filter(|(o, _)| o.status == status).count()
+        self.queue
+            .iter()
+            .filter(|(o, _)| o.status == status)
+            .count()
     }
 
     /// Total number of obligations in the channel.
@@ -748,7 +755,10 @@ impl TwoPhaseFlow {
         if self.committed {
             return CommitResult::RolledBack {
                 flow_id: self.flow_id.clone(),
-                reason: format!("{}: flow already committed", error_codes::ERR_OCH_COMMIT_FAILED),
+                reason: format!(
+                    "{}: flow already committed",
+                    error_codes::ERR_OCH_COMMIT_FAILED
+                ),
             };
         }
 
@@ -765,15 +775,19 @@ impl TwoPhaseFlow {
         // Fulfill all obligations (clone IDs to avoid borrow conflict with do_rollback)
         let ids: Vec<String> = self.obligation_ids.clone();
         for id in &ids {
-            if let Err(_e) = self
-                .ledger
-                .update_status(id, ObligationStatus::Fulfilled, now_ms, trace_id)
+            if let Err(_e) =
+                self.ledger
+                    .update_status(id, ObligationStatus::Fulfilled, now_ms, trace_id)
             {
                 // On commit failure, rollback atomically. INV-OCH-ROLLBACK-ATOMIC
                 self.do_rollback(now_ms, trace_id);
                 return CommitResult::RolledBack {
                     flow_id: self.flow_id.clone(),
-                    reason: format!("{}: failed to fulfill obligation {}", error_codes::ERR_OCH_COMMIT_FAILED, id),
+                    reason: format!(
+                        "{}: failed to fulfill obligation {}",
+                        error_codes::ERR_OCH_COMMIT_FAILED,
+                        id
+                    ),
                 };
             }
         }
@@ -1301,7 +1315,10 @@ mod tests {
             event_codes::FN_OB_012,
         ];
         for code in &codes {
-            assert!(code.starts_with("FN-OB-"), "code {code} must start with FN-OB-");
+            assert!(
+                code.starts_with("FN-OB-"),
+                "code {code} must start with FN-OB-"
+            );
         }
     }
 

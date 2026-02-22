@@ -15,12 +15,12 @@ pub mod observability;
 pub mod ops;
 pub mod perf;
 pub mod policy;
-pub mod repair;
-#[path = "control_plane/root_pointer.rs"]
-pub mod root_pointer;
 pub mod registry;
 pub mod remote;
+pub mod repair;
 pub mod replay;
+#[path = "control_plane/root_pointer.rs"]
+pub mod root_pointer;
 pub mod runtime;
 pub mod sdk;
 pub mod security;
@@ -40,12 +40,12 @@ use api::trust_card_routes::{
     Pagination, compare_trust_card_versions, compare_trust_cards, get_trust_card,
     get_trust_cards_by_publisher, list_trust_cards, search_trust_cards,
 };
-use config::{CliOverrides, Profile};
 use cli::{
     BenchCommand, Cli, Command, FleetCommand, IncidentCommand, MigrateCommand, RegistryCommand,
     RemoteCapCommand, RemoteCapIssueArgs, TrustCardCommand, TrustCommand, VerifyCommand,
     VerifyReleaseArgs,
 };
+use config::{CliOverrides, Profile};
 use security::decision_receipt::{
     Decision, Receipt, ReceiptQuery, append_signed_receipt, demo_signing_key,
     export_receipts_to_path, write_receipts_markdown,
@@ -140,10 +140,7 @@ fn incident_bundle_output_path(incident_id: &str) -> PathBuf {
     if slug.is_empty() {
         slug.push_str("incident");
     }
-    PathBuf::from(format!(
-        "{}.fnbundle",
-        slug
-    ))
+    PathBuf::from(format!("{}.fnbundle", slug))
 }
 
 fn now_unix_secs() -> u64 {
@@ -547,7 +544,8 @@ fn build_doctor_report_with_cwd(
                 (
                     DoctorStatus::Warn,
                     "Profile is legacy-risky.".to_string(),
-                    "Prefer --profile balanced or --profile strict for stronger controls.".to_string(),
+                    "Prefer --profile balanced or --profile strict for stronger controls."
+                        .to_string(),
                 )
             },
         ));
@@ -616,7 +614,8 @@ fn build_doctor_report_with_cwd(
                 (
                     DoctorStatus::Warn,
                     "Lockstep validation requirement is disabled.".to_string(),
-                    "Set migration.require_lockstep_validation=true for safer rollout validation.".to_string(),
+                    "Set migration.require_lockstep_validation=true for safer rollout validation."
+                        .to_string(),
                 )
             },
         ));
@@ -686,7 +685,8 @@ fn build_doctor_report_with_cwd(
                 (
                     DoctorStatus::Warn,
                     "No merge decisions recorded for this configuration.".to_string(),
-                    "Investigate resolver instrumentation before relying on doctor provenance.".to_string(),
+                    "Investigate resolver instrumentation before relying on doctor provenance."
+                        .to_string(),
                 )
             },
         ));
@@ -698,7 +698,10 @@ fn build_doctor_report_with_cwd(
             || {
                 (
                     DoctorStatus::Pass,
-                    format!("Merge provenance recorded ({} decisions).", resolved.decisions.len()),
+                    format!(
+                        "Merge provenance recorded ({} decisions).",
+                        resolved.decisions.len()
+                    ),
                     "No action required.".to_string(),
                 )
             },
@@ -818,7 +821,10 @@ mod init_tests {
         let action = apply_init_write_policy(&path, "profile = \"balanced\"\n", false, false, "t0")
             .expect("create file");
         assert_eq!(action.action, InitFileActionKind::Created);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "profile = \"balanced\"\n");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "profile = \"balanced\"\n"
+        );
     }
 
     #[test]
@@ -828,9 +834,10 @@ mod init_tests {
         std::fs::write(&path, "old").expect("seed");
         let err =
             apply_init_write_policy(&path, "new", false, false, "t0").expect_err("should fail");
-        assert!(err
-            .to_string()
-            .contains("without --overwrite or --backup-existing"));
+        assert!(
+            err.to_string()
+                .contains("without --overwrite or --backup-existing")
+        );
     }
 
     #[test]
@@ -838,8 +845,7 @@ mod init_tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("franken_node.toml");
         std::fs::write(&path, "old").expect("seed");
-        let action =
-            apply_init_write_policy(&path, "new", true, false, "t0").expect("overwrite");
+        let action = apply_init_write_policy(&path, "new", true, false, "t0").expect("overwrite");
         assert_eq!(action.action, InitFileActionKind::Overwritten);
         assert!(action.backup_path.is_none());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
@@ -924,8 +930,11 @@ mod doctor_tests {
 
     #[test]
     fn doctor_report_uses_stable_check_order_and_codes() {
-        let report =
-            build_doctor_report_with_cwd(&resolved_fixture(Profile::Balanced), "trace-test", Ok(PathBuf::from(".")));
+        let report = build_doctor_report_with_cwd(
+            &resolved_fixture(Profile::Balanced),
+            "trace-test",
+            Ok(PathBuf::from(".")),
+        );
         let codes = report
             .checks
             .iter()
@@ -982,8 +991,11 @@ mod doctor_tests {
 
     #[test]
     fn verbose_human_report_includes_merge_decisions_and_logs() {
-        let report =
-            build_doctor_report_with_cwd(&resolved_fixture(Profile::Balanced), "trace-verbose", Ok(PathBuf::from(".")));
+        let report = build_doctor_report_with_cwd(
+            &resolved_fixture(Profile::Balanced),
+            "trace-verbose",
+            Ok(PathBuf::from(".")),
+        );
         let rendered = render_doctor_report_human(&report, true);
         assert!(rendered.contains("merge decisions:"));
         assert!(rendered.contains("structured logs:"));
@@ -1097,7 +1109,7 @@ fn render_trust_card_list(cards: &[TrustCard]) -> String {
 
 fn handle_verify_release(args: &VerifyReleaseArgs) {
     use supply_chain::artifact_signing::{
-        AuditLogEntry, ASV_002_VERIFICATION_OK, ASV_003_VERIFICATION_FAILED,
+        ASV_002_VERIFICATION_OK, ASV_003_VERIFICATION_FAILED, AuditLogEntry,
     };
 
     let release_dir = &args.release_path;
@@ -1124,10 +1136,15 @@ fn handle_verify_release(args: &VerifyReleaseArgs) {
     });
 
     if args.json {
-        println!("{}", serde_json::to_string_pretty(&stub_result).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&stub_result).unwrap_or_default()
+        );
     } else {
         eprintln!("[verify-release stub] — filesystem I/O not yet wired.");
-        eprintln!("  Use the library API `supply_chain::artifact_signing::verify_release` for full verification.");
+        eprintln!(
+            "  Use the library API `supply_chain::artifact_signing::verify_release` for full verification."
+        );
     }
 
     let _log = AuditLogEntry::now(
@@ -1421,15 +1438,13 @@ async fn main() -> Result<()> {
 
         Command::Verify(sub) => match sub {
             VerifyCommand::Module(args) => {
-                let code = emit_verify_contract_stub("verify module", args.json, args.compat_version);
+                let code =
+                    emit_verify_contract_stub("verify module", args.json, args.compat_version);
                 std::process::exit(code);
             }
             VerifyCommand::Migration(args) => {
-                let code = emit_verify_contract_stub(
-                    "verify migration",
-                    args.json,
-                    args.compat_version,
-                );
+                let code =
+                    emit_verify_contract_stub("verify migration", args.json, args.compat_version);
                 std::process::exit(code);
             }
             VerifyCommand::Compatibility(args) => {
@@ -1441,7 +1456,8 @@ async fn main() -> Result<()> {
                 std::process::exit(code);
             }
             VerifyCommand::Corpus(args) => {
-                let code = emit_verify_contract_stub("verify corpus", args.json, args.compat_version);
+                let code =
+                    emit_verify_contract_stub("verify corpus", args.json, args.compat_version);
                 std::process::exit(code);
             }
             VerifyCommand::Lockstep(args) => {

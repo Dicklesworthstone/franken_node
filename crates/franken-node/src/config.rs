@@ -160,7 +160,8 @@ impl Config {
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let content =
             std::fs::read_to_string(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
-        let parsed: Self = toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))?;
+        let parsed: Self =
+            toml::from_str(&content).map_err(|e| ConfigError::ParseFailed(path.into(), e))?;
         parsed.validate()?;
         Ok(parsed)
     }
@@ -231,11 +232,14 @@ impl Config {
         }
 
         if let Some(raw_profile) = env_lookup("FRANKEN_NODE_PROFILE") {
-            let parsed = raw_profile.parse::<Profile>().map_err(|_| ConfigError::EnvParseFailed {
-                key: "FRANKEN_NODE_PROFILE".to_string(),
-                value: raw_profile.clone(),
-                reason: "expected strict, balanced, or legacy-risky".to_string(),
-            })?;
+            let parsed =
+                raw_profile
+                    .parse::<Profile>()
+                    .map_err(|_| ConfigError::EnvParseFailed {
+                        key: "FRANKEN_NODE_PROFILE".to_string(),
+                        value: raw_profile.clone(),
+                        reason: "expected strict, balanced, or legacy-risky".to_string(),
+                    })?;
             selected_profile = parsed;
             decisions.push(MergeDecision::new(
                 MergeStage::Env,
@@ -503,13 +507,13 @@ impl Config {
         )?;
 
         if let Some(raw) = env_lookup("FRANKEN_NODE_COMPATIBILITY_MODE") {
-            let parsed = raw
-                .parse::<CompatibilityMode>()
-                .map_err(|_| ConfigError::EnvParseFailed {
-                    key: "FRANKEN_NODE_COMPATIBILITY_MODE".to_string(),
-                    value: raw.clone(),
-                    reason: "expected strict, balanced, or legacy-risky".to_string(),
-                })?;
+            let parsed =
+                raw.parse::<CompatibilityMode>()
+                    .map_err(|_| ConfigError::EnvParseFailed {
+                        key: "FRANKEN_NODE_COMPATIBILITY_MODE".to_string(),
+                        value: raw.clone(),
+                        reason: "expected strict, balanced, or legacy-risky".to_string(),
+                    })?;
             self.compatibility.mode = parsed;
             decisions.push(MergeDecision::new(
                 MergeStage::Env,
@@ -1309,10 +1313,7 @@ mod tests {
         let path = dir.path().join("franken_node.toml");
         std::fs::write(&path, "profile = \"legacy-risky\"\n").unwrap();
 
-        let env = HashMap::from([(
-            "FRANKEN_NODE_PROFILE".to_string(),
-            "strict".to_string(),
-        )]);
+        let env = HashMap::from([("FRANKEN_NODE_PROFILE".to_string(), "strict".to_string())]);
 
         let resolved = Config::resolve_with_env(
             Some(&path),
@@ -1349,17 +1350,16 @@ require_lockstep_validation = true
         .unwrap();
 
         let env = HashMap::from([
-            (
-                "FRANKEN_NODE_PROFILE".to_string(),
-                "strict".to_string(),
-            ),
+            ("FRANKEN_NODE_PROFILE".to_string(), "strict".to_string()),
             (
                 "FRANKEN_NODE_MIGRATION_AUTOFIX".to_string(),
                 "true".to_string(),
             ),
         ]);
 
-        let resolved = Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(env)).unwrap();
+        let resolved =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(env))
+                .unwrap();
 
         assert_eq!(resolved.config.profile, Profile::Strict);
         assert!(resolved.config.migration.autofix);
@@ -1374,7 +1374,8 @@ require_lockstep_validation = true
             "not-a-bool".to_string(),
         )]);
 
-        let err = Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap_err();
+        let err =
+            Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap_err();
         let message = err.to_string();
         assert!(message.contains("FRANKEN_NODE_MIGRATION_AUTOFIX"));
     }
@@ -1393,9 +1394,19 @@ quarantine_on_high_risk = false
         )
         .unwrap();
 
-        let resolved = Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(HashMap::new())).unwrap();
+        let resolved = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(HashMap::new()),
+        )
+        .unwrap();
 
-        assert!(resolved.decisions.iter().any(|d| d.field == "profile" && d.stage == MergeStage::File));
+        assert!(
+            resolved
+                .decisions
+                .iter()
+                .any(|d| d.field == "profile" && d.stage == MergeStage::File)
+        );
         assert!(resolved.decisions.iter().any(|d| {
             d.field == "trust.quarantine_on_high_risk" && d.stage == MergeStage::File
         }));
@@ -1422,8 +1433,12 @@ overflow_policy = "reject"
         )
         .unwrap();
 
-        let resolved =
-            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(HashMap::new())).unwrap();
+        let resolved = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(HashMap::new()),
+        )
+        .unwrap();
 
         assert_eq!(resolved.config.runtime.remote_max_in_flight, 77);
         assert_eq!(resolved.config.runtime.bulkhead_retry_after_ms, 33);
@@ -1448,7 +1463,8 @@ overflow_policy = "reject"
             ),
         ]);
 
-        let resolved = Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap();
+        let resolved =
+            Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap();
 
         assert_eq!(resolved.config.runtime.remote_max_in_flight, 66);
         assert_eq!(resolved.config.runtime.bulkhead_retry_after_ms, 17);
@@ -1467,7 +1483,12 @@ minimum_assurance_level = 9
         )
         .unwrap();
 
-        let err = Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(HashMap::new())).unwrap_err();
+        let err = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(HashMap::new()),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("minimum_assurance_level"));
     }
 }
