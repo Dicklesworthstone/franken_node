@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use syn::{FnArg, ImplItem, Item, Pat, Type, Visibility};
 
 const EVENT_PASS: &str = "CXF-001";
 const EVENT_FAIL: &str = "CXF-002";
@@ -380,6 +381,21 @@ fn matches_cx_reference(ty: &str) -> bool {
 }
 
 fn run_pattern(config: &PolicyConfig, pattern: &str) -> Result<Vec<AstMatch>, PolicyError> {
+    match run_pattern_with_ast_grep(config, pattern) {
+        Ok(matches) => Ok(matches),
+        Err(PolicyError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+            // rch workers may not have ast-grep installed. Fall back to a
+            // native syn-based AST walk to preserve gate determinism.
+            run_pattern_with_syn_fallback(config)
+        }
+        Err(error) => Err(error),
+    }
+}
+
+fn run_pattern_with_ast_grep(
+    config: &PolicyConfig,
+    pattern: &str,
+) -> Result<Vec<AstMatch>, PolicyError> {
     let mut cmd = Command::new(&config.ast_grep_bin);
     cmd.args(["run", "-l", "Rust", "-p", pattern, "--json=compact"]);
     for root in &config.target_roots {
@@ -396,6 +412,192 @@ fn run_pattern(config: &PolicyConfig, pattern: &str) -> Result<Vec<AstMatch>, Po
         return Ok(Vec::new());
     }
     serde_json::from_str::<Vec<AstMatch>>(&stdout).map_err(PolicyError::from)
+}
+
+fn run_pattern_with_syn_fallback(config: &PolicyConfig) -> Result<Vec<AstMatch>, PolicyError> {
+    let mut rust_files = Vec::new();
+    for root in &config.target_roots {
+        collect_rust_files(root, &mut rust_files)?;
+    }
+    rust_files.sort();
+
+    let mut matches = Vec::new();
+    for file in rust_files {
+        let source = std::fs::read_to_string(&file)?;
+        let parsed = syn::parse_file(&source).map_err(|error| {
+            PolicyError::AstGrepFailed(format!(
+                "syn fallback parse failed for {}: {error}",
+                file.display()
+            ))
+        })?;
+        let file_path = file.to_string_lossy().to_string();
+        let mut line_counter = 1usize;
+        collect_items_from_module(&parsed.items, &file_path, &mut line_counter, &mut matches);
+    }
+    Ok(matches)
+}
+
+fn collect_rust_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), PolicyError> {
+    if !root.exists() {
+        return Ok(());
+    }
+    if root.is_file() {
+        if root.extension().is_some_and(|ext| ext == "rs") {
+            out.push(root.to_path_buf());
+        }
+        return Ok(());
+    }
+
+    let mut entries = std::fs::read_dir(root)?.collect::<Result<Vec<_>, std::io::Error>>()?;
+    entries.sort_by_key(|entry| entry.path());
+    for entry in entries {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_files(&path, out)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
+fn collect_items_from_module(
+    items: &[Item],
+    file_path: &str,
+    line_counter: &mut usize,
+    out: &mut Vec<AstMatch>,
+) {
+    for item in items {
+        match item {
+            Item::Fn(function)
+                if visibility_is_public(&function.vis) && function.sig.asyncness.is_some() =>
+            {
+                push_function_match(
+                    function.sig.ident.to_string(),
+                    argument_snippets(&function.sig.inputs),
+                    file_path,
+                    line_counter,
+                    out,
+                );
+            }
+            Item::Impl(impl_block) => {
+                for impl_item in &impl_block.items {
+                    if let ImplItem::Fn(function) = impl_item
+                        && visibility_is_public(&function.vis)
+                        && function.sig.asyncness.is_some()
+                    {
+                        push_function_match(
+                            function.sig.ident.to_string(),
+                            argument_snippets(&function.sig.inputs),
+                            file_path,
+                            line_counter,
+                            out,
+                        );
+                    }
+                }
+            }
+            Item::Mod(module) => {
+                if let Some((_, nested_items)) = &module.content {
+                    collect_items_from_module(nested_items, file_path, line_counter, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn visibility_is_public(visibility: &Visibility) -> bool {
+    matches!(visibility, Visibility::Public(_))
+}
+
+fn argument_snippets(inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>) -> Vec<AstSnippet> {
+    inputs.iter().map(fn_arg_snippet).collect()
+}
+
+fn fn_arg_snippet(argument: &FnArg) -> AstSnippet {
+    match argument {
+        FnArg::Typed(pat_type) => {
+            let binding = match &*pat_type.pat {
+                Pat::Ident(ident) => ident.ident.to_string(),
+                _ => "_arg".to_string(),
+            };
+            AstSnippet {
+                text: format!("{binding}: {}", type_snippet(&pat_type.ty)),
+            }
+        }
+        FnArg::Receiver(receiver) => AstSnippet {
+            text: receiver_snippet(receiver),
+        },
+    }
+}
+
+fn receiver_snippet(receiver: &syn::Receiver) -> String {
+    let mut text = String::new();
+    if receiver.reference.is_some() {
+        text.push('&');
+    }
+    if receiver.mutability.is_some() {
+        text.push_str("mut ");
+    }
+    text.push_str("self");
+    text
+}
+
+fn type_snippet(ty: &Type) -> String {
+    match ty {
+        Type::Reference(reference) => {
+            let mut text = String::from("&");
+            if let Some(lifetime) = &reference.lifetime {
+                text.push('\'');
+                text.push_str(&lifetime.ident.to_string());
+                text.push(' ');
+            }
+            if reference.mutability.is_some() {
+                text.push_str("mut ");
+            }
+            text.push_str(&type_snippet(&reference.elem));
+            text
+        }
+        Type::Path(path) => path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>()
+            .join("::"),
+        Type::Paren(inner) => type_snippet(&inner.elem),
+        Type::Group(inner) => type_snippet(&inner.elem),
+        _ => "Unknown".to_string(),
+    }
+}
+
+fn push_function_match(
+    function_name: String,
+    arguments: Vec<AstSnippet>,
+    file_path: &str,
+    line_counter: &mut usize,
+    out: &mut Vec<AstMatch>,
+) {
+    let mut single = BTreeMap::new();
+    single.insert(
+        "NAME".to_string(),
+        AstSnippet {
+            text: function_name,
+        },
+    );
+    let mut multi = BTreeMap::new();
+    multi.insert("ARGS".to_string(), arguments);
+
+    out.push(AstMatch {
+        file: file_path.to_string(),
+        range: AstRange {
+            start: Position {
+                line: *line_counter,
+            },
+        },
+        meta_variables: MetaVariables { single, multi },
+    });
+    *line_counter += 1;
 }
 
 fn load_allowlist(path: &Path) -> Result<BTreeMap<String, AllowlistException>, PolicyError> {
@@ -586,5 +788,24 @@ mod tests {
             "module_path,function_name,has_cx_first,exception_status,exception_expiry\n"
         ));
         assert!(csv.contains("sample.rs,ok,true"));
+    }
+
+    #[test]
+    fn falls_back_to_syn_when_ast_grep_binary_missing() {
+        let (_temp, mut config) = setup_repo(
+            &[(
+                "crates/franken-node/src/connector/sample.rs",
+                "pub async fn ok(cx: &Cx) {}\n\
+                 pub async fn bad(value: u64) {}\n",
+            )],
+            "exceptions = []\n",
+        );
+        config.ast_grep_bin = "ast-grep-binary-not-installed".to_string();
+
+        let report = run_policy(&config, NaiveDate::from_ymd_opt(2026, 2, 20).expect("date"))
+            .expect("policy runs via syn fallback");
+        assert_eq!(report.summary.total_functions, 2);
+        assert_eq!(report.summary.compliant_functions, 1);
+        assert_eq!(report.summary.violations, 1);
     }
 }

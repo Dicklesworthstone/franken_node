@@ -1,0 +1,39 @@
+{
+  "bead_id": "bd-2zl.1",
+  "timestamp_utc": "2026-02-22T17:47:18Z",
+  "scope": "Support diagnostics for bd-2zl lockfile workflow",
+  "commands": [
+    {
+      "cmd": "./transplant/generate_lockfile.sh --output /tmp/bd2zl1_probe.lock",
+      "exit_code": 2,
+      "stdout_file": "generate_lockfile.stdout",
+      "stderr_file": "generate_lockfile.stderr"
+    },
+    {
+      "cmd": "./transplant/verify_lockfile.sh --json",
+      "exit_code": 2,
+      "stdout_file": "verify_lockfile.stdout",
+      "stderr_file": "verify_lockfile.stderr"
+    }
+  ],
+  "findings": [
+    {
+      "id": "SNAPSHOT_MISSING",
+      "severity": "high",
+      "detail": "transplant/pi_agent_rust is missing from workspace, causing lockfile generate/verify to fail"
+    },
+    {
+      "id": "LOCKFILE_NONDETERMINISTIC_HEADER",
+      "severity": "medium",
+      "detail": "generate_lockfile.sh includes generated_utc from date -u, preventing byte-identical outputs across runs"
+    }
+  ],
+  "evidence_files": [
+    "transplant_dir_listing.txt",
+    "generate_lockfile.stdout",
+    "generate_lockfile.stderr",
+    "verify_lockfile.stdout",
+    "verify_lockfile.stderr",
+    "generate_lockfile_timestamp_lines.txt"
+  ]
+}

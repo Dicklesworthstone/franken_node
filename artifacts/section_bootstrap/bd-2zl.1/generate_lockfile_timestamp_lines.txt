@@ -1,0 +1,2 @@
+42:GENERATED_UTC=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+50:# generated_utc: $GENERATED_UTC

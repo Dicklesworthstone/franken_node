@@ -1,0 +1,13 @@
+total 112
+drwxrwxr-x  2 ubuntu ubuntu  4096 Feb 20 02:38 .
+drwxrwxr-x 24 ubuntu ubuntu  4096 Feb 22 11:46 ..
+-rw-rw-r--  1 ubuntu ubuntu  2325 Feb 20 02:16 DRIFT_REPORT_SCHEMA.md
+-rw-rw-r--  1 ubuntu ubuntu  2650 Feb 20 02:09 LOCKFILE_FORMAT.md
+-rw-rw-r--  1 ubuntu ubuntu  1946 Feb 20 02:08 RESTORATION_REPORT.md
+-rw-rw-r--  1 ubuntu ubuntu 43077 Feb 20 02:15 TRANSPLANT_LOCKFILE.sha256
+-rw-rw-r--  1 ubuntu ubuntu   446 Feb 18 16:53 TRANSPLANT_MANIFEST.md
+-rwxrwxr-x  1 ubuntu ubuntu  5459 Feb 20 02:15 drift_detect.sh
+-rwxrwxr-x  1 ubuntu ubuntu  1919 Feb 20 02:10 generate_lockfile.sh
+-rwxrwxr-x  1 ubuntu ubuntu  5124 Feb 20 02:14 resync.sh
+-rw-rw-r--  1 ubuntu ubuntu 18958 Feb 20 02:08 transplant_manifest.txt
+-rwxrwxr-x  1 ubuntu ubuntu  3939 Feb 20 02:10 verify_lockfile.sh
