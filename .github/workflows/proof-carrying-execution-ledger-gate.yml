@@ -1,0 +1,49 @@
+name: Proof-Carrying Execution Ledger Gate
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/proof-carrying-execution-ledger-gate.yml"
+      - "scripts/check_proof_carrying_execution_ledger.py"
+      - "tests/test_check_proof_carrying_execution_ledger.py"
+      - "docs/verification/proof_carrying_execution_ledger.md"
+      - ".beads/issues.jsonl"
+      - "artifacts/**/bd-2hqd*/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/proof-carrying-execution-ledger-gate.yml"
+      - "scripts/check_proof_carrying_execution_ledger.py"
+      - "tests/test_check_proof_carrying_execution_ledger.py"
+      - "docs/verification/proof_carrying_execution_ledger.md"
+      - ".beads/issues.jsonl"
+      - "artifacts/**/bd-2hqd*/**"
+
+jobs:
+  pcel-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run PCEL self-test
+        run: |
+          python3 scripts/check_proof_carrying_execution_ledger.py --self-test --json > /tmp/pcel_self_test.json
+
+      - name: Run PCEL gate report
+        run: |
+          python3 scripts/check_proof_carrying_execution_ledger.py --build-report --json > /tmp/pcel_gate_report.json
+
+      - name: Run PCEL unit tests
+        run: |
+          python3 -m unittest tests/test_check_proof_carrying_execution_ledger.py
+
+      - name: Upload PCEL evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pcel-gate
+          path: |
+            /tmp/pcel_self_test.json
+            /tmp/pcel_gate_report.json
+            artifacts/assurance/proof_carrying_execution_ledger_v1.json
+            artifacts/assurance/proof_carrying_execution_ledger_v1.md
