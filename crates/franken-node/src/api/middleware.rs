@@ -11,7 +11,7 @@
 //! 6. Structured response + telemetry emission
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::time::Instant;
 
 use super::error::ApiError;
@@ -569,8 +569,8 @@ impl LatencyMetrics {
 /// Aggregated metrics for the control-plane service.
 #[derive(Debug, Default)]
 pub struct ServiceMetrics {
-    pub latencies: HashMap<String, LatencyMetrics>,
-    pub error_counts: HashMap<String, u64>,
+    pub latencies: BTreeMap<String, LatencyMetrics>,
+    pub error_counts: BTreeMap<String, u64>,
     pub request_count: u64,
 }
 

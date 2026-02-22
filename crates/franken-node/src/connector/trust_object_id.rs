@@ -17,7 +17,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -381,7 +381,7 @@ pub struct IdRegistry {
     /// Schema version.
     pub version: String,
     /// Registered domain prefixes.
-    pub domains: HashMap<String, DomainRegistryEntry>,
+    pub domains: BTreeMap<String, DomainRegistryEntry>,
 }
 
 /// Entry in the domain prefix registry.
@@ -400,7 +400,7 @@ pub struct DomainRegistryEntry {
 impl IdRegistry {
     /// Create a new registry with all 6 canonical domains.
     pub fn new() -> Self {
-        let mut domains = HashMap::new();
+        let mut domains = BTreeMap::new();
         for dp in DomainPrefix::all() {
             domains.insert(
                 dp.label().to_string(),

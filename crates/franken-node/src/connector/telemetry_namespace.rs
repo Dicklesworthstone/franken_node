@@ -3,7 +3,7 @@
 //! Metric names and labels are versioned and frozen by contract.  Deprecations
 //! follow a compatibility policy.  A schema validator enforces namespace rules.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ── Planes ──────────────────────────────────────────────────────────────────
@@ -143,7 +143,7 @@ pub struct MetricRegistration {
 /// In-memory schema registry enforcing all four invariants.
 #[derive(Debug, Default)]
 pub struct SchemaRegistry {
-    schemas: HashMap<String, MetricSchema>,
+    schemas: BTreeMap<String, MetricSchema>,
 }
 
 impl SchemaRegistry {

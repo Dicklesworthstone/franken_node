@@ -28,7 +28,7 @@
 //! - **INV-PCG-TRANSITION**: Mode transitions are policy-gated
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ pub struct CompatGateEvent {
 // ---------------------------------------------------------------------------
 
 pub struct CompatGateService {
-    scopes: HashMap<String, CompatMode>,
+    scopes: BTreeMap<String, CompatMode>,
     shims: Vec<ShimMetadata>,
     receipts: Vec<CompatReceipt>,
     events: Vec<CompatGateEvent>,
@@ -251,7 +251,7 @@ pub struct CompatGateService {
 impl CompatGateService {
     pub fn new() -> Self {
         Self {
-            scopes: HashMap::new(),
+            scopes: BTreeMap::new(),
             shims: Vec::new(),
             receipts: Vec::new(),
             events: Vec::new(),

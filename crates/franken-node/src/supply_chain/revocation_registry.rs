@@ -4,7 +4,7 @@
 //! monotonic: stale updates are rejected. State is recoverable from the
 //! canonical revocation log.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A revocation head checkpoint for a specific zone.
 #[derive(Debug, Clone)]
@@ -82,11 +82,11 @@ pub struct RevocationAudit {
 #[derive(Debug, Default)]
 pub struct RevocationRegistry {
     /// Current head sequence per zone.
-    heads: HashMap<String, u64>,
+    heads: BTreeMap<String, u64>,
     /// Canonical log of all revocation events (for recovery).
     log: Vec<RevocationHead>,
     /// Set of revoked artifacts per zone.
-    revoked: HashMap<String, Vec<String>>,
+    revoked: BTreeMap<String, Vec<String>>,
     /// Audit trail.
     pub audits: Vec<RevocationAudit>,
 }

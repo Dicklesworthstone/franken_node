@@ -5,7 +5,7 @@
 //! validation report.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 /// The nine standard connector methods.
@@ -138,7 +138,7 @@ pub struct ReportSummary {
 /// Takes the connector's declared methods and checks each against the
 /// pinned specification. Returns a machine-readable report.
 pub fn validate_contract(connector_id: &str, declarations: &[MethodDeclaration]) -> ContractReport {
-    let decl_map: HashMap<&str, &MethodDeclaration> =
+    let decl_map: BTreeMap<&str, &MethodDeclaration> =
         declarations.iter().map(|d| (d.name.as_str(), d)).collect();
 
     let mut results = Vec::new();

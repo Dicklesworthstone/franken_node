@@ -14,7 +14,7 @@
 //! `ERR_AUTHORITY_MAP_IMMUTABLE`.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -58,7 +58,7 @@ pub const INV_TIER_ORDERED: &str = "INV-TIER-ORDERED";
 // ---------------------------------------------------------------------------
 
 /// Canonical object class identifiers from bd-2573.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ObjectClass {
     CriticalMarker,
@@ -144,7 +144,7 @@ pub fn authority_level_for(tier: Tier) -> AuthorityLevel {
 }
 
 /// Unique artifact identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ArtifactId(pub String);
 
 impl fmt::Display for ArtifactId {
@@ -248,7 +248,7 @@ impl fmt::Display for StorageError {
 /// Immutable after construction.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthorityMap {
-    mapping: HashMap<ObjectClass, Tier>,
+    mapping: BTreeMap<ObjectClass, Tier>,
     frozen: bool,
 }
 
@@ -256,7 +256,7 @@ impl AuthorityMap {
     /// Build an authority map from a set of (class, tier) pairs.
     /// The map is frozen immediately — no further modifications are allowed.
     pub fn new(entries: &[(ObjectClass, Tier)]) -> Self {
-        let mapping: HashMap<ObjectClass, Tier> = entries.iter().cloned().collect();
+        let mapping: BTreeMap<ObjectClass, Tier> = entries.iter().cloned().collect();
         AuthorityMap {
             mapping,
             frozen: true,
@@ -322,14 +322,14 @@ impl AuthorityMap {
 #[derive(Debug, Clone)]
 struct TierStore {
     tier: Tier,
-    artifacts: HashMap<ArtifactId, TrustArtifact>,
+    artifacts: BTreeMap<ArtifactId, TrustArtifact>,
 }
 
 impl TierStore {
     fn new(tier: Tier) -> Self {
         TierStore {
             tier,
-            artifacts: HashMap::new(),
+            artifacts: BTreeMap::new(),
         }
     }
 

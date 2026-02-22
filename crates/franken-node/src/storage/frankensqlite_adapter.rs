@@ -22,7 +22,7 @@
 //! - **INV-FSA-SCHEMA-VERSIONED**: Schema migrations are versioned and reversible
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::Instant;
 
@@ -52,7 +52,7 @@ pub const INV_FSA_SCHEMA_VERSIONED: &str = "INV-FSA-SCHEMA-VERSIONED";
 // DurabilityTier
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum DurabilityTier {
     /// WAL-mode, crash-safe. Survives process death.
     Tier1,
@@ -86,7 +86,7 @@ impl fmt::Display for DurabilityTier {
 // PersistenceClass
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum PersistenceClass {
     /// Fencing tokens, lease state, rollout state.
     ControlState,
@@ -240,7 +240,7 @@ pub struct AdapterSummary {
     pub write_failures: usize,
     pub replay_count: usize,
     pub replay_mismatches: usize,
-    pub writes_by_tier: HashMap<String, usize>,
+    pub writes_by_tier: BTreeMap<String, usize>,
     pub schema_version: u32,
 }
 
@@ -250,7 +250,7 @@ pub struct AdapterSummary {
 
 pub struct FrankensqliteAdapter {
     config: AdapterConfig,
-    store: HashMap<(PersistenceClass, String), Vec<u8>>,
+    store: BTreeMap<(PersistenceClass, String), Vec<u8>>,
     audit_log: Vec<(String, Vec<u8>)>,
     events: Vec<AdapterEvent>,
     write_count: usize,
@@ -258,7 +258,7 @@ pub struct FrankensqliteAdapter {
     write_failures: usize,
     replay_count: usize,
     replay_mismatches: usize,
-    writes_by_tier: HashMap<DurabilityTier, usize>,
+    writes_by_tier: BTreeMap<DurabilityTier, usize>,
     schema_versions: Vec<SchemaVersion>,
 }
 
@@ -266,7 +266,7 @@ impl FrankensqliteAdapter {
     pub fn new(config: AdapterConfig) -> Self {
         let mut adapter = Self {
             config,
-            store: HashMap::new(),
+            store: BTreeMap::new(),
             audit_log: Vec::new(),
             events: Vec::new(),
             write_count: 0,
@@ -274,7 +274,7 @@ impl FrankensqliteAdapter {
             write_failures: 0,
             replay_count: 0,
             replay_mismatches: 0,
-            writes_by_tier: HashMap::new(),
+            writes_by_tier: BTreeMap::new(),
             schema_versions: vec![SchemaVersion {
                 version: 1,
                 applied_at: "2026-02-20T00:00:00Z".into(),
@@ -411,7 +411,7 @@ impl FrankensqliteAdapter {
 
     /// Aggregate summary.
     pub fn summary(&self) -> AdapterSummary {
-        let writes_by_tier: HashMap<String, usize> = self
+        let writes_by_tier: BTreeMap<String, usize> = self
             .writes_by_tier
             .iter()
             .map(|(t, c)| (t.label().to_string(), *c))

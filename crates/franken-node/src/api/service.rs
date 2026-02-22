@@ -7,7 +7,7 @@
 //! `ControlPlaneService` with dispatch, metrics, and endpoint catalog.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::fleet_control_routes;
 use super::middleware::{
@@ -25,7 +25,7 @@ pub struct ServiceConfig {
     /// Listen address (for future HTTP binding).
     pub listen_addr: String,
     /// Rate limit overrides per endpoint group.
-    pub rate_limits: HashMap<String, RateLimitConfig>,
+    pub rate_limits: BTreeMap<String, RateLimitConfig>,
     /// Whether to enable OpenTelemetry export.
     pub otel_enabled: bool,
     /// Service name for tracing.
@@ -36,7 +36,7 @@ impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
             listen_addr: "127.0.0.1:9090".to_string(),
-            rate_limits: HashMap::new(),
+            rate_limits: BTreeMap::new(),
             otel_enabled: false,
             service_name: "franken-node-control-plane".to_string(),
         }

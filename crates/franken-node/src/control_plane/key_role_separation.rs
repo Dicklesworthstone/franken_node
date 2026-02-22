@@ -13,7 +13,7 @@
 //! - INV-KRS-ROTATION-ATOMIC: Key rotation atomically revokes old and binds new.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -284,7 +284,7 @@ impl KeyRoleEvent {
 #[derive(Debug)]
 pub struct KeyRoleRegistry {
     /// Active bindings: key_id -> KeyRoleBinding.
-    active: HashMap<String, KeyRoleBinding>,
+    active: BTreeMap<String, KeyRoleBinding>,
     /// Revoked bindings for audit trail.
     revoked: Vec<KeyRoleBinding>,
     /// Event log for structured telemetry.
@@ -295,7 +295,7 @@ impl KeyRoleRegistry {
     /// Create an empty registry.
     pub fn new() -> Self {
         Self {
-            active: HashMap::new(),
+            active: BTreeMap::new(),
             revoked: Vec::new(),
             events: Vec::new(),
         }

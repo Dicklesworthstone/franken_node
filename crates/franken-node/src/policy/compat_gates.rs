@@ -17,7 +17,7 @@
 //!   risk requires approval; de-escalating is auto-approved but audited.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ── Event Codes ──────────────────────────────────────────────────────────────
@@ -237,14 +237,14 @@ pub struct ShimRegistryEntry {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ShimRegistry {
     entries: Vec<ShimRegistryEntry>,
-    index: HashMap<String, usize>,
+    index: BTreeMap<String, usize>,
 }
 
 impl ShimRegistry {
     pub fn new() -> Self {
         Self {
             entries: Vec::new(),
-            index: HashMap::new(),
+            index: BTreeMap::new(),
         }
     }
 
@@ -531,7 +531,7 @@ impl std::error::Error for CompatGateError {}
 #[derive(Debug, Clone)]
 pub struct CompatGateEvaluator {
     registry: ShimRegistry,
-    scopes: HashMap<String, ScopeConfig>,
+    scopes: BTreeMap<String, ScopeConfig>,
     audit_log: Vec<GateCheckResult>,
     receipts: Vec<ModeSelectionReceipt>,
 }
@@ -540,7 +540,7 @@ impl CompatGateEvaluator {
     pub fn new(registry: ShimRegistry) -> Self {
         Self {
             registry,
-            scopes: HashMap::new(),
+            scopes: BTreeMap::new(),
             audit_log: Vec::new(),
             receipts: Vec::new(),
         }
@@ -861,9 +861,9 @@ pub struct CompatGateReport {
     pub total_scopes: usize,
     pub total_evaluations: usize,
     pub total_receipts: usize,
-    pub shims_by_band: HashMap<String, usize>,
-    pub shims_by_risk: HashMap<String, usize>,
-    pub decisions_summary: HashMap<String, usize>,
+    pub shims_by_band: BTreeMap<String, usize>,
+    pub shims_by_risk: BTreeMap<String, usize>,
+    pub decisions_summary: BTreeMap<String, usize>,
     pub generated_at: String,
 }
 
@@ -871,8 +871,8 @@ pub struct CompatGateReport {
 pub fn generate_compat_report(evaluator: &CompatGateEvaluator) -> CompatGateReport {
     let registry = evaluator.registry();
 
-    let mut shims_by_band: HashMap<String, usize> = HashMap::new();
-    let mut shims_by_risk: HashMap<String, usize> = HashMap::new();
+    let mut shims_by_band: BTreeMap<String, usize> = BTreeMap::new();
+    let mut shims_by_risk: BTreeMap<String, usize> = BTreeMap::new();
 
     for entry in registry.all() {
         *shims_by_band
@@ -883,7 +883,7 @@ pub fn generate_compat_report(evaluator: &CompatGateEvaluator) -> CompatGateRepo
             .or_insert(0) += 1;
     }
 
-    let mut decisions_summary: HashMap<String, usize> = HashMap::new();
+    let mut decisions_summary: BTreeMap<String, usize> = BTreeMap::new();
     for result in &evaluator.audit_log {
         *decisions_summary
             .entry(result.decision.label().to_string())

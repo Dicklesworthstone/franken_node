@@ -4,7 +4,7 @@
 //! and frozen once registered.  Non-fatal errors carry `retryable`, `retry_after_ms`,
 //! and `recovery_hint` metadata.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ── Severity ────────────────────────────────────────────────────────────────
@@ -137,7 +137,7 @@ fn parse_subsystem(code: &str) -> Option<String> {
 
 #[derive(Debug, Default)]
 pub struct ErrorCodeRegistry {
-    entries: HashMap<String, ErrorCodeEntry>,
+    entries: BTreeMap<String, ErrorCodeEntry>,
 }
 
 impl ErrorCodeRegistry {
