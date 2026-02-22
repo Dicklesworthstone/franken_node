@@ -1,0 +1,18 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/projects/franken_node
+plugins: typeguard-4.4.2, anyio-4.8.0
+collecting ... collected 9 items
+
+tests/test_check_counterfactual_lab.py::TestVerdict::test_gate_verdict_pass PASSED [ 11%]
+tests/test_check_counterfactual_lab.py::TestResultShape::test_bead_and_section PASSED [ 22%]
+tests/test_check_counterfactual_lab.py::TestResultShape::test_required_fields PASSED [ 33%]
+tests/test_check_counterfactual_lab.py::TestChecks::test_all_checks_have_keys PASSED [ 44%]
+tests/test_check_counterfactual_lab.py::TestChecks::test_minimum_check_count PASSED [ 55%]
+tests/test_check_counterfactual_lab.py::TestSelfTest::test_self_test_passes PASSED [ 66%]
+tests/test_check_counterfactual_lab.py::TestLabContract::test_lab_contract_fields PASSED [ 77%]
+tests/test_check_counterfactual_lab.py::TestCli::test_json_output_parseable PASSED [ 88%]
+tests/test_check_counterfactual_lab.py::TestCli::test_self_test_exit_zero PASSED [100%]
+
+============================== 9 passed in 0.31s ===============================

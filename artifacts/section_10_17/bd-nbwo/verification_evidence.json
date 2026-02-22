@@ -5,62 +5,101 @@
   "status": "pass",
   "verdict": "PASS",
   "deliverables": [
+    "docs/specs/replay_capsule_format.md",
     "docs/specs/section_10_17/bd-nbwo_contract.md",
     "crates/franken-node/src/connector/universal_verifier_sdk.rs",
-    "scripts/check_universal_verifier_sdk.py",
-    "tests/test_check_universal_verifier_sdk.py",
+    "sdk/verifier/mod.rs",
+    "sdk/verifier/capsule.rs",
+    "tests/conformance/verifier_sdk_capsule_replay.rs",
+    "scripts/check_verifier_sdk_capsule.py",
+    "tests/test_check_verifier_sdk_capsule.py",
+    "artifacts/10.17/verifier_sdk_certification_report.json",
     "artifacts/section_10_17/bd-nbwo/verification_evidence.json",
     "artifacts/section_10_17/bd-nbwo/verification_summary.md"
   ],
   "checker": {
-    "command": "python3 scripts/check_universal_verifier_sdk.py --json",
-    "report_path": "artifacts/section_10_17/bd-nbwo/check_report.json"
+    "command": "python3 scripts/check_verifier_sdk_capsule.py --build-report --json",
+    "exit_code": 0,
+    "report_path": "artifacts/10.17/verifier_sdk_certification_report.json",
+    "passed_checks": 70,
+    "failed_checks": 0
   },
   "self_test": {
-    "command": "python3 scripts/check_universal_verifier_sdk.py --self-test"
+    "command": "python3 scripts/check_verifier_sdk_capsule.py --self-test --json",
+    "exit_code": 0
   },
   "unit_tests": {
-    "command": "python3 -m pytest tests/test_check_universal_verifier_sdk.py -v"
+    "command": "python3 -m pytest tests/test_check_verifier_sdk_capsule.py -v",
+    "exit_code": 0
   },
-  "implementation": {
-    "module": "crates/franken-node/src/connector/universal_verifier_sdk.rs",
-    "schema_version": "vsdk-v1.0",
-    "types": [
-      "CapsuleVerdict",
-      "CapsuleManifest",
-      "ReplayCapsule",
-      "ReplayResult",
-      "SessionStep",
-      "VerificationSession",
-      "VerifierSdk",
-      "VsdkEvent",
-      "VsdkError"
+  "capsule_contract": {
+    "capsule_replay_deterministic": true,
+    "no_privileged_access": true,
+    "schema_versioned": true,
+    "signature_bound": true
+  },
+  "event_codes": {
+    "public_facing": [
+      "CAPSULE_CREATED",
+      "CAPSULE_SIGNED",
+      "CAPSULE_REPLAY_START",
+      "CAPSULE_VERDICT_REPRODUCED",
+      "SDK_VERSION_CHECK"
     ],
-    "event_codes": 7,
-    "error_codes": 7,
-    "invariants": 5,
-    "core_operations": [
-      "validate_manifest",
-      "verify_capsule_signature",
-      "sign_capsule",
-      "replay_capsule",
-      "create_session",
-      "record_session_step",
-      "seal_session",
-      "create_verifier_sdk"
+    "internal_impl": [
+      "VSDK_001",
+      "VSDK_002",
+      "VSDK_003",
+      "VSDK_004",
+      "VSDK_005",
+      "VSDK_006",
+      "VSDK_007"
+    ]
+  },
+  "error_codes": {
+    "public_facing": [
+      "ERR_CAPSULE_SIGNATURE_INVALID",
+      "ERR_CAPSULE_SCHEMA_MISMATCH",
+      "ERR_CAPSULE_REPLAY_DIVERGED",
+      "ERR_CAPSULE_VERDICT_MISMATCH",
+      "ERR_SDK_VERSION_UNSUPPORTED",
+      "ERR_CAPSULE_ACCESS_DENIED"
+    ],
+    "internal_impl": [
+      "ERR_VSDK_CAPSULE_INVALID",
+      "ERR_VSDK_SIGNATURE_MISMATCH",
+      "ERR_VSDK_SCHEMA_UNSUPPORTED",
+      "ERR_VSDK_REPLAY_DIVERGED",
+      "ERR_VSDK_SESSION_SEALED",
+      "ERR_VSDK_MANIFEST_INCOMPLETE",
+      "ERR_VSDK_EMPTY_PAYLOAD"
     ]
   },
   "invariants": {
-    "INV-VSDK-CAPSULE-DETERMINISTIC": "Same capsule always produces same verdict and output hash",
-    "INV-VSDK-NO-PRIVILEGE": "External verifiers never require privileged internal access",
-    "INV-VSDK-SCHEMA-VERSIONED": "Every capsule and manifest carries a schema version",
-    "INV-VSDK-SESSION-MONOTONIC": "Session steps are append-only; sealed sessions reject new steps",
-    "INV-VSDK-SIGNATURE-BOUND": "Capsule signature covers manifest + payload + inputs"
+    "public_facing": [
+      "INV-CAPSULE-STABLE-SCHEMA",
+      "INV-CAPSULE-VERSIONED-API",
+      "INV-CAPSULE-NO-PRIVILEGED-ACCESS",
+      "INV-CAPSULE-VERDICT-REPRODUCIBLE"
+    ],
+    "internal_impl": [
+      "INV-VSDK-CAPSULE-DETERMINISTIC",
+      "INV-VSDK-NO-PRIVILEGE",
+      "INV-VSDK-SCHEMA-VERSIONED",
+      "INV-VSDK-SESSION-MONOTONIC",
+      "INV-VSDK-SIGNATURE-BOUND"
+    ]
+  },
+  "rust_tests": {
+    "universal_verifier_sdk": 52,
+    "sdk_verifier_mod": 10,
+    "sdk_verifier_capsule": 20
   },
   "notes": [
-    "External verifiers can replay signed capsules and reproduce claim verdicts without privileged internal access.",
-    "Capsule schema (vsdk-v1.0) and verification APIs are stable and versioned.",
-    "All types are Send + Sync, serializable via serde, and use BTreeMap for deterministic ordering.",
-    "Builds on the verifier-economy SDK (bd-3c2, Section 10.12) foundation."
+    "The universal_verifier_sdk module (connector) provides the internal implementation.",
+    "The sdk/verifier/ facade provides the public-facing SDK surface.",
+    "External verifiers can replay signed capsules without privileged access.",
+    "Schema version vsdk-v1.0 is stable and versioned.",
+    "52 inline Rust tests in the implementation, 30 in the SDK facade."
   ]
 }

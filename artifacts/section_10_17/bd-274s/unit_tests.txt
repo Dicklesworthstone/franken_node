@@ -1,0 +1,23 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/projects/franken_node
+plugins: typeguard-4.4.2, anyio-4.8.0
+collecting ... collected 14 items
+
+tests/test_check_adversary_graph.py::TestVerdict::test_gate_verdict_pass PASSED [  7%]
+tests/test_check_adversary_graph.py::TestResultShape::test_bead_and_section PASSED [ 14%]
+tests/test_check_adversary_graph.py::TestResultShape::test_required_fields PASSED [ 21%]
+tests/test_check_adversary_graph.py::TestResultShape::test_schema_version PASSED [ 28%]
+tests/test_check_adversary_graph.py::TestChecks::test_all_checks_have_keys PASSED [ 35%]
+tests/test_check_adversary_graph.py::TestChecks::test_minimum_check_count PASSED [ 42%]
+tests/test_check_adversary_graph.py::TestEventCodes::test_event_code_count PASSED [ 50%]
+tests/test_check_adversary_graph.py::TestEventCodes::test_event_codes_list PASSED [ 57%]
+tests/test_check_adversary_graph.py::TestPolicyThresholds::test_threshold_values PASSED [ 64%]
+tests/test_check_adversary_graph.py::TestInvariants::test_invariant_count PASSED [ 71%]
+tests/test_check_adversary_graph.py::TestSelfTest::test_self_test_has_checks PASSED [ 78%]
+tests/test_check_adversary_graph.py::TestSelfTest::test_self_test_passes PASSED [ 85%]
+tests/test_check_adversary_graph.py::TestCli::test_json_output_parseable PASSED [ 92%]
+tests/test_check_adversary_graph.py::TestCli::test_self_test_exit_zero PASSED [100%]
+
+============================== 14 passed in 0.15s ==============================

@@ -1,0 +1,173 @@
+{
+  "bead_id": "bd-p73r",
+  "schema_version": "vef-receipt-vectors-v1",
+  "receipt_schema_version": "vef-execution-receipt-v1",
+  "description": "Golden vectors for canonical ExecutionReceipt serialization + hashing.",
+  "vectors": [
+    {
+      "name": "network_access_baseline",
+      "input_receipt": {
+        "schema_version": "vef-execution-receipt-v1",
+        "action_type": "network_access",
+        "capability_context": {
+          "capability": "network.egress",
+          "domain": "runtime",
+          "scope": "extensions"
+        },
+        "actor_identity": "agent:purple-harbor",
+        "artifact_identity": "artifact:ext:core",
+        "policy_snapshot_hash": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+        "timestamp_millis": 1745000001000,
+        "sequence_number": 1,
+        "witness_references": [
+          "witness:b",
+          "witness:a"
+        ],
+        "trace_id": "trace-rcpt-001"
+      },
+      "expected_hash": "sha256:adf3b2a92ca3862f4c9449d0d8220e4f9b77dd0d6033ad307a9112e7ea8b26cb",
+      "expected_canonical_witnesses": [
+        "witness:a",
+        "witness:b"
+      ]
+    },
+    {
+      "name": "unicode_actor_identity",
+      "input_receipt": {
+        "schema_version": "vef-execution-receipt-v1",
+        "action_type": "policy_transition",
+        "capability_context": {
+          "capability": "policy.approval",
+          "domain": "control-plane",
+          "scope": "release"
+        },
+        "actor_identity": "operator:東京-node",
+        "artifact_identity": "artifact:policy:release-2026-02-22",
+        "policy_snapshot_hash": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+        "timestamp_millis": 1745000002000,
+        "sequence_number": 17,
+        "witness_references": [
+          "witness:zeta",
+          "witness:alpha",
+          "witness:alpha"
+        ],
+        "trace_id": "trace-rcpt-002"
+      },
+      "expected_hash": "sha256:eb6f69a8f9eca57be58b4d4e23f7cdced16035097a31f7f3f80c92374f5cfc5e",
+      "expected_canonical_witnesses": [
+        "witness:alpha",
+        "witness:zeta"
+      ]
+    },
+    {
+      "name": "artifact_promotion_high_sequence",
+      "input_receipt": {
+        "schema_version": "vef-execution-receipt-v1",
+        "action_type": "artifact_promotion",
+        "capability_context": {
+          "capability": "artifact.promote",
+          "domain": "promotion-pipeline",
+          "scope": "production"
+        },
+        "actor_identity": "service:promoter",
+        "artifact_identity": "artifact:image:sha256-deadbeef",
+        "policy_snapshot_hash": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+        "timestamp_millis": 18446744073709551615,
+        "sequence_number": 4294967295,
+        "witness_references": [
+          "witness:quorum-1",
+          "witness:quorum-2",
+          "witness:quorum-3"
+        ],
+        "trace_id": "trace-rcpt-003"
+      },
+      "expected_hash": "sha256:c2992e0348fd3f602665719a8458abf1ff302e9dc2d86d8a3af40ad6e2e3b8e6",
+      "expected_canonical_witnesses": [
+        "witness:quorum-1",
+        "witness:quorum-2",
+        "witness:quorum-3"
+      ]
+    },
+    {
+      "name": "filesystem_operation_baseline",
+      "input_receipt": {
+        "schema_version": "vef-execution-receipt-v1",
+        "action_type": "filesystem_operation",
+        "capability_context": {
+          "capability": "fs.read",
+          "domain": "runtime",
+          "scope": "sandbox"
+        },
+        "actor_identity": "service:file-agent",
+        "artifact_identity": "artifact:workspace:/srv/extensions/a",
+        "policy_snapshot_hash": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+        "timestamp_millis": 1745000003000,
+        "sequence_number": 19,
+        "witness_references": [
+          "witness:disk-guard",
+          "witness:policy-daemon"
+        ],
+        "trace_id": "trace-rcpt-004"
+      },
+      "expected_hash": "sha256:af2f6bbd4f4b7d4f09d7ac8e08484d43bcf9f58d65ba750e68be1864e67a70a0",
+      "expected_canonical_witnesses": [
+        "witness:disk-guard",
+        "witness:policy-daemon"
+      ]
+    },
+    {
+      "name": "process_spawn_denied",
+      "input_receipt": {
+        "schema_version": "vef-execution-receipt-v1",
+        "action_type": "process_spawn",
+        "capability_context": {
+          "capability": "process.spawn",
+          "domain": "runtime",
+          "scope": "extensions"
+        },
+        "actor_identity": "service:spawn-guard",
+        "artifact_identity": "artifact:process:python3",
+        "policy_snapshot_hash": "sha256:5555555555555555555555555555555555555555555555555555555555555555",
+        "timestamp_millis": 1745000004000,
+        "sequence_number": 23,
+        "witness_references": [
+          "witness:deny-rule",
+          "witness:spawn-monitor"
+        ],
+        "trace_id": "trace-rcpt-005"
+      },
+      "expected_hash": "sha256:7d6b6f6461af23bcf8d4a9d548fddf6ebc9c17effeeb9bce3f846d0a6f2f1f5e",
+      "expected_canonical_witnesses": [
+        "witness:deny-rule",
+        "witness:spawn-monitor"
+      ]
+    },
+    {
+      "name": "secret_access_quorum",
+      "input_receipt": {
+        "schema_version": "vef-execution-receipt-v1",
+        "action_type": "secret_access",
+        "capability_context": {
+          "capability": "secret.fetch",
+          "domain": "runtime",
+          "scope": "vault"
+        },
+        "actor_identity": "service:secret-agent",
+        "artifact_identity": "artifact:secret:api-key",
+        "policy_snapshot_hash": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+        "timestamp_millis": 1745000005000,
+        "sequence_number": 29,
+        "witness_references": [
+          "witness:vault-audit",
+          "witness:quorum-check"
+        ],
+        "trace_id": "trace-rcpt-006"
+      },
+      "expected_hash": "sha256:af0966199d755fce6f65a27372fbc28ec17fe59af80f535af59db17ca6f5f4ab",
+      "expected_canonical_witnesses": [
+        "witness:quorum-check",
+        "witness:vault-audit"
+      ]
+    }
+  ]
+}

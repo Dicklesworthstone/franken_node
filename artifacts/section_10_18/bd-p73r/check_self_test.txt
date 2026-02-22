@@ -1,0 +1,8 @@
+[bd-p73r] PASS (7/7)
+- PASS action_type_count: 6
+- PASS event_code_count: 2
+- PASS error_code_count: 5
+- PASS invariant_count: 4
+- PASS run_all_is_dict: dict
+- PASS run_all_has_checks: checks list
+- PASS run_all_total_matches: total vs checks

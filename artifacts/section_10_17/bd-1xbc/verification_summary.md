@@ -1,62 +1,91 @@
-# bd-1xbc: Verification Summary
+# bd-1xbc Verification Summary
 
-## Bead Identity
+## Result
+PASS
 
-| Field | Value |
-|-------|-------|
-| Bead ID | bd-1xbc |
-| Section | 10.17 |
-| Title | Deterministic time-travel runtime capture/replay for extension-host workflows |
-| Verdict | PASS |
+## Delivered
+- `crates/franken-node/src/replay/time_travel_engine.rs`
+- `crates/franken-node/src/replay/mod.rs` (wired time_travel_engine module)
+- `crates/franken-node/src/main.rs` (wired replay module)
+- `docs/specs/section_10_17/bd-1xbc_contract.md`
+- `scripts/check_time_travel_replay.py`
+- `tests/test_check_time_travel_replay.py`
+- `artifacts/section_10_17/bd-1xbc/verification_evidence.json`
+- `artifacts/section_10_17/bd-1xbc/verification_summary.md`
 
-## Implementation Overview
+## Invariants
 
-The `time_travel` module (`crates/franken-node/src/runtime/time_travel.rs`) implements
-a deterministic time-travel runtime for extension-host workflows. The module provides:
+| ID | Status |
+|----|--------|
+| INV-TTR-DETERMINISM | Enforced -- identity replay produces bit-identical outcomes |
+| INV-TTR-DIVERGENCE-DETECT | Enforced -- divergences reported with step_seq, kind, digests, explanation |
+| INV-TTR-TRACE-COMPLETE | Enforced -- validation rejects empty traces and incomplete environment |
+| INV-TTR-STEP-ORDER | Enforced -- sequence gaps detected and rejected |
+| INV-TTR-ENV-SEALED | Enforced -- EnvironmentSnapshot is immutable, validated at capture time |
+| INV-TTR-AUDIT-COMPLETE | Enforced -- all events emit AuditEntry with stable event codes |
+| INV-REPLAY-DETERMINISTIC | Enforced -- same seed/input produces same output digest |
+| INV-REPLAY-SEED-EQUIVALENCE | Enforced -- environment clock_seed_ns bound to trace |
+| INV-REPLAY-STEP-NAVIGATION | Enforced -- sequential step replay with seq validation |
+| INV-REPLAY-DIVERGENCE-EXPLAIN | Enforced -- Divergence struct with step_seq, kind, explanation |
 
-- **TimeTravelRuntime**: Top-level facade for managing capture and replay sessions,
-  with a BTreeMap-backed snapshot registry for deterministic ordering.
-- **CaptureSession**: Records CaptureFrames during live workflow execution, enforcing
-  clock monotonicity (INV-TTR-CLOCK-MONOTONIC) and frame completeness (INV-TTR-FRAME-COMPLETE).
-- **ReplaySession**: Steps through captured frames with forward/backward navigation
-  (INV-TTR-STEP-NAVIGATION) and divergence detection (INV-TTR-DIVERGENCE-DETECTED).
-- **WorkflowSnapshot**: Serializable snapshot with SHA-256 integrity digest and
-  schema versioning (INV-TTR-SNAPSHOT-SCHEMA).
-- **DeterministicClock**: Replaces wallclock time to eliminate non-determinism.
-- **DivergenceExplanation**: Structured report emitted when replay diverges.
+## Event Codes
 
-## Acceptance Criteria Mapping
+| Code | Description | Status |
+|------|-------------|--------|
+| TTR-001 | Workflow trace capture started | Implemented |
+| TTR-002 | Trace step recorded | Implemented |
+| TTR-003 | Workflow trace capture completed | Implemented |
+| TTR-004 | Replay started | Implemented |
+| TTR-005 | Replay step compared (identical) | Implemented |
+| TTR-006 | Replay step diverged | Implemented |
+| TTR-007 | Replay completed -- verdict emitted | Implemented |
+| TTR-008 | Environment snapshot sealed | Implemented |
+| TTR-009 | Trace integrity check passed | Implemented |
+| TTR-010 | Trace integrity check failed | Implemented |
 
-| Criterion | Status | Evidence |
-|-----------|--------|----------|
-| Byte-for-byte replay equivalence | PASS | `byte_for_byte_replay_equivalence` test verifies identical digests across two capture runs and replay verification |
-| Stepwise state navigation | PASS | `step_forward`, `step_backward`, `jump_to` methods with boundary checks |
-| Divergence explanation | PASS | `verify_decision` returns `DivergenceExplanation` with frame index, clock tick, expected/actual digests |
-| >= 20 unit tests | PASS | 30 inline `#[test]` functions |
-| Event codes TTR_001..TTR_010 | PASS | All 10 codes defined in `event_codes` module |
-| Error codes ERR_TTR_* | PASS | All 6 codes defined in `error_codes` module |
-| BTreeMap deterministic ordering | PASS | Used for `WorkflowSnapshot.metadata`, `ControlDecision.metadata`, and `TimeTravelRuntime.snapshots` |
-| Schema version ttr-v1.0 | PASS | `SCHEMA_VERSION` constant |
+## Error Codes
 
-## Invariant Coverage
+| Code | Description | Status |
+|------|-------------|--------|
+| ERR_TTR_EMPTY_TRACE | Trace has no steps | Implemented |
+| ERR_TTR_SEQ_GAP | Sequence gap in trace steps | Implemented |
+| ERR_TTR_DIGEST_MISMATCH | Trace digest does not match | Implemented |
+| ERR_TTR_ENV_MISSING | Environment field missing | Implemented |
+| ERR_TTR_REPLAY_FAILED | Replay execution failed | Implemented |
+| ERR_TTR_DUPLICATE_TRACE | Duplicate trace ID | Implemented |
+| ERR_TTR_STEP_ORDER_VIOLATION | Steps violate ordering | Implemented |
+| ERR_TTR_TRACE_NOT_FOUND | Trace not found in engine | Implemented |
 
-| Invariant | Enforced By | Tested By |
-|-----------|-------------|-----------|
-| INV-TTR-DETERMINISTIC | `deterministic_decision()` uses seed+tick+input; `ReplaySession::verify_decision()` | `byte_for_byte_replay_equivalence`, `deterministic_decision_stable` |
-| INV-TTR-FRAME-COMPLETE | `CaptureFrame` stores frame_index, clock_tick, input_hash, decision, event_code | `capture_session_records_frames`, `capture_finalize_produces_snapshot` |
-| INV-TTR-CLOCK-MONOTONIC | `DeterministicClock::advance_to()` rejects regression | `clock_advance_to_rejects_regression`, `capture_session_rejects_clock_regression` |
-| INV-TTR-DIVERGENCE-DETECTED | `ReplaySession::verify_decision()` returns `DivergenceExplanation` | `verify_decision_detects_divergence` |
-| INV-TTR-SNAPSHOT-SCHEMA | `WorkflowSnapshot.schema_version`, `from_json_bytes()` integrity check | `snapshot_round_trip_json`, `snapshot_from_corrupt_bytes` |
-| INV-TTR-STEP-NAVIGATION | `step_forward()`, `step_backward()`, `jump_to()` with bounds | `replay_step_forward`, `replay_step_backward`, `replay_step_forward_out_of_bounds`, `replay_step_backward_at_zero` |
+## Gate Results
+- `python3 scripts/check_time_travel_replay.py --json` -> PASS (43/43 checks)
+- `python3 scripts/check_time_travel_replay.py --self-test` -> PASS
+- `python3 -m pytest tests/test_check_time_travel_replay.py -v` -> PASS (27 tests)
 
-## Deliverables
+## Key Types
+- `WorkflowTrace` -- complete trace with steps, environment, and digest
+- `TraceStep` -- input, output, side-effects, timing for one step
+- `EnvironmentSnapshot` -- sealed environment state at capture time
+- `TraceBuilder` -- step-by-step trace construction with audit logging
+- `ReplayEngine` -- stores traces and replays with divergence detection
+- `ReplayResult` -- verdict and divergences from a replay
+- `ReplayVerdict` -- Identical or Diverged(count)
+- `Divergence` -- step_seq, kind, expected/actual digests, explanation
+- `DivergenceKind` -- OutputMismatch, SideEffectMismatch, FullMismatch
+- `TimeTravelError` -- typed errors for all 8 failure modes
+- `AuditEntry` -- structured audit entry with event code and trace ID
+- `SideEffect` -- kind + payload for recorded side-effects
 
-| Artifact | Path | Status |
-|----------|------|--------|
-| Spec contract | `docs/specs/section_10_17/bd-1xbc_contract.md` | Created |
-| Rust module | `crates/franken-node/src/runtime/time_travel.rs` | Created |
-| Module wiring | `crates/franken-node/src/runtime/mod.rs` | Updated |
-| Check script | `scripts/check_time_travel_replay.py` | Created |
-| Test suite | `tests/test_check_time_travel_replay.py` | Created |
-| Evidence | `artifacts/section_10_17/bd-1xbc/verification_evidence.json` | Created |
-| Summary | `artifacts/section_10_17/bd-1xbc/verification_summary.md` | Created |
+## Unit Tests
+47 inline `#[test]` functions in `time_travel_engine.rs` covering:
+- Invariant constants, event codes, error codes, schema version
+- EnvironmentSnapshot validation (success, empty platform, empty runtime version)
+- TraceStep digest determinism and variation
+- WorkflowTrace validation (valid, empty, sequence gap, bad digest)
+- TraceBuilder lifecycle (capture, audit emission, build, empty rejection)
+- ReplayEngine operations (register, duplicate, get, sorted IDs, remove)
+- Identity replay determinism (single-step, multi-step)
+- Divergence detection (output, side-effect, full mismatch, partial)
+- Audit log emission and draining
+- Serde round-trip for WorkflowTrace, ReplayResult, Divergence
+- Digest determinism and variation
+- Error Display formatting

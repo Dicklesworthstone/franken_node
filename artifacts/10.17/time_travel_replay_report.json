@@ -1,21 +1,275 @@
 {
-  "schema_version": "time-travel-v1.0",
+  "schema_version": "time-travel-replay-v1.0",
   "bead_id": "bd-1xbc",
+  "title": "Deterministic time-travel runtime capture/replay for extension-host workflows",
   "section": "10.17",
-  "title": "Time-travel runtime capture/replay report",
-  "replay_contract": {
-    "deterministic_under_same_seed": true,
-    "byte_for_byte_equivalent_decisions": true,
-    "stepwise_navigation_supported": true,
-    "divergence_explanation_provided": true
+  "overall_pass": true,
+  "verdict": "PASS",
+  "summary": {
+    "passing": 43,
+    "failing": 0,
+    "total": 43
   },
-  "event_codes": 5,
-  "error_codes": 6,
-  "invariants": 4,
-  "test_scenarios": {
-    "capture_replay_match": "PASS",
-    "seed_equivalence": "PASS",
-    "step_navigation": "PASS",
-    "divergence_detection": "PASS"
-  }
+  "total": 43,
+  "passed": 43,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "source file exists",
+      "passed": true,
+      "detail": "crates/franken-node/src/replay/time_travel_engine.rs"
+    },
+    {
+      "check": "module wired in replay/mod.rs",
+      "passed": true,
+      "detail": "replay/mod.rs contains pub mod time_travel_engine"
+    },
+    {
+      "check": "replay module wired in main.rs",
+      "passed": true,
+      "detail": "main.rs contains pub mod replay"
+    },
+    {
+      "check": "spec contract exists",
+      "passed": true,
+      "detail": "docs/specs/section_10_17/bd-1xbc_contract.md"
+    },
+    {
+      "check": "test suite exists",
+      "passed": true,
+      "detail": "tests/test_check_time_travel_replay.py"
+    },
+    {
+      "check": "verification evidence exists",
+      "passed": true,
+      "detail": "artifacts/section_10_17/bd-1xbc/verification_evidence.json"
+    },
+    {
+      "check": "verification summary exists",
+      "passed": true,
+      "detail": "artifacts/section_10_17/bd-1xbc/verification_summary.md"
+    },
+    {
+      "check": "WorkflowTrace struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "TraceStep struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "EnvironmentSnapshot struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "SideEffect struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "TraceBuilder struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "ReplayEngine struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "ReplayResult struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "ReplayVerdict enum",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "Divergence struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "DivergenceKind enum",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "TimeTravelError enum",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "AuditEntry struct",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "compute_digest method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "validate method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "record_step method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "register_trace method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "replay method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "replay_identity method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "identity_replay function",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "build method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "output_digest method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "side_effects_digest method",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "event codes (10/10)",
+      "passed": true,
+      "detail": "10/10"
+    },
+    {
+      "check": "error codes (8/8)",
+      "passed": true,
+      "detail": "8/8"
+    },
+    {
+      "check": "invariant constants (6/6)",
+      "passed": true,
+      "detail": "6/6"
+    },
+    {
+      "check": "schema version ttr-v1.0",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "Serialize/Deserialize derives",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "BTreeMap for deterministic ordering",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "SHA-256 digest computation",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "unit tests >= 25 (47)",
+      "passed": true,
+      "detail": "47 tests"
+    },
+    {
+      "check": "#[cfg(test)] module",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "OutputMismatch variant",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "SideEffectMismatch variant",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "FullMismatch variant",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "Identical verdict variant",
+      "passed": true,
+      "detail": "found"
+    },
+    {
+      "check": "Diverged verdict variant",
+      "passed": true,
+      "detail": "found"
+    }
+  ],
+  "events": [
+    "TTR-001",
+    "TTR-002",
+    "TTR-003",
+    "TTR-004",
+    "TTR-005",
+    "TTR-006",
+    "TTR-007",
+    "TTR-008",
+    "TTR-009",
+    "TTR-010"
+  ],
+  "event_codes": [
+    "TTR-001",
+    "TTR-002",
+    "TTR-003",
+    "TTR-004",
+    "TTR-005",
+    "TTR-006",
+    "TTR-007",
+    "TTR-008",
+    "TTR-009",
+    "TTR-010"
+  ],
+  "error_codes": [
+    "ERR_TTR_EMPTY_TRACE",
+    "ERR_TTR_SEQ_GAP",
+    "ERR_TTR_DIGEST_MISMATCH",
+    "ERR_TTR_ENV_MISSING",
+    "ERR_TTR_REPLAY_FAILED",
+    "ERR_TTR_DUPLICATE_TRACE",
+    "ERR_TTR_STEP_ORDER_VIOLATION",
+    "ERR_TTR_TRACE_NOT_FOUND"
+  ],
+  "invariants": [
+    "INV-TTR-DETERMINISM",
+    "INV-TTR-DIVERGENCE-DETECT",
+    "INV-TTR-TRACE-COMPLETE",
+    "INV-TTR-STEP-ORDER",
+    "INV-TTR-ENV-SEALED",
+    "INV-TTR-AUDIT-COMPLETE"
+  ]
 }

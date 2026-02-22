@@ -1,0 +1,115 @@
+{
+  "schema_version": "hwp-v1.0",
+  "bead_id": "bd-2o8b",
+  "section": "10.17",
+  "title": "Hardware Placement Trace",
+  "description": "Sample placement trace demonstrating deterministic hardware planner behavior with policy-evidenced placements.",
+  "generated_at": "2026-02-22T06:00:00Z",
+  "trace": [
+    {
+      "event_code": "HWP-001",
+      "timestamp_ms": 1000,
+      "trace_id": "trace-init",
+      "detail": "Registered hardware profile: gpu-node-1 (capabilities: [compute, gpu], risk: 10, slots: 4)"
+    },
+    {
+      "event_code": "HWP-001",
+      "timestamp_ms": 1001,
+      "trace_id": "trace-init",
+      "detail": "Registered hardware profile: fpga-node-1 (capabilities: [compute, fpga], risk: 20, slots: 2)"
+    },
+    {
+      "event_code": "HWP-001",
+      "timestamp_ms": 1002,
+      "trace_id": "trace-init",
+      "detail": "Registered hardware profile: sgx-node-1 (capabilities: [compute, sgx], risk: 5, slots: 1)"
+    },
+    {
+      "event_code": "HWP-002",
+      "timestamp_ms": 1100,
+      "trace_id": "trace-init",
+      "detail": "Registered placement policy: default (max_risk_tolerance: 50, prefer_lowest_risk: true)"
+    },
+    {
+      "event_code": "HWP-003",
+      "timestamp_ms": 2000,
+      "trace_id": "trace-wl-001",
+      "workload_id": "wl-001",
+      "detail": "Placement requested for workload wl-001 (required: [compute, gpu], max_risk: 50, policy: default)"
+    },
+    {
+      "event_code": "HWP-004",
+      "timestamp_ms": 2001,
+      "trace_id": "trace-wl-001",
+      "workload_id": "wl-001",
+      "target_profile_id": "gpu-node-1",
+      "detail": "Placement succeeded: wl-001 -> gpu-node-1 (outcome: placed)"
+    },
+    {
+      "event_code": "HWP-012",
+      "timestamp_ms": 2002,
+      "trace_id": "trace-wl-001",
+      "workload_id": "wl-001",
+      "detail": "Policy evidence recorded: candidates_considered=[fpga-node-1, gpu-node-1, sgx-node-1], rejections={fpga-node-1: capability_mismatch, sgx-node-1: capability_mismatch}, selected=gpu-node-1"
+    },
+    {
+      "event_code": "HWP-011",
+      "timestamp_ms": 2100,
+      "trace_id": "trace-wl-001",
+      "workload_id": "wl-001",
+      "target_profile_id": "gpu-node-1",
+      "detail": "Dispatch executed through approved interface: franken_engine"
+    },
+    {
+      "event_code": "HWP-003",
+      "timestamp_ms": 3000,
+      "trace_id": "trace-wl-002",
+      "workload_id": "wl-002",
+      "detail": "Placement requested for workload wl-002 (required: [compute, fpga], max_risk: 10, policy: default)"
+    },
+    {
+      "event_code": "HWP-006",
+      "timestamp_ms": 3001,
+      "trace_id": "trace-wl-002",
+      "workload_id": "wl-002",
+      "detail": "Placement rejected: all capable targets exceed risk tolerance (fpga-node-1 risk=20 > max=10)"
+    },
+    {
+      "event_code": "HWP-012",
+      "timestamp_ms": 3002,
+      "trace_id": "trace-wl-002",
+      "workload_id": "wl-002",
+      "detail": "Policy evidence recorded: rejection reason=risk_exceeded"
+    }
+  ],
+  "invariants_demonstrated": [
+    {
+      "invariant": "INV-HWP-DETERMINISTIC",
+      "evidence": "BTreeMap iteration order ensures gpu-node-1 is consistently selected over other candidates with equal qualifications"
+    },
+    {
+      "invariant": "INV-HWP-CAPABILITY-MATCH",
+      "evidence": "fpga-node-1 and sgx-node-1 rejected for wl-001 due to missing 'gpu' capability"
+    },
+    {
+      "invariant": "INV-HWP-RISK-BOUND",
+      "evidence": "wl-002 rejected because fpga-node-1 risk (20) exceeds max_risk (10)"
+    },
+    {
+      "invariant": "INV-HWP-EVIDENCE-COMPLETE",
+      "evidence": "Every placement decision (HWP-004, HWP-006) accompanied by HWP-012 evidence event"
+    },
+    {
+      "invariant": "INV-HWP-DISPATCH-GATED",
+      "evidence": "Dispatch (HWP-011) executed only through 'franken_engine' approved interface"
+    },
+    {
+      "invariant": "INV-HWP-SCHEMA-VERSIONED",
+      "evidence": "All records carry schema_version: hwp-v1.0"
+    },
+    {
+      "invariant": "INV-HWP-AUDIT-COMPLETE",
+      "evidence": "All 11 trace entries use stable event codes HWP-001 through HWP-012"
+    }
+  ]
+}

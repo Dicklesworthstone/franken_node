@@ -1,0 +1,19 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/projects/franken_node
+plugins: typeguard-4.4.2, anyio-4.8.0
+collecting ... collected 10 items
+
+tests/test_check_staking_governance.py::TestVerdict::test_gate_verdict_pass PASSED [ 10%]
+tests/test_check_staking_governance.py::TestResultShape::test_bead_and_section PASSED [ 20%]
+tests/test_check_staking_governance.py::TestResultShape::test_required_fields PASSED [ 30%]
+tests/test_check_staking_governance.py::TestChecks::test_all_checks_have_keys PASSED [ 40%]
+tests/test_check_staking_governance.py::TestChecks::test_minimum_check_count PASSED [ 50%]
+tests/test_check_staking_governance.py::TestSelfTest::test_self_test_passes PASSED [ 60%]
+tests/test_check_staking_governance.py::TestCli::test_build_report_creates_artifact PASSED [ 70%]
+tests/test_check_staking_governance.py::TestCli::test_json_output_parseable PASSED [ 80%]
+tests/test_check_staking_governance.py::TestCli::test_self_test_exit_zero PASSED [ 90%]
+tests/test_check_staking_governance.py::TestStakingContract::test_staking_contract_flags PASSED [100%]
+
+============================== 10 passed in 0.19s ==============================

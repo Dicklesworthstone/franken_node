@@ -1,0 +1,448 @@
+{
+  "bead_id": "bd-21fo",
+  "section": "10.17",
+  "title": "Self-Evolving Optimization Governor with Safety-Envelope Enforcement",
+  "checks": [
+    {
+      "name": "SOURCE_EXISTS",
+      "passed": true,
+      "detail": "crates/franken-node/src/runtime/optimization_governor.rs exists"
+    },
+    {
+      "name": "EVENT_CODE:GOV_001",
+      "passed": true,
+      "detail": "GOV_001 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:GOV_002",
+      "passed": true,
+      "detail": "GOV_002 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:GOV_003",
+      "passed": true,
+      "detail": "GOV_003 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:GOV_004",
+      "passed": true,
+      "detail": "GOV_004 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:GOV_005",
+      "passed": true,
+      "detail": "GOV_005 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:GOV_006",
+      "passed": true,
+      "detail": "GOV_006 found in Rust"
+    },
+    {
+      "name": "EVENT_CODE:GOV_007",
+      "passed": true,
+      "detail": "GOV_007 found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-GOV-ENVELOPE-NEVER-BREACHED",
+      "passed": true,
+      "detail": "INV-GOV-ENVELOPE-NEVER-BREACHED found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-GOV-SHADOW-BEFORE-APPLY",
+      "passed": true,
+      "detail": "INV-GOV-SHADOW-BEFORE-APPLY found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-GOV-EVIDENCE-ON-REJECT",
+      "passed": true,
+      "detail": "INV-GOV-EVIDENCE-ON-REJECT found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-GOV-KNOBS-ONLY",
+      "passed": true,
+      "detail": "INV-GOV-KNOBS-ONLY found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-GOV-AUTO-REVERT",
+      "passed": true,
+      "detail": "INV-GOV-AUTO-REVERT found in Rust"
+    },
+    {
+      "name": "INVARIANT:INV-GOV-DETERMINISTIC-ORDER",
+      "passed": true,
+      "detail": "INV-GOV-DETERMINISTIC-ORDER found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_GOV_ENVELOPE_VIOLATION",
+      "passed": true,
+      "detail": "ERR_GOV_ENVELOPE_VIOLATION found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_GOV_NON_BENEFICIAL",
+      "passed": true,
+      "detail": "ERR_GOV_NON_BENEFICIAL found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_GOV_KNOB_LOCKED",
+      "passed": true,
+      "detail": "ERR_GOV_KNOB_LOCKED found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_GOV_REVERT_FAILED",
+      "passed": true,
+      "detail": "ERR_GOV_REVERT_FAILED found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_GOV_SHADOW_TIMEOUT",
+      "passed": true,
+      "detail": "ERR_GOV_SHADOW_TIMEOUT found in Rust"
+    },
+    {
+      "name": "ERROR_CODE:ERR_GOV_INVALID_PROPOSAL",
+      "passed": true,
+      "detail": "ERR_GOV_INVALID_PROPOSAL found in Rust"
+    },
+    {
+      "name": "CORE_TYPE:SafetyEnvelope",
+      "passed": true,
+      "detail": "SafetyEnvelope defined"
+    },
+    {
+      "name": "CORE_TYPE:OptimizationProposal",
+      "passed": true,
+      "detail": "OptimizationProposal defined"
+    },
+    {
+      "name": "CORE_TYPE:GovernorDecision",
+      "passed": true,
+      "detail": "GovernorDecision defined"
+    },
+    {
+      "name": "CORE_TYPE:DecisionLogEntry",
+      "passed": true,
+      "detail": "DecisionLogEntry defined"
+    },
+    {
+      "name": "CORE_TYPE:GovernorSnapshot",
+      "passed": true,
+      "detail": "GovernorSnapshot defined"
+    },
+    {
+      "name": "CORE_TYPE:ShadowEvalResult",
+      "passed": true,
+      "detail": "ShadowEvalResult defined"
+    },
+    {
+      "name": "CORE_TYPE:PredictedOutcome",
+      "passed": true,
+      "detail": "PredictedOutcome defined"
+    },
+    {
+      "name": "CORE_TYPE:RuntimeKnob",
+      "passed": true,
+      "detail": "RuntimeKnob defined"
+    },
+    {
+      "name": "CORE_TYPE:OptimizationGovernor",
+      "passed": true,
+      "detail": "OptimizationGovernor defined"
+    },
+    {
+      "name": "KNOB_VARIANT:ConcurrencyLimit",
+      "passed": true,
+      "detail": "ConcurrencyLimit variant present"
+    },
+    {
+      "name": "KNOB_VARIANT:BatchSize",
+      "passed": true,
+      "detail": "BatchSize variant present"
+    },
+    {
+      "name": "KNOB_VARIANT:CacheCapacity",
+      "passed": true,
+      "detail": "CacheCapacity variant present"
+    },
+    {
+      "name": "KNOB_VARIANT:DrainTimeoutMs",
+      "passed": true,
+      "detail": "DrainTimeoutMs variant present"
+    },
+    {
+      "name": "KNOB_VARIANT:RetryBudget",
+      "passed": true,
+      "detail": "RetryBudget variant present"
+    },
+    {
+      "name": "METHOD:shadow_evaluate",
+      "passed": true,
+      "detail": "shadow_evaluate implemented"
+    },
+    {
+      "name": "METHOD:submit_proposal",
+      "passed": true,
+      "detail": "submit_proposal implemented"
+    },
+    {
+      "name": "METHOD:auto_revert_check",
+      "passed": true,
+      "detail": "auto_revert_check implemented"
+    },
+    {
+      "name": "METHOD:submit_shadow_only",
+      "passed": true,
+      "detail": "submit_shadow_only implemented"
+    },
+    {
+      "name": "METHOD:snapshot",
+      "passed": true,
+      "detail": "snapshot implemented"
+    },
+    {
+      "name": "METHOD:export_decision_log_jsonl",
+      "passed": true,
+      "detail": "export_decision_log_jsonl implemented"
+    },
+    {
+      "name": "METHOD:export_verification_evidence",
+      "passed": true,
+      "detail": "export_verification_evidence implemented"
+    },
+    {
+      "name": "METHOD:update_envelope",
+      "passed": true,
+      "detail": "update_envelope implemented"
+    },
+    {
+      "name": "METHOD:lock_knob",
+      "passed": true,
+      "detail": "lock_knob implemented"
+    },
+    {
+      "name": "METHOD:unlock_knob",
+      "passed": true,
+      "detail": "unlock_knob implemented"
+    },
+    {
+      "name": "METHOD:knob_value",
+      "passed": true,
+      "detail": "knob_value implemented"
+    },
+    {
+      "name": "METHOD:decision_log",
+      "passed": true,
+      "detail": "decision_log implemented"
+    },
+    {
+      "name": "METHOD:decision_count",
+      "passed": true,
+      "detail": "decision_count implemented"
+    },
+    {
+      "name": "SCHEMA_VERSION",
+      "passed": true,
+      "detail": "gov-v1.0 declared"
+    },
+    {
+      "name": "SERDE_DERIVES",
+      "passed": true,
+      "detail": "Serialize/Deserialize present"
+    },
+    {
+      "name": "TEST_COVERAGE",
+      "passed": true,
+      "detail": "29 tests (>= 25 required)"
+    },
+    {
+      "name": "MODULE_REGISTERED",
+      "passed": true,
+      "detail": "optimization_governor registered in runtime/mod.rs"
+    },
+    {
+      "name": "SPEC_EXISTS",
+      "passed": true,
+      "detail": "docs/specs/section_10_17/bd-21fo_contract.md exists"
+    },
+    {
+      "name": "SPEC_EVENT:GOV_001",
+      "passed": true,
+      "detail": "GOV_001 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:GOV_002",
+      "passed": true,
+      "detail": "GOV_002 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:GOV_003",
+      "passed": true,
+      "detail": "GOV_003 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:GOV_004",
+      "passed": true,
+      "detail": "GOV_004 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:GOV_005",
+      "passed": true,
+      "detail": "GOV_005 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:GOV_006",
+      "passed": true,
+      "detail": "GOV_006 in spec"
+    },
+    {
+      "name": "SPEC_EVENT:GOV_007",
+      "passed": true,
+      "detail": "GOV_007 in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-GOV-ENVELOPE-NEVER-BREACHED",
+      "passed": true,
+      "detail": "INV-GOV-ENVELOPE-NEVER-BREACHED in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-GOV-SHADOW-BEFORE-APPLY",
+      "passed": true,
+      "detail": "INV-GOV-SHADOW-BEFORE-APPLY in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-GOV-EVIDENCE-ON-REJECT",
+      "passed": true,
+      "detail": "INV-GOV-EVIDENCE-ON-REJECT in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-GOV-KNOBS-ONLY",
+      "passed": true,
+      "detail": "INV-GOV-KNOBS-ONLY in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-GOV-AUTO-REVERT",
+      "passed": true,
+      "detail": "INV-GOV-AUTO-REVERT in spec"
+    },
+    {
+      "name": "SPEC_INVARIANT:INV-GOV-DETERMINISTIC-ORDER",
+      "passed": true,
+      "detail": "INV-GOV-DETERMINISTIC-ORDER in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_GOV_ENVELOPE_VIOLATION",
+      "passed": true,
+      "detail": "ERR_GOV_ENVELOPE_VIOLATION in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_GOV_NON_BENEFICIAL",
+      "passed": true,
+      "detail": "ERR_GOV_NON_BENEFICIAL in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_GOV_KNOB_LOCKED",
+      "passed": true,
+      "detail": "ERR_GOV_KNOB_LOCKED in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_GOV_REVERT_FAILED",
+      "passed": true,
+      "detail": "ERR_GOV_REVERT_FAILED in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_GOV_SHADOW_TIMEOUT",
+      "passed": true,
+      "detail": "ERR_GOV_SHADOW_TIMEOUT in spec"
+    },
+    {
+      "name": "SPEC_ERROR:ERR_GOV_INVALID_PROPOSAL",
+      "passed": true,
+      "detail": "ERR_GOV_INVALID_PROPOSAL in spec"
+    },
+    {
+      "name": "SPEC_TYPE:SafetyEnvelope",
+      "passed": true,
+      "detail": "SafetyEnvelope in spec"
+    },
+    {
+      "name": "SPEC_TYPE:OptimizationProposal",
+      "passed": true,
+      "detail": "OptimizationProposal in spec"
+    },
+    {
+      "name": "SPEC_TYPE:GovernorDecision",
+      "passed": true,
+      "detail": "GovernorDecision in spec"
+    },
+    {
+      "name": "SPEC_TYPE:DecisionLogEntry",
+      "passed": true,
+      "detail": "DecisionLogEntry in spec"
+    },
+    {
+      "name": "SPEC_TYPE:GovernorSnapshot",
+      "passed": true,
+      "detail": "GovernorSnapshot in spec"
+    },
+    {
+      "name": "SPEC_TYPE:ShadowEvalResult",
+      "passed": true,
+      "detail": "ShadowEvalResult in spec"
+    },
+    {
+      "name": "SPEC_TYPE:PredictedOutcome",
+      "passed": true,
+      "detail": "PredictedOutcome in spec"
+    },
+    {
+      "name": "SPEC_TYPE:RuntimeKnob",
+      "passed": true,
+      "detail": "RuntimeKnob in spec"
+    },
+    {
+      "name": "SPEC_TYPE:OptimizationGovernor",
+      "passed": true,
+      "detail": "OptimizationGovernor in spec"
+    },
+    {
+      "name": "TEST_FILE_EXISTS",
+      "passed": true,
+      "detail": "tests/test_check_optimization_governor.py exists"
+    },
+    {
+      "name": "EVIDENCE_EXISTS",
+      "passed": true,
+      "detail": "evidence JSON exists"
+    },
+    {
+      "name": "EVIDENCE_VALID_JSON",
+      "passed": true,
+      "detail": "evidence is valid JSON"
+    },
+    {
+      "name": "EVIDENCE_BEAD_ID",
+      "passed": true,
+      "detail": "bead_id=bd-21fo"
+    },
+    {
+      "name": "SUMMARY_EXISTS",
+      "passed": true,
+      "detail": "verification summary exists"
+    },
+    {
+      "name": "DECISION_LOG_EXISTS",
+      "passed": true,
+      "detail": "governor_decision_log.jsonl exists"
+    },
+    {
+      "name": "DECISION_LOG_VALID_JSONL",
+      "passed": true,
+      "detail": "3/3 valid JSONL lines"
+    }
+  ],
+  "passed": 87,
+  "failed": 0,
+  "total": 87,
+  "verdict": "PASS",
+  "all_passed": true,
+  "status": "pass"
+}

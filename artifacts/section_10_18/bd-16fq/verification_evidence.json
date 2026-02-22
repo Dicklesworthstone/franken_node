@@ -1,0 +1,84 @@
+{
+  "bead_id": "bd-16fq",
+  "title": "VEF policy-constraint language and compiler contract",
+  "section": "10.18",
+  "verdict": "PASS",
+  "timestamp": "2026-02-22T05:45:30Z",
+  "artifacts": {
+    "implementation": "crates/franken-node/src/connector/vef_policy_constraints.rs",
+    "module_wiring": "crates/franken-node/src/connector/mod.rs",
+    "language_spec": "docs/specs/vef_policy_constraint_language.md",
+    "contract_spec": "docs/specs/section_10_18/bd-16fq_contract.md",
+    "schema": "spec/vef_policy_constraints_v1.json",
+    "vector": "vectors/vef_policy_constraint_compiler.json",
+    "conformance_test": "tests/conformance/vef_policy_constraint_compiler.rs",
+    "checker": "scripts/check_vef_policy_constraints.py",
+    "checker_test": "tests/test_check_vef_policy_constraints.py",
+    "cargo_test_wrapper": "crates/franken-node/tests/vef_policy_constraint_compiler.rs",
+    "report": "artifacts/10.18/vef_constraint_compiler_report.json",
+    "summary": "artifacts/section_10_18/bd-16fq/verification_summary.md",
+    "check_report": "artifacts/section_10_18/bd-16fq/check_report.json",
+    "check_self_test": "artifacts/section_10_18/bd-16fq/check_self_test.txt",
+    "unit_test_log": "artifacts/section_10_18/bd-16fq/unit_tests.txt"
+  },
+  "verification_steps": [
+    {
+      "name": "checker_json",
+      "command": "python3 scripts/check_vef_policy_constraints.py --json",
+      "status": "PASS",
+      "output_path": "artifacts/section_10_18/bd-16fq/check_report.json"
+    },
+    {
+      "name": "checker_self_test",
+      "command": "python3 scripts/check_vef_policy_constraints.py --self-test",
+      "status": "PASS",
+      "output_path": "artifacts/section_10_18/bd-16fq/check_self_test.txt"
+    },
+    {
+      "name": "checker_unit_tests",
+      "command": "python3 -m unittest tests/test_check_vef_policy_constraints.py",
+      "status": "PASS",
+      "output_path": "artifacts/section_10_18/bd-16fq/unit_tests.txt"
+    },
+    {
+      "name": "rch_cargo_test_named_target",
+      "command": "rch exec -- cargo test -p frankenengine-node --test vef_policy_constraint_compiler",
+      "status": "FAIL",
+      "detail": "Target is now resolvable via crates/franken-node/tests wrapper, but remote compile fails on pre-existing workspace errors outside bd-16fq surfaces."
+    },
+    {
+      "name": "rch_cargo_check_all_targets",
+      "command": "rch exec -- cargo check --all-targets",
+      "status": "FAIL",
+      "detail": "Workspace currently has pre-existing compile errors outside bd-16fq (e.g. runtime/time_travel, registry/staking_governance, security/intent_firewall, runtime/isolation_mesh, security/zk_attestation)."
+    },
+    {
+      "name": "rch_cargo_clippy_all_targets",
+      "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+      "status": "FAIL",
+      "detail": "Workspace currently has broad pre-existing clippy failures unrelated to bd-16fq surfaces."
+    },
+    {
+      "name": "rch_cargo_fmt_check",
+      "command": "rch exec -- cargo fmt --check",
+      "status": "FAIL",
+      "detail": "Workspace currently has extensive pre-existing formatting diffs in many files unrelated to bd-16fq surfaces."
+    }
+  ],
+  "invariants": [
+    "INV-VEF-COMP-DETERMINISTIC",
+    "INV-VEF-COMP-COVERAGE",
+    "INV-VEF-COMP-TRACEABLE",
+    "INV-VEF-COMP-VERSIONED",
+    "INV-VEF-COMP-ROUNDTRIP"
+  ],
+  "event_codes": [
+    "VEF-COMPILE-001",
+    "VEF-COMPILE-002",
+    "VEF-COMPILE-ERR-001",
+    "VEF-COMPILE-ERR-002",
+    "VEF-COMPILE-ERR-003",
+    "VEF-COMPILE-ERR-004",
+    "VEF-COMPILE-ERR-005"
+  ]
+}

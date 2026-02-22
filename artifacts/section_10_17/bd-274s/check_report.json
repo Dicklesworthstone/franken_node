@@ -1,0 +1,349 @@
+{
+  "schema_version": "adversary-graph-v1.0",
+  "bead_id": "bd-274s",
+  "section": "10.17",
+  "title": "Bayesian adversary graph and automated quarantine controller",
+  "verdict": "PASS",
+  "total": 61,
+  "passed": 61,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "Spec file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/section_10_17/bd-274s_contract.md"
+    },
+    {
+      "check": "Adversary graph file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/security/adversary_graph.rs"
+    },
+    {
+      "check": "Quarantine controller file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/security/quarantine_controller.rs"
+    },
+    {
+      "check": "Security mod file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/security/mod.rs"
+    },
+    {
+      "check": "adversary_graph wired in mod.rs",
+      "passed": true,
+      "detail": "pub mod adversary_graph; in security/mod.rs"
+    },
+    {
+      "check": "quarantine_controller wired in mod.rs",
+      "passed": true,
+      "detail": "pub mod quarantine_controller; in security/mod.rs"
+    },
+    {
+      "check": "Adversary graph token 'struct AdversaryNode'",
+      "passed": true,
+      "detail": "struct AdversaryNode"
+    },
+    {
+      "check": "Adversary graph token 'enum EntityType'",
+      "passed": true,
+      "detail": "enum EntityType"
+    },
+    {
+      "check": "Adversary graph token 'struct TrustEdge'",
+      "passed": true,
+      "detail": "struct TrustEdge"
+    },
+    {
+      "check": "Adversary graph token 'struct EvidenceEvent'",
+      "passed": true,
+      "detail": "struct EvidenceEvent"
+    },
+    {
+      "check": "Adversary graph token 'struct SignedEvidenceEntry'",
+      "passed": true,
+      "detail": "struct SignedEvidenceEntry"
+    },
+    {
+      "check": "Adversary graph token 'struct PolicyThreshold'",
+      "passed": true,
+      "detail": "struct PolicyThreshold"
+    },
+    {
+      "check": "Adversary graph token 'enum QuarantineAction'",
+      "passed": true,
+      "detail": "enum QuarantineAction"
+    },
+    {
+      "check": "Adversary graph token 'struct AdversaryGraph'",
+      "passed": true,
+      "detail": "struct AdversaryGraph"
+    },
+    {
+      "check": "Adversary graph token 'fn ingest_evidence'",
+      "passed": true,
+      "detail": "fn ingest_evidence"
+    },
+    {
+      "check": "Adversary graph token 'fn replay_evidence'",
+      "passed": true,
+      "detail": "fn replay_evidence"
+    },
+    {
+      "check": "Adversary graph token 'fn action_for_risk'",
+      "passed": true,
+      "detail": "fn action_for_risk"
+    },
+    {
+      "check": "Adversary graph token 'fn state_snapshot'",
+      "passed": true,
+      "detail": "fn state_snapshot"
+    },
+    {
+      "check": "Quarantine controller token 'struct QuarantineController'",
+      "passed": true,
+      "detail": "struct QuarantineController"
+    },
+    {
+      "check": "Quarantine controller token 'struct ActionRecord'",
+      "passed": true,
+      "detail": "struct ActionRecord"
+    },
+    {
+      "check": "Quarantine controller token 'fn submit_evidence'",
+      "passed": true,
+      "detail": "fn submit_evidence"
+    },
+    {
+      "check": "Quarantine controller token 'fn replay_batch'",
+      "passed": true,
+      "detail": "fn replay_batch"
+    },
+    {
+      "check": "Quarantine controller token 'fn verify_signature'",
+      "passed": true,
+      "detail": "fn verify_signature"
+    },
+    {
+      "check": "Quarantine controller token 'fn sign_evidence'",
+      "passed": true,
+      "detail": "fn sign_evidence"
+    },
+    {
+      "check": "Quarantine controller token 'fn hmac_sha256'",
+      "passed": true,
+      "detail": "fn hmac_sha256"
+    },
+    {
+      "check": "Event code ADV-001",
+      "passed": true,
+      "detail": "ADV-001"
+    },
+    {
+      "check": "Event code ADV-002",
+      "passed": true,
+      "detail": "ADV-002"
+    },
+    {
+      "check": "Event code ADV-003",
+      "passed": true,
+      "detail": "ADV-003"
+    },
+    {
+      "check": "Event code ADV-004",
+      "passed": true,
+      "detail": "ADV-004"
+    },
+    {
+      "check": "Event code ADV-005",
+      "passed": true,
+      "detail": "ADV-005"
+    },
+    {
+      "check": "Event code ADV-006",
+      "passed": true,
+      "detail": "ADV-006"
+    },
+    {
+      "check": "Event code ADV-007",
+      "passed": true,
+      "detail": "ADV-007"
+    },
+    {
+      "check": "Event code ADV-008",
+      "passed": true,
+      "detail": "ADV-008"
+    },
+    {
+      "check": "Error code ERR_ADV_NODE_NOT_FOUND",
+      "passed": true,
+      "detail": "ERR_ADV_NODE_NOT_FOUND"
+    },
+    {
+      "check": "Error code ERR_ADV_DUPLICATE_NODE",
+      "passed": true,
+      "detail": "ERR_ADV_DUPLICATE_NODE"
+    },
+    {
+      "check": "Error code ERR_ADV_DANGLING_EDGE",
+      "passed": true,
+      "detail": "ERR_ADV_DANGLING_EDGE"
+    },
+    {
+      "check": "Error code ERR_ADV_INVALID_EVIDENCE_WEIGHT",
+      "passed": true,
+      "detail": "ERR_ADV_INVALID_EVIDENCE_WEIGHT"
+    },
+    {
+      "check": "Error code ERR_QC_INVALID_KEY",
+      "passed": true,
+      "detail": "ERR_QC_INVALID_KEY"
+    },
+    {
+      "check": "Error code ERR_QC_SEQUENCE_VIOLATION",
+      "passed": true,
+      "detail": "ERR_QC_SEQUENCE_VIOLATION"
+    },
+    {
+      "check": "Invariant INV-ADV-DETERMINISTIC",
+      "passed": true,
+      "detail": "INV-ADV-DETERMINISTIC"
+    },
+    {
+      "check": "Invariant INV-ADV-PRIOR-BOUNDED",
+      "passed": true,
+      "detail": "INV-ADV-PRIOR-BOUNDED"
+    },
+    {
+      "check": "Invariant INV-ADV-MONOTONE-EVIDENCE",
+      "passed": true,
+      "detail": "INV-ADV-MONOTONE-EVIDENCE"
+    },
+    {
+      "check": "Invariant INV-QC-SIGNED-LOG",
+      "passed": true,
+      "detail": "INV-QC-SIGNED-LOG"
+    },
+    {
+      "check": "Invariant INV-QC-THRESHOLD-REPRODUCIBLE",
+      "passed": true,
+      "detail": "INV-QC-THRESHOLD-REPRODUCIBLE"
+    },
+    {
+      "check": "Invariant INV-QC-SEQUENCE-MONOTONIC",
+      "passed": true,
+      "detail": "INV-QC-SEQUENCE-MONOTONIC"
+    },
+    {
+      "check": "Throttle threshold 0.3",
+      "passed": true,
+      "detail": "throttle: 0.3"
+    },
+    {
+      "check": "Isolate threshold 0.5",
+      "passed": true,
+      "detail": "isolate: 0.5"
+    },
+    {
+      "check": "Revoke threshold 0.7",
+      "passed": true,
+      "detail": "revoke: 0.7"
+    },
+    {
+      "check": "Quarantine threshold 0.9",
+      "passed": true,
+      "detail": "quarantine: 0.9"
+    },
+    {
+      "check": "Deterministic model (alpha/beta)",
+      "passed": true,
+      "detail": "Beta-Bernoulli conjugate model"
+    },
+    {
+      "check": "No RNG in adversary graph",
+      "passed": true,
+      "detail": "No random number generation in posteriors"
+    },
+    {
+      "check": "HMAC signing in quarantine controller",
+      "passed": true,
+      "detail": "HMAC-SHA256 signing"
+    },
+    {
+      "check": "Signature verification",
+      "passed": true,
+      "detail": "verify_signature method present"
+    },
+    {
+      "check": "Adversary graph unit tests >= 10",
+      "passed": true,
+      "detail": "found 14"
+    },
+    {
+      "check": "Quarantine controller unit tests >= 10",
+      "passed": true,
+      "detail": "found 13"
+    },
+    {
+      "check": "Total Rust unit tests >= 20",
+      "passed": true,
+      "detail": "found 27"
+    },
+    {
+      "check": "Python unit test file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_adversary_graph.py"
+    },
+    {
+      "check": "QuarantineAction::Throttle defined",
+      "passed": true,
+      "detail": "QuarantineAction::Throttle"
+    },
+    {
+      "check": "QuarantineAction::Isolate defined",
+      "passed": true,
+      "detail": "QuarantineAction::Isolate"
+    },
+    {
+      "check": "QuarantineAction::Revoke defined",
+      "passed": true,
+      "detail": "QuarantineAction::Revoke"
+    },
+    {
+      "check": "QuarantineAction::Quarantine defined",
+      "passed": true,
+      "detail": "QuarantineAction::Quarantine"
+    }
+  ],
+  "event_codes": [
+    "ADV-001",
+    "ADV-002",
+    "ADV-003",
+    "ADV-004",
+    "ADV-005",
+    "ADV-006",
+    "ADV-007",
+    "ADV-008"
+  ],
+  "error_codes": [
+    "ERR_ADV_NODE_NOT_FOUND",
+    "ERR_ADV_DUPLICATE_NODE",
+    "ERR_ADV_DANGLING_EDGE",
+    "ERR_ADV_INVALID_EVIDENCE_WEIGHT",
+    "ERR_QC_INVALID_KEY",
+    "ERR_QC_SEQUENCE_VIOLATION"
+  ],
+  "invariants": [
+    "INV-ADV-DETERMINISTIC",
+    "INV-ADV-PRIOR-BOUNDED",
+    "INV-ADV-MONOTONE-EVIDENCE",
+    "INV-QC-SIGNED-LOG",
+    "INV-QC-THRESHOLD-REPRODUCIBLE",
+    "INV-QC-SEQUENCE-MONOTONIC"
+  ],
+  "policy_thresholds": {
+    "throttle": 0.3,
+    "isolate": 0.5,
+    "revoke": 0.7,
+    "quarantine": 0.9
+  }
+}

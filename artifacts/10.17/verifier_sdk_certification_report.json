@@ -1,37 +1,413 @@
 {
+  "schema_version": "verifier-sdk-capsule-v1.0",
   "bead_id": "bd-nbwo",
-  "section": "10.17",
   "title": "Universal Verifier SDK and Replay Capsule Format",
+  "section": "10.17",
   "verdict": "PASS",
-  "certification_level": "full",
-  "api_version": "1.0.0",
-  "schema_tag": "vsk-v1.0",
-  "capsule_format_version": 1,
-  "invariants_verified": [
+  "total": 70,
+  "passed": 70,
+  "failed": 0,
+  "checks": [
     {
-      "invariant": "INV-VSK-STABLE-API",
-      "status": "verified",
-      "evidence": "API_VERSION and SCHEMA_TAG constants defined; VerificationReport carries both fields"
+      "check": "Spec file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/replay_capsule_format.md"
     },
     {
-      "invariant": "INV-VSK-DETERMINISTIC-VERIFY",
-      "status": "verified",
-      "evidence": "Deterministic tests for verify_artifact, verify_capsule, verify_chain confirm identical inputs produce identical outputs"
+      "check": "Implementation file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/connector/universal_verifier_sdk.rs"
     },
     {
-      "invariant": "INV-VSK-CAPSULE-SELF-CONTAINED",
-      "status": "verified",
-      "evidence": "ReplayCapsule carries inputs, expected_outputs, EnvironmentSnapshot; replay uses only capsule data"
+      "check": "SDK mod.rs exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/sdk/verifier/mod.rs"
+    },
+    {
+      "check": "SDK capsule.rs exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/sdk/verifier/capsule.rs"
+    },
+    {
+      "check": "Wired into connector/mod.rs",
+      "passed": true,
+      "detail": "universal_verifier_sdk in mod.rs"
+    },
+    {
+      "check": "Conformance test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/conformance/verifier_sdk_capsule_replay.rs"
+    },
+    {
+      "check": "Python checker unit test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_verifier_sdk_capsule.py"
+    },
+    {
+      "check": "Event code CAPSULE_CREATED",
+      "passed": true,
+      "detail": "CAPSULE_CREATED"
+    },
+    {
+      "check": "Event code CAPSULE_SIGNED",
+      "passed": true,
+      "detail": "CAPSULE_SIGNED"
+    },
+    {
+      "check": "Event code CAPSULE_REPLAY_START",
+      "passed": true,
+      "detail": "CAPSULE_REPLAY_START"
+    },
+    {
+      "check": "Event code CAPSULE_VERDICT_REPRODUCED",
+      "passed": true,
+      "detail": "CAPSULE_VERDICT_REPRODUCED"
+    },
+    {
+      "check": "Event code SDK_VERSION_CHECK",
+      "passed": true,
+      "detail": "SDK_VERSION_CHECK"
+    },
+    {
+      "check": "Error code ERR_CAPSULE_SIGNATURE_INVALID",
+      "passed": true,
+      "detail": "ERR_CAPSULE_SIGNATURE_INVALID"
+    },
+    {
+      "check": "Error code ERR_CAPSULE_SCHEMA_MISMATCH",
+      "passed": true,
+      "detail": "ERR_CAPSULE_SCHEMA_MISMATCH"
+    },
+    {
+      "check": "Error code ERR_CAPSULE_REPLAY_DIVERGED",
+      "passed": true,
+      "detail": "ERR_CAPSULE_REPLAY_DIVERGED"
+    },
+    {
+      "check": "Error code ERR_CAPSULE_VERDICT_MISMATCH",
+      "passed": true,
+      "detail": "ERR_CAPSULE_VERDICT_MISMATCH"
+    },
+    {
+      "check": "Error code ERR_SDK_VERSION_UNSUPPORTED",
+      "passed": true,
+      "detail": "ERR_SDK_VERSION_UNSUPPORTED"
+    },
+    {
+      "check": "Error code ERR_CAPSULE_ACCESS_DENIED",
+      "passed": true,
+      "detail": "ERR_CAPSULE_ACCESS_DENIED"
+    },
+    {
+      "check": "Invariant INV-CAPSULE-STABLE-SCHEMA",
+      "passed": true,
+      "detail": "INV-CAPSULE-STABLE-SCHEMA"
+    },
+    {
+      "check": "Invariant INV-CAPSULE-VERSIONED-API",
+      "passed": true,
+      "detail": "INV-CAPSULE-VERSIONED-API"
+    },
+    {
+      "check": "Invariant INV-CAPSULE-NO-PRIVILEGED-ACCESS",
+      "passed": true,
+      "detail": "INV-CAPSULE-NO-PRIVILEGED-ACCESS"
+    },
+    {
+      "check": "Invariant INV-CAPSULE-VERDICT-REPRODUCIBLE",
+      "passed": true,
+      "detail": "INV-CAPSULE-VERDICT-REPRODUCIBLE"
+    },
+    {
+      "check": "Impl event code VSDK_001",
+      "passed": true,
+      "detail": "VSDK_001"
+    },
+    {
+      "check": "Impl event code VSDK_002",
+      "passed": true,
+      "detail": "VSDK_002"
+    },
+    {
+      "check": "Impl event code VSDK_003",
+      "passed": true,
+      "detail": "VSDK_003"
+    },
+    {
+      "check": "Impl event code VSDK_004",
+      "passed": true,
+      "detail": "VSDK_004"
+    },
+    {
+      "check": "Impl event code VSDK_005",
+      "passed": true,
+      "detail": "VSDK_005"
+    },
+    {
+      "check": "Impl event code VSDK_006",
+      "passed": true,
+      "detail": "VSDK_006"
+    },
+    {
+      "check": "Impl event code VSDK_007",
+      "passed": true,
+      "detail": "VSDK_007"
+    },
+    {
+      "check": "Impl error code ERR_VSDK_CAPSULE_INVALID",
+      "passed": true,
+      "detail": "ERR_VSDK_CAPSULE_INVALID"
+    },
+    {
+      "check": "Impl error code ERR_VSDK_SIGNATURE_MISMATCH",
+      "passed": true,
+      "detail": "ERR_VSDK_SIGNATURE_MISMATCH"
+    },
+    {
+      "check": "Impl error code ERR_VSDK_SCHEMA_UNSUPPORTED",
+      "passed": true,
+      "detail": "ERR_VSDK_SCHEMA_UNSUPPORTED"
+    },
+    {
+      "check": "Impl error code ERR_VSDK_REPLAY_DIVERGED",
+      "passed": true,
+      "detail": "ERR_VSDK_REPLAY_DIVERGED"
+    },
+    {
+      "check": "Impl error code ERR_VSDK_SESSION_SEALED",
+      "passed": true,
+      "detail": "ERR_VSDK_SESSION_SEALED"
+    },
+    {
+      "check": "Impl error code ERR_VSDK_MANIFEST_INCOMPLETE",
+      "passed": true,
+      "detail": "ERR_VSDK_MANIFEST_INCOMPLETE"
+    },
+    {
+      "check": "Impl error code ERR_VSDK_EMPTY_PAYLOAD",
+      "passed": true,
+      "detail": "ERR_VSDK_EMPTY_PAYLOAD"
+    },
+    {
+      "check": "Impl invariant INV-VSDK-CAPSULE-DETERMINISTIC",
+      "passed": true,
+      "detail": "INV-VSDK-CAPSULE-DETERMINISTIC"
+    },
+    {
+      "check": "Impl invariant INV-VSDK-NO-PRIVILEGE",
+      "passed": true,
+      "detail": "INV-VSDK-NO-PRIVILEGE"
+    },
+    {
+      "check": "Impl invariant INV-VSDK-SCHEMA-VERSIONED",
+      "passed": true,
+      "detail": "INV-VSDK-SCHEMA-VERSIONED"
+    },
+    {
+      "check": "Impl invariant INV-VSDK-SESSION-MONOTONIC",
+      "passed": true,
+      "detail": "INV-VSDK-SESSION-MONOTONIC"
+    },
+    {
+      "check": "Impl invariant INV-VSDK-SIGNATURE-BOUND",
+      "passed": true,
+      "detail": "INV-VSDK-SIGNATURE-BOUND"
+    },
+    {
+      "check": "Core operation 'fn validate_manifest'",
+      "passed": true,
+      "detail": "fn validate_manifest"
+    },
+    {
+      "check": "Core operation 'fn verify_capsule_signature'",
+      "passed": true,
+      "detail": "fn verify_capsule_signature"
+    },
+    {
+      "check": "Core operation 'fn sign_capsule'",
+      "passed": true,
+      "detail": "fn sign_capsule"
+    },
+    {
+      "check": "Core operation 'fn replay_capsule'",
+      "passed": true,
+      "detail": "fn replay_capsule"
+    },
+    {
+      "check": "Core operation 'fn create_session'",
+      "passed": true,
+      "detail": "fn create_session"
+    },
+    {
+      "check": "Core operation 'fn record_session_step'",
+      "passed": true,
+      "detail": "fn record_session_step"
+    },
+    {
+      "check": "Core operation 'fn seal_session'",
+      "passed": true,
+      "detail": "fn seal_session"
+    },
+    {
+      "check": "Core operation 'fn create_verifier_sdk'",
+      "passed": true,
+      "detail": "fn create_verifier_sdk"
+    },
+    {
+      "check": "Type CapsuleVerdict",
+      "passed": true,
+      "detail": "CapsuleVerdict"
+    },
+    {
+      "check": "Type CapsuleManifest",
+      "passed": true,
+      "detail": "CapsuleManifest"
+    },
+    {
+      "check": "Type ReplayCapsule",
+      "passed": true,
+      "detail": "ReplayCapsule"
+    },
+    {
+      "check": "Type ReplayResult",
+      "passed": true,
+      "detail": "ReplayResult"
+    },
+    {
+      "check": "Type SessionStep",
+      "passed": true,
+      "detail": "SessionStep"
+    },
+    {
+      "check": "Type VerificationSession",
+      "passed": true,
+      "detail": "VerificationSession"
+    },
+    {
+      "check": "Type VerifierSdk",
+      "passed": true,
+      "detail": "VerifierSdk"
+    },
+    {
+      "check": "Type VsdkEvent",
+      "passed": true,
+      "detail": "VsdkEvent"
+    },
+    {
+      "check": "Type VsdkError",
+      "passed": true,
+      "detail": "VsdkError"
+    },
+    {
+      "check": "Schema version vsdk-v1.0",
+      "passed": true,
+      "detail": "VSDK_SCHEMA_VERSION"
+    },
+    {
+      "check": "BTreeMap usage for determinism",
+      "passed": true,
+      "detail": "deterministic ordering"
+    },
+    {
+      "check": "Serde derives present",
+      "passed": true,
+      "detail": "Serialize + Deserialize"
+    },
+    {
+      "check": "Rust unit tests >= 20",
+      "passed": true,
+      "detail": "found 52"
+    },
+    {
+      "check": "SDK facade tests >= 8",
+      "passed": true,
+      "detail": "found 30"
+    },
+    {
+      "check": "ReplayCapsule has signature field",
+      "passed": true,
+      "detail": "signature field"
+    },
+    {
+      "check": "CapsuleManifest has schema_version field",
+      "passed": true,
+      "detail": "schema_version field"
+    },
+    {
+      "check": "No-privilege invariant documented",
+      "passed": true,
+      "detail": "no-privilege invariant"
+    },
+    {
+      "check": "Reference capsule builder",
+      "passed": true,
+      "detail": "build_reference_capsule"
+    },
+    {
+      "check": "Deterministic hash helper",
+      "passed": true,
+      "detail": "deterministic_hash"
+    },
+    {
+      "check": "Evidence exists with PASS verdict",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-nbwo/verification_evidence.json"
+    },
+    {
+      "check": "Verification summary exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-nbwo/verification_summary.md"
     }
   ],
-  "event_codes": ["VSK-001", "VSK-002", "VSK-003", "VSK-004", "VSK-005", "VSK-006", "VSK-007", "VSK-008"],
-  "sdk_operations": ["verify_artifact", "verify_capsule", "verify_chain"],
-  "capsule_operations": ["create_capsule", "validate_capsule", "replay", "replay_and_verify"],
-  "test_counts": {
-    "verifier_sdk_rs": 40,
-    "replay_capsule_rs": 40,
-    "check_script_checks": 50,
-    "python_test_suite": 12
+  "event_codes": [
+    "CAPSULE_CREATED",
+    "CAPSULE_SIGNED",
+    "CAPSULE_REPLAY_START",
+    "CAPSULE_VERDICT_REPRODUCED",
+    "SDK_VERSION_CHECK"
+  ],
+  "error_codes": [
+    "ERR_CAPSULE_SIGNATURE_INVALID",
+    "ERR_CAPSULE_SCHEMA_MISMATCH",
+    "ERR_CAPSULE_REPLAY_DIVERGED",
+    "ERR_CAPSULE_VERDICT_MISMATCH",
+    "ERR_SDK_VERSION_UNSUPPORTED",
+    "ERR_CAPSULE_ACCESS_DENIED"
+  ],
+  "invariants": [
+    "INV-CAPSULE-STABLE-SCHEMA",
+    "INV-CAPSULE-VERSIONED-API",
+    "INV-CAPSULE-NO-PRIVILEGED-ACCESS",
+    "INV-CAPSULE-VERDICT-REPRODUCIBLE"
+  ],
+  "capsule_contract": {
+    "capsule_replay_deterministic": true,
+    "no_privileged_access": true,
+    "schema_versioned": true,
+    "signature_bound": true
   },
-  "timestamp": "2026-02-21T12:00:00Z"
+  "events": [
+    {
+      "code": "CAPSULE_CREATED",
+      "status": "defined"
+    },
+    {
+      "code": "CAPSULE_SIGNED",
+      "status": "defined"
+    },
+    {
+      "code": "CAPSULE_REPLAY_START",
+      "status": "defined"
+    },
+    {
+      "code": "CAPSULE_VERDICT_REPRODUCED",
+      "status": "defined"
+    },
+    {
+      "code": "SDK_VERSION_CHECK",
+      "status": "defined"
+    }
+  ],
+  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 70/70 passing\nVerdict: PASS",
+  "timestamp": "2026-02-22T05:33:58.940748+00:00"
 }

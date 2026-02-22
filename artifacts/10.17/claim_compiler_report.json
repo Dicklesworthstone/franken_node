@@ -1,0 +1,316 @@
+{
+  "schema_version": "claim-compiler-v1.0",
+  "bead_id": "bd-2kd9",
+  "section": "10.17",
+  "title": "Claim compiler and public trust scoreboard pipeline",
+  "verdict": "PASS",
+  "total": 53,
+  "passed": 53,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "Spec file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/section_10_17/bd-2kd9_contract.md"
+    },
+    {
+      "check": "Implementation file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/connector/claim_compiler.rs"
+    },
+    {
+      "check": "Connector module wired",
+      "passed": true,
+      "detail": "pub mod claim_compiler; in connector/mod.rs"
+    },
+    {
+      "check": "Impl token 'struct ClaimCompiler'",
+      "passed": true,
+      "detail": "struct ClaimCompiler"
+    },
+    {
+      "check": "Impl token 'struct TrustScoreboard'",
+      "passed": true,
+      "detail": "struct TrustScoreboard"
+    },
+    {
+      "check": "Impl token 'struct CompiledClaim'",
+      "passed": true,
+      "detail": "struct CompiledClaim"
+    },
+    {
+      "check": "Impl token 'struct ScoreEntry'",
+      "passed": true,
+      "detail": "struct ScoreEntry"
+    },
+    {
+      "check": "Impl token 'struct ClaimSource'",
+      "passed": true,
+      "detail": "struct ClaimSource"
+    },
+    {
+      "check": "Impl token 'struct EvidenceLink'",
+      "passed": true,
+      "detail": "struct EvidenceLink"
+    },
+    {
+      "check": "Impl token 'struct RawClaim'",
+      "passed": true,
+      "detail": "struct RawClaim"
+    },
+    {
+      "check": "Impl token 'struct ScoreboardSnapshot'",
+      "passed": true,
+      "detail": "struct ScoreboardSnapshot"
+    },
+    {
+      "check": "Impl token 'fn compile_claim'",
+      "passed": true,
+      "detail": "fn compile_claim"
+    },
+    {
+      "check": "Impl token 'fn publish_batch'",
+      "passed": true,
+      "detail": "fn publish_batch"
+    },
+    {
+      "check": "Impl token 'fn snapshot'",
+      "passed": true,
+      "detail": "fn snapshot"
+    },
+    {
+      "check": "Impl token 'fn verify_snapshot_digest'",
+      "passed": true,
+      "detail": "fn verify_snapshot_digest"
+    },
+    {
+      "check": "Impl token 'BTreeMap'",
+      "passed": true,
+      "detail": "BTreeMap"
+    },
+    {
+      "check": "Impl token 'SCHEMA_VERSION'",
+      "passed": true,
+      "detail": "SCHEMA_VERSION"
+    },
+    {
+      "check": "Impl token 'compute_compilation_digest'",
+      "passed": true,
+      "detail": "compute_compilation_digest"
+    },
+    {
+      "check": "Impl token 'compute_scoreboard_digest'",
+      "passed": true,
+      "detail": "compute_scoreboard_digest"
+    },
+    {
+      "check": "Impl token 'validate_evidence_uri'",
+      "passed": true,
+      "detail": "validate_evidence_uri"
+    },
+    {
+      "check": "Impl token 'struct ClaimCompilerEvent'",
+      "passed": true,
+      "detail": "struct ClaimCompilerEvent"
+    },
+    {
+      "check": "Impl token 'enum ClaimCompilerError'",
+      "passed": true,
+      "detail": "enum ClaimCompilerError"
+    },
+    {
+      "check": "Event code CLMC_001",
+      "passed": true,
+      "detail": "CLMC_001"
+    },
+    {
+      "check": "Event code CLMC_002",
+      "passed": true,
+      "detail": "CLMC_002"
+    },
+    {
+      "check": "Event code CLMC_003",
+      "passed": true,
+      "detail": "CLMC_003"
+    },
+    {
+      "check": "Event code CLMC_004",
+      "passed": true,
+      "detail": "CLMC_004"
+    },
+    {
+      "check": "Event code CLMC_005",
+      "passed": true,
+      "detail": "CLMC_005"
+    },
+    {
+      "check": "Event code CLMC_006",
+      "passed": true,
+      "detail": "CLMC_006"
+    },
+    {
+      "check": "Event code CLMC_007",
+      "passed": true,
+      "detail": "CLMC_007"
+    },
+    {
+      "check": "Event code CLMC_008",
+      "passed": true,
+      "detail": "CLMC_008"
+    },
+    {
+      "check": "Event code CLMC_009",
+      "passed": true,
+      "detail": "CLMC_009"
+    },
+    {
+      "check": "Event code CLMC_010",
+      "passed": true,
+      "detail": "CLMC_010"
+    },
+    {
+      "check": "Error code ERR_CLMC_EMPTY_CLAIM_TEXT",
+      "passed": true,
+      "detail": "ERR_CLMC_EMPTY_CLAIM_TEXT"
+    },
+    {
+      "check": "Error code ERR_CLMC_MISSING_SOURCE",
+      "passed": true,
+      "detail": "ERR_CLMC_MISSING_SOURCE"
+    },
+    {
+      "check": "Error code ERR_CLMC_NO_EVIDENCE_LINKS",
+      "passed": true,
+      "detail": "ERR_CLMC_NO_EVIDENCE_LINKS"
+    },
+    {
+      "check": "Error code ERR_CLMC_INVALID_EVIDENCE_LINK",
+      "passed": true,
+      "detail": "ERR_CLMC_INVALID_EVIDENCE_LINK"
+    },
+    {
+      "check": "Error code ERR_CLMC_DUPLICATE_CLAIM_ID",
+      "passed": true,
+      "detail": "ERR_CLMC_DUPLICATE_CLAIM_ID"
+    },
+    {
+      "check": "Error code ERR_CLMC_SCOREBOARD_FULL",
+      "passed": true,
+      "detail": "ERR_CLMC_SCOREBOARD_FULL"
+    },
+    {
+      "check": "Error code ERR_CLMC_DIGEST_MISMATCH",
+      "passed": true,
+      "detail": "ERR_CLMC_DIGEST_MISMATCH"
+    },
+    {
+      "check": "Error code ERR_CLMC_SCHEMA_UNKNOWN",
+      "passed": true,
+      "detail": "ERR_CLMC_SCHEMA_UNKNOWN"
+    },
+    {
+      "check": "Invariant INV-CLMC-FAIL-CLOSED",
+      "passed": true,
+      "detail": "INV-CLMC-FAIL-CLOSED"
+    },
+    {
+      "check": "Invariant INV-CLMC-EVIDENCE-LINKED",
+      "passed": true,
+      "detail": "INV-CLMC-EVIDENCE-LINKED"
+    },
+    {
+      "check": "Invariant INV-CLMC-SCOREBOARD-ATOMIC",
+      "passed": true,
+      "detail": "INV-CLMC-SCOREBOARD-ATOMIC"
+    },
+    {
+      "check": "Invariant INV-CLMC-DETERMINISTIC",
+      "passed": true,
+      "detail": "INV-CLMC-DETERMINISTIC"
+    },
+    {
+      "check": "Invariant INV-CLMC-SIGNED-EVIDENCE",
+      "passed": true,
+      "detail": "INV-CLMC-SIGNED-EVIDENCE"
+    },
+    {
+      "check": "Invariant INV-CLMC-SCHEMA-VERSIONED",
+      "passed": true,
+      "detail": "INV-CLMC-SCHEMA-VERSIONED"
+    },
+    {
+      "check": "Invariant INV-CLMC-AUDIT-COMPLETE",
+      "passed": true,
+      "detail": "INV-CLMC-AUDIT-COMPLETE"
+    },
+    {
+      "check": "Rust unit tests >= 20",
+      "passed": true,
+      "detail": "found 32"
+    },
+    {
+      "check": "BTreeMap used for scoreboard entries",
+      "passed": true,
+      "detail": "BTreeMap<String, ScoreEntry>"
+    },
+    {
+      "check": "SHA-256 digest computation",
+      "passed": true,
+      "detail": "Sha256 + hex::encode"
+    },
+    {
+      "check": "Python checker unit test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_claim_compiler.py"
+    },
+    {
+      "check": "Evidence file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-2kd9/verification_evidence.json"
+    },
+    {
+      "check": "Summary file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-2kd9/verification_summary.md"
+    }
+  ],
+  "event_codes": [
+    "CLMC_001",
+    "CLMC_002",
+    "CLMC_003",
+    "CLMC_004",
+    "CLMC_005",
+    "CLMC_006",
+    "CLMC_007",
+    "CLMC_008",
+    "CLMC_009",
+    "CLMC_010"
+  ],
+  "error_codes": [
+    "ERR_CLMC_EMPTY_CLAIM_TEXT",
+    "ERR_CLMC_MISSING_SOURCE",
+    "ERR_CLMC_NO_EVIDENCE_LINKS",
+    "ERR_CLMC_INVALID_EVIDENCE_LINK",
+    "ERR_CLMC_DUPLICATE_CLAIM_ID",
+    "ERR_CLMC_SCOREBOARD_FULL",
+    "ERR_CLMC_DIGEST_MISMATCH",
+    "ERR_CLMC_SCHEMA_UNKNOWN"
+  ],
+  "invariants": [
+    "INV-CLMC-FAIL-CLOSED",
+    "INV-CLMC-EVIDENCE-LINKED",
+    "INV-CLMC-SCOREBOARD-ATOMIC",
+    "INV-CLMC-DETERMINISTIC",
+    "INV-CLMC-SIGNED-EVIDENCE",
+    "INV-CLMC-SCHEMA-VERSIONED",
+    "INV-CLMC-AUDIT-COMPLETE"
+  ],
+  "claim_compiler_contract": {
+    "fail_closed_on_unverifiable_claims": true,
+    "scoreboard_updates_publish_signed_evidence_links": true,
+    "deterministic_btreemap_ordering": true,
+    "schema_versioned_outputs": true,
+    "atomic_scoreboard_updates": true,
+    "sha256_digest_binding": true
+  }
+}

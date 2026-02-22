@@ -2,16 +2,249 @@
   "schema_version": "isolation-mesh-v1.0",
   "bead_id": "bd-gad3",
   "section": "10.17",
-  "title": "Isolation mesh profile report",
-  "mesh_profile": {
-    "total_rails": 4,
-    "rails": ["standard", "elevated", "high_assurance", "critical"],
-    "hot_elevation_supported": true,
+  "title": "Adaptive multi-rail isolation mesh with hot-elevation policy",
+  "verdict": "PASS",
+  "total": 41,
+  "passed": 41,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "Spec file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/architecture/isolation_mesh.md"
+    },
+    {
+      "check": "Implementation file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/security/isolation_rail_router.rs"
+    },
+    {
+      "check": "Security mod file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/security/mod.rs"
+    },
+    {
+      "check": "Module wired in security/mod.rs",
+      "passed": true,
+      "detail": "pub mod isolation_rail_router; in security/mod.rs"
+    },
+    {
+      "check": "Integration test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/integration/isolation_hot_elevation.rs"
+    },
+    {
+      "check": "Python checker unit test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_isolation_mesh.py"
+    },
+    {
+      "check": "Impl token 'struct RailRouter'",
+      "passed": true,
+      "detail": "struct RailRouter"
+    },
+    {
+      "check": "Impl token 'struct Placement'",
+      "passed": true,
+      "detail": "struct Placement"
+    },
+    {
+      "check": "Impl token 'struct Workload'",
+      "passed": true,
+      "detail": "struct Workload"
+    },
+    {
+      "check": "Impl token 'struct RailPolicy'",
+      "passed": true,
+      "detail": "struct RailPolicy"
+    },
+    {
+      "check": "Impl token 'struct PolicyRule'",
+      "passed": true,
+      "detail": "struct PolicyRule"
+    },
+    {
+      "check": "Impl token 'struct MeshConfig'",
+      "passed": true,
+      "detail": "struct MeshConfig"
+    },
+    {
+      "check": "Impl token 'enum IsolationRail'",
+      "passed": true,
+      "detail": "enum IsolationRail"
+    },
+    {
+      "check": "Impl token 'enum TrustProfile'",
+      "passed": true,
+      "detail": "enum TrustProfile"
+    },
+    {
+      "check": "Impl token 'enum RailRouterError'",
+      "passed": true,
+      "detail": "enum RailRouterError"
+    },
+    {
+      "check": "Impl token 'fn assign_workload'",
+      "passed": true,
+      "detail": "fn assign_workload"
+    },
+    {
+      "check": "Impl token 'fn hot_elevate'",
+      "passed": true,
+      "detail": "fn hot_elevate"
+    },
+    {
+      "check": "Impl token 'fn record_latency'",
+      "passed": true,
+      "detail": "fn record_latency"
+    },
+    {
+      "check": "Impl token 'fn check_mesh_connectivity'",
+      "passed": true,
+      "detail": "fn check_mesh_connectivity"
+    },
+    {
+      "check": "Impl token 'fn mesh_profile_report'",
+      "passed": true,
+      "detail": "fn mesh_profile_report"
+    },
+    {
+      "check": "Impl token 'fn is_subset_of'",
+      "passed": true,
+      "detail": "fn is_subset_of"
+    },
+    {
+      "check": "Impl token 'fn can_elevate_to'",
+      "passed": true,
+      "detail": "fn can_elevate_to"
+    },
+    {
+      "check": "Impl token 'fn is_downgrade_to'",
+      "passed": true,
+      "detail": "fn is_downgrade_to"
+    },
+    {
+      "check": "Impl token 'fn default_latency_budget_us'",
+      "passed": true,
+      "detail": "fn default_latency_budget_us"
+    },
+    {
+      "check": "Event code ISOLATION_RAIL_ASSIGNED",
+      "passed": true,
+      "detail": "ISOLATION_RAIL_ASSIGNED"
+    },
+    {
+      "check": "Event code ISOLATION_ELEVATION_START",
+      "passed": true,
+      "detail": "ISOLATION_ELEVATION_START"
+    },
+    {
+      "check": "Event code ISOLATION_ELEVATION_COMPLETE",
+      "passed": true,
+      "detail": "ISOLATION_ELEVATION_COMPLETE"
+    },
+    {
+      "check": "Event code ISOLATION_POLICY_PRESERVED",
+      "passed": true,
+      "detail": "ISOLATION_POLICY_PRESERVED"
+    },
+    {
+      "check": "Event code ISOLATION_BUDGET_CHECK",
+      "passed": true,
+      "detail": "ISOLATION_BUDGET_CHECK"
+    },
+    {
+      "check": "Error code ERR_ISOLATION_RAIL_UNAVAILABLE",
+      "passed": true,
+      "detail": "ERR_ISOLATION_RAIL_UNAVAILABLE"
+    },
+    {
+      "check": "Error code ERR_ISOLATION_ELEVATION_DENIED",
+      "passed": true,
+      "detail": "ERR_ISOLATION_ELEVATION_DENIED"
+    },
+    {
+      "check": "Error code ERR_ISOLATION_POLICY_BREAK",
+      "passed": true,
+      "detail": "ERR_ISOLATION_POLICY_BREAK"
+    },
+    {
+      "check": "Error code ERR_ISOLATION_BUDGET_EXCEEDED",
+      "passed": true,
+      "detail": "ERR_ISOLATION_BUDGET_EXCEEDED"
+    },
+    {
+      "check": "Error code ERR_ISOLATION_MESH_PARTITION",
+      "passed": true,
+      "detail": "ERR_ISOLATION_MESH_PARTITION"
+    },
+    {
+      "check": "Error code ERR_ISOLATION_WORKLOAD_REJECTED",
+      "passed": true,
+      "detail": "ERR_ISOLATION_WORKLOAD_REJECTED"
+    },
+    {
+      "check": "Invariant INV-ISOLATION-POLICY-CONTINUITY",
+      "passed": true,
+      "detail": "INV-ISOLATION-POLICY-CONTINUITY"
+    },
+    {
+      "check": "Invariant INV-ISOLATION-HOT-ELEVATION",
+      "passed": true,
+      "detail": "INV-ISOLATION-HOT-ELEVATION"
+    },
+    {
+      "check": "Invariant INV-ISOLATION-BUDGET-BOUND",
+      "passed": true,
+      "detail": "INV-ISOLATION-BUDGET-BOUND"
+    },
+    {
+      "check": "Invariant INV-ISOLATION-FAIL-SAFE",
+      "passed": true,
+      "detail": "INV-ISOLATION-FAIL-SAFE"
+    },
+    {
+      "check": "Rust unit tests >= 8",
+      "passed": true,
+      "detail": "found 31"
+    },
+    {
+      "check": "Integration tests >= 6",
+      "passed": true,
+      "detail": "found 9"
+    }
+  ],
+  "event_codes": [
+    "ISOLATION_RAIL_ASSIGNED",
+    "ISOLATION_ELEVATION_START",
+    "ISOLATION_ELEVATION_COMPLETE",
+    "ISOLATION_POLICY_PRESERVED",
+    "ISOLATION_BUDGET_CHECK"
+  ],
+  "error_codes": [
+    "ERR_ISOLATION_RAIL_UNAVAILABLE",
+    "ERR_ISOLATION_ELEVATION_DENIED",
+    "ERR_ISOLATION_POLICY_BREAK",
+    "ERR_ISOLATION_BUDGET_EXCEEDED",
+    "ERR_ISOLATION_MESH_PARTITION",
+    "ERR_ISOLATION_WORKLOAD_REJECTED"
+  ],
+  "invariants": [
+    "INV-ISOLATION-POLICY-CONTINUITY",
+    "INV-ISOLATION-HOT-ELEVATION",
+    "INV-ISOLATION-BUDGET-BOUND",
+    "INV-ISOLATION-FAIL-SAFE"
+  ],
+  "mesh_contract": {
     "policy_continuity_enforced": true,
+    "hot_elevation_only_stricter": true,
     "budget_bound_enforced": true,
-    "fail_safe_on_error": true
-  },
-  "event_codes": 5,
-  "error_codes": 6,
-  "invariants": 4
+    "fail_safe_on_error": true,
+    "rails": [
+      "standard",
+      "elevated",
+      "high_assurance",
+      "critical"
+    ]
+  }
 }

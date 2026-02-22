@@ -1,0 +1,40 @@
+{
+  "name": "check_staking_governance",
+  "bead": "bd-26mk",
+  "section": "10.17",
+  "passed": 6,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "event code count >= 5",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "error code count >= 6",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "invariant count >= 4",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "run_all has verdict",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "run_all has checks",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "run_all checks non-empty",
+      "passed": true,
+      "detail": "ok"
+    }
+  ],
+  "verdict": "PASS"
+}

@@ -1,0 +1,437 @@
+{
+  "bead_id": "bd-3g4k",
+  "title": "VEF hash-chained receipt stream with periodic commitment checkpoints",
+  "section": "10.18",
+  "verdict": "PASS",
+  "total": 85,
+  "passed": 85,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "impl_exists",
+      "pass": true,
+      "detail": "crates/franken-node/src/vef/receipt_chain.rs"
+    },
+    {
+      "check": "mod_exists",
+      "pass": true,
+      "detail": "crates/franken-node/src/vef/mod.rs"
+    },
+    {
+      "check": "spec_doc_exists",
+      "pass": true,
+      "detail": "docs/specs/vef_receipt_chain.md"
+    },
+    {
+      "check": "spec_contract_exists",
+      "pass": true,
+      "detail": "docs/specs/section_10_18/bd-3g4k_contract.md"
+    },
+    {
+      "check": "conformance_test_exists",
+      "pass": true,
+      "detail": "tests/conformance/vef_receipt_chain_integrity.rs"
+    },
+    {
+      "check": "conformance_wrapper_exists",
+      "pass": true,
+      "detail": "crates/franken-node/tests/vef_receipt_chain_integrity.rs"
+    },
+    {
+      "check": "commitment_log_exists",
+      "pass": true,
+      "detail": "artifacts/10.18/vef_receipt_commitment_log.jsonl"
+    },
+    {
+      "check": "checker_test_exists",
+      "pass": true,
+      "detail": "tests/test_check_vef_receipt_chain.py"
+    },
+    {
+      "check": "evidence_exists",
+      "pass": true,
+      "detail": "artifacts/section_10_18/bd-3g4k/verification_evidence.json"
+    },
+    {
+      "check": "summary_exists",
+      "pass": true,
+      "detail": "artifacts/section_10_18/bd-3g4k/verification_summary.md"
+    },
+    {
+      "check": "impl_symbol_pub struct ReceiptChainConfig",
+      "pass": true,
+      "detail": "pub struct ReceiptChainConfig"
+    },
+    {
+      "check": "impl_symbol_pub struct ReceiptChainEntry",
+      "pass": true,
+      "detail": "pub struct ReceiptChainEntry"
+    },
+    {
+      "check": "impl_symbol_pub struct ReceiptCheckpoint",
+      "pass": true,
+      "detail": "pub struct ReceiptCheckpoint"
+    },
+    {
+      "check": "impl_symbol_pub struct AppendOutcome",
+      "pass": true,
+      "detail": "pub struct AppendOutcome"
+    },
+    {
+      "check": "impl_symbol_pub struct ReceiptChain",
+      "pass": true,
+      "detail": "pub struct ReceiptChain"
+    },
+    {
+      "check": "impl_symbol_pub struct ConcurrentReceiptChain",
+      "pass": true,
+      "detail": "pub struct ConcurrentReceiptChain"
+    },
+    {
+      "check": "impl_symbol_pub fn append(",
+      "pass": true,
+      "detail": "pub fn append("
+    },
+    {
+      "check": "impl_symbol_pub fn force_checkpoint",
+      "pass": true,
+      "detail": "pub fn force_checkpoint"
+    },
+    {
+      "check": "impl_symbol_pub fn verify_integrity",
+      "pass": true,
+      "detail": "pub fn verify_integrity"
+    },
+    {
+      "check": "impl_symbol_pub fn verify_entries_and_checkpoints",
+      "pass": true,
+      "detail": "pub fn verify_entries_and_checkpoints"
+    },
+    {
+      "check": "impl_symbol_pub fn resume_from_snapshot",
+      "pass": true,
+      "detail": "pub fn resume_from_snapshot"
+    },
+    {
+      "check": "impl_schema_version",
+      "pass": true,
+      "detail": "vef-receipt-chain-v1"
+    },
+    {
+      "check": "impl_genesis_hash",
+      "pass": true,
+      "detail": "GENESIS_PREV_HASH"
+    },
+    {
+      "check": "impl_uses_sha256",
+      "pass": true,
+      "detail": "Sha256"
+    },
+    {
+      "check": "impl_append_only_wording",
+      "pass": true,
+      "detail": "append-only"
+    },
+    {
+      "check": "impl_linearizable_wording",
+      "pass": true,
+      "detail": "linearizable"
+    },
+    {
+      "check": "impl_event_VEF-CHAIN-001",
+      "pass": true,
+      "detail": "VEF-CHAIN-001"
+    },
+    {
+      "check": "impl_event_VEF-CHAIN-002",
+      "pass": true,
+      "detail": "VEF-CHAIN-002"
+    },
+    {
+      "check": "impl_event_VEF-CHAIN-003",
+      "pass": true,
+      "detail": "VEF-CHAIN-003"
+    },
+    {
+      "check": "impl_event_VEF-CHAIN-ERR-001",
+      "pass": true,
+      "detail": "VEF-CHAIN-ERR-001"
+    },
+    {
+      "check": "impl_event_VEF-CHAIN-ERR-002",
+      "pass": true,
+      "detail": "VEF-CHAIN-ERR-002"
+    },
+    {
+      "check": "impl_event_VEF-CHAIN-ERR-003",
+      "pass": true,
+      "detail": "VEF-CHAIN-ERR-003"
+    },
+    {
+      "check": "impl_event_VEF-CHAIN-ERR-004",
+      "pass": true,
+      "detail": "VEF-CHAIN-ERR-004"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-CHAIN-APPEND-ONLY",
+      "pass": true,
+      "detail": "INV-VEF-CHAIN-APPEND-ONLY"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-CHAIN-DETERMINISTIC",
+      "pass": true,
+      "detail": "INV-VEF-CHAIN-DETERMINISTIC"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-CHAIN-CHECKPOINT-REPRODUCIBLE",
+      "pass": true,
+      "detail": "INV-VEF-CHAIN-CHECKPOINT-REPRODUCIBLE"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-CHAIN-FAIL-CLOSED",
+      "pass": true,
+      "detail": "INV-VEF-CHAIN-FAIL-CLOSED"
+    },
+    {
+      "check": "impl_minimum_unit_tests",
+      "pass": true,
+      "detail": "12 tests"
+    },
+    {
+      "check": "vef_mod_wires_receipt_chain",
+      "pass": true,
+      "detail": "pub mod receipt_chain;"
+    },
+    {
+      "check": "commitment_log_minimum_lines",
+      "pass": true,
+      "detail": "2"
+    },
+    {
+      "check": "commitment_line_0_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "commitment_line_0_required_fields",
+      "pass": true,
+      "detail": "all fields present"
+    },
+    {
+      "check": "commitment_line_0_schema_version",
+      "pass": true,
+      "detail": "vef-receipt-chain-v1"
+    },
+    {
+      "check": "commitment_line_0_chain_hash_format",
+      "pass": true,
+      "detail": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+    },
+    {
+      "check": "commitment_line_0_commitment_hash_format",
+      "pass": true,
+      "detail": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    },
+    {
+      "check": "commitment_line_1_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "commitment_line_1_required_fields",
+      "pass": true,
+      "detail": "all fields present"
+    },
+    {
+      "check": "commitment_line_1_schema_version",
+      "pass": true,
+      "detail": "vef-receipt-chain-v1"
+    },
+    {
+      "check": "commitment_line_1_chain_hash_format",
+      "pass": true,
+      "detail": "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+    },
+    {
+      "check": "commitment_line_1_commitment_hash_format",
+      "pass": true,
+      "detail": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    },
+    {
+      "check": "commitment_line_0_checkpoint_id",
+      "pass": true,
+      "detail": "0"
+    },
+    {
+      "check": "commitment_line_0_valid_range",
+      "pass": true,
+      "detail": "0..1"
+    },
+    {
+      "check": "commitment_line_0_entry_count_matches",
+      "pass": true,
+      "detail": "entry_count=2"
+    },
+    {
+      "check": "commitment_line_1_checkpoint_id",
+      "pass": true,
+      "detail": "1"
+    },
+    {
+      "check": "commitment_line_1_valid_range",
+      "pass": true,
+      "detail": "2..3"
+    },
+    {
+      "check": "commitment_line_1_entry_count_matches",
+      "pass": true,
+      "detail": "entry_count=2"
+    },
+    {
+      "check": "commitment_line_1_contiguous_start",
+      "pass": true,
+      "detail": "start=2 prev_end=1"
+    },
+    {
+      "check": "spec_doc_mentions_bead",
+      "pass": true,
+      "detail": "bd-3g4k"
+    },
+    {
+      "check": "spec_doc_mentions_schema",
+      "pass": true,
+      "detail": "vef-receipt-chain-v1"
+    },
+    {
+      "check": "spec_doc_mentions_deterministic_rule",
+      "pass": true,
+      "detail": "Deterministic Chain-Link Rule"
+    },
+    {
+      "check": "spec_doc_mentions_checkpoint_rule",
+      "pass": true,
+      "detail": "Checkpoint Commitment Rule"
+    },
+    {
+      "check": "spec_doc_mentions_tamper",
+      "pass": true,
+      "detail": "Tamper Detection"
+    },
+    {
+      "check": "contract_mentions_acceptance",
+      "pass": true,
+      "detail": "Acceptance Criteria"
+    },
+    {
+      "check": "contract_mentions_tamper_classes",
+      "pass": true,
+      "detail": "Tamper Classes"
+    },
+    {
+      "check": "spec_doc_event_VEF-CHAIN-001",
+      "pass": true,
+      "detail": "VEF-CHAIN-001"
+    },
+    {
+      "check": "spec_doc_event_VEF-CHAIN-002",
+      "pass": true,
+      "detail": "VEF-CHAIN-002"
+    },
+    {
+      "check": "spec_doc_event_VEF-CHAIN-003",
+      "pass": true,
+      "detail": "VEF-CHAIN-003"
+    },
+    {
+      "check": "spec_doc_event_VEF-CHAIN-ERR-001",
+      "pass": true,
+      "detail": "VEF-CHAIN-ERR-001"
+    },
+    {
+      "check": "spec_doc_event_VEF-CHAIN-ERR-002",
+      "pass": true,
+      "detail": "VEF-CHAIN-ERR-002"
+    },
+    {
+      "check": "spec_doc_event_VEF-CHAIN-ERR-003",
+      "pass": true,
+      "detail": "VEF-CHAIN-ERR-003"
+    },
+    {
+      "check": "spec_doc_event_VEF-CHAIN-ERR-004",
+      "pass": true,
+      "detail": "VEF-CHAIN-ERR-004"
+    },
+    {
+      "check": "spec_doc_invariant_INV-VEF-CHAIN-APPEND-ONLY",
+      "pass": true,
+      "detail": "INV-VEF-CHAIN-APPEND-ONLY"
+    },
+    {
+      "check": "spec_doc_invariant_INV-VEF-CHAIN-DETERMINISTIC",
+      "pass": true,
+      "detail": "INV-VEF-CHAIN-DETERMINISTIC"
+    },
+    {
+      "check": "spec_doc_invariant_INV-VEF-CHAIN-CHECKPOINT-REPRODUCIBLE",
+      "pass": true,
+      "detail": "INV-VEF-CHAIN-CHECKPOINT-REPRODUCIBLE"
+    },
+    {
+      "check": "spec_doc_invariant_INV-VEF-CHAIN-FAIL-CLOSED",
+      "pass": true,
+      "detail": "INV-VEF-CHAIN-FAIL-CLOSED"
+    },
+    {
+      "check": "conformance_mentions_deterministic",
+      "pass": true,
+      "detail": "deterministic"
+    },
+    {
+      "check": "conformance_mentions_tamper",
+      "pass": true,
+      "detail": "tamper"
+    },
+    {
+      "check": "conformance_mentions_resume",
+      "pass": true,
+      "detail": "resume"
+    },
+    {
+      "check": "conformance_wrapper_mentions_fixture_path",
+      "pass": true,
+      "detail": "tests/conformance/vef_receipt_chain_integrity.rs"
+    },
+    {
+      "check": "conformance_wrapper_uses_manifest_dir",
+      "pass": true,
+      "detail": "CARGO_MANIFEST_DIR"
+    },
+    {
+      "check": "evidence_parseable_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "evidence_bead_id",
+      "pass": true,
+      "detail": "bd-3g4k"
+    },
+    {
+      "check": "evidence_verdict_pass",
+      "pass": true,
+      "detail": "PASS"
+    },
+    {
+      "check": "summary_mentions_bead",
+      "pass": true,
+      "detail": "bd-3g4k"
+    },
+    {
+      "check": "summary_mentions_pass",
+      "pass": true,
+      "detail": "PASS"
+    }
+  ],
+  "timestamp": "2026-02-22T06:08:57.290710+00:00"
+}

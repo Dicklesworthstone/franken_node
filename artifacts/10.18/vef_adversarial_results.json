@@ -1,0 +1,232 @@
+{
+  "bead_id": "bd-3ptu",
+  "title": "VEF adversarial suite contract verification",
+  "section": "10.18",
+  "verdict": "FAIL",
+  "total": 44,
+  "passed": 33,
+  "failed": 11,
+  "checks": [
+    {
+      "check": "suite_exists",
+      "pass": true,
+      "detail": "tests/security/vef_adversarial_suite.rs"
+    },
+    {
+      "check": "doc_exists",
+      "pass": true,
+      "detail": "docs/security/vef_adversarial_testing.md"
+    },
+    {
+      "check": "report_exists",
+      "pass": true,
+      "detail": "artifacts/10.18/vef_adversarial_results.json"
+    },
+    {
+      "check": "evidence_exists",
+      "pass": false,
+      "detail": "artifacts/section_10_18/bd-3ptu/verification_evidence.json"
+    },
+    {
+      "check": "summary_exists",
+      "pass": false,
+      "detail": "artifacts/section_10_18/bd-3ptu/verification_summary.md"
+    },
+    {
+      "check": "unit_test_exists",
+      "pass": true,
+      "detail": "tests/test_check_vef_adversarial_suite.py"
+    },
+    {
+      "check": "suite_readable",
+      "pass": true,
+      "detail": "tests/security/vef_adversarial_suite.rs"
+    },
+    {
+      "check": "suite_symbol_tamper",
+      "pass": true,
+      "detail": "tamper"
+    },
+    {
+      "check": "suite_symbol_replay",
+      "pass": true,
+      "detail": "replay"
+    },
+    {
+      "check": "suite_symbol_stale",
+      "pass": true,
+      "detail": "stale"
+    },
+    {
+      "check": "suite_symbol_commitment",
+      "pass": true,
+      "detail": "commitment"
+    },
+    {
+      "check": "suite_symbol_expect_err",
+      "pass": false,
+      "detail": "expect_err"
+    },
+    {
+      "check": "suite_attack_class_receipt tampering",
+      "pass": true,
+      "detail": "receipt tampering"
+    },
+    {
+      "check": "suite_attack_class_proof replay",
+      "pass": true,
+      "detail": "proof replay"
+    },
+    {
+      "check": "suite_attack_class_stale-policy",
+      "pass": true,
+      "detail": "stale-policy"
+    },
+    {
+      "check": "suite_attack_class_commitment mismatch",
+      "pass": true,
+      "detail": "commitment mismatch"
+    },
+    {
+      "check": "suite_event_code_VEF-ADVERSARIAL-001",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-001"
+    },
+    {
+      "check": "suite_event_code_VEF-ADVERSARIAL-002",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-002"
+    },
+    {
+      "check": "suite_error_code_VEF-ADVERSARIAL-ERR-TAMPER",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-ERR-TAMPER"
+    },
+    {
+      "check": "suite_error_code_VEF-ADVERSARIAL-ERR-REPLAY",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-ERR-REPLAY"
+    },
+    {
+      "check": "suite_error_code_VEF-ADVERSARIAL-ERR-STALE-POLICY",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-ERR-STALE-POLICY"
+    },
+    {
+      "check": "suite_error_code_VEF-ADVERSARIAL-ERR-COMMITMENT",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-ERR-COMMITMENT"
+    },
+    {
+      "check": "suite_minimum_test_count",
+      "pass": false,
+      "detail": "7 tests"
+    },
+    {
+      "check": "suite_has_determinism_loop_hint",
+      "pass": true,
+      "detail": "contains 100x loop marker"
+    },
+    {
+      "check": "suite_mentions_false_positive_guard",
+      "pass": true,
+      "detail": "false positive or legitimate marker"
+    },
+    {
+      "check": "doc_readable",
+      "pass": true,
+      "detail": "docs/security/vef_adversarial_testing.md"
+    },
+    {
+      "check": "doc_mentions_bd",
+      "pass": true,
+      "detail": "bd-3ptu"
+    },
+    {
+      "check": "doc_mentions_fail_closed",
+      "pass": true,
+      "detail": "fail-closed"
+    },
+    {
+      "check": "doc_mentions_deterministic",
+      "pass": true,
+      "detail": "deterministic"
+    },
+    {
+      "check": "doc_mentions_remediation",
+      "pass": true,
+      "detail": "remediation"
+    },
+    {
+      "check": "doc_attack_class_receipt tampering",
+      "pass": false,
+      "detail": "receipt tampering"
+    },
+    {
+      "check": "doc_attack_class_proof replay",
+      "pass": false,
+      "detail": "proof replay"
+    },
+    {
+      "check": "doc_attack_class_stale-policy",
+      "pass": true,
+      "detail": "stale-policy"
+    },
+    {
+      "check": "doc_attack_class_commitment mismatch",
+      "pass": false,
+      "detail": "commitment mismatch"
+    },
+    {
+      "check": "doc_event_code_VEF-ADVERSARIAL-001",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-001"
+    },
+    {
+      "check": "doc_event_code_VEF-ADVERSARIAL-002",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-002"
+    },
+    {
+      "check": "doc_error_code_VEF-ADVERSARIAL-ERR-TAMPER",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-ERR-TAMPER"
+    },
+    {
+      "check": "doc_error_code_VEF-ADVERSARIAL-ERR-REPLAY",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-ERR-REPLAY"
+    },
+    {
+      "check": "doc_error_code_VEF-ADVERSARIAL-ERR-STALE-POLICY",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-ERR-STALE-POLICY"
+    },
+    {
+      "check": "doc_error_code_VEF-ADVERSARIAL-ERR-COMMITMENT",
+      "pass": true,
+      "detail": "VEF-ADVERSARIAL-ERR-COMMITMENT"
+    },
+    {
+      "check": "report_parseable_json",
+      "pass": false,
+      "detail": "invalid or missing JSON"
+    },
+    {
+      "check": "evidence_parseable_json",
+      "pass": false,
+      "detail": "invalid or missing JSON"
+    },
+    {
+      "check": "summary_mentions_bd",
+      "pass": false,
+      "detail": "bd-3ptu"
+    },
+    {
+      "check": "summary_mentions_verdict",
+      "pass": false,
+      "detail": "verdict marker"
+    }
+  ],
+  "timestamp": "2026-02-22T06:35:36.996873+00:00"
+}

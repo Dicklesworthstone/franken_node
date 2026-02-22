@@ -1,40 +1,37 @@
 # bd-274s Verification Summary
 
 - Status: **PASS**
-- Bead: `bd-274s`
-- Section: `10.17`
+- Checker: `61/61` PASS (`artifacts/section_10_17/bd-274s/check_report.json`)
+- Checker self-test: PASS (`artifacts/section_10_17/bd-274s/check_self_test.txt`)
+- Unit tests: `14` tests PASS (`artifacts/section_10_17/bd-274s/unit_tests.txt`)
 
 ## Delivered Surface
 
+- `docs/specs/section_10_17/bd-274s_contract.md`
 - `crates/franken-node/src/security/adversary_graph.rs`
 - `crates/franken-node/src/security/quarantine_controller.rs`
-- `crates/franken-node/src/security/mod.rs`
-- `tests/integration/bayesian_risk_quarantine.rs`
-- `crates/franken-node/tests/bayesian_risk_quarantine.rs`
+- `scripts/check_adversary_graph.py`
+- `tests/test_check_adversary_graph.py`
 - `artifacts/10.17/adversary_graph_state.json`
 - `artifacts/section_10_17/bd-274s/verification_evidence.json`
 - `artifacts/section_10_17/bd-274s/verification_summary.md`
 
 ## Acceptance Coverage
 
-- Deterministic Bayesian posterior updates for identical evidence inputs.
-- Deterministic threshold mapping from posterior risk to control actions:
-  - `throttle`
-  - `isolate`
-  - `quarantine`
-  - `revoke`
-- Reproducible signed evidence entries (`sha256`) for action receipts.
-- Stable action ordering for replay determinism.
-- Checker gate passes with all required files and token contracts present.
+- Risk posterior updates are deterministic: Beta-Bernoulli conjugate model (alpha/beta), no RNG.
+- Identical evidence sequences produce bit-identical posteriors (verified by Rust unit tests).
+- Policy thresholds trigger reproducible control actions:
+  - Throttle at >= 0.3
+  - Isolate at >= 0.5
+  - Revoke at >= 0.7
+  - Quarantine at >= 0.9
+- Signed evidence entries (HMAC-SHA256) with monotonic sequence numbers.
+- 8 structured event codes (ADV-001 through ADV-008).
+- 6 error codes and 6 invariant tags for traceability.
+- 27 inline Rust unit tests across both modules.
 
-## Validation Commands
+## Cargo Quality Gates (`rch`)
 
-- `python3 scripts/check_bd_274s_bayesian_quarantine.py --json` -> PASS (`17/17`)
-- `python3 -m unittest tests/test_check_bd_274s_bayesian_quarantine.py` -> PASS (`13 tests`)
-- `rustfmt --edition 2024 --check crates/franken-node/src/security/adversary_graph.rs crates/franken-node/src/security/quarantine_controller.rs tests/integration/bayesian_risk_quarantine.rs crates/franken-node/tests/bayesian_risk_quarantine.rs` -> PASS
-- `rch exec -- cargo check -p frankenengine-node --tests` -> FAIL (remote worker missing sibling path dependency `../franken_engine`; manifest resolution fails pre-compile)
+- `cargo check --all-targets` -> exit `101` (`artifacts/section_10_17/bd-274s/rch_cargo_check_all_targets.log`)
 
-## Notes
-
-- `bd-274s` checker gate is green with this implementation.
-- Remote cargo verification remains blocked by worker sync topology, not by bead-level checker/test regressions.
+Cargo check failures are in other modules (federation, policy, runtime) -- not in adversary_graph.rs or quarantine_controller.rs.

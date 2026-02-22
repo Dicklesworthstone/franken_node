@@ -2,17 +2,493 @@
   "schema_version": "zk-attestation-v1.0",
   "bead_id": "bd-kcg9",
   "section": "10.17",
-  "title": "ZK attestation test vectors",
-  "vectors": [
-    {"name": "valid_proof_accepted", "predicate": "compliance_level >= 3", "expected": "accept"},
-    {"name": "forged_proof_rejected", "predicate": "compliance_level >= 3", "expected": "reject"},
-    {"name": "expired_proof_rejected", "predicate": "audit_passed == true", "expected": "reject"},
-    {"name": "no_disclosure_verified", "predicate": "data_residency == EU", "expected": "accept"},
-    {"name": "circuit_mismatch_rejected", "predicate": "encryption_strength >= 256", "expected": "reject"}
+  "title": "Zero-knowledge attestation support for selective compliance verification",
+  "verdict": "PASS",
+  "total": 86,
+  "passed": 86,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "Spec file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/zk_attestation_contract.md"
+    },
+    {
+      "check": "Contract file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/section_10_17/bd-kcg9_contract.md"
+    },
+    {
+      "check": "Implementation file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/security/zk_attestation.rs"
+    },
+    {
+      "check": "Security module wired",
+      "passed": true,
+      "detail": "pub mod zk_attestation; in security/mod.rs"
+    },
+    {
+      "check": "Security test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/security/zk_attestation_verification.rs"
+    },
+    {
+      "check": "Python unit test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_zk_attestation.py"
+    },
+    {
+      "check": "Evidence file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-kcg9/verification_evidence.json"
+    },
+    {
+      "check": "Summary file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-kcg9/verification_summary.md"
+    },
+    {
+      "check": "Impl type 'ZkAttestation'",
+      "passed": true,
+      "detail": "ZkAttestation"
+    },
+    {
+      "check": "Impl type 'ZkPolicy'",
+      "passed": true,
+      "detail": "ZkPolicy"
+    },
+    {
+      "check": "Impl type 'ZkVerificationResult'",
+      "passed": true,
+      "detail": "ZkVerificationResult"
+    },
+    {
+      "check": "Impl type 'ZkBatchResult'",
+      "passed": true,
+      "detail": "ZkBatchResult"
+    },
+    {
+      "check": "Impl type 'ZkAuditRecord'",
+      "passed": true,
+      "detail": "ZkAuditRecord"
+    },
+    {
+      "check": "Impl type 'PredicateOutcome'",
+      "passed": true,
+      "detail": "PredicateOutcome"
+    },
+    {
+      "check": "Impl type 'AttestationStatus'",
+      "passed": true,
+      "detail": "AttestationStatus"
+    },
+    {
+      "check": "Impl type 'PolicyRegistry'",
+      "passed": true,
+      "detail": "PolicyRegistry"
+    },
+    {
+      "check": "Impl type 'AttestationLedger'",
+      "passed": true,
+      "detail": "AttestationLedger"
+    },
+    {
+      "check": "Impl type 'ZkProofPayload'",
+      "passed": true,
+      "detail": "ZkProofPayload"
+    },
+    {
+      "check": "Impl method 'generate_proof'",
+      "passed": true,
+      "detail": "generate_proof"
+    },
+    {
+      "check": "Impl method 'verify_proof'",
+      "passed": true,
+      "detail": "verify_proof"
+    },
+    {
+      "check": "Impl method 'verify_batch'",
+      "passed": true,
+      "detail": "verify_batch"
+    },
+    {
+      "check": "Impl method 'register_policy'",
+      "passed": true,
+      "detail": "register_policy"
+    },
+    {
+      "check": "Impl method 'deregister_policy'",
+      "passed": true,
+      "detail": "deregister_policy"
+    },
+    {
+      "check": "Impl method 'revoke_attestation'",
+      "passed": true,
+      "detail": "revoke_attestation"
+    },
+    {
+      "check": "Impl method 'query_audit'",
+      "passed": true,
+      "detail": "query_audit"
+    },
+    {
+      "check": "Impl method 'is_valid'",
+      "passed": true,
+      "detail": "is_valid"
+    },
+    {
+      "check": "Impl method 'sweep_expired'",
+      "passed": true,
+      "detail": "sweep_expired"
+    },
+    {
+      "check": "Impl method 'generate_compliance_report'",
+      "passed": true,
+      "detail": "generate_compliance_report"
+    },
+    {
+      "check": "Event code ZK_ATTESTATION_REQUEST in spec",
+      "passed": true,
+      "detail": "ZK_ATTESTATION_REQUEST"
+    },
+    {
+      "check": "Event code ZK_PROOF_GENERATED in spec",
+      "passed": true,
+      "detail": "ZK_PROOF_GENERATED"
+    },
+    {
+      "check": "Event code ZK_PROOF_VERIFIED in spec",
+      "passed": true,
+      "detail": "ZK_PROOF_VERIFIED"
+    },
+    {
+      "check": "Event code ZK_PREDICATE_SATISFIED in spec",
+      "passed": true,
+      "detail": "ZK_PREDICATE_SATISFIED"
+    },
+    {
+      "check": "Event code ZK_ATTESTATION_ISSUED in spec",
+      "passed": true,
+      "detail": "ZK_ATTESTATION_ISSUED"
+    },
+    {
+      "check": "FN code FN-ZK-001 in impl",
+      "passed": true,
+      "detail": "FN-ZK-001"
+    },
+    {
+      "check": "FN code FN-ZK-002 in impl",
+      "passed": true,
+      "detail": "FN-ZK-002"
+    },
+    {
+      "check": "FN code FN-ZK-003 in impl",
+      "passed": true,
+      "detail": "FN-ZK-003"
+    },
+    {
+      "check": "FN code FN-ZK-004 in impl",
+      "passed": true,
+      "detail": "FN-ZK-004"
+    },
+    {
+      "check": "FN code FN-ZK-005 in impl",
+      "passed": true,
+      "detail": "FN-ZK-005"
+    },
+    {
+      "check": "FN code FN-ZK-006 in impl",
+      "passed": true,
+      "detail": "FN-ZK-006"
+    },
+    {
+      "check": "FN code FN-ZK-007 in impl",
+      "passed": true,
+      "detail": "FN-ZK-007"
+    },
+    {
+      "check": "FN code FN-ZK-008 in impl",
+      "passed": true,
+      "detail": "FN-ZK-008"
+    },
+    {
+      "check": "FN code FN-ZK-009 in impl",
+      "passed": true,
+      "detail": "FN-ZK-009"
+    },
+    {
+      "check": "FN code FN-ZK-010 in impl",
+      "passed": true,
+      "detail": "FN-ZK-010"
+    },
+    {
+      "check": "FN code FN-ZK-011 in impl",
+      "passed": true,
+      "detail": "FN-ZK-011"
+    },
+    {
+      "check": "FN code FN-ZK-012 in impl",
+      "passed": true,
+      "detail": "FN-ZK-012"
+    },
+    {
+      "check": "Error code ERR_ZK_PROOF_INVALID in spec",
+      "passed": true,
+      "detail": "ERR_ZK_PROOF_INVALID"
+    },
+    {
+      "check": "Error code ERR_ZK_PROOF_FORGED in spec",
+      "passed": true,
+      "detail": "ERR_ZK_PROOF_FORGED"
+    },
+    {
+      "check": "Error code ERR_ZK_PREDICATE_UNSATISFIED in spec",
+      "passed": true,
+      "detail": "ERR_ZK_PREDICATE_UNSATISFIED"
+    },
+    {
+      "check": "Error code ERR_ZK_WITNESS_MISSING in spec",
+      "passed": true,
+      "detail": "ERR_ZK_WITNESS_MISSING"
+    },
+    {
+      "check": "Error code ERR_ZK_CIRCUIT_MISMATCH in spec",
+      "passed": true,
+      "detail": "ERR_ZK_CIRCUIT_MISMATCH"
+    },
+    {
+      "check": "Error code ERR_ZK_ATTESTATION_EXPIRED in spec",
+      "passed": true,
+      "detail": "ERR_ZK_ATTESTATION_EXPIRED"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_INVALID_PROOF",
+      "passed": true,
+      "detail": "ERR_ZKA_INVALID_PROOF"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_POLICY_MISMATCH",
+      "passed": true,
+      "detail": "ERR_ZKA_POLICY_MISMATCH"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_EXPIRED",
+      "passed": true,
+      "detail": "ERR_ZKA_EXPIRED"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_REVOKED",
+      "passed": true,
+      "detail": "ERR_ZKA_REVOKED"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_PREDICATE_UNSATISFIED",
+      "passed": true,
+      "detail": "ERR_ZKA_PREDICATE_UNSATISFIED"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_DUPLICATE",
+      "passed": true,
+      "detail": "ERR_ZKA_DUPLICATE"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_TIMEOUT",
+      "passed": true,
+      "detail": "ERR_ZKA_TIMEOUT"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_POLICY_NOT_FOUND",
+      "passed": true,
+      "detail": "ERR_ZKA_POLICY_NOT_FOUND"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_BATCH_PARTIAL",
+      "passed": true,
+      "detail": "ERR_ZKA_BATCH_PARTIAL"
+    },
+    {
+      "check": "Impl error code ERR_ZKA_METADATA_LEAK",
+      "passed": true,
+      "detail": "ERR_ZKA_METADATA_LEAK"
+    },
+    {
+      "check": "Invariant INV-ZK-NO-DISCLOSURE in spec",
+      "passed": true,
+      "detail": "INV-ZK-NO-DISCLOSURE"
+    },
+    {
+      "check": "Invariant INV-ZK-PROOF-SOUNDNESS in spec",
+      "passed": true,
+      "detail": "INV-ZK-PROOF-SOUNDNESS"
+    },
+    {
+      "check": "Invariant INV-ZK-FAIL-CLOSED in spec",
+      "passed": true,
+      "detail": "INV-ZK-FAIL-CLOSED"
+    },
+    {
+      "check": "Invariant INV-ZK-PREDICATE-COMPLETENESS in spec",
+      "passed": true,
+      "detail": "INV-ZK-PREDICATE-COMPLETENESS"
+    },
+    {
+      "check": "Impl invariant INV-ZKA-SELECTIVE",
+      "passed": true,
+      "detail": "INV-ZKA-SELECTIVE"
+    },
+    {
+      "check": "Impl invariant INV-ZKA-SOUNDNESS",
+      "passed": true,
+      "detail": "INV-ZKA-SOUNDNESS"
+    },
+    {
+      "check": "Impl invariant INV-ZKA-COMPLETENESS",
+      "passed": true,
+      "detail": "INV-ZKA-COMPLETENESS"
+    },
+    {
+      "check": "Impl invariant INV-ZKA-POLICY-BOUND",
+      "passed": true,
+      "detail": "INV-ZKA-POLICY-BOUND"
+    },
+    {
+      "check": "Impl invariant INV-ZKA-AUDIT-TRAIL",
+      "passed": true,
+      "detail": "INV-ZKA-AUDIT-TRAIL"
+    },
+    {
+      "check": "Impl invariant INV-ZKA-SCHEMA-VERSIONED",
+      "passed": true,
+      "detail": "INV-ZKA-SCHEMA-VERSIONED"
+    },
+    {
+      "check": "Contract invariant INV-ZKA-SELECTIVE",
+      "passed": true,
+      "detail": "INV-ZKA-SELECTIVE"
+    },
+    {
+      "check": "Contract invariant INV-ZKA-SOUNDNESS",
+      "passed": true,
+      "detail": "INV-ZKA-SOUNDNESS"
+    },
+    {
+      "check": "Contract invariant INV-ZKA-COMPLETENESS",
+      "passed": true,
+      "detail": "INV-ZKA-COMPLETENESS"
+    },
+    {
+      "check": "Contract invariant INV-ZKA-POLICY-BOUND",
+      "passed": true,
+      "detail": "INV-ZKA-POLICY-BOUND"
+    },
+    {
+      "check": "Contract invariant INV-ZKA-AUDIT-TRAIL",
+      "passed": true,
+      "detail": "INV-ZKA-AUDIT-TRAIL"
+    },
+    {
+      "check": "Contract invariant INV-ZKA-SCHEMA-VERSIONED",
+      "passed": true,
+      "detail": "INV-ZKA-SCHEMA-VERSIONED"
+    },
+    {
+      "check": "Rust inline tests >= 20",
+      "passed": true,
+      "detail": "found 39"
+    },
+    {
+      "check": "Security tests >= 10",
+      "passed": true,
+      "detail": "found 29"
+    },
+    {
+      "check": "Uses BTreeMap",
+      "passed": true,
+      "detail": "BTreeMap in implementation"
+    },
+    {
+      "check": "Schema version defined",
+      "passed": true,
+      "detail": "SCHEMA_VERSION constant"
+    },
+    {
+      "check": "Schema version value",
+      "passed": true,
+      "detail": "zka-v1.0"
+    },
+    {
+      "check": "Serde derives",
+      "passed": true,
+      "detail": "Serialize/Deserialize"
+    },
+    {
+      "check": "cfg(test) module",
+      "passed": true,
+      "detail": "#[cfg(test)] module present"
+    },
+    {
+      "check": "Invariants module",
+      "passed": true,
+      "detail": "pub mod invariants"
+    },
+    {
+      "check": "Selective disclosure",
+      "passed": true,
+      "detail": "commitment-based proof, not raw metadata"
+    }
   ],
-  "event_codes": 5,
-  "error_codes": 6,
-  "invariants": 4,
-  "pass_count": 5,
-  "fail_count": 0
+  "status": "pass",
+  "all_passed": true,
+  "event_codes": [
+    "ZK_ATTESTATION_REQUEST",
+    "ZK_PROOF_GENERATED",
+    "ZK_PROOF_VERIFIED",
+    "ZK_PREDICATE_SATISFIED",
+    "ZK_ATTESTATION_ISSUED"
+  ],
+  "error_codes": [
+    "ERR_ZK_PROOF_INVALID",
+    "ERR_ZK_PROOF_FORGED",
+    "ERR_ZK_PREDICATE_UNSATISFIED",
+    "ERR_ZK_WITNESS_MISSING",
+    "ERR_ZK_CIRCUIT_MISMATCH",
+    "ERR_ZK_ATTESTATION_EXPIRED"
+  ],
+  "impl_error_codes": [
+    "ERR_ZKA_INVALID_PROOF",
+    "ERR_ZKA_POLICY_MISMATCH",
+    "ERR_ZKA_EXPIRED",
+    "ERR_ZKA_REVOKED",
+    "ERR_ZKA_PREDICATE_UNSATISFIED",
+    "ERR_ZKA_DUPLICATE",
+    "ERR_ZKA_TIMEOUT",
+    "ERR_ZKA_POLICY_NOT_FOUND",
+    "ERR_ZKA_BATCH_PARTIAL",
+    "ERR_ZKA_METADATA_LEAK"
+  ],
+  "invariants": [
+    "INV-ZK-NO-DISCLOSURE",
+    "INV-ZK-PROOF-SOUNDNESS",
+    "INV-ZK-FAIL-CLOSED",
+    "INV-ZK-PREDICATE-COMPLETENESS"
+  ],
+  "impl_invariants": [
+    "INV-ZKA-SELECTIVE",
+    "INV-ZKA-SOUNDNESS",
+    "INV-ZKA-COMPLETENESS",
+    "INV-ZKA-POLICY-BOUND",
+    "INV-ZKA-AUDIT-TRAIL",
+    "INV-ZKA-SCHEMA-VERSIONED"
+  ],
+  "zk_contract": {
+    "selective_disclosure": true,
+    "proof_soundness": true,
+    "fail_closed": true,
+    "predicate_completeness": true,
+    "policy_bound": true,
+    "audit_trail": true,
+    "schema_versioned": true
+  }
 }

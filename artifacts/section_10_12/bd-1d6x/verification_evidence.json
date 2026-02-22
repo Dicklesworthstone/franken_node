@@ -1,0 +1,91 @@
+{
+  "schema_version": "gate-v1.0",
+  "bead_id": "bd-1d6x",
+  "section": "10.12",
+  "title": "Section 10.12 verification gate",
+  "verdict": "PASS",
+  "gate_type": "section",
+  "upstream_beads": [
+    {
+      "bead_id": "bd-3hm",
+      "verdict": "PASS"
+    },
+    {
+      "bead_id": "bd-3j4",
+      "verdict": "PASS"
+    },
+    {
+      "bead_id": "bd-5si",
+      "verdict": "PASS"
+    },
+    {
+      "bead_id": "bd-3c2",
+      "verdict": "PASS"
+    },
+    {
+      "bead_id": "bd-y0v",
+      "verdict": "PASS"
+    },
+    {
+      "bead_id": "bd-2aj",
+      "verdict": "PASS"
+    },
+    {
+      "bead_id": "bd-n1w",
+      "verdict": "PASS"
+    }
+  ],
+  "frontier_coverage": {
+    "migration_singularity": [
+      "bd-3hm",
+      "bd-3j4"
+    ],
+    "trust_fabric": [
+      "bd-5si"
+    ],
+    "verifier_economy": [
+      "bd-3c2"
+    ],
+    "operator_intelligence": [
+      "bd-y0v"
+    ],
+    "ecosystem_network_effects": [
+      "bd-2aj",
+      "bd-n1w"
+    ]
+  },
+  "reproducibility_audit": {
+    "manifest_path": "artifacts/10.12/frontier_demo_manifest.json",
+    "schema_version": "demo-v1.0",
+    "programs_required": 5,
+    "programs_passed": 5,
+    "metadata_complete": true,
+    "fingerprints_complete": true,
+    "timing_complete": true
+  },
+  "degraded_mode_contracts": {
+    "migration_singularity": "PASS",
+    "trust_fabric": "PASS",
+    "verifier_economy": "PASS",
+    "operator_intelligence": "PASS",
+    "ecosystem_network_effects": "PASS"
+  },
+  "checks_total": 50,
+  "checks_passed": 50,
+  "checks_failed": 0,
+  "invariants_validated": [
+    "INV-GATE-12-ALL-EVIDENCE",
+    "INV-GATE-12-ALL-PASS",
+    "INV-GATE-12-REPRODUCIBILITY-AUDIT",
+    "INV-GATE-12-DEGRADED-CONTRACTS",
+    "INV-GATE-12-DETERMINISTIC"
+  ],
+  "events": [
+    "GATE_10_12_EVALUATION_STARTED",
+    "GATE_10_12_BEAD_CHECKED",
+    "GATE_10_12_REPRODUCIBILITY_AUDIT",
+    "GATE_10_12_VERDICT_EMITTED"
+  ],
+  "verification_method": "python3 scripts/check_section_10_12_gate.py --json",
+  "test_suite": "python3 -m pytest tests/test_check_section_10_12_gate.py -q"
+}

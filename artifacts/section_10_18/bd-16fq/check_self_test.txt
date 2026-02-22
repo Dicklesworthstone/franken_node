@@ -1,0 +1,8 @@
+[bd-16fq] PASS (7/7)
+- PASS action_class_count: 6
+- PASS event_code_count: 7
+- PASS invariant_count: 5
+- PASS symbol_count: 13
+- PASS run_all_dict: dict
+- PASS run_all_has_checks: checks list
+- PASS run_all_total_consistent: total vs checks

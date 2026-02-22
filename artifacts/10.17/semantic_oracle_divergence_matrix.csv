@@ -1,5 +1,16 @@
-divergence_id,boundary_name,franken_engine_digest,reference_digest,reference_runtime_id,reference_version,risk_tier,classification_reason,receipt_id,l1_link,status
-div-0001,boundary::state_transition,a1b2c3d4,e5f6a7b8,ref-substrate-v1,1.0.0,high,digest mismatch: all references agree,,, blocked
-div-0002,boundary::event_encoding,9c8d7e6f,1a2b3c4d,ref-substrate-v1,1.0.0,high,digest mismatch: all references agree,,, blocked
-div-0003,boundary::ordering_hint,f0e1d2c3,a4b5c6d7,ref-substrate-v1,1.0.0,medium,single reference disagrees,rcpt-001,https://l1-oracle.example/result/42,receipted
-div-0004,boundary::metadata_format,0011aabb,ccdd0011,ref-alternative-v2,2.1.0,medium,references disagree among themselves,rcpt-002,https://l1-oracle.example/result/43,receipted
+boundary_scope,risk_tier,blocks_release,requires_receipt,default_action,example_divergence
+Security,Critical,yes,no,block,"Encryption algorithm mismatch between franken_engine and reference runtime"
+Memory,High,yes,no,block,"Allocation strategy divergence causing different GC pressure"
+Concurrency,High,yes,no,block,"Lock ordering disagreement between runtimes"
+IO,Medium,no,no,warn,"File buffering strategy difference with equivalent semantics"
+TypeSystem,Low,no,yes,receipt,"Numeric coercion rounding difference within tolerance"
+Security,High,yes,no,block,"Permission check ordering divergence"
+Memory,Medium,no,no,warn,"Cache eviction heuristic difference"
+IO,Low,no,yes,receipt,"Newline normalization difference"
+Concurrency,Medium,no,no,warn,"Thread pool sizing heuristic divergence"
+TypeSystem,Info,no,no,record,"Whitespace handling in string serialization"
+Security,Critical,yes,no,block,"Signature verification algorithm version mismatch"
+Memory,Critical,yes,no,block,"Use-after-free detection divergence"
+IO,High,yes,no,block,"File locking semantics incompatibility"
+Concurrency,Critical,yes,no,block,"Deadlock detection algorithm mismatch"
+TypeSystem,Medium,no,no,warn,"Generic type inference ambiguity"

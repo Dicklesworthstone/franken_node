@@ -1,244 +1,39 @@
 {
-  "schema_version": "intent-firewall-v1.0",
   "bead_id": "bd-3l2p",
   "section": "10.17",
-  "title": "Intent-aware remote effects firewall for extension-originated traffic",
+  "title": "Intent-Aware Remote Effects Firewall",
+  "schema_version": "fw-v1.0",
   "verdict": "PASS",
-  "total": 41,
-  "passed": 41,
-  "failed": 0,
-  "checks": [
-    {
-      "check": "Spec file exists",
-      "passed": true,
-      "detail": "/data/projects/franken_node/docs/specs/intent_effects_policy.md"
-    },
-    {
-      "check": "Implementation file exists",
-      "passed": true,
-      "detail": "/data/projects/franken_node/crates/franken-node/src/security/intent_firewall.rs"
-    },
-    {
-      "check": "Security module wired",
-      "passed": true,
-      "detail": "pub mod intent_firewall; in security/mod.rs"
-    },
-    {
-      "check": "Conformance test exists",
-      "passed": true,
-      "detail": "/data/projects/franken_node/tests/security/intent_firewall_conformance.rs"
-    },
-    {
-      "check": "Python checker unit test exists",
-      "passed": true,
-      "detail": "/data/projects/franken_node/tests/test_check_intent_firewall.py"
-    },
-    {
-      "check": "Impl token 'struct RemoteEffect'",
-      "passed": true,
-      "detail": "struct RemoteEffect"
-    },
-    {
-      "check": "Impl token 'enum IntentClassification'",
-      "passed": true,
-      "detail": "enum IntentClassification"
-    },
-    {
-      "check": "Impl token 'enum FirewallVerdict'",
-      "passed": true,
-      "detail": "enum FirewallVerdict"
-    },
-    {
-      "check": "Impl token 'struct FirewallDecision'",
-      "passed": true,
-      "detail": "struct FirewallDecision"
-    },
-    {
-      "check": "Impl token 'struct TrafficPolicy'",
-      "passed": true,
-      "detail": "struct TrafficPolicy"
-    },
-    {
-      "check": "Impl token 'struct EffectsFirewall'",
-      "passed": true,
-      "detail": "struct EffectsFirewall"
-    },
-    {
-      "check": "Impl token 'fn evaluate'",
-      "passed": true,
-      "detail": "fn evaluate"
-    },
-    {
-      "check": "Impl token 'fn classify'",
-      "passed": true,
-      "detail": "fn classify"
-    },
-    {
-      "check": "Impl token 'FirewallVerdict::Allow'",
-      "passed": true,
-      "detail": "FirewallVerdict::Allow"
-    },
-    {
-      "check": "Impl token 'FirewallVerdict::Challenge'",
-      "passed": true,
-      "detail": "FirewallVerdict::Challenge"
-    },
-    {
-      "check": "Impl token 'FirewallVerdict::Simulate'",
-      "passed": true,
-      "detail": "FirewallVerdict::Simulate"
-    },
-    {
-      "check": "Impl token 'FirewallVerdict::Deny'",
-      "passed": true,
-      "detail": "FirewallVerdict::Deny"
-    },
-    {
-      "check": "Impl token 'FirewallVerdict::Quarantine'",
-      "passed": true,
-      "detail": "FirewallVerdict::Quarantine"
-    },
-    {
-      "check": "Impl token 'IntentClassification::Exfiltration'",
-      "passed": true,
-      "detail": "IntentClassification::Exfiltration"
-    },
-    {
-      "check": "Impl token 'IntentClassification::CredentialForward'",
-      "passed": true,
-      "detail": "IntentClassification::CredentialForward"
-    },
-    {
-      "check": "Impl token 'IntentClassification::SideChannel'",
-      "passed": true,
-      "detail": "IntentClassification::SideChannel"
-    },
-    {
-      "check": "Event code FIREWALL_REQUEST_CLASSIFIED",
-      "passed": true,
-      "detail": "FIREWALL_REQUEST_CLASSIFIED"
-    },
-    {
-      "check": "Event code FIREWALL_INTENT_BENIGN",
-      "passed": true,
-      "detail": "FIREWALL_INTENT_BENIGN"
-    },
-    {
-      "check": "Event code FIREWALL_INTENT_RISKY",
-      "passed": true,
-      "detail": "FIREWALL_INTENT_RISKY"
-    },
-    {
-      "check": "Event code FIREWALL_CHALLENGE_ISSUED",
-      "passed": true,
-      "detail": "FIREWALL_CHALLENGE_ISSUED"
-    },
-    {
-      "check": "Event code FIREWALL_VERDICT_RENDERED",
-      "passed": true,
-      "detail": "FIREWALL_VERDICT_RENDERED"
-    },
-    {
-      "check": "Error code ERR_FIREWALL_CLASSIFICATION_FAILED",
-      "passed": true,
-      "detail": "ERR_FIREWALL_CLASSIFICATION_FAILED"
-    },
-    {
-      "check": "Error code ERR_FIREWALL_CHALLENGE_TIMEOUT",
-      "passed": true,
-      "detail": "ERR_FIREWALL_CHALLENGE_TIMEOUT"
-    },
-    {
-      "check": "Error code ERR_FIREWALL_SIMULATE_FAILED",
-      "passed": true,
-      "detail": "ERR_FIREWALL_SIMULATE_FAILED"
-    },
-    {
-      "check": "Error code ERR_FIREWALL_QUARANTINE_FULL",
-      "passed": true,
-      "detail": "ERR_FIREWALL_QUARANTINE_FULL"
-    },
-    {
-      "check": "Error code ERR_FIREWALL_RECEIPT_UNSIGNED",
-      "passed": true,
-      "detail": "ERR_FIREWALL_RECEIPT_UNSIGNED"
-    },
-    {
-      "check": "Error code ERR_FIREWALL_POLICY_MISSING",
-      "passed": true,
-      "detail": "ERR_FIREWALL_POLICY_MISSING"
-    },
-    {
-      "check": "Invariant INV-FIREWALL-STABLE-CLASSIFICATION",
-      "passed": true,
-      "detail": "INV-FIREWALL-STABLE-CLASSIFICATION"
-    },
-    {
-      "check": "Invariant INV-FIREWALL-DETERMINISTIC-RECEIPT",
-      "passed": true,
-      "detail": "INV-FIREWALL-DETERMINISTIC-RECEIPT"
-    },
-    {
-      "check": "Invariant INV-FIREWALL-FAIL-DENY",
-      "passed": true,
-      "detail": "INV-FIREWALL-FAIL-DENY"
-    },
-    {
-      "check": "Invariant INV-FIREWALL-RISKY-PATHWAY",
-      "passed": true,
-      "detail": "INV-FIREWALL-RISKY-PATHWAY"
-    },
-    {
-      "check": "Rust unit tests >= 8",
-      "passed": true,
-      "detail": "found 44"
-    },
-    {
-      "check": "Risky classification logic",
-      "passed": true,
-      "detail": "fn is_risky present"
-    },
-    {
-      "check": "Fail-closed deny logic",
-      "passed": true,
-      "detail": "fail-closed pattern found"
-    },
-    {
-      "check": "Deterministic BTreeMap usage",
-      "passed": true,
-      "detail": "BTreeMap used for determinism"
-    },
-    {
-      "check": "Receipt ID generation",
-      "passed": true,
-      "detail": "receipt_id field present"
-    }
-  ],
-  "event_codes": [
-    "FIREWALL_REQUEST_CLASSIFIED",
-    "FIREWALL_INTENT_BENIGN",
-    "FIREWALL_INTENT_RISKY",
-    "FIREWALL_CHALLENGE_ISSUED",
-    "FIREWALL_VERDICT_RENDERED"
-  ],
-  "error_codes": [
-    "ERR_FIREWALL_CLASSIFICATION_FAILED",
-    "ERR_FIREWALL_CHALLENGE_TIMEOUT",
-    "ERR_FIREWALL_SIMULATE_FAILED",
-    "ERR_FIREWALL_QUARANTINE_FULL",
-    "ERR_FIREWALL_RECEIPT_UNSIGNED",
-    "ERR_FIREWALL_POLICY_MISSING"
-  ],
-  "invariants": [
-    "INV-FIREWALL-STABLE-CLASSIFICATION",
-    "INV-FIREWALL-DETERMINISTIC-RECEIPT",
-    "INV-FIREWALL-FAIL-DENY",
-    "INV-FIREWALL-RISKY-PATHWAY"
-  ],
-  "firewall_contract": {
-    "fail_closed_unclassifiable": true,
-    "risky_default_deny": true,
-    "receipt_every_decision": true,
-    "extension_scoped": true
-  }
+  "evaluation": {
+    "intent_classifications": 10,
+    "risky_categories": 3,
+    "verdict_pathways": 5,
+    "event_codes": 10,
+    "error_codes": 8,
+    "invariants": 5,
+    "inline_tests": 37,
+    "policy_rules_in_default": 10,
+    "quarantine_capacity": 1000
+  },
+  "invariant_checks": {
+    "INV-FW-FAIL-CLOSED": "enforced: unclassifiable traffic returns Deny verdict",
+    "INV-FW-RECEIPT-EVERY-DECISION": "enforced: every evaluate() call produces FirewallDecision with receipt_id",
+    "INV-FW-RISKY-DEFAULT-DENY": "enforced: Exfiltration, CredentialForward, SideChannel default to Deny",
+    "INV-FW-DETERMINISTIC": "enforced: BTreeMap/BTreeSet ordering; same inputs produce same outputs",
+    "INV-FW-EXTENSION-SCOPED": "enforced: NodeInternal traffic bypasses firewall with audit trail"
+  },
+  "verdict_coverage": {
+    "Allow": "tested: non-risky data_fetch with registered extension",
+    "Challenge": "tested: policy override to challenge pathway",
+    "Simulate": "tested: policy rule with simulate verdict",
+    "Deny": "tested: risky categories, unclassifiable traffic, unknown extension",
+    "Quarantine": "tested: quarantine capacity enforcement"
+  },
+  "notes": [
+    "All 10 intent classification categories have dedicated test cases.",
+    "Risky categories (exfiltration, credential_forward, side_channel) verified to default-deny.",
+    "Quarantine capacity overflow triggers ERR_FW_QUARANTINE_FULL.",
+    "Policy overrides require non-empty justification (ERR_FW_OVERRIDE_UNAUTHORIZED).",
+    "Node-internal traffic bypasses the firewall with a separate audit trail."
+  ]
 }

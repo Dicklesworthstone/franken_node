@@ -1,0 +1,266 @@
+{
+  "schema_version": "claim-compiler-v1.0",
+  "bead_id": "bd-2kd9",
+  "section": "10.17",
+  "title": "Claim compiler and public trust scoreboard pipeline",
+  "verdict": "PASS",
+  "total": 45,
+  "passed": 45,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "Spec file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/claim_compiler.md"
+    },
+    {
+      "check": "Implementation file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/claims/claim_compiler.rs"
+    },
+    {
+      "check": "Claims mod file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/claims/mod.rs"
+    },
+    {
+      "check": "Main module wired",
+      "passed": true,
+      "detail": "pub mod claims; in main.rs"
+    },
+    {
+      "check": "Claims mod exports claim_compiler",
+      "passed": true,
+      "detail": "pub mod claim_compiler; in claims/mod.rs"
+    },
+    {
+      "check": "Impl token 'struct ExternalClaim'",
+      "passed": true,
+      "detail": "struct ExternalClaim"
+    },
+    {
+      "check": "Impl token 'struct CompiledContract'",
+      "passed": true,
+      "detail": "struct CompiledContract"
+    },
+    {
+      "check": "Impl token 'struct ScoreboardEntry'",
+      "passed": true,
+      "detail": "struct ScoreboardEntry"
+    },
+    {
+      "check": "Impl token 'struct ScoreboardSnapshot'",
+      "passed": true,
+      "detail": "struct ScoreboardSnapshot"
+    },
+    {
+      "check": "Impl token 'enum CompilationResult'",
+      "passed": true,
+      "detail": "enum CompilationResult"
+    },
+    {
+      "check": "Impl token 'enum ScoreboardUpdateResult'",
+      "passed": true,
+      "detail": "enum ScoreboardUpdateResult"
+    },
+    {
+      "check": "Impl token 'enum ClaimRejectionReason'",
+      "passed": true,
+      "detail": "enum ClaimRejectionReason"
+    },
+    {
+      "check": "Impl token 'enum ScoreboardRejectionReason'",
+      "passed": true,
+      "detail": "enum ScoreboardRejectionReason"
+    },
+    {
+      "check": "Impl token 'fn compile'",
+      "passed": true,
+      "detail": "fn compile"
+    },
+    {
+      "check": "Impl token 'fn publish'",
+      "passed": true,
+      "detail": "fn publish"
+    },
+    {
+      "check": "Impl token 'fn build_snapshot'",
+      "passed": true,
+      "detail": "fn build_snapshot"
+    },
+    {
+      "check": "Impl token 'fn is_valid_evidence_uri'",
+      "passed": true,
+      "detail": "fn is_valid_evidence_uri"
+    },
+    {
+      "check": "Impl token 'fn compute_contract_digest'",
+      "passed": true,
+      "detail": "fn compute_contract_digest"
+    },
+    {
+      "check": "Impl token 'fn sign_contract'",
+      "passed": true,
+      "detail": "fn sign_contract"
+    },
+    {
+      "check": "Impl token 'fn compute_entry_digest'",
+      "passed": true,
+      "detail": "fn compute_entry_digest"
+    },
+    {
+      "check": "Impl token 'fn compute_snapshot_digest'",
+      "passed": true,
+      "detail": "fn compute_snapshot_digest"
+    },
+    {
+      "check": "Impl token 'CompilationResult::Compiled'",
+      "passed": true,
+      "detail": "CompilationResult::Compiled"
+    },
+    {
+      "check": "Impl token 'CompilationResult::Rejected'",
+      "passed": true,
+      "detail": "CompilationResult::Rejected"
+    },
+    {
+      "check": "Impl token 'ScoreboardUpdateResult::Published'",
+      "passed": true,
+      "detail": "ScoreboardUpdateResult::Published"
+    },
+    {
+      "check": "Impl token 'ScoreboardUpdateResult::Rejected'",
+      "passed": true,
+      "detail": "ScoreboardUpdateResult::Rejected"
+    },
+    {
+      "check": "Impl token 'BTreeMap'",
+      "passed": true,
+      "detail": "BTreeMap"
+    },
+    {
+      "check": "Impl token 'Sha256'",
+      "passed": true,
+      "detail": "Sha256"
+    },
+    {
+      "check": "Event code CLAIM_COMPILATION_START",
+      "passed": true,
+      "detail": "CLAIM_COMPILATION_START"
+    },
+    {
+      "check": "Event code CLAIM_CONTRACT_GENERATED",
+      "passed": true,
+      "detail": "CLAIM_CONTRACT_GENERATED"
+    },
+    {
+      "check": "Event code CLAIM_VERIFICATION_LINKED",
+      "passed": true,
+      "detail": "CLAIM_VERIFICATION_LINKED"
+    },
+    {
+      "check": "Event code SCOREBOARD_UPDATE_PUBLISHED",
+      "passed": true,
+      "detail": "SCOREBOARD_UPDATE_PUBLISHED"
+    },
+    {
+      "check": "Event code SCOREBOARD_EVIDENCE_SIGNED",
+      "passed": true,
+      "detail": "SCOREBOARD_EVIDENCE_SIGNED"
+    },
+    {
+      "check": "Error code ERR_CLAIM_UNVERIFIABLE",
+      "passed": true,
+      "detail": "ERR_CLAIM_UNVERIFIABLE"
+    },
+    {
+      "check": "Error code ERR_CLAIM_SYNTAX_INVALID",
+      "passed": true,
+      "detail": "ERR_CLAIM_SYNTAX_INVALID"
+    },
+    {
+      "check": "Error code ERR_CLAIM_EVIDENCE_MISSING",
+      "passed": true,
+      "detail": "ERR_CLAIM_EVIDENCE_MISSING"
+    },
+    {
+      "check": "Error code ERR_CLAIM_BLOCKED",
+      "passed": true,
+      "detail": "ERR_CLAIM_BLOCKED"
+    },
+    {
+      "check": "Error code ERR_SCOREBOARD_SIGNATURE_INVALID",
+      "passed": true,
+      "detail": "ERR_SCOREBOARD_SIGNATURE_INVALID"
+    },
+    {
+      "check": "Error code ERR_SCOREBOARD_STALE_EVIDENCE",
+      "passed": true,
+      "detail": "ERR_SCOREBOARD_STALE_EVIDENCE"
+    },
+    {
+      "check": "Invariant INV-CLAIM-EXECUTABLE-CONTRACT",
+      "passed": true,
+      "detail": "INV-CLAIM-EXECUTABLE-CONTRACT"
+    },
+    {
+      "check": "Invariant INV-CLAIM-BLOCK-UNVERIFIABLE",
+      "passed": true,
+      "detail": "INV-CLAIM-BLOCK-UNVERIFIABLE"
+    },
+    {
+      "check": "Invariant INV-SCOREBOARD-SIGNED-EVIDENCE",
+      "passed": true,
+      "detail": "INV-SCOREBOARD-SIGNED-EVIDENCE"
+    },
+    {
+      "check": "Invariant INV-SCOREBOARD-FRESH-LINKS",
+      "passed": true,
+      "detail": "INV-SCOREBOARD-FRESH-LINKS"
+    },
+    {
+      "check": "Rust unit tests >= 8",
+      "passed": true,
+      "detail": "found 22"
+    },
+    {
+      "check": "Conformance test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/conformance/claim_compiler_gate.rs"
+    },
+    {
+      "check": "Python checker unit test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_claim_compiler.py"
+    }
+  ],
+  "event_codes": [
+    "CLAIM_COMPILATION_START",
+    "CLAIM_CONTRACT_GENERATED",
+    "CLAIM_VERIFICATION_LINKED",
+    "SCOREBOARD_UPDATE_PUBLISHED",
+    "SCOREBOARD_EVIDENCE_SIGNED"
+  ],
+  "error_codes": [
+    "ERR_CLAIM_UNVERIFIABLE",
+    "ERR_CLAIM_SYNTAX_INVALID",
+    "ERR_CLAIM_EVIDENCE_MISSING",
+    "ERR_CLAIM_BLOCKED",
+    "ERR_SCOREBOARD_SIGNATURE_INVALID",
+    "ERR_SCOREBOARD_STALE_EVIDENCE"
+  ],
+  "invariants": [
+    "INV-CLAIM-EXECUTABLE-CONTRACT",
+    "INV-CLAIM-BLOCK-UNVERIFIABLE",
+    "INV-SCOREBOARD-SIGNED-EVIDENCE",
+    "INV-SCOREBOARD-FRESH-LINKS"
+  ],
+  "claim_compiler_contract": {
+    "fail_closed_on_unverifiable_claims": true,
+    "scoreboard_updates_publish_signed_evidence_links": true,
+    "deterministic_btreemap_ordering": true,
+    "schema_versioned_outputs": true,
+    "atomic_scoreboard_updates": true,
+    "sha256_digest_binding": true
+  }
+}

@@ -1,0 +1,40 @@
+{
+  "bead_id": "bd-1d6x",
+  "agent": "BlueLantern",
+  "timestamp_utc": "2026-02-22T05:43:09Z",
+  "status": "gaps_detected",
+  "deliverable_presence": [
+    {"path": "scripts/check_section_10_12_gate.py", "present": false},
+    {"path": "tests/test_check_section_10_12_gate.py", "present": false},
+    {"path": "docs/specs/section_10_12/bd-1d6x_contract.md", "present": false},
+    {"path": "artifacts/section_10_12/bd-1d6x/verification_evidence.json", "present": false},
+    {"path": "artifacts/section_10_12/bd-1d6x/verification_summary.md", "present": false}
+  ],
+  "probe_commands": [
+    {
+      "cmd": "python3 scripts/check_section_10_12_gate.py --json",
+      "exit_code": 2,
+      "result": "failed",
+      "detail": "No such file or directory"
+    },
+    {
+      "cmd": "python3 -m unittest tests/test_check_section_10_12_gate.py",
+      "exit_code": 1,
+      "result": "failed",
+      "detail": "ImportError: No module named tests/test_check_section_10_12_gate"
+    }
+  ],
+  "missing_deliverables": [
+    "scripts/check_section_10_12_gate.py",
+    "tests/test_check_section_10_12_gate.py",
+    "docs/specs/section_10_12/bd-1d6x_contract.md",
+    "artifacts/section_10_12/bd-1d6x/verification_evidence.json",
+    "artifacts/section_10_12/bd-1d6x/verification_summary.md"
+  ],
+  "recommended_next_steps": [
+    "Implement deterministic section-gate checker script with --json and self_test().",
+    "Add unittest module covering all bead checks, missing-artifact failures, and deterministic verdict behavior.",
+    "Add contract doc and section verification evidence/summary artifacts.",
+    "Re-run checker and unit tests and attach outputs in artifacts/section_10_12/bd-1d6x/."
+  ]
+}

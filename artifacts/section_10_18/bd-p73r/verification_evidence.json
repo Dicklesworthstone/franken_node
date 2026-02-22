@@ -1,0 +1,74 @@
+{
+  "bead_id": "bd-p73r",
+  "title": "VEF canonical ExecutionReceipt schema and deterministic serialization",
+  "section": "10.18",
+  "verdict": "PASS",
+  "timestamp": "2026-02-22T05:57:13Z",
+  "artifacts": {
+    "implementation": "crates/franken-node/src/connector/vef_execution_receipt.rs",
+    "module_wiring": "crates/franken-node/src/connector/mod.rs",
+    "schema_spec": "spec/vef_execution_receipt_v1.json",
+    "receipt_spec": "docs/specs/vef_execution_receipt.md",
+    "contract_spec": "docs/specs/section_10_18/bd-p73r_contract.md",
+    "golden_vectors": "artifacts/10.18/vef_receipt_schema_vectors.json",
+    "checker": "scripts/check_vef_execution_receipt.py",
+    "checker_test": "tests/test_check_vef_execution_receipt.py",
+    "summary": "artifacts/section_10_18/bd-p73r/verification_summary.md",
+    "check_report": "artifacts/section_10_18/bd-p73r/check_report.json",
+    "check_self_test": "artifacts/section_10_18/bd-p73r/check_self_test.txt",
+    "unit_test_log": "artifacts/section_10_18/bd-p73r/unit_tests.txt"
+  },
+  "verification_steps": [
+    {
+      "name": "checker_json",
+      "command": "python3 scripts/check_vef_execution_receipt.py --json",
+      "status": "PASS",
+      "output_path": "artifacts/section_10_18/bd-p73r/check_report.json"
+    },
+    {
+      "name": "checker_self_test",
+      "command": "python3 scripts/check_vef_execution_receipt.py --self-test",
+      "status": "PASS",
+      "output_path": "artifacts/section_10_18/bd-p73r/check_self_test.txt"
+    },
+    {
+      "name": "checker_unit_tests",
+      "command": "pytest -q tests/test_check_vef_execution_receipt.py",
+      "status": "PASS",
+      "output_path": "artifacts/section_10_18/bd-p73r/unit_tests.txt"
+    },
+    {
+      "name": "rch_cargo_check_all_targets",
+      "command": "rch exec -- cargo check --all-targets",
+      "status": "FAIL",
+      "detail": "Workspace currently has pre-existing compile failures outside bd-p73r surfaces (e.g. runtime/time_travel, registry/staking_governance, runtime/isolation_mesh, security/intent_firewall, security/zk_attestation)."
+    },
+    {
+      "name": "rch_cargo_clippy_all_targets",
+      "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+      "status": "FAIL",
+      "detail": "Workspace currently has broad pre-existing clippy/lint failures outside bd-p73r surfaces."
+    },
+    {
+      "name": "rch_cargo_fmt_check",
+      "command": "rch exec -- cargo fmt --check",
+      "status": "FAIL",
+      "detail": "Workspace currently has extensive pre-existing formatting diffs in files unrelated to bd-p73r."
+    }
+  ],
+  "invariants": [
+    "INV-VEF-RECEIPT-DETERMINISTIC",
+    "INV-VEF-RECEIPT-HASH-STABLE",
+    "INV-VEF-RECEIPT-VERSIONED",
+    "INV-VEF-RECEIPT-TRACEABLE"
+  ],
+  "event_codes": [
+    "VEF-RECEIPT-001",
+    "VEF-RECEIPT-002",
+    "VEF-RECEIPT-ERR-001",
+    "VEF-RECEIPT-ERR-002",
+    "VEF-RECEIPT-ERR-003",
+    "VEF-RECEIPT-ERR-004",
+    "VEF-RECEIPT-ERR-005"
+  ]
+}

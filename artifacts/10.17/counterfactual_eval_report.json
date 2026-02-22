@@ -1,27 +1,37 @@
 {
-  "schema_version": "incident-lab-v1.0",
+  "schema_version": "counterfactual-lab-v1.0",
   "bead_id": "bd-383z",
   "section": "10.17",
-  "title": "Counterfactual incident lab and mitigation synthesis",
+  "title": "Counterfactual incident lab and mitigation synthesis workflow",
   "verdict": "PASS",
-  "total": 45,
-  "passed": 45,
+  "total": 39,
+  "passed": 39,
   "failed": 0,
   "checks": [
     {
       "check": "Spec file exists",
       "passed": true,
-      "detail": "/data/projects/franken_node/docs/specs/section_10_17/bd-383z_contract.md"
+      "detail": "/data/projects/franken_node/docs/specs/counterfactual_incident_lab.md"
     },
     {
       "check": "Implementation file exists",
       "passed": true,
-      "detail": "/data/projects/franken_node/crates/franken-node/src/runtime/incident_lab.rs"
+      "detail": "/data/projects/franken_node/crates/franken-node/src/ops/mitigation_synthesis.rs"
     },
     {
-      "check": "Runtime module wired",
+      "check": "Ops mod file exists",
       "passed": true,
-      "detail": "pub mod incident_lab; in runtime/mod.rs"
+      "detail": "/data/projects/franken_node/crates/franken-node/src/ops/mod.rs"
+    },
+    {
+      "check": "Main module wired",
+      "passed": true,
+      "detail": "pub mod ops; in main.rs"
+    },
+    {
+      "check": "Ops mod exports mitigation_synthesis",
+      "passed": true,
+      "detail": "pub mod mitigation_synthesis; in ops/mod.rs"
     },
     {
       "check": "Impl token 'struct IncidentTrace'",
@@ -29,24 +39,9 @@
       "detail": "struct IncidentTrace"
     },
     {
-      "check": "Impl token 'struct CounterfactualScenario'",
+      "check": "Impl token 'struct MitigationCandidate'",
       "passed": true,
-      "detail": "struct CounterfactualScenario"
-    },
-    {
-      "check": "Impl token 'struct MitigationPlan'",
-      "passed": true,
-      "detail": "struct MitigationPlan"
-    },
-    {
-      "check": "Impl token 'struct IncidentReplay'",
-      "passed": true,
-      "detail": "struct IncidentReplay"
-    },
-    {
-      "check": "Impl token 'struct SynthesisResult'",
-      "passed": true,
-      "detail": "struct SynthesisResult"
+      "detail": "struct MitigationCandidate"
     },
     {
       "check": "Impl token 'struct RolloutContract'",
@@ -54,9 +49,14 @@
       "detail": "struct RolloutContract"
     },
     {
-      "check": "Impl token 'struct RollbackClause'",
+      "check": "Impl token 'struct RollbackContract'",
       "passed": true,
-      "detail": "struct RollbackClause"
+      "detail": "struct RollbackContract"
+    },
+    {
+      "check": "Impl token 'struct PromotedMitigation'",
+      "passed": true,
+      "detail": "struct PromotedMitigation"
     },
     {
       "check": "Impl token 'struct IncidentLab'",
@@ -64,197 +64,171 @@
       "detail": "struct IncidentLab"
     },
     {
+      "check": "Impl token 'fn load_trace'",
+      "passed": true,
+      "detail": "fn load_trace"
+    },
+    {
+      "check": "Impl token 'fn replay_baseline'",
+      "passed": true,
+      "detail": "fn replay_baseline"
+    },
+    {
+      "check": "Impl token 'fn synthesize_mitigation'",
+      "passed": true,
+      "detail": "fn synthesize_mitigation"
+    },
+    {
+      "check": "Impl token 'fn compare_replay'",
+      "passed": true,
+      "detail": "fn compare_replay"
+    },
+    {
+      "check": "Impl token 'fn promote_mitigation'",
+      "passed": true,
+      "detail": "fn promote_mitigation"
+    },
+    {
+      "check": "Impl token 'fn run_full_workflow'",
+      "passed": true,
+      "detail": "fn run_full_workflow"
+    },
+    {
+      "check": "Impl token 'struct LabDecision'",
+      "passed": true,
+      "detail": "struct LabDecision"
+    },
+    {
+      "check": "Impl token 'struct ReplayComparison'",
+      "passed": true,
+      "detail": "struct ReplayComparison"
+    },
+    {
       "check": "Impl token 'struct LabConfig'",
       "passed": true,
       "detail": "struct LabConfig"
     },
     {
-      "check": "Impl token 'struct LabError'",
+      "check": "Event code LAB_INCIDENT_LOADED",
       "passed": true,
-      "detail": "struct LabError"
+      "detail": "LAB_INCIDENT_LOADED"
     },
     {
-      "check": "Impl token 'fn replay_trace'",
+      "check": "Event code LAB_MITIGATION_SYNTHESIZED",
       "passed": true,
-      "detail": "fn replay_trace"
+      "detail": "LAB_MITIGATION_SYNTHESIZED"
     },
     {
-      "check": "Impl token 'fn compute_delta'",
+      "check": "Event code LAB_REPLAY_COMPARED",
       "passed": true,
-      "detail": "fn compute_delta"
+      "detail": "LAB_REPLAY_COMPARED"
     },
     {
-      "check": "Impl token 'fn generate_rollout_contract'",
+      "check": "Event code LAB_LOSS_DELTA_COMPUTED",
       "passed": true,
-      "detail": "fn generate_rollout_contract"
+      "detail": "LAB_LOSS_DELTA_COMPUTED"
     },
     {
-      "check": "Impl token 'fn evaluate_scenario'",
+      "check": "Event code LAB_MITIGATION_PROMOTED",
       "passed": true,
-      "detail": "fn evaluate_scenario"
+      "detail": "LAB_MITIGATION_PROMOTED"
     },
     {
-      "check": "Impl token 'fn validate_trace'",
+      "check": "Error code ERR_LAB_TRACE_CORRUPT",
       "passed": true,
-      "detail": "fn validate_trace"
+      "detail": "ERR_LAB_TRACE_CORRUPT"
     },
     {
-      "check": "Impl token 'fn validate_mitigation'",
+      "check": "Error code ERR_LAB_REPLAY_DIVERGED",
       "passed": true,
-      "detail": "fn validate_mitigation"
+      "detail": "ERR_LAB_REPLAY_DIVERGED"
     },
     {
-      "check": "Impl token 'fn verify_deterministic_replay'",
+      "check": "Error code ERR_LAB_MITIGATION_UNSAFE",
       "passed": true,
-      "detail": "fn verify_deterministic_replay"
+      "detail": "ERR_LAB_MITIGATION_UNSAFE"
     },
     {
-      "check": "Impl token 'fn compute_trace_hash'",
+      "check": "Error code ERR_LAB_ROLLOUT_UNSIGNED",
       "passed": true,
-      "detail": "fn compute_trace_hash"
+      "detail": "ERR_LAB_ROLLOUT_UNSIGNED"
     },
     {
-      "check": "Impl token 'BTreeMap'",
+      "check": "Error code ERR_LAB_ROLLBACK_MISSING",
       "passed": true,
-      "detail": "BTreeMap"
+      "detail": "ERR_LAB_ROLLBACK_MISSING"
     },
     {
-      "check": "Impl token 'SCHEMA_VERSION'",
+      "check": "Error code ERR_LAB_LOSS_DELTA_NEGATIVE",
       "passed": true,
-      "detail": "SCHEMA_VERSION"
+      "detail": "ERR_LAB_LOSS_DELTA_NEGATIVE"
     },
     {
-      "check": "Event code ILAB_001",
+      "check": "Invariant INV-LAB-REPLAY-FIDELITY",
       "passed": true,
-      "detail": "ILAB_001"
+      "detail": "INV-LAB-REPLAY-FIDELITY"
     },
     {
-      "check": "Event code ILAB_002",
+      "check": "Invariant INV-LAB-SIGNED-ROLLOUT",
       "passed": true,
-      "detail": "ILAB_002"
+      "detail": "INV-LAB-SIGNED-ROLLOUT"
     },
     {
-      "check": "Event code ILAB_003",
+      "check": "Invariant INV-LAB-ROLLBACK-CONTRACT",
       "passed": true,
-      "detail": "ILAB_003"
+      "detail": "INV-LAB-ROLLBACK-CONTRACT"
     },
     {
-      "check": "Event code ILAB_004",
+      "check": "Invariant INV-LAB-LOSS-DELTA-POSITIVE",
       "passed": true,
-      "detail": "ILAB_004"
+      "detail": "INV-LAB-LOSS-DELTA-POSITIVE"
     },
     {
-      "check": "Event code ILAB_005",
+      "check": "Rust unit tests >= 8",
       "passed": true,
-      "detail": "ILAB_005"
+      "detail": "found 17"
     },
     {
-      "check": "Event code ILAB_006",
+      "check": "Lab test exists",
       "passed": true,
-      "detail": "ILAB_006"
+      "detail": "/data/projects/franken_node/tests/lab/counterfactual_mitigation_eval.rs"
     },
     {
-      "check": "Error code ERR_ILAB_TRACE_EMPTY",
+      "check": "Lab test has >= 10 tests",
       "passed": true,
-      "detail": "ERR_ILAB_TRACE_EMPTY"
-    },
-    {
-      "check": "Error code ERR_ILAB_TRACE_CORRUPT",
-      "passed": true,
-      "detail": "ERR_ILAB_TRACE_CORRUPT"
-    },
-    {
-      "check": "Error code ERR_ILAB_REPLAY_DIVERGENCE",
-      "passed": true,
-      "detail": "ERR_ILAB_REPLAY_DIVERGENCE"
-    },
-    {
-      "check": "Error code ERR_ILAB_MITIGATION_INVALID",
-      "passed": true,
-      "detail": "ERR_ILAB_MITIGATION_INVALID"
-    },
-    {
-      "check": "Error code ERR_ILAB_DELTA_NEGATIVE",
-      "passed": true,
-      "detail": "ERR_ILAB_DELTA_NEGATIVE"
-    },
-    {
-      "check": "Error code ERR_ILAB_CONTRACT_UNSIGNED",
-      "passed": true,
-      "detail": "ERR_ILAB_CONTRACT_UNSIGNED"
-    },
-    {
-      "check": "Invariant INV-ILAB-DETERMINISTIC",
-      "passed": true,
-      "detail": "INV-ILAB-DETERMINISTIC"
-    },
-    {
-      "check": "Invariant INV-ILAB-DELTA-REQUIRED",
-      "passed": true,
-      "detail": "INV-ILAB-DELTA-REQUIRED"
-    },
-    {
-      "check": "Invariant INV-ILAB-SIGNED-ROLLOUT",
-      "passed": true,
-      "detail": "INV-ILAB-SIGNED-ROLLOUT"
-    },
-    {
-      "check": "Invariant INV-ILAB-ROLLBACK-ATTACHED",
-      "passed": true,
-      "detail": "INV-ILAB-ROLLBACK-ATTACHED"
-    },
-    {
-      "check": "Invariant INV-ILAB-TRACE-INTEGRITY",
-      "passed": true,
-      "detail": "INV-ILAB-TRACE-INTEGRITY"
-    },
-    {
-      "check": "Rust unit tests >= 20",
-      "passed": true,
-      "detail": "found 28"
+      "detail": "found 13"
     },
     {
       "check": "Python checker unit test exists",
       "passed": true,
-      "detail": "/data/projects/franken_node/tests/test_check_incident_lab.py"
-    },
-    {
-      "check": "Verification evidence exists",
-      "passed": true,
-      "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-383z/verification_evidence.json"
-    },
-    {
-      "check": "Verification summary exists",
-      "passed": true,
-      "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-383z/verification_summary.md"
-    },
-    {
-      "check": "Evidence verdict is PASS",
-      "passed": true,
-      "detail": "PASS"
+      "detail": "/data/projects/franken_node/tests/test_check_counterfactual_lab.py"
     }
   ],
   "event_codes": [
-    "ILAB_001",
-    "ILAB_002",
-    "ILAB_003",
-    "ILAB_004",
-    "ILAB_005",
-    "ILAB_006"
+    "LAB_INCIDENT_LOADED",
+    "LAB_MITIGATION_SYNTHESIZED",
+    "LAB_REPLAY_COMPARED",
+    "LAB_LOSS_DELTA_COMPUTED",
+    "LAB_MITIGATION_PROMOTED"
   ],
   "error_codes": [
-    "ERR_ILAB_TRACE_EMPTY",
-    "ERR_ILAB_TRACE_CORRUPT",
-    "ERR_ILAB_REPLAY_DIVERGENCE",
-    "ERR_ILAB_MITIGATION_INVALID",
-    "ERR_ILAB_DELTA_NEGATIVE",
-    "ERR_ILAB_CONTRACT_UNSIGNED"
+    "ERR_LAB_TRACE_CORRUPT",
+    "ERR_LAB_REPLAY_DIVERGED",
+    "ERR_LAB_MITIGATION_UNSAFE",
+    "ERR_LAB_ROLLOUT_UNSIGNED",
+    "ERR_LAB_ROLLBACK_MISSING",
+    "ERR_LAB_LOSS_DELTA_NEGATIVE"
   ],
   "invariants": [
-    "INV-ILAB-DETERMINISTIC",
-    "INV-ILAB-DELTA-REQUIRED",
-    "INV-ILAB-SIGNED-ROLLOUT",
-    "INV-ILAB-ROLLBACK-ATTACHED",
-    "INV-ILAB-TRACE-INTEGRITY"
-  ]
+    "INV-LAB-REPLAY-FIDELITY",
+    "INV-LAB-SIGNED-ROLLOUT",
+    "INV-LAB-ROLLBACK-CONTRACT",
+    "INV-LAB-LOSS-DELTA-POSITIVE"
+  ],
+  "lab_contract": {
+    "requires_signed_rollout": true,
+    "requires_rollback_contract": true,
+    "requires_positive_loss_delta": true,
+    "requires_trace_integrity": true
+  }
 }

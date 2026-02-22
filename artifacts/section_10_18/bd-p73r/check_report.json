@@ -1,0 +1,622 @@
+{
+  "bead_id": "bd-p73r",
+  "title": "VEF canonical ExecutionReceipt schema and deterministic serialization",
+  "section": "10.18",
+  "verdict": "PASS",
+  "total": 122,
+  "passed": 122,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "impl_exists",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/vef_execution_receipt.rs"
+    },
+    {
+      "check": "mod_exists",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/mod.rs"
+    },
+    {
+      "check": "spec_doc_exists",
+      "pass": true,
+      "detail": "docs/specs/vef_execution_receipt.md"
+    },
+    {
+      "check": "spec_contract_exists",
+      "pass": true,
+      "detail": "docs/specs/section_10_18/bd-p73r_contract.md"
+    },
+    {
+      "check": "schema_exists",
+      "pass": true,
+      "detail": "spec/vef_execution_receipt_v1.json"
+    },
+    {
+      "check": "vectors_exists",
+      "pass": true,
+      "detail": "artifacts/10.18/vef_receipt_schema_vectors.json"
+    },
+    {
+      "check": "unit_test_exists",
+      "pass": true,
+      "detail": "tests/test_check_vef_execution_receipt.py"
+    },
+    {
+      "check": "evidence_exists",
+      "pass": true,
+      "detail": "artifacts/section_10_18/bd-p73r/verification_evidence.json"
+    },
+    {
+      "check": "summary_exists",
+      "pass": true,
+      "detail": "artifacts/section_10_18/bd-p73r/verification_summary.md"
+    },
+    {
+      "check": "impl_symbol_pub enum ExecutionActionType",
+      "pass": true,
+      "detail": "pub enum ExecutionActionType"
+    },
+    {
+      "check": "impl_symbol_pub struct ExecutionReceipt",
+      "pass": true,
+      "detail": "pub struct ExecutionReceipt"
+    },
+    {
+      "check": "impl_symbol_pub struct ExecutionReceiptError",
+      "pass": true,
+      "detail": "pub struct ExecutionReceiptError"
+    },
+    {
+      "check": "impl_symbol_pub fn validate_receipt",
+      "pass": true,
+      "detail": "pub fn validate_receipt"
+    },
+    {
+      "check": "impl_symbol_pub fn serialize_canonical",
+      "pass": true,
+      "detail": "pub fn serialize_canonical"
+    },
+    {
+      "check": "impl_symbol_pub fn receipt_hash_sha256",
+      "pass": true,
+      "detail": "pub fn receipt_hash_sha256"
+    },
+    {
+      "check": "impl_symbol_pub fn verify_hash",
+      "pass": true,
+      "detail": "pub fn verify_hash"
+    },
+    {
+      "check": "impl_symbol_pub fn round_trip_canonical_bytes",
+      "pass": true,
+      "detail": "pub fn round_trip_canonical_bytes"
+    },
+    {
+      "check": "impl_symbol_pub fn canonicalized",
+      "pass": true,
+      "detail": "pub fn canonicalized"
+    },
+    {
+      "check": "impl_field_schema_version",
+      "pass": true,
+      "detail": "schema_version"
+    },
+    {
+      "check": "impl_field_action_type",
+      "pass": true,
+      "detail": "action_type"
+    },
+    {
+      "check": "impl_field_capability_context",
+      "pass": true,
+      "detail": "capability_context"
+    },
+    {
+      "check": "impl_field_actor_identity",
+      "pass": true,
+      "detail": "actor_identity"
+    },
+    {
+      "check": "impl_field_artifact_identity",
+      "pass": true,
+      "detail": "artifact_identity"
+    },
+    {
+      "check": "impl_field_policy_snapshot_hash",
+      "pass": true,
+      "detail": "policy_snapshot_hash"
+    },
+    {
+      "check": "impl_field_timestamp_millis",
+      "pass": true,
+      "detail": "timestamp_millis"
+    },
+    {
+      "check": "impl_field_sequence_number",
+      "pass": true,
+      "detail": "sequence_number"
+    },
+    {
+      "check": "impl_field_witness_references",
+      "pass": true,
+      "detail": "witness_references"
+    },
+    {
+      "check": "impl_field_trace_id",
+      "pass": true,
+      "detail": "trace_id"
+    },
+    {
+      "check": "impl_action_type_network_access",
+      "pass": true,
+      "detail": "network_access"
+    },
+    {
+      "check": "impl_action_type_filesystem_operation",
+      "pass": true,
+      "detail": "filesystem_operation"
+    },
+    {
+      "check": "impl_action_type_process_spawn",
+      "pass": true,
+      "detail": "process_spawn"
+    },
+    {
+      "check": "impl_action_type_secret_access",
+      "pass": true,
+      "detail": "secret_access"
+    },
+    {
+      "check": "impl_action_type_policy_transition",
+      "pass": true,
+      "detail": "policy_transition"
+    },
+    {
+      "check": "impl_action_type_artifact_promotion",
+      "pass": true,
+      "detail": "artifact_promotion"
+    },
+    {
+      "check": "impl_event_VEF-RECEIPT-001",
+      "pass": true,
+      "detail": "VEF-RECEIPT-001"
+    },
+    {
+      "check": "impl_event_VEF-RECEIPT-002",
+      "pass": true,
+      "detail": "VEF-RECEIPT-002"
+    },
+    {
+      "check": "impl_error_VEF-RECEIPT-ERR-001",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-001"
+    },
+    {
+      "check": "impl_error_VEF-RECEIPT-ERR-002",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-002"
+    },
+    {
+      "check": "impl_error_VEF-RECEIPT-ERR-003",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-003"
+    },
+    {
+      "check": "impl_error_VEF-RECEIPT-ERR-004",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-004"
+    },
+    {
+      "check": "impl_error_VEF-RECEIPT-ERR-005",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-005"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-RECEIPT-DETERMINISTIC",
+      "pass": true,
+      "detail": "INV-VEF-RECEIPT-DETERMINISTIC"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-RECEIPT-HASH-STABLE",
+      "pass": true,
+      "detail": "INV-VEF-RECEIPT-HASH-STABLE"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-RECEIPT-VERSIONED",
+      "pass": true,
+      "detail": "INV-VEF-RECEIPT-VERSIONED"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-RECEIPT-TRACEABLE",
+      "pass": true,
+      "detail": "INV-VEF-RECEIPT-TRACEABLE"
+    },
+    {
+      "check": "impl_uses_sha256",
+      "pass": true,
+      "detail": "Sha256"
+    },
+    {
+      "check": "impl_has_validation_hash_prefix",
+      "pass": true,
+      "detail": "sha256:"
+    },
+    {
+      "check": "impl_has_canonicalization",
+      "pass": true,
+      "detail": "witness_references.sort()"
+    },
+    {
+      "check": "impl_minimum_unit_tests",
+      "pass": true,
+      "detail": "17 tests"
+    },
+    {
+      "check": "connector_mod_wires_vef_execution_receipt",
+      "pass": true,
+      "detail": "pub mod vef_execution_receipt;"
+    },
+    {
+      "check": "schema_parseable_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "schema_draft_2020_12",
+      "pass": true,
+      "detail": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "check": "schema_required_top_fields",
+      "pass": true,
+      "detail": "have=10"
+    },
+    {
+      "check": "schema_has_properties_block",
+      "pass": true,
+      "detail": "properties"
+    },
+    {
+      "check": "schema_version_const",
+      "pass": true,
+      "detail": "vef-execution-receipt-v1"
+    },
+    {
+      "check": "schema_policy_hash_pattern",
+      "pass": true,
+      "detail": "^sha256:[0-9a-f]{64}$"
+    },
+    {
+      "check": "schema_capability_context_nonempty",
+      "pass": true,
+      "detail": "1"
+    },
+    {
+      "check": "schema_action_enum_count",
+      "pass": true,
+      "detail": "6"
+    },
+    {
+      "check": "schema_action_enum_values",
+      "pass": true,
+      "detail": "['network_access', 'filesystem_operation', 'process_spawn', 'secret_access', 'policy_transition', 'artifact_promotion']"
+    },
+    {
+      "check": "spec_doc_mentions_bead",
+      "pass": true,
+      "detail": "bd-p73r"
+    },
+    {
+      "check": "spec_doc_mentions_schema",
+      "pass": true,
+      "detail": "vef-execution-receipt-v1"
+    },
+    {
+      "check": "spec_doc_mentions_deterministic_serialization",
+      "pass": true,
+      "detail": "Deterministic Serialization Contract"
+    },
+    {
+      "check": "spec_doc_mentions_hash_contract",
+      "pass": true,
+      "detail": "Hashing Contract"
+    },
+    {
+      "check": "contract_mentions_acceptance",
+      "pass": true,
+      "detail": "Acceptance Criteria"
+    },
+    {
+      "check": "contract_mentions_receipt_contract",
+      "pass": true,
+      "detail": "Receipt Contract"
+    },
+    {
+      "check": "spec_doc_event_VEF-RECEIPT-001",
+      "pass": true,
+      "detail": "VEF-RECEIPT-001"
+    },
+    {
+      "check": "spec_doc_event_VEF-RECEIPT-002",
+      "pass": true,
+      "detail": "VEF-RECEIPT-002"
+    },
+    {
+      "check": "spec_doc_error_VEF-RECEIPT-ERR-001",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-001"
+    },
+    {
+      "check": "spec_doc_error_VEF-RECEIPT-ERR-002",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-002"
+    },
+    {
+      "check": "spec_doc_error_VEF-RECEIPT-ERR-003",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-003"
+    },
+    {
+      "check": "spec_doc_error_VEF-RECEIPT-ERR-004",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-004"
+    },
+    {
+      "check": "spec_doc_error_VEF-RECEIPT-ERR-005",
+      "pass": true,
+      "detail": "VEF-RECEIPT-ERR-005"
+    },
+    {
+      "check": "spec_doc_invariant_INV-VEF-RECEIPT-DETERMINISTIC",
+      "pass": true,
+      "detail": "INV-VEF-RECEIPT-DETERMINISTIC"
+    },
+    {
+      "check": "spec_doc_invariant_INV-VEF-RECEIPT-HASH-STABLE",
+      "pass": true,
+      "detail": "INV-VEF-RECEIPT-HASH-STABLE"
+    },
+    {
+      "check": "spec_doc_invariant_INV-VEF-RECEIPT-VERSIONED",
+      "pass": true,
+      "detail": "INV-VEF-RECEIPT-VERSIONED"
+    },
+    {
+      "check": "spec_doc_invariant_INV-VEF-RECEIPT-TRACEABLE",
+      "pass": true,
+      "detail": "INV-VEF-RECEIPT-TRACEABLE"
+    },
+    {
+      "check": "vectors_parseable_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "vectors_bead_id",
+      "pass": true,
+      "detail": "bd-p73r"
+    },
+    {
+      "check": "vectors_receipt_schema_version",
+      "pass": true,
+      "detail": "vef-execution-receipt-v1"
+    },
+    {
+      "check": "vectors_minimum_count",
+      "pass": true,
+      "detail": "6"
+    },
+    {
+      "check": "vector_0_receipt_object",
+      "pass": true,
+      "detail": "input_receipt object"
+    },
+    {
+      "check": "vector_0_expected_hash_format",
+      "pass": true,
+      "detail": "sha256:adf3b2a92ca3862f4c9449d0d8220e4f9b77dd0d6033ad307a9112e7ea8b26cb"
+    },
+    {
+      "check": "vector_0_canonical_witnesses_list",
+      "pass": true,
+      "detail": "['witness:a', 'witness:b']"
+    },
+    {
+      "check": "vector_0_required_fields",
+      "pass": true,
+      "detail": "all fields present"
+    },
+    {
+      "check": "vector_0_action_type_valid",
+      "pass": true,
+      "detail": "network_access"
+    },
+    {
+      "check": "vector_0_canonical_witnesses_match",
+      "pass": true,
+      "detail": "normalized=['witness:a', 'witness:b']"
+    },
+    {
+      "check": "vector_1_receipt_object",
+      "pass": true,
+      "detail": "input_receipt object"
+    },
+    {
+      "check": "vector_1_expected_hash_format",
+      "pass": true,
+      "detail": "sha256:eb6f69a8f9eca57be58b4d4e23f7cdced16035097a31f7f3f80c92374f5cfc5e"
+    },
+    {
+      "check": "vector_1_canonical_witnesses_list",
+      "pass": true,
+      "detail": "['witness:alpha', 'witness:zeta']"
+    },
+    {
+      "check": "vector_1_required_fields",
+      "pass": true,
+      "detail": "all fields present"
+    },
+    {
+      "check": "vector_1_action_type_valid",
+      "pass": true,
+      "detail": "policy_transition"
+    },
+    {
+      "check": "vector_1_canonical_witnesses_match",
+      "pass": true,
+      "detail": "normalized=['witness:alpha', 'witness:zeta']"
+    },
+    {
+      "check": "vector_2_receipt_object",
+      "pass": true,
+      "detail": "input_receipt object"
+    },
+    {
+      "check": "vector_2_expected_hash_format",
+      "pass": true,
+      "detail": "sha256:c2992e0348fd3f602665719a8458abf1ff302e9dc2d86d8a3af40ad6e2e3b8e6"
+    },
+    {
+      "check": "vector_2_canonical_witnesses_list",
+      "pass": true,
+      "detail": "['witness:quorum-1', 'witness:quorum-2', 'witness:quorum-3']"
+    },
+    {
+      "check": "vector_2_required_fields",
+      "pass": true,
+      "detail": "all fields present"
+    },
+    {
+      "check": "vector_2_action_type_valid",
+      "pass": true,
+      "detail": "artifact_promotion"
+    },
+    {
+      "check": "vector_2_canonical_witnesses_match",
+      "pass": true,
+      "detail": "normalized=['witness:quorum-1', 'witness:quorum-2', 'witness:quorum-3']"
+    },
+    {
+      "check": "vector_3_receipt_object",
+      "pass": true,
+      "detail": "input_receipt object"
+    },
+    {
+      "check": "vector_3_expected_hash_format",
+      "pass": true,
+      "detail": "sha256:af2f6bbd4f4b7d4f09d7ac8e08484d43bcf9f58d65ba750e68be1864e67a70a0"
+    },
+    {
+      "check": "vector_3_canonical_witnesses_list",
+      "pass": true,
+      "detail": "['witness:disk-guard', 'witness:policy-daemon']"
+    },
+    {
+      "check": "vector_3_required_fields",
+      "pass": true,
+      "detail": "all fields present"
+    },
+    {
+      "check": "vector_3_action_type_valid",
+      "pass": true,
+      "detail": "filesystem_operation"
+    },
+    {
+      "check": "vector_3_canonical_witnesses_match",
+      "pass": true,
+      "detail": "normalized=['witness:disk-guard', 'witness:policy-daemon']"
+    },
+    {
+      "check": "vector_4_receipt_object",
+      "pass": true,
+      "detail": "input_receipt object"
+    },
+    {
+      "check": "vector_4_expected_hash_format",
+      "pass": true,
+      "detail": "sha256:7d6b6f6461af23bcf8d4a9d548fddf6ebc9c17effeeb9bce3f846d0a6f2f1f5e"
+    },
+    {
+      "check": "vector_4_canonical_witnesses_list",
+      "pass": true,
+      "detail": "['witness:deny-rule', 'witness:spawn-monitor']"
+    },
+    {
+      "check": "vector_4_required_fields",
+      "pass": true,
+      "detail": "all fields present"
+    },
+    {
+      "check": "vector_4_action_type_valid",
+      "pass": true,
+      "detail": "process_spawn"
+    },
+    {
+      "check": "vector_4_canonical_witnesses_match",
+      "pass": true,
+      "detail": "normalized=['witness:deny-rule', 'witness:spawn-monitor']"
+    },
+    {
+      "check": "vector_5_receipt_object",
+      "pass": true,
+      "detail": "input_receipt object"
+    },
+    {
+      "check": "vector_5_expected_hash_format",
+      "pass": true,
+      "detail": "sha256:af0966199d755fce6f65a27372fbc28ec17fe59af80f535af59db17ca6f5f4ab"
+    },
+    {
+      "check": "vector_5_canonical_witnesses_list",
+      "pass": true,
+      "detail": "['witness:quorum-check', 'witness:vault-audit']"
+    },
+    {
+      "check": "vector_5_required_fields",
+      "pass": true,
+      "detail": "all fields present"
+    },
+    {
+      "check": "vector_5_action_type_valid",
+      "pass": true,
+      "detail": "secret_access"
+    },
+    {
+      "check": "vector_5_canonical_witnesses_match",
+      "pass": true,
+      "detail": "normalized=['witness:quorum-check', 'witness:vault-audit']"
+    },
+    {
+      "check": "vectors_action_type_coverage",
+      "pass": true,
+      "detail": "['artifact_promotion', 'filesystem_operation', 'network_access', 'policy_transition', 'process_spawn', 'secret_access']"
+    },
+    {
+      "check": "evidence_parseable_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "evidence_bead_id",
+      "pass": true,
+      "detail": "bd-p73r"
+    },
+    {
+      "check": "evidence_verdict_pass",
+      "pass": true,
+      "detail": "PASS"
+    },
+    {
+      "check": "summary_mentions_bead",
+      "pass": true,
+      "detail": "bd-p73r"
+    },
+    {
+      "check": "summary_mentions_pass",
+      "pass": true,
+      "detail": "PASS"
+    }
+  ],
+  "timestamp": "2026-02-22T05:57:02.741601+00:00"
+}

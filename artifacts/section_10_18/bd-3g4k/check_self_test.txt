@@ -1,0 +1,7 @@
+[bd-3g4k] PASS (6/6)
+- PASS event_code_count: 7
+- PASS invariant_count: 4
+- PASS impl_symbol_count: 11
+- PASS run_all_is_dict: dict
+- PASS run_all_has_checks: checks list
+- PASS run_all_total_matches: total vs checks

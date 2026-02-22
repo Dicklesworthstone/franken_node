@@ -1,80 +1,55 @@
 {
   "bead_id": "bd-3l2p",
   "section": "10.17",
-  "title": "Intent-aware remote effects firewall for extension-originated traffic",
+  "title": "Intent-Aware Remote Effects Firewall",
+  "status": "pass",
   "verdict": "PASS",
-  "timestamp": "2026-02-21T23:30:00Z",
-  "schema_version": "fw-v1.0",
-  "deliverables": {
-    "spec_contract": "docs/specs/section_10_17/bd-3l2p_contract.md",
-    "rust_module": "crates/franken-node/src/security/intent_firewall.rs",
-    "check_script": "scripts/check_effects_firewall.py",
-    "test_suite": "tests/test_check_effects_firewall.py",
-    "evidence": "artifacts/section_10_17/bd-3l2p/verification_evidence.json",
-    "summary": "artifacts/section_10_17/bd-3l2p/verification_summary.md"
+  "deliverables": [
+    "docs/specs/section_10_17/bd-3l2p_contract.md",
+    "docs/specs/intent_effects_policy.md",
+    "crates/franken-node/src/security/intent_firewall.rs",
+    "tests/security/intent_firewall_conformance.rs",
+    "scripts/check_intent_firewall.py",
+    "tests/test_check_intent_firewall.py",
+    "artifacts/10.17/intent_firewall_eval_report.json",
+    "artifacts/section_10_17/bd-3l2p/verification_evidence.json",
+    "artifacts/section_10_17/bd-3l2p/verification_summary.md"
+  ],
+  "implementation": {
+    "module": "crates/franken-node/src/security/intent_firewall.rs",
+    "registered_in": "crates/franken-node/src/security/mod.rs",
+    "schema_version": "fw-v1.0",
+    "intent_classifications": 10,
+    "verdict_pathways": ["Allow", "Challenge", "Simulate", "Deny", "Quarantine"],
+    "risky_categories": ["Exfiltration", "CredentialForward", "SideChannel"],
+    "event_codes": ["FW_001", "FW_002", "FW_003", "FW_004", "FW_005", "FW_006", "FW_007", "FW_008", "FW_009", "FW_010"],
+    "error_codes": ["ERR_FW_UNCLASSIFIED", "ERR_FW_NO_POLICY", "ERR_FW_INVALID_EFFECT", "ERR_FW_RECEIPT_FAILED", "ERR_FW_POLICY_CONFLICT", "ERR_FW_EXTENSION_UNKNOWN", "ERR_FW_OVERRIDE_UNAUTHORIZED", "ERR_FW_QUARANTINE_FULL"],
+    "invariants": ["INV-FW-FAIL-CLOSED", "INV-FW-RECEIPT-EVERY-DECISION", "INV-FW-RISKY-DEFAULT-DENY", "INV-FW-DETERMINISTIC", "INV-FW-EXTENSION-SCOPED"],
+    "inline_test_count": 37,
+    "core_types": ["IntentClassification", "IntentClassifier", "EffectsFirewall", "RemoteEffect", "FirewallVerdict", "FirewallDecision", "TrafficPolicy", "TrafficPolicyRule", "FirewallError", "FirewallAuditEvent", "TrafficOrigin", "PolicyOverride"],
+    "uses_btreemap": true,
+    "uses_btreeset": true,
+    "serde_derives": true
   },
-  "invariants": [
-    {
-      "id": "INV-FW-FAIL-CLOSED",
-      "description": "Unclassifiable traffic is denied with a receipt",
-      "verified": true
-    },
-    {
-      "id": "INV-FW-RECEIPT-EVERY-DECISION",
-      "description": "Every decision produces a deterministic receipt with trace_id",
-      "verified": true
-    },
-    {
-      "id": "INV-FW-RISKY-DEFAULT-DENY",
-      "description": "Risky intent categories default to deny/quarantine",
-      "verified": true
-    },
-    {
-      "id": "INV-FW-DETERMINISTIC",
-      "description": "Identical inputs produce identical outputs via BTreeMap ordering",
-      "verified": true
-    },
-    {
-      "id": "INV-FW-EXTENSION-SCOPED",
-      "description": "Firewall applies only to extension-originated traffic",
-      "verified": true
-    }
-  ],
-  "event_codes": ["FW_001", "FW_002", "FW_003", "FW_004", "FW_005", "FW_006", "FW_007", "FW_008", "FW_009", "FW_010"],
-  "error_codes": [
-    "ERR_FW_UNCLASSIFIED",
-    "ERR_FW_NO_POLICY",
-    "ERR_FW_INVALID_EFFECT",
-    "ERR_FW_RECEIPT_FAILED",
-    "ERR_FW_POLICY_CONFLICT",
-    "ERR_FW_EXTENSION_UNKNOWN",
-    "ERR_FW_OVERRIDE_UNAUTHORIZED",
-    "ERR_FW_QUARANTINE_FULL"
-  ],
-  "verdict_pathways": ["allow", "challenge", "simulate", "deny", "quarantine"],
-  "intent_categories": [
-    "data_fetch", "data_mutation", "webhook_dispatch", "analytics_export",
-    "exfiltration", "credential_forward", "side_channel",
-    "service_discovery", "health_check", "config_sync"
-  ],
-  "core_types": [
-    "EffectsFirewall", "IntentClassification", "TrafficPolicy",
-    "FirewallDecision", "RemoteEffect", "FirewallVerdict",
-    "TrafficPolicyRule", "TrafficOrigin", "FirewallError",
-    "FirewallAuditEvent", "IntentClassifier", "PolicyOverride"
-  ],
-  "test_count": {
-    "rust_unit_tests": 28,
-    "python_test_methods": 14
+  "checker": {
+    "command": "python3 scripts/check_intent_firewall.py --json",
+    "self_test_command": "python3 scripts/check_intent_firewall.py --self-test",
+    "exit_code": 0,
+    "passed_checks": 83,
+    "failed_checks": 0
   },
-  "acceptance_criteria_met": [
-    "Stable intent classification for all 10 categories",
-    "Risky categories (exfiltration, credential_forward, side_channel) trigger deny by default",
-    "Challenge/simulate/quarantine pathways implemented",
-    "Deterministic receipts with trace_id for every decision",
-    "Fail-closed on unclassifiable traffic",
-    "BTreeMap ordering for determinism",
-    "20+ Rust unit tests",
-    "Check script with --json and --self-test flags"
+  "test_suite": {
+    "command": "python3 -m pytest tests/test_check_intent_firewall.py -v",
+    "test_file": "tests/test_check_intent_firewall.py"
+  },
+  "notes": [
+    "Extension-originated remote effects are classified by intent through 10 categories.",
+    "Risky intents (exfiltration, credential_forward, side_channel) default to Deny via INV-FW-RISKY-DEFAULT-DENY.",
+    "Unclassifiable traffic is denied via INV-FW-FAIL-CLOSED.",
+    "Every decision produces a structured receipt with trace_id via INV-FW-RECEIPT-EVERY-DECISION.",
+    "Node-internal traffic bypasses the firewall with audit trail via INV-FW-EXTENSION-SCOPED.",
+    "BTreeMap/BTreeSet used throughout for deterministic ordering via INV-FW-DETERMINISTIC.",
+    "Policy overrides require non-empty justification; empty justification triggers ERR_FW_OVERRIDE_UNAUTHORIZED.",
+    "Quarantine capacity is bounded; overflow triggers ERR_FW_QUARANTINE_FULL."
   ]
 }

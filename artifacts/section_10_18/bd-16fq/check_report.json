@@ -1,0 +1,477 @@
+{
+  "bead_id": "bd-16fq",
+  "title": "VEF policy-constraint language and compiler contract",
+  "section": "10.18",
+  "verdict": "PASS",
+  "total": 93,
+  "passed": 93,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "impl_exists",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/vef_policy_constraints.rs"
+    },
+    {
+      "check": "mod_exists",
+      "pass": true,
+      "detail": "crates/franken-node/src/connector/mod.rs"
+    },
+    {
+      "check": "spec_language_exists",
+      "pass": true,
+      "detail": "docs/specs/vef_policy_constraint_language.md"
+    },
+    {
+      "check": "spec_contract_exists",
+      "pass": true,
+      "detail": "docs/specs/section_10_18/bd-16fq_contract.md"
+    },
+    {
+      "check": "schema_exists",
+      "pass": true,
+      "detail": "spec/vef_policy_constraints_v1.json"
+    },
+    {
+      "check": "vector_exists",
+      "pass": true,
+      "detail": "vectors/vef_policy_constraint_compiler.json"
+    },
+    {
+      "check": "conformance_exists",
+      "pass": true,
+      "detail": "tests/conformance/vef_policy_constraint_compiler.rs"
+    },
+    {
+      "check": "unit_test_exists",
+      "pass": true,
+      "detail": "tests/test_check_vef_policy_constraints.py"
+    },
+    {
+      "check": "report_exists",
+      "pass": true,
+      "detail": "artifacts/10.18/vef_constraint_compiler_report.json"
+    },
+    {
+      "check": "evidence_exists",
+      "pass": true,
+      "detail": "artifacts/section_10_18/bd-16fq/verification_evidence.json"
+    },
+    {
+      "check": "summary_exists",
+      "pass": true,
+      "detail": "artifacts/section_10_18/bd-16fq/verification_summary.md"
+    },
+    {
+      "check": "connector_mod_wires_vef_policy_constraints",
+      "pass": true,
+      "detail": "pub mod vef_policy_constraints;"
+    },
+    {
+      "check": "impl_symbol_pub struct RuntimePolicy",
+      "pass": true,
+      "detail": "pub struct RuntimePolicy"
+    },
+    {
+      "check": "impl_symbol_pub struct PolicyRule",
+      "pass": true,
+      "detail": "pub struct PolicyRule"
+    },
+    {
+      "check": "impl_symbol_pub enum ActionClass",
+      "pass": true,
+      "detail": "pub enum ActionClass"
+    },
+    {
+      "check": "impl_symbol_pub enum RuleEffect",
+      "pass": true,
+      "detail": "pub enum RuleEffect"
+    },
+    {
+      "check": "impl_symbol_pub struct CompiledConstraintEnvelope",
+      "pass": true,
+      "detail": "pub struct CompiledConstraintEnvelope"
+    },
+    {
+      "check": "impl_symbol_pub struct CompiledPredicate",
+      "pass": true,
+      "detail": "pub struct CompiledPredicate"
+    },
+    {
+      "check": "impl_symbol_pub struct RuleSemanticProjection",
+      "pass": true,
+      "detail": "pub struct RuleSemanticProjection"
+    },
+    {
+      "check": "impl_symbol_pub struct CompilerEvent",
+      "pass": true,
+      "detail": "pub struct CompilerEvent"
+    },
+    {
+      "check": "impl_symbol_pub struct ConstraintCompileError",
+      "pass": true,
+      "detail": "pub struct ConstraintCompileError"
+    },
+    {
+      "check": "impl_symbol_pub fn compile_policy",
+      "pass": true,
+      "detail": "pub fn compile_policy"
+    },
+    {
+      "check": "impl_symbol_pub fn decompile_projection",
+      "pass": true,
+      "detail": "pub fn decompile_projection"
+    },
+    {
+      "check": "impl_symbol_pub fn round_trip_semantics",
+      "pass": true,
+      "detail": "pub fn round_trip_semantics"
+    },
+    {
+      "check": "impl_symbol_pub fn mock_proof_generator_accepts",
+      "pass": true,
+      "detail": "pub fn mock_proof_generator_accepts"
+    },
+    {
+      "check": "impl_action_class_network_access",
+      "pass": true,
+      "detail": "network_access"
+    },
+    {
+      "check": "impl_action_class_filesystem_operation",
+      "pass": true,
+      "detail": "filesystem_operation"
+    },
+    {
+      "check": "impl_action_class_process_spawn",
+      "pass": true,
+      "detail": "process_spawn"
+    },
+    {
+      "check": "impl_action_class_secret_access",
+      "pass": true,
+      "detail": "secret_access"
+    },
+    {
+      "check": "impl_action_class_policy_transition",
+      "pass": true,
+      "detail": "policy_transition"
+    },
+    {
+      "check": "impl_action_class_artifact_promotion",
+      "pass": true,
+      "detail": "artifact_promotion"
+    },
+    {
+      "check": "impl_event_code_VEF-COMPILE-001",
+      "pass": true,
+      "detail": "VEF-COMPILE-001"
+    },
+    {
+      "check": "impl_event_code_VEF-COMPILE-002",
+      "pass": true,
+      "detail": "VEF-COMPILE-002"
+    },
+    {
+      "check": "impl_event_code_VEF-COMPILE-ERR-001",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-001"
+    },
+    {
+      "check": "impl_event_code_VEF-COMPILE-ERR-002",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-002"
+    },
+    {
+      "check": "impl_event_code_VEF-COMPILE-ERR-003",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-003"
+    },
+    {
+      "check": "impl_event_code_VEF-COMPILE-ERR-004",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-004"
+    },
+    {
+      "check": "impl_event_code_VEF-COMPILE-ERR-005",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-005"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-COMP-DETERMINISTIC",
+      "pass": true,
+      "detail": "INV-VEF-COMP-DETERMINISTIC"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-COMP-COVERAGE",
+      "pass": true,
+      "detail": "INV-VEF-COMP-COVERAGE"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-COMP-TRACEABLE",
+      "pass": true,
+      "detail": "INV-VEF-COMP-TRACEABLE"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-COMP-VERSIONED",
+      "pass": true,
+      "detail": "INV-VEF-COMP-VERSIONED"
+    },
+    {
+      "check": "impl_invariant_INV-VEF-COMP-ROUNDTRIP",
+      "pass": true,
+      "detail": "INV-VEF-COMP-ROUNDTRIP"
+    },
+    {
+      "check": "impl_trace_link_contract",
+      "pass": true,
+      "detail": "trace_link + policy:"
+    },
+    {
+      "check": "impl_sha256_hashing",
+      "pass": true,
+      "detail": "Sha256 + policy_snapshot_hash"
+    },
+    {
+      "check": "impl_minimum_unit_tests",
+      "pass": true,
+      "detail": "19 tests"
+    },
+    {
+      "check": "schema_parseable_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "schema_draft_2020_12",
+      "pass": true,
+      "detail": "https://json-schema.org/draft/2020-12/schema"
+    },
+    {
+      "check": "schema_required_top_fields",
+      "pass": true,
+      "detail": "have=10"
+    },
+    {
+      "check": "schema_def_RuntimePolicy",
+      "pass": true,
+      "detail": "RuntimePolicy"
+    },
+    {
+      "check": "schema_def_PolicyRule",
+      "pass": true,
+      "detail": "PolicyRule"
+    },
+    {
+      "check": "schema_def_CompiledPredicate",
+      "pass": true,
+      "detail": "CompiledPredicate"
+    },
+    {
+      "check": "schema_def_RuleSemanticProjection",
+      "pass": true,
+      "detail": "RuleSemanticProjection"
+    },
+    {
+      "check": "schema_def_CompilerEvent",
+      "pass": true,
+      "detail": "CompilerEvent"
+    },
+    {
+      "check": "schema_def_ActionClass",
+      "pass": true,
+      "detail": "ActionClass"
+    },
+    {
+      "check": "schema_action_class_count",
+      "pass": true,
+      "detail": "6"
+    },
+    {
+      "check": "schema_action_class_values",
+      "pass": true,
+      "detail": "['network_access', 'filesystem_operation', 'process_spawn', 'secret_access', 'policy_transition', 'artifact_promotion']"
+    },
+    {
+      "check": "spec_lang_mentions_bead",
+      "pass": true,
+      "detail": "bd-16fq"
+    },
+    {
+      "check": "spec_lang_mentions_section",
+      "pass": true,
+      "detail": "10.18"
+    },
+    {
+      "check": "spec_lang_mentions_round_trip",
+      "pass": true,
+      "detail": "round-trip"
+    },
+    {
+      "check": "spec_lang_event_VEF-COMPILE-001",
+      "pass": true,
+      "detail": "VEF-COMPILE-001"
+    },
+    {
+      "check": "spec_lang_event_VEF-COMPILE-002",
+      "pass": true,
+      "detail": "VEF-COMPILE-002"
+    },
+    {
+      "check": "spec_lang_event_VEF-COMPILE-ERR-001",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-001"
+    },
+    {
+      "check": "spec_lang_event_VEF-COMPILE-ERR-002",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-002"
+    },
+    {
+      "check": "spec_lang_event_VEF-COMPILE-ERR-003",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-003"
+    },
+    {
+      "check": "spec_lang_event_VEF-COMPILE-ERR-004",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-004"
+    },
+    {
+      "check": "spec_lang_event_VEF-COMPILE-ERR-005",
+      "pass": true,
+      "detail": "VEF-COMPILE-ERR-005"
+    },
+    {
+      "check": "spec_lang_invariant_INV-VEF-COMP-DETERMINISTIC",
+      "pass": true,
+      "detail": "INV-VEF-COMP-DETERMINISTIC"
+    },
+    {
+      "check": "spec_lang_invariant_INV-VEF-COMP-COVERAGE",
+      "pass": true,
+      "detail": "INV-VEF-COMP-COVERAGE"
+    },
+    {
+      "check": "spec_lang_invariant_INV-VEF-COMP-TRACEABLE",
+      "pass": true,
+      "detail": "INV-VEF-COMP-TRACEABLE"
+    },
+    {
+      "check": "spec_lang_invariant_INV-VEF-COMP-VERSIONED",
+      "pass": true,
+      "detail": "INV-VEF-COMP-VERSIONED"
+    },
+    {
+      "check": "spec_lang_invariant_INV-VEF-COMP-ROUNDTRIP",
+      "pass": true,
+      "detail": "INV-VEF-COMP-ROUNDTRIP"
+    },
+    {
+      "check": "contract_mentions_acceptance",
+      "pass": true,
+      "detail": "Acceptance Criteria"
+    },
+    {
+      "check": "contract_mentions_action_classes",
+      "pass": true,
+      "detail": "Required Action Classes"
+    },
+    {
+      "check": "vector_parseable_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "vector_bead_id",
+      "pass": true,
+      "detail": "bd-16fq"
+    },
+    {
+      "check": "vector_has_input_policy",
+      "pass": true,
+      "detail": "input_policy object"
+    },
+    {
+      "check": "vector_has_expected_output",
+      "pass": true,
+      "detail": "expected_output object"
+    },
+    {
+      "check": "vector_input_schema_version",
+      "pass": true,
+      "detail": "vef-policy-lang-v1"
+    },
+    {
+      "check": "vector_expected_schema_version",
+      "pass": true,
+      "detail": "vef-policy-constraints-v1"
+    },
+    {
+      "check": "vector_input_rule_count",
+      "pass": true,
+      "detail": "6"
+    },
+    {
+      "check": "vector_covers_all_action_classes",
+      "pass": true,
+      "detail": "['artifact_promotion', 'filesystem_operation', 'network_access', 'policy_transition', 'process_spawn', 'secret_access']"
+    },
+    {
+      "check": "report_parseable_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "report_section_10_18",
+      "pass": true,
+      "detail": "10.18"
+    },
+    {
+      "check": "report_verdict_pass",
+      "pass": true,
+      "detail": "PASS"
+    },
+    {
+      "check": "report_has_coverage_matrix",
+      "pass": true,
+      "detail": "coverage_matrix"
+    },
+    {
+      "check": "report_coverage_matrix_all_classes",
+      "pass": true,
+      "detail": "['artifact_promotion', 'filesystem_operation', 'network_access', 'policy_transition', 'process_spawn', 'secret_access']"
+    },
+    {
+      "check": "evidence_parseable_json",
+      "pass": true,
+      "detail": "valid JSON"
+    },
+    {
+      "check": "evidence_bead",
+      "pass": true,
+      "detail": "bd-16fq"
+    },
+    {
+      "check": "evidence_verdict_pass",
+      "pass": true,
+      "detail": "PASS"
+    },
+    {
+      "check": "evidence_artifacts_block",
+      "pass": true,
+      "detail": "artifacts block"
+    },
+    {
+      "check": "summary_mentions_bd",
+      "pass": true,
+      "detail": "bd-16fq"
+    },
+    {
+      "check": "summary_mentions_pass",
+      "pass": true,
+      "detail": "PASS"
+    }
+  ],
+  "timestamp": "2026-02-22T05:49:23.908837+00:00"
+}

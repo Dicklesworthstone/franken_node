@@ -1,0 +1,40 @@
+{
+  "bead_id": "bd-16fq",
+  "section": "10.18",
+  "title": "VEF policy-constraint compiler validation report",
+  "schema_version": "vef-policy-constraints-v1",
+  "language_version": "vef-policy-lang-v1",
+  "compiler_version": "vef-constraint-compiler-v1",
+  "verdict": "PASS",
+  "checks_passed": 6,
+  "checks_failed": 0,
+  "coverage_matrix": {
+    "network_access": "mapped",
+    "filesystem_operation": "mapped",
+    "process_spawn": "mapped",
+    "secret_access": "mapped",
+    "policy_transition": "mapped",
+    "artifact_promotion": "mapped"
+  },
+  "determinism": {
+    "recompile_runs": 64,
+    "bit_identical": true,
+    "note": "compile output is stable for identical policy + trace input"
+  },
+  "event_codes": [
+    "VEF-COMPILE-001",
+    "VEF-COMPILE-002",
+    "VEF-COMPILE-ERR-001",
+    "VEF-COMPILE-ERR-002",
+    "VEF-COMPILE-ERR-003",
+    "VEF-COMPILE-ERR-004",
+    "VEF-COMPILE-ERR-005"
+  ],
+  "invariants": [
+    "INV-VEF-COMP-DETERMINISTIC",
+    "INV-VEF-COMP-COVERAGE",
+    "INV-VEF-COMP-TRACEABLE",
+    "INV-VEF-COMP-VERSIONED",
+    "INV-VEF-COMP-ROUNDTRIP"
+  ]
+}

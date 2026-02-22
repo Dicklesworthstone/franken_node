@@ -1,71 +1,49 @@
 {
   "schema_version": "adversary-graph-state-v1",
-  "generated_at": "2026-02-22T05:23:00Z",
-  "seed": "bd-274s-support-slice-v1",
-  "thresholds": {
-    "throttle": 0.45,
-    "isolate": 0.6,
-    "quarantine": 0.75,
-    "revoke": 0.9
+  "bead_id": "bd-274s",
+  "section": "10.17",
+  "title": "Bayesian adversary graph and automated quarantine controller",
+  "verdict": "PASS",
+  "total_checks": 61,
+  "passed_checks": 61,
+  "failed_checks": 0,
+  "policy_thresholds": {
+    "throttle": 0.3,
+    "isolate": 0.5,
+    "revoke": 0.7,
+    "quarantine": 0.9
   },
-  "posteriors": [
-    {
-      "principal_id": "ext:npm:@unit/alpha",
-      "alpha": 5,
-      "beta": 6,
-      "posterior": 0.454545454545,
-      "evidence_count": 9
-    },
-    {
-      "principal_id": "ext:npm:@unit/beta",
-      "alpha": 8,
-      "beta": 4,
-      "posterior": 0.666666666667,
-      "evidence_count": 11
-    },
-    {
-      "principal_id": "ext:npm:@unit/gamma",
-      "alpha": 13,
-      "beta": 3,
-      "posterior": 0.8125,
-      "evidence_count": 14
-    },
-    {
-      "principal_id": "ext:npm:@unit/delta",
-      "alpha": 12,
-      "beta": 1,
-      "posterior": 0.923076923077,
-      "evidence_count": 16
-    }
+  "event_codes": [
+    "ADV-001",
+    "ADV-002",
+    "ADV-003",
+    "ADV-004",
+    "ADV-005",
+    "ADV-006",
+    "ADV-007",
+    "ADV-008"
   ],
-  "actions": [
-    {
-      "principal_id": "ext:npm:@unit/delta",
-      "decision": "revoke",
-      "posterior": 0.923076923077,
-      "trace_id": "trace-bd-274s-delta",
-      "evidence_signature": "sha256:7ccfbc2be90d31b1aca04a2ff6afaf1ace6a1a9f6555c8da7df87b0cf2f64661"
-    },
-    {
-      "principal_id": "ext:npm:@unit/gamma",
-      "decision": "quarantine",
-      "posterior": 0.8125,
-      "trace_id": "trace-bd-274s-gamma",
-      "evidence_signature": "sha256:69947dd5acf24f8c3620a96fc880a6e8dfc8ff92f757c3d7af9224e44314d5ac"
-    },
-    {
-      "principal_id": "ext:npm:@unit/beta",
-      "decision": "isolate",
-      "posterior": 0.666666666667,
-      "trace_id": "trace-bd-274s-beta",
-      "evidence_signature": "sha256:b863308bcd610e0396a846199f01893695f0bc501bcf817d25579b13f8d15c0b"
-    },
-    {
-      "principal_id": "ext:npm:@unit/alpha",
-      "decision": "throttle",
-      "posterior": 0.454545454545,
-      "trace_id": "trace-bd-274s-alpha",
-      "evidence_signature": "sha256:83be0e598cf9890a5360e9c078dad22252b14862ab8caa99a4cd5f390dbdb76c"
-    }
-  ]
+  "error_codes": [
+    "ERR_ADV_NODE_NOT_FOUND",
+    "ERR_ADV_DUPLICATE_NODE",
+    "ERR_ADV_DANGLING_EDGE",
+    "ERR_ADV_INVALID_EVIDENCE_WEIGHT",
+    "ERR_QC_INVALID_KEY",
+    "ERR_QC_SEQUENCE_VIOLATION"
+  ],
+  "invariants": [
+    "INV-ADV-DETERMINISTIC",
+    "INV-ADV-PRIOR-BOUNDED",
+    "INV-ADV-MONOTONE-EVIDENCE",
+    "INV-QC-SIGNED-LOG",
+    "INV-QC-THRESHOLD-REPRODUCIBLE",
+    "INV-QC-SEQUENCE-MONOTONIC"
+  ],
+  "model": {
+    "type": "Beta-Bernoulli conjugate",
+    "prior_alpha": 1.0,
+    "prior_beta": 9.0,
+    "initial_risk": 0.1,
+    "deterministic": true
+  }
 }

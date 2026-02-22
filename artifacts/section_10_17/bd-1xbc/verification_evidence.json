@@ -2,52 +2,72 @@
   "bead_id": "bd-1xbc",
   "section": "10.17",
   "title": "Deterministic time-travel runtime capture/replay for extension-host workflows",
-  "verdict": "PASS",
-  "schema_version": "evidence-v1.0",
-  "timestamp": "2026-02-21T00:00:00Z",
-  "agent": "CrimsonCrane",
-  "deliverables": {
-    "spec_contract": "docs/specs/section_10_17/bd-1xbc_contract.md",
-    "rust_module": "crates/franken-node/src/runtime/time_travel.rs",
-    "module_wiring": "crates/franken-node/src/runtime/mod.rs",
-    "check_script": "scripts/check_time_travel_replay.py",
-    "test_suite": "tests/test_check_time_travel_replay.py",
-    "verification_evidence": "artifacts/section_10_17/bd-1xbc/verification_evidence.json",
-    "verification_summary": "artifacts/section_10_17/bd-1xbc/verification_summary.md"
+  "generated_at": "2026-02-21T00:00:00Z",
+  "status": "completed",
+  "gate_script": "scripts/check_time_travel_replay.py",
+  "test_suite": "tests/test_check_time_travel_replay.py",
+  "checks": [
+    {
+      "name": "implementation_surface_present",
+      "command": "test -f crates/franken-node/src/replay/time_travel_engine.rs && test -f docs/specs/section_10_17/bd-1xbc_contract.md",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "name": "gate_script_json",
+      "command": "python3 scripts/check_time_travel_replay.py --json",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "name": "gate_script_self_test",
+      "command": "python3 scripts/check_time_travel_replay.py --self-test",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "name": "pytest_gate_tests",
+      "command": "python3 -m pytest tests/test_check_time_travel_replay.py -v",
+      "exit_code": 0,
+      "status": "PASS",
+      "detail": "27 passed"
+    }
+  ],
+  "contract_surface": {
+    "implementation": "crates/franken-node/src/replay/time_travel_engine.rs",
+    "module_wire": "crates/franken-node/src/replay/mod.rs",
+    "main_wire": "crates/franken-node/src/main.rs (pub mod replay)",
+    "spec": "docs/specs/section_10_17/bd-1xbc_contract.md",
+    "gate_script": "scripts/check_time_travel_replay.py",
+    "gate_tests": "tests/test_check_time_travel_replay.py"
   },
-  "invariants": [
-    "INV-TTR-DETERMINISTIC",
-    "INV-TTR-FRAME-COMPLETE",
-    "INV-TTR-CLOCK-MONOTONIC",
-    "INV-TTR-DIVERGENCE-DETECTED",
-    "INV-TTR-SNAPSHOT-SCHEMA",
-    "INV-TTR-STEP-NAVIGATION"
+  "capabilities_verified": [
+    "WorkflowTrace struct with trace_id, steps, environment, trace_digest",
+    "TraceStep struct with seq, input, output, side_effects, timestamp_ns",
+    "EnvironmentSnapshot with clock_seed_ns, env_vars, platform, runtime_version",
+    "TraceBuilder for step-by-step trace construction with audit logging",
+    "ReplayEngine with register_trace, replay, replay_identity, remove_trace",
+    "ReplayResult with divergences list and ReplayVerdict",
+    "ReplayVerdict: Identical or Diverged(count)",
+    "Divergence struct with step_seq, kind, expected/actual digests, explanation",
+    "DivergenceKind: OutputMismatch, SideEffectMismatch, FullMismatch",
+    "TimeTravelError enum covering all 8 error scenarios",
+    "10 TTR event codes (TTR-001 through TTR-010)",
+    "8 TTR error codes (ERR_TTR_*)",
+    "6 invariant constants (INV-TTR-*)",
+    "Contract-level invariants (INV-REPLAY-*)",
+    "Contract-level event codes (REPLAY_*)",
+    "Contract-level error codes (ERR_REPLAY_*)",
+    "SHA-256 trace digest for integrity verification",
+    "BTreeMap for deterministic ordering",
+    "Schema version ttr-v1.0",
+    "Serde Serialize/Deserialize on all types",
+    "identity_replay function for baseline determinism testing",
+    "47 inline unit tests"
   ],
-  "event_codes": [
-    "TTR_001", "TTR_002", "TTR_003", "TTR_004", "TTR_005",
-    "TTR_006", "TTR_007", "TTR_008", "TTR_009", "TTR_010"
-  ],
-  "error_codes": [
-    "ERR_TTR_EMPTY_TRACE",
-    "ERR_TTR_DIVERGENCE",
-    "ERR_TTR_CLOCK_REGRESSION",
-    "ERR_TTR_STEP_OUT_OF_BOUNDS",
-    "ERR_TTR_SNAPSHOT_CORRUPT",
-    "ERR_TTR_SEED_MISMATCH"
-  ],
-  "acceptance_criteria": {
-    "byte_for_byte_replay": "PASS - identical seed+input produces identical decision digests across capture runs; replay session verifies all frames",
-    "stepwise_navigation": "PASS - ReplaySession supports step_forward, step_backward, and jump_to with boundary enforcement",
-    "divergence_explanation": "PASS - verify_decision produces DivergenceExplanation with frame_index, clock_tick, expected/actual digest, and human-readable explanation",
-    "unit_tests_ge_20": "PASS - 30 inline #[test] functions covering all invariants, error codes, and edge cases",
-    "event_codes_complete": "PASS - TTR_001..TTR_010 all present as constants",
-    "error_codes_complete": "PASS - all 6 ERR_TTR_* codes present as constants",
-    "btreemap_deterministic": "PASS - BTreeMap used for all map types",
-    "schema_version": "PASS - ttr-v1.0 constant defined"
-  },
   "checks_summary": {
-    "total": 30,
-    "passing": 30,
+    "total": 43,
+    "passing": 43,
     "failing": 0
   }
 }
