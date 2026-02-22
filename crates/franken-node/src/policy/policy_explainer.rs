@@ -779,7 +779,7 @@ mod tests {
         };
         let json = serde_json::to_string(&wv).unwrap();
         let parsed: WordingValidation = serde_json::from_str(&json).unwrap();
-        assert_eq!(parsed.valid, true);
+        assert!(parsed.valid);
     }
 
     // -- Diagnostic section uses correct language --

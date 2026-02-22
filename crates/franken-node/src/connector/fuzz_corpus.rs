@@ -188,7 +188,7 @@ impl FuzzCorpus {
             }
         }
 
-        for (name, _target) in &self.targets {
+        for name in self.targets.keys() {
             let count = self.seeds.get(name).map_or(0, |s| s.len());
             if count < self.min_seeds {
                 return Err(FuzzError::InsufficientCorpus {
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn seed_to_missing_target() {
         let c = FuzzCorpus::new(3);
-        let err = c.seeds.get("no_such").is_none();
+        let err = !c.seeds.contains_key("no_such");
         assert!(err);
         let mut c2 = FuzzCorpus::new(3);
         let err = c2
@@ -390,7 +390,7 @@ mod tests {
 
     #[test]
     fn all_error_codes_present() {
-        let errors = vec![
+        let errors = [
             FuzzError::MissingTarget("x".into()),
             FuzzError::InsufficientCorpus {
                 target: "x".into(),

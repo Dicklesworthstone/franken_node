@@ -18,6 +18,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+/// Type alias for the result of a safety-violation check: `None` means safe,
+/// `Some((description, trace))` describes the violation.
+type SafetyViolation = Option<(String, Vec<CounterexampleStep>)>;
+
 /// Schema version for DPOR reports.
 pub const SCHEMA_VERSION: &str = "dpor-v1.0";
 
@@ -426,7 +430,7 @@ impl DporExplorer {
     pub fn explore(
         &mut self,
         model_name: &str,
-        check_fn: &dyn Fn(&[&Operation]) -> Option<(String, Vec<CounterexampleStep>)>,
+        check_fn: &dyn Fn(&[&Operation]) -> SafetyViolation,
         trace_id: &str,
     ) -> Result<ExplorationResult, DporError> {
         let model = self

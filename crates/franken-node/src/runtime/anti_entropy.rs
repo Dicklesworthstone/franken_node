@@ -538,8 +538,10 @@ mod tests {
 
     #[test]
     fn test_invalid_max_delta_batch() {
-        let mut cfg = ReconciliationConfig::default();
-        cfg.max_delta_batch = 0;
+        let cfg = ReconciliationConfig {
+            max_delta_batch: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 

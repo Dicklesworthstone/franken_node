@@ -156,6 +156,7 @@ impl ScheduleConfig {
         hasher.finalize().into()
     }
 
+    #[allow(dead_code)]
     pub fn config_hash_hex(&self) -> String {
         hex::encode(self.config_hash())
     }
@@ -213,6 +214,7 @@ pub enum SeedError {
     #[error("invalid content hash: must be 32 bytes hex-encoded")]
     InvalidContentHash,
     #[error("config version must be > 0")]
+    #[allow(dead_code)]
     ZeroConfigVersion,
 }
 
@@ -248,7 +250,7 @@ pub fn derive_seed(
     // Domain-separation prefix (INV-SEED-DOMAIN-SEP)
     hasher.update(domain.prefix().as_bytes());
     // Null separator to prevent prefix collisions
-    hasher.update(&[0x00]);
+    hasher.update([0x00]);
     // Content hash (32 bytes)
     hasher.update(content_hash.0);
     // Config hash (32 bytes, deterministic)
@@ -377,7 +379,7 @@ fn derive_seed_raw(
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(domain.prefix().as_bytes());
-    hasher.update(&[0x00]);
+    hasher.update([0x00]);
     hasher.update(content_hash.0);
     hasher.update(config_hash);
     hasher.finalize().into()

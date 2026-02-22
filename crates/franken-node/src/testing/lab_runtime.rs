@@ -907,6 +907,7 @@ mod tests {
         }
     }
 
+    #[allow(dead_code)]
     fn corrupt_profile() -> FaultProfile {
         FaultProfile {
             drop_pct: 0.0,
@@ -1439,7 +1440,7 @@ mod tests {
         let restored = ReproBundle::from_json(&json).unwrap();
         assert_eq!(restored.schema_version, SCHEMA_VERSION);
         assert_eq!(restored.seed, 42);
-        assert_eq!(restored.passed, false);
+        assert!(!restored.passed);
         assert_eq!(restored.links.len(), 1);
     }
 

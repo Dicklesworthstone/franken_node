@@ -598,48 +598,48 @@ impl BarrierEngine {
         let barrier_ids = self.get_node_barrier_ids(node_id);
 
         for barrier_id in &barrier_ids {
-            if let Some(barrier) = self.barriers.get(barrier_id) {
-                if let BarrierConfig::SandboxEscalation(ref cfg) = barrier.config {
-                    // Enforce minimum tier
-                    if current_tier.level() < cfg.min_tier.level() {
-                        let receipt = BarrierAuditReceipt::new(
-                            event_codes::BARRIER_CHECK_DENIED,
-                            barrier,
-                            BarrierAction::CheckDenied,
-                            trace_id,
-                            serde_json::json!({
-                                "reason": "sandbox tier below minimum",
-                                "current_tier": format!("{current_tier}"),
-                                "required_tier": format!("{}", cfg.min_tier),
-                            }),
-                        );
-                        self.audit_log.push(receipt);
-                        return Err(BarrierError::SandboxEscalation(format!(
-                            "node {node_id} requires at least {}, currently at {current_tier}",
-                            cfg.min_tier
-                        )));
-                    }
+            if let Some(barrier) = self.barriers.get(barrier_id)
+                && let BarrierConfig::SandboxEscalation(ref cfg) = barrier.config
+            {
+                // Enforce minimum tier
+                if current_tier.level() < cfg.min_tier.level() {
+                    let receipt = BarrierAuditReceipt::new(
+                        event_codes::BARRIER_CHECK_DENIED,
+                        barrier,
+                        BarrierAction::CheckDenied,
+                        trace_id,
+                        serde_json::json!({
+                            "reason": "sandbox tier below minimum",
+                            "current_tier": format!("{current_tier}"),
+                            "required_tier": format!("{}", cfg.min_tier),
+                        }),
+                    );
+                    self.audit_log.push(receipt);
+                    return Err(BarrierError::SandboxEscalation(format!(
+                        "node {node_id} requires at least {}, currently at {current_tier}",
+                        cfg.min_tier
+                    )));
+                }
 
-                    // Check denied capabilities
-                    if cfg
-                        .denied_capabilities
-                        .contains(&requested_capability.to_string())
-                    {
-                        let receipt = BarrierAuditReceipt::new(
-                            event_codes::BARRIER_CHECK_DENIED,
-                            barrier,
-                            BarrierAction::CheckDenied,
-                            trace_id,
-                            serde_json::json!({
-                                "reason": "capability denied by sandbox escalation",
-                                "capability": requested_capability,
-                            }),
-                        );
-                        self.audit_log.push(receipt);
-                        return Err(BarrierError::SandboxEscalation(format!(
-                            "capability '{requested_capability}' denied on node {node_id}"
-                        )));
-                    }
+                // Check denied capabilities
+                if cfg
+                    .denied_capabilities
+                    .contains(&requested_capability.to_string())
+                {
+                    let receipt = BarrierAuditReceipt::new(
+                        event_codes::BARRIER_CHECK_DENIED,
+                        barrier,
+                        BarrierAction::CheckDenied,
+                        trace_id,
+                        serde_json::json!({
+                            "reason": "capability denied by sandbox escalation",
+                            "capability": requested_capability,
+                        }),
+                    );
+                    self.audit_log.push(receipt);
+                    return Err(BarrierError::SandboxEscalation(format!(
+                        "capability '{requested_capability}' denied on node {node_id}"
+                    )));
                 }
             }
         }
@@ -674,32 +674,31 @@ impl BarrierEngine {
         let barrier_ids = self.get_node_barrier_ids(node_id);
 
         for barrier_id in &barrier_ids {
-            if let Some(barrier) = self.barriers.get(barrier_id) {
-                if let BarrierConfig::CompositionFirewall(ref cfg) = barrier.config {
-                    if cfg.boundary_id == target_boundary {
-                        // Capability blocked unless in allow list
-                        let is_allowed = cfg.allow_list.contains(&capability.to_string());
-                        let is_blocked = cfg.blocked_capabilities.contains(&capability.to_string());
+            if let Some(barrier) = self.barriers.get(barrier_id)
+                && let BarrierConfig::CompositionFirewall(ref cfg) = barrier.config
+                && cfg.boundary_id == target_boundary
+            {
+                // Capability blocked unless in allow list
+                let is_allowed = cfg.allow_list.contains(&capability.to_string());
+                let is_blocked = cfg.blocked_capabilities.contains(&capability.to_string());
 
-                        if is_blocked && !is_allowed {
-                            let receipt = BarrierAuditReceipt::new(
-                                event_codes::BARRIER_CHECK_DENIED,
-                                barrier,
-                                BarrierAction::CheckDenied,
-                                trace_id,
-                                serde_json::json!({
-                                    "reason": "capability blocked by composition firewall",
-                                    "capability": capability,
-                                    "boundary": target_boundary,
-                                }),
-                            );
-                            self.audit_log.push(receipt);
-                            return Err(BarrierError::FirewallViolation {
-                                capability: capability.to_string(),
-                                boundary: target_boundary.to_string(),
-                            });
-                        }
-                    }
+                if is_blocked && !is_allowed {
+                    let receipt = BarrierAuditReceipt::new(
+                        event_codes::BARRIER_CHECK_DENIED,
+                        barrier,
+                        BarrierAction::CheckDenied,
+                        trace_id,
+                        serde_json::json!({
+                            "reason": "capability blocked by composition firewall",
+                            "capability": capability,
+                            "boundary": target_boundary,
+                        }),
+                    );
+                    self.audit_log.push(receipt);
+                    return Err(BarrierError::FirewallViolation {
+                        capability: capability.to_string(),
+                        boundary: target_boundary.to_string(),
+                    });
                 }
             }
         }
@@ -732,27 +731,26 @@ impl BarrierEngine {
         let barrier_ids = self.get_node_barrier_ids(node_id);
 
         for barrier_id in &barrier_ids {
-            if let Some(barrier) = self.barriers.get(barrier_id) {
-                if let BarrierConfig::VerifiedForkPin(ref cfg) = barrier.config {
-                    if cfg.expected_digest != artifact_digest {
-                        let receipt = BarrierAuditReceipt::new(
-                            event_codes::FORK_PIN_REJECTED,
-                            barrier,
-                            BarrierAction::CheckDenied,
-                            trace_id,
-                            serde_json::json!({
-                                "expected_digest": cfg.expected_digest,
-                                "actual_digest": artifact_digest,
-                                "pinned_commit": cfg.pinned_commit,
-                            }),
-                        );
-                        self.audit_log.push(receipt);
-                        return Err(BarrierError::ForkPinVerification(format!(
-                            "digest mismatch for node {node_id}: expected {}, got {artifact_digest}",
-                            cfg.expected_digest
-                        )));
-                    }
-                }
+            if let Some(barrier) = self.barriers.get(barrier_id)
+                && let BarrierConfig::VerifiedForkPin(ref cfg) = barrier.config
+                && cfg.expected_digest != artifact_digest
+            {
+                let receipt = BarrierAuditReceipt::new(
+                    event_codes::FORK_PIN_REJECTED,
+                    barrier,
+                    BarrierAction::CheckDenied,
+                    trace_id,
+                    serde_json::json!({
+                        "expected_digest": cfg.expected_digest,
+                        "actual_digest": artifact_digest,
+                        "pinned_commit": cfg.pinned_commit,
+                    }),
+                );
+                self.audit_log.push(receipt);
+                return Err(BarrierError::ForkPinVerification(format!(
+                    "digest mismatch for node {node_id}: expected {}, got {artifact_digest}",
+                    cfg.expected_digest
+                )));
             }
         }
 

@@ -242,7 +242,7 @@ pub enum ReconciliationSuggestion {
         remote_hash: String,
     },
     /// Rollback detected: full proof for operator review.
-    InvestigateRollback { proof: RollbackProof },
+    InvestigateRollback { proof: Box<RollbackProof> },
 }
 
 // ---------------------------------------------------------------------------
@@ -483,7 +483,7 @@ impl DivergenceDetector {
             },
             DetectionResult::RollbackDetected => {
                 if let Some(p) = proof {
-                    ReconciliationSuggestion::InvestigateRollback { proof: p }
+                    ReconciliationSuggestion::InvestigateRollback { proof: Box::new(p) }
                 } else {
                     ReconciliationSuggestion::ResolveConflict {
                         epoch: local.epoch,

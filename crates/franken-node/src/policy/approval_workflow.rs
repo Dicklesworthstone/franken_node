@@ -335,7 +335,7 @@ impl PolicyChangeEngine {
             .proposal
             .required_approvers
             .iter()
-            .all(|req| unique_approvers.iter().any(|a| *a == req));
+            .all(|req| unique_approvers.contains(&req));
 
         // Verify key-role separation EARLY: proposer cannot be sole approver.
         if unique_approvers.len() == 1 && *unique_approvers[0] == record.proposal.proposed_by {
@@ -601,6 +601,7 @@ impl PolicyChangeEngine {
 
     // ── Internal ─────────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn append_audit(
         &mut self,
         event_code: &str,

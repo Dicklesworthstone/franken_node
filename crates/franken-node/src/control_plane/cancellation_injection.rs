@@ -530,6 +530,7 @@ impl CancellationInjectionFramework {
     /// Run a single cancellation test case.
     ///
     /// Takes snapshots before/after, checks for leaks and half-commits.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_cancel_case(
         &mut self,
         workflow_name: &str,
@@ -607,6 +608,7 @@ impl CancellationInjectionFramework {
         Ok(outcome)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_entry(
         &mut self,
         workflow: &str,

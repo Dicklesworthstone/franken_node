@@ -164,15 +164,14 @@ pub fn validate_constraints(constraints: &[PlacementConstraint]) -> Result<(), R
 }
 
 /// Device profile registry.
+#[derive(Default)]
 pub struct DeviceProfileRegistry {
     profiles: HashMap<String, DeviceProfile>,
 }
 
 impl DeviceProfileRegistry {
     pub fn new() -> Self {
-        Self {
-            profiles: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a device profile after schema validation.

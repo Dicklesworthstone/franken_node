@@ -710,17 +710,17 @@ impl TwoPhaseFlow {
 
         // Check deadlines
         for id in &self.obligation_ids {
-            if let Some(o) = self.ledger.get(id) {
-                if now_ms > o.deadline {
-                    return PrepareResult::Failed {
-                        flow_id: self.flow_id.clone(),
-                        reason: format!(
-                            "{}: obligation {} deadline exceeded",
-                            error_codes::ERR_OCH_DEADLINE_EXCEEDED,
-                            id
-                        ),
-                    };
-                }
+            if let Some(o) = self.ledger.get(id)
+                && now_ms > o.deadline
+            {
+                return PrepareResult::Failed {
+                    flow_id: self.flow_id.clone(),
+                    reason: format!(
+                        "{}: obligation {} deadline exceeded",
+                        error_codes::ERR_OCH_DEADLINE_EXCEEDED,
+                        id
+                    ),
+                };
             }
         }
 
@@ -827,15 +827,15 @@ impl TwoPhaseFlow {
     /// Internal rollback helper.
     fn do_rollback(&mut self, now_ms: u64, trace_id: &str) {
         for id in &self.obligation_ids {
-            if let Some(o) = self.ledger.get(id) {
-                if !o.status.is_terminal() {
-                    let _ = self.ledger.update_status(
-                        id,
-                        ObligationStatus::Cancelled,
-                        now_ms,
-                        trace_id,
-                    );
-                }
+            if let Some(o) = self.ledger.get(id)
+                && !o.status.is_terminal()
+            {
+                let _ = self.ledger.update_status(
+                    id,
+                    ObligationStatus::Cancelled,
+                    now_ms,
+                    trace_id,
+                );
             }
         }
 
@@ -854,11 +854,9 @@ impl TwoPhaseFlow {
     /// Generate a closure proof for this flow. INV-OCH-CLOSURE-SIGNED
     #[must_use]
     pub fn closure_proof(&self, now_ms: u64) -> ClosureProof {
-        let proof = self
+        self
             .ledger
-            .generate_closure_proof(&self.flow_id, &self.obligation_ids, now_ms);
-
-        proof
+            .generate_closure_proof(&self.flow_id, &self.obligation_ids, now_ms)
     }
 
     /// Query outstanding (non-terminal) obligations in this flow.

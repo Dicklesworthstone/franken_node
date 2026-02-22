@@ -433,6 +433,7 @@ impl SessionManager {
     /// Caller must supply the correct role-bound key IDs. The manager
     /// records them but the actual key-role verification is done at a
     /// higher layer (KeyRoleRegistry).
+    #[allow(clippy::too_many_arguments)]
     pub fn establish_session(
         &mut self,
         session_id: String,
@@ -472,7 +473,7 @@ impl SessionManager {
 
         self.sessions
             .get(&session_id)
-            .ok_or_else(|| SessionError::NoSession { session_id })
+            .ok_or(SessionError::NoSession { session_id })
     }
 
     /// Process an authenticated message within a session.
@@ -482,6 +483,7 @@ impl SessionManager {
     /// - Session is Active (INV-SCC-TERMINATED)
     /// - Sequence monotonicity (INV-SCC-MONOTONIC)
     /// - Replay detection for windowed mode
+    #[allow(clippy::too_many_arguments)]
     pub fn process_message(
         &mut self,
         session_id: &str,
@@ -566,11 +568,7 @@ impl SessionManager {
         } else {
             // Windowed mode: accept sequences within [floor, ...) where
             // floor = max(0, high_watermark - replay_window). Reject replays.
-            let floor = if expected_seq > self.config.replay_window {
-                expected_seq - self.config.replay_window
-            } else {
-                0
-            };
+            let floor = expected_seq.saturating_sub(self.config.replay_window);
 
             if sequence < floor {
                 self.events.push(SessionEvent {

@@ -564,15 +564,15 @@ impl ReportingPipeline {
 
         // Check threshold status changes
         for (i, new_th) in new_report.thresholds.iter().enumerate() {
-            if let Some(old_th) = old_report.thresholds.get(i) {
-                if old_th.status != new_th.status {
-                    diffs.push(ReportDiffEntry {
-                        claim_id: format!("THRESHOLD-{}", new_th.name),
-                        field: "status".to_string(),
-                        old_value: format!("{:?}", old_th.status),
-                        new_value: format!("{:?}", new_th.status),
-                    });
-                }
+            if let Some(old_th) = old_report.thresholds.get(i)
+                && old_th.status != new_th.status
+            {
+                diffs.push(ReportDiffEntry {
+                    claim_id: format!("THRESHOLD-{}", new_th.name),
+                    field: "status".to_string(),
+                    old_value: format!("{:?}", old_th.status),
+                    new_value: format!("{:?}", new_th.status),
+                });
             }
         }
 

@@ -49,7 +49,7 @@ impl Severity {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "critical" => Some(Self::Critical),
             "high" => Some(Self::High),
@@ -85,7 +85,7 @@ impl RetentionTier {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "hot" => Some(Self::Hot),
             "cold" => Some(Self::Cold),
@@ -128,7 +128,7 @@ impl ExportFormat {
         }
     }
 
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s {
             "json" => Some(Self::Json),
             "csv" => Some(Self::Csv),
@@ -619,7 +619,7 @@ impl IncidentBundleStore {
             });
         }
 
-        let removed = self.bundles.remove(bundle_id).unwrap();
+        let removed = self.bundles.remove(bundle_id).expect("bundle verified present");
         self.total_bytes = self.total_bytes.saturating_sub(removed.size_bytes);
 
         self.decisions.push(RetentionDecision {
@@ -661,7 +661,7 @@ impl IncidentBundleStore {
                 timestamp: now,
                 event_code: event_codes::IBR_004.into(),
             });
-            decisions.push(self.decisions.last().unwrap().clone());
+            decisions.push(self.decisions.last().expect("decisions non-empty after push").clone());
         }
 
         decisions
@@ -742,11 +742,11 @@ mod tests {
 
     #[test]
     fn test_severity_from_str() {
-        assert_eq!(Severity::from_str("critical"), Some(Severity::Critical));
-        assert_eq!(Severity::from_str("high"), Some(Severity::High));
-        assert_eq!(Severity::from_str("medium"), Some(Severity::Medium));
-        assert_eq!(Severity::from_str("low"), Some(Severity::Low));
-        assert_eq!(Severity::from_str("unknown"), None);
+        assert_eq!(Severity::parse("critical"), Some(Severity::Critical));
+        assert_eq!(Severity::parse("high"), Some(Severity::High));
+        assert_eq!(Severity::parse("medium"), Some(Severity::Medium));
+        assert_eq!(Severity::parse("low"), Some(Severity::Low));
+        assert_eq!(Severity::parse("unknown"), None);
     }
 
     #[test]
@@ -758,13 +758,13 @@ mod tests {
 
     #[test]
     fn test_retention_tier_from_str() {
-        assert_eq!(RetentionTier::from_str("hot"), Some(RetentionTier::Hot));
-        assert_eq!(RetentionTier::from_str("cold"), Some(RetentionTier::Cold));
+        assert_eq!(RetentionTier::parse("hot"), Some(RetentionTier::Hot));
+        assert_eq!(RetentionTier::parse("cold"), Some(RetentionTier::Cold));
         assert_eq!(
-            RetentionTier::from_str("archive"),
+            RetentionTier::parse("archive"),
             Some(RetentionTier::Archive)
         );
-        assert_eq!(RetentionTier::from_str("unknown"), None);
+        assert_eq!(RetentionTier::parse("unknown"), None);
     }
 
     #[test]
@@ -783,10 +783,10 @@ mod tests {
 
     #[test]
     fn test_export_format_from_str() {
-        assert_eq!(ExportFormat::from_str("json"), Some(ExportFormat::Json));
-        assert_eq!(ExportFormat::from_str("csv"), Some(ExportFormat::Csv));
-        assert_eq!(ExportFormat::from_str("sarif"), Some(ExportFormat::Sarif));
-        assert_eq!(ExportFormat::from_str("xml"), None);
+        assert_eq!(ExportFormat::parse("json"), Some(ExportFormat::Json));
+        assert_eq!(ExportFormat::parse("csv"), Some(ExportFormat::Csv));
+        assert_eq!(ExportFormat::parse("sarif"), Some(ExportFormat::Sarif));
+        assert_eq!(ExportFormat::parse("xml"), None);
     }
 
     #[test]
@@ -1306,9 +1306,11 @@ mod tests {
 
     #[test]
     fn test_invalid_config_warn_ge_critical() {
-        let mut cfg = RetentionConfig::default();
-        cfg.storage_warn_percent = 90;
-        cfg.storage_critical_percent = 85;
+        let cfg = RetentionConfig {
+            storage_warn_percent: 90,
+            storage_critical_percent: 85,
+            ..Default::default()
+        };
         let err = IncidentBundleStore::new(cfg, 10000).unwrap_err();
         assert_eq!(err.code(), "IBR_INVALID_CONFIG");
     }

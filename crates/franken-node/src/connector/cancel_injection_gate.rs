@@ -376,6 +376,7 @@ impl CancelInjectionGate {
     }
 
     /// Run a single injection case through the canonical framework.
+    #[allow(clippy::too_many_arguments)]
     pub fn run_injection_case(
         &mut self,
         workflow_name: &str,

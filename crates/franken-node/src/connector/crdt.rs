@@ -70,12 +70,18 @@ pub struct LwwEntry {
     pub timestamp: u64,
 }
 
-impl LwwMap {
-    pub fn new() -> Self {
+impl Default for LwwMap {
+    fn default() -> Self {
         Self {
             crdt_type: CrdtType::LwwMap,
             entries: HashMap::new(),
         }
+    }
+}
+
+impl LwwMap {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn set(&mut self, key: String, value: serde_json::Value, timestamp: u64) {
@@ -112,13 +118,19 @@ pub struct OrSet {
     pub removes: HashSet<String>,
 }
 
-impl OrSet {
-    pub fn new() -> Self {
+impl Default for OrSet {
+    fn default() -> Self {
         Self {
             crdt_type: CrdtType::OrSet,
             adds: HashSet::new(),
             removes: HashSet::new(),
         }
+    }
+}
+
+impl OrSet {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn add(&mut self, element: String) {
@@ -157,12 +169,18 @@ pub struct GCounter {
     pub counts: HashMap<String, u64>,
 }
 
-impl GCounter {
-    pub fn new() -> Self {
+impl Default for GCounter {
+    fn default() -> Self {
         Self {
             crdt_type: CrdtType::GCounter,
             counts: HashMap::new(),
         }
+    }
+}
+
+impl GCounter {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn increment(&mut self, replica_id: &str, amount: u64) {
@@ -203,19 +221,19 @@ pub struct PnCounter {
     pub negative: GCounter,
 }
 
-impl PnCounter {
-    pub fn new() -> Self {
+impl Default for PnCounter {
+    fn default() -> Self {
         Self {
             crdt_type: CrdtType::PnCounter,
-            positive: GCounter {
-                crdt_type: CrdtType::GCounter,
-                counts: HashMap::new(),
-            },
-            negative: GCounter {
-                crdt_type: CrdtType::GCounter,
-                counts: HashMap::new(),
-            },
+            positive: GCounter::new(),
+            negative: GCounter::new(),
         }
+    }
+}
+
+impl PnCounter {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     pub fn increment(&mut self, replica_id: &str, amount: u64) {

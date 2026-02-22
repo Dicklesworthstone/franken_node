@@ -664,7 +664,7 @@ impl BundleStore {
             actions,
             health_results,
             errors,
-            pre_snapshot: pre_snapshot,
+            pre_snapshot,
             post_snapshot: post_state,
         }
     }

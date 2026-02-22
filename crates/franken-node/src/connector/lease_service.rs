@@ -123,13 +123,19 @@ pub struct LeaseService {
     next_id: u64,
 }
 
-impl LeaseService {
-    pub fn new() -> Self {
+impl Default for LeaseService {
+    fn default() -> Self {
         Self {
             leases: HashMap::new(),
             decisions: Vec::new(),
             next_id: 1,
         }
+    }
+}
+
+impl LeaseService {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     /// Grant a new lease.

@@ -107,7 +107,7 @@ impl fmt::Display for RejectionCode {
 // ── Admission telemetry ─────────────────────────────────────────────
 
 /// Telemetry tracker for admission checks.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AdmissionTelemetry {
     pub total_checks: u64,
     pub total_admitted: u64,
@@ -118,13 +118,7 @@ pub struct AdmissionTelemetry {
 
 impl AdmissionTelemetry {
     pub fn new() -> Self {
-        Self {
-            total_checks: 0,
-            total_admitted: 0,
-            total_rejected: 0,
-            rejection_distribution: HashMap::new(),
-            checks: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Run a full admission check, record telemetry, and return whether admitted.

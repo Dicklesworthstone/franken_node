@@ -588,7 +588,7 @@ impl HardwarePlanner {
         });
 
         self.profiles.insert(pid.clone(), profile);
-        Ok(self.profiles.get(&pid).unwrap())
+        Ok(self.profiles.get(&pid).expect("profile present after insert"))
     }
 
     /// Register a placement policy.
@@ -617,7 +617,7 @@ impl HardwarePlanner {
         });
 
         self.policies.insert(pid.clone(), policy);
-        Ok(self.policies.get(&pid).unwrap())
+        Ok(self.policies.get(&pid).expect("policy present after insert"))
     }
 
     /// Request placement for a workload.
@@ -1070,8 +1070,8 @@ impl HardwarePlanner {
             return candidates[0].clone();
         }
 
-        let prefer_lowest_risk = policy.map_or(true, |p| p.prefer_lowest_risk);
-        let prefer_most_capacity = policy.map_or(false, |p| p.prefer_most_capacity);
+        let prefer_lowest_risk = policy.is_none_or(|p| p.prefer_lowest_risk);
+        let prefer_most_capacity = policy.is_some_and(|p| p.prefer_most_capacity);
 
         let mut best = candidates[0].clone();
         let mut best_risk = self.profiles[&best].risk_level;
@@ -1079,22 +1079,10 @@ impl HardwarePlanner {
 
         for pid in &candidates[1..] {
             let prof = &self.profiles[pid];
-            let mut is_better = false;
-
-            if prefer_lowest_risk && prof.risk_level < best_risk {
-                is_better = true;
-            } else if prefer_lowest_risk
-                && prof.risk_level == best_risk
-                && prefer_most_capacity
-                && prof.available_slots() > best_available
-            {
-                is_better = true;
-            } else if !prefer_lowest_risk
-                && prefer_most_capacity
-                && prof.available_slots() > best_available
-            {
-                is_better = true;
-            }
+            let is_better = (prefer_lowest_risk && prof.risk_level < best_risk)
+                || (prefer_most_capacity
+                    && prof.available_slots() > best_available
+                    && (!prefer_lowest_risk || prof.risk_level == best_risk));
 
             if is_better {
                 best = pid.clone();

@@ -799,12 +799,11 @@ impl SafeModeController {
         }
 
         // Priority 2: Environment variable.
-        if self.config.check_env_var {
-            if let Some(val) = env_value {
-                if val == "1" || val.eq_ignore_ascii_case("true") {
-                    return Some(SafeModeEntryReason::EnvironmentVariable);
-                }
-            }
+        if self.config.check_env_var
+            && let Some(val) = env_value
+            && (val == "1" || val.eq_ignore_ascii_case("true"))
+        {
+            return Some(SafeModeEntryReason::EnvironmentVariable);
         }
 
         // Priority 3: Configuration field.

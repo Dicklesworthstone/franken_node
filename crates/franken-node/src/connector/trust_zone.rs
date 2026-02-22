@@ -336,13 +336,13 @@ impl ZoneSegmentationEngine {
             }
             IsolationLevel::Permissive => {
                 // Permissive: reads allowed, writes require bridge.
-                if req.action.contains("write") || req.action.contains("delete") {
-                    if !source.allowed_cross_zone_targets.contains(&req.target_zone) {
-                        return Err(SegmentationError::IsolationViolation {
-                            zone_id: req.source_zone.clone(),
-                            level: IsolationLevel::Permissive,
-                        });
-                    }
+                if (req.action.contains("write") || req.action.contains("delete"))
+                    && !source.allowed_cross_zone_targets.contains(&req.target_zone)
+                {
+                    return Err(SegmentationError::IsolationViolation {
+                        zone_id: req.source_zone.clone(),
+                        level: IsolationLevel::Permissive,
+                    });
                 }
             }
             IsolationLevel::Custom => {

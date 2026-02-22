@@ -609,6 +609,7 @@ impl VefProofService {
         }
     }
 
+    #[allow(dead_code)]
     pub fn events(&self) -> &[ProofServiceEvent] {
         &self.events
     }

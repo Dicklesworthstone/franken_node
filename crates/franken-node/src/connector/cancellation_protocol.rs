@@ -268,14 +268,14 @@ impl ResourceTracker {
 
     /// Release a resource.
     pub fn release(&mut self, name: &str) -> bool {
-        if let Some(count) = self.held.get_mut(name) {
-            if *count > 0 {
-                *count -= 1;
-                if *count == 0 {
-                    self.held.remove(name);
-                }
-                return true;
+        if let Some(count) = self.held.get_mut(name)
+            && *count > 0
+        {
+            *count -= 1;
+            if *count == 0 {
+                self.held.remove(name);
             }
+            return true;
         }
         false
     }

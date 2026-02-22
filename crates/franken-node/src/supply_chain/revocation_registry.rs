@@ -79,7 +79,7 @@ pub struct RevocationAudit {
 }
 
 /// Revocation registry maintaining per-zone monotonic heads.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RevocationRegistry {
     /// Current head sequence per zone.
     heads: HashMap<String, u64>,
@@ -93,12 +93,7 @@ pub struct RevocationRegistry {
 
 impl RevocationRegistry {
     pub fn new() -> Self {
-        Self {
-            heads: HashMap::new(),
-            log: Vec::new(),
-            revoked: HashMap::new(),
-            audits: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Initialize a zone with head at sequence 0.

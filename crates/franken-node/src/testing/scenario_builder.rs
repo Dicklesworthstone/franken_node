@@ -563,9 +563,9 @@ mod tests {
     }
 
     fn two_node_builder() -> Result<ScenarioBuilder, ScenarioBuilderError> {
-        Ok(minimal_builder()
+        minimal_builder()
             .add_node("n1", "Node One", NodeRole::Coordinator)?
-            .add_node("n2", "Node Two", NodeRole::Participant)?)
+            .add_node("n2", "Node Two", NodeRole::Participant)
     }
 
     // ---------------------------------------------------------------

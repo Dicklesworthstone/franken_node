@@ -176,6 +176,7 @@ pub struct MeasurementResult {
 impl MeasurementResult {
     /// Compute overhead from baseline and integrated measurements,
     /// then check against budget.
+    #[allow(clippy::too_many_arguments)]
     pub fn from_measurements(
         hot_path: HotPath,
         baseline_p50_us: f64,

@@ -281,10 +281,10 @@ impl EcosystemReputationApi {
         timestamp: &str,
     ) -> Result<&EcosystemPublisherReputation, ReputationApiError> {
         // Sybil check
-        if let Some(existing) = self.publisher_keys.get(publisher_key) {
-            if existing != publisher_id {
-                return Err(ReputationApiError::SybilDuplicate(publisher_key.to_owned()));
-            }
+        if let Some(existing) = self.publisher_keys.get(publisher_key)
+            && existing != publisher_id
+        {
+            return Err(ReputationApiError::SybilDuplicate(publisher_key.to_owned()));
         }
         self.publisher_keys
             .insert(publisher_key.to_owned(), publisher_id.to_owned());

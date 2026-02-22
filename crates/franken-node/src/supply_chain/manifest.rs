@@ -138,7 +138,6 @@ pub struct ManifestAuditEvent {
 }
 
 impl SignedExtensionManifest {
-    #[must_use]
     pub fn to_engine_manifest(&self) -> Result<ExtensionManifest, ManifestSchemaError> {
         // Build through serde to avoid compile-time coupling to extension-host
         // manifest field drift while still projecting required core fields.
@@ -259,8 +258,8 @@ fn ensure_non_empty(value: &str, field: &str) -> Result<(), ManifestSchemaError>
 fn ensure_capabilities_unique(capabilities: &[Capability]) -> Result<(), ManifestSchemaError> {
     let mut seen = BTreeSet::new();
     for capability in capabilities {
-        if !seen.insert(capability.clone()) {
-            return Err(ManifestSchemaError::DuplicateCapability(capability.clone()));
+        if !seen.insert(*capability) {
+            return Err(ManifestSchemaError::DuplicateCapability(*capability));
         }
     }
     Ok(())

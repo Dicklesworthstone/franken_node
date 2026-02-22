@@ -124,10 +124,10 @@ const VALID_SUBSYSTEMS: &[&str] = &[
 fn parse_subsystem(code: &str) -> Option<String> {
     let rest = code.strip_prefix("FRANKEN_")?;
     for &sub in VALID_SUBSYSTEMS {
-        if let Some(after) = rest.strip_prefix(sub) {
-            if after.starts_with('_') && after.len() > 1 {
-                return Some(sub.to_string());
-            }
+        if let Some(after) = rest.strip_prefix(sub)
+            && after.starts_with('_') && after.len() > 1
+        {
+            return Some(sub.to_string());
         }
     }
     None
@@ -135,16 +135,14 @@ fn parse_subsystem(code: &str) -> Option<String> {
 
 // ── Registry ────────────────────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct ErrorCodeRegistry {
     entries: HashMap<String, ErrorCodeEntry>,
 }
 
 impl ErrorCodeRegistry {
     pub fn new() -> Self {
-        Self {
-            entries: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a new error code.
@@ -178,10 +176,10 @@ impl ErrorCodeRegistry {
         }
 
         // INV-ECR-RECOVERY — non-fatal must have recovery fields
-        if !reg.severity.is_fatal() {
-            if reg.recovery.recovery_hint.is_empty() {
-                return Err(RegistryError::MissingRecovery(reg.code.clone()));
-            }
+        if !reg.severity.is_fatal()
+            && reg.recovery.recovery_hint.is_empty()
+        {
+            return Err(RegistryError::MissingRecovery(reg.code.clone()));
         }
 
         // Fatal errors must not be retryable
@@ -512,7 +510,7 @@ mod tests {
 
     #[test]
     fn all_error_codes_present() {
-        let errors = vec![
+        let errors = [
             RegistryError::InvalidNamespace("x".into()),
             RegistryError::DuplicateCode("x".into()),
             RegistryError::MissingRecovery("x".into()),

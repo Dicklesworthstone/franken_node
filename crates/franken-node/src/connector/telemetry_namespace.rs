@@ -141,16 +141,14 @@ pub struct MetricRegistration {
 // ── Registry ────────────────────────────────────────────────────────────────
 
 /// In-memory schema registry enforcing all four invariants.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SchemaRegistry {
     schemas: HashMap<String, MetricSchema>,
 }
 
 impl SchemaRegistry {
     pub fn new() -> Self {
-        Self {
-            schemas: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a new metric schema.
@@ -167,19 +165,19 @@ impl SchemaRegistry {
         }
 
         // INV-TNS-FROZEN
-        if let Some(existing) = self.schemas.get(&reg.name) {
-            if existing.frozen {
-                let type_match = existing.metric_type == reg.metric_type;
-                let labels_match = existing.labels == reg.labels;
-                if !type_match || !labels_match {
-                    return Err(NamespaceError::FrozenConflict(reg.name.clone()));
-                }
-                // Same shape is fine — update version only.
-                let mut updated = existing.clone();
-                updated.version = reg.version;
-                self.schemas.insert(reg.name.clone(), updated.clone());
-                return Ok(updated);
+        if let Some(existing) = self.schemas.get(&reg.name)
+            && existing.frozen
+        {
+            let type_match = existing.metric_type == reg.metric_type;
+            let labels_match = existing.labels == reg.labels;
+            if !type_match || !labels_match {
+                return Err(NamespaceError::FrozenConflict(reg.name.clone()));
             }
+            // Same shape is fine — update version only.
+            let mut updated = existing.clone();
+            updated.version = reg.version;
+            self.schemas.insert(reg.name.clone(), updated.clone());
+            return Ok(updated);
         }
 
         let schema = MetricSchema {
@@ -490,7 +488,7 @@ mod tests {
 
     #[test]
     fn all_error_codes_present() {
-        let errors = vec![
+        let errors = [
             NamespaceError::InvalidNamespace("x".into()),
             NamespaceError::VersionMissing("x".into()),
             NamespaceError::FrozenConflict("x".into()),

@@ -488,11 +488,11 @@ pub fn collect_threshold_signatures(
         if seen_keys.contains(&partial.key_id) {
             continue; // each key holder contributes at most once
         }
-        if let Some(vk) = key_ring.get_key(&partial.key_id) {
-            if verify_signature(vk, data, &partial.signature).is_ok() {
-                seen_keys.insert(partial.key_id.clone());
-                valid.push(partial.clone());
-            }
+        if let Some(vk) = key_ring.get_key(&partial.key_id)
+            && verify_signature(vk, data, &partial.signature).is_ok()
+        {
+            seen_keys.insert(partial.key_id.clone());
+            valid.push(partial.clone());
         }
         if valid.len() >= required {
             return Ok(valid);

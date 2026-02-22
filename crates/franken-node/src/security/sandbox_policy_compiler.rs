@@ -171,14 +171,14 @@ pub const CAPABILITIES: [&str; 6] = [
 pub fn validate_policy(policy: &CompiledPolicy) -> Result<(), SandboxError> {
     let mut seen = std::collections::HashMap::new();
     for g in &policy.grants {
-        if let Some(prev) = seen.insert(&g.capability, &g.access) {
-            if prev != &g.access {
-                return Err(SandboxError::PolicyConflict {
-                    capability: g.capability.clone(),
-                    access_a: format!("{prev}"),
-                    access_b: format!("{}", g.access),
-                });
-            }
+        if let Some(prev) = seen.insert(&g.capability, &g.access)
+            && prev != &g.access
+        {
+            return Err(SandboxError::PolicyConflict {
+                capability: g.capability.clone(),
+                access_a: format!("{prev}"),
+                access_b: format!("{}", g.access),
+            });
         }
     }
     Ok(())

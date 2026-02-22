@@ -106,6 +106,7 @@ pub enum ReceiptError {
 
 impl Receipt {
     /// Construct a new receipt with canonical input/output hashes.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         action_name: &str,
         actor_identity: &str,

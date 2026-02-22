@@ -91,7 +91,7 @@ impl PhenotypeTrajectory {
         // Normalize and combine: positive values = worsening
         let trend_score = (activity_trend.max(0.0) * 0.3
             + velocity_trend.max(0.0) * 0.2
-            + (response_trend / 100.0).max(0.0).min(1.0) * 0.25
+            + (response_trend / 100.0).clamp(0.0, 1.0) * 0.25
             + diversity_trend.max(0.0) * 0.25)
             .min(1.0);
 
@@ -790,7 +790,7 @@ mod tests {
     fn propensity_bounded_zero_to_one() {
         let traj = make_declining_trajectory();
         let p = traj.compromise_propensity();
-        assert!(p >= 0.0 && p <= 1.0);
+        assert!((0.0..=1.0).contains(&p));
     }
 
     // === Compromise pricing ===

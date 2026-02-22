@@ -284,7 +284,7 @@ impl TrustAggregator {
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let n = sorted.len();
-        let median = if n % 2 == 0 {
+        let median = if n.is_multiple_of(2) {
             (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
         } else {
             sorted[n / 2]
@@ -510,7 +510,7 @@ impl SybilDetector {
                 .push(sig);
         }
 
-        for (_target, target_signals) in &by_target {
+        for target_signals in by_target.values() {
             if target_signals.len() < 3 {
                 continue;
             }
@@ -636,6 +636,7 @@ impl SybilDetector {
 
 /// Full Sybil defense pipeline combining aggregation, stake weighting, and
 /// Sybil detection.
+#[derive(Default)]
 pub struct SybilDefensePipeline {
     pub aggregator: TrustAggregator,
     pub weighter: StakeWeighter,
@@ -644,18 +645,6 @@ pub struct SybilDefensePipeline {
     nodes: HashMap<String, TrustNode>,
     /// Audit event log.
     events: Vec<SybilDefenseEvent>,
-}
-
-impl Default for SybilDefensePipeline {
-    fn default() -> Self {
-        Self {
-            aggregator: TrustAggregator::default(),
-            weighter: StakeWeighter::default(),
-            detector: SybilDetector::default(),
-            nodes: HashMap::new(),
-            events: Vec::new(),
-        }
-    }
 }
 
 impl SybilDefensePipeline {
@@ -818,6 +807,7 @@ mod tests {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn poisoned_signals(count: usize, target: &str) -> Vec<TrustSignal> {
         (0..count)
             .map(|i| {
@@ -832,6 +822,7 @@ mod tests {
             .collect()
     }
 
+    #[allow(dead_code)]
     fn sybil_signals(count: usize, target: &str) -> Vec<TrustSignal> {
         (0..count)
             .map(|i| {
@@ -982,7 +973,7 @@ mod tests {
 
         for history_len in [0, 1, 5, 10, 25, 50, 75, 100, 150, 200] {
             let node =
-                TrustNode::established(&format!("node-{history_len}"), 50.0, history_len, 1000);
+                TrustNode::established(format!("node-{history_len}"), 50.0, history_len, 1000);
             let weight = w.compute_weight(&node);
             assert!(
                 weight >= prev_weight,
@@ -1314,7 +1305,7 @@ mod tests {
         let mut prev = 0.0_f64;
 
         for h in 0..=300 {
-            let node = TrustNode::established(&format!("n-{h}"), 50.0, h, 1000);
+            let node = TrustNode::established(format!("n-{h}"), 50.0, h, 1000);
             let weight = w.compute_weight(&node);
             assert!(
                 weight >= prev - f64::EPSILON,

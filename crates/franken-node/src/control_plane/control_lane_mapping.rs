@@ -224,23 +224,23 @@ impl ControlLanePolicy {
         }
 
         // INV-CLM-CANCEL-MIN-BUDGET
-        if let Some(cancel) = self.budgets.get("cancel") {
-            if cancel.min_percent < 20 {
-                return Err(ControlLanePolicyError::InvalidBudget {
-                    lane: ControlLane::Cancel,
-                    detail: format!("cancel budget {}% < 20% minimum", cancel.min_percent),
-                });
-            }
+        if let Some(cancel) = self.budgets.get("cancel")
+            && cancel.min_percent < 20
+        {
+            return Err(ControlLanePolicyError::InvalidBudget {
+                lane: ControlLane::Cancel,
+                detail: format!("cancel budget {}% < 20% minimum", cancel.min_percent),
+            });
         }
 
         // INV-CLM-TIMED-MIN-BUDGET
-        if let Some(timed) = self.budgets.get("timed") {
-            if timed.min_percent < 30 {
-                return Err(ControlLanePolicyError::InvalidBudget {
-                    lane: ControlLane::Timed,
-                    detail: format!("timed budget {}% < 30% minimum", timed.min_percent),
-                });
-            }
+        if let Some(timed) = self.budgets.get("timed")
+            && timed.min_percent < 30
+        {
+            return Err(ControlLanePolicyError::InvalidBudget {
+                lane: ControlLane::Timed,
+                detail: format!("timed budget {}% < 30% minimum", timed.min_percent),
+            });
         }
 
         Ok(())
@@ -496,23 +496,23 @@ impl ControlLaneScheduler {
             }
             counters.tasks_run += tasks_run;
 
-            if let Some(budget) = self.policy.budgets.get(&lane_key) {
-                if counters.consecutive_empty_ticks >= budget.starvation_threshold_ticks {
-                    counters.starvation_alerts += 1;
-                    alerts.push(ControlLanePolicyError::Starvation {
-                        lane: *lane,
-                        consecutive_ticks: counters.consecutive_empty_ticks,
-                    });
-                    self.audit_log.push(ControlLaneAuditRecord {
-                        event_code: event_codes::CLM_STARVATION_ALERT.to_string(),
-                        task_class: String::new(),
-                        lane: lane.to_string(),
-                        timestamp_ms,
-                        detail: format!("starved for {} ticks", counters.consecutive_empty_ticks),
-                        trace_id: trace_id.to_string(),
-                        schema_version: SCHEMA_VERSION.to_string(),
-                    });
-                }
+            if let Some(budget) = self.policy.budgets.get(&lane_key)
+                && counters.consecutive_empty_ticks >= budget.starvation_threshold_ticks
+            {
+                counters.starvation_alerts += 1;
+                alerts.push(ControlLanePolicyError::Starvation {
+                    lane: *lane,
+                    consecutive_ticks: counters.consecutive_empty_ticks,
+                });
+                self.audit_log.push(ControlLaneAuditRecord {
+                    event_code: event_codes::CLM_STARVATION_ALERT.to_string(),
+                    task_class: String::new(),
+                    lane: lane.to_string(),
+                    timestamp_ms,
+                    detail: format!("starved for {} ticks", counters.consecutive_empty_ticks),
+                    trace_id: trace_id.to_string(),
+                    schema_version: SCHEMA_VERSION.to_string(),
+                });
             }
         }
 

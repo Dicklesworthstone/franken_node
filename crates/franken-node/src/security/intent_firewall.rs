@@ -444,7 +444,7 @@ impl IntentClassifier {
         }
 
         // Rule 3: Side-channel probing (many enumeration-style requests).
-        if effect.metadata.get("probe_mode").is_some() {
+        if effect.metadata.contains_key("probe_mode") {
             return Some(IntentClassification::SideChannel);
         }
 

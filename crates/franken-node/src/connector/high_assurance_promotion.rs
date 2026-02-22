@@ -360,13 +360,13 @@ impl HighAssuranceGate {
         }
 
         // Downgrade requires authorization
-        if self.mode == AssuranceMode::HighAssurance && new_mode == AssuranceMode::Standard {
-            if authorization.is_none() {
-                return Err(PromotionDenialReason::UnauthorizedModeDowngrade {
-                    from: self.mode,
-                    to: new_mode,
-                });
-            }
+        if self.mode == AssuranceMode::HighAssurance && new_mode == AssuranceMode::Standard
+            && authorization.is_none()
+        {
+            return Err(PromotionDenialReason::UnauthorizedModeDowngrade {
+                from: self.mode,
+                to: new_mode,
+            });
         }
 
         self.mode = new_mode;

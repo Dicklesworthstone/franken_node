@@ -82,6 +82,7 @@ impl PlatformCapabilities {
     }
 
     /// Create capabilities from known values (for testing).
+    #[allow(clippy::too_many_arguments)]
     pub fn from_values(
         os: &str,
         arch: &str,

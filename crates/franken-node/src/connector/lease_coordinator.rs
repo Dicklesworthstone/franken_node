@@ -154,6 +154,7 @@ pub fn select_coordinator(
 ///
 /// INV-LC-QUORUM-TIER: threshold depends on safety tier.
 /// INV-LC-VERIFY-CLASSIFIED: failures are classified by type.
+#[allow(clippy::too_many_arguments)]
 pub fn verify_quorum(
     config: &QuorumConfig,
     lease_id: &str,

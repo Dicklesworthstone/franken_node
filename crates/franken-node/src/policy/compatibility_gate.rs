@@ -454,8 +454,8 @@ impl GateEngine {
     ) -> Vec<&DivergenceReceipt> {
         self.divergence_receipts
             .iter()
-            .filter(|r| scope_id.map_or(true, |s| r.scope_id == s))
-            .filter(|r| severity.map_or(true, |s| r.severity == s))
+            .filter(|r| scope_id.is_none_or(|s| r.scope_id == s))
+            .filter(|r| severity.is_none_or(|s| r.severity == s))
             .collect()
     }
 

@@ -589,7 +589,7 @@ impl PolicyCheckpointChain {
                 .or_insert_with(|| cp.channel.clone());
         }
         let mut channels: Vec<ReleaseChannel> = seen.into_values().collect();
-        channels.sort_by(|a, b| a.label().cmp(&b.label()));
+        channels.sort_by_key(|c| c.label());
         channels
     }
 
@@ -1108,8 +1108,8 @@ mod tests {
 
         // Flip one character in policy_hash (simulates bit-flip)
         let original = chain.checkpoints()[1].policy_hash.clone();
-        let flipped = if original.starts_with('a') {
-            format!("b{}", &original[1..])
+        let flipped = if let Some(rest) = original.strip_prefix('a') {
+            format!("b{rest}")
         } else {
             format!("a{}", &original[1..])
         };

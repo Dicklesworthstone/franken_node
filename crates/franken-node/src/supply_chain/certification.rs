@@ -252,7 +252,7 @@ pub fn evaluate_certification(input: &CertificationInput) -> CertificationResult
     } else {
         unsatisfied.push("reproducible_build_evidence".to_owned());
     }
-    let adequate_coverage = input.test_coverage_pct.map_or(false, |pct| pct >= 80.0);
+    let adequate_coverage = input.test_coverage_pct.is_some_and(|pct| pct >= 80.0);
     if input.has_test_coverage_evidence && adequate_coverage {
         satisfied.push("test_coverage_above_80pct".to_owned());
     } else {
@@ -598,7 +598,7 @@ impl CertificationRegistry {
         let record = self
             .records
             .get(&key)
-            .ok_or_else(|| CertificationError::ExtensionNotFound(key))?;
+            .ok_or(CertificationError::ExtensionNotFound(key))?;
 
         if is_capability_allowed(capability, record.level) {
             Ok(())
@@ -619,7 +619,7 @@ impl CertificationRegistry {
         let key = format!("{extension_id}@{version}");
         self.records
             .get(&key)
-            .ok_or_else(|| CertificationError::ExtensionNotFound(key))
+            .ok_or(CertificationError::ExtensionNotFound(key))
     }
 
     /// Query audit trail for an extension.

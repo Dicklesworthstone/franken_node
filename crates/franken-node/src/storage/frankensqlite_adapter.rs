@@ -356,7 +356,7 @@ impl FrankensqliteAdapter {
         let mut results = Vec::new();
         for (key, expected) in &log_snapshot {
             let stored = self.store.get(&(PersistenceClass::AuditLog, key.clone()));
-            let matches = stored.map_or(false, |v| v == expected);
+            let matches = stored.is_some_and(|v| v == expected);
             if !matches {
                 self.replay_mismatches += 1;
                 self.emit_event(
@@ -956,7 +956,7 @@ mod tests {
     fn test_default_adapter() {
         let adapter = FrankensqliteAdapter::default();
         assert!(!adapter.gate_pass());
-        assert!(adapter.events().len() >= 1); // init event
+        assert!(!adapter.events().is_empty()); // init event
     }
 
     // -- AdapterEvent serde --

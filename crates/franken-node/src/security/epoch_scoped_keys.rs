@@ -54,6 +54,7 @@ impl RootSecret {
         &self.0
     }
 
+    #[allow(dead_code)]
     pub fn to_hex(&self) -> String {
         hex::encode(self.0)
     }
@@ -97,6 +98,7 @@ pub struct Signature {
 }
 
 impl Signature {
+    #[allow(dead_code)]
     pub fn from_hex(hex: &str) -> Result<Self, AuthError> {
         let bytes = hex::decode(hex).map_err(|e| AuthError::InvalidHex {
             reason: e.to_string(),

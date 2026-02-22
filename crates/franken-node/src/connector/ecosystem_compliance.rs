@@ -147,6 +147,7 @@ impl ComplianceEvidenceStore {
     ///
     /// The content_hash is computed from the content and used as the storage key.
     /// Returns the content hash.
+    #[allow(clippy::too_many_arguments)]
     pub fn store_evidence(
         &mut self,
         publisher_id: &str,

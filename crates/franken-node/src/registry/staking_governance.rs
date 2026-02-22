@@ -637,16 +637,15 @@ impl CapabilityStakeGate {
         }
 
         // Check cooldown has elapsed
-        if let Some(account) = ledger.accounts.get(publisher_id) {
-            if let Some(cooldown_until) = account.cooldown_until {
-                if current_time < cooldown_until {
-                    return (
-                        false,
-                        STAKE_007,
-                        format!("publisher {publisher_id} in cooldown until {cooldown_until}"),
-                    );
-                }
-            }
+        if let Some(account) = ledger.accounts.get(publisher_id)
+            && let Some(cooldown_until) = account.cooldown_until
+            && current_time < cooldown_until
+        {
+            return (
+                false,
+                STAKE_007,
+                format!("publisher {publisher_id} in cooldown until {cooldown_until}"),
+            );
         }
 
         (
@@ -727,14 +726,14 @@ impl StakingLedger {
         timestamp: u64,
     ) -> Result<StakeId, StakingError> {
         // INV-STAKE-MINIMUM: check minimum for risk tier
-        if let Some(tier_policy) = self.engine.penalty_schedule.get_tier(&risk_tier) {
-            if amount < tier_policy.minimum_stake {
-                return Err(StakingError::InsufficientStake {
-                    required: tier_policy.minimum_stake,
-                    provided: amount,
-                    code: ERR_STAKE_INSUFFICIENT,
-                });
-            }
+        if let Some(tier_policy) = self.engine.penalty_schedule.get_tier(&risk_tier)
+            && amount < tier_policy.minimum_stake
+        {
+            return Err(StakingError::InsufficientStake {
+                required: tier_policy.minimum_stake,
+                provided: amount,
+                code: ERR_STAKE_INSUFFICIENT,
+            });
         }
 
         let stake_id = StakeId(self.state.next_stake_id);
@@ -1140,20 +1139,26 @@ impl StakingLedger {
         }
 
         // INV-STAKE-WITHDRAWAL-SAFE: check cooldown has elapsed
-        if let Some(account) = self.accounts.get(&record.publisher_id) {
-            if let Some(cooldown_until) = account.cooldown_until {
-                if current_time < cooldown_until {
-                    return Err(StakingError::WithdrawalBlocked {
-                        stake_id,
-                        reason: format!("cooldown active until {cooldown_until}"),
-                        code: ERR_STAKE_WITHDRAWAL_BLOCKED,
-                    });
-                }
-            }
+        if let Some(account) = self.accounts.get(&record.publisher_id)
+            && let Some(cooldown_until) = account.cooldown_until
+            && current_time < cooldown_until
+        {
+            return Err(StakingError::WithdrawalBlocked {
+                stake_id,
+                reason: format!("cooldown active until {cooldown_until}"),
+                code: ERR_STAKE_WITHDRAWAL_BLOCKED,
+            });
         }
 
         // Perform withdrawal
-        let stake_record = self.state.stakes.get_mut(&stake_id.0).unwrap();
+        let stake_record =
+            self.state
+                .stakes
+                .get_mut(&stake_id.0)
+                .ok_or(StakingError::StakeNotFound {
+                    stake_id,
+                    code: ERR_STAKE_NOT_FOUND,
+                })?;
         stake_record.state = StakeState::Withdrawn;
         stake_record.withdrawn_at = Some(current_time);
         let withdrawn_amount = stake_record.amount;
@@ -1208,17 +1213,24 @@ impl StakingLedger {
             });
         }
 
-        if let Some(expires_at) = record.expires_at {
-            if current_time < expires_at {
-                return Err(StakingError::InvalidTransition {
-                    from: record.state,
-                    to: StakeState::Expired,
-                    code: ERR_STAKE_INVALID_TRANSITION,
-                });
-            }
+        if let Some(expires_at) = record.expires_at
+            && current_time < expires_at
+        {
+            return Err(StakingError::InvalidTransition {
+                from: record.state,
+                to: StakeState::Expired,
+                code: ERR_STAKE_INVALID_TRANSITION,
+            });
         }
 
-        let stake_record = self.state.stakes.get_mut(&stake_id.0).unwrap();
+        let stake_record =
+            self.state
+                .stakes
+                .get_mut(&stake_id.0)
+                .ok_or(StakingError::StakeNotFound {
+                    stake_id,
+                    code: ERR_STAKE_NOT_FOUND,
+                })?;
         stake_record.state = StakeState::Expired;
         let released_amount = stake_record.amount;
         stake_record.amount = 0;
@@ -1336,6 +1348,7 @@ impl StakingLedger {
     // Internal helpers
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_audit(
         &mut self,
         event_code: &str,

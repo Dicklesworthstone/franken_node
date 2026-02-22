@@ -619,11 +619,8 @@ impl VirtualTransportLayer {
     /// Deliver all eligible messages from a link.
     pub fn deliver_all(&mut self, link_id: &str) -> Result<Vec<Message>, VirtualTransportError> {
         let mut delivered = Vec::new();
-        loop {
-            match self.deliver_next(link_id)? {
-                Some(msg) => delivered.push(msg),
-                None => break,
-            }
+        while let Some(msg) = self.deliver_next(link_id)? {
+            delivered.push(msg);
         }
         Ok(delivered)
     }

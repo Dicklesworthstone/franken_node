@@ -81,7 +81,7 @@ impl RemoteScope {
     pub fn allows_endpoint(&self, endpoint: &str) -> bool {
         self.endpoint_prefixes
             .iter()
-            .any(|prefix| endpoint.starts_with(prefix))
+            .any(|prefix| endpoint_matches_prefix(endpoint, prefix))
     }
 
     fn normalize(&mut self) {
@@ -95,6 +95,18 @@ impl RemoteScope {
             .filter(|entry| !entry.is_empty())
             .collect();
         self.endpoint_prefixes = endpoint_set.into_iter().collect();
+    }
+}
+
+fn endpoint_matches_prefix(endpoint: &str, prefix: &str) -> bool {
+    if !endpoint.starts_with(prefix) {
+        return false;
+    }
+
+    match endpoint.as_bytes().get(prefix.len()) {
+        None => true,
+        Some(b'/') | Some(b'?') | Some(b'#') | Some(b':') => true,
+        Some(_) => false,
     }
 }
 
@@ -860,5 +872,59 @@ mod tests {
         let event = gate.audit_log().last().expect("event");
         assert_eq!(event.event_code, "REMOTECAP_LOCAL_MODE_ACTIVE");
         assert!(event.allowed);
+    }
+
+    #[test]
+    fn lookalike_domain_is_denied_even_with_string_prefix_match() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-16",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com.evil.tld/v1",
+                1_700_000_010,
+                "trace-17",
+            )
+            .expect_err("lookalike domain must fail scope checks");
+        assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
+    }
+
+    #[test]
+    fn endpoint_with_explicit_port_is_allowed_for_host_prefix() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-18",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://telemetry.example.com:443/v1",
+            1_700_000_010,
+            "trace-19",
+        )
+        .expect("host prefix with explicit port should be allowed");
     }
 }

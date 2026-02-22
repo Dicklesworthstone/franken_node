@@ -159,6 +159,7 @@ pub struct MemoryBudgetGuardrail {
     /// Warn threshold (0.0-1.0): warn when utilization exceeds this.
     warn_threshold: f64,
     /// Minimum block threshold enforced by correctness envelope.
+    #[allow(dead_code)]
     min_block_threshold: f64,
 }
 
@@ -225,6 +226,7 @@ pub struct DurabilityLossGuardrail {
     /// Warn when durability is within this margin of min.
     warn_margin: f64,
     /// Correctness envelope minimum durability.
+    #[allow(dead_code)]
     min_allowed_durability: f64,
 }
 
@@ -300,17 +302,17 @@ impl Default for HardeningRegressionGuardrail {
 
 impl GuardrailMonitor for HardeningRegressionGuardrail {
     fn check(&self, state: &SystemState) -> GuardrailVerdict {
-        if let Some(proposed) = state.proposed_hardening_level {
-            if proposed < state.hardening_level {
-                return GuardrailVerdict::Block {
-                    reason: format!(
-                        "hardening regression from {} to {} (INV-001-MONOTONIC-HARDENING)",
-                        state.hardening_level.label(),
-                        proposed.label(),
-                    ),
-                    budget_id: self.budget_id.clone(),
-                };
-            }
+        if let Some(proposed) = state.proposed_hardening_level
+            && proposed < state.hardening_level
+        {
+            return GuardrailVerdict::Block {
+                reason: format!(
+                    "hardening regression from {} to {} (INV-001-MONOTONIC-HARDENING)",
+                    state.hardening_level.label(),
+                    proposed.label(),
+                ),
+                budget_id: self.budget_id.clone(),
+            };
         }
         GuardrailVerdict::Allow
     }

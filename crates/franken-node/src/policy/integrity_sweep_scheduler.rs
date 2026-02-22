@@ -748,7 +748,7 @@ mod tests {
         for i in 1..=5 {
             let evidence = EvidenceTrajectory::new(
                 i * 2,
-                i as u32,
+                i,
                 0.9 - (i as f64 * 0.1),
                 Trend::Degrading,
                 i as u64,

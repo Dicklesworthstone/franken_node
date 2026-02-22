@@ -411,7 +411,7 @@ mod tests {
 
     #[test]
     fn all_error_codes_present() {
-        let errors = vec![
+        let errors = [
             InteropError::SerializationMismatch {
                 case_id: "x".into(),
                 expected: "".into(),

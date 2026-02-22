@@ -514,11 +514,11 @@ impl RegionTree {
         // INV-REGION-DETERMINISTIC-CLOSE
         for child_id in &children {
             let child_node = self.nodes.get(child_id.as_str());
-            if let Some(cn) = child_node {
-                if cn.state != RegionState::Closed {
-                    let child_events = self.close(child_id, timestamp_ms)?;
-                    all_events.extend(child_events);
-                }
+            if let Some(cn) = child_node
+                && cn.state != RegionState::Closed
+            {
+                let child_events = self.close(child_id, timestamp_ms)?;
+                all_events.extend(child_events);
             }
         }
 

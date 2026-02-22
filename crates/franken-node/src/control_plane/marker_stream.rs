@@ -384,7 +384,8 @@ impl MarkerStream {
         };
 
         self.markers.push(marker);
-        Ok(self.markers.last().unwrap())
+        // Safety: we just pushed, so last() is guaranteed Some
+        Ok(self.markers.last().expect("markers non-empty after push"))
     }
 
     /// Get the most recent marker.

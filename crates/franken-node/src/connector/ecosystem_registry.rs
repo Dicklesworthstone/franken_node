@@ -175,22 +175,22 @@ impl EcosystemRegistry {
         trace_id: &str,
     ) -> Result<&ExtensionRecord, RegistryError> {
         // Sybil check: reject duplicate publisher keys from different publishers.
-        if let Some(existing_pub) = self.publisher_keys.get(&metadata.publisher_key) {
-            if existing_pub != &metadata.publisher_id {
-                self.emit_event(
-                    ENE_011_SYBIL_REJECT,
-                    &metadata.extension_id,
-                    &format!(
-                        "duplicate key {} from publisher {}",
-                        metadata.publisher_key, metadata.publisher_id
-                    ),
-                    timestamp,
-                    trace_id,
-                );
-                return Err(RegistryError::SybilDuplicate(
-                    metadata.publisher_key.clone(),
-                ));
-            }
+        if let Some(existing_pub) = self.publisher_keys.get(&metadata.publisher_key)
+            && existing_pub != &metadata.publisher_id
+        {
+            self.emit_event(
+                ENE_011_SYBIL_REJECT,
+                &metadata.extension_id,
+                &format!(
+                    "duplicate key {} from publisher {}",
+                    metadata.publisher_key, metadata.publisher_id
+                ),
+                timestamp,
+                trace_id,
+            );
+            return Err(RegistryError::SybilDuplicate(
+                metadata.publisher_key.clone(),
+            ));
         }
 
         // Duplicate extension check.

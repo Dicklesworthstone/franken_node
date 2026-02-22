@@ -102,13 +102,14 @@ pub fn validate_schema(event: &DegradedModeEvent) -> Result<(), AuditError> {
 /// Append-only audit log for degraded-mode events.
 ///
 /// INV-DM-IMMUTABLE: events cannot be modified or deleted.
+#[derive(Default)]
 pub struct DegradedModeAuditLog {
     events: Vec<DegradedModeEvent>,
 }
 
 impl DegradedModeAuditLog {
     pub fn new() -> Self {
-        Self { events: Vec::new() }
+        Self::default()
     }
 
     /// Emit a degraded-mode event. Validates schema before appending.

@@ -108,7 +108,7 @@ impl EvidenceRequirement {
     pub fn for_action(action: PolicyAction) -> Self {
         Self {
             required_decision_kind: action.expected_decision_kind(),
-            action: action,
+            action,
             action_id_must_match: true,
         }
     }
@@ -588,7 +588,7 @@ mod tests {
 
     #[test]
     fn conformance_error_codes() {
-        let errors = vec![
+        let errors = [
             ConformanceError::MissingEvidence {
                 action: PolicyAction::Commit,
                 action_id: ActionId::new("ACT-001"),

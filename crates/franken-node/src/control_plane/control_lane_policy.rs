@@ -681,12 +681,12 @@ mod tests {
 
     #[test]
     fn test_cancel_budget_at_least_20() {
-        assert!(CANCEL_LANE_BUDGET_PCT >= 20);
+        const { assert!(CANCEL_LANE_BUDGET_PCT >= 20) };
     }
 
     #[test]
     fn test_timed_budget_at_least_30() {
-        assert!(TIMED_LANE_BUDGET_PCT >= 30);
+        const { assert!(TIMED_LANE_BUDGET_PCT >= 30) };
     }
 
     #[test]

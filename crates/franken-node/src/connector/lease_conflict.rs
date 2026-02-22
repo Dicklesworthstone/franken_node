@@ -15,7 +15,7 @@ pub enum ConflictTier {
 }
 
 impl ConflictTier {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "Standard" => Self::Standard,
             "Risky" => Self::Risky,
@@ -41,7 +41,7 @@ pub enum LeasePurposePriority {
 }
 
 impl LeasePurposePriority {
-    pub fn from_str(s: &str) -> Self {
+    pub fn parse(s: &str) -> Self {
         match s {
             "MigrationHandoff" => Self::MigrationHandoff,
             "StateWrite" => Self::StateWrite,
@@ -174,8 +174,8 @@ pub fn detect_conflicts(leases: &[ActiveLease], resource: &str, now: u64) -> Vec
             let end = a.expires_at.min(b.expires_at);
             if start < end {
                 // Effective tier: highest of the two
-                let tier_a = ConflictTier::from_str(&a.tier);
-                let tier_b = ConflictTier::from_str(&b.tier);
+                let tier_a = ConflictTier::parse(&a.tier);
+                let tier_b = ConflictTier::parse(&b.tier);
                 let tier = match (tier_a, tier_b) {
                     (ConflictTier::Dangerous, _) | (_, ConflictTier::Dangerous) => {
                         ConflictTier::Dangerous
@@ -227,8 +227,8 @@ pub fn resolve_conflict(
     };
 
     // Deterministic resolution: purpose priority first, then earliest grant
-    let priority_a = LeasePurposePriority::from_str(&a.purpose) as u8;
-    let priority_b = LeasePurposePriority::from_str(&b.purpose) as u8;
+    let priority_a = LeasePurposePriority::parse(&a.purpose) as u8;
+    let priority_b = LeasePurposePriority::parse(&b.purpose) as u8;
 
     let (winner, loser, rule) = if priority_a != priority_b {
         if priority_a > priority_b {
@@ -679,9 +679,9 @@ mod tests {
 
     #[test]
     fn conflict_tier_from_str() {
-        assert_eq!(ConflictTier::from_str("Standard"), ConflictTier::Standard);
-        assert_eq!(ConflictTier::from_str("Risky"), ConflictTier::Risky);
-        assert_eq!(ConflictTier::from_str("Dangerous"), ConflictTier::Dangerous);
-        assert_eq!(ConflictTier::from_str("Unknown"), ConflictTier::Dangerous);
+        assert_eq!(ConflictTier::parse("Standard"), ConflictTier::Standard);
+        assert_eq!(ConflictTier::parse("Risky"), ConflictTier::Risky);
+        assert_eq!(ConflictTier::parse("Dangerous"), ConflictTier::Dangerous);
+        assert_eq!(ConflictTier::parse("Unknown"), ConflictTier::Dangerous);
     }
 }

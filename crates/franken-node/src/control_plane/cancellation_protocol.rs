@@ -677,7 +677,7 @@ impl CancellationProtocol {
         self.records
             .iter()
             .position(|r| r.workflow_id == workflow_id)
-            .ok_or_else(|| CancelProtocolError::InvalidPhase {
+            .ok_or(CancelProtocolError::InvalidPhase {
                 from: CancelPhase::Idle,
                 to: CancelPhase::CancelRequested,
             })

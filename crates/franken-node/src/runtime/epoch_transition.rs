@@ -149,6 +149,7 @@ struct PendingTransitionMetadata {
     target_epoch: u64,
     initiator: String,
     reason: String,
+    #[allow(dead_code)]
     started_at_ms: u64,
 }
 

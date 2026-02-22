@@ -234,9 +234,9 @@ fn ln_gamma(x: f64) -> f64 {
     }
     // Use the Lanczos approximation (g=7, n=9).
     let coefficients = [
-        0.999_999_999_999_809_93,
+        0.999_999_999_999_809_9,
         676.520_368_121_885_1,
-        -1259.139_216_722_402_8,
+        -1_259.139_216_722_402_8,
         771.323_428_777_653_1,
         -176.615_029_162_140_6,
         12.507_343_278_686_905,
@@ -455,8 +455,8 @@ impl BocpdDetector {
 
         // Step 1: Compute predictive probabilities for each run length.
         let mut pred_probs = vec![0.0; max_rl];
-        for r in 0..max_rl {
-            pred_probs[r] = match &self.model {
+        for (r, pred_prob) in pred_probs.iter_mut().enumerate() {
+            *pred_prob = match &self.model {
                 ObservationModel::Gaussian(m) => m.predictive_prob(&self.gaussian_stats[r], x),
                 ObservationModel::Poisson(m) => m.predictive_prob(&self.poisson_stats[r], x),
                 ObservationModel::Categorical(m) => {

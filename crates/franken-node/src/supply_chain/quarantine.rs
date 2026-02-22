@@ -554,6 +554,7 @@ impl QuarantineRegistry {
     }
 
     /// Generate an impact report for a quarantine.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_impact_report(
         &mut self,
         order_id: &str,
@@ -868,6 +869,7 @@ impl QuarantineRegistry {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn append_audit(
         &mut self,
         event_code: &str,

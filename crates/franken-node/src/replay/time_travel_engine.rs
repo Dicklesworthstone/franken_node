@@ -1499,7 +1499,7 @@ mod tests {
 
         // Only diverge on even steps
         fn even_bad(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
-            if step.seq % 2 == 0 {
+            if step.seq.is_multiple_of(2) {
                 (vec![0xFF], step.side_effects.clone())
             } else {
                 (step.output.clone(), step.side_effects.clone())

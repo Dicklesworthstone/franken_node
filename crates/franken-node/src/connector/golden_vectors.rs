@@ -117,7 +117,7 @@ impl fmt::Display for SchemaError {
 
 // ── Schema & vector registry ────────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct SchemaRegistry {
     schemas: HashMap<SchemaCategory, SchemaSpec>,
     vectors: HashMap<SchemaCategory, Vec<GoldenVector>>,
@@ -125,10 +125,7 @@ pub struct SchemaRegistry {
 
 impl SchemaRegistry {
     pub fn new() -> Self {
-        Self {
-            schemas: HashMap::new(),
-            vectors: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Register a schema spec.
@@ -360,7 +357,7 @@ mod tests {
 
     #[test]
     fn all_error_codes_present() {
-        let errors = vec![
+        let errors = [
             SchemaError::MissingSchema("x".into()),
             SchemaError::MissingVector("x".into()),
             SchemaError::VectorMismatch {

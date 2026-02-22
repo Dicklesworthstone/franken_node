@@ -496,7 +496,12 @@ impl LaneScheduler {
                 })?;
 
         let config = &self.policy.lane_configs[lane.as_str()];
-        let counters = self.counters.get_mut(lane.as_str()).unwrap();
+        let counters =
+            self.counters
+                .get_mut(lane.as_str())
+                .ok_or_else(|| LaneSchedulerError::UnknownLane {
+                    lane: lane.to_string(),
+                })?;
 
         // INV-LANE-CAP-ENFORCE
         if counters.active_count >= config.concurrency_cap {
@@ -552,7 +557,12 @@ impl LaneScheduler {
                     task_id: task_id.to_string(),
                 })?;
 
-        let counters = self.counters.get_mut(assignment.lane.as_str()).unwrap();
+        let counters =
+            self.counters
+                .get_mut(assignment.lane.as_str())
+                .ok_or_else(|| LaneSchedulerError::UnknownLane {
+                    lane: assignment.lane.to_string(),
+                })?;
         counters.active_count = counters.active_count.saturating_sub(1);
         counters.completed_total += 1;
         counters.last_completion_ms = Some(timestamp_ms);
@@ -604,8 +614,9 @@ impl LaneScheduler {
             };
             starved.push(err);
 
-            let c = self.counters.get_mut(lane.as_str()).unwrap();
-            c.starvation_events += 1;
+            if let Some(c) = self.counters.get_mut(lane.as_str()) {
+                c.starvation_events += 1;
+            }
 
             self.audit_log.push(LaneAuditRecord {
                 event_code: event_codes::LANE_STARVED.to_string(),

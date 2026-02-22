@@ -698,8 +698,7 @@ mod tests {
                 "t",
             )
             .unwrap();
-            let trace = exec.compensate(&id, "t").unwrap();
-            trace
+            exec.compensate(&id, "t").unwrap()
         };
 
         let t1 = run();

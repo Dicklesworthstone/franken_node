@@ -110,6 +110,7 @@ pub struct TransitionAbortEvent {
 
 impl TransitionAbortEvent {
     /// Create a new abort event.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         barrier_id: &str,
         reason: TransitionAbortReason,
@@ -376,6 +377,7 @@ impl TransitionAbortManager {
 
     /// Record a standard abort (no force policy).
     /// INV-ABORT-NO-PARTIAL, INV-ABORT-ALL-NOTIFIED
+    #[allow(clippy::too_many_arguments)]
     pub fn record_abort(
         &mut self,
         barrier_id: &str,
@@ -416,6 +418,7 @@ impl TransitionAbortManager {
 
     /// Record a force transition application.
     /// INV-ABORT-FORCE-AUDITED
+    #[allow(clippy::too_many_arguments)]
     pub fn record_force_transition(
         &mut self,
         barrier_id: &str,

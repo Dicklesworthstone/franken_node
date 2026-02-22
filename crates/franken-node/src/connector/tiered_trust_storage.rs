@@ -194,12 +194,21 @@ impl StorageError {
         )
     }
 
-    pub fn recovery_source_missing(id: &ArtifactId, source_tier: Tier) -> Self {
+    pub fn recovery_source_missing(
+        id: &ArtifactId,
+        target_tier: Tier,
+        searched_tiers: &[Tier],
+    ) -> Self {
+        let searched = searched_tiers
+            .iter()
+            .map(Tier::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
         Self::new(
             ERR_RECOVERY_SOURCE_MISSING,
             format!(
-                "Artifact {} not found in source tier {} for recovery",
-                id, source_tier
+                "Artifact {} not found in recovery source tier(s) [{}] for target tier {}",
+                id, searched, target_tier
             ),
         )
     }
@@ -604,6 +613,7 @@ impl TieredTrustStorage {
         Err(StorageError::recovery_source_missing(
             artifact_id,
             target_tier,
+            candidate_tiers,
         ))
     }
 
@@ -956,6 +966,18 @@ mod tests {
         let result = storage.recover_tier(Tier::L1Local, &id);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_RECOVERY_SOURCE_MISSING);
+    }
+
+    #[test]
+    fn test_recover_missing_source_reports_candidate_tiers() {
+        let mut storage = TieredTrustStorage::with_defaults();
+        let id = ArtifactId("missing".to_string());
+        let err = storage.recover_tier(Tier::L1Local, &id).unwrap_err();
+
+        assert_eq!(err.code, ERR_RECOVERY_SOURCE_MISSING);
+        assert!(err.message.contains("L1_local"));
+        assert!(err.message.contains("L2_warm"));
+        assert!(err.message.contains("L3_archive"));
     }
 
     #[test]

@@ -434,7 +434,7 @@ impl CaptureSession {
         };
         self.frames.push(frame);
         self.events.push(event_codes::TTR_002.to_string());
-        Ok(self.frames.last().unwrap())
+        Ok(self.frames.last().expect("frames non-empty after push"))
     }
 
     /// Return the number of captured frames.
@@ -479,6 +479,7 @@ impl CaptureSession {
 pub struct ReplaySession {
     snapshot: WorkflowSnapshot,
     cursor: u64,
+    #[allow(dead_code)]
     seed: u64,
     events: Vec<String>,
 }
@@ -499,8 +500,7 @@ impl ReplaySession {
                 replay_seed: seed,
             });
         }
-        let mut events = Vec::new();
-        events.push(event_codes::TTR_003.to_string());
+        let events = vec![event_codes::TTR_003.to_string()];
         Ok(Self {
             snapshot,
             cursor: 0,

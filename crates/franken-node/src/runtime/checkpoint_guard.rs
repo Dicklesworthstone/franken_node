@@ -221,10 +221,7 @@ impl CheckpointGuard {
 }
 
 fn duration_ms(duration: Duration) -> u64 {
-    match u64::try_from(duration.as_millis()) {
-        Ok(value) => value,
-        Err(_) => u64::MAX,
-    }
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
 }
 
 fn elapsed_ms(started: Instant) -> u64 {

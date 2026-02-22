@@ -123,6 +123,7 @@ struct ScopeState {
 }
 
 /// Offline coverage tracker.
+#[derive(Default)]
 pub struct OfflineCoverageTracker {
     scopes: HashMap<String, ScopeState>,
     all_events: Vec<CoverageEvent>,
@@ -130,10 +131,7 @@ pub struct OfflineCoverageTracker {
 
 impl OfflineCoverageTracker {
     pub fn new() -> Self {
-        Self {
-            scopes: HashMap::new(),
-            all_events: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Record a coverage event.

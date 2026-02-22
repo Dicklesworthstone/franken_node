@@ -583,16 +583,14 @@ impl TrustFabricNode {
 // ---------------------------------------------------------------------------
 
 /// Simulated fleet of trust fabric nodes.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TrustFabricFleet {
     nodes: HashMap<String, TrustFabricNode>,
 }
 
 impl TrustFabricFleet {
     pub fn new() -> Self {
-        Self {
-            nodes: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn add_node(&mut self, node: TrustFabricNode) {

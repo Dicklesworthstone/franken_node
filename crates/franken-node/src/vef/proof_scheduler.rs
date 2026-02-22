@@ -23,6 +23,7 @@ pub mod event_codes {
 }
 
 pub mod error_codes {
+    #[allow(dead_code)]
     pub const ERR_VEF_SCHED_DEADLINE: &str = "ERR-VEF-SCHED-DEADLINE";
     pub const ERR_VEF_SCHED_BUDGET: &str = "ERR-VEF-SCHED-BUDGET";
     pub const ERR_VEF_SCHED_WINDOW: &str = "ERR-VEF-SCHED-WINDOW";
@@ -152,6 +153,7 @@ pub struct SchedulerError {
 }
 
 impl SchedulerError {
+    #[allow(dead_code)]
     fn deadline(message: impl Into<String>) -> Self {
         Self {
             code: error_codes::ERR_VEF_SCHED_DEADLINE.to_string(),
@@ -219,6 +221,7 @@ impl VefProofScheduler {
         &self.jobs
     }
 
+    #[allow(dead_code)]
     pub fn events(&self) -> &[SchedulerEvent] {
         &self.events
     }

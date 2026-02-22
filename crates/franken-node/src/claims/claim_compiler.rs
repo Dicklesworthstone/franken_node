@@ -799,7 +799,7 @@ mod tests {
             _ => panic!("expected compiled"),
         };
         let s1 = sb
-            .build_snapshot("snap-det", &[contract.clone()])
+            .build_snapshot("snap-det", std::slice::from_ref(&contract))
             .expect("s1");
         let s2 = sb.build_snapshot("snap-det", &[contract]).expect("s2");
         assert_eq!(s1.snapshot_digest, s2.snapshot_digest);

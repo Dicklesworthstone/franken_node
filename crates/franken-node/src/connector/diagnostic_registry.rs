@@ -739,29 +739,37 @@ mod tests {
 
     #[test]
     fn test_invalid_budget() {
-        let mut cfg = VoiConfig::default();
-        cfg.budget_units = -1.0;
+        let cfg = VoiConfig {
+            budget_units: -1.0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_invalid_window() {
-        let mut cfg = VoiConfig::default();
-        cfg.window_secs = 0;
+        let cfg = VoiConfig {
+            window_secs: 0,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_invalid_storm_threshold() {
-        let mut cfg = VoiConfig::default();
-        cfg.storm_threshold = 0.5;
+        let cfg = VoiConfig {
+            storm_threshold: 0.5,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
     #[test]
     fn test_invalid_weights() {
-        let mut cfg = VoiConfig::default();
-        cfg.weight_staleness = 0.5;
+        let cfg = VoiConfig {
+            weight_staleness: 0.5,
+            ..Default::default()
+        };
         // Weights now sum to 1.2 (0.5+0.3+0.2+0.2).
         assert!(cfg.validate().is_err());
     }

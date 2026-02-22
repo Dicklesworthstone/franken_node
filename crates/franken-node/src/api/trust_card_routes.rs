@@ -4,6 +4,7 @@
 //! - `GET /trust-cards/{extension_id}`
 //! - `GET /trust-cards/publisher/{publisher_id}`
 //! - `GET /trust-cards/search?query=...`
+//!
 //! plus create/update/list/compare helpers for internal services.
 
 use serde::{Deserialize, Serialize};

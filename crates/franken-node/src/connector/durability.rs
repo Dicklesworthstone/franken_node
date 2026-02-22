@@ -959,7 +959,7 @@ mod tests {
     #[test]
     fn test_claim_matrix_all_deterministic() {
         let matrix = DurabilityController::claim_matrix();
-        for (_, claim) in &matrix {
+        for claim in matrix.values() {
             assert!(claim.deterministic);
         }
     }

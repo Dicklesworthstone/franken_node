@@ -466,7 +466,7 @@ impl TelemetryPipeline {
 
         // Filter by labels.
         for (key, val) in &query.labels {
-            results.retain(|p| p.labels.get(key).map_or(false, |v| v == val));
+            results.retain(|p| p.labels.get(key).is_some_and(|v| v == val));
         }
 
         let total_count = results.len();

@@ -426,7 +426,7 @@ impl ParticipationWeightEngine {
         match &participant.stake {
             None => 0.0,
             Some(stake) => {
-                let base = (stake.amount.ln_1p() / 10.0).min(1.0).max(0.0);
+                let base = (stake.amount.ln_1p() / 10.0).clamp(0.0, 1.0);
                 let lock_bonus = if stake.locked {
                     (stake.lock_duration_seconds as f64 / (86400.0 * 365.0)).min(0.5)
                 } else {
@@ -523,7 +523,7 @@ impl ParticipationWeightEngine {
 
         established_weights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = established_weights.len() / 2;
-        if established_weights.len() % 2 == 0 {
+        if established_weights.len().is_multiple_of(2) {
             (established_weights[mid - 1] + established_weights[mid]) / 2.0
         } else {
             established_weights[mid]

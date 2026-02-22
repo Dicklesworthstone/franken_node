@@ -474,9 +474,9 @@ impl EpochTransitionBarrier {
 
     /// Unregister a participant (only when no barrier is active).
     pub fn unregister_participant(&mut self, participant_id: &str) -> Result<(), BarrierError> {
-        if self.active_barrier.is_some() {
+        if let Some(active) = &self.active_barrier {
             return Err(BarrierError::ConcurrentBarrier {
-                active_barrier_id: self.active_barrier.as_ref().unwrap().barrier_id.clone(),
+                active_barrier_id: active.barrier_id.clone(),
             });
         }
         self.participants.remove(participant_id);
@@ -577,7 +577,7 @@ impl EpochTransitionBarrier {
         let barrier = self
             .active_barrier
             .as_mut()
-            .ok_or_else(|| BarrierError::NoParticipants)?;
+            .ok_or(BarrierError::NoParticipants)?;
 
         if barrier.is_terminal() {
             return Err(BarrierError::AlreadyComplete {
@@ -622,7 +622,7 @@ impl EpochTransitionBarrier {
         let barrier = self
             .active_barrier
             .as_mut()
-            .ok_or_else(|| BarrierError::NoParticipants)?;
+            .ok_or(BarrierError::NoParticipants)?;
 
         if barrier.is_terminal() {
             return Err(BarrierError::AlreadyComplete {
@@ -701,7 +701,7 @@ impl EpochTransitionBarrier {
         let barrier = self
             .active_barrier
             .as_mut()
-            .ok_or_else(|| BarrierError::NoParticipants)?;
+            .ok_or(BarrierError::NoParticipants)?;
 
         if barrier.is_terminal() {
             return Err(BarrierError::AlreadyComplete {
@@ -779,7 +779,7 @@ impl EpochTransitionBarrier {
         let barrier = self
             .active_barrier
             .as_mut()
-            .ok_or_else(|| BarrierError::NoParticipants)?;
+            .ok_or(BarrierError::NoParticipants)?;
 
         if !barrier.participants.contains(participant_id) {
             return Err(BarrierError::UnknownParticipant {

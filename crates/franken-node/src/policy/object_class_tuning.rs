@@ -249,11 +249,10 @@ pub struct ObjectClassTuningEngine {
 
 impl ObjectClassTuningEngine {
     pub fn new() -> Self {
-        let engine = Self {
+        Self {
             overrides: HashMap::new(),
             events: Vec::new(),
-        };
-        engine
+        }
     }
 
     pub fn with_init_event() -> Self {

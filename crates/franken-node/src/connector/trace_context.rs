@@ -38,12 +38,12 @@ impl TraceContext {
                 self.span_id
             )));
         }
-        if let Some(ref parent) = self.parent_span_id {
-            if !is_hex(parent, 16) {
-                return Err(TraceError::InvalidFormat(format!(
-                    "parent_span_id must be 16 hex chars, got '{parent}'"
-                )));
-            }
+        if let Some(ref parent) = self.parent_span_id
+            && !is_hex(parent, 16)
+        {
+            return Err(TraceError::InvalidFormat(format!(
+                "parent_span_id must be 16 hex chars, got '{parent}'"
+            )));
         }
         Ok(())
     }
@@ -130,7 +130,7 @@ impl fmt::Display for TraceError {
 
 // ── Trace store (for stitching) ─────────────────────────────────────────────
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct TraceStore {
     /// trace_id → list of spans in insertion order.
     traces: HashMap<String, Vec<TraceContext>>,
@@ -138,9 +138,7 @@ pub struct TraceStore {
 
 impl TraceStore {
     pub fn new() -> Self {
-        Self {
-            traces: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Record a span.  Validates context first.
@@ -354,7 +352,7 @@ mod tests {
 
     #[test]
     fn all_error_codes_present() {
-        let errors = vec![
+        let errors = [
             TraceError::MissingTraceId,
             TraceError::MissingSpanId,
             TraceError::InvalidFormat("x".into()),

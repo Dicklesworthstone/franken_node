@@ -507,6 +507,7 @@ impl AttestationLedger {
     /// Generate a ZK attestation proof from private data commitment and a policy.
     /// INV-ZKA-SELECTIVE: we never store or transmit the raw private data.
     /// Returns the attestation. Emits FN-ZK-001.
+    #[allow(clippy::too_many_arguments)]
     pub fn generate_proof(
         &mut self,
         attestation_id: String,
@@ -895,6 +896,7 @@ impl AttestationLedger {
 
     // ── Internal helpers ────────────────────────────────────────────────────
 
+    #[allow(clippy::too_many_arguments)]
     fn record_audit(
         &mut self,
         record_id: String,

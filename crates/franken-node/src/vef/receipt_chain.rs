@@ -19,9 +19,13 @@ use std::sync::{Arc, Mutex};
 pub const RECEIPT_CHAIN_SCHEMA_VERSION: &str = "vef-receipt-chain-v1";
 
 /// Stable chain invariants for documentation/checker parity.
+#[allow(dead_code)]
 pub const INV_VEF_CHAIN_APPEND_ONLY: &str = "INV-VEF-CHAIN-APPEND-ONLY";
+#[allow(dead_code)]
 pub const INV_VEF_CHAIN_DETERMINISTIC: &str = "INV-VEF-CHAIN-DETERMINISTIC";
+#[allow(dead_code)]
 pub const INV_VEF_CHAIN_CHECKPOINT_REPRODUCIBLE: &str = "INV-VEF-CHAIN-CHECKPOINT-REPRODUCIBLE";
+#[allow(dead_code)]
 pub const INV_VEF_CHAIN_FAIL_CLOSED: &str = "INV-VEF-CHAIN-FAIL-CLOSED";
 
 /// Genesis predecessor hash used for entry index 0.
@@ -474,6 +478,7 @@ impl ConcurrentReceiptChain {
         guard.append(receipt, appended_at_millis, trace_id)
     }
 
+    #[allow(dead_code)]
     pub fn force_checkpoint(
         &self,
         now_millis: u64,

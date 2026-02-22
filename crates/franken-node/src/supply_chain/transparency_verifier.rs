@@ -116,7 +116,7 @@ pub fn recompute_root(proof: &InclusionProof) -> String {
     let mut index = proof.leaf_index;
 
     for sibling in &proof.audit_path {
-        if index % 2 == 0 {
+        if index.is_multiple_of(2) {
             current = hash_pair(&current, sibling);
         } else {
             current = hash_pair(sibling, &current);
@@ -294,7 +294,7 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
 
     // Build inclusion proofs for each original leaf
     let mut proofs = Vec::new();
-    for i in 0..n {
+    for (i, leaf_hash) in leaf_hashes.iter().enumerate() {
         let mut audit_path = Vec::new();
         let mut idx = i;
         for lvl in &levels[..levels.len() - 1] {
@@ -307,7 +307,7 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
         proofs.push(InclusionProof {
             leaf_index: i as u64,
             tree_size: n as u64,
-            leaf_hash: leaf_hashes[i].clone(),
+            leaf_hash: leaf_hash.clone(),
             audit_path,
         });
     }

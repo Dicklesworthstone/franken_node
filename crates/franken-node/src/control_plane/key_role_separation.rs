@@ -305,6 +305,7 @@ impl KeyRoleRegistry {
     ///
     /// INV-KRS-ROLE-EXCLUSIVITY: if the key_id is already bound to a
     /// different role, returns RoleSeparationViolation.
+    #[allow(clippy::too_many_arguments)]
     pub fn bind(
         &mut self,
         key_id: &str,
@@ -331,7 +332,7 @@ impl KeyRoleRegistry {
                 });
             }
             // Re-binding to the same role is idempotent; return existing.
-            return Ok(self.active.get(key_id).unwrap());
+            return Ok(self.active.get(key_id).expect("key verified present"));
         }
 
         let binding = KeyRoleBinding {
@@ -347,7 +348,7 @@ impl KeyRoleRegistry {
         self.events
             .push(KeyRoleEvent::bound(key_id, role, authority, trace_id));
 
-        Ok(self.active.get(key_id).unwrap())
+        Ok(self.active.get(key_id).expect("binding present after insert"))
     }
 
     /// Look up a binding by key_id. Returns None if not found or revoked.
@@ -391,6 +392,7 @@ impl KeyRoleRegistry {
     /// INV-KRS-ROTATION-ATOMIC: revokes old_key_id and binds new_key_id
     /// in a single operation. If old_key_id is not found or is not bound
     /// to the specified role, the entire operation fails and no state changes.
+    #[allow(clippy::too_many_arguments)]
     pub fn rotate(
         &mut self,
         role: KeyRole,
@@ -422,18 +424,18 @@ impl KeyRoleRegistry {
         }
 
         // Validate: new key must not already be bound to a different role.
-        if let Some(existing) = self.active.get(new_key_id) {
-            if existing.role != role {
-                return Err(KeyRoleSeparationError::RoleSeparationViolation {
-                    key_id: new_key_id.to_string(),
-                    existing_role: existing.role,
-                    attempted_role: role,
-                });
-            }
+        if let Some(existing) = self.active.get(new_key_id)
+            && existing.role != role
+        {
+            return Err(KeyRoleSeparationError::RoleSeparationViolation {
+                key_id: new_key_id.to_string(),
+                existing_role: existing.role,
+                attempted_role: role,
+            });
         }
 
         // Atomic: revoke old, bind new.
-        let old_binding = self.active.remove(old_key_id).unwrap();
+        let old_binding = self.active.remove(old_key_id).expect("old key verified present");
         self.revoked.push(old_binding);
 
         let new_binding = KeyRoleBinding {
@@ -450,7 +452,7 @@ impl KeyRoleRegistry {
             old_key_id, new_key_id, role, authority, trace_id,
         ));
 
-        Ok(self.active.get(new_key_id).unwrap())
+        Ok(self.active.get(new_key_id).expect("binding present after insert"))
     }
 
     /// Verify that a key is bound to the expected role.
@@ -1406,7 +1408,7 @@ mod tests {
 
     #[test]
     fn error_codes_all_variants() {
-        let errors = vec![
+        let errors = [
             KeyRoleSeparationError::RoleSeparationViolation {
                 key_id: "k".into(),
                 existing_role: KeyRole::Signing,

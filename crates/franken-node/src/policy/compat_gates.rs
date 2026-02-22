@@ -566,14 +566,14 @@ impl CompatGateEvaluator {
         let previous_mode = self.scopes.get(scope_id).map(|s| s.mode);
 
         // Check escalation policy
-        if let Some(prev) = previous_mode {
-            if prev.is_escalation_to(mode) && !approval {
-                return Err(CompatGateError::TransitionDenied {
-                    from: prev.label().to_string(),
-                    to: mode.label().to_string(),
-                    reason: "escalation requires explicit approval".to_string(),
-                });
-            }
+        if let Some(prev) = previous_mode
+            && prev.is_escalation_to(mode) && !approval
+        {
+            return Err(CompatGateError::TransitionDenied {
+                from: prev.label().to_string(),
+                to: mode.label().to_string(),
+                reason: "escalation requires explicit approval".to_string(),
+            });
         }
 
         let receipt = ModeSelectionReceipt {
@@ -585,7 +585,7 @@ impl CompatGateEvaluator {
             signature: "a".repeat(64), // placeholder signature
             requestor: requestor.to_string(),
             justification: justification.to_string(),
-            approval_required: previous_mode.map_or(false, |p| p.is_escalation_to(mode)),
+            approval_required: previous_mode.is_some_and(|p| p.is_escalation_to(mode)),
             approved: approval,
         };
 

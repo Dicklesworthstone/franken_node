@@ -311,11 +311,12 @@ fn now_timestamp() -> String {
 /// Compute the signing payload for a capsule.
 /// INV-VSDK-SIGNATURE-BOUND: covers manifest + payload + inputs.
 fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
-    let mut parts = Vec::new();
-    parts.push(capsule.manifest.capsule_id.clone());
-    parts.push(capsule.manifest.schema_version.clone());
-    parts.push(capsule.manifest.expected_output_hash.clone());
-    parts.push(capsule.payload.clone());
+    let mut parts = vec![
+        capsule.manifest.capsule_id.clone(),
+        capsule.manifest.schema_version.clone(),
+        capsule.manifest.expected_output_hash.clone(),
+        capsule.payload.clone(),
+    ];
     for (k, v) in &capsule.inputs {
         parts.push(format!("{k}={v}"));
     }

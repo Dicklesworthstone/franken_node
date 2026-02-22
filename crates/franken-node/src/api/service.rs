@@ -333,9 +333,11 @@ mod tests {
 
     #[test]
     fn service_custom_config() {
-        let mut config = ServiceConfig::default();
-        config.listen_addr = "0.0.0.0:8080".to_string();
-        config.otel_enabled = true;
+        let config = ServiceConfig {
+            listen_addr: "0.0.0.0:8080".to_string(),
+            otel_enabled: true,
+            ..Default::default()
+        };
         let service = ControlPlaneService::new(config);
         assert_eq!(service.config().listen_addr, "0.0.0.0:8080");
         assert!(service.config().otel_enabled);

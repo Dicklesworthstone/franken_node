@@ -340,11 +340,11 @@ impl ControlEvidenceEmitter {
                 entry.decision_id.clone(),
                 entry.chosen_action.clone(),
             );
-            if let Some(ref prev) = last_key {
-                if key < *prev {
-                    violation = Some((entry.decision_id.clone(), entry.decision_type));
-                    break;
-                }
+            if let Some(ref prev) = last_key
+                && key < *prev
+            {
+                violation = Some((entry.decision_id.clone(), entry.decision_type));
+                break;
             }
             last_key = Some(key);
         }

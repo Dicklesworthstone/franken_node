@@ -519,7 +519,7 @@ impl Supervisor {
             .into_iter()
             .filter_map(|k| self.children.remove(&k).map(|v| (k, v)))
             .collect();
-        ordered.sort_by(|a, b| b.1.start_order.cmp(&a.1.start_order));
+        ordered.sort_by_key(|x| std::cmp::Reverse(x.1.start_order));
 
         let mut children_stopped: u32 = 0;
         let mut force_terminated: u32 = 0;

@@ -333,12 +333,12 @@ pub struct LineageQuery {
 
 impl LineageQuery {
     pub fn validate(&self) -> Result<(), LineageError> {
-        if let (Some(from), Some(to)) = (self.from_timestamp_ms, self.to_timestamp_ms) {
-            if from > to {
-                return Err(LineageError::QueryInvalid {
-                    detail: format!("{}: from_timestamp > to_timestamp", ERR_IFL_QUERY_INVALID),
-                });
-            }
+        if let (Some(from), Some(to)) = (self.from_timestamp_ms, self.to_timestamp_ms)
+            && from > to
+        {
+            return Err(LineageError::QueryInvalid {
+                detail: format!("{}: from_timestamp > to_timestamp", ERR_IFL_QUERY_INVALID),
+            });
         }
         Ok(())
     }
@@ -567,30 +567,30 @@ impl LineageGraph {
             .edges
             .values()
             .filter(|e| {
-                if let Some(ref src) = q.source {
-                    if &e.source != src {
-                        return false;
-                    }
+                if let Some(ref src) = q.source
+                    && &e.source != src
+                {
+                    return false;
                 }
-                if let Some(ref snk) = q.sink {
-                    if &e.sink != snk {
-                        return false;
-                    }
+                if let Some(ref snk) = q.sink
+                    && &e.sink != snk
+                {
+                    return false;
                 }
-                if let Some(ref lbl) = q.taint_label {
-                    if !e.taint_set.contains(lbl) {
-                        return false;
-                    }
+                if let Some(ref lbl) = q.taint_label
+                    && !e.taint_set.contains(lbl)
+                {
+                    return false;
                 }
-                if let Some(from) = q.from_timestamp_ms {
-                    if e.timestamp_ms < from {
-                        return false;
-                    }
+                if let Some(from) = q.from_timestamp_ms
+                    && e.timestamp_ms < from
+                {
+                    return false;
                 }
-                if let Some(to) = q.to_timestamp_ms {
-                    if e.timestamp_ms > to {
-                        return false;
-                    }
+                if let Some(to) = q.to_timestamp_ms
+                    && e.timestamp_ms > to
+                {
+                    return false;
                 }
                 true
             })
@@ -1081,10 +1081,10 @@ pub mod invariants {
             for boundary in boundaries.values() {
                 let crosses = edge.source.contains(&boundary.from_zone)
                     && edge.sink.contains(&boundary.to_zone);
-                if crosses && boundary.is_violated_by(&edge.taint_set) {
-                    if !edge.quarantined {
-                        return false;
-                    }
+                if crosses && boundary.is_violated_by(&edge.taint_set)
+                    && !edge.quarantined
+                {
+                    return false;
                 }
             }
         }

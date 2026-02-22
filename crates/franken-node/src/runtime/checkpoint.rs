@@ -247,6 +247,7 @@ impl CheckpointBackend for InMemoryCheckpointBackend {
 
 /// Contract that all long orchestrations must use for checkpoint IO.
 pub trait CheckpointContract {
+    #[allow(clippy::too_many_arguments)]
     fn save_checkpoint<T: Serialize>(
         &mut self,
         cx: &CapabilityContext,

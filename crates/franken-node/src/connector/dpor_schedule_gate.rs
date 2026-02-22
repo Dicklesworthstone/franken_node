@@ -25,6 +25,13 @@ use crate::control_plane::dpor_exploration::{
     ProtocolModel, ProtocolModelId, SafetyProperty,
 };
 
+/// Type alias for a list of scenario names paired with their model-builder functions.
+type ScenarioBuilderList<'a> = Vec<(&'a str, fn() -> ProtocolModel)>;
+
+/// Type alias for the result of a safety-violation check: `None` means safe,
+/// `Some((description, trace))` describes the violation.
+type SafetyViolation = Option<(String, Vec<CounterexampleStep>)>;
+
 // ---------------------------------------------------------------------------
 // Schema version
 // ---------------------------------------------------------------------------
@@ -602,7 +609,7 @@ impl DporScheduleGate {
 
     /// Register all six canonical scenarios as exploration targets.
     pub fn register_all_scenarios(&mut self) -> Result<(), DporScheduleGateError> {
-        let builders: Vec<(&str, fn() -> ProtocolModel)> = vec![
+        let builders: ScenarioBuilderList<'_> = vec![
             (
                 SCENARIO_EPOCH_LEASE_INTERLEAVE,
                 build_epoch_lease_interleave,
@@ -674,7 +681,7 @@ impl DporScheduleGate {
     pub fn explore_scenario(
         &mut self,
         scenario_name: &str,
-        check_fn: &dyn Fn(&[&Operation]) -> Option<(String, Vec<CounterexampleStep>)>,
+        check_fn: &dyn Fn(&[&Operation]) -> SafetyViolation,
     ) -> Result<ExplorationResult, DporScheduleGateError> {
         // Resolve the model name: ProtocolModelId::Custom display is "custom:<name>"
         let model_key = format!("custom:{}", scenario_name);
@@ -783,7 +790,7 @@ impl DporScheduleGate {
     /// Run the full gate with a custom per-scenario checker map.
     pub fn run_full_gate_with_checker(
         &mut self,
-        check_fn: &dyn Fn(&[&Operation]) -> Option<(String, Vec<CounterexampleStep>)>,
+        check_fn: &dyn Fn(&[&Operation]) -> SafetyViolation,
     ) -> Result<GateResult, DporScheduleGateError> {
         if self.registered_scenarios.is_empty() {
             return Err(DporScheduleGateError::NoScenarios);

@@ -271,6 +271,7 @@ impl RetrievabilityGate {
     ///
     /// # INV-RG-FAIL-CLOSED
     /// Any failure returns Err — there is no bypass.
+    #[allow(clippy::result_large_err)]
     pub fn check_retrievability(
         &mut self,
         artifact_id: &ArtifactId,
@@ -437,6 +438,7 @@ impl RetrievabilityGate {
     /// Eviction only proceeds if check_retrievability succeeds.
     /// # INV-RG-FAIL-CLOSED
     /// Failed proof blocks eviction unconditionally.
+    #[allow(clippy::result_large_err)]
     pub fn attempt_eviction(
         &mut self,
         artifact_id: &ArtifactId,
@@ -497,6 +499,7 @@ impl RetrievabilityGate {
         serde_json::to_string_pretty(&self.receipts).unwrap_or_default()
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn record_failure(
         &mut self,
         artifact_id: &ArtifactId,

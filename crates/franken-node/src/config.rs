@@ -157,6 +157,7 @@ impl Config {
     /// Load configuration from a TOML file without CLI/env merge layers.
     ///
     /// This method is useful for fixtures and static snapshots.
+    #[allow(dead_code)]
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
         let content =
             std::fs::read_to_string(path).map_err(|e| ConfigError::ReadFailed(path.into(), e))?;
@@ -174,6 +175,7 @@ impl Config {
     /// 3. `~/.config/franken-node/config.toml` (user)
     ///
     /// Returns the default balanced profile if no config file is found.
+    #[allow(dead_code)]
     pub fn discover(explicit_path: Option<&Path>) -> Result<Self, ConfigError> {
         if let Some(path) = explicit_path {
             return Self::load(path);
@@ -397,15 +399,15 @@ impl Config {
             }
         }
 
-        if let Some(section) = &overrides.fleet {
-            if let Some(value) = section.convergence_timeout_seconds {
-                self.fleet.convergence_timeout_seconds = value;
-                decisions.push(MergeDecision::new(
-                    stage.clone(),
-                    "fleet.convergence_timeout_seconds",
-                    value,
-                ));
-            }
+        if let Some(section) = &overrides.fleet
+            && let Some(value) = section.convergence_timeout_seconds
+        {
+            self.fleet.convergence_timeout_seconds = value;
+            decisions.push(MergeDecision::new(
+                stage.clone(),
+                "fleet.convergence_timeout_seconds",
+                value,
+            ));
         }
 
         if let Some(section) = &overrides.observability {

@@ -470,7 +470,16 @@ impl CancellationRuntime {
                 task_id: parent_id.to_string(),
             });
         }
+        if !self.tasks.contains_key(child_id) {
+            return Err(CancellableTaskError::TaskNotFound {
+                task_id: child_id.to_string(),
+            });
+        }
         let parent = self.tasks.get_mut(parent_id).unwrap();
+        if parent.child_task_ids.iter().any(|existing| existing == child_id) {
+            // Idempotent child-link registration avoids duplicate propagation events.
+            return Ok(());
+        }
         parent.child_task_ids.push(child_id.to_string());
         Ok(())
     }
@@ -1050,6 +1059,41 @@ mod tests {
             .filter(|e| e.event_code == event_codes::FN_CX_009)
             .collect();
         assert_eq!(propagation_events.len(), 2);
+    }
+
+    #[test]
+    fn register_child_rejects_unknown_child() {
+        let mut rt = make_runtime();
+        rt.register_task("parent", 1000, "t1").unwrap();
+
+        let err = rt.register_child("parent", "missing-child").unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_CXT_TASK_NOT_FOUND);
+        match err {
+            CancellableTaskError::TaskNotFound { task_id } => {
+                assert_eq!(task_id, "missing-child");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn register_child_duplicate_link_is_idempotent() {
+        let mut rt = make_runtime();
+        rt.register_task("parent", 1000, "t1").unwrap();
+        rt.register_task("child", 1000, "t1").unwrap();
+
+        rt.register_child("parent", "child").unwrap();
+        rt.register_child("parent", "child").unwrap();
+        rt.cancel_task("parent", "shutdown", 1100, "t1").unwrap();
+
+        assert_eq!(rt.current_phase("child"), Some(TaskPhase::CancelRequested));
+
+        let propagation_events: Vec<_> = rt
+            .audit_log()
+            .iter()
+            .filter(|e| e.event_code == event_codes::FN_CX_009)
+            .collect();
+        assert_eq!(propagation_events.len(), 1);
     }
 
     // ---- Obligation closure incomplete ----

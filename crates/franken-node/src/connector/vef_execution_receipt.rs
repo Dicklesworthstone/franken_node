@@ -18,8 +18,10 @@ pub const RECEIPT_SCHEMA_VERSION: &str = "vef-execution-receipt-v1";
 
 pub mod event_codes {
     /// Receipt object created in-memory.
+    #[allow(dead_code)]
     pub const VEF_RECEIPT_001_CREATED: &str = "VEF-RECEIPT-001";
     /// Canonical receipt serialization completed.
+    #[allow(dead_code)]
     pub const VEF_RECEIPT_002_SERIALIZED: &str = "VEF-RECEIPT-002";
 }
 
@@ -36,9 +38,13 @@ pub mod error_codes {
     pub const ERR_VEF_RECEIPT_INTERNAL: &str = "VEF-RECEIPT-ERR-005";
 }
 
+#[allow(dead_code)]
 pub const INV_VEF_RECEIPT_DETERMINISTIC: &str = "INV-VEF-RECEIPT-DETERMINISTIC";
+#[allow(dead_code)]
 pub const INV_VEF_RECEIPT_HASH_STABLE: &str = "INV-VEF-RECEIPT-HASH-STABLE";
+#[allow(dead_code)]
 pub const INV_VEF_RECEIPT_VERSIONED: &str = "INV-VEF-RECEIPT-VERSIONED";
+#[allow(dead_code)]
 pub const INV_VEF_RECEIPT_TRACEABLE: &str = "INV-VEF-RECEIPT-TRACEABLE";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -53,6 +59,7 @@ pub enum ExecutionActionType {
 }
 
 impl ExecutionActionType {
+    #[allow(dead_code)]
     pub fn all() -> &'static [ExecutionActionType] {
         &[
             ExecutionActionType::NetworkAccess,

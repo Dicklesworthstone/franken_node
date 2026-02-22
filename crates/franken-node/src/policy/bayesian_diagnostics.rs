@@ -17,6 +17,11 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Type alias for a raw candidate score tuple:
+/// `(candidate_ref, posterior_mean, prior, observation_count, (ci_lower, ci_upper))`.
+#[allow(dead_code)]
+type RawCandidateScore = (CandidateRef, f64, f64, u64, (f64, f64));
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -133,6 +138,7 @@ impl BetaState {
         (lo, hi)
     }
 
+    #[allow(dead_code)]
     fn diagnostic_confidence(&self) -> DiagnosticConfidence {
         match self.observation_count {
             0..=2 => DiagnosticConfidence::Low,
@@ -206,7 +212,7 @@ impl BayesianDiagnostics {
         }
 
         // Compute raw posterior means
-        let mut raw_scores: Vec<(CandidateRef, f64, f64, u64, (f64, f64))> = candidates
+        let mut raw_scores: Vec<RawCandidateScore> = candidates
             .iter()
             .map(|c| {
                 let (posterior, prior, count, ci) = if let Some(state) = self.states.get(c) {
@@ -261,10 +267,10 @@ impl BayesianDiagnostics {
         let _event = EVD_BAYES_002;
 
         // [EVD-BAYES-003] guardrail conflict on top candidate
-        if let Some(top) = ranked.first() {
-            if top.guardrail_filtered {
-                let _event = EVD_BAYES_003;
-            }
+        if let Some(top) = ranked.first()
+            && top.guardrail_filtered
+        {
+            let _event = EVD_BAYES_003;
         }
 
         ranked
@@ -458,8 +464,8 @@ mod tests {
         }
         let ranked = d.rank_candidates(&[c("A")], &[]);
         let (lo, hi) = ranked[0].confidence_interval;
-        assert!(lo >= 0.0 && lo <= 1.0);
-        assert!(hi >= 0.0 && hi <= 1.0);
+        assert!((0.0..=1.0).contains(&lo));
+        assert!((0.0..=1.0).contains(&hi));
         assert!(lo <= hi);
     }
 

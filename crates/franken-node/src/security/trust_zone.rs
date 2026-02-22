@@ -406,7 +406,7 @@ impl ZoneSegmentationEngine {
     pub fn is_key_bound_to_zone(&self, key_id: &str, zone_id: &str) -> bool {
         self.key_zone_bindings
             .get(key_id)
-            .map_or(false, |zones| zones.iter().any(|z| z == zone_id))
+            .is_some_and(|zones| zones.iter().any(|z| z == zone_id))
     }
 
     /// Validate that a key is authorized for a zone, returning KeyZoneMismatch

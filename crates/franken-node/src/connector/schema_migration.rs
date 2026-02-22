@@ -53,10 +53,6 @@ impl SchemaVersion {
         Ok(Self::new(major, minor, patch))
     }
 
-    pub fn to_string(&self) -> String {
-        format!("{}.{}.{}", self.major, self.minor, self.patch)
-    }
-
     /// True if self > other (for forward-only enforcement).
     pub fn is_ahead_of(&self, other: &SchemaVersion) -> bool {
         (self.major, self.minor, self.patch) > (other.major, other.minor, other.patch)

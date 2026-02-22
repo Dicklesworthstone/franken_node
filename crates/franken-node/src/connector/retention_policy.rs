@@ -30,16 +30,14 @@ pub struct RetentionPolicy {
 }
 
 /// Registry of retention policies per message type.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct RetentionRegistry {
     policies: HashMap<String, RetentionPolicy>,
 }
 
 impl RetentionRegistry {
     pub fn new() -> Self {
-        Self {
-            policies: HashMap::new(),
-        }
+        Self::default()
     }
 
     pub fn register(&mut self, policy: RetentionPolicy) -> Result<(), RetentionError> {
@@ -242,12 +240,12 @@ impl RetentionStore {
         let mut to_drop = Vec::new();
 
         for (id, msg) in &self.messages {
-            if msg.retention_class == RetentionClass::Ephemeral {
-                if let Ok(policy) = self.registry.classify(&msg.message_type) {
-                    let age = now.saturating_sub(msg.stored_at);
-                    if age >= policy.ephemeral_ttl_seconds {
-                        to_drop.push(id.clone());
-                    }
+            if msg.retention_class == RetentionClass::Ephemeral
+                && let Ok(policy) = self.registry.classify(&msg.message_type)
+            {
+                let age = now.saturating_sub(msg.stored_at);
+                if age >= policy.ephemeral_ttl_seconds {
+                    to_drop.push(id.clone());
                 }
             }
         }

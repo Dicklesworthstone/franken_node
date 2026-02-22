@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn all_error_codes_present() {
-        let errors = vec![
+        let errors = [
             ProfileError::UnknownProfile("x".into()),
             ProfileError::MissingResult("x".into()),
             ProfileError::CapabilityFailed("x".into()),

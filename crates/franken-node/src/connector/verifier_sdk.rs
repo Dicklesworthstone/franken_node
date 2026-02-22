@@ -289,9 +289,7 @@ fn deterministic_hash(data: &str) -> String {
 /// Compute the binding hash for a claim and its evidence items.
 /// INV-VER-EVIDENCE-BOUND: result is bound to evidence.
 fn compute_binding_hash(claim: &Claim, evidence: &[Evidence]) -> String {
-    let mut parts = Vec::new();
-    parts.push(claim.claim_id.clone());
-    parts.push(claim.assertion.clone());
+    let mut parts = vec![claim.claim_id.clone(), claim.assertion.clone()];
     for ev in evidence {
         parts.push(ev.evidence_id.clone());
         for (k, v) in &ev.artifacts {
@@ -469,7 +467,7 @@ pub fn verify_migration_artifact(
 
     // Check rollback_receipt
     let rb = artifact.get("rollback_receipt");
-    let rb_ok = rb.map_or(false, |v| v.is_object());
+    let rb_ok = rb.is_some_and(|v| v.is_object());
     assertions.push(AssertionResult {
         assertion: "rollback_receipt_present".to_string(),
         passed: rb_ok,
@@ -482,7 +480,7 @@ pub fn verify_migration_artifact(
 
     // Check preconditions
     let pre = artifact.get("preconditions");
-    let pre_ok = pre.map_or(false, |v| v.is_array());
+    let pre_ok = pre.is_some_and(|v| v.is_array());
     assertions.push(AssertionResult {
         assertion: "preconditions_present".to_string(),
         passed: pre_ok,

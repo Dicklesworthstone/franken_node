@@ -357,11 +357,11 @@ impl VefDegradedModeEngine {
             self.maybe_deescalate(target, metrics, now_secs, correlation_id);
         } else {
             // Same mode: reset stabilization if we were stabilizing toward a different target
-            if let Some(ctx) = &mut self.context {
-                if ctx.stabilization_target.is_some_and(|t| t != target) {
-                    ctx.stabilization_started_at_secs = None;
-                    ctx.stabilization_target = None;
-                }
+            if let Some(ctx) = &mut self.context
+                && ctx.stabilization_target.is_some_and(|t| t != target)
+            {
+                ctx.stabilization_started_at_secs = None;
+                ctx.stabilization_target = None;
             }
         }
     }
@@ -414,10 +414,10 @@ impl VefDegradedModeEngine {
         };
 
         // Track affected actions in degraded mode
-        if self.mode != VefMode::Normal {
-            if let Some(ctx) = &mut self.context {
-                ctx.actions_affected += 1;
-            }
+        if self.mode != VefMode::Normal
+            && let Some(ctx) = &mut self.context
+        {
+            ctx.actions_affected += 1;
         }
 
         VefActionDecision {

@@ -217,6 +217,7 @@ fn deterministic_hash(data: &str) -> String {
     hex::encode(hash)
 }
 
+#[allow(dead_code)]
 fn now_timestamp() -> String {
     "2026-02-21T00:00:00Z".to_string()
 }
@@ -359,13 +360,13 @@ impl VerifierSdk {
         Ok(VerificationReport {
             request_id: format!(
                 "vreq-{}",
-                deterministic_hash(&request.artifact_id)[..24].to_string()
+                &deterministic_hash(&request.artifact_id)[..24]
             ),
             verdict,
             evidence,
             trace_id: format!(
                 "vtrc-{}",
-                deterministic_hash(&binding_input)[..24].to_string()
+                &deterministic_hash(&binding_input)[..24]
             ),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
@@ -495,13 +496,13 @@ impl VerifierSdk {
         Ok(VerificationReport {
             request_id: format!(
                 "vcap-{}",
-                deterministic_hash(&capsule.capsule_id)[..24].to_string()
+                &deterministic_hash(&capsule.capsule_id)[..24]
             ),
             verdict,
             evidence,
             trace_id: format!(
                 "vtrc-{}",
-                deterministic_hash(&binding_input)[..24].to_string()
+                &deterministic_hash(&binding_input)[..24]
             ),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
@@ -631,13 +632,13 @@ impl VerifierSdk {
         Ok(VerificationReport {
             request_id: format!(
                 "vchn-{}",
-                deterministic_hash(&chain_binding)[..24].to_string()
+                &deterministic_hash(&chain_binding)[..24]
             ),
             verdict,
             evidence,
             trace_id: format!(
                 "vtrc-{}",
-                deterministic_hash(&format!("chain:{chain_binding}"))[..24].to_string()
+                &deterministic_hash(&format!("chain:{chain_binding}"))[..24]
             ),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
@@ -1039,7 +1040,7 @@ mod tests {
         // INV-VSK-DETERMINISTIC-VERIFY
         let sdk = test_sdk();
         let r1 = sdk.verify_artifact(&valid_request()).unwrap();
-        let chain1 = sdk.verify_chain(&[r1.clone()]).unwrap();
+        let chain1 = sdk.verify_chain(std::slice::from_ref(&r1)).unwrap();
         let chain2 = sdk.verify_chain(&[r1]).unwrap();
         assert_eq!(chain1.binding_hash, chain2.binding_hash);
     }

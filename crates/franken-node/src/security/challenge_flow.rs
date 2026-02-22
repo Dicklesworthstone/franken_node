@@ -638,6 +638,7 @@ impl ChallengeFlowController {
 
     // -- Internal -----------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     fn log_transition(
         &mut self,
         challenge_id: &ChallengeId,

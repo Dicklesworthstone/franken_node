@@ -166,7 +166,7 @@ impl SsrfPolicyTemplate {
     fn find_allowlist(&self, host: &str, port: u16) -> Option<&AllowlistEntry> {
         self.allowlist
             .iter()
-            .find(|e| e.host == host && e.port.map_or(true, |p| p == port))
+            .find(|e| e.host == host && e.port.is_none_or(|p| p == port))
     }
 
     /// Evaluate a request against the SSRF policy.
@@ -344,6 +344,7 @@ impl SsrfPolicyTemplate {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn emit_audit(
         &mut self,
         host: &str,

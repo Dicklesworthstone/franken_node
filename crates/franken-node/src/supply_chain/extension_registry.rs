@@ -512,7 +512,7 @@ impl SignedExtensionRegistry {
     pub fn list(&self, status_filter: Option<ExtensionStatus>) -> Vec<&SignedExtension> {
         self.extensions
             .values()
-            .filter(|e| status_filter.map_or(true, |s| e.status == s))
+            .filter(|e| status_filter.is_none_or(|s| e.status == s))
             .collect()
     }
 

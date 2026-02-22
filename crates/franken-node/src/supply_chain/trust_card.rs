@@ -522,24 +522,23 @@ impl TrustCardRegistry {
             let Some(card) = history.last() else {
                 continue;
             };
-            if let Some(level) = filter.certification_level {
-                if card.certification_level != level {
-                    continue;
-                }
+            if let Some(level) = filter.certification_level
+                && card.certification_level != level
+            {
+                continue;
             }
-            if let Some(publisher_id) = &filter.publisher_id {
-                if &card.publisher.publisher_id != publisher_id {
-                    continue;
-                }
+            if let Some(publisher_id) = &filter.publisher_id
+                && &card.publisher.publisher_id != publisher_id
+            {
+                continue;
             }
-            if let Some(capability) = &filter.capability {
-                if !card
+            if let Some(capability) = &filter.capability
+                && !card
                     .capability_declarations
                     .iter()
                     .any(|cap| cap.name.contains(capability))
-                {
-                    continue;
-                }
+            {
+                continue;
             }
             out.push(card.clone());
         }
