@@ -1,0 +1,31 @@
+{
+  "schema_version": "section-gate-v1.0",
+  "section": "10.16",
+  "bead_id": "bd-10g0",
+  "title": "Section-wide verification gate: comprehensive unit+e2e+logging",
+  "verdict": "PASS",
+  "release_gate_ready": true,
+  "summary": {
+    "gate_checks_total": 49,
+    "gate_checks_passed": 49,
+    "gate_checks_failed": 0,
+    "upstream_beads_total": 17,
+    "upstream_beads_passing": 17,
+    "substrate_planes_covered": 4,
+    "e2e_scenarios_passed": 7
+  },
+  "artifacts": {
+    "gate_report": "artifacts/section_10_16/bd-10g0/check_report.json",
+    "self_test_log": "artifacts/section_10_16/bd-10g0/check_self_test.txt",
+    "unit_test_log": "artifacts/section_10_16/bd-10g0/unit_tests.txt",
+    "test_matrix": "artifacts/10.16/section_10_16_test_matrix.json",
+    "traceability_bundle": "artifacts/10.16/section_10_16_traceability_bundle.json",
+    "verification_evidence": "artifacts/section_10_16/bd-10g0/verification_evidence.json",
+    "verification_summary": "artifacts/section_10_16/bd-10g0/verification_summary.md"
+  },
+  "cargo_quality_gates": {
+    "fmt_check_exit": 1,
+    "check_all_targets_exit": 0,
+    "clippy_all_targets_exit": 101
+  }
+}

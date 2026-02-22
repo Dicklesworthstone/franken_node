@@ -1,0 +1,75 @@
+{
+  "bead_id": "bd-1hf",
+  "section": "10.10",
+  "title": "FCP-Inspired Hardening + Interop Integration Track",
+  "status": "pass",
+  "verdict": "PASS",
+  "timestamp": "2026-02-22T03:01:19Z",
+  "epic_integrity": {
+    "epic_status_before": "in_progress",
+    "epic_status_after": "closed",
+    "dependency_count": 15,
+    "dependency_closed_count": 15,
+    "dependent_count": 5,
+    "master_graph_link_present": true,
+    "section_gate_dependency_present": true,
+    "section_gate_id": "bd-1jjq",
+    "section_gate_verdict": "PASS"
+  },
+  "graph_diagnostics": {
+    "ready_count_before": 5,
+    "ready_count_after": 4,
+    "contained_bd_1hf_before": true,
+    "contained_bd_1hf_after": false,
+    "bv_highest_impact_before": "bd-1cs7",
+    "bv_highest_impact_after": "bd-721z",
+    "actionable_before": 6,
+    "actionable_after": 5,
+    "blocked_before": 107,
+    "blocked_after": 104,
+    "cycles_before": 0,
+    "cycles_after": 0,
+    "orphans_before": 0,
+    "orphans_after": 0
+  },
+  "checker_results": {
+    "script": "scripts/check_section_10_10_plan_epic.py",
+    "tests": "tests/test_check_section_10_10_plan_epic.py",
+    "check_report_path": "artifacts/section_10_10/bd-1hf/check_report.json",
+    "self_test_log": "artifacts/section_10_10/bd-1hf/check_self_test.txt",
+    "unit_test_log": "artifacts/section_10_10/bd-1hf/unit_tests.txt",
+    "checks_passed": 17,
+    "checks_total": 17,
+    "unit_tests_passed": 13,
+    "unit_tests_total": 13
+  },
+  "required_rch_cargo_validation": {
+    "cargo_check_all_targets": {
+      "exit_code": 101,
+      "log": "artifacts/section_10_10/bd-1hf/rch_cargo_check_all_targets.log",
+      "notes": "Workspace compile failures from active non-bd-1hf surfaces (e.g., unresolved import and in-progress obligation tracker changes)."
+    },
+    "cargo_clippy_all_targets": {
+      "exit_code": 101,
+      "log": "artifacts/section_10_10/bd-1hf/rch_cargo_clippy_all_targets.log",
+      "notes": "Workspace lint/compile failures outside bd-1hf checker/test surfaces."
+    },
+    "cargo_fmt_check": {
+      "exit_code": 1,
+      "log": "artifacts/section_10_10/bd-1hf/rch_cargo_fmt_check.log",
+      "notes": "Pre-existing formatting drift across unrelated API files."
+    }
+  },
+  "artifacts": {
+    "graph_before_br_show": "artifacts/section_10_10/bd-1hf/graph_before_br_show.json",
+    "graph_before_br_ready": "artifacts/section_10_10/bd-1hf/graph_before_br_ready.json",
+    "graph_before_bv_plan": "artifacts/section_10_10/bd-1hf/graph_before_bv_plan.json",
+    "graph_before_bv_insights": "artifacts/section_10_10/bd-1hf/graph_before_bv_insights.json",
+    "graph_after_br_show": "artifacts/section_10_10/bd-1hf/graph_after_br_show.json",
+    "graph_after_br_ready": "artifacts/section_10_10/bd-1hf/graph_after_br_ready.json",
+    "graph_after_bv_plan": "artifacts/section_10_10/bd-1hf/graph_after_bv_plan.json",
+    "graph_after_bv_insights": "artifacts/section_10_10/bd-1hf/graph_after_bv_insights.json",
+    "graph_state_summary": "artifacts/section_10_10/bd-1hf/graph_state_summary.json",
+    "graph_transition_log": "artifacts/section_10_10/bd-1hf/graph_transition_log.jsonl"
+  }
+}

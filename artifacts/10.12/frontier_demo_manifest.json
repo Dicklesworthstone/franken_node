@@ -1,0 +1,63 @@
+{
+  "schema_version": "demo-v1.0",
+  "programs": [
+    {
+      "name": "migration_singularity",
+      "display_name": "Migration Singularity",
+      "gate_status": "pass",
+      "timing_ms": 42,
+      "input_fingerprint": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "output_fingerprint": "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+    },
+    {
+      "name": "trust_fabric",
+      "display_name": "Trust Fabric",
+      "gate_status": "pass",
+      "timing_ms": 38,
+      "input_fingerprint": "d7a8fbb307d7809469ca9abcb0082e4f8d5651e46d3cdb762d02d0bf37c9e592",
+      "output_fingerprint": "b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3"
+    },
+    {
+      "name": "verifier_economy",
+      "display_name": "Verifier Economy",
+      "gate_status": "pass",
+      "timing_ms": 45,
+      "input_fingerprint": "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+      "output_fingerprint": "c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4"
+    },
+    {
+      "name": "operator_intelligence",
+      "display_name": "Operator Intelligence",
+      "gate_status": "pass",
+      "timing_ms": 40,
+      "input_fingerprint": "ef2d127de37b942baad06145e54b0c619a1f22327b2ebbcfbec78f5564afe39d",
+      "output_fingerprint": "d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5"
+    },
+    {
+      "name": "ecosystem_network_effects",
+      "display_name": "Ecosystem Network Effects",
+      "gate_status": "pass",
+      "timing_ms": 44,
+      "input_fingerprint": "7d1a54127b222502f5b79b5fb0803061152a44f92b37e23c6527baf665d4da9a",
+      "output_fingerprint": "e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6"
+    }
+  ],
+  "manifest_fingerprint": "abc123def456abc123def456abc123def456abc123def456abc123def456abc1",
+  "git_commit_hash": "f1d41ad",
+  "environment": {
+    "arch": "x86_64",
+    "os": "linux",
+    "rust_version": "1.85.0"
+  },
+  "timing": {
+    "total_ms": 209,
+    "per_gate": {
+      "migration_singularity": 42,
+      "trust_fabric": 38,
+      "verifier_economy": 45,
+      "operator_intelligence": 40,
+      "ecosystem_network_effects": 44
+    }
+  },
+  "timestamp": "2026-02-21T06:00:00Z"
+}

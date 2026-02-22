@@ -1,0 +1,29 @@
+{
+  "generated_at": "2026-02-22T03:16:26Z",
+  "plan": {
+    "tracks": [
+      {
+        "track_id": "track-A",
+        "items": [
+          {
+            "id": "bd-721z",
+            "title": "[10.15] Add ambient-authority audit gate for control-plane modules.",
+            "priority": 1,
+            "status": "in_progress",
+            "unblocks": [
+              "bd-20eg"
+            ]
+          }
+        ],
+        "reason": "Single actionable item"
+      }
+    ],
+    "total_actionable": 1,
+    "total_blocked": 102,
+    "summary": {
+      "highest_impact": "bd-721z",
+      "impact_reason": "Unblocks 1 task",
+      "unblocks_count": 1
+    }
+  }
+}

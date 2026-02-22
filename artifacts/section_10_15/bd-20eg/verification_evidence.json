@@ -1,0 +1,51 @@
+{
+  "bead_id": "bd-20eg",
+  "section": "10.15",
+  "title": "Section 10.15 verification gate: Asupersync-First Integration",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "generated_at": "2026-02-22T05:30:00Z",
+  "gate": true,
+  "gated_beads": 25,
+  "checks": {
+    "gate_script": {
+      "path": "scripts/check_section_10_15_gate.py",
+      "verdict": "PASS",
+      "checks_passed": 85,
+      "checks_total": 85
+    },
+    "gate_self_test": {
+      "command": "python3 scripts/check_section_10_15_gate.py --self-test",
+      "exit_code": 0,
+      "status": "PASS",
+      "detail": "SELF-TEST OK: 85 checks returned"
+    },
+    "pytest_gate_tests": {
+      "command": "pytest -q tests/test_check_section_10_15_gate.py",
+      "exit_code": 0,
+      "status": "PASS",
+      "tests_passed": 45,
+      "tests_total": 45
+    }
+  },
+  "section_beads": [
+    "bd-1id0", "bd-2177", "bd-2g6r", "bd-721z", "bd-2tdi",
+    "bd-1cs7", "bd-1n5p", "bd-cuut", "bd-3014", "bd-1cwp",
+    "bd-3h63", "bd-181w", "bd-1hbw", "bd-15j6", "bd-tyr2",
+    "bd-145n", "bd-3tpg", "bd-3u6o", "bd-25oa", "bd-h93z",
+    "bd-3gnh", "bd-1f8m", "bd-1xwz", "bd-33kj", "bd-2h2s"
+  ],
+  "evidence_categories": {
+    "bead_evidence_files": "25/25 present with PASS verdict",
+    "bead_summary_files": "25/25 present",
+    "spec_contracts": "25/25 present",
+    "key_modules": "4/4 present (region_ownership, cancellation_protocol, obligation_tracker, ambient_authority_gate)",
+    "key_specs": "4/4 present (tri_kernel_ownership, region_tree_topology, ambient_authority_policy, ambient_authority_allowlist)"
+  },
+  "contract_surface": {
+    "gate_script": "scripts/check_section_10_15_gate.py",
+    "test_suite": "tests/test_check_section_10_15_gate.py",
+    "evidence": "artifacts/section_10_15/bd-20eg/verification_evidence.json",
+    "summary": "artifacts/section_10_15/bd-20eg/verification_summary.md"
+  }
+}

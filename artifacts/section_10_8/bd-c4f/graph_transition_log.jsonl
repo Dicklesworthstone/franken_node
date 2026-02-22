@@ -1,0 +1,5 @@
+{"event": "status_transition", "bead_id": "bd-c4f", "before": "in_progress", "after": "closed"}
+{"event": "ready_queue_transition", "bead_id": "bd-c4f", "count_before": 3, "count_after": 0, "contains_before": true, "contains_after": false}
+{"event": "dependency_closure", "bead_id": "bd-c4f", "closed_before": 11, "count_before": 11, "closed_after": 11, "count_after": 11}
+{"event": "bv_plan_transition", "bead_id": "bd-c4f", "highest_impact_before": "bd-721z", "highest_impact_after": "bd-721z", "actionable_before": 5, "actionable_after": 1, "blocked_before": 104, "blocked_after": 102}
+{"event": "graph_health_transition", "bead_id": "bd-c4f", "cycles_before": 0, "cycles_after": 0, "orphans_before": 0, "orphans_after": 0}

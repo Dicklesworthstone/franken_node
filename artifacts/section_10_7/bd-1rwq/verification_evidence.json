@@ -1,0 +1,32 @@
+{
+  "bead_id": "bd-1rwq",
+  "section": "10.7",
+  "title": "Section 10.7 Verification Gate",
+  "gate_script": "scripts/check_section_10_7_gate.py",
+  "test_suite": "tests/test_check_section_10_7_gate.py",
+  "timestamp": "2026-02-22T03:10:00+00:00",
+  "verdict": "PASS",
+  "upstream_beads": {
+    "bd-2ja": {"verdict": "PASS", "domain": "corpus", "bands_covered": ["core", "high_value", "edge", "unsafe"]},
+    "bd-s6y": {"verdict": "PASS", "domain": "vectors", "sources_passed": 4, "vector_sets_passed": 8},
+    "bd-1ul": {"verdict": "PASS", "domain": "fuzz", "checks_passing": 52, "checks_total": 52},
+    "bd-1u4": {"verdict": "PASS", "domain": "metamorphic", "checks_passing": 60, "checks_total": 60},
+    "bd-3ex": {"verdict": "PASS", "domain": "cli", "checks_passing": 26, "checks_total": 26},
+    "bd-2pu": {"verdict": "PASS", "domain": "reproduction", "checks_passing": 91, "checks_total": 91}
+  },
+  "coverage_summary": {
+    "corpus_bands_covered": 4,
+    "corpus_bands_required": 4,
+    "trust_vector_sources": 4,
+    "trust_vector_sets": 8,
+    "fuzz_domains": ["migration", "shim"],
+    "metamorphic_relations": ["MR-EQUIV", "MR-MONO", "MR-IDEM", "MR-COMM"],
+    "reproduction_claims": 8
+  },
+  "events": [
+    "GATE_10_7_EVALUATION_STARTED",
+    "GATE_10_7_BEAD_CHECKED",
+    "GATE_10_7_CORPUS_COVERAGE",
+    "GATE_10_7_VERDICT_EMITTED"
+  ]
+}

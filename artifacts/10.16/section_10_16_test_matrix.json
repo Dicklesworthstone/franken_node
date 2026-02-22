@@ -1,0 +1,187 @@
+{
+  "schema_version": "section-test-matrix-v1.0",
+  "section": "10.16",
+  "bead_id": "bd-10g0",
+  "title": "Section-wide verification matrix: adjacent substrate integration",
+  "coverage_summary": {
+    "beads_total": 17,
+    "beads_with_pass_evidence": 17,
+    "beads_with_test_signal": 17,
+    "beads_with_structured_log_signal": 6,
+    "substrate_planes_total": 4,
+    "substrate_planes_covered": 4,
+    "e2e_scenarios_total": 7,
+    "e2e_scenarios_passed": 7,
+    "deterministic_replay": true
+  },
+  "scenario_classification": {
+    "happy_path": [
+      "operator_status_flow",
+      "lease_management_flow",
+      "audit_log_flow"
+    ],
+    "edge_case": [
+      "trace_propagation",
+      "replay_determinism"
+    ],
+    "adversarial_error": [
+      "error_propagation_flow",
+      "concurrent_access_flow"
+    ]
+  },
+  "matrix": [
+    {
+      "bead_id": "bd-2owx",
+      "domain": "policy",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-2owx/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-2owx/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-28ld",
+      "domain": "architecture",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": true,
+      "evidence_path": "artifacts/section_10_16/bd-28ld/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-28ld/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-34ll",
+      "domain": "frankentui",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": true,
+      "evidence_path": "artifacts/section_10_16/bd-34ll/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-34ll/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-1xtf",
+      "domain": "frankentui",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-1xtf/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-1xtf/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-1719",
+      "domain": "frankentui",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-1719/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-1719/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-1a1j",
+      "domain": "frankensqlite",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": true,
+      "evidence_path": "artifacts/section_10_16/bd-1a1j/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-1a1j/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-2tua",
+      "domain": "frankensqlite",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-2tua/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-2tua/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-26ux",
+      "domain": "frankensqlite",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-26ux/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-26ux/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-bt82",
+      "domain": "sqlmodel_rust",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": true,
+      "evidence_path": "artifacts/section_10_16/bd-bt82/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-bt82/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-1v65",
+      "domain": "sqlmodel_rust",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-1v65/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-1v65/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-3ndj",
+      "domain": "fastapi_rust",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": true,
+      "evidence_path": "artifacts/section_10_16/bd-3ndj/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-3ndj/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-2f5l",
+      "domain": "fastapi_rust",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-2f5l/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-2f5l/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-159q",
+      "domain": "governance",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-159q/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-159q/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-2ji2",
+      "domain": "governance",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-2ji2/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-2ji2/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-35l5",
+      "domain": "performance",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-35l5/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-35l5/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-3u2o",
+      "domain": "ci",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": false,
+      "evidence_path": "artifacts/section_10_16/bd-3u2o/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-3u2o/verification_summary.md"
+    },
+    {
+      "bead_id": "bd-8l9k",
+      "domain": "e2e",
+      "verdict": "PASS",
+      "test_signal": true,
+      "structured_log_signal": true,
+      "evidence_path": "artifacts/section_10_16/bd-8l9k/verification_evidence.json",
+      "summary_path": "artifacts/section_10_16/bd-8l9k/verification_summary.md"
+    }
+  ]
+}

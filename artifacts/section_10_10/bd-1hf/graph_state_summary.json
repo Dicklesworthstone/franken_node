@@ -1,0 +1,41 @@
+{
+  "bead_id": "bd-1hf",
+  "captured_at": "2026-02-22T03:01:19Z",
+  "epic_status_transition": {
+    "before": "in_progress",
+    "after": "closed",
+    "assignee": "PurpleHarbor",
+    "close_reason": "Section 10.10 integration epic closure criteria met (all dependencies closed; gate bd-1jjq PASS; artifacts present)"
+  },
+  "dependency_state": {
+    "total": 15,
+    "closed_before": 15,
+    "closed_after": 15
+  },
+  "ready_queue": {
+    "count_before": 5,
+    "count_after": 4,
+    "contained_bd_1hf_before": true,
+    "contained_bd_1hf_after": false
+  },
+  "bv_plan": {
+    "highest_impact_before": "bd-1cs7",
+    "highest_impact_after": "bd-721z",
+    "actionable_before": 6,
+    "actionable_after": 5,
+    "blocked_before": 107,
+    "blocked_after": 104
+  },
+  "graph_health": {
+    "cycles_before": 0,
+    "cycles_after": 0,
+    "orphans_before": 0,
+    "orphans_after": 0
+  },
+  "epic_checker": {
+    "verdict": "PASS",
+    "passed": 17,
+    "failed": 0,
+    "total": 17
+  }
+}

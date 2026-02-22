@@ -1,0 +1,72 @@
+{
+  "bead_id": "bd-cvt",
+  "section": "10.11",
+  "title": "Capability profiles for product subsystems with narrowing enforcement",
+  "generated_at": "2026-02-21T12:00:00Z",
+  "status": "completed",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "name": "rust_module_exists",
+      "command": "test -f crates/franken-node/src/connector/capability_guard.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "module_wired_into_mod_rs",
+      "command": "grep 'pub mod capability_guard' crates/franken-node/src/connector/mod.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "capabilities_dir_exists",
+      "command": "test -d capabilities/",
+      "status": "PASS"
+    },
+    {
+      "name": "capabilities_profile_count",
+      "command": "ls capabilities/*.toml | wc -l",
+      "status": "PASS"
+    },
+    {
+      "name": "spec_contract_exists",
+      "command": "test -f docs/specs/section_10_11/bd-cvt_contract.md",
+      "status": "PASS"
+    },
+    {
+      "name": "gate_script_exists",
+      "command": "test -f scripts/check_capability_profiles.py",
+      "status": "PASS"
+    },
+    {
+      "name": "gate_tests_exist",
+      "command": "test -f tests/test_check_capability_profiles.py",
+      "status": "PASS"
+    },
+    {
+      "name": "event_codes_defined",
+      "command": "grep 'CAP_001\\|CAP_008' crates/franken-node/src/connector/capability_guard.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "error_codes_defined",
+      "command": "grep 'ERR_CAP_UNDECLARED\\|ERR_CAP_DENIED' crates/franken-node/src/connector/capability_guard.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "invariants_defined",
+      "command": "grep 'INV_CAP_LEAST_PRIVILEGE\\|INV_CAP_DETERMINISTIC' crates/franken-node/src/connector/capability_guard.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "capability_taxonomy_complete",
+      "command": "grep -c 'cap:' crates/franken-node/src/connector/capability_guard.rs",
+      "status": "PASS"
+    }
+  ],
+  "contract_surface": {
+    "capability_guard": "crates/franken-node/src/connector/capability_guard.rs",
+    "capabilities_dir": "capabilities/",
+    "gate_script": "scripts/check_capability_profiles.py",
+    "gate_tests": "tests/test_check_capability_profiles.py",
+    "spec": "docs/specs/section_10_11/bd-cvt_contract.md"
+  }
+}

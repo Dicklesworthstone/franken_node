@@ -1,0 +1,62 @@
+{
+  "bead_id": "bd-3vm",
+  "section": "10.11",
+  "title": "Ambient-authority audit gate for product security-critical modules",
+  "generated_at": "2026-02-21T12:00:00Z",
+  "status": "completed",
+  "verdict": "PASS",
+  "checks": [
+    {
+      "name": "rust_module_exists",
+      "command": "test -f crates/franken-node/src/runtime/authority_audit.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "module_wired_into_mod_rs",
+      "command": "grep 'pub mod authority_audit' crates/franken-node/src/runtime/mod.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "config_inventory_exists",
+      "command": "test -f config/security_critical_modules.toml",
+      "status": "PASS"
+    },
+    {
+      "name": "spec_contract_exists",
+      "command": "test -f docs/specs/section_10_11/bd-3vm_contract.md",
+      "status": "PASS"
+    },
+    {
+      "name": "gate_script_exists",
+      "command": "test -f scripts/check_ambient_authority.py",
+      "status": "PASS"
+    },
+    {
+      "name": "gate_tests_exist",
+      "command": "test -f tests/test_check_ambient_authority.py",
+      "status": "PASS"
+    },
+    {
+      "name": "event_codes_defined",
+      "command": "grep 'FN_AA_001\\|FN_AA_008' crates/franken-node/src/runtime/authority_audit.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "error_codes_defined",
+      "command": "grep 'ERR_AA_MISSING_CAPABILITY\\|ERR_AA_AMBIENT_DETECTED' crates/franken-node/src/runtime/authority_audit.rs",
+      "status": "PASS"
+    },
+    {
+      "name": "invariants_defined",
+      "command": "grep 'INV_AA_NO_AMBIENT\\|INV_AA_DETERMINISTIC' crates/franken-node/src/runtime/authority_audit.rs",
+      "status": "PASS"
+    }
+  ],
+  "contract_surface": {
+    "authority_audit": "crates/franken-node/src/runtime/authority_audit.rs",
+    "config": "config/security_critical_modules.toml",
+    "gate_script": "scripts/check_ambient_authority.py",
+    "gate_tests": "tests/test_check_ambient_authority.py",
+    "spec": "docs/specs/section_10_11/bd-3vm_contract.md"
+  }
+}

@@ -1,0 +1,46 @@
+{
+  "bead_id": "bd-274s",
+  "section": "10.17",
+  "title": "Implement Bayesian adversary graph and automated quarantine controller",
+  "status": "pass",
+  "verdict": "PASS",
+  "scope": "support_slice_integration_fixture_and_evidence",
+  "generated_at": "2026-02-22T05:23:30Z",
+  "deliverables": [
+    "tests/integration/bayesian_risk_quarantine.rs",
+    "artifacts/10.17/adversary_graph_state.json",
+    "artifacts/section_10_17/bd-274s/verification_evidence.json",
+    "artifacts/section_10_17/bd-274s/verification_summary.md"
+  ],
+  "checks": [
+    {
+      "name": "fixture_schema",
+      "status": "pass",
+      "detail": "adversary_graph_state fixture includes schema_version/generated_at/posteriors/actions."
+    },
+    {
+      "name": "deterministic_posterior_update_contract",
+      "status": "pass",
+      "detail": "Integration test defines deterministic Beta posterior update and asserts identical-input stability."
+    },
+    {
+      "name": "threshold_action_mapping_contract",
+      "status": "pass",
+      "detail": "Integration test enforces deterministic threshold mapping across throttle/isolate/quarantine/revoke."
+    },
+    {
+      "name": "signed_evidence_contract",
+      "status": "pass",
+      "detail": "Fixture actions include reproducible sha256 evidence signatures verified by integration logic."
+    },
+    {
+      "name": "replay_order_contract",
+      "status": "pass",
+      "detail": "Fixture action ordering is deterministic (posterior desc, principal asc tie-break)."
+    }
+  ],
+  "notes": [
+    "This evidence is a non-overlapping support slice for bd-274s.",
+    "Primary implementation of `adversary_graph.rs` and `quarantine_controller.rs` remains with the main assignee thread."
+  ]
+}

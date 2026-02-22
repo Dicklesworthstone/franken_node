@@ -1,0 +1,88 @@
+{
+  "bead_id": "bd-8l9k",
+  "section": "10.16",
+  "title": "Cross-Substrate Contract Tests: End-to-End Behavior Validation",
+  "status": "pass",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "timestamp": "2026-02-22T00:00:00Z",
+  "deliverables": [
+    "tests/e2e/adjacent_substrate_flow.rs",
+    "tests/e2e/mod.rs",
+    "artifacts/10.16/adjacent_substrate_e2e_report.json",
+    "docs/specs/section_10_16/bd-8l9k_contract.md",
+    "scripts/check_cross_substrate_e2e.py",
+    "tests/test_check_cross_substrate_e2e.py",
+    "artifacts/section_10_16/bd-8l9k/verification_evidence.json",
+    "artifacts/section_10_16/bd-8l9k/verification_summary.md"
+  ],
+  "checker": {
+    "command": "python3 scripts/check_cross_substrate_e2e.py --json",
+    "exit_code": 0,
+    "passed_checks": 55,
+    "failed_checks": 0
+  },
+  "self_test": {
+    "command": "python3 scripts/check_cross_substrate_e2e.py --self-test",
+    "exit_code": 0,
+    "passed_checks": 18,
+    "failed_checks": 0
+  },
+  "unit_tests": {
+    "command": "python3 -m pytest -q tests/test_check_cross_substrate_e2e.py",
+    "exit_code": 0,
+    "summary": "13 passed in 0.14s"
+  },
+  "rust_tests": 54,
+  "scenarios": 7,
+  "event_codes": [
+    "E2E_SCENARIO_START",
+    "E2E_SCENARIO_PASS",
+    "E2E_SCENARIO_FAIL",
+    "E2E_TRACE_ORPHAN_DETECTED",
+    "E2E_REPLAY_MISMATCH",
+    "E2E_CONCURRENT_CONFLICT"
+  ],
+  "error_codes": [
+    "ERR_E2E_SETUP_FAILED",
+    "ERR_E2E_TRACE_BROKEN",
+    "ERR_E2E_REPLAY_DIVERGED",
+    "ERR_E2E_PERSISTENCE_MISMATCH",
+    "ERR_E2E_SERVICE_ERROR",
+    "ERR_E2E_CONCURRENT_INCONSISTENT",
+    "ERR_E2E_TUI_RENDER_FAILED",
+    "ERR_E2E_AUDIT_MISSING",
+    "ERR_E2E_FENCING_REJECTED",
+    "ERR_E2E_SCHEMA_MISMATCH"
+  ],
+  "invariants": [
+    "INV-E2E-TRACE",
+    "INV-E2E-REPLAY",
+    "INV-E2E-FENCING",
+    "INV-E2E-AUDIT",
+    "INV-E2E-ERROR-FIDELITY",
+    "INV-E2E-SCHEMA-COMPAT",
+    "INV-E2E-CONCURRENT-SAFETY"
+  ],
+  "cargo_quality_gates": {
+    "fmt_check": {
+      "command": "rch exec -- cargo fmt --check",
+      "exit_code": 1,
+      "note": "Baseline workspace formatting issues outside this bead scope"
+    },
+    "check_all_targets": {
+      "command": "rch exec -- cargo check --all-targets",
+      "exit_code": 0
+    },
+    "clippy_all_targets": {
+      "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+      "exit_code": 101,
+      "note": "Baseline workspace clippy issues outside this bead scope"
+    }
+  },
+  "notes": [
+    "All 7 E2E scenarios pass covering all four substrate planes.",
+    "54 Rust unit tests validate trace propagation, fencing, audit chain, replay determinism, and concurrent access.",
+    "Workspace-level clippy/fmt baseline issues remain outside this bead scope."
+  ]
+}

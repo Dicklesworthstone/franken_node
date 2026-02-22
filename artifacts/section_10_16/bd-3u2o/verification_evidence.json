@@ -1,0 +1,72 @@
+{
+  "bead_id": "bd-3u2o",
+  "section": "10.16",
+  "title": "Adjacent substrate CI conformance gate",
+  "status": "pass",
+  "verdict": "PASS",
+  "deliverables": [
+    ".github/workflows/adjacent-substrate-gate.yml",
+    "tests/conformance/adjacent_substrate_gate.rs",
+    "artifacts/10.16/adjacent_substrate_gate_report.json",
+    "scripts/check_substrate_gate.py",
+    "tests/test_check_substrate_gate.py",
+    "artifacts/section_10_16/bd-3u2o/check_report.json",
+    "artifacts/section_10_16/bd-3u2o/check_self_test.txt",
+    "artifacts/section_10_16/bd-3u2o/unit_tests.txt",
+    "artifacts/section_10_16/bd-3u2o/verification_evidence.json",
+    "artifacts/section_10_16/bd-3u2o/verification_summary.md"
+  ],
+  "gate_report": {
+    "path": "artifacts/10.16/adjacent_substrate_gate_report.json",
+    "gate_verdict": "pass",
+    "summary": {
+      "total_checks": 6,
+      "passed": 6,
+      "failed": 0,
+      "waived": 0
+    },
+    "changed_modules": [
+      "crates/franken-node/src/api/mod.rs",
+      "crates/franken-node/src/cli.rs",
+      "crates/franken-node/src/connector/mod.rs",
+      "crates/franken-node/src/storage/models.rs"
+    ]
+  },
+  "checker": {
+    "command": "python3 scripts/check_substrate_gate.py --build-report --json",
+    "exit_code": 0,
+    "report_path": "artifacts/section_10_16/bd-3u2o/check_report.json",
+    "self_test_path": "artifacts/section_10_16/bd-3u2o/check_self_test.txt",
+    "passed_checks": 9,
+    "failed_checks": 0
+  },
+  "unit_tests": {
+    "command": "python3 -m unittest tests/test_check_substrate_gate.py",
+    "exit_code": 0,
+    "log_path": "artifacts/section_10_16/bd-3u2o/unit_tests.txt",
+    "summary": "Ran 6 tests ... OK"
+  },
+  "cargo_quality_gates": {
+    "fmt_check": {
+      "command": "rch exec -- cargo fmt --check",
+      "exit_code": 1,
+      "log_path": "artifacts/section_10_16/bd-3u2o/rch_cargo_fmt_check.log"
+    },
+    "check_all_targets": {
+      "command": "rch exec -- cargo check --all-targets",
+      "exit_code": 0,
+      "log_path": "artifacts/section_10_16/bd-3u2o/rch_cargo_check_all_targets.log"
+    },
+    "clippy_all_targets": {
+      "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+      "exit_code": 101,
+      "log_path": "artifacts/section_10_16/bd-3u2o/rch_cargo_clippy_all_targets.log"
+    }
+  },
+  "notes": [
+    "Workflow gate builds and validates adjacent substrate report on PRs/pushes touching policy/gate surfaces.",
+    "Validator enforces report completeness, verdict consistency, remediation hints on failures, and waiver-id presence on waived checks.",
+    "Unit tests include active and expired waiver handling paths plus validation-failure cases.",
+    "Workspace-level fmt/clippy baseline debt remains outside this bead scope."
+  ]
+}

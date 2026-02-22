@@ -1,0 +1,95 @@
+{
+  "schema_version": "bd-274s-support-v1",
+  "bead_id": "bd-274s",
+  "section": "10.17",
+  "title": "Implement Bayesian adversary graph and automated quarantine controller",
+  "verdict": "FAIL",
+  "status": "fail",
+  "total": 15,
+  "passed": 7,
+  "failed": 8,
+  "checks": [
+    {
+      "check": "bead_record_accessible",
+      "passed": true,
+      "detail": "br show bd-274s readable"
+    },
+    {
+      "check": "bead_identity",
+      "passed": true,
+      "detail": "id=bd-274s issue_type=task"
+    },
+    {
+      "check": "section_label_present",
+      "passed": true,
+      "detail": "labels=['plan', 'section-10-17', 'self-contained', 'test-obligations']"
+    },
+    {
+      "check": "bead_status_actionable_or_done",
+      "passed": true,
+      "detail": "status=in_progress"
+    },
+    {
+      "check": "required_dependency_closed",
+      "passed": true,
+      "detail": "bd-1nl1=closed"
+    },
+    {
+      "check": "required_dependents_linked",
+      "passed": true,
+      "detail": "missing=[]"
+    },
+    {
+      "check": "required_files_present",
+      "passed": false,
+      "detail": "missing=['crates/franken-node/src/security/adversary_graph.rs', 'crates/franken-node/src/security/quarantine_controller.rs', 'tests/integration/bayesian_risk_quarantine.rs', 'artifacts/10.17/adversary_graph_state.json', 'artifacts/section_10_17/bd-274s/verification_evidence.json', 'artifacts/section_10_17/bd-274s/verification_summary.md']"
+    },
+    {
+      "check": "adversary_graph_tokens",
+      "passed": false,
+      "detail": "expects posterior/deterministic/evidence markers"
+    },
+    {
+      "check": "quarantine_action_tokens",
+      "passed": false,
+      "detail": "found=[]"
+    },
+    {
+      "check": "quarantine_signed_evidence_tokens",
+      "passed": false,
+      "detail": "expects signed evidence markers in quarantine controller"
+    },
+    {
+      "check": "integration_test_determinism_markers",
+      "passed": false,
+      "detail": "expects deterministic quarantine integration assertions"
+    },
+    {
+      "check": "fallback_signal_surface_present",
+      "passed": true,
+      "detail": "hits=['threshold', 'quarantine', 'propensity']"
+    },
+    {
+      "check": "adversary_graph_state_parseable",
+      "passed": false,
+      "detail": "missing or invalid json"
+    },
+    {
+      "check": "verification_evidence_parseable",
+      "passed": false,
+      "detail": "missing or invalid json"
+    },
+    {
+      "check": "verification_summary_present",
+      "passed": false,
+      "detail": "artifacts/section_10_17/bd-274s/verification_summary.md"
+    }
+  ],
+  "metrics": {
+    "dependency_count": 1,
+    "dependent_count": 4,
+    "required_file_count": 6,
+    "required_files_missing": 6,
+    "fallback_signal_hits": 3
+  }
+}

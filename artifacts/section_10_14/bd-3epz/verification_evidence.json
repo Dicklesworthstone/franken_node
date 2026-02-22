@@ -2,7 +2,7 @@
   "bead_id": "bd-3epz",
   "section": "10.14",
   "title": "Section-wide verification gate: FrankenSQLite Deep-Mined Expansion",
-  "generated_at": "2026-02-22T02:17:00.711621+00:00",
+  "generated_at": "2026-02-22T03:40:33.704782+00:00",
   "verdict": "PASS",
   "gate_pass": true,
   "total_beads": 52,

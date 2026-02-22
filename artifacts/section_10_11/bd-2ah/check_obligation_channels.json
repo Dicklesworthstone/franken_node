@@ -1,0 +1,448 @@
+{
+  "bead_id": "bd-2ah",
+  "section": "10.11",
+  "title": "Obligation-Tracked Two-Phase Channel Contracts",
+  "checks": [
+    {
+      "check": "source_file_exists",
+      "passed": true,
+      "detail": "crates/franken-node/src/runtime/obligation_channel.rs"
+    },
+    {
+      "check": "module_wired_in_mod_rs",
+      "passed": true,
+      "detail": "runtime/mod.rs exports obligation_channel"
+    },
+    {
+      "check": "spec_contract_exists",
+      "passed": true,
+      "detail": "docs/specs/section_10_11/bd-2ah_contract.md"
+    },
+    {
+      "check": "test_suite_exists",
+      "passed": true,
+      "detail": "tests/test_check_obligation_channel_protocol.py"
+    },
+    {
+      "check": "verification_evidence_exists",
+      "passed": true,
+      "detail": "artifacts/section_10_11/bd-2ah/verification_evidence.json"
+    },
+    {
+      "check": "verification_summary_exists",
+      "passed": true,
+      "detail": "artifacts/section_10_11/bd-2ah/verification_summary.md"
+    },
+    {
+      "check": "type:ObligationChannel",
+      "passed": true,
+      "detail": "ObligationChannel present in obligation_channel.rs"
+    },
+    {
+      "check": "type:ObligationLedger",
+      "passed": true,
+      "detail": "ObligationLedger present in obligation_channel.rs"
+    },
+    {
+      "check": "type:TwoPhaseFlow",
+      "passed": true,
+      "detail": "TwoPhaseFlow present in obligation_channel.rs"
+    },
+    {
+      "check": "type:ChannelObligation",
+      "passed": true,
+      "detail": "ChannelObligation present in obligation_channel.rs"
+    },
+    {
+      "check": "type:ObligationStatus",
+      "passed": true,
+      "detail": "ObligationStatus present in obligation_channel.rs"
+    },
+    {
+      "check": "type:TimeoutPolicy",
+      "passed": true,
+      "detail": "TimeoutPolicy present in obligation_channel.rs"
+    },
+    {
+      "check": "type:ClosureProof",
+      "passed": true,
+      "detail": "ClosureProof present in obligation_channel.rs"
+    },
+    {
+      "check": "type:PrepareResult",
+      "passed": true,
+      "detail": "PrepareResult present in obligation_channel.rs"
+    },
+    {
+      "check": "type:CommitResult",
+      "passed": true,
+      "detail": "CommitResult present in obligation_channel.rs"
+    },
+    {
+      "check": "type:ChannelAuditRecord",
+      "passed": true,
+      "detail": "ChannelAuditRecord present in obligation_channel.rs"
+    },
+    {
+      "check": "method:send",
+      "passed": true,
+      "detail": "fn send exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:fulfill",
+      "passed": true,
+      "detail": "fn fulfill exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:reject",
+      "passed": true,
+      "detail": "fn reject exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:prepare",
+      "passed": true,
+      "detail": "fn prepare exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:commit",
+      "passed": true,
+      "detail": "fn commit exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:rollback",
+      "passed": true,
+      "detail": "fn rollback exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:query_outstanding",
+      "passed": true,
+      "detail": "fn query_outstanding exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:cancel",
+      "passed": true,
+      "detail": "fn cancel exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:sweep_timeouts",
+      "passed": true,
+      "detail": "fn sweep_timeouts exists in obligation_channel.rs"
+    },
+    {
+      "check": "method:generate_closure_proof",
+      "passed": true,
+      "detail": "fn generate_closure_proof exists in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-001",
+      "passed": true,
+      "detail": "FN-OB-001 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-002",
+      "passed": true,
+      "detail": "FN-OB-002 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-003",
+      "passed": true,
+      "detail": "FN-OB-003 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-004",
+      "passed": true,
+      "detail": "FN-OB-004 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-005",
+      "passed": true,
+      "detail": "FN-OB-005 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-006",
+      "passed": true,
+      "detail": "FN-OB-006 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-007",
+      "passed": true,
+      "detail": "FN-OB-007 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-008",
+      "passed": true,
+      "detail": "FN-OB-008 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-009",
+      "passed": true,
+      "detail": "FN-OB-009 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-010",
+      "passed": true,
+      "detail": "FN-OB-010 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-011",
+      "passed": true,
+      "detail": "FN-OB-011 declared in obligation_channel.rs"
+    },
+    {
+      "check": "event_code:FN-OB-012",
+      "passed": true,
+      "detail": "FN-OB-012 declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_NOT_FOUND",
+      "passed": true,
+      "detail": "ERR_OCH_NOT_FOUND declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_ALREADY_FULFILLED",
+      "passed": true,
+      "detail": "ERR_OCH_ALREADY_FULFILLED declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_ALREADY_REJECTED",
+      "passed": true,
+      "detail": "ERR_OCH_ALREADY_REJECTED declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_TIMED_OUT",
+      "passed": true,
+      "detail": "ERR_OCH_TIMED_OUT declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_CANCELLED",
+      "passed": true,
+      "detail": "ERR_OCH_CANCELLED declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_PREPARE_FAILED",
+      "passed": true,
+      "detail": "ERR_OCH_PREPARE_FAILED declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_COMMIT_FAILED",
+      "passed": true,
+      "detail": "ERR_OCH_COMMIT_FAILED declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_ROLLBACK_FAILED",
+      "passed": true,
+      "detail": "ERR_OCH_ROLLBACK_FAILED declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_DEADLINE_EXCEEDED",
+      "passed": true,
+      "detail": "ERR_OCH_DEADLINE_EXCEEDED declared in obligation_channel.rs"
+    },
+    {
+      "check": "error_code:ERR_OCH_INVALID_TRANSITION",
+      "passed": true,
+      "detail": "ERR_OCH_INVALID_TRANSITION declared in obligation_channel.rs"
+    },
+    {
+      "check": "invariant:INV-OCH-TRACKED",
+      "passed": true,
+      "detail": "INV-OCH-TRACKED present in obligation_channel.rs"
+    },
+    {
+      "check": "invariant:INV-OCH-DEADLINE",
+      "passed": true,
+      "detail": "INV-OCH-DEADLINE present in obligation_channel.rs"
+    },
+    {
+      "check": "invariant:INV-OCH-LEDGER-COMPLETE",
+      "passed": true,
+      "detail": "INV-OCH-LEDGER-COMPLETE present in obligation_channel.rs"
+    },
+    {
+      "check": "invariant:INV-OCH-CLOSURE-SIGNED",
+      "passed": true,
+      "detail": "INV-OCH-CLOSURE-SIGNED present in obligation_channel.rs"
+    },
+    {
+      "check": "invariant:INV-OCH-TWO-PHASE",
+      "passed": true,
+      "detail": "INV-OCH-TWO-PHASE present in obligation_channel.rs"
+    },
+    {
+      "check": "invariant:INV-OCH-ROLLBACK-ATOMIC",
+      "passed": true,
+      "detail": "INV-OCH-ROLLBACK-ATOMIC present in obligation_channel.rs"
+    },
+    {
+      "check": "spec_invariant:INV-OCH-TRACKED",
+      "passed": true,
+      "detail": "INV-OCH-TRACKED present in spec contract"
+    },
+    {
+      "check": "spec_invariant:INV-OCH-DEADLINE",
+      "passed": true,
+      "detail": "INV-OCH-DEADLINE present in spec contract"
+    },
+    {
+      "check": "spec_invariant:INV-OCH-LEDGER-COMPLETE",
+      "passed": true,
+      "detail": "INV-OCH-LEDGER-COMPLETE present in spec contract"
+    },
+    {
+      "check": "spec_invariant:INV-OCH-CLOSURE-SIGNED",
+      "passed": true,
+      "detail": "INV-OCH-CLOSURE-SIGNED present in spec contract"
+    },
+    {
+      "check": "spec_invariant:INV-OCH-TWO-PHASE",
+      "passed": true,
+      "detail": "INV-OCH-TWO-PHASE present in spec contract"
+    },
+    {
+      "check": "spec_invariant:INV-OCH-ROLLBACK-ATOMIC",
+      "passed": true,
+      "detail": "INV-OCH-ROLLBACK-ATOMIC present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-001",
+      "passed": true,
+      "detail": "FN-OB-001 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-002",
+      "passed": true,
+      "detail": "FN-OB-002 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-003",
+      "passed": true,
+      "detail": "FN-OB-003 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-004",
+      "passed": true,
+      "detail": "FN-OB-004 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-005",
+      "passed": true,
+      "detail": "FN-OB-005 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-006",
+      "passed": true,
+      "detail": "FN-OB-006 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-007",
+      "passed": true,
+      "detail": "FN-OB-007 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-008",
+      "passed": true,
+      "detail": "FN-OB-008 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-009",
+      "passed": true,
+      "detail": "FN-OB-009 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-010",
+      "passed": true,
+      "detail": "FN-OB-010 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-011",
+      "passed": true,
+      "detail": "FN-OB-011 present in spec contract"
+    },
+    {
+      "check": "spec_event:FN-OB-012",
+      "passed": true,
+      "detail": "FN-OB-012 present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_NOT_FOUND",
+      "passed": true,
+      "detail": "ERR_OCH_NOT_FOUND present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_ALREADY_FULFILLED",
+      "passed": true,
+      "detail": "ERR_OCH_ALREADY_FULFILLED present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_ALREADY_REJECTED",
+      "passed": true,
+      "detail": "ERR_OCH_ALREADY_REJECTED present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_TIMED_OUT",
+      "passed": true,
+      "detail": "ERR_OCH_TIMED_OUT present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_CANCELLED",
+      "passed": true,
+      "detail": "ERR_OCH_CANCELLED present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_PREPARE_FAILED",
+      "passed": true,
+      "detail": "ERR_OCH_PREPARE_FAILED present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_COMMIT_FAILED",
+      "passed": true,
+      "detail": "ERR_OCH_COMMIT_FAILED present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_ROLLBACK_FAILED",
+      "passed": true,
+      "detail": "ERR_OCH_ROLLBACK_FAILED present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_DEADLINE_EXCEEDED",
+      "passed": true,
+      "detail": "ERR_OCH_DEADLINE_EXCEEDED present in spec contract"
+    },
+    {
+      "check": "spec_error:ERR_OCH_INVALID_TRANSITION",
+      "passed": true,
+      "detail": "ERR_OCH_INVALID_TRANSITION present in spec contract"
+    },
+    {
+      "check": "schema_version",
+      "passed": true,
+      "detail": "schema version och-v1.0 present"
+    },
+    {
+      "check": "serde_derives",
+      "passed": true,
+      "detail": "Serialize/Deserialize derives present"
+    },
+    {
+      "check": "btreemap_usage",
+      "passed": true,
+      "detail": "BTreeMap used for ordered collections"
+    },
+    {
+      "check": "unit_test_count",
+      "passed": true,
+      "detail": "35 tests (>= 15)"
+    },
+    {
+      "check": "cfg_test_module",
+      "passed": true,
+      "detail": "#[cfg(test)] module present"
+    }
+  ],
+  "passed": 87,
+  "failed": 0,
+  "total": 87,
+  "status": "pass",
+  "verdict": "PASS",
+  "all_passed": true
+}

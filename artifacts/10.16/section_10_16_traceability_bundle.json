@@ -1,0 +1,54 @@
+{
+  "schema_version": "traceability-bundle-v1.0",
+  "section": "10.16",
+  "bead_id": "bd-10g0",
+  "status": "PASS",
+  "sources": {
+    "e2e_report": "artifacts/10.16/adjacent_substrate_e2e_report.json",
+    "substrate_gate_report": "artifacts/10.16/adjacent_substrate_gate_report.json",
+    "dependency_map_evidence": "artifacts/section_10_16/bd-28ld/verification_evidence.json"
+  },
+  "trace_context": {
+    "w3c_trace_context_compliant": true,
+    "all_scenarios_traced": true,
+    "orphaned_spans": 0,
+    "trace_correlation_id": "440d743e68168aa4b71d32a1c3767ef378b48fa71e9db6d54fc2d9a438890ceb"
+  },
+  "replay": {
+    "deterministic": true,
+    "hash_match": true,
+    "event_sequence_match": true,
+    "seed": 48,
+    "runs": 2
+  },
+  "event_codes": [
+    "E2E_SCENARIO_START",
+    "E2E_SCENARIO_PASS",
+    "E2E_SCENARIO_FAIL",
+    "E2E_TRACE_ORPHAN_DETECTED",
+    "E2E_REPLAY_MISMATCH",
+    "E2E_CONCURRENT_CONFLICT"
+  ],
+  "error_codes": [
+    "ERR_E2E_SETUP_FAILED",
+    "ERR_E2E_TRACE_BROKEN",
+    "ERR_E2E_REPLAY_DIVERGED",
+    "ERR_E2E_PERSISTENCE_MISMATCH",
+    "ERR_E2E_SERVICE_ERROR",
+    "ERR_E2E_CONCURRENT_INCONSISTENT",
+    "ERR_E2E_TUI_RENDER_FAILED",
+    "ERR_E2E_AUDIT_MISSING",
+    "ERR_E2E_FENCING_REJECTED",
+    "ERR_E2E_SCHEMA_MISMATCH"
+  ],
+  "gate_event_codes": [
+    "SUBSTRATE_GATE_START",
+    "SUBSTRATE_GATE_PASS"
+  ],
+  "triage_readiness": {
+    "has_stable_event_codes": true,
+    "has_stable_error_codes": true,
+    "has_trace_correlation": true,
+    "supports_deterministic_replay": true
+  }
+}

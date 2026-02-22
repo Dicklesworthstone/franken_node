@@ -1,0 +1,120 @@
+{
+  "schema_version": "1.0.0",
+  "policy_id": "bd-2owx-adjacent-substrate-policy",
+  "module_root": "crates/franken-node/src",
+  "classification_mode": "first_match",
+  "substrates": [
+    {
+      "name": "frankentui",
+      "version": "^0.1.0",
+      "plane": "presentation",
+      "mandatory_modules": [
+        "crates/franken-node/src/cli.rs"
+      ],
+      "should_use_modules": [
+        "crates/franken-node/src/main.rs",
+        "crates/franken-node/src/api/**",
+        "crates/franken-node/src/tools/**",
+        "crates/franken-node/src/testing/**"
+      ],
+      "optional_modules": [
+        "crates/franken-node/src/**"
+      ]
+    },
+    {
+      "name": "frankensqlite",
+      "version": "^0.1.0",
+      "plane": "persistence",
+      "mandatory_modules": [
+        "crates/franken-node/src/connector/**",
+        "crates/franken-node/src/control_plane/**",
+        "crates/franken-node/src/observability/**",
+        "crates/franken-node/src/storage/**"
+      ],
+      "should_use_modules": [
+        "crates/franken-node/src/runtime/**",
+        "crates/franken-node/src/supply_chain/**",
+        "crates/franken-node/src/remote/**",
+        "crates/franken-node/src/repair/**"
+      ],
+      "optional_modules": [
+        "crates/franken-node/src/**"
+      ]
+    },
+    {
+      "name": "sqlmodel_rust",
+      "version": "^0.1.0",
+      "plane": "model",
+      "mandatory_modules": [
+        "crates/franken-node/src/config.rs",
+        "crates/franken-node/src/storage/models.rs",
+        "crates/franken-node/src/policy/**"
+      ],
+      "should_use_modules": [
+        "crates/franken-node/src/connector/**",
+        "crates/franken-node/src/control_plane/**",
+        "crates/franken-node/src/runtime/**",
+        "crates/franken-node/src/security/**",
+        "crates/franken-node/src/supply_chain/**",
+        "crates/franken-node/src/api/**",
+        "crates/franken-node/src/remote/**",
+        "crates/franken-node/src/migration/**"
+      ],
+      "optional_modules": [
+        "crates/franken-node/src/**"
+      ]
+    },
+    {
+      "name": "fastapi_rust",
+      "version": "^0.1.0",
+      "plane": "service",
+      "mandatory_modules": [
+        "crates/franken-node/src/api/**"
+      ],
+      "should_use_modules": [
+        "crates/franken-node/src/main.rs",
+        "crates/franken-node/src/connector/**",
+        "crates/franken-node/src/control_plane/**",
+        "crates/franken-node/src/policy/**",
+        "crates/franken-node/src/security/**",
+        "crates/franken-node/src/supply_chain/**",
+        "crates/franken-node/src/remote/**",
+        "crates/franken-node/src/tools/**"
+      ],
+      "optional_modules": [
+        "crates/franken-node/src/**"
+      ]
+    }
+  ],
+  "exceptions": [
+    {
+      "module": "crates/franken-node/src/encoding/**",
+      "substrate": "frankentui",
+      "reason": "Deterministic codec internals do not own presentation surfaces.",
+      "waiver_required": false
+    },
+    {
+      "module": "crates/franken-node/src/conformance/**",
+      "substrate": "fastapi_rust",
+      "reason": "Conformance harness modules execute in-process and do not expose service APIs.",
+      "waiver_required": false
+    },
+    {
+      "module": "crates/franken-node/src/verifier_economy/**",
+      "substrate": "frankensqlite",
+      "reason": "Verifier economy package remains model-first while persistence integration is staged.",
+      "waiver_required": true
+    },
+    {
+      "module": "crates/franken-node/src/repair/**",
+      "substrate": "fastapi_rust",
+      "reason": "Repair logic is currently consumed via internal orchestrators rather than public service routes.",
+      "waiver_required": true
+    }
+  ],
+  "metadata": {
+    "schema_version": "1.0.0",
+    "created_at": "2026-02-22T00:00:00Z",
+    "policy_hash": "sha256:e9d6014d69180125a91d09b251a00af938b029071fb1f18060828954d83c0dc1"
+  }
+}

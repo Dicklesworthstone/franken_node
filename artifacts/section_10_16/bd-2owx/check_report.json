@@ -1,0 +1,132 @@
+{
+  "bead_id": "bd-2owx",
+  "section": "10.16",
+  "title": "Publish substrate policy contract for `frankentui`, `frankensqlite`, `sqlmodel_rust`, and `fastapi_rust`.",
+  "checks": [
+    {
+      "check": "policy_file_exists",
+      "pass": true,
+      "detail": "/data/projects/franken_node/docs/architecture/adjacent_substrate_policy.md"
+    },
+    {
+      "check": "manifest_file_exists",
+      "pass": true,
+      "detail": "/data/projects/franken_node/artifacts/10.16/adjacent_substrate_policy_manifest.json"
+    },
+    {
+      "check": "manifest_parseable",
+      "pass": true,
+      "detail": "json parse ok"
+    },
+    {
+      "check": "manifest_schema_valid",
+      "pass": true,
+      "detail": "schema ok"
+    },
+    {
+      "check": "policy_hash_matches",
+      "pass": true,
+      "detail": "expected=sha256:e9d6014d69180125a91d09b251a00af938b029071fb1f18060828954d83c0dc1 actual=sha256:e9d6014d69180125a91d09b251a00af938b029071fb1f18060828954d83c0dc1"
+    },
+    {
+      "check": "policy_hash_deterministic",
+      "pass": true,
+      "detail": "hash computation stable across repeated evaluation"
+    },
+    {
+      "check": "module_inventory_non_empty",
+      "pass": true,
+      "detail": "module_count=243"
+    },
+    {
+      "check": "required_scope_classified",
+      "pass": true,
+      "detail": "missing=[]"
+    },
+    {
+      "check": "module_coverage_complete",
+      "pass": true,
+      "detail": "unmapped_count=0"
+    },
+    {
+      "check": "policy_contract_block_parseable",
+      "pass": true,
+      "detail": "policy contract block parsed as JSON"
+    },
+    {
+      "check": "markdown_manifest_consistent",
+      "pass": true,
+      "detail": "contract and manifest are consistent"
+    },
+    {
+      "check": "waiver_reference_present",
+      "pass": true,
+      "detail": "policy references bd-159q"
+    },
+    {
+      "check": "waiver_required_fields_documented",
+      "pass": true,
+      "detail": "required_fields=['risk_analysis', 'scope', 'owner_signoff', 'expiry']"
+    },
+    {
+      "check": "event_codes_documented",
+      "pass": true,
+      "detail": "event_codes=['SUBSTRATE_POLICY_LOADED', 'SUBSTRATE_POLICY_MODULE_UNMAPPED', 'SUBSTRATE_POLICY_SCHEMA_INVALID']"
+    },
+    {
+      "check": "exception_patterns_resolve",
+      "pass": true,
+      "detail": "all exception module patterns match at least one source module"
+    }
+  ],
+  "events": [
+    {
+      "code": "SUBSTRATE_POLICY_LOADED",
+      "detail": "policy loaded for 243 modules"
+    }
+  ],
+  "total": 15,
+  "passed": 15,
+  "failed": 0,
+  "overall_pass": true,
+  "verdict": "PASS",
+  "status": "pass",
+  "metrics": {
+    "module_count": 243,
+    "substrate_count": 4,
+    "unmapped_count": 0,
+    "assignment_totals": {
+      "frankentui": 243,
+      "frankensqlite": 243,
+      "sqlmodel_rust": 243,
+      "fastapi_rust": 243
+    },
+    "tier_counts": {
+      "frankentui": {
+        "mandatory_modules": 1,
+        "should_use_modules": 47,
+        "optional_modules": 195
+      },
+      "frankensqlite": {
+        "mandatory_modules": 95,
+        "should_use_modules": 41,
+        "optional_modules": 107
+      },
+      "sqlmodel_rust": {
+        "mandatory_modules": 20,
+        "should_use_modules": 167,
+        "optional_modules": 56
+      },
+      "fastapi_rust": {
+        "mandatory_modules": 11,
+        "should_use_modules": 187,
+        "optional_modules": 45
+      }
+    },
+    "expected_event_codes": [
+      "SUBSTRATE_POLICY_LOADED",
+      "SUBSTRATE_POLICY_MODULE_UNMAPPED",
+      "SUBSTRATE_POLICY_SCHEMA_INVALID"
+    ]
+  }
+}

@@ -1,0 +1,74 @@
+{
+  "bead_id": "bd-1nl1",
+  "section": "10.17",
+  "title": "Proof-carrying speculative execution governance framework",
+  "status": "pass",
+  "verdict": "PASS",
+  "deliverables": [
+    "docs/specs/proof_carrying_speculation.md",
+    "crates/franken-node/src/runtime/speculation/mod.rs",
+    "crates/franken-node/src/runtime/speculation/proof_executor.rs",
+    "tests/conformance/proof_speculation_guards.rs",
+    "scripts/check_proof_carrying_speculation.py",
+    "tests/test_check_proof_carrying_speculation.py",
+    "artifacts/10.17/speculation_proof_report.json",
+    "artifacts/section_10_17/bd-1nl1/check_report.json",
+    "artifacts/section_10_17/bd-1nl1/check_self_test.txt",
+    "artifacts/section_10_17/bd-1nl1/unit_tests.txt",
+    "artifacts/section_10_17/bd-1nl1/verification_evidence.json",
+    "artifacts/section_10_17/bd-1nl1/verification_summary.md"
+  ],
+  "checker": {
+    "command": "python3 scripts/check_proof_carrying_speculation.py --build-report --json",
+    "exit_code": 0,
+    "report_path": "artifacts/section_10_17/bd-1nl1/check_report.json",
+    "passed_checks": 31,
+    "failed_checks": 0
+  },
+  "self_test": {
+    "command": "python3 scripts/check_proof_carrying_speculation.py --self-test --json",
+    "exit_code": 0,
+    "log_path": "artifacts/section_10_17/bd-1nl1/check_self_test.txt"
+  },
+  "unit_tests": {
+    "command": "python3 -m unittest tests/test_check_proof_carrying_speculation.py",
+    "exit_code": 0,
+    "log_path": "artifacts/section_10_17/bd-1nl1/unit_tests.txt",
+    "summary": "Ran 8 tests ... OK"
+  },
+  "speculation_report": {
+    "path": "artifacts/10.17/speculation_proof_report.json",
+    "schema_version": "speculation-proof-v1.0",
+    "guard_contract": {
+      "requires_receipt": true,
+      "requires_approved_interface": true,
+      "guard_failure_degrades_to_baseline": true,
+      "activation_only_via_approved_franken_engine_interfaces": true
+    },
+    "event_codes": 5,
+    "error_codes": 6,
+    "invariants": 4
+  },
+  "cargo_quality_gates": {
+    "fmt_check": {
+      "command": "rch exec -- cargo fmt --check",
+      "exit_code": 1,
+      "log_path": "artifacts/section_10_17/bd-1nl1/rch_cargo_fmt_check.log"
+    },
+    "check_all_targets": {
+      "command": "rch exec -- cargo check --all-targets",
+      "exit_code": 0,
+      "log_path": "artifacts/section_10_17/bd-1nl1/rch_cargo_check_all_targets.log"
+    },
+    "clippy_all_targets": {
+      "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+      "exit_code": 101,
+      "log_path": "artifacts/section_10_17/bd-1nl1/rch_cargo_clippy_all_targets.log"
+    }
+  },
+  "notes": [
+    "Speculative activation now requires signed proof receipts, approved interface allowlists, and guard pass conditions.",
+    "Any proof/guard failure degrades deterministically to safe baseline output with no speculative side-effects.",
+    "Workspace-level fmt/clippy baseline debt remains outside this bead scope."
+  ]
+}

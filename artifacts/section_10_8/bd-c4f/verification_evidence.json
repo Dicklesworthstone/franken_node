@@ -1,0 +1,75 @@
+{
+  "bead_id": "bd-c4f",
+  "section": "10.8",
+  "title": "Operational Readiness",
+  "status": "pass",
+  "verdict": "PASS",
+  "timestamp": "2026-02-22T03:12:35Z",
+  "epic_integrity": {
+    "epic_status_before": "in_progress",
+    "epic_status_after": "closed",
+    "dependency_count": 11,
+    "dependency_closed_count": 11,
+    "dependent_count": 6,
+    "master_graph_link_present": true,
+    "section_gate_dependency_present": true,
+    "section_gate_id": "bd-1fi2",
+    "section_gate_verdict": "PASS"
+  },
+  "graph_diagnostics": {
+    "ready_count_before": 3,
+    "ready_count_after": 0,
+    "contained_bd_c4f_before": true,
+    "contained_bd_c4f_after": false,
+    "bv_highest_impact_before": "bd-721z",
+    "bv_highest_impact_after": "bd-721z",
+    "actionable_before": 5,
+    "actionable_after": 1,
+    "blocked_before": 104,
+    "blocked_after": 102,
+    "cycles_before": 0,
+    "cycles_after": 0,
+    "orphans_before": 0,
+    "orphans_after": 0
+  },
+  "checker_results": {
+    "script": "scripts/check_section_10_8_plan_epic.py",
+    "tests": "tests/test_check_section_10_8_plan_epic.py",
+    "check_report_path": "artifacts/section_10_8/bd-c4f/check_report.json",
+    "self_test_log": "artifacts/section_10_8/bd-c4f/check_self_test.txt",
+    "unit_test_log": "artifacts/section_10_8/bd-c4f/unit_tests.txt",
+    "checks_passed": 18,
+    "checks_total": 18,
+    "unit_tests_passed": 13,
+    "unit_tests_total": 13
+  },
+  "required_rch_cargo_validation": {
+    "cargo_check_all_targets": {
+      "exit_code": 101,
+      "log": "artifacts/section_10_8/bd-c4f/rch_cargo_check_all_targets.log",
+      "notes": "Workspace compile failures outside bd-c4f scope (e.g., unresolved import `super::cancellation_protocol` and pre-existing borrow-checker failures in obligation-channel surfaces)."
+    },
+    "cargo_clippy_all_targets": {
+      "exit_code": 101,
+      "log": "artifacts/section_10_8/bd-c4f/rch_cargo_clippy_all_targets.log",
+      "notes": "Workspace lint/compile failures outside bd-c4f checker/test surfaces, including existing multi-target test compile errors."
+    },
+    "cargo_fmt_check": {
+      "exit_code": 1,
+      "log": "artifacts/section_10_8/bd-c4f/rch_cargo_fmt_check.log",
+      "notes": "Pre-existing formatting drift in API files outside bd-c4f scope."
+    }
+  },
+  "artifacts": {
+    "graph_before_br_show": "artifacts/section_10_8/bd-c4f/graph_before_br_show.json",
+    "graph_before_br_ready": "artifacts/section_10_8/bd-c4f/graph_before_br_ready.json",
+    "graph_before_bv_plan": "artifacts/section_10_8/bd-c4f/graph_before_bv_plan.json",
+    "graph_before_bv_insights": "artifacts/section_10_8/bd-c4f/graph_before_bv_insights.json",
+    "graph_after_br_show": "artifacts/section_10_8/bd-c4f/graph_after_br_show.json",
+    "graph_after_br_ready": "artifacts/section_10_8/bd-c4f/graph_after_br_ready.json",
+    "graph_after_bv_plan": "artifacts/section_10_8/bd-c4f/graph_after_bv_plan.json",
+    "graph_after_bv_insights": "artifacts/section_10_8/bd-c4f/graph_after_bv_insights.json",
+    "graph_state_summary": "artifacts/section_10_8/bd-c4f/graph_state_summary.json",
+    "graph_transition_log": "artifacts/section_10_8/bd-c4f/graph_transition_log.jsonl"
+  }
+}

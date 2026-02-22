@@ -1,0 +1,37 @@
+{
+  "bead_id": "bd-n1w",
+  "section": "10.12",
+  "title": "Frontier Demo Gates with External Reproducibility Requirements",
+  "status": "pass",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "verification_checks": {
+    "total": 55,
+    "passed": 55,
+    "failed": 0
+  },
+  "event_codes": ["DEMO-001", "DEMO-002", "DEMO-003", "DEMO-004", "DEMO-005", "DEMO-006", "DEMO-007"],
+  "invariants": ["INV-DEMO-DETERMINISTIC", "INV-DEMO-ISOLATED", "INV-DEMO-FINGERPRINTED", "INV-DEMO-REPRODUCIBLE", "INV-DEMO-MANIFEST-COMPLETE", "INV-DEMO-SCHEMA-VERSIONED"],
+  "error_codes": ["ERR_DEMO_GATE_NOT_FOUND", "ERR_DEMO_EXECUTION_FAILED", "ERR_DEMO_FINGERPRINT_MISMATCH", "ERR_DEMO_MANIFEST_INVALID", "ERR_DEMO_BOOTSTRAP_FAILED", "ERR_DEMO_ISOLATION_VIOLATED", "ERR_DEMO_SCHEMA_MISMATCH"],
+  "types": ["FrontierProgram", "DemoGateResult", "ResourceMetrics", "ReproducibilityManifest", "ExternalVerifierBootstrap", "DemoGateRunner", "DemoEvent", "DefaultDemoGate"],
+  "rust_tests": 45,
+  "compilation": "exit 0",
+  "artifacts": {
+    "spec": "docs/specs/section_10_12/bd-n1w_contract.md",
+    "rust_src": "crates/franken-node/src/tools/frontier_demo_gate.rs",
+    "demo_manifest": "artifacts/10.12/frontier_demo_manifest.json",
+    "check_script": "scripts/check_frontier_demo_gates.py",
+    "unit_tests": "tests/test_check_frontier_demo_gates.py",
+    "evidence": "artifacts/section_10_12/bd-n1w/verification_evidence.json",
+    "summary": "artifacts/section_10_12/bd-n1w/verification_summary.md"
+  },
+  "frontier_programs": [
+    "MigrationSingularity",
+    "TrustFabric",
+    "VerifierEconomy",
+    "OperatorIntelligence",
+    "EcosystemNetworkEffects"
+  ],
+  "timestamp": "2026-02-21T06:00:00Z",
+  "summary": "All 55 checks pass. Five frontier programs covered. External reproducibility manifest validated."
+}

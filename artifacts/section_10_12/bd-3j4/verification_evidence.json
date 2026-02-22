@@ -1,0 +1,62 @@
+{
+  "bead_id": "bd-3j4",
+  "section": "10.12",
+  "title": "End-to-End Migration Singularity Pipeline for Pilot Cohorts",
+  "status": "pass",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "verification_checks": {
+    "total": 55,
+    "passed": 55,
+    "failed": 0
+  },
+  "event_codes": [
+    "PIPE-001", "PIPE-002", "PIPE-003", "PIPE-004", "PIPE-005",
+    "PIPE-006", "PIPE-007", "PIPE-008", "PIPE-009", "PIPE-010",
+    "PIPE-011", "PIPE-012", "PIPE-013"
+  ],
+  "invariants": [
+    "INV-PIPE-DETERMINISTIC",
+    "INV-PIPE-IDEMPOTENT",
+    "INV-PIPE-THRESHOLD-ENFORCED",
+    "INV-PIPE-ROLLBACK-ANY-STAGE",
+    "INV-PIPE-RECEIPT-SIGNED",
+    "INV-PIPE-STAGE-MONOTONIC"
+  ],
+  "error_codes": [
+    "ERR_PIPE_INVALID_TRANSITION",
+    "ERR_PIPE_VERIFICATION_FAILED",
+    "ERR_PIPE_IDEMPOTENCY_VIOLATED",
+    "ERR_PIPE_ROLLBACK_FAILED",
+    "ERR_PIPE_THRESHOLD_NOT_MET",
+    "ERR_PIPE_DUPLICATE_EXTENSION"
+  ],
+  "types": [
+    "PipelineStage",
+    "PipelineState",
+    "CohortDefinition",
+    "ExtensionSpec",
+    "CompatibilityReport",
+    "MigrationPlan",
+    "TransformationStep",
+    "TransformAction",
+    "ExecutionTrace",
+    "VerificationReport",
+    "MigrationReceipt",
+    "CohortSummary",
+    "PipelineError",
+    "PipelineEvent",
+    "StageTransition"
+  ],
+  "rust_tests": 50,
+  "compilation": "exit 0",
+  "artifacts": {
+    "spec": "docs/specs/section_10_12/bd-3j4_contract.md",
+    "rust_src": "crates/franken-node/src/connector/migration_pipeline.rs",
+    "check_script": "scripts/check_migration_pipeline.py",
+    "unit_tests": "tests/test_check_migration_pipeline.py",
+    "evidence": "artifacts/section_10_12/bd-3j4/verification_evidence.json",
+    "summary": "artifacts/section_10_12/bd-3j4/verification_summary.md"
+  },
+  "timestamp": "2026-02-21T05:00:00Z"
+}

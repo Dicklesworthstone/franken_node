@@ -1,0 +1,124 @@
+{
+  "bead_id": "bd-721z",
+  "section": "10.15",
+  "title": "Add ambient-authority audit gate for control-plane modules",
+  "checks": [
+    {
+      "check": "bead_record_accessible",
+      "pass": true,
+      "detail": "br show bd-721z readable"
+    },
+    {
+      "check": "bead_identity",
+      "pass": true,
+      "detail": "id=bd-721z issue_type=task"
+    },
+    {
+      "check": "section_label_present",
+      "pass": true,
+      "detail": "labels=['plan', 'section-10-15', 'self-contained', 'test-obligations']"
+    },
+    {
+      "check": "not_blocked",
+      "pass": true,
+      "detail": "status=closed"
+    },
+    {
+      "check": "downstream_gate_linked",
+      "pass": true,
+      "detail": "dependents=['bd-20eg', 'bd-3qo']"
+    },
+    {
+      "check": "required_artifacts_exist",
+      "pass": true,
+      "detail": "missing=[]"
+    },
+    {
+      "check": "gate_event_codes_present",
+      "pass": true,
+      "detail": "missing=[]"
+    },
+    {
+      "check": "gate_restricted_apis_present",
+      "pass": true,
+      "detail": "missing=[]"
+    },
+    {
+      "check": "policy_event_codes_documented",
+      "pass": true,
+      "detail": "missing=[]"
+    },
+    {
+      "check": "conformance_test_writes_artifacts",
+      "pass": true,
+      "detail": "ambient_authority_gate conformance test emits findings + verification artifacts"
+    },
+    {
+      "check": "allowlist_parseable",
+      "pass": true,
+      "detail": "toml parse ok"
+    },
+    {
+      "check": "allowlist_entries_present",
+      "pass": true,
+      "detail": "count=4"
+    },
+    {
+      "check": "allowlist_signatures_valid",
+      "pass": true,
+      "detail": "bad_signatures=[]"
+    },
+    {
+      "check": "allowlist_entries_not_expired",
+      "pass": true,
+      "detail": "expired_or_invalid_dates=[]"
+    },
+    {
+      "check": "findings_parseable",
+      "pass": true,
+      "detail": "json parse ok"
+    },
+    {
+      "check": "evidence_parseable",
+      "pass": true,
+      "detail": "json parse ok"
+    },
+    {
+      "check": "findings_no_violations",
+      "pass": true,
+      "detail": "violations=0"
+    },
+    {
+      "check": "findings_allowlist_integrity",
+      "pass": true,
+      "detail": "expired_allowlist and invalid_allowlist are zero"
+    },
+    {
+      "check": "evidence_status_pass",
+      "pass": true,
+      "detail": "status=pass verdict=None"
+    },
+    {
+      "check": "findings_evidence_metrics_match",
+      "pass": true,
+      "detail": "mismatches=[]"
+    },
+    {
+      "check": "summary_reports_pass",
+      "pass": true,
+      "detail": "verification summary contains PASS status"
+    }
+  ],
+  "total": 21,
+  "passed": 21,
+  "failed": 0,
+  "overall_pass": true,
+  "verdict": "PASS",
+  "status": "pass",
+  "metrics": {
+    "allowlist_entries": 4,
+    "dependent_count": 2,
+    "event_codes_required": 4,
+    "restricted_api_markers_required": 10
+  }
+}

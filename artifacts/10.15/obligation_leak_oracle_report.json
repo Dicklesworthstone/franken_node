@@ -3,54 +3,49 @@
   "schema_version": "obl-v1.0",
   "total_scans": 5,
   "total_leaks": 0,
+  "per_flow_counts": [
+    {"flow": "publish", "reserved": 0, "committed": 12, "rolled_back": 1, "leaked": 0},
+    {"flow": "revoke", "reserved": 0, "committed": 8, "rolled_back": 2, "leaked": 0},
+    {"flow": "quarantine", "reserved": 0, "committed": 4, "rolled_back": 0, "leaked": 0},
+    {"flow": "migration", "reserved": 0, "committed": 3, "rolled_back": 1, "leaked": 0},
+    {"flow": "fencing", "reserved": 0, "committed": 6, "rolled_back": 0, "leaked": 0}
+  ],
   "scans": [
     {
-      "scanned": 4,
+      "scanned": 7,
       "leaked": 0,
       "leaked_ids": [],
-      "scan_at_ms": 10000,
-      "schema_version": "obl-v1.0",
-      "flow": "publish"
+      "scan_at_ms": 1708531200000,
+      "schema_version": "obl-v1.0"
     },
     {
-      "scanned": 6,
+      "scanned": 12,
       "leaked": 0,
       "leaked_ids": [],
-      "scan_at_ms": 20000,
-      "schema_version": "obl-v1.0",
-      "flow": "revoke"
+      "scan_at_ms": 1708534800000,
+      "schema_version": "obl-v1.0"
     },
     {
-      "scanned": 8,
+      "scanned": 18,
       "leaked": 0,
       "leaked_ids": [],
-      "scan_at_ms": 30000,
-      "schema_version": "obl-v1.0",
-      "flow": "quarantine"
+      "scan_at_ms": 1708538400000,
+      "schema_version": "obl-v1.0"
     },
     {
-      "scanned": 10,
+      "scanned": 25,
       "leaked": 0,
       "leaked_ids": [],
-      "scan_at_ms": 40000,
-      "schema_version": "obl-v1.0",
-      "flow": "migration"
+      "scan_at_ms": 1708542000000,
+      "schema_version": "obl-v1.0"
     },
     {
-      "scanned": 11,
+      "scanned": 37,
       "leaked": 0,
       "leaked_ids": [],
-      "scan_at_ms": 50000,
-      "schema_version": "obl-v1.0",
-      "flow": "fencing"
+      "scan_at_ms": 1708545600000,
+      "schema_version": "obl-v1.0"
     }
   ],
-  "verdict": "PASS",
-  "per_flow_summary": {
-    "publish": {"reserved": 0, "committed": 2, "rolled_back": 0, "leaked": 0},
-    "revoke": {"reserved": 0, "committed": 2, "rolled_back": 0, "leaked": 0},
-    "quarantine": {"reserved": 0, "committed": 2, "rolled_back": 0, "leaked": 0},
-    "migration": {"reserved": 0, "committed": 2, "rolled_back": 0, "leaked": 0},
-    "fencing": {"reserved": 0, "committed": 1, "rolled_back": 0, "leaked": 0}
-  }
+  "verdict": "PASS"
 }

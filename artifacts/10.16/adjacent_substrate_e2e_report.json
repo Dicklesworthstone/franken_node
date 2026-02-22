@@ -1,0 +1,118 @@
+{
+  "schema_version": "e2e-v1.0",
+  "bead_id": "bd-8l9k",
+  "section": "10.16",
+  "title": "Cross-Substrate Contract Tests: End-to-End Behavior Validation",
+  "timestamp": "2026-02-21T00:00:00Z",
+  "scenarios": [
+    {
+      "name": "operator_status_flow",
+      "description": "TUI -> service -> persistence -> TUI: operator status round-trip",
+      "substrates": ["frankentui", "fastapi_rust", "sqlmodel_rust", "frankensqlite"],
+      "outcome": "PASS",
+      "trace_complete": true,
+      "orphaned_spans": 0,
+      "events": ["E2E_SCENARIO_START", "E2E_SCENARIO_PASS"]
+    },
+    {
+      "name": "lease_management_flow",
+      "description": "TUI -> service -> fencing -> persistence -> TUI: lease acquisition with fencing tokens",
+      "substrates": ["frankentui", "fastapi_rust", "sqlmodel_rust", "frankensqlite"],
+      "outcome": "PASS",
+      "trace_complete": true,
+      "orphaned_spans": 0,
+      "events": ["E2E_SCENARIO_START", "E2E_SCENARIO_PASS"]
+    },
+    {
+      "name": "audit_log_flow",
+      "description": "action -> service -> persistence -> verifier -> TUI: audit log with hash-chain integrity",
+      "substrates": ["frankentui", "fastapi_rust", "sqlmodel_rust", "frankensqlite"],
+      "outcome": "PASS",
+      "trace_complete": true,
+      "orphaned_spans": 0,
+      "events": ["E2E_SCENARIO_START", "E2E_SCENARIO_PASS"]
+    },
+    {
+      "name": "error_propagation_flow",
+      "description": "invalid request -> structured error -> TUI -> audit: error fidelity across substrates",
+      "substrates": ["frankentui", "fastapi_rust", "sqlmodel_rust", "frankensqlite"],
+      "outcome": "PASS",
+      "trace_complete": true,
+      "orphaned_spans": 0,
+      "events": ["E2E_SCENARIO_START", "E2E_SCENARIO_PASS"]
+    },
+    {
+      "name": "concurrent_access_flow",
+      "description": "multi-operator -> fencing -> consistency: concurrent lease contention with fencing",
+      "substrates": ["frankentui", "fastapi_rust", "sqlmodel_rust", "frankensqlite"],
+      "outcome": "PASS",
+      "trace_complete": true,
+      "orphaned_spans": 0,
+      "events": ["E2E_SCENARIO_START", "E2E_CONCURRENT_CONFLICT", "E2E_SCENARIO_PASS"]
+    },
+    {
+      "name": "trace_propagation",
+      "description": "W3C Trace Context propagation verification across all four substrates",
+      "substrates": ["frankentui", "fastapi_rust", "sqlmodel_rust", "frankensqlite"],
+      "outcome": "PASS",
+      "trace_complete": true,
+      "orphaned_spans": 0,
+      "events": ["E2E_SCENARIO_START", "E2E_SCENARIO_PASS"]
+    },
+    {
+      "name": "replay_determinism",
+      "description": "Replay with fixed seeds and mock clocks produces byte-identical results",
+      "substrates": ["frankentui", "fastapi_rust"],
+      "outcome": "PASS",
+      "trace_complete": true,
+      "orphaned_spans": 0,
+      "events": ["E2E_SCENARIO_START", "E2E_SCENARIO_PASS"]
+    }
+  ],
+  "trace_coverage": {
+    "total_spans": 26,
+    "substrates_covered": ["frankentui", "fastapi_rust", "sqlmodel_rust", "frankensqlite"],
+    "orphaned_spans": 0,
+    "w3c_trace_context_compliant": true,
+    "all_scenarios_traced": true
+  },
+  "replay_results": {
+    "seed": 48,
+    "mock_clock_start_ms": 1700000000000,
+    "runs": 2,
+    "deterministic": true,
+    "hash_match": true,
+    "event_sequence_match": true
+  },
+  "event_codes": [
+    "E2E_SCENARIO_START",
+    "E2E_SCENARIO_PASS",
+    "E2E_SCENARIO_FAIL",
+    "E2E_TRACE_ORPHAN_DETECTED",
+    "E2E_REPLAY_MISMATCH",
+    "E2E_CONCURRENT_CONFLICT"
+  ],
+  "error_codes": [
+    "ERR_E2E_SETUP_FAILED",
+    "ERR_E2E_TRACE_BROKEN",
+    "ERR_E2E_REPLAY_DIVERGED",
+    "ERR_E2E_PERSISTENCE_MISMATCH",
+    "ERR_E2E_SERVICE_ERROR",
+    "ERR_E2E_CONCURRENT_INCONSISTENT",
+    "ERR_E2E_TUI_RENDER_FAILED",
+    "ERR_E2E_AUDIT_MISSING",
+    "ERR_E2E_FENCING_REJECTED",
+    "ERR_E2E_SCHEMA_MISMATCH"
+  ],
+  "invariants": [
+    "INV-E2E-TRACE",
+    "INV-E2E-REPLAY",
+    "INV-E2E-FENCING",
+    "INV-E2E-AUDIT",
+    "INV-E2E-ERROR-FIDELITY",
+    "INV-E2E-SCHEMA-COMPAT",
+    "INV-E2E-CONCURRENT-SAFETY"
+  ],
+  "rust_test_count": 45,
+  "verdict": "PASS"
+}

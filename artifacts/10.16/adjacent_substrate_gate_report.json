@@ -1,0 +1,47 @@
+{
+  "schema_version": "1.0.0",
+  "bead_id": "bd-3u2o",
+  "section": "10.16",
+  "title": "Adjacent substrate conformance gate",
+  "generated_at": "2026-02-22T00:00:00Z",
+  "policy_manifest": "artifacts/10.16/adjacent_substrate_policy_manifest.json",
+  "waiver_registry": "artifacts/10.16/waiver_registry.json",
+  "changed_modules": [
+    "crates/franken-node/src/cli.rs"
+  ],
+  "checks": [
+    {
+      "module": "crates/franken-node/src/cli.rs",
+      "substrate": "frankentui",
+      "rule": "adjacent-substrate.mandatory.frankentui.ansi-literal",
+      "status": "pass",
+      "remediation_hint": "Remove raw ANSI escape literals and route presentation through frankentui theming.",
+      "waiver_id": ""
+    },
+    {
+      "module": "crates/franken-node/src/cli.rs",
+      "substrate": "frankentui",
+      "rule": "adjacent-substrate.mandatory.frankentui.raw-output",
+      "status": "pass",
+      "remediation_hint": "Replace raw println!/eprintln! usage with frankentui rendering primitives.",
+      "waiver_id": ""
+    }
+  ],
+  "summary": {
+    "total_checks": 2,
+    "passed": 2,
+    "failed": 0,
+    "waived": 0
+  },
+  "gate_verdict": "pass",
+  "events": [
+    {
+      "code": "SUBSTRATE_GATE_START",
+      "detail": "evaluating 1 changed modules"
+    },
+    {
+      "code": "SUBSTRATE_GATE_PASS",
+      "detail": "gate_verdict=pass"
+    }
+  ]
+}

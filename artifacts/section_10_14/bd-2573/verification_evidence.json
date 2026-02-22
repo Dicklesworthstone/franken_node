@@ -3,7 +3,7 @@
   "bead": "bd-2573",
   "section": "10.14",
   "verdict": "PASS",
-  "timestamp": "2026-02-20T17:23:45.735114+00:00",
+  "timestamp": "2026-02-22T03:44:07.254130+00:00",
   "checks": [
     {
       "id": "OCP-SPEC",

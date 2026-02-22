@@ -1,0 +1,48 @@
+{
+  "bead_id": "bd-1jpo",
+  "section": "10.11",
+  "title": "Section 10.11 verification gate: FrankenSQLite-Inspired Runtime Systems",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "generated_at": "2026-02-22T05:35:00Z",
+  "gate": true,
+  "gated_beads": 14,
+  "checks": {
+    "gate_script": {
+      "path": "scripts/check_section_10_11_gate.py",
+      "verdict": "PASS",
+      "checks_passed": 52,
+      "checks_total": 52
+    },
+    "gate_self_test": {
+      "command": "python3 scripts/check_section_10_11_gate.py --self-test",
+      "exit_code": 0,
+      "status": "PASS",
+      "detail": "SELF-TEST OK: 52 checks returned"
+    },
+    "pytest_gate_tests": {
+      "command": "pytest -q tests/test_check_section_10_11_gate.py",
+      "exit_code": 0,
+      "status": "PASS",
+      "tests_passed": 43,
+      "tests_total": 43
+    }
+  },
+  "section_beads": [
+    "bd-cvt", "bd-3vm", "bd-93k", "bd-7om", "bd-24k",
+    "bd-2ah", "bd-3he", "bd-2ko", "bd-3u4", "bd-2nt",
+    "bd-2gr", "bd-3hw", "bd-lus", "bd-390"
+  ],
+  "evidence_categories": {
+    "bead_evidence_files": "14/14 present with PASS verdict",
+    "bead_summary_files": "14/14 present",
+    "spec_contracts": "14/14 present",
+    "key_modules": "8/8 present (checkpoint, checkpoint_guard, bounded_mask, supervision, lane_router, bulkhead, anti_entropy, epoch_guard)"
+  },
+  "contract_surface": {
+    "gate_script": "scripts/check_section_10_11_gate.py",
+    "test_suite": "tests/test_check_section_10_11_gate.py",
+    "evidence": "artifacts/section_10_11/bd-1jpo/verification_evidence.json",
+    "summary": "artifacts/section_10_11/bd-1jpo/verification_summary.md"
+  }
+}

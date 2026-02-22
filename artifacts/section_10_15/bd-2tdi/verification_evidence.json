@@ -1,19 +1,31 @@
 {
   "bead_id": "bd-2tdi",
   "section": "10.15",
-  "title": "Region-Owned Lifecycle Orchestration",
-  "timestamp": "2026-02-22T00:00:00Z",
+  "title": "Region-Owned Execution Trees",
+  "timestamp": "2026-02-22T05:05:00Z",
   "region_kinds": ["ConnectorLifecycle", "HealthGate", "Rollout", "Fencing"],
   "event_codes": ["RGN-001", "RGN-002", "RGN-003", "RGN-004", "RGN-005"],
-  "error_codes": ["RGN_ALREADY_CLOSED", "RGN_CHILD_STILL_OPEN", "RGN_TASK_NOT_FOUND"],
+  "types_defined": ["RegionId", "RegionKind", "Region", "TaskState", "RegionTask", "CloseResult", "RegionEvent", "RegionError"],
   "invariants_enforced": [
-    "INV-RGN-QUIESCENCE",
-    "INV-RGN-NO-OUTLIVE",
-    "INV-RGN-HIERARCHY",
-    "INV-RGN-DETERMINISTIC"
+    "INV-RGN-QUIESCENCE: close() is a hard quiescence barrier",
+    "INV-RGN-NO-OUTLIVE: tasks cannot outlive their region",
+    "INV-RGN-HIERARCHY: proper parent-child nesting",
+    "INV-RGN-DETERMINISTIC: reproducible quiescence traces"
   ],
-  "rust_unit_tests": 11,
-  "types_defined": ["RegionId", "RegionKind", "Region", "CloseResult", "RegionEvent", "RegionError", "RegionTask", "TaskState"],
-  "gate_script": "scripts/check_region_owned_lifecycle.py",
+  "rust_unit_tests": 12,
+  "integration_tests": 8,
+  "gate_script": "scripts/check_region_ownership.py",
+  "gate_checks": 28,
+  "gate_verdict": "PASS",
+  "test_suite": "tests/test_check_region_ownership.py",
+  "test_suite_count": 21,
+  "test_suite_verdict": "PASS",
+  "artifacts": {
+    "module": "crates/franken-node/src/connector/region_ownership.rs",
+    "spec_doc": "docs/specs/region_tree_topology.md",
+    "spec_contract": "docs/specs/section_10_15/bd-2tdi_contract.md",
+    "integration_test": "tests/integration/region_owned_lifecycle.rs",
+    "quiescence_trace": "artifacts/10.15/region_quiescence_trace.jsonl"
+  },
   "verdict": "PASS"
 }

@@ -1,0 +1,147 @@
+[
+  {
+    "id": "bd-c4f",
+    "title": "[PLAN 10.8] Operational Readiness",
+    "description": "Section: 10.8 — Operational Readiness\n\nStrategic Context:\nOperational readiness and fleet safety posture: control APIs, observability contracts, safe-mode operations, and disaster drills.\n\nExecution Requirements:\n- Preserve all scoped capabilities from the canonical plan.\n- Keep contracts self-contained so future contributors can execute without reopening the master plan.\n- Require explicit testing strategy (unit + integration/e2e) and structured logging/telemetry for every child bead.\n- Require artifact-backed validation for performance, security, and correctness claims.\n\nDependency Semantics:\n- This epic is blocked by its child implementation beads.\n- Cross-epic dependencies encode strategic sequencing and canonical ownership boundaries.\n\n## Success Criteria\n- All child beads for this section are completed with acceptance artifacts attached and no unresolved blockers.\n- Section-level verification gate for comprehensive unit tests, integration/e2e workflows, and detailed structured logging evidence is green.\n- Scope-to-plan traceability is explicit, with no feature loss versus the canonical plan section.\n\n## Optimization Notes\n- User-Outcome Lens: \"[PLAN 10.8] Operational Readiness\" must improve operator confidence, safety posture, and deterministic recovery behavior under both normal and adversarial conditions.\n- Cross-Section Coordination: child beads must encode integration assumptions explicitly to avoid local optimizations that degrade system-wide correctness.\n- Verification Non-Negotiable: completion requires reproducible unit/integration/E2E evidence and structured logs suitable for independent replay.\n- Scope Protection: any simplification must preserve canonical-plan feature intent and be justified with explicit tradeoff documentation.",
+    "notes": "Claimed by PurpleHarbor for section 10.8 epic closure verification/evidence pass.",
+    "status": "closed",
+    "priority": 2,
+    "issue_type": "epic",
+    "assignee": "PurpleHarbor",
+    "created_at": "2026-02-20T07:36:40.869070676Z",
+    "created_by": "ubuntu",
+    "updated_at": "2026-02-22T03:11:23.956351855Z",
+    "closed_at": "2026-02-22T03:11:23.956318563Z",
+    "close_reason": "Section 10.8 epic closure criteria verified: all deps closed, gate bd-1fi2 PASS, and section evidence/spec artifacts complete.",
+    "source_repo": ".",
+    "compaction_level": 0,
+    "original_size": 0,
+    "labels": [
+      "plan",
+      "section-10-8"
+    ],
+    "dependencies": [
+      {
+        "id": "bd-1fi2",
+        "title": "[10.8] Section-wide verification gate: comprehensive unit+e2e+logging",
+        "status": "closed",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-1ta",
+        "title": "[PLAN 10.13] FCP Deep-Mined Expansion Execution Track (9I)",
+        "status": "closed",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-20a",
+        "title": "[PLAN 10.5] Security + Policy Product Surfaces",
+        "status": "closed",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-cda",
+        "title": "[PLAN 10.N] Execution Normalization Contract (No Duplicate Implementations)",
+        "status": "closed",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-3m6",
+        "title": "[10.8] Implement disaster-recovery drills for control-plane failures.",
+        "status": "closed",
+        "priority": 2,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-nr4",
+        "title": "[10.8] Implement operator runbooks for high-severity trust incidents.",
+        "status": "closed",
+        "priority": 2,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-f2y",
+        "title": "[10.8] Implement incident bundle retention and export policy.",
+        "status": "closed",
+        "priority": 2,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-k6o",
+        "title": "[10.8] Implement deterministic safe-mode startup and operation flags.",
+        "status": "closed",
+        "priority": 2,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-3o6",
+        "title": "[10.8] Adopt canonical structured observability + stable error taxonomy contracts (from `10.13`) across operational surfaces.",
+        "status": "closed",
+        "priority": 2,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-tg2",
+        "title": "[10.8] Implement fleet control API for quarantine/revocation operations.",
+        "status": "closed",
+        "priority": 2,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-1hf",
+        "title": "[PLAN 10.10] FCP-Inspired Hardening + Interop Integration Track",
+        "status": "closed",
+        "priority": 2,
+        "dependency_type": "blocks"
+      }
+    ],
+    "dependents": [
+      {
+        "id": "bd-33v",
+        "title": "[PLAN] franken_node master execution graph (full 10.x)",
+        "status": "open",
+        "priority": 0,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-1qp",
+        "title": "[10.0] Implement compatibility envelope + divergence ledger.",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-1ps",
+        "title": "[PLAN 13] Program Success Criteria Instrumentation",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-2g8",
+        "title": "[PLAN 12] Risk Register Countermeasure Program",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-4ou",
+        "title": "[PLAN 11] Evidence And Decision Contracts",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      },
+      {
+        "id": "bd-3fo",
+        "title": "[PLAN 10.0] Top 10 Initiative Tracking",
+        "status": "open",
+        "priority": 1,
+        "dependency_type": "blocks"
+      }
+    ]
+  }
+]

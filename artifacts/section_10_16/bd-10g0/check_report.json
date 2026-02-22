@@ -1,0 +1,277 @@
+{
+  "bead_id": "bd-10g0",
+  "title": "Section 10.16 verification gate: Adjacent Substrate Integration",
+  "section": "10.16",
+  "gate": true,
+  "verdict": "PASS",
+  "overall_pass": true,
+  "total": 49,
+  "passed": 49,
+  "failed": 0,
+  "section_beads": [
+    "bd-2owx",
+    "bd-28ld",
+    "bd-34ll",
+    "bd-1xtf",
+    "bd-1719",
+    "bd-1a1j",
+    "bd-2tua",
+    "bd-26ux",
+    "bd-bt82",
+    "bd-1v65",
+    "bd-3ndj",
+    "bd-2f5l",
+    "bd-159q",
+    "bd-2ji2",
+    "bd-35l5",
+    "bd-3u2o",
+    "bd-8l9k"
+  ],
+  "checks": [
+    {
+      "check": "evidence_bd-2owx",
+      "pass": true,
+      "detail": "PASS: Publish substrate policy contract for adjacent substrates"
+    },
+    {
+      "check": "evidence_bd-28ld",
+      "pass": true,
+      "detail": "PASS: Add architecture dependency map for adjacent substrates"
+    },
+    {
+      "check": "evidence_bd-34ll",
+      "pass": true,
+      "detail": "PASS: Define frankentui integration contract for console/TUI surfa"
+    },
+    {
+      "check": "evidence_bd-1xtf",
+      "pass": true,
+      "detail": "PASS: Migrate existing TUI workflows to frankentui primitives"
+    },
+    {
+      "check": "evidence_bd-1719",
+      "pass": true,
+      "detail": "PASS: Add deterministic visual/snapshot tests for frankentui surfa"
+    },
+    {
+      "check": "evidence_bd-1a1j",
+      "pass": true,
+      "detail": "PASS: Define frankensqlite persistence integration contract"
+    },
+    {
+      "check": "evidence_bd-2tua",
+      "pass": true,
+      "detail": "PASS: Implement frankensqlite adapter layer for persistence surfac"
+    },
+    {
+      "check": "evidence_bd-26ux",
+      "pass": true,
+      "detail": "PASS: Add migration path from interim stores to frankensqlite"
+    },
+    {
+      "check": "evidence_bd-bt82",
+      "pass": true,
+      "detail": "PASS: Define sqlmodel_rust usage policy and typed model boundaries"
+    },
+    {
+      "check": "evidence_bd-1v65",
+      "pass": true,
+      "detail": "PASS: Integrate sqlmodel_rust in domains with typed schema/query s"
+    },
+    {
+      "check": "evidence_bd-3ndj",
+      "pass": true,
+      "detail": "PASS: Define fastapi_rust control-plane service integration contra"
+    },
+    {
+      "check": "evidence_bd-2f5l",
+      "pass": true,
+      "detail": "PASS: Build fastapi_rust service skeleton for control endpoints"
+    },
+    {
+      "check": "evidence_bd-159q",
+      "pass": true,
+      "detail": "PASS: Add waiver workflow for justified substrate exceptions"
+    },
+    {
+      "check": "evidence_bd-2ji2",
+      "pass": true,
+      "detail": "PASS: Add claim-language gate for substrate-backed evidence"
+    },
+    {
+      "check": "evidence_bd-35l5",
+      "pass": true,
+      "detail": "PASS: Add performance overhead guardrails for substrate integratio"
+    },
+    {
+      "check": "evidence_bd-3u2o",
+      "pass": true,
+      "detail": "PASS: Add substrate conformance gate in CI"
+    },
+    {
+      "check": "evidence_bd-8l9k",
+      "pass": true,
+      "detail": "PASS: Add cross-substrate contract tests for E2E behavior"
+    },
+    {
+      "check": "summary_bd-2owx",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-2owx/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-28ld",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-28ld/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-34ll",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-34ll/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-1xtf",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-1xtf/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-1719",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-1719/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-1a1j",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-1a1j/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-2tua",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-2tua/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-26ux",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-26ux/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-bt82",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-bt82/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-1v65",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-1v65/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-3ndj",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-3ndj/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-2f5l",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-2f5l/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-159q",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-159q/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-2ji2",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-2ji2/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-35l5",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-35l5/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-3u2o",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-3u2o/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-8l9k",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-8l9k/verification_summary.md"
+    },
+    {
+      "check": "all_evidence_present",
+      "pass": true,
+      "detail": "17/17 beads have evidence"
+    },
+    {
+      "check": "all_verdicts_pass",
+      "pass": true,
+      "detail": "17/17 PASS"
+    },
+    {
+      "check": "artifact_substrate_policy",
+      "pass": true,
+      "detail": "exists: docs/architecture/adjacent_substrate_policy.md"
+    },
+    {
+      "check": "artifact_substrate_manifest",
+      "pass": true,
+      "detail": "exists: artifacts/10.16/adjacent_substrate_policy_manifest.json"
+    },
+    {
+      "check": "artifact_e2e_report",
+      "pass": true,
+      "detail": "exists: artifacts/10.16/adjacent_substrate_e2e_report.json"
+    },
+    {
+      "check": "script_substrate_policy_check",
+      "pass": true,
+      "detail": "exists: scripts/check_adjacent_substrate_policy.py"
+    },
+    {
+      "check": "script_cross_substrate_e2e_check",
+      "pass": true,
+      "detail": "exists: scripts/check_cross_substrate_e2e.py"
+    },
+    {
+      "check": "gate_evidence",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-10g0/verification_evidence.json"
+    },
+    {
+      "check": "gate_summary",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_16/bd-10g0/verification_summary.md"
+    },
+    {
+      "check": "gate_spec",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_16/bd-10g0_contract.md"
+    },
+    {
+      "check": "gate_tests",
+      "pass": true,
+      "detail": "exists: tests/test_check_section_10_16_gate.py"
+    },
+    {
+      "check": "substrate_frankentui_coverage",
+      "pass": true,
+      "detail": "3/3 beads PASS"
+    },
+    {
+      "check": "substrate_frankensqlite_coverage",
+      "pass": true,
+      "detail": "3/3 beads PASS"
+    },
+    {
+      "check": "substrate_sqlmodel_rust_coverage",
+      "pass": true,
+      "detail": "2/2 beads PASS"
+    },
+    {
+      "check": "substrate_fastapi_rust_coverage",
+      "pass": true,
+      "detail": "2/2 beads PASS"
+    }
+  ]
+}

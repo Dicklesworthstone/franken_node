@@ -1,0 +1,58 @@
+{
+  "bead_id": "bd-7om",
+  "section": "10.11",
+  "title": "Canonical cancel -> drain -> finalize protocol contracts for product services",
+  "generated_at": "2026-02-21T12:00:00Z",
+  "status": "completed",
+  "gate_script": "scripts/check_cancellable_task_protocol.py",
+  "test_suite": "tests/test_check_cancellable_task_protocol.py",
+  "checks": [
+    {
+      "name": "implementation_surface_present",
+      "command": "test -f crates/franken-node/src/runtime/cancellable_task.rs && test -f docs/specs/section_10_11/bd-7om_contract.md",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "name": "gate_script_json",
+      "command": "python3 scripts/check_cancellable_task_protocol.py --json",
+      "exit_code": 0,
+      "status": "PASS",
+      "output_path": "artifacts/section_10_11/bd-7om/check_report.json"
+    },
+    {
+      "name": "gate_script_self_test",
+      "command": "python3 scripts/check_cancellable_task_protocol.py --self-test",
+      "exit_code": 0,
+      "status": "PASS"
+    },
+    {
+      "name": "pytest_gate_tests",
+      "command": "python3 -m pytest tests/test_check_cancellable_task_protocol.py -v",
+      "exit_code": 0,
+      "status": "PASS"
+    }
+  ],
+  "contract_surface": {
+    "implementation": "crates/franken-node/src/runtime/cancellable_task.rs",
+    "module_wire": "crates/franken-node/src/runtime/mod.rs",
+    "spec": "docs/specs/section_10_11/bd-7om_contract.md",
+    "gate_script": "scripts/check_cancellable_task_protocol.py",
+    "gate_tests": "tests/test_check_cancellable_task_protocol.py"
+  },
+  "capabilities_verified": [
+    "CancellableTask trait with on_cancel, on_drain_complete, on_finalize",
+    "CancellationRuntime managing cancel-drain-finalize lifecycle",
+    "DrainResult enum (Completed, TimedOut, Error)",
+    "FinalizeRecord with obligation closure proof and phase timestamps",
+    "ObligationClosureProof struct",
+    "10 event codes FN-CX-001 through FN-CX-010",
+    "6 error codes for phase violations",
+    "6 invariant constants",
+    "Schema version cxt-v1.0",
+    "Nested cancel propagation to child tasks",
+    "Lane slot release tracking",
+    "Serde derives on all types",
+    "30+ unit tests"
+  ]
+}

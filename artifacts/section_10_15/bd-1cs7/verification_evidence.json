@@ -2,28 +2,33 @@
   "bead_id": "bd-1cs7",
   "section": "10.15",
   "title": "Implement REQUEST -> DRAIN -> FINALIZE cancellation protocol across high-impact workflows",
-  "verification_timestamp": "2026-02-22T02:50:00Z",
+  "gate_script": "scripts/check_cancellation_protocol.py",
+  "test_suite": "tests/test_check_cancellation_protocol.py",
+  "timestamp": "2026-02-22T03:15:00+00:00",
   "verdict": "PASS",
-  "artifacts": {
-    "implementation": "crates/franken-node/src/control_plane/cancellation_protocol.rs",
+  "implementation_artifacts": {
+    "connector_protocol": "crates/franken-node/src/connector/cancellation_protocol.rs",
+    "control_plane_protocol": "crates/franken-node/src/control_plane/cancellation_protocol.rs",
     "spec_contract": "docs/specs/section_10_15/bd-1cs7_contract.md",
     "conformance_tests": "tests/conformance/cancel_drain_finalize.rs",
     "timing_csv": "artifacts/10.15/cancel_protocol_timing.csv",
-    "gate_script": "scripts/check_cancellation_protocol.py",
-    "test_file": "tests/test_check_cancellation_protocol.py"
+    "verification_script": "scripts/check_cancellation_protocol.py",
+    "unit_tests": "tests/test_check_cancellation_protocol.py"
   },
   "modified_files": [
     "crates/franken-node/src/connector/lifecycle.rs",
     "crates/franken-node/src/connector/rollout_state.rs",
+    "crates/franken-node/src/connector/mod.rs",
     "crates/franken-node/src/control_plane/mod.rs"
   ],
+  "gate_checks_passed": 59,
+  "gate_checks_total": 59,
+  "python_test_count": 67,
   "invariants_verified": [
-    "INV-CANP-THREE-PHASE",
-    "INV-CANP-NO-NEW-WORK",
-    "INV-CANP-DRAIN-BOUNDED",
-    "INV-CANP-FINALIZE-CLEAN",
-    "INV-CANP-IDEMPOTENT",
-    "INV-CANP-AUDIT-COMPLETE"
+    "INV-CAN-THREE-PHASE",
+    "INV-CAN-BUDGET-BOUNDED",
+    "INV-CAN-PROPAGATION",
+    "INV-CAN-NO-LEAK"
   ],
   "event_codes_verified": [
     "CAN-001",
@@ -40,21 +45,43 @@
     "ERR_CANCEL_LEAK"
   ],
   "workflows_covered": [
-    "lifecycle_shutdown",
-    "rollout_cancel",
-    "publish_abort",
-    "health_check_cancel",
-    "epoch_transition_cancel"
+    "lifecycle",
+    "rollout",
+    "publish",
+    "revoke",
+    "quarantine",
+    "migration"
   ],
+  "per_workflow_budgets_ms": {
+    "lifecycle": 5000,
+    "rollout": 3000,
+    "publish": 2000,
+    "revoke": 2000,
+    "quarantine": 3000,
+    "migration": 5000
+  },
   "integration_points": {
     "lifecycle_rs": "Added Cancelling state with transitions from Active/Paused to Cancelling to Stopped/Failed",
     "rollout_state_rs": "Added cancel_phase field, set_cancel_phase(), clear_cancel_phase(), is_cancelling()",
+    "connector_mod_rs": "Wired pub mod cancellation_protocol",
     "control_plane_mod_rs": "Wired pub mod cancellation_protocol"
   },
   "test_summary": {
-    "rust_unit_tests": 30,
+    "rust_unit_tests": 34,
     "conformance_tests": 18,
-    "gate_script_checks": 48,
-    "python_tests": 55
+    "gate_script_checks": 59,
+    "python_tests": 67
+  },
+  "capabilities_verified": {
+    "three_phase_protocol": true,
+    "per_workflow_budgets": true,
+    "resource_guard_drop_safety": true,
+    "force_finalize_on_timeout": true,
+    "resource_leak_detection": true,
+    "audit_log_jsonl_export": true,
+    "timing_csv_generation": true,
+    "child_propagation_tracking": true,
+    "idempotent_request": true,
+    "schema_version": "cancel-v1.0"
   }
 }

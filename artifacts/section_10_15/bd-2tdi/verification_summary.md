@@ -1,7 +1,7 @@
-# Verification Summary: Region-Owned Lifecycle Orchestration
+# Verification Summary: Region-Owned Execution Trees
 
 **Bead:** bd-2tdi | **Section:** 10.15
-**Timestamp:** 2026-02-22T00:00:00Z
+**Timestamp:** 2026-02-22T05:05:00Z
 **Overall:** PASS
 
 ## Implementation
@@ -19,29 +19,38 @@ quiescence of all child tasks.
 
 ## Event Codes
 
-- RGN-001: Region opened
-- RGN-002: Region close initiated
-- RGN-003: Quiescence achieved
-- RGN-004: Child task force-terminated
-- RGN-005: Quiescence timeout
+| Code | Event |
+|------|-------|
+| RGN-001 | Region opened |
+| RGN-002 | Region close initiated |
+| RGN-003 | Quiescence achieved |
+| RGN-004 | Child task force-terminated |
+| RGN-005 | Quiescence timeout |
 
 ## Invariants
 
-- INV-RGN-QUIESCENCE: close() is a hard barrier
+- INV-RGN-QUIESCENCE: close() is a hard quiescence barrier
 - INV-RGN-NO-OUTLIVE: tasks cannot outlive their region
 - INV-RGN-HIERARCHY: proper parent-child nesting
 - INV-RGN-DETERMINISTIC: reproducible quiescence traces
 
 ## Test Coverage
 
-- 11 Rust unit tests covering region creation, child linkage, task lifecycle,
-  close/drain, error handling, event codes, and serde roundtrip
-- Python gate script with 35+ checks
-- Pytest suite with positive and negative test cases
+| Suite | Count | Verdict |
+|-------|-------|---------|
+| Rust unit tests (`region_ownership.rs`) | 12 | PASS |
+| Integration tests (`region_owned_lifecycle.rs`) | 8 | PASS |
+| Gate checks (`check_region_ownership.py`) | 28 | PASS |
+| Python test suite (`test_check_region_ownership.py`) | 21 | PASS |
 
 ## Artifacts
 
-- Implementation: `crates/franken-node/src/connector/region_ownership.rs`
-- Spec: `docs/specs/section_10_15/bd-2tdi_contract.md`
-- Gate: `scripts/check_region_owned_lifecycle.py`
-- Tests: `tests/test_check_region_owned_lifecycle.py`
+| Artifact | Path |
+|----------|------|
+| Rust module | `crates/franken-node/src/connector/region_ownership.rs` |
+| Spec doc | `docs/specs/region_tree_topology.md` |
+| Spec contract | `docs/specs/section_10_15/bd-2tdi_contract.md` |
+| Integration test | `tests/integration/region_owned_lifecycle.rs` |
+| Gate script | `scripts/check_region_ownership.py` |
+| Test suite | `tests/test_check_region_ownership.py` |
+| Quiescence trace | `artifacts/10.15/region_quiescence_trace.jsonl` |

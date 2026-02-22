@@ -1,0 +1,69 @@
+{
+  "bead_id": "bd-3u2o",
+  "section": "10.16",
+  "title": "Adjacent substrate conformance gate",
+  "checks": [
+    {
+      "check": "report_required_fields",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "check": "checks_array",
+      "pass": true,
+      "detail": "type=list"
+    },
+    {
+      "check": "check_entry_schema",
+      "pass": true,
+      "detail": "ok"
+    },
+    {
+      "check": "failure_remediation_hints_present",
+      "pass": true,
+      "detail": "failures_without_hint=0"
+    },
+    {
+      "check": "waived_checks_have_waiver_id",
+      "pass": true,
+      "detail": "waived_without_id=0"
+    },
+    {
+      "check": "summary_matches_checks",
+      "pass": true,
+      "detail": "summary={'total_checks': 6, 'passed': 6, 'failed': 0, 'waived': 0} computed={'total_checks': 6, 'passed': 6, 'failed': 0, 'waived': 0}"
+    },
+    {
+      "check": "gate_verdict_consistent",
+      "pass": true,
+      "detail": "expected=pass actual=pass"
+    },
+    {
+      "check": "changed_modules_normalized",
+      "pass": true,
+      "detail": "count=4"
+    },
+    {
+      "check": "event_codes_from_expected_set",
+      "pass": true,
+      "detail": "event_codes=['SUBSTRATE_GATE_PASS', 'SUBSTRATE_GATE_START']"
+    }
+  ],
+  "total": 9,
+  "passed": 9,
+  "failed": 0,
+  "overall_pass": true,
+  "verdict": "PASS",
+  "status": "pass",
+  "metrics": {
+    "report_check_count": 6,
+    "expected_event_codes": [
+      "SUBSTRATE_GATE_START",
+      "SUBSTRATE_GATE_VIOLATION",
+      "SUBSTRATE_GATE_WAIVED",
+      "SUBSTRATE_GATE_WAIVER_EXPIRED",
+      "SUBSTRATE_GATE_PASS",
+      "SUBSTRATE_GATE_FAIL"
+    ]
+  }
+}

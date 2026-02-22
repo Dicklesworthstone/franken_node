@@ -1,0 +1,30 @@
+{
+  "bead_id": "bd-3hm",
+  "section": "10.12",
+  "title": "Migration Singularity Artifact Contract and Verifier Format",
+  "status": "pass",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "verification_checks": {
+    "total": 50,
+    "passed": 50,
+    "failed": 0
+  },
+  "event_codes": ["MA-001", "MA-002", "MA-003", "MA-004", "MA-005", "MA-006", "MA-007", "MA-008"],
+  "invariants": ["INV-MA-SIGNED", "INV-MA-ROLLBACK-PRESENT", "INV-MA-CONFIDENCE-CALIBRATED", "INV-MA-VERSIONED", "INV-MA-VERIFIER-COMPLETE", "INV-MA-DETERMINISTIC"],
+  "error_codes": ["ERR_MA_INVALID_SCHEMA", "ERR_MA_SIGNATURE_INVALID", "ERR_MA_MISSING_ROLLBACK", "ERR_MA_CONFIDENCE_LOW", "ERR_MA_VERSION_UNSUPPORTED"],
+  "types": ["MigrationArtifact", "MigrationStep", "RollbackReceipt", "ConfidenceInterval", "VerifierMetadata", "ArtifactVersion", "ValidationResult", "MigrationArtifactEvent"],
+  "rust_tests": 40,
+  "compilation": "exit 0",
+  "artifacts": {
+    "spec": "docs/specs/section_10_12/bd-3hm_contract.md",
+    "rust_src": "crates/franken-node/src/connector/migration_artifact.rs",
+    "json_schema": "spec/migration_artifact_schema.json",
+    "reference_vectors": "vectors/migration_artifacts.json",
+    "check_script": "scripts/check_migration_artifacts.py",
+    "unit_tests": "tests/test_check_migration_artifacts.py",
+    "evidence": "artifacts/section_10_12/bd-3hm/verification_evidence.json",
+    "summary": "artifacts/section_10_12/bd-3hm/verification_summary.md"
+  },
+  "timestamp": "2026-02-21T05:00:00Z"
+}

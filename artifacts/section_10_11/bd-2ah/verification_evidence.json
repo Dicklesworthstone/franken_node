@@ -1,0 +1,57 @@
+{
+  "bead_id": "bd-2ah",
+  "section": "10.11",
+  "title": "Obligation-Tracked Two-Phase Channel Contracts",
+  "gate_script": "scripts/check_obligation_channel_protocol.py",
+  "test_suite": "tests/test_check_obligation_channel_protocol.py",
+  "timestamp": "2026-02-21T12:00:00Z",
+  "verdict": "PASS",
+  "gate_checks_passed": 87,
+  "gate_checks_total": 87,
+  "capabilities_verified": [
+    "ObligationChannel send/fulfill/reject lifecycle",
+    "ObligationLedger tracking and query_outstanding",
+    "TwoPhaseFlow prepare/commit/rollback protocol",
+    "ChannelObligation with deadline and trace tracking",
+    "ObligationStatus terminal state detection",
+    "TimeoutPolicy enum (Retry/Compensate/Escalate)",
+    "ClosureProof generation with completeness check",
+    "Event codes FN-OB-001 through FN-OB-012",
+    "Error codes ERR_OCH_*",
+    "Invariant constants INV-OCH-*",
+    "Schema version och-v1.0",
+    "Serde Serialize/Deserialize derives",
+    "BTreeMap ordered collections",
+    "Deadline enforcement in prepare phase",
+    "Atomic rollback of non-terminal obligations"
+  ],
+  "artifacts": {
+    "spec": "docs/specs/section_10_11/bd-2ah_contract.md",
+    "source": "crates/franken-node/src/runtime/obligation_channel.rs",
+    "mod_wiring": "crates/franken-node/src/runtime/mod.rs",
+    "gate_script": "scripts/check_obligation_channel_protocol.py",
+    "test_suite": "tests/test_check_obligation_channel_protocol.py"
+  },
+  "event_codes_verified": [
+    "FN-OB-001",
+    "FN-OB-002",
+    "FN-OB-003",
+    "FN-OB-004",
+    "FN-OB-005",
+    "FN-OB-006",
+    "FN-OB-007",
+    "FN-OB-008",
+    "FN-OB-009",
+    "FN-OB-010",
+    "FN-OB-011",
+    "FN-OB-012"
+  ],
+  "invariants_verified": [
+    "INV-OCH-TRACKED",
+    "INV-OCH-DEADLINE",
+    "INV-OCH-LEDGER-COMPLETE",
+    "INV-OCH-CLOSURE-SIGNED",
+    "INV-OCH-TWO-PHASE",
+    "INV-OCH-ROLLBACK-ATOMIC"
+  ]
+}

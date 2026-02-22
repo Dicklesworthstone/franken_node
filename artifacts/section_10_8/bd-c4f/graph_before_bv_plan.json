@@ -1,0 +1,61 @@
+{
+  "generated_at": "2026-02-22T03:05:57Z",
+  "plan": {
+    "tracks": [
+      {
+        "track_id": "track-A",
+        "items": [
+          {
+            "id": "bd-1rwq",
+            "title": "[10.7] Section-wide verification gate: comprehensive unit+e2e+logging",
+            "priority": 1,
+            "status": "open",
+            "unblocks": [
+              "bd-3rc"
+            ]
+          },
+          {
+            "id": "bd-721z",
+            "title": "[10.15] Add ambient-authority audit gate for control-plane modules.",
+            "priority": 1,
+            "status": "blocked",
+            "unblocks": [
+              "bd-20eg"
+            ]
+          },
+          {
+            "id": "bd-2ah",
+            "title": "[10.11] Adopt canonical obligation-tracked two-phase channel contracts (from `10.15`) for critical flows.",
+            "priority": 2,
+            "status": "open",
+            "unblocks": null
+          },
+          {
+            "id": "bd-7om",
+            "title": "[10.11] Adopt canonical cancel -\u003e drain -\u003e finalize protocol contracts (from `10.15`) for product services.",
+            "priority": 2,
+            "status": "open",
+            "unblocks": [
+              "bd-3he"
+            ]
+          },
+          {
+            "id": "bd-c4f",
+            "title": "[PLAN 10.8] Operational Readiness",
+            "priority": 2,
+            "status": "open",
+            "unblocks": null
+          }
+        ],
+        "reason": "Independent work stream"
+      }
+    ],
+    "total_actionable": 5,
+    "total_blocked": 104,
+    "summary": {
+      "highest_impact": "bd-721z",
+      "impact_reason": "Unblocks 1 task",
+      "unblocks_count": 1
+    }
+  }
+}

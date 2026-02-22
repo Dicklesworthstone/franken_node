@@ -1,0 +1,3 @@
+{"ts": "2026-02-22T03:01:19Z", "event_code": "EPIC_1010_GRAPH_SNAPSHOT_BEFORE", "details": {"ready_count": 5, "contains_bd_1hf": true, "highest_impact": "bd-1cs7", "cycles": 0, "orphans": 0}}
+{"ts": "2026-02-22T03:01:19Z", "event_code": "EPIC_1010_CHECKER_VERDICT", "details": {"verdict": "PASS", "passed": 17, "failed": 0, "total": 17}}
+{"ts": "2026-02-22T03:01:19Z", "event_code": "EPIC_1010_GRAPH_SNAPSHOT_AFTER", "details": {"ready_count": 4, "contains_bd_1hf": false, "highest_impact": "bd-721z", "cycles": 0, "orphans": 0, "epic_status": "closed"}}

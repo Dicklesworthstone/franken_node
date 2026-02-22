@@ -1,0 +1,55 @@
+{
+  "bead_id": "bd-2owx",
+  "section": "10.16",
+  "title": "Publish substrate policy contract for adjacent substrates",
+  "status": "pass",
+  "verdict": "PASS",
+  "deliverables": [
+    "docs/architecture/adjacent_substrate_policy.md",
+    "artifacts/10.16/adjacent_substrate_policy_manifest.json",
+    "scripts/check_adjacent_substrate_policy.py",
+    "tests/test_check_adjacent_substrate_policy.py",
+    "artifacts/section_10_16/bd-2owx/check_report.json",
+    "artifacts/section_10_16/bd-2owx/check_self_test.txt",
+    "artifacts/section_10_16/bd-2owx/unit_tests.txt"
+  ],
+  "checker": {
+    "command": "python3 scripts/check_adjacent_substrate_policy.py --json",
+    "exit_code": 0,
+    "report_path": "artifacts/section_10_16/bd-2owx/check_report.json",
+    "self_test_path": "artifacts/section_10_16/bd-2owx/check_self_test.txt",
+    "passed_checks": 15,
+    "failed_checks": 0,
+    "module_count": 243,
+    "substrate_count": 4,
+    "unmapped_count": 0
+  },
+  "unit_tests": {
+    "command": "pytest -q tests/test_check_adjacent_substrate_policy.py",
+    "exit_code": 0,
+    "log_path": "artifacts/section_10_16/bd-2owx/unit_tests.txt",
+    "summary": "9 passed in 0.23s"
+  },
+  "cargo_quality_gates": {
+    "fmt_check": {
+      "command": "rch exec -- cargo fmt --check",
+      "exit_code": 1,
+      "log_path": "artifacts/section_10_16/bd-2owx/rch_cargo_fmt_check.log"
+    },
+    "check_all_targets": {
+      "command": "rch exec -- cargo check --all-targets",
+      "exit_code": 0,
+      "log_path": "artifacts/section_10_16/bd-2owx/rch_cargo_check_all_targets.log"
+    },
+    "clippy_all_targets": {
+      "command": "rch exec -- cargo clippy --all-targets -- -D warnings",
+      "exit_code": 101,
+      "log_path": "artifacts/section_10_16/bd-2owx/rch_cargo_clippy_all_targets.log"
+    }
+  },
+  "notes": [
+    "Manifest includes full src module coverage with first-match tiering and deterministic policy hash.",
+    "Markdown contract contains machine-readable policy block, waiver metadata requirements, and required event codes.",
+    "Workspace-level clippy/fmt baseline issues remain outside this bead scope."
+  ]
+}

@@ -1,0 +1,39 @@
+{
+  "bead_id": "bd-c4f",
+  "timestamp": "2026-02-22T03:11:34Z",
+  "status_transition": {
+    "before": "in_progress",
+    "after": "closed"
+  },
+  "ready_queue": {
+    "count_before": 3,
+    "count_after": 0,
+    "contains_bd_c4f_before": true,
+    "contains_bd_c4f_after": false
+  },
+  "dependency_closure": {
+    "count_before": 11,
+    "closed_before": 11,
+    "count_after": 11,
+    "closed_after": 11
+  },
+  "bv_plan": {
+    "highest_impact_before": "bd-721z",
+    "highest_impact_after": "bd-721z",
+    "actionable_before": 5,
+    "actionable_after": 1,
+    "blocked_before": 104,
+    "blocked_after": 102
+  },
+  "graph_health": {
+    "cycles_before": 0,
+    "cycles_after": 0,
+    "orphans_before": 0,
+    "orphans_after": 0
+  },
+  "checker": {
+    "checks_total": 18,
+    "checks_passed": 18,
+    "verdict": "PASS"
+  }
+}

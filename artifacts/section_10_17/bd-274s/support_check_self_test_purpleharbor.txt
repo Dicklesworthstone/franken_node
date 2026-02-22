@@ -1,0 +1,40 @@
+{
+  "name": "check_bd_274s_bayesian_quarantine",
+  "bead": "bd-274s",
+  "section": "10.17",
+  "passed": 6,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "constants_bead",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "constants_section",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "action_token_count",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "evidence_pass_helper",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "run_all_has_checks",
+      "passed": true,
+      "detail": "ok"
+    },
+    {
+      "check": "run_all_has_verdict",
+      "passed": true,
+      "detail": "ok"
+    }
+  ],
+  "verdict": "PASS"
+}

@@ -1,0 +1,29 @@
+{
+  "bead_id": "bd-3c2",
+  "section": "10.12",
+  "title": "Verifier-Economy SDK with Independent Validation Workflows",
+  "status": "pass",
+  "verdict": "PASS",
+  "overall_pass": true,
+  "verification_checks": {
+    "total": 55,
+    "passed": 55,
+    "failed": 0
+  },
+  "event_codes": ["VER-001", "VER-002", "VER-003", "VER-004", "VER-005", "VER-006", "VER-007", "VER-008", "VER-009", "VER-010"],
+  "invariants": ["INV-VER-DETERMINISTIC", "INV-VER-OFFLINE-CAPABLE", "INV-VER-EVIDENCE-BOUND", "INV-VER-RESULT-SIGNED", "INV-VER-TRANSPARENCY-APPEND"],
+  "error_codes": ["ERR_VER_INVALID_CLAIM", "ERR_VER_EVIDENCE_MISSING", "ERR_VER_SIGNATURE_INVALID", "ERR_VER_HASH_MISMATCH", "ERR_VER_REPLAY_DIVERGED", "ERR_VER_ANCHOR_UNKNOWN", "ERR_VER_BUNDLE_INCOMPLETE"],
+  "types": ["Claim", "Evidence", "EvidenceBundle", "VerificationResult", "ReplayResult", "ValidationWorkflow", "TransparencyLogEntry", "Verdict", "AssertionResult", "VerifierSdkEvent", "VerifierSdkError"],
+  "rust_tests": 50,
+  "compilation": "exit 0",
+  "artifacts": {
+    "spec": "docs/specs/section_10_12/bd-3c2_contract.md",
+    "rust_src": "crates/franken-node/src/connector/verifier_sdk.rs",
+    "json_schema": "spec/evidence_bundle_schema.json",
+    "check_script": "scripts/check_verifier_sdk.py",
+    "unit_tests": "tests/test_check_verifier_sdk.py",
+    "evidence": "artifacts/section_10_12/bd-3c2/verification_evidence.json",
+    "summary": "artifacts/section_10_12/bd-3c2/verification_summary.md"
+  },
+  "timestamp": "2026-02-21T05:00:00Z"
+}

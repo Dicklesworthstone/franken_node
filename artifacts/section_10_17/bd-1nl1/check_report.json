@@ -1,0 +1,194 @@
+{
+  "schema_version": "speculation-proof-v1.0",
+  "bead_id": "bd-1nl1",
+  "section": "10.17",
+  "title": "Proof-carrying speculative execution governance",
+  "verdict": "PASS",
+  "total": 31,
+  "passed": 31,
+  "failed": 0,
+  "checks": [
+    {
+      "check": "Spec file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/docs/specs/proof_carrying_speculation.md"
+    },
+    {
+      "check": "Implementation file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/runtime/speculation/proof_executor.rs"
+    },
+    {
+      "check": "Speculation mod file exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/crates/franken-node/src/runtime/speculation/mod.rs"
+    },
+    {
+      "check": "Runtime module wired",
+      "passed": true,
+      "detail": "pub mod speculation; in runtime/mod.rs"
+    },
+    {
+      "check": "Speculation mod exports proof_executor",
+      "passed": true,
+      "detail": "pub mod proof_executor; in speculation/mod.rs"
+    },
+    {
+      "check": "Impl token 'struct ProofReceipt'",
+      "passed": true,
+      "detail": "struct ProofReceipt"
+    },
+    {
+      "check": "Impl token 'enum ActivationDecision'",
+      "passed": true,
+      "detail": "enum ActivationDecision"
+    },
+    {
+      "check": "Impl token 'fn evaluate_activation'",
+      "passed": true,
+      "detail": "fn evaluate_activation"
+    },
+    {
+      "check": "Impl token 'fn execute_with_fallback'",
+      "passed": true,
+      "detail": "fn execute_with_fallback"
+    },
+    {
+      "check": "Impl token 'fn deterministic_baseline_digest'",
+      "passed": true,
+      "detail": "fn deterministic_baseline_digest"
+    },
+    {
+      "check": "Impl token 'approved_interfaces'",
+      "passed": true,
+      "detail": "approved_interfaces"
+    },
+    {
+      "check": "Impl token 'ActivationDecision::Degraded'",
+      "passed": true,
+      "detail": "ActivationDecision::Degraded"
+    },
+    {
+      "check": "Impl token 'ActivationDecision::Activated'",
+      "passed": true,
+      "detail": "ActivationDecision::Activated"
+    },
+    {
+      "check": "Event code SPECULATION_GUARD_START",
+      "passed": true,
+      "detail": "SPECULATION_GUARD_START"
+    },
+    {
+      "check": "Event code SPECULATION_PROOF_ACCEPTED",
+      "passed": true,
+      "detail": "SPECULATION_PROOF_ACCEPTED"
+    },
+    {
+      "check": "Event code SPECULATION_ACTIVATED",
+      "passed": true,
+      "detail": "SPECULATION_ACTIVATED"
+    },
+    {
+      "check": "Event code SPECULATION_DEGRADED",
+      "passed": true,
+      "detail": "SPECULATION_DEGRADED"
+    },
+    {
+      "check": "Event code SPECULATION_SAFE_BASELINE_USED",
+      "passed": true,
+      "detail": "SPECULATION_SAFE_BASELINE_USED"
+    },
+    {
+      "check": "Error code ERR_SPEC_MISSING_PROOF",
+      "passed": true,
+      "detail": "ERR_SPEC_MISSING_PROOF"
+    },
+    {
+      "check": "Error code ERR_SPEC_EXPIRED_PROOF",
+      "passed": true,
+      "detail": "ERR_SPEC_EXPIRED_PROOF"
+    },
+    {
+      "check": "Error code ERR_SPEC_SIGNATURE_INVALID",
+      "passed": true,
+      "detail": "ERR_SPEC_SIGNATURE_INVALID"
+    },
+    {
+      "check": "Error code ERR_SPEC_INTERFACE_UNAPPROVED",
+      "passed": true,
+      "detail": "ERR_SPEC_INTERFACE_UNAPPROVED"
+    },
+    {
+      "check": "Error code ERR_SPEC_GUARD_REJECTED",
+      "passed": true,
+      "detail": "ERR_SPEC_GUARD_REJECTED"
+    },
+    {
+      "check": "Error code ERR_SPEC_TRANSFORM_MISMATCH",
+      "passed": true,
+      "detail": "ERR_SPEC_TRANSFORM_MISMATCH"
+    },
+    {
+      "check": "Invariant INV-SPEC-PROOF-REQUIRED",
+      "passed": true,
+      "detail": "INV-SPEC-PROOF-REQUIRED"
+    },
+    {
+      "check": "Invariant INV-SPEC-APPROVED-INTERFACE-ONLY",
+      "passed": true,
+      "detail": "INV-SPEC-APPROVED-INTERFACE-ONLY"
+    },
+    {
+      "check": "Invariant INV-SPEC-FAIL-CLOSED-TO-BASELINE",
+      "passed": true,
+      "detail": "INV-SPEC-FAIL-CLOSED-TO-BASELINE"
+    },
+    {
+      "check": "Invariant INV-SPEC-DETERMINISTIC-BASELINE",
+      "passed": true,
+      "detail": "INV-SPEC-DETERMINISTIC-BASELINE"
+    },
+    {
+      "check": "Rust unit tests >= 8",
+      "passed": true,
+      "detail": "found 9"
+    },
+    {
+      "check": "Conformance test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/conformance/proof_speculation_guards.rs"
+    },
+    {
+      "check": "Python checker unit test exists",
+      "passed": true,
+      "detail": "/data/projects/franken_node/tests/test_check_proof_carrying_speculation.py"
+    }
+  ],
+  "event_codes": [
+    "SPECULATION_GUARD_START",
+    "SPECULATION_PROOF_ACCEPTED",
+    "SPECULATION_ACTIVATED",
+    "SPECULATION_DEGRADED",
+    "SPECULATION_SAFE_BASELINE_USED"
+  ],
+  "error_codes": [
+    "ERR_SPEC_MISSING_PROOF",
+    "ERR_SPEC_EXPIRED_PROOF",
+    "ERR_SPEC_SIGNATURE_INVALID",
+    "ERR_SPEC_INTERFACE_UNAPPROVED",
+    "ERR_SPEC_GUARD_REJECTED",
+    "ERR_SPEC_TRANSFORM_MISMATCH"
+  ],
+  "invariants": [
+    "INV-SPEC-PROOF-REQUIRED",
+    "INV-SPEC-APPROVED-INTERFACE-ONLY",
+    "INV-SPEC-FAIL-CLOSED-TO-BASELINE",
+    "INV-SPEC-DETERMINISTIC-BASELINE"
+  ],
+  "guard_contract": {
+    "requires_receipt": true,
+    "requires_approved_interface": true,
+    "guard_failure_degrades_to_baseline": true,
+    "activation_only_via_approved_franken_engine_interfaces": true
+  }
+}

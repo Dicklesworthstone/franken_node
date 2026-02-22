@@ -2,7 +2,7 @@
   "bead_id": "bd-2nre",
   "section": "15",
   "title": "Section-wide verification gate: comprehensive unit+e2e+logging",
-  "generated_at": "2026-02-22T01:11:29.685125+00:00",
+  "generated_at": "2026-02-22T03:40:45.301821+00:00",
   "verdict": "PASS",
   "gate_pass": true,
   "beads_expected": 8,

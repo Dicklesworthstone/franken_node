@@ -2,19 +2,19 @@
   "gate": "section_10_13_verification_gate",
   "bead": "bd-3uoo",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "GATE-RUST-UNIT",
       "description": "Connector Rust unit tests pass",
-      "status": "PASS",
-      "details": "561 tests passed"
+      "status": "FAIL",
+      "details": "0 tests passed"
     },
     {
       "id": "GATE-PYTHON-TESTS",
       "description": "Python verification tests pass",
-      "status": "PASS",
-      "details": "1024 tests passed"
+      "status": "FAIL",
+      "details": "8424 tests passed"
     },
     {
       "id": "GATE-EVIDENCE",
@@ -26,7 +26,7 @@
       "id": "GATE-MODULES",
       "description": "Connector module count",
       "status": "PASS",
-      "details": "33 modules"
+      "details": "68 modules"
     },
     {
       "id": "GATE-SPECS",
@@ -38,14 +38,14 @@
       "id": "GATE-INTEGRATION",
       "description": "Integration test files",
       "status": "PASS",
-      "details": "27 integration test files"
+      "details": "40 integration test files"
     }
   ],
   "summary": {
     "total_checks": 6,
-    "passing_checks": 6,
-    "failing_checks": 0,
-    "rust_unit_tests": 561,
-    "python_tests": 1024
+    "passing_checks": 4,
+    "failing_checks": 2,
+    "rust_unit_tests": 0,
+    "python_tests": 8424
   }
 }

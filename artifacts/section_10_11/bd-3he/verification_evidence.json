@@ -1,0 +1,39 @@
+{
+  "bead_id": "bd-3he",
+  "section": "10.11",
+  "title": "Supervision Tree with Restart Budgets and Escalation Policies",
+  "timestamp": "2026-02-21T00:00:00Z",
+  "schema_version": "sup-v1.0",
+  "strategies_implemented": ["OneForOne", "OneForAll", "RestForOne"],
+  "restart_types": ["Permanent", "Transient", "Temporary"],
+  "modules_implemented": [
+    "crates/franken-node/src/connector/supervision.rs"
+  ],
+  "invariants_enforced": [
+    "INV-SUP-BUDGET-BOUND",
+    "INV-SUP-ESCALATION-BOUNDED",
+    "INV-SUP-SHUTDOWN-ORDER",
+    "INV-SUP-TIMEOUT-ENFORCED",
+    "INV-SUP-STRATEGY-DETERMINISTIC"
+  ],
+  "event_codes": [
+    "SUP-001",
+    "SUP-002",
+    "SUP-003",
+    "SUP-004",
+    "SUP-005",
+    "SUP-006",
+    "SUP-007",
+    "SUP-008"
+  ],
+  "error_codes": [
+    "ERR_SUP_CHILD_NOT_FOUND",
+    "ERR_SUP_BUDGET_EXHAUSTED",
+    "ERR_SUP_MAX_ESCALATION",
+    "ERR_SUP_SHUTDOWN_TIMEOUT",
+    "ERR_SUP_DUPLICATE_CHILD"
+  ],
+  "unit_tests": 20,
+  "gate_script": "scripts/check_supervision_tree.py",
+  "verdict": "PASS"
+}

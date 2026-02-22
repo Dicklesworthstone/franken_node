@@ -2,7 +2,7 @@
   "bead_id": "bd-unkm",
   "section": "16",
   "title": "Section-wide verification gate: comprehensive unit+e2e+logging",
-  "generated_at": "2026-02-22T01:03:55.848975+00:00",
+  "generated_at": "2026-02-22T03:40:49.230387+00:00",
   "verdict": "PASS",
   "gate_pass": true,
   "beads_expected": 8,

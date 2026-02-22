@@ -7,28 +7,32 @@
   "checks": [
     {"id": "SOURCE_EXISTS", "status": "PASS", "details": {"file": "crates/franken-node/src/connector/obligation_tracker.rs"}},
     {"id": "EVENT_CODES", "status": "PASS", "details": {"count": 5, "codes": ["OBL-001", "OBL-002", "OBL-003", "OBL-004", "OBL-005"]}},
-    {"id": "INVARIANTS", "status": "PASS", "details": {"count": 6, "invariants": ["INV-OBL-TWO-PHASE", "INV-OBL-NO-LEAK", "INV-OBL-ATOMIC-COMMIT", "INV-OBL-ROLLBACK-SAFE", "INV-OBL-AUDIT-COMPLETE", "INV-OBL-SCAN-PERIODIC"]}},
-    {"id": "ERROR_CODES", "status": "PASS", "details": {"count": 5, "codes": ["ERR_OBL_ALREADY_COMMITTED", "ERR_OBL_ALREADY_ROLLED_BACK", "ERR_OBL_NOT_FOUND", "ERR_OBL_LEAK_TIMEOUT", "ERR_OBL_DUPLICATE_RESERVE"]}},
-    {"id": "CORE_TYPES", "status": "PASS", "details": {"types": ["ObligationTracker", "ObligationId", "ObligationFlow", "ObligationState", "Obligation", "ObligationAuditRecord", "LeakScanResult", "LeakOracleReport"]}},
+    {"id": "INVARIANTS", "status": "PASS", "details": {"count": 8, "invariants": ["INV-OBL-TWO-PHASE", "INV-OBL-NO-LEAK", "INV-OBL-BUDGET-BOUND", "INV-OBL-DROP-SAFE", "INV-OBL-ATOMIC-COMMIT", "INV-OBL-ROLLBACK-SAFE", "INV-OBL-AUDIT-COMPLETE", "INV-OBL-SCAN-PERIODIC"]}},
+    {"id": "ERROR_CODES", "status": "PASS", "details": {"count": 6, "codes": ["ERR_OBL_ALREADY_COMMITTED", "ERR_OBL_ALREADY_ROLLED_BACK", "ERR_OBL_NOT_FOUND", "ERR_OBL_LEAK_TIMEOUT", "ERR_OBL_DUPLICATE_RESERVE", "ERR_OBL_BUDGET_EXCEEDED"]}},
+    {"id": "CORE_TYPES", "status": "PASS", "details": {"types": ["ObligationTracker", "ObligationId", "ObligationFlow", "ObligationState", "Obligation", "ObligationAuditRecord", "LeakScanResult", "LeakOracleReport", "FlowObligationCounts", "ObligationGuard"]}},
     {"id": "TRACKED_FLOWS", "status": "PASS", "details": {"flows": ["publish", "revoke", "quarantine", "migration", "fencing"]}},
-    {"id": "REQUIRED_METHODS", "status": "PASS", "details": {"methods": ["reserve", "commit", "rollback", "run_leak_scan", "get_obligation", "count_in_state", "total_obligations", "export_audit_log_jsonl", "generate_leak_oracle_report", "export_leak_oracle_report_json"]}},
+    {"id": "REQUIRED_METHODS", "status": "PASS", "details": {"methods": ["reserve", "try_reserve", "commit", "rollback", "run_leak_scan", "get_obligation", "count_in_state", "total_obligations", "per_flow_counts", "export_audit_log_jsonl", "generate_leak_oracle_report", "export_leak_oracle_report_json"]}},
     {"id": "SCHEMA_VERSION", "status": "PASS", "details": {"version": "obl-v1.0"}},
     {"id": "SERDE_DERIVES", "status": "PASS", "details": {"present": true}},
-    {"id": "TEST_COVERAGE", "status": "PASS", "details": {"rust_tests": 32, "min_required": 15}},
+    {"id": "TEST_COVERAGE", "status": "PASS", "details": {"rust_tests": 42, "min_required": 15}},
     {"id": "MODULE_REGISTERED", "status": "PASS"},
     {"id": "SPEC_EXISTS", "status": "PASS"},
     {"id": "TWO_PHASE_SPEC_EXISTS", "status": "PASS"},
     {"id": "ORACLE_REPORT", "status": "PASS", "details": {"verdict": "PASS", "total_leaks": 0}},
     {"id": "TEST_FILE_EXISTS", "status": "PASS"},
     {"id": "EVIDENCE_EXISTS", "status": "PASS"},
-    {"id": "SUMMARY_EXISTS", "status": "PASS"}
+    {"id": "SUMMARY_EXISTS", "status": "PASS"},
+    {"id": "OBLIGATION_GUARD_DROP", "status": "PASS", "details": {"impl_drop": true}},
+    {"id": "LEAKED_STATE", "status": "PASS", "details": {"variant": "Leaked"}},
+    {"id": "BUDGET_ENFORCEMENT", "status": "PASS", "details": {"try_reserve": true, "default_budget": 256}},
+    {"id": "PER_FLOW_COUNTS", "status": "PASS", "details": {"in_report": true}}
   ],
   "summary": {
-    "total_checks": 76,
-    "passing_checks": 76,
+    "total_checks": 84,
+    "passing_checks": 84,
     "failing_checks": 0,
-    "rust_unit_tests": 32,
-    "python_unit_tests": 30
+    "rust_unit_tests": 42,
+    "python_unit_tests": 40
   },
   "artifacts": {
     "spec": "docs/specs/section_10_15/bd-1n5p_contract.md",
