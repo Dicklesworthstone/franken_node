@@ -9,6 +9,7 @@
 use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -650,11 +651,10 @@ fn scope_fingerprint(scope: &RemoteScope) -> String {
 }
 
 fn keyed_digest(secret: &str, payload: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(secret.as_bytes());
-    hasher.update(b"|");
-    hasher.update(payload.as_bytes());
-    hex::encode(hasher.finalize())
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(payload.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
 }
 
 fn sha256_hex(input: &[u8]) -> String {
@@ -926,5 +926,19 @@ mod tests {
             "trace-19",
         )
         .expect("host prefix with explicit port should be allowed");
+    }
+
+    #[test]
+    fn signature_uses_hmac_instead_of_plain_concat_hash() {
+        let payload = "v1|token=t|issuer=i|issued=1|expires=2|ops=x|endpoints=y|single_use=false";
+        let hmac_digest = keyed_digest("secret-a", payload);
+
+        let mut legacy_hasher = Sha256::new();
+        legacy_hasher.update("secret-a".as_bytes());
+        legacy_hasher.update(b"|");
+        legacy_hasher.update(payload.as_bytes());
+        let legacy_digest = hex::encode(legacy_hasher.finalize());
+
+        assert_ne!(hmac_digest, legacy_digest);
     }
 }

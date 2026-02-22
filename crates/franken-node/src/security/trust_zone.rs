@@ -21,7 +21,7 @@
 //! - **INV-ZTS-BIND**: Tenants bound to exactly one zone
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -266,13 +266,13 @@ pub struct ZoneAuditEvent {
 /// authorization.
 pub struct ZoneSegmentationEngine {
     /// Registered zones indexed by zone_id.
-    zones: HashMap<String, ZonePolicy>,
+    zones: BTreeMap<String, ZonePolicy>,
     /// Tenant-to-zone bindings indexed by tenant_id.
-    tenant_bindings: HashMap<String, TenantBinding>,
+    tenant_bindings: BTreeMap<String, TenantBinding>,
     /// Resource-to-zone mappings for deterministic resolution.
-    resource_zone_map: HashMap<String, String>,
+    resource_zone_map: BTreeMap<String, String>,
     /// Zone-scoped key bindings: key_id -> set of zone_ids.
-    key_zone_bindings: HashMap<String, Vec<String>>,
+    key_zone_bindings: BTreeMap<String, Vec<String>>,
     /// Audit events emitted by the engine.
     events: Vec<ZoneAuditEvent>,
     /// Whether freshness gate is satisfied (simulates bd-2sx integration).
@@ -282,10 +282,10 @@ pub struct ZoneSegmentationEngine {
 impl ZoneSegmentationEngine {
     pub fn new() -> Self {
         Self {
-            zones: HashMap::new(),
-            tenant_bindings: HashMap::new(),
-            resource_zone_map: HashMap::new(),
-            key_zone_bindings: HashMap::new(),
+            zones: BTreeMap::new(),
+            tenant_bindings: BTreeMap::new(),
+            resource_zone_map: BTreeMap::new(),
+            key_zone_bindings: BTreeMap::new(),
             events: Vec::new(),
             freshness_valid: true,
         }

@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ── Domain-separated hash ───────────────────────────────────────────
@@ -84,7 +84,7 @@ pub struct AdmissionCheck {
 }
 
 /// Reason for rejecting an interface hash.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RejectionCode {
     HashMismatch,
@@ -112,7 +112,7 @@ pub struct AdmissionTelemetry {
     pub total_checks: u64,
     pub total_admitted: u64,
     pub total_rejected: u64,
-    pub rejection_distribution: HashMap<RejectionCode, u64>,
+    pub rejection_distribution: BTreeMap<RejectionCode, u64>,
     pub checks: Vec<AdmissionCheck>,
 }
 

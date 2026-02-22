@@ -715,7 +715,10 @@ impl TrustGovernanceState {
         let latest_slash = record
             .slash_events
             .last()
-            .expect("slashed stake must have at least one slash event");
+            .ok_or_else(|| StakingError::new(
+                ERR_STAKE_INVALID_TRANSITION,
+                "slashed stake has no slash events",
+            ))?;
         if self.current_time > latest_slash.appeal_deadline {
             return Err(StakingError::new(
                 ERR_STAKE_APPEAL_EXPIRED,
@@ -750,7 +753,10 @@ impl TrustGovernanceState {
         self.appeals.insert(appeal_id, appeal.clone());
 
         // Transition to UnderAppeal
-        let record = self.stakes.get_mut(&stake_id.0).unwrap();
+        let record = self
+            .stakes
+            .get_mut(&stake_id.0)
+            .ok_or_else(|| StakingError::new(ERR_STAKE_NOT_FOUND, "stake not found"))?;
         record.state = StakeState::UnderAppeal;
 
         let publisher = record.publisher.clone();

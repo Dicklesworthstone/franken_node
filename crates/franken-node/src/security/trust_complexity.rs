@@ -21,7 +21,7 @@
 //! - **INV-RTC-AUDIT**: Trust decision outcomes are tracked with dashboard visibility
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -173,14 +173,14 @@ impl DegradedModeState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComplexityBudget {
     pub default_max_depth: u32,
-    pub endpoint_overrides: HashMap<String, u32>,
+    pub endpoint_overrides: BTreeMap<String, u32>,
 }
 
 impl ComplexityBudget {
     pub fn new(default_max_depth: u32) -> Self {
         Self {
             default_max_depth,
-            endpoint_overrides: HashMap::new(),
+            endpoint_overrides: BTreeMap::new(),
         }
     }
 

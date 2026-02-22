@@ -14,7 +14,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -53,7 +53,7 @@ pub const INV_CHALLENGE_VALID_TRANSITIONS: &str = "INV-CHALLENGE-VALID-TRANSITIO
 // ---------------------------------------------------------------------------
 
 /// Unique challenge identifier.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct ChallengeId(pub String);
 
 impl ChallengeId {
@@ -321,7 +321,7 @@ impl Challenge {
 ///
 /// Enforces state machine transitions, audit logging, and timeout policy.
 pub struct ChallengeFlowController {
-    challenges: HashMap<ChallengeId, Challenge>,
+    challenges: BTreeMap<ChallengeId, Challenge>,
     audit_log: Vec<ChallengeAuditEntry>,
     config: ChallengeConfig,
     metrics: ChallengeMetrics,
@@ -331,7 +331,7 @@ pub struct ChallengeFlowController {
 impl ChallengeFlowController {
     pub fn new(config: ChallengeConfig) -> Self {
         Self {
-            challenges: HashMap::new(),
+            challenges: BTreeMap::new(),
             audit_log: Vec::new(),
             config,
             metrics: ChallengeMetrics::default(),

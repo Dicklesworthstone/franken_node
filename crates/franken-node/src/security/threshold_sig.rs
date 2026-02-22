@@ -171,7 +171,8 @@ pub fn verify_threshold(
         .iter()
         .map(|k| k.key_id.as_str())
         .collect();
-    let mut seen_signers = HashSet::new();
+    let mut seen_signers: HashSet<&str> = HashSet::new();
+    let mut seen_key_ids: HashSet<&str> = HashSet::new();
     let mut valid_count = 0u32;
     let mut first_failure: Option<FailureReason> = None;
 
@@ -186,8 +187,18 @@ pub fn verify_threshold(
             continue;
         }
 
-        // Check for duplicate
-        if !seen_signers.insert(&sig.signer_id) {
+        // A signer key can only contribute once toward quorum.
+        if !seen_key_ids.insert(sig.key_id.as_str()) {
+            if first_failure.is_none() {
+                first_failure = Some(FailureReason::DuplicateSigner {
+                    signer_id: sig.signer_id.clone(),
+                });
+            }
+            continue;
+        }
+
+        // Signer IDs must also be unique within the signature set.
+        if !seen_signers.insert(sig.signer_id.as_str()) {
             if first_failure.is_none() {
                 first_failure = Some(FailureReason::DuplicateSigner {
                     signer_id: sig.signer_id.clone(),
@@ -416,6 +427,24 @@ mod tests {
         let result = verify_threshold(&config, &artifact, "t7", "ts");
         assert!(!result.verified);
         assert_eq!(result.valid_signatures, 1);
+    }
+
+    #[test]
+    fn duplicate_key_with_different_signer_id_counted_once() {
+        let config = test_config(2, 3);
+        let mut artifact = signed_artifact(&config, "hash-abc", 1);
+
+        let mut replay = sign(&config.signer_keys[0], "hash-abc");
+        replay.signer_id = "signer-0-alias".to_string();
+        artifact.signatures.push(replay);
+
+        let result = verify_threshold(&config, &artifact, "t7b", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::DuplicateSigner { .. })
+        ));
     }
 
     // === Trace and timestamp ===

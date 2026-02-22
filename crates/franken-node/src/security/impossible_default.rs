@@ -39,7 +39,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -81,7 +81,7 @@ pub const INV_IBD_ADOPTION: &str = "INV-IBD-ADOPTION";
 // ---------------------------------------------------------------------------
 
 /// The five impossible-by-default capabilities.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ImpossibleCapability {
     /// Arbitrary file system access outside project root.
     FsAccess,
@@ -399,16 +399,16 @@ impl SignatureVerifier for HashSignatureVerifier {
 /// (INV-IBD-TOKEN). Every action is logged to the audit trail (INV-IBD-AUDIT).
 pub struct CapabilityEnforcer {
     /// Current enforcement state per capability.
-    state: HashMap<ImpossibleCapability, EnforcementStatus>,
+    state: BTreeMap<ImpossibleCapability, EnforcementStatus>,
     /// Active tokens indexed by capability.
-    tokens: HashMap<ImpossibleCapability, CapabilityToken>,
+    tokens: BTreeMap<ImpossibleCapability, CapabilityToken>,
     /// Audit log.
     audit_log: Vec<EnforcementAuditEntry>,
     /// Metrics.
     metrics: EnforcementMetrics,
     /// Per-capability blocked/opted-in counters for reporting.
-    blocked_counts: HashMap<ImpossibleCapability, u64>,
-    opted_in_counts: HashMap<ImpossibleCapability, u64>,
+    blocked_counts: BTreeMap<ImpossibleCapability, u64>,
+    opted_in_counts: BTreeMap<ImpossibleCapability, u64>,
     /// Signature verifier.
     verifier: Box<dyn SignatureVerifier>,
 }
@@ -417,16 +417,16 @@ impl CapabilityEnforcer {
     /// Create a new enforcer with the given signature verifier.
     /// All capabilities start in Blocked state (INV-IBD-ENFORCE).
     pub fn new(verifier: Box<dyn SignatureVerifier>) -> Self {
-        let mut state = HashMap::new();
-        let mut blocked_counts = HashMap::new();
-        let opted_in_counts = HashMap::new();
+        let mut state = BTreeMap::new();
+        let mut blocked_counts = BTreeMap::new();
+        let opted_in_counts = BTreeMap::new();
         for &cap in ImpossibleCapability::ALL {
             state.insert(cap, EnforcementStatus::Blocked);
             blocked_counts.insert(cap, 0);
         }
         Self {
             state,
-            tokens: HashMap::new(),
+            tokens: BTreeMap::new(),
             audit_log: Vec::new(),
             metrics: EnforcementMetrics::default(),
             blocked_counts,
