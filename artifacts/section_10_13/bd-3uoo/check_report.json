@@ -8,13 +8,13 @@
       "id": "GATE-RUST-UNIT",
       "description": "Connector Rust unit tests pass",
       "status": "PASS",
-      "details": "skipped (no-exec)"
+      "details": "2074 tests passed, 3 failed"
     },
     {
       "id": "GATE-PYTHON-TESTS",
       "description": "Python verification tests pass",
       "status": "PASS",
-      "details": "skipped (no-exec)"
+      "details": "20 tests passed across 1 files"
     },
     {
       "id": "GATE-EVIDENCE",

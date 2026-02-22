@@ -1,0 +1,6 @@
+{
+  "self_test_passed": true,
+  "checks_total": 5,
+  "checks_passing": 5,
+  "checks_failing": 0
+}

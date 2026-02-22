@@ -1,0 +1,29 @@
+============================= test session starts ==============================
+platform linux -- Python 3.13.7, pytest-8.3.5, pluggy-1.5.0 -- /usr/bin/python3
+cachedir: .pytest_cache
+rootdir: /data/projects/franken_node
+plugins: typeguard-4.4.2, anyio-4.8.0
+collecting ... collected 20 items
+
+tests/test_check_section_10_13_gate.py::TestCheckHelper::test_passing_check PASSED [  5%]
+tests/test_check_section_10_13_gate.py::TestCheckHelper::test_failing_check PASSED [ 10%]
+tests/test_check_section_10_13_gate.py::TestCheckHelper::test_check_without_details PASSED [ 15%]
+tests/test_check_section_10_13_gate.py::TestCheckHelper::test_multiple_checks_accumulate PASSED [ 20%]
+tests/test_check_section_10_13_gate.py::TestCheckHelper::test_check_entry_structure PASSED [ 25%]
+tests/test_check_section_10_13_gate.py::TestCheckHelper::test_json_mode_suppresses_output PASSED [ 30%]
+tests/test_check_section_10_13_gate.py::test_beads_list_not_empty PASSED [ 35%]
+tests/test_check_section_10_13_gate.py::test_beads_all_prefixed PASSED   [ 40%]
+tests/test_check_section_10_13_gate.py::test_bead_id PASSED              [ 45%]
+tests/test_check_section_10_13_gate.py::test_section PASSED              [ 50%]
+tests/test_check_section_10_13_gate.py::test_known_beads_present PASSED  [ 55%]
+tests/test_check_section_10_13_gate.py::test_self_test_passes PASSED     [ 60%]
+tests/test_check_section_10_13_gate.py::test_cli_self_test_json PASSED   [ 65%]
+tests/test_check_section_10_13_gate.py::test_cli_no_exec_json PASSED     [ 70%]
+tests/test_check_section_10_13_gate.py::test_evidence_artifact_paths PASSED [ 75%]
+tests/test_check_section_10_13_gate.py::test_build_report_no_exec PASSED [ 80%]
+tests/test_check_section_10_13_gate.py::test_evidence_threshold PASSED   [ 85%]
+tests/test_check_section_10_13_gate.py::test_module_threshold PASSED     [ 90%]
+tests/test_check_section_10_13_gate.py::test_spec_threshold PASSED       [ 95%]
+tests/test_check_section_10_13_gate.py::test_integration_threshold PASSED [100%]
+
+============================== 20 passed in 0.16s ==============================
