@@ -304,7 +304,13 @@ impl Default for ExpectedLossModel {
 
 impl ExpectedLossModel {
     /// Bayesian posterior update: combine prior with new observation.
-    pub fn posterior_update(&mut self, category: &str, observed_frequency: f64, effectiveness: f64) {
+    pub fn posterior_update(
+        &mut self,
+        category: &str,
+        observed_frequency: f64,
+        effectiveness: f64,
+    ) {
+        self.observation_count += 1;
         let n = self.observation_count as f64;
         let w = self.prior_weight;
 
@@ -314,14 +320,25 @@ impl ExpectedLossModel {
         if let Some(eff) = self.defense_effectiveness.get_mut(category) {
             *eff = (w * *eff + n * effectiveness) / (w + n);
         }
-        self.observation_count += 1;
     }
 
     /// Compute expected annual loss for a category.
     pub fn expected_loss(&self, category: &str) -> f64 {
-        let freq = self.attack_frequencies.get(category).copied().unwrap_or(0.1);
-        let eff = self.defense_effectiveness.get(category).copied().unwrap_or(0.5);
-        let cost = self.operational_costs.get(category).copied().unwrap_or(1000.0);
+        let freq = self
+            .attack_frequencies
+            .get(category)
+            .copied()
+            .unwrap_or(0.1);
+        let eff = self
+            .defense_effectiveness
+            .get(category)
+            .copied()
+            .unwrap_or(0.5);
+        let cost = self
+            .operational_costs
+            .get(category)
+            .copied()
+            .unwrap_or(1000.0);
         freq * (1.0 - eff) * cost * 365.0
     }
 }
@@ -411,7 +428,10 @@ impl TrustEconomicsDashboard {
         let loss_summary = self.compute_expected_loss_summary();
 
         let overall_amp = if !amplification.is_empty() {
-            amplification.iter().map(|a| a.franken_vs_node_factor).sum::<f64>()
+            amplification
+                .iter()
+                .map(|a| a.franken_vs_node_factor)
+                .sum::<f64>()
                 / amplification.len() as f64
         } else {
             1.0
@@ -437,10 +457,14 @@ impl TrustEconomicsDashboard {
             content_hash,
         };
 
-        self.log(event_codes::TED_REPORT_GENERATED, trace_id, serde_json::json!({
-            "report_id": &report.report_id,
-            "overall_amplification": overall_amp,
-        }));
+        self.log(
+            event_codes::TED_REPORT_GENERATED,
+            trace_id,
+            serde_json::json!({
+                "report_id": &report.report_id,
+                "overall_amplification": overall_amp,
+            }),
+        );
 
         self.reports.push(report.clone());
         report
@@ -454,13 +478,18 @@ impl TrustEconomicsDashboard {
         effectiveness: f64,
         trace_id: &str,
     ) {
-        self.model.posterior_update(category, observed_frequency, effectiveness);
-        self.log(event_codes::TED_POSTERIOR_UPDATED, trace_id, serde_json::json!({
-            "category": category,
-            "observed_frequency": observed_frequency,
-            "effectiveness": effectiveness,
-            "observation_count": self.model.observation_count,
-        }));
+        self.model
+            .posterior_update(category, observed_frequency, effectiveness);
+        self.log(
+            event_codes::TED_POSTERIOR_UPDATED,
+            trace_id,
+            serde_json::json!({
+                "category": category,
+                "observed_frequency": observed_frequency,
+                "effectiveness": effectiveness,
+                "observation_count": self.model.observation_count,
+            }),
+        );
     }
 
     pub fn audit_log(&self) -> &[TedAuditRecord] {
@@ -522,7 +551,10 @@ impl TrustEconomicsDashboard {
             .collect()
     }
 
-    fn default_attack_costs(&self, category: &AttackCategory) -> (AttackCost, AttackCost, AttackCost) {
+    fn default_attack_costs(
+        &self,
+        category: &AttackCategory,
+    ) -> (AttackCost, AttackCost, AttackCost) {
         match category {
             AttackCategory::CredentialExfiltration => (
                 AttackCost::compute(2.0, 1.0, 0.3, 0.2),
@@ -791,8 +823,14 @@ mod tests {
         let mut dash = TrustEconomicsDashboard::default();
         let report = dash.generate_report(&make_trace());
         let prices = &report.privilege_risk_curve.prices;
-        let unrestricted = prices.iter().find(|p| p.privilege_level == PrivilegeLevel::Unrestricted).unwrap();
-        let quarantined = prices.iter().find(|p| p.privilege_level == PrivilegeLevel::Quarantined).unwrap();
+        let unrestricted = prices
+            .iter()
+            .find(|p| p.privilege_level == PrivilegeLevel::Unrestricted)
+            .unwrap();
+        let quarantined = prices
+            .iter()
+            .find(|p| p.privilege_level == PrivilegeLevel::Quarantined)
+            .unwrap();
         assert!(unrestricted.risk_adjusted_price > quarantined.risk_adjusted_price);
     }
 
@@ -880,7 +918,10 @@ mod tests {
         let r1 = d1.generate_report("det-trace");
         let r2 = d2.generate_report("det-trace");
         assert_eq!(r1.content_hash, r2.content_hash);
-        assert_eq!(r1.overall_amplification_factor, r2.overall_amplification_factor);
+        assert_eq!(
+            r1.overall_amplification_factor,
+            r2.overall_amplification_factor
+        );
     }
 
     #[test]
@@ -897,7 +938,10 @@ mod tests {
         let mut dash = TrustEconomicsDashboard::default();
         dash.generate_report(&make_trace());
         assert_eq!(dash.audit_log().len(), 1);
-        assert_eq!(dash.audit_log()[0].event_code, event_codes::TED_REPORT_GENERATED);
+        assert_eq!(
+            dash.audit_log()[0].event_code,
+            event_codes::TED_REPORT_GENERATED
+        );
     }
 
     #[test]
@@ -905,7 +949,10 @@ mod tests {
         let mut dash = TrustEconomicsDashboard::default();
         dash.update_model("credential_exfiltration", 0.3, 0.7, &make_trace());
         assert_eq!(dash.audit_log().len(), 1);
-        assert_eq!(dash.audit_log()[0].event_code, event_codes::TED_POSTERIOR_UPDATED);
+        assert_eq!(
+            dash.audit_log()[0].event_code,
+            event_codes::TED_POSTERIOR_UPDATED
+        );
     }
 
     #[test]
@@ -913,7 +960,8 @@ mod tests {
         let mut dash = TrustEconomicsDashboard::default();
         dash.generate_report(&make_trace());
         let jsonl = dash.export_audit_log_jsonl().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(parsed["event_code"], event_codes::TED_REPORT_GENERATED);
     }
 

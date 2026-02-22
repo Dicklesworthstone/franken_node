@@ -465,6 +465,8 @@ impl ControlPlaneDivergenceGate {
 
         match result {
             DetectionResult::Converged => {
+                self.events
+                    .push(event_codes::DG_005_FRESHNESS_VERIFIED.to_string());
                 self.emit_audit(
                     timestamp,
                     event_codes::DG_005_FRESHNESS_VERIFIED,
@@ -614,9 +616,7 @@ impl ControlPlaneDivergenceGate {
             event_codes::DG_003_RESPONSE_ACTIVATED,
             "HALT response activated — all mutations blocked",
             trace_id,
-            self.active_divergence
-                .as_ref()
-                .map_or(0, |a| a.fork_epoch),
+            self.active_divergence.as_ref().map_or(0, |a| a.fork_epoch),
         );
         Ok(())
     }
@@ -641,10 +641,7 @@ impl ControlPlaneDivergenceGate {
             });
         }
 
-        let epoch = self
-            .active_divergence
-            .as_ref()
-            .map_or(0, |a| a.fork_epoch);
+        let epoch = self.active_divergence.as_ref().map_or(0, |a| a.fork_epoch);
 
         let partition = QuarantinePartition {
             partition_id: partition_id.into(),
@@ -787,10 +784,7 @@ impl ControlPlaneDivergenceGate {
         self.state = GateState::Recovering;
         self.detector.operator_reset();
         self.state = GateState::Normal;
-        let epoch = self
-            .active_divergence
-            .as_ref()
-            .map_or(0, |a| a.fork_epoch);
+        let epoch = self.active_divergence.as_ref().map_or(0, |a| a.fork_epoch);
         self.active_divergence = None;
 
         let result = RecoveryResult {
@@ -994,9 +988,9 @@ mod tests {
         let result = gate.check_mutation(&MutationKind::TokenIssuance, 2001, "trace-2");
         assert!(result.is_err());
         match result.unwrap_err() {
-            DivergenceGateError::DivergenceBlock {
-                mutation_kind, ..
-            } => assert_eq!(mutation_kind, "token_issuance"),
+            DivergenceGateError::DivergenceBlock { mutation_kind, .. } => {
+                assert_eq!(mutation_kind, "token_issuance")
+            }
             _ => panic!("expected DivergenceBlock"),
         }
     }
@@ -1006,9 +1000,10 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        assert!(gate
-            .events()
-            .contains(&event_codes::DG_001_DIVERGENCE_DETECTED.to_string()));
+        assert!(
+            gate.events()
+                .contains(&event_codes::DG_001_DIVERGENCE_DETECTED.to_string())
+        );
     }
 
     #[test]
@@ -1054,9 +1049,10 @@ mod tests {
         let result = gate.respond_halt(2001, "trace-2");
         assert!(result.is_ok());
         assert_eq!(gate.state(), GateState::Diverged);
-        assert!(gate
-            .events()
-            .contains(&event_codes::DG_003_RESPONSE_ACTIVATED.to_string()));
+        assert!(
+            gate.events()
+                .contains(&event_codes::DG_003_RESPONSE_ACTIVATED.to_string())
+        );
     }
 
     #[test]
@@ -1426,9 +1422,10 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = converged_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        assert!(gate
-            .events()
-            .contains(&event_codes::DG_005_FRESHNESS_VERIFIED.to_string()));
+        assert!(
+            gate.events()
+                .contains(&event_codes::DG_005_FRESHNESS_VERIFIED.to_string())
+        );
     }
 
     // --- QuarantinePartition serde ---

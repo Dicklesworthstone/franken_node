@@ -333,7 +333,11 @@ impl ParticipationWeightEngine {
         let cap = median_established * self.config.new_participant_cap_fraction;
 
         for (i, w) in weights.iter_mut().enumerate() {
-            if !w.rejected && !self.is_established(&participants[i]) && w.final_weight > cap && cap > 0.0 {
+            if !w.rejected
+                && !self.is_established(&participants[i])
+                && w.final_weight > cap
+                && cap > 0.0
+            {
                 w.final_weight = cap;
                 w.capped = true;
             }
@@ -438,14 +442,16 @@ impl ParticipationWeightEngine {
             None => 0.0,
             Some(rep) => {
                 let score_component = rep.score;
-                let tenure_component =
-                    (rep.tenure_seconds as f64 / self.config.established_tenure_seconds as f64).min(1.0);
-                let interaction_ratio = if rep.contributions_accepted + rep.contributions_rejected > 0 {
-                    rep.contributions_accepted as f64
-                        / (rep.contributions_accepted + rep.contributions_rejected) as f64
-                } else {
-                    0.0
-                };
+                let tenure_component = (rep.tenure_seconds as f64
+                    / self.config.established_tenure_seconds as f64)
+                    .min(1.0);
+                let interaction_ratio =
+                    if rep.contributions_accepted + rep.contributions_rejected > 0 {
+                        rep.contributions_accepted as f64
+                            / (rep.contributions_accepted + rep.contributions_rejected) as f64
+                    } else {
+                        0.0
+                    };
                 (score_component * 0.4 + tenure_component * 0.3 + interaction_ratio * 0.3).min(1.0)
             }
         }
@@ -709,14 +715,14 @@ mod tests {
         let newcomer_weight = &record.weights[3];
 
         // Established median weight
-        let mut est_weights: Vec<f64> = record.weights[..3]
-            .iter()
-            .map(|w| w.final_weight)
-            .collect();
+        let mut est_weights: Vec<f64> =
+            record.weights[..3].iter().map(|w| w.final_weight).collect();
         est_weights.sort_by(|a, b| a.partial_cmp(b).unwrap());
         let median = est_weights[1];
 
-        assert!(newcomer_weight.capped || newcomer_weight.final_weight <= median * 0.01 + f64::EPSILON);
+        assert!(
+            newcomer_weight.capped || newcomer_weight.final_weight <= median * 0.01 + f64::EPSILON
+        );
     }
 
     // === Sybil cluster detection and attenuation (INV-ATC-SYBIL-BOUND) ===
@@ -844,32 +850,22 @@ mod tests {
         let mut engine = ParticipationWeightEngine::default();
         let sybils = make_sybil_participants(5, "cluster-a");
 
-        // Compute without clustering first
-        let mut no_hint_participants: Vec<ParticipantIdentity> = sybils
-            .iter()
-            .cloned()
-            .enumerate()
-            .map(|(i, mut p)| {
-                p.cluster_hint = None;
-                p.participant_id = format!("nohint-{i}");
-                p
-            })
-            .collect();
-
-        let mut engine_clean = ParticipationWeightEngine::default();
-        let clean = engine_clean.compute_weights(&no_hint_participants, "clean", "2026-02-20T00:00:00Z");
-        let clean_total: f64 = clean.weights.iter().map(|w| w.final_weight).sum();
-
-        // Compute with clustering
         let clustered = engine.compute_weights(&sybils, "clustered", "2026-02-20T00:00:00Z");
-        let clustered_total: f64 = clustered.weights.iter().map(|w| w.final_weight).sum();
 
-        // Clustered total should be ~10% of clean total (90% attenuation)
-        if clean_total > 0.0 {
-            let ratio = clustered_total / clean_total;
+        // Each sybil participant should receive 90% penalty (attenuation_factor = 0.1).
+        for w in &clustered.weights {
+            assert!(
+                (w.sybil_penalty - 0.9).abs() < 1e-9,
+                "Sybil penalty for {} should be 0.9 (90% reduction), got {}",
+                w.participant_id,
+                w.sybil_penalty,
+            );
+            // final_weight should be ~10% of raw_weight (after attenuation)
+            let ratio = w.final_weight / w.raw_weight;
             assert!(
                 ratio <= 0.15,
-                "Cluster attenuation ratio {ratio} should be <= 0.15 (90%+ reduction)"
+                "Weight ratio for {} should be <= 0.15, got {ratio}",
+                w.participant_id,
             );
         }
     }

@@ -1,49 +1,77 @@
 {
   "schema_version": "adversary-graph-state-v1",
-  "bead_id": "bd-274s",
-  "section": "10.17",
-  "title": "Bayesian adversary graph and automated quarantine controller",
-  "verdict": "PASS",
-  "total_checks": 61,
-  "passed_checks": 61,
-  "failed_checks": 0,
-  "policy_thresholds": {
-    "throttle": 0.3,
-    "isolate": 0.5,
-    "revoke": 0.7,
-    "quarantine": 0.9
+  "generated_at": "2026-02-22T00:00:00Z",
+  "thresholds": {
+    "throttle": 0.4,
+    "isolate": 0.6,
+    "quarantine": 0.7,
+    "revoke": 0.9
   },
-  "event_codes": [
-    "ADV-001",
-    "ADV-002",
-    "ADV-003",
-    "ADV-004",
-    "ADV-005",
-    "ADV-006",
-    "ADV-007",
-    "ADV-008"
+  "posteriors": [
+    {
+      "principal_id": "principal-001",
+      "alpha": 9,
+      "beta": 1,
+      "posterior": 0.9,
+      "evidence_count": 10
+    },
+    {
+      "principal_id": "principal-002",
+      "alpha": 8,
+      "beta": 2,
+      "posterior": 0.8,
+      "evidence_count": 10
+    },
+    {
+      "principal_id": "principal-003",
+      "alpha": 3,
+      "beta": 7,
+      "posterior": 0.3,
+      "evidence_count": 10
+    },
+    {
+      "principal_id": "principal-004",
+      "alpha": 13,
+      "beta": 7,
+      "posterior": 0.65,
+      "evidence_count": 20
+    },
+    {
+      "principal_id": "principal-005",
+      "alpha": 9,
+      "beta": 11,
+      "posterior": 0.45,
+      "evidence_count": 20
+    }
   ],
-  "error_codes": [
-    "ERR_ADV_NODE_NOT_FOUND",
-    "ERR_ADV_DUPLICATE_NODE",
-    "ERR_ADV_DANGLING_EDGE",
-    "ERR_ADV_INVALID_EVIDENCE_WEIGHT",
-    "ERR_QC_INVALID_KEY",
-    "ERR_QC_SEQUENCE_VIOLATION"
-  ],
-  "invariants": [
-    "INV-ADV-DETERMINISTIC",
-    "INV-ADV-PRIOR-BOUNDED",
-    "INV-ADV-MONOTONE-EVIDENCE",
-    "INV-QC-SIGNED-LOG",
-    "INV-QC-THRESHOLD-REPRODUCIBLE",
-    "INV-QC-SEQUENCE-MONOTONIC"
-  ],
-  "model": {
-    "type": "Beta-Bernoulli conjugate",
-    "prior_alpha": 1.0,
-    "prior_beta": 9.0,
-    "initial_risk": 0.1,
-    "deterministic": true
-  }
+  "actions": [
+    {
+      "principal_id": "principal-001",
+      "decision": "revoke",
+      "posterior": 0.9,
+      "trace_id": "trace-001",
+      "evidence_signature": "sha256:2cafba95e0aceeef589ecca8b750521d2acb037992401e2764e0435956f43af8"
+    },
+    {
+      "principal_id": "principal-002",
+      "decision": "quarantine",
+      "posterior": 0.8,
+      "trace_id": "trace-002",
+      "evidence_signature": "sha256:cfcbdb1e2f9708eeb392fb10ef1d074a919d641a4d73b66435ff891e9401088d"
+    },
+    {
+      "principal_id": "principal-004",
+      "decision": "isolate",
+      "posterior": 0.65,
+      "trace_id": "trace-004",
+      "evidence_signature": "sha256:26de80f020c0f5aa45fb38741cc18864ce1ca958dfeb8a5cf7a6456632c10cc8"
+    },
+    {
+      "principal_id": "principal-005",
+      "decision": "throttle",
+      "posterior": 0.45,
+      "trace_id": "trace-005",
+      "evidence_signature": "sha256:4b13bc042a839d39e5a1591a7ae5d421c22c4ec757feecefb667a9f656c7f59c"
+    }
+  ]
 }

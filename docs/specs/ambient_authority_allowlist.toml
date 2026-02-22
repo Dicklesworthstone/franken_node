@@ -39,3 +39,30 @@ justification = "State-model deterministic fixture IDs still derive from SystemT
 signer = "MistyBridge"
 expires_on = "2026-12-31"
 signature = "sha256:6e0c0908fe5ca34e184c2b8c6b1d8d519f758fa960a068db2a57f4d092ae820f"
+
+[[exceptions]]
+id = "AAL-005"
+module_path = "crates/franken-node/src/connector/eviction_saga.rs"
+ambient_api = "std::time::SystemTime"
+justification = "Eviction saga uses SystemTime::now() for deadline tracking pending capability-clock adapter."
+signer = "BronzePond"
+expires_on = "2026-12-31"
+signature = "sha256:380d87984839d2047364074f96b6b207937e0108adacf2ea6e7e87e8cff5fe98"
+
+[[exceptions]]
+id = "AAL-006"
+module_path = "crates/franken-node/src/connector/policy_checkpoint.rs"
+ambient_api = "std::time::SystemTime"
+justification = "Policy checkpoint uses SystemTime::now() for checkpoint timestamps pending capability-clock adapter."
+signer = "BronzePond"
+expires_on = "2026-12-31"
+signature = "sha256:4b24488f86de986e922760eefe9f2c8f87d460542092cb50cca1be234a41f15c"
+
+[[exceptions]]
+id = "AAL-007"
+module_path = "crates/franken-node/src/connector/region_ownership.rs"
+ambient_api = "std::time::Instant"
+justification = "Region ownership uses Instant::now() for latency tracking pending capability-clock adapter."
+signer = "BronzePond"
+expires_on = "2026-12-31"
+signature = "sha256:b602cb686ebf0b960594012ecde8a3d7d6cddedf755b63a789cf36952efab675"

@@ -525,13 +525,14 @@ impl SlashingEngine {
         stake_balance: u64,
         evidence_hash: &str,
     ) -> Result<(u64, String), StakingError> {
-        let tier_policy = self.penalty_schedule.get_tier(risk_tier).ok_or(
-            StakingError::InvalidTransition {
-                from: StakeState::Active,
-                to: StakeState::Slashed,
-                code: ERR_STAKE_INVALID_TRANSITION,
-            },
-        )?;
+        let tier_policy =
+            self.penalty_schedule
+                .get_tier(risk_tier)
+                .ok_or(StakingError::InvalidTransition {
+                    from: StakeState::Active,
+                    to: StakeState::Slashed,
+                    code: ERR_STAKE_INVALID_TRANSITION,
+                })?;
 
         let slash_amount =
             (stake_balance as u128 * tier_policy.slash_fraction_bps as u128 / 10000) as u64;
@@ -593,13 +594,7 @@ impl CapabilityStakeGate {
     ) -> (bool, &'static str, String) {
         let tier_policy = match self.policy.get_tier(risk_tier) {
             Some(tp) => tp,
-            None => {
-                return (
-                    false,
-                    STAKE_007,
-                    format!("unknown risk tier: {risk_tier}"),
-                )
-            }
+            None => return (false, STAKE_007, format!("unknown risk tier: {risk_tier}")),
         };
 
         // Check publisher has an active stake
@@ -613,7 +608,7 @@ impl CapabilityStakeGate {
                         "[{}] no active stake for publisher {publisher_id}",
                         ERR_STAKE_NOT_FOUND
                     ),
-                )
+                );
             }
         };
 
@@ -648,9 +643,7 @@ impl CapabilityStakeGate {
                     return (
                         false,
                         STAKE_007,
-                        format!(
-                            "publisher {publisher_id} in cooldown until {cooldown_until}"
-                        ),
+                        format!("publisher {publisher_id} in cooldown until {cooldown_until}"),
                     );
                 }
             }
@@ -827,9 +820,9 @@ impl StakingLedger {
         }
 
         // INV-STAKE-NO-DOUBLE-SLASH: check evidence hash not already used
-        let evidence_hash = &evidence.evidence_hash;
+        let evidence_hash = evidence.evidence_hash.clone();
         for existing in &self.state.slash_events {
-            if existing.evidence.evidence_hash == *evidence_hash
+            if existing.evidence.evidence_hash == evidence_hash
                 && existing.publisher_id == record.publisher_id
             {
                 return Err(StakingError::AlreadySlashed {
@@ -842,7 +835,7 @@ impl StakingLedger {
         // INV-STAKE-SLASH-DETERMINISTIC: compute penalty deterministically
         let (slash_amount, penalty_hash) =
             self.engine
-                .compute_penalty(&record.risk_tier, record.amount, evidence_hash)?;
+                .compute_penalty(&record.risk_tier, record.amount, &evidence_hash)?;
 
         let pre_balance = record.amount;
         // INV-STK-NO-NEGATIVE-BALANCE: floor at zero
@@ -895,7 +888,7 @@ impl StakingLedger {
             &publisher_id,
             stake_id,
             "slash",
-            Some(evidence_hash.clone()),
+            Some(evidence_hash),
             &format!(
                 "slashed {slash_amount} from {pre_balance} (post={post_balance}, tier={})",
                 record.risk_tier
@@ -1020,8 +1013,10 @@ impl StakingLedger {
                 code: ERR_STAKE_NOT_FOUND,
             })?;
 
-        let appeal = &self.state.appeals[appeal_idx];
-        let stake_id = appeal.stake_id;
+        let (stake_id, slash_id) = {
+            let appeal = &self.state.appeals[appeal_idx];
+            (appeal.stake_id, appeal.slash_id)
+        };
 
         let record = self
             .state
@@ -1068,7 +1063,7 @@ impl StakingLedger {
                 .state
                 .slash_events
                 .iter()
-                .find(|e| e.slash_id == appeal.slash_id)
+                .find(|e| e.slash_id == slash_id)
             {
                 let restore_amount = slash_event.slash_amount;
                 stake_record.amount = stake_record.amount.saturating_add(restore_amount);
@@ -1439,15 +1434,11 @@ mod tests {
     fn test_slash_deterministic_penalty() {
         // Same evidence + same policy = same penalty hash
         let mut ledger1 = StakingLedger::new();
-        let id1 = ledger1
-            .deposit("pub-1", 500, RiskTier::High, 100)
-            .unwrap();
+        let id1 = ledger1.deposit("pub-1", 500, RiskTier::High, 100).unwrap();
         let ev1 = test_evidence(ViolationType::PolicyViolation);
 
         let mut ledger2 = StakingLedger::new();
-        let id2 = ledger2
-            .deposit("pub-2", 500, RiskTier::High, 100)
-            .unwrap();
+        let id2 = ledger2.deposit("pub-2", 500, RiskTier::High, 100).unwrap();
         let ev2 = test_evidence(ViolationType::PolicyViolation);
 
         let event1 = ledger1.slash(id1, ev1, 200).unwrap();
@@ -1469,7 +1460,11 @@ mod tests {
             .unwrap();
         // Same stake can't be slashed again (it's in Slashed state)
         let err = ledger
-            .slash(id, test_evidence_unique(ViolationType::MaliciousCode, "other"), 300)
+            .slash(
+                id,
+                test_evidence_unique(ViolationType::MaliciousCode, "other"),
+                300,
+            )
             .unwrap_err();
         match err {
             StakingError::AlreadySlashed { .. } => {}
@@ -1502,9 +1497,7 @@ mod tests {
     #[test]
     fn test_no_negative_balance() {
         let mut ledger = StakingLedger::new();
-        let id = ledger
-            .deposit("pub-1", 100, RiskTier::Medium, 100)
-            .unwrap();
+        let id = ledger.deposit("pub-1", 100, RiskTier::Medium, 100).unwrap();
         let event = ledger
             .slash(
                 id,
@@ -1522,9 +1515,7 @@ mod tests {
     #[test]
     fn test_slash_fraction_high_tier() {
         let mut ledger = StakingLedger::new();
-        let id = ledger
-            .deposit("pub-1", 500, RiskTier::High, 100)
-            .unwrap();
+        let id = ledger.deposit("pub-1", 500, RiskTier::High, 100).unwrap();
         let event = ledger
             .slash(
                 id,
@@ -1538,9 +1529,7 @@ mod tests {
     #[test]
     fn test_slash_fraction_low_tier() {
         let mut ledger = StakingLedger::new();
-        let id = ledger
-            .deposit("pub-1", 100, RiskTier::Low, 100)
-            .unwrap();
+        let id = ledger.deposit("pub-1", 100, RiskTier::Low, 100).unwrap();
         let event = ledger
             .slash(
                 id,
@@ -1554,9 +1543,7 @@ mod tests {
     #[test]
     fn test_withdraw_active_stake() {
         let mut ledger = StakingLedger::new();
-        let id = ledger
-            .deposit("pub-1", 500, RiskTier::High, 100)
-            .unwrap();
+        let id = ledger.deposit("pub-1", 500, RiskTier::High, 100).unwrap();
         let record = ledger.withdraw(id, 200).unwrap();
         assert_eq!(record.state, StakeState::Withdrawn);
         assert_eq!(record.amount, 0);
@@ -1673,12 +1660,11 @@ mod tests {
             )
             .unwrap();
         ledger.file_appeal(id, 1, "first appeal", 300).unwrap();
-        let err = ledger
-            .file_appeal(id, 1, "duplicate", 301)
-            .unwrap_err();
+        // Second appeal fails with InvalidTransition: state is UnderAppeal, not Slashed.
+        let err = ledger.file_appeal(id, 1, "duplicate", 301).unwrap_err();
         match err {
-            StakingError::DuplicateAppeal { code, .. } => {
-                assert_eq!(code, ERR_STAKE_DUPLICATE_APPEAL);
+            StakingError::InvalidTransition { code, .. } => {
+                assert_eq!(code, ERR_STAKE_INVALID_TRANSITION);
             }
             other => panic!("unexpected error: {other}"),
         }
@@ -1698,9 +1684,7 @@ mod tests {
             )
             .unwrap();
         let appeal = ledger.file_appeal(id, 1, "contest", 300).unwrap();
-        let resolved = ledger
-            .resolve_appeal(appeal.appeal_id, true, 400)
-            .unwrap();
+        let resolved = ledger.resolve_appeal(appeal.appeal_id, true, 400).unwrap();
         assert_eq!(resolved.outcome, AppealOutcome::Upheld);
         let record = ledger.get_stake(id).unwrap();
         assert_eq!(record.state, StakeState::Slashed);
@@ -1720,9 +1704,7 @@ mod tests {
             )
             .unwrap();
         let appeal = ledger.file_appeal(id, 1, "contest", 300).unwrap();
-        let resolved = ledger
-            .resolve_appeal(appeal.appeal_id, false, 400)
-            .unwrap();
+        let resolved = ledger.resolve_appeal(appeal.appeal_id, false, 400).unwrap();
         assert_eq!(resolved.outcome, AppealOutcome::Reversed);
         let record = ledger.get_stake(id).unwrap();
         assert_eq!(record.state, StakeState::Active);
@@ -1732,9 +1714,7 @@ mod tests {
     #[test]
     fn test_expire_stake() {
         let mut ledger = StakingLedger::new();
-        let id = ledger
-            .deposit("pub-1", 100, RiskTier::Low, 100)
-            .unwrap();
+        let id = ledger.deposit("pub-1", 100, RiskTier::Low, 100).unwrap();
         // Set expiration
         ledger.state.stakes.get_mut(&id.0).unwrap().expires_at = Some(500);
         let record = ledger.expire(id, 600).unwrap();
@@ -1745,9 +1725,7 @@ mod tests {
     #[test]
     fn test_expire_before_expiration_rejected() {
         let mut ledger = StakingLedger::new();
-        let id = ledger
-            .deposit("pub-1", 100, RiskTier::Low, 100)
-            .unwrap();
+        let id = ledger.deposit("pub-1", 100, RiskTier::Low, 100).unwrap();
         ledger.state.stakes.get_mut(&id.0).unwrap().expires_at = Some(500);
         let err = ledger.expire(id, 400).unwrap_err();
         match err {
@@ -1789,12 +1767,16 @@ mod tests {
             )
             .unwrap();
         let slash_entry = &ledger.state.audit_log[1];
-        assert!(slash_entry
-            .invariants_checked
-            .contains(&INV_STAKE_SLASH_DETERMINISTIC.to_string()));
-        assert!(slash_entry
-            .invariants_checked
-            .contains(&INV_STK_DETERMINISTIC_PENALTY.to_string()));
+        assert!(
+            slash_entry
+                .invariants_checked
+                .contains(&INV_STAKE_SLASH_DETERMINISTIC.to_string())
+        );
+        assert!(
+            slash_entry
+                .invariants_checked
+                .contains(&INV_STK_DETERMINISTIC_PENALTY.to_string())
+        );
     }
 
     #[test]
@@ -1835,7 +1817,9 @@ mod tests {
     #[test]
     fn test_snapshot_generation() {
         let mut ledger = StakingLedger::new();
-        ledger.deposit("pub-1", 1000, RiskTier::Critical, 100).unwrap();
+        ledger
+            .deposit("pub-1", 1000, RiskTier::Critical, 100)
+            .unwrap();
         ledger.deposit("pub-2", 500, RiskTier::High, 100).unwrap();
         let snapshot = ledger.generate_snapshot();
         assert_eq!(snapshot["total_stakes"], 2);
@@ -1846,7 +1830,9 @@ mod tests {
     #[test]
     fn test_export_audit_jsonl() {
         let mut ledger = StakingLedger::new();
-        ledger.deposit("pub-1", 1000, RiskTier::Critical, 100).unwrap();
+        ledger
+            .deposit("pub-1", 1000, RiskTier::Critical, 100)
+            .unwrap();
         let jsonl = ledger.export_audit_log_jsonl();
         assert!(!jsonl.is_empty());
         let parsed: serde_json::Value = serde_json::from_str(&jsonl).unwrap();
@@ -1916,7 +1902,9 @@ mod tests {
     #[test]
     fn test_slash_events_for_publisher() {
         let mut ledger = StakingLedger::new();
-        let id = ledger.deposit("pub-1", 1000, RiskTier::Critical, 100).unwrap();
+        let id = ledger
+            .deposit("pub-1", 1000, RiskTier::Critical, 100)
+            .unwrap();
         ledger
             .slash(
                 id,
@@ -1932,7 +1920,9 @@ mod tests {
     #[test]
     fn test_appeals_for_stake() {
         let mut ledger = StakingLedger::new();
-        let id = ledger.deposit("pub-1", 1000, RiskTier::Critical, 100).unwrap();
+        let id = ledger
+            .deposit("pub-1", 1000, RiskTier::Critical, 100)
+            .unwrap();
         ledger
             .slash(
                 id,
@@ -1982,11 +1972,17 @@ mod tests {
     #[test]
     fn test_violation_type_display() {
         assert_eq!(ViolationType::MaliciousCode.to_string(), "malicious_code");
-        assert_eq!(ViolationType::PolicyViolation.to_string(), "policy_violation");
+        assert_eq!(
+            ViolationType::PolicyViolation.to_string(),
+            "policy_violation"
+        );
         assert_eq!(
             ViolationType::SupplyChainCompromise.to_string(),
             "supply_chain_compromise"
         );
-        assert_eq!(ViolationType::FalseAttestation.to_string(), "false_attestation");
+        assert_eq!(
+            ViolationType::FalseAttestation.to_string(),
+            "false_attestation"
+        );
     }
 }

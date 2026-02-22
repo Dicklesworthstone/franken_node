@@ -254,12 +254,17 @@ impl VerifierToolkit {
         let mut parent_hash = "genesis".to_string();
 
         for claim in claims {
-            self.log(event_codes::VTK_CLAIM_INGESTED, trace_id, serde_json::json!({
-                "claim_id": &claim.claim_id,
-                "claim_type": claim.claim_type.label(),
-            }));
+            self.log(
+                event_codes::VTK_CLAIM_INGESTED,
+                trace_id,
+                serde_json::json!({
+                    "claim_id": &claim.claim_id,
+                    "claim_type": claim.claim_type.label(),
+                }),
+            );
 
-            let result = self.validate_single_claim(claim, trace_id, &mut evidence_chain, &mut parent_hash);
+            let result =
+                self.validate_single_claim(claim, trace_id, &mut evidence_chain, &mut parent_hash);
             claim_results.push(result);
         }
 
@@ -295,12 +300,16 @@ impl VerifierToolkit {
             content_hash,
         };
 
-        self.log(event_codes::VTK_REPORT_GENERATED, trace_id, serde_json::json!({
-            "report_id": &report.report_id,
-            "verdict": format!("{:?}", verdict),
-            "passed": passed,
-            "failed": failed,
-        }));
+        self.log(
+            event_codes::VTK_REPORT_GENERATED,
+            trace_id,
+            serde_json::json!({
+                "report_id": &report.report_id,
+                "verdict": format!("{:?}", verdict),
+                "passed": passed,
+                "failed": failed,
+            }),
+        );
 
         self.reports.push(report.clone());
         report
@@ -350,13 +359,17 @@ impl VerifierToolkit {
             },
         });
 
-        self.log(event_codes::VTK_SCHEMA_VALIDATED, trace_id, serde_json::json!({
-            "claim_id": &claim.claim_id,
-            "valid": schema_valid,
-        }));
+        self.log(
+            event_codes::VTK_SCHEMA_VALIDATED,
+            trace_id,
+            serde_json::json!({
+                "claim_id": &claim.claim_id,
+                "valid": schema_valid,
+            }),
+        );
 
         evidence_chain.push(EvidenceLink {
-            link_id: Uuid::now_v7().to_string(),
+            link_id: format!("link-{}-schema", claim.claim_id),
             claim_id: claim.claim_id.clone(),
             step_id: format!("{}-schema", claim.claim_id),
             parent_hash: parent_hash.clone(),
@@ -379,13 +392,17 @@ impl VerifierToolkit {
             },
         });
 
-        self.log(event_codes::VTK_EVIDENCE_CHAIN_VERIFIED, trace_id, serde_json::json!({
-            "claim_id": &claim.claim_id,
-            "verified": evidence_verified,
-        }));
+        self.log(
+            event_codes::VTK_EVIDENCE_CHAIN_VERIFIED,
+            trace_id,
+            serde_json::json!({
+                "claim_id": &claim.claim_id,
+                "verified": evidence_verified,
+            }),
+        );
 
         evidence_chain.push(EvidenceLink {
-            link_id: Uuid::now_v7().to_string(),
+            link_id: format!("link-{}-evidence", claim.claim_id),
             claim_id: claim.claim_id.clone(),
             step_id: format!("{}-evidence", claim.claim_id),
             parent_hash: parent_hash.clone(),
@@ -411,13 +428,17 @@ impl VerifierToolkit {
             },
         });
 
-        self.log(event_codes::VTK_BENCHMARK_VERIFIED, trace_id, serde_json::json!({
-            "claim_id": &claim.claim_id,
-            "metrics_ok": metrics_ok,
-        }));
+        self.log(
+            event_codes::VTK_BENCHMARK_VERIFIED,
+            trace_id,
+            serde_json::json!({
+                "claim_id": &claim.claim_id,
+                "metrics_ok": metrics_ok,
+            }),
+        );
 
         evidence_chain.push(EvidenceLink {
-            link_id: Uuid::now_v7().to_string(),
+            link_id: format!("link-{}-metrics", claim.claim_id),
             claim_id: claim.claim_id.clone(),
             step_id: format!("{}-metrics", claim.claim_id),
             parent_hash: parent_hash.clone(),
@@ -444,13 +465,17 @@ impl VerifierToolkit {
             },
         });
 
-        self.log(event_codes::VTK_METRIC_CROSSCHECKED, trace_id, serde_json::json!({
-            "claim_id": &claim.claim_id,
-            "cross_ok": cross_ok,
-        }));
+        self.log(
+            event_codes::VTK_METRIC_CROSSCHECKED,
+            trace_id,
+            serde_json::json!({
+                "claim_id": &claim.claim_id,
+                "cross_ok": cross_ok,
+            }),
+        );
 
         evidence_chain.push(EvidenceLink {
-            link_id: Uuid::now_v7().to_string(),
+            link_id: format!("link-{}-crosscheck", claim.claim_id),
             claim_id: claim.claim_id.clone(),
             step_id: format!("{}-crosscheck", claim.claim_id),
             parent_hash: parent_hash.clone(),
@@ -461,13 +486,17 @@ impl VerifierToolkit {
         let overall = schema_valid && evidence_verified && metrics_ok && cross_ok;
 
         if !overall {
-            self.log(event_codes::VTK_CLAIM_REJECTED, trace_id, serde_json::json!({
-                "claim_id": &claim.claim_id,
-                "schema": schema_valid,
-                "evidence": evidence_verified,
-                "metrics": metrics_ok,
-                "cross_check": cross_ok,
-            }));
+            self.log(
+                event_codes::VTK_CLAIM_REJECTED,
+                trace_id,
+                serde_json::json!({
+                    "claim_id": &claim.claim_id,
+                    "schema": schema_valid,
+                    "evidence": evidence_verified,
+                    "metrics": metrics_ok,
+                    "cross_check": cross_ok,
+                }),
+            );
         }
 
         ClaimValidationResult {
@@ -571,10 +600,7 @@ mod tests {
                 ("score".to_string(), 0.9),
                 ("latency".to_string(), 0.85),
             ]),
-            thresholds: BTreeMap::from([
-                ("score".to_string(), 0.75),
-                ("latency".to_string(), 0.7),
-            ]),
+            thresholds: BTreeMap::from([("score".to_string(), 0.75), ("latency".to_string(), 0.7)]),
             metadata: BTreeMap::new(),
         }
     }
@@ -586,12 +612,8 @@ mod tests {
             source_bead: "bd-fail".to_string(),
             description: "Failing claim".to_string(),
             evidence_hash: "b".repeat(64),
-            metric_values: BTreeMap::from([
-                ("score".to_string(), 0.5),
-            ]),
-            thresholds: BTreeMap::from([
-                ("score".to_string(), 0.75),
-            ]),
+            metric_values: BTreeMap::from([("score".to_string(), 0.5)]),
+            thresholds: BTreeMap::from([("score".to_string(), 0.75)]),
             metadata: BTreeMap::new(),
         }
     }
@@ -825,7 +847,11 @@ mod tests {
     fn audit_log_has_event_codes() {
         let mut toolkit = VerifierToolkit::default();
         toolkit.validate_claims(&[sample_claim("c1")], &make_trace());
-        let codes: Vec<&str> = toolkit.audit_log().iter().map(|r| r.event_code.as_str()).collect();
+        let codes: Vec<&str> = toolkit
+            .audit_log()
+            .iter()
+            .map(|r| r.event_code.as_str())
+            .collect();
         assert!(codes.contains(&event_codes::VTK_CLAIM_INGESTED));
         assert!(codes.contains(&event_codes::VTK_REPORT_GENERATED));
     }

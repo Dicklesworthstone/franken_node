@@ -421,34 +421,83 @@ impl fmt::Display for HardwarePlannerError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::NoCapableTarget { workload_id } => {
-                write!(f, "{}: no capable target for workload {}", self.code(), workload_id)
+                write!(
+                    f,
+                    "{}: no capable target for workload {}",
+                    self.code(),
+                    workload_id
+                )
             }
             Self::RiskExceeded { workload_id } => {
-                write!(f, "{}: risk exceeded for workload {}", self.code(), workload_id)
+                write!(
+                    f,
+                    "{}: risk exceeded for workload {}",
+                    self.code(),
+                    workload_id
+                )
             }
             Self::CapacityExhausted { workload_id } => {
-                write!(f, "{}: capacity exhausted for workload {}", self.code(), workload_id)
+                write!(
+                    f,
+                    "{}: capacity exhausted for workload {}",
+                    self.code(),
+                    workload_id
+                )
             }
             Self::DuplicateProfile { profile_id } => {
-                write!(f, "{}: profile {} already registered", self.code(), profile_id)
+                write!(
+                    f,
+                    "{}: profile {} already registered",
+                    self.code(),
+                    profile_id
+                )
             }
             Self::DuplicatePolicy { policy_id } => {
-                write!(f, "{}: policy {} already registered", self.code(), policy_id)
+                write!(
+                    f,
+                    "{}: policy {} already registered",
+                    self.code(),
+                    policy_id
+                )
             }
             Self::UnknownProfile { profile_id } => {
                 write!(f, "{}: unknown profile {}", self.code(), profile_id)
             }
             Self::EmptyCapabilities { workload_id } => {
-                write!(f, "{}: workload {} has empty capabilities", self.code(), workload_id)
+                write!(
+                    f,
+                    "{}: workload {} has empty capabilities",
+                    self.code(),
+                    workload_id
+                )
             }
             Self::DispatchUngated { workload_id } => {
-                write!(f, "{}: ungated dispatch for workload {}", self.code(), workload_id)
+                write!(
+                    f,
+                    "{}: ungated dispatch for workload {}",
+                    self.code(),
+                    workload_id
+                )
             }
-            Self::InvalidRiskLevel { profile_id, risk_level } => {
-                write!(f, "{}: profile {} has invalid risk level {}", self.code(), profile_id, risk_level)
+            Self::InvalidRiskLevel {
+                profile_id,
+                risk_level,
+            } => {
+                write!(
+                    f,
+                    "{}: profile {} has invalid risk level {}",
+                    self.code(),
+                    profile_id,
+                    risk_level
+                )
             }
             Self::FallbackExhausted { workload_id } => {
-                write!(f, "{}: fallback exhausted for workload {}", self.code(), workload_id)
+                write!(
+                    f,
+                    "{}: fallback exhausted for workload {}",
+                    self.code(),
+                    workload_id
+                )
             }
         }
     }
@@ -617,10 +666,9 @@ impl HardwarePlanner {
             if prof.satisfies_capabilities(&request.required_capabilities) {
                 capable.push(pid.clone());
             } else {
-                evidence.rejections.insert(
-                    pid.clone(),
-                    "capability_mismatch".to_string(),
-                );
+                evidence
+                    .rejections
+                    .insert(pid.clone(), "capability_mismatch".to_string());
                 evidence.reasoning_chain.push(format!(
                     "rejected {}: missing capabilities {:?}",
                     pid,
@@ -668,7 +716,10 @@ impl HardwarePlanner {
             } else {
                 evidence.rejections.insert(
                     pid.clone(),
-                    format!("risk_exceeded: {} > {}", prof.risk_level, effective_max_risk),
+                    format!(
+                        "risk_exceeded: {} > {}",
+                        prof.risk_level, effective_max_risk
+                    ),
                 );
                 evidence.reasoning_chain.push(format!(
                     "rejected {}: risk {} exceeds tolerance {}",
@@ -737,9 +788,9 @@ impl HardwarePlanner {
                 schema_version: SCHEMA_VERSION.to_string(),
             });
 
-            evidence.reasoning_chain.push(
-                "primary targets at capacity, attempting fallback".to_string(),
-            );
+            evidence
+                .reasoning_chain
+                .push("primary targets at capacity, attempting fallback".to_string());
 
             // Fallback: look at ALL risk-ok profiles, relax nothing -- just
             // re-check after marking contention evidence. In a real system the
@@ -826,7 +877,8 @@ impl HardwarePlanner {
         // First try normal placement
         match self.request_placement(request, timestamp_ms) {
             Ok(decision) => Ok(decision),
-            Err(HardwarePlannerError::CapacityExhausted { .. })
+            Err(HardwarePlannerError::RiskExceeded { .. })
+            | Err(HardwarePlannerError::CapacityExhausted { .. })
             | Err(HardwarePlannerError::FallbackExhausted { .. }) => {
                 // HWP-008: fallback attempted
                 self.audit_log.push(PlannerAuditEvent {
@@ -843,14 +895,19 @@ impl HardwarePlanner {
                 });
 
                 let mut relaxed = request.clone();
-                relaxed.max_risk = request.max_risk.saturating_add(risk_relaxation_delta).min(MAX_RISK_LEVEL);
+                relaxed.max_risk = request
+                    .max_risk
+                    .saturating_add(risk_relaxation_delta)
+                    .min(MAX_RISK_LEVEL);
 
                 match self.request_placement(&relaxed, timestamp_ms) {
                     Ok(mut decision) => {
                         decision.outcome = PlacementOutcome::PlacedViaFallback;
                         decision.evidence.fallback_attempted = true;
-                        decision.evidence.fallback_reason =
-                            Some(format!("risk relaxed from {} to {}", request.max_risk, relaxed.max_risk));
+                        decision.evidence.fallback_reason = Some(format!(
+                            "risk relaxed from {} to {}",
+                            request.max_risk, relaxed.max_risk
+                        ));
 
                         // HWP-009
                         self.audit_log.push(PlannerAuditEvent {
@@ -934,10 +991,7 @@ impl HardwarePlanner {
     }
 
     /// Release a slot on a hardware profile (e.g. workload completed).
-    pub fn release_slot(
-        &mut self,
-        profile_id: &str,
-    ) -> Result<(), HardwarePlannerError> {
+    pub fn release_slot(&mut self, profile_id: &str) -> Result<(), HardwarePlannerError> {
         let prof = self.profiles.get_mut(profile_id).ok_or_else(|| {
             HardwarePlannerError::UnknownProfile {
                 profile_id: profile_id.to_string(),
@@ -1008,11 +1062,7 @@ impl HardwarePlanner {
     /// Select the best candidate from a list per policy preferences.
     /// INV-HWP-DETERMINISTIC: deterministic selection using sorted IDs and
     /// stable comparison criteria.
-    fn select_best(
-        &self,
-        candidates: &[String],
-        policy: Option<&PlacementPolicy>,
-    ) -> String {
+    fn select_best(&self, candidates: &[String], policy: Option<&PlacementPolicy>) -> String {
         if candidates.is_empty() {
             unreachable!("select_best called with empty candidates");
         }
@@ -1033,9 +1083,16 @@ impl HardwarePlanner {
 
             if prefer_lowest_risk && prof.risk_level < best_risk {
                 is_better = true;
-            } else if prefer_lowest_risk && prof.risk_level == best_risk && prefer_most_capacity && prof.available_slots() > best_available {
+            } else if prefer_lowest_risk
+                && prof.risk_level == best_risk
+                && prefer_most_capacity
+                && prof.available_slots() > best_available
+            {
                 is_better = true;
-            } else if !prefer_lowest_risk && prefer_most_capacity && prof.available_slots() > best_available {
+            } else if !prefer_lowest_risk
+                && prefer_most_capacity
+                && prof.available_slots() > best_available
+            {
                 is_better = true;
             }
 
@@ -1089,11 +1146,25 @@ mod tests {
     }
 
     fn gpu_profile(id: &str, risk: u32, slots: u32) -> HardwareProfile {
-        HardwareProfile::new(id, format!("GPU {}", id), caps(&["gpu", "compute"]), risk, slots).unwrap()
+        HardwareProfile::new(
+            id,
+            format!("GPU {}", id),
+            caps(&["gpu", "compute"]),
+            risk,
+            slots,
+        )
+        .unwrap()
     }
 
     fn fpga_profile(id: &str, risk: u32, slots: u32) -> HardwareProfile {
-        HardwareProfile::new(id, format!("FPGA {}", id), caps(&["fpga", "compute"]), risk, slots).unwrap()
+        HardwareProfile::new(
+            id,
+            format!("FPGA {}", id),
+            caps(&["fpga", "compute"]),
+            risk,
+            slots,
+        )
+        .unwrap()
     }
 
     fn default_policy() -> PlacementPolicy {
@@ -1160,8 +1231,12 @@ mod tests {
     #[test]
     fn register_duplicate_profile_rejected() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
-        let err = planner.register_profile(gpu_profile("hw-1", 20, 2), 1001, "t1").unwrap_err();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
+        let err = planner
+            .register_profile(gpu_profile("hw-1", 20, 2), 1001, "t1")
+            .unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_HWP_DUPLICATE_PROFILE);
     }
 
@@ -1177,8 +1252,12 @@ mod tests {
     #[test]
     fn register_duplicate_policy_rejected() {
         let mut planner = make_planner();
-        planner.register_policy(default_policy(), 1000, "t1").unwrap();
-        let err = planner.register_policy(default_policy(), 1001, "t1").unwrap_err();
+        planner
+            .register_policy(default_policy(), 1000, "t1")
+            .unwrap();
+        let err = planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_HWP_DUPLICATE_POLICY);
     }
 
@@ -1187,8 +1266,12 @@ mod tests {
     #[test]
     fn happy_path_placement() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
-        planner.register_policy(default_policy(), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
 
         let req = workload("wl-1", &["gpu", "compute"], 50, "default");
         let decision = planner.request_placement(&req, 2000).unwrap();
@@ -1210,9 +1293,15 @@ mod tests {
         // INV-HWP-DETERMINISTIC: same inputs produce same output
         let run = || {
             let mut planner = make_planner();
-            planner.register_profile(gpu_profile("hw-a", 10, 4), 1000, "t1").unwrap();
-            planner.register_profile(gpu_profile("hw-b", 20, 4), 1001, "t1").unwrap();
-            planner.register_policy(default_policy(), 1002, "t1").unwrap();
+            planner
+                .register_profile(gpu_profile("hw-a", 10, 4), 1000, "t1")
+                .unwrap();
+            planner
+                .register_profile(gpu_profile("hw-b", 20, 4), 1001, "t1")
+                .unwrap();
+            planner
+                .register_policy(default_policy(), 1002, "t1")
+                .unwrap();
 
             let req = workload("wl-1", &["gpu", "compute"], 50, "default");
             planner.request_placement(&req, 2000).unwrap()
@@ -1229,8 +1318,12 @@ mod tests {
     #[test]
     fn placement_rejected_capability_mismatch() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
-        planner.register_policy(default_policy(), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
 
         let req = workload("wl-1", &["fpga"], 50, "default");
         let err = planner.request_placement(&req, 2000).unwrap_err();
@@ -1242,8 +1335,12 @@ mod tests {
     #[test]
     fn placement_rejected_risk_exceeded() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 60, 4), 1000, "t1").unwrap();
-        planner.register_policy(default_policy(), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 60, 4), 1000, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
 
         let req = workload("wl-1", &["gpu", "compute"], 20, "default");
         let err = planner.request_placement(&req, 2000).unwrap_err();
@@ -1258,7 +1355,9 @@ mod tests {
         let mut prof = gpu_profile("hw-1", 10, 1);
         prof.used_slots = 1; // at capacity
         planner.register_profile(prof, 1000, "t1").unwrap();
-        planner.register_policy(default_policy(), 1001, "t1").unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
 
         let req = workload("wl-1", &["gpu", "compute"], 50, "default");
         let err = planner.request_placement(&req, 2000).unwrap_err();
@@ -1289,8 +1388,12 @@ mod tests {
     #[test]
     fn policy_prefers_lowest_risk() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-high", 40, 4), 1000, "t1").unwrap();
-        planner.register_profile(gpu_profile("hw-low", 10, 4), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-high", 40, 4), 1000, "t1")
+            .unwrap();
+        planner
+            .register_profile(gpu_profile("hw-low", 10, 4), 1001, "t1")
+            .unwrap();
         let mut pol = default_policy();
         pol.prefer_lowest_risk = true;
         planner.register_policy(pol, 1002, "t1").unwrap();
@@ -1305,8 +1408,12 @@ mod tests {
     #[test]
     fn policy_prefers_most_capacity_when_risk_equal() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-small", 10, 2), 1000, "t1").unwrap();
-        planner.register_profile(gpu_profile("hw-big", 10, 8), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-small", 10, 2), 1000, "t1")
+            .unwrap();
+        planner
+            .register_profile(gpu_profile("hw-big", 10, 8), 1001, "t1")
+            .unwrap();
         let mut pol = default_policy();
         pol.prefer_lowest_risk = true;
         pol.prefer_most_capacity = true;
@@ -1322,9 +1429,13 @@ mod tests {
     #[test]
     fn dispatch_through_approved_interface() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
 
-        let token = planner.dispatch("wl-1", "hw-1", "franken_engine", 2000, "t1").unwrap();
+        let token = planner
+            .dispatch("wl-1", "hw-1", "franken_engine", 2000, "t1")
+            .unwrap();
         assert_eq!(token.workload_id, "wl-1");
         assert_eq!(token.target_profile_id, "hw-1");
         assert_eq!(token.approved_interface, "franken_engine");
@@ -1334,16 +1445,22 @@ mod tests {
     #[test]
     fn dispatch_ungated_rejected() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
 
-        let err = planner.dispatch("wl-1", "hw-1", "rogue_interface", 2000, "t1").unwrap_err();
+        let err = planner
+            .dispatch("wl-1", "hw-1", "rogue_interface", 2000, "t1")
+            .unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_HWP_DISPATCH_UNGATED);
     }
 
     #[test]
     fn dispatch_unknown_profile_rejected() {
         let mut planner = make_planner();
-        let err = planner.dispatch("wl-1", "hw-nonexistent", "franken_engine", 2000, "t1").unwrap_err();
+        let err = planner
+            .dispatch("wl-1", "hw-nonexistent", "franken_engine", 2000, "t1")
+            .unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_HWP_UNKNOWN_PROFILE);
     }
 
@@ -1352,8 +1469,12 @@ mod tests {
     #[test]
     fn release_slot_success() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
-        planner.register_policy(default_policy(), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
 
         let req = workload("wl-1", &["gpu", "compute"], 50, "default");
         planner.request_placement(&req, 2000).unwrap();
@@ -1375,7 +1496,9 @@ mod tests {
     #[test]
     fn audit_log_records_profile_registration() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
         assert!(!planner.audit_log().is_empty());
         assert_eq!(planner.audit_log()[0].event_code, event_codes::HWP_001);
     }
@@ -1383,20 +1506,30 @@ mod tests {
     #[test]
     fn audit_log_records_policy_registration() {
         let mut planner = make_planner();
-        planner.register_policy(default_policy(), 1000, "t1").unwrap();
+        planner
+            .register_policy(default_policy(), 1000, "t1")
+            .unwrap();
         assert_eq!(planner.audit_log()[0].event_code, event_codes::HWP_002);
     }
 
     #[test]
     fn audit_log_happy_path_contains_expected_events() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
-        planner.register_policy(default_policy(), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
 
         let req = workload("wl-1", &["gpu", "compute"], 50, "default");
         planner.request_placement(&req, 2000).unwrap();
 
-        let codes: Vec<&str> = planner.audit_log().iter().map(|e| e.event_code.as_str()).collect();
+        let codes: Vec<&str> = planner
+            .audit_log()
+            .iter()
+            .map(|e| e.event_code.as_str())
+            .collect();
         assert!(codes.contains(&event_codes::HWP_001));
         assert!(codes.contains(&event_codes::HWP_002));
         assert!(codes.contains(&event_codes::HWP_003));
@@ -1409,7 +1542,9 @@ mod tests {
     #[test]
     fn jsonl_export_parses() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
         let jsonl = planner.export_audit_log_jsonl();
         assert!(!jsonl.is_empty());
         let parsed: serde_json::Value =
@@ -1423,9 +1558,15 @@ mod tests {
     #[test]
     fn evidence_records_rejections() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 60, 4), 1000, "t1").unwrap();
-        planner.register_profile(fpga_profile("hw-2", 10, 4), 1001, "t1").unwrap();
-        planner.register_policy(default_policy(), 1002, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 60, 4), 1000, "t1")
+            .unwrap();
+        planner
+            .register_profile(fpga_profile("hw-2", 10, 4), 1001, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1002, "t1")
+            .unwrap();
 
         let req = workload("wl-1", &["gpu", "compute"], 20, "default");
         let _ = planner.request_placement(&req, 2000);
@@ -1484,20 +1625,46 @@ mod tests {
     #[test]
     fn error_display_all_variants() {
         let errors: Vec<HardwarePlannerError> = vec![
-            HardwarePlannerError::NoCapableTarget { workload_id: "wl-1".into() },
-            HardwarePlannerError::RiskExceeded { workload_id: "wl-1".into() },
-            HardwarePlannerError::CapacityExhausted { workload_id: "wl-1".into() },
-            HardwarePlannerError::DuplicateProfile { profile_id: "hw-1".into() },
-            HardwarePlannerError::DuplicatePolicy { policy_id: "pol-1".into() },
-            HardwarePlannerError::UnknownProfile { profile_id: "hw-x".into() },
-            HardwarePlannerError::EmptyCapabilities { workload_id: "wl-1".into() },
-            HardwarePlannerError::DispatchUngated { workload_id: "wl-1".into() },
-            HardwarePlannerError::InvalidRiskLevel { profile_id: "hw-1".into(), risk_level: 999 },
-            HardwarePlannerError::FallbackExhausted { workload_id: "wl-1".into() },
+            HardwarePlannerError::NoCapableTarget {
+                workload_id: "wl-1".into(),
+            },
+            HardwarePlannerError::RiskExceeded {
+                workload_id: "wl-1".into(),
+            },
+            HardwarePlannerError::CapacityExhausted {
+                workload_id: "wl-1".into(),
+            },
+            HardwarePlannerError::DuplicateProfile {
+                profile_id: "hw-1".into(),
+            },
+            HardwarePlannerError::DuplicatePolicy {
+                policy_id: "pol-1".into(),
+            },
+            HardwarePlannerError::UnknownProfile {
+                profile_id: "hw-x".into(),
+            },
+            HardwarePlannerError::EmptyCapabilities {
+                workload_id: "wl-1".into(),
+            },
+            HardwarePlannerError::DispatchUngated {
+                workload_id: "wl-1".into(),
+            },
+            HardwarePlannerError::InvalidRiskLevel {
+                profile_id: "hw-1".into(),
+                risk_level: 999,
+            },
+            HardwarePlannerError::FallbackExhausted {
+                workload_id: "wl-1".into(),
+            },
         ];
         for e in &errors {
             let s = e.to_string();
-            assert!(s.contains(e.code()), "{:?} display should contain code {}", e, e.code());
+            assert!(
+                s.contains(e.code()),
+                "{:?} display should contain code {}",
+                e,
+                e.code()
+            );
         }
     }
 
@@ -1522,8 +1689,12 @@ mod tests {
     #[test]
     fn multiple_placements_consume_slots() {
         let mut planner = make_planner();
-        planner.register_profile(gpu_profile("hw-1", 10, 2), 1000, "t1").unwrap();
-        planner.register_policy(default_policy(), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 2), 1000, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
 
         let req1 = workload("wl-1", &["gpu", "compute"], 50, "default");
         let req2 = workload("wl-2", &["gpu", "compute"], 50, "default");
@@ -1559,8 +1730,12 @@ mod tests {
     fn fallback_with_risk_relaxation_succeeds() {
         let mut planner = make_planner();
         // Only target has risk 40, workload asks max risk 30
-        planner.register_profile(gpu_profile("hw-1", 40, 4), 1000, "t1").unwrap();
-        planner.register_policy(default_policy(), 1001, "t1").unwrap();
+        planner
+            .register_profile(gpu_profile("hw-1", 40, 4), 1000, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
 
         let req = workload("wl-1", &["gpu", "compute"], 30, "default");
         // Normal placement fails due to risk
@@ -1568,7 +1743,9 @@ mod tests {
         assert_eq!(err.code(), error_codes::ERR_HWP_RISK_EXCEEDED);
 
         // Fallback relaxes risk by 20 (30 + 20 = 50 >= 40)
-        let decision = planner.request_placement_with_fallback(&req, 20, 3000).unwrap();
+        let decision = planner
+            .request_placement_with_fallback(&req, 20, 3000)
+            .unwrap();
         assert_eq!(decision.outcome, PlacementOutcome::PlacedViaFallback);
         assert_eq!(decision.target_profile_id, Some("hw-1".to_string()));
         assert!(decision.evidence.fallback_attempted);

@@ -432,14 +432,8 @@ impl ReportingPipeline {
     #[must_use]
     pub fn render_markdown(report: &CategoryShiftReport) -> String {
         let mut out = String::new();
-        out.push_str(&format!(
-            "# Category-Shift Report v{}\n\n",
-            report.version
-        ));
-        out.push_str(&format!(
-            "**Generated:** {}\n\n",
-            report.generated_at_iso
-        ));
+        out.push_str(&format!("# Category-Shift Report v{}\n\n", report.version));
+        out.push_str(&format!("**Generated:** {}\n\n", report.generated_at_iso));
 
         // Dashboard summary
         out.push_str("## Dashboard\n\n");
@@ -495,10 +489,7 @@ impl ReportingPipeline {
             ));
         }
 
-        out.push_str(&format!(
-            "\n**Report Hash:** `{}`\n",
-            report.report_hash
-        ));
+        out.push_str(&format!("\n**Report Hash:** `{}`\n", report.report_hash));
 
         out
     }
@@ -819,7 +810,9 @@ fn canonicalize_value(value: serde_json::Value) -> serde_json::Value {
 }
 
 /// Build a demo pipeline with sample data from all five dimensions.
-pub fn demo_pipeline(now_secs: u64) -> Result<(ReportingPipeline, CategoryShiftReport), CategoryShiftError> {
+pub fn demo_pipeline(
+    now_secs: u64,
+) -> Result<(ReportingPipeline, CategoryShiftReport), CategoryShiftError> {
     let mut pipeline = ReportingPipeline::default();
     let trace = "trace-demo";
     pipeline.start(now_secs, trace);
@@ -1061,7 +1054,10 @@ mod tests {
             "trace",
         );
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), CategoryShiftError::HashMismatch(_)));
+        assert!(matches!(
+            result.unwrap_err(),
+            CategoryShiftError::HashMismatch(_)
+        ));
     }
 
     #[test]
@@ -1100,7 +1096,10 @@ mod tests {
         let mut pipeline = ReportingPipeline::default();
         let result = pipeline.generate_report(1000, "trace");
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), CategoryShiftError::EmptyPipeline));
+        assert!(matches!(
+            result.unwrap_err(),
+            CategoryShiftError::EmptyPipeline
+        ));
     }
 
     #[test]
@@ -1134,7 +1133,11 @@ mod tests {
     fn threshold_compatibility_exceeded() {
         let now = 1_000_000;
         let (_, report) = demo_pipeline(now).unwrap();
-        let compat = report.thresholds.iter().find(|t| t.name == "compatibility").unwrap();
+        let compat = report
+            .thresholds
+            .iter()
+            .find(|t| t.name == "compatibility")
+            .unwrap();
         assert_eq!(compat.status, ThresholdStatus::Met);
         assert!(compat.actual >= THRESHOLD_COMPAT_PERCENT);
     }
@@ -1282,9 +1285,21 @@ mod tests {
 
     #[test]
     fn evaluate_threshold_status_logic() {
-        assert_eq!(evaluate_threshold_status(100.0, 95.0), ThresholdStatus::Exceeded);
+        // 100.0 >= 95.0 but 100.0 <= 95.0*1.1=104.5 → Met (not Exceeded).
+        assert_eq!(
+            evaluate_threshold_status(100.0, 95.0),
+            ThresholdStatus::Met
+        );
+        // 105.0 > 95.0*1.1=104.5 → Exceeded.
+        assert_eq!(
+            evaluate_threshold_status(105.0, 95.0),
+            ThresholdStatus::Exceeded
+        );
         assert_eq!(evaluate_threshold_status(96.0, 95.0), ThresholdStatus::Met);
-        assert_eq!(evaluate_threshold_status(90.0, 95.0), ThresholdStatus::NotMet);
+        assert_eq!(
+            evaluate_threshold_status(90.0, 95.0),
+            ThresholdStatus::NotMet
+        );
     }
 
     #[test]
@@ -1292,8 +1307,14 @@ mod tests {
         let config = PipelineConfig::default();
         assert_eq!(config.freshness_window_secs, DEFAULT_FRESHNESS_WINDOW_SECS);
         assert_eq!(config.compat_threshold, THRESHOLD_COMPAT_PERCENT);
-        assert_eq!(config.migration_velocity_threshold, THRESHOLD_MIGRATION_VELOCITY);
-        assert_eq!(config.compromise_reduction_threshold, THRESHOLD_COMPROMISE_REDUCTION);
+        assert_eq!(
+            config.migration_velocity_threshold,
+            THRESHOLD_MIGRATION_VELOCITY
+        );
+        assert_eq!(
+            config.compromise_reduction_threshold,
+            THRESHOLD_COMPROMISE_REDUCTION
+        );
     }
 
     #[test]

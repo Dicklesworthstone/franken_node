@@ -691,8 +691,17 @@ mod tests {
         }));
 
         assert!(result.is_err());
-        let panic_text = format!("{:?}", result.err());
-        assert!(panic_text.contains(MASK_NESTING_VIOLATION));
+        // catch_unwind captures the panic payload; verify it contains the violation code.
+        let payload = result.unwrap_err();
+        let panic_text = payload
+            .downcast_ref::<String>()
+            .map(|s| s.as_str())
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        assert!(
+            panic_text.contains(MASK_NESTING_VIOLATION),
+            "expected MASK_NESTING_VIOLATION in panic message, got: {panic_text}"
+        );
     }
 
     #[test]

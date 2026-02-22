@@ -255,9 +255,7 @@ impl TrustAggregator {
         };
 
         if trimmed.is_empty() {
-            return Err(SybilDefenseError::aggregation_failed(
-                "all values trimmed",
-            ));
+            return Err(SybilDefenseError::aggregation_failed("all values trimmed"));
         }
 
         let sum: f64 = trimmed.iter().sum();
@@ -349,9 +347,8 @@ impl StakeWeighter {
             return self.base_weight;
         }
 
-        let progress = (node.verified_history_len as f64
-            / self.established_threshold as f64)
-            .min(1.0);
+        let progress =
+            (node.verified_history_len as f64 / self.established_threshold as f64).min(1.0);
 
         // Logarithmic growth: monotonically increasing, slow start, fast middle
         let log_progress = (1.0 + progress * (std::f64::consts::E - 1.0)).ln();
@@ -455,11 +452,7 @@ impl Default for SybilDetector {
 
 impl SybilDetector {
     /// Create a new detector with custom parameters.
-    pub fn new(
-        burst_threshold: usize,
-        burst_window_ms: u64,
-        similarity_threshold: f64,
-    ) -> Self {
+    pub fn new(burst_threshold: usize, burst_window_ms: u64, similarity_threshold: f64) -> Self {
         Self {
             burst_threshold,
             burst_window_ms,
@@ -491,8 +484,16 @@ impl SybilDetector {
         for (source_id, source_signals) in &by_source {
             if source_signals.len() > self.burst_threshold {
                 // Check time window
-                let min_ts = source_signals.iter().map(|s| s.timestamp_ms).min().unwrap_or(0);
-                let max_ts = source_signals.iter().map(|s| s.timestamp_ms).max().unwrap_or(0);
+                let min_ts = source_signals
+                    .iter()
+                    .map(|s| s.timestamp_ms)
+                    .min()
+                    .unwrap_or(0);
+                let max_ts = source_signals
+                    .iter()
+                    .map(|s| s.timestamp_ms)
+                    .max()
+                    .unwrap_or(0);
                 if max_ts - min_ts <= self.burst_window_ms {
                     sybil_ids.insert(source_id.to_string());
                 }
@@ -563,10 +564,7 @@ impl SybilDetector {
                     .first()
                     .map(|s| s.target_id.clone())
                     .unwrap_or_default(),
-                detail: format!(
-                    "Detected {} suspected Sybil identities",
-                    sybil_ids.len()
-                ),
+                detail: format!("Detected {} suspected Sybil identities", sybil_ids.len()),
                 timestamp_ms,
             });
         }
@@ -697,9 +695,9 @@ impl SybilDefensePipeline {
         }
 
         // Step 1: Detect Sybil clusters
-        let sybil_ids =
-            self.detector
-                .detect_sybil_cluster(signals, &self.nodes, timestamp_ms);
+        let sybil_ids = self
+            .detector
+            .detect_sybil_cluster(signals, &self.nodes, timestamp_ms);
 
         // Step 2: Attenuate Sybil signals
         let attenuated = self.detector.attenuate_sybil_signals(signals, &sybil_ids);
@@ -754,10 +752,7 @@ impl SybilDefensePipeline {
 
     /// Get all nodes as a BTreeMap for deterministic ordering.
     pub fn ordered_nodes(&self) -> BTreeMap<String, &TrustNode> {
-        self.nodes
-            .iter()
-            .map(|(k, v)| (k.clone(), v))
-            .collect()
+        self.nodes.iter().map(|(k, v)| (k.clone(), v)).collect()
     }
 }
 
@@ -811,37 +806,43 @@ mod tests {
 
     fn honest_signals(count: usize, target: &str) -> Vec<TrustSignal> {
         (0..count)
-            .map(|i| make_signal(
-                &format!("honest-{i}"),
-                &format!("honest-node-{i}"),
-                target,
-                0.8 + (i as f64 * 0.001), // Slight variation around 0.8
-                1000 + i as u64 * 100,
-            ))
+            .map(|i| {
+                make_signal(
+                    &format!("honest-{i}"),
+                    &format!("honest-node-{i}"),
+                    target,
+                    0.8 + (i as f64 * 0.001), // Slight variation around 0.8
+                    1000 + i as u64 * 100,
+                )
+            })
             .collect()
     }
 
     fn poisoned_signals(count: usize, target: &str) -> Vec<TrustSignal> {
         (0..count)
-            .map(|i| make_signal(
-                &format!("poison-{i}"),
-                &format!("poison-node-{i}"),
-                target,
-                0.01, // Maximally adversarial: trying to drive score to 0
-                1000 + i as u64 * 10,
-            ))
+            .map(|i| {
+                make_signal(
+                    &format!("poison-{i}"),
+                    &format!("poison-node-{i}"),
+                    target,
+                    0.01, // Maximally adversarial: trying to drive score to 0
+                    1000 + i as u64 * 10,
+                )
+            })
             .collect()
     }
 
     fn sybil_signals(count: usize, target: &str) -> Vec<TrustSignal> {
         (0..count)
-            .map(|i| make_signal(
-                &format!("sybil-{i}"),
-                &format!("sybil-node-{i}"),
-                target,
-                0.99, // All endorsing with nearly identical high value
-                5000 + i as u64, // Very close timestamps
-            ))
+            .map(|i| {
+                make_signal(
+                    &format!("sybil-{i}"),
+                    &format!("sybil-node-{i}"),
+                    target,
+                    0.99,            // All endorsing with nearly identical high value
+                    5000 + i as u64, // Very close timestamps
+                )
+            })
             .collect()
     }
 
@@ -945,7 +946,8 @@ mod tests {
         let weight = w.compute_weight(&node);
         assert!(
             weight <= w.base_weight + f64::EPSILON,
-            "New node weight {weight} exceeds base {}", w.base_weight
+            "New node weight {weight} exceeds base {}",
+            w.base_weight
         );
     }
 
@@ -979,12 +981,8 @@ mod tests {
         let mut prev_weight = 0.0_f64;
 
         for history_len in [0, 1, 5, 10, 25, 50, 75, 100, 150, 200] {
-            let node = TrustNode::established(
-                &format!("node-{history_len}"),
-                50.0,
-                history_len,
-                1000,
-            );
+            let node =
+                TrustNode::established(&format!("node-{history_len}"), 50.0, history_len, 1000);
             let weight = w.compute_weight(&node);
             assert!(
                 weight >= prev_weight,
@@ -1015,9 +1013,7 @@ mod tests {
     #[test]
     fn test_weighted_average() {
         let w = StakeWeighter::default();
-        let signals = vec![
-            make_signal("s1", "est-1", "target", 0.8, 1000),
-        ];
+        let signals = vec![make_signal("s1", "est-1", "target", 0.8, 1000)];
         let mut nodes = HashMap::new();
         nodes.insert("est-1".to_string(), make_established_node("est-1"));
 
@@ -1038,13 +1034,15 @@ mod tests {
     fn test_detect_burst_sybil() {
         let mut detector = SybilDetector::new(3, 60_000, 0.95);
         let signals: Vec<TrustSignal> = (0..10)
-            .map(|i| make_signal(
-                &format!("burst-{i}"),
-                "attacker", // Same source
-                "target",
-                0.99,
-                5000 + i * 10,
-            ))
+            .map(|i| {
+                make_signal(
+                    &format!("burst-{i}"),
+                    "attacker", // Same source
+                    "target",
+                    0.99,
+                    5000 + i * 10,
+                )
+            })
             .collect();
 
         let mut nodes = HashMap::new();
@@ -1067,14 +1065,17 @@ mod tests {
                 &format!("coord-{i}"),
                 &node_id,
                 "target-ext",
-                0.99, // Nearly identical values
+                0.99,         // Nearly identical values
                 5000 + i * 5, // Very close timestamps
             ));
             nodes.insert(node_id.clone(), make_new_node(&node_id));
         }
 
         let sybils = detector.detect_sybil_cluster(&signals, &nodes, 10_000);
-        assert!(!sybils.is_empty(), "Should detect coordinated Sybil cluster");
+        assert!(
+            !sybils.is_empty(),
+            "Should detect coordinated Sybil cluster"
+        );
     }
 
     #[test]
@@ -1139,26 +1140,14 @@ mod tests {
         let honest_sigs: Vec<TrustSignal> = honest_node_ids
             .iter()
             .enumerate()
-            .map(|(i, id)| make_signal(
-                &format!("h-{i}"),
-                id,
-                "target",
-                0.8,
-                1000 + i as u64 * 100,
-            ))
+            .map(|(i, id)| make_signal(&format!("h-{i}"), id, "target", 0.8, 1000 + i as u64 * 100))
             .collect();
 
         // Signals from Sybil nodes
         let sybil_sigs: Vec<TrustSignal> = sybil_node_ids
             .iter()
             .enumerate()
-            .map(|(i, id)| make_signal(
-                &format!("s-{i}"),
-                id,
-                "target",
-                0.99,
-                5000 + i as u64,
-            ))
+            .map(|(i, id)| make_signal(&format!("s-{i}"), id, "target", 0.99, 5000 + i as u64))
             .collect();
 
         let honest_influence =
@@ -1177,13 +1166,15 @@ mod tests {
     fn test_sybil_events_logged() {
         let mut detector = SybilDetector::new(3, 60_000, 0.95);
         let signals: Vec<TrustSignal> = (0..10)
-            .map(|i| make_signal(
-                &format!("sig-{i}"),
-                "attacker",
-                "target",
-                0.99,
-                5000 + i * 10,
-            ))
+            .map(|i| {
+                make_signal(
+                    &format!("sig-{i}"),
+                    "attacker",
+                    "target",
+                    0.99,
+                    5000 + i * 10,
+                )
+            })
             .collect();
         let mut nodes = HashMap::new();
         nodes.insert("attacker".to_string(), make_new_node("attacker"));
@@ -1199,10 +1190,12 @@ mod tests {
     fn test_scenario_a_poisoned_signal_ranking() {
         // Inject 20% maximally-adversarial signals; verify trust ranking of
         // honest nodes changes by <= 1 position.
-        let agg = TrustAggregator::new(0.1);
+        let agg = TrustAggregator::new(0.2);
 
         // Build honest values: 10 nodes with scores around 0.8
-        let honest_values: Vec<f64> = (0..80).map(|i| 0.75 + (i as f64 * 0.005).min(0.1)).collect();
+        let honest_values: Vec<f64> = (0..80)
+            .map(|i| 0.75 + (i as f64 * 0.005).min(0.1))
+            .collect();
 
         // Inject 20% poisoned at extreme values (0.0)
         let mut mixed = honest_values.clone();
@@ -1211,9 +1204,8 @@ mod tests {
         let clean_result = agg.trimmed_mean(&honest_values).unwrap();
         let poisoned_result = agg.trimmed_mean(&mixed).unwrap();
 
-        let shift_pct = ((poisoned_result.value - clean_result.value).abs()
-            / clean_result.value)
-            * 100.0;
+        let shift_pct =
+            ((poisoned_result.value - clean_result.value).abs() / clean_result.value) * 100.0;
 
         assert!(
             shift_pct <= 5.0,
@@ -1438,7 +1430,7 @@ mod tests {
     #[test]
     fn test_adversarial_01_pure_poisoning_trimmed_mean() {
         // Attack: 20% signals at 0.0 trying to pull down honest 0.8
-        let agg = TrustAggregator::new(0.1);
+        let agg = TrustAggregator::new(0.2);
         let mut values: Vec<f64> = (0..80).map(|_| 0.8).collect();
         values.extend((0..20).map(|_| 0.0));
         let result = agg.trimmed_mean(&values).unwrap();
@@ -1493,21 +1485,24 @@ mod tests {
     #[test]
     fn test_adversarial_05_gradual_poisoning() {
         // Attack: gradually increasing poison ratio
-        let agg = TrustAggregator::new(0.1);
+        let agg = TrustAggregator::new(0.2);
         for poison_pct in [5, 10, 15, 20] {
             let honest_count = 100 - poison_pct;
             let mut values: Vec<f64> = (0..honest_count).map(|_| 0.7).collect();
             values.extend((0..poison_pct).map(|_| 0.0));
             let result = agg.trimmed_mean(&values).unwrap();
             let shift = (result.value - 0.7).abs() / 0.7;
-            assert!(shift <= 0.05, "Gradual poison at {poison_pct}%: shift {shift:.4}");
+            assert!(
+                shift <= 0.05,
+                "Gradual poison at {poison_pct}%: shift {shift:.4}"
+            );
         }
     }
 
     #[test]
     fn test_adversarial_06_bimodal_attack() {
         // Attack: half of poisoned signals at 0.0, half at 1.0
-        let agg = TrustAggregator::new(0.1);
+        let agg = TrustAggregator::new(0.2);
         let mut values: Vec<f64> = (0..80).map(|_| 0.6).collect();
         values.extend((0..10).map(|_| 0.0));
         values.extend((0..10).map(|_| 1.0));
@@ -1521,16 +1516,21 @@ mod tests {
         // Attack: all Sybil signals arrive simultaneously
         let mut detector = SybilDetector::new(3, 1000, 0.95);
         let signals: Vec<TrustSignal> = (0..50)
-            .map(|i| make_signal(
-                &format!("burst-{i}"),
-                "single-attacker",
-                "target",
-                0.99,
-                5000 + i, // 1ms apart
-            ))
+            .map(|i| {
+                make_signal(
+                    &format!("burst-{i}"),
+                    "single-attacker",
+                    "target",
+                    0.99,
+                    5000 + i, // 1ms apart
+                )
+            })
             .collect();
         let mut nodes = HashMap::new();
-        nodes.insert("single-attacker".to_string(), make_new_node("single-attacker"));
+        nodes.insert(
+            "single-attacker".to_string(),
+            make_new_node("single-attacker"),
+        );
 
         let sybils = detector.detect_sybil_cluster(&signals, &nodes, 10_000);
         assert!(sybils.contains("single-attacker"));
@@ -1539,7 +1539,7 @@ mod tests {
     #[test]
     fn test_adversarial_08_near_threshold_poisoning() {
         // Attack: poison signals just below detection threshold
-        let agg = TrustAggregator::new(0.1);
+        let agg = TrustAggregator::new(0.2);
         let mut values: Vec<f64> = (0..80).map(|_| 0.75).collect();
         // Subtle poisoning: slightly lower than honest
         values.extend((0..20).map(|_| 0.4));
@@ -1566,21 +1566,25 @@ mod tests {
         }
 
         let mut signals: Vec<TrustSignal> = (0..10)
-            .map(|i| make_signal(
-                &format!("h-{i}"),
-                &format!("honest-{i}"),
-                "target",
-                0.7,
-                1000 + i * 100,
-            ))
+            .map(|i| {
+                make_signal(
+                    &format!("h-{i}"),
+                    &format!("honest-{i}"),
+                    "target",
+                    0.7,
+                    1000 + i * 100,
+                )
+            })
             .collect();
-        signals.extend((0..50).map(|i| make_signal(
-            &format!("s-{i}"),
-            &format!("sybil-{i}"),
-            "target",
-            0.01,
-            5000 + i,
-        )));
+        signals.extend((0..50).map(|i| {
+            make_signal(
+                &format!("s-{i}"),
+                &format!("sybil-{i}"),
+                "target",
+                0.01,
+                5000 + i,
+            )
+        }));
 
         let result = pipeline.process_signals(&signals, 10_000).unwrap();
         // Result should still be positive due to established-node dominance

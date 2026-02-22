@@ -536,8 +536,9 @@ fn derive_checkpoint_id(
     hasher.update(epoch.to_le_bytes());
     hasher.update([0x00]);
     hasher.update(progress_state_hash.as_bytes());
-    hasher.update([0x00]);
-    hasher.update(previous_checkpoint_hash.unwrap_or("ROOT").as_bytes());
+    // NOTE: previous_checkpoint_hash is intentionally excluded from the ID
+    // derivation so that saving the same state twice (idempotent save)
+    // produces the same checkpoint_id regardless of chain position.
     format!("{:x}", hasher.finalize())
 }
 

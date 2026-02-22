@@ -298,7 +298,10 @@ impl PolicyChangeEngine {
         signature: ApprovalSignature,
     ) -> Result<ProposalState, PolicyChangeError> {
         let record = self.proposals.get_mut(proposal_id).ok_or_else(|| {
-            PolicyChangeError::new(ERR_PROPOSAL_NOT_FOUND, format!("Proposal not found: {proposal_id}"))
+            PolicyChangeError::new(
+                ERR_PROPOSAL_NOT_FOUND,
+                format!("Proposal not found: {proposal_id}"),
+            )
         })?;
 
         // Check valid state for approval.
@@ -334,16 +337,17 @@ impl PolicyChangeEngine {
             .iter()
             .all(|req| unique_approvers.iter().any(|a| *a == req));
 
+        // Verify key-role separation EARLY: proposer cannot be sole approver.
+        if unique_approvers.len() == 1 && *unique_approvers[0] == record.proposal.proposed_by {
+            return Err(PolicyChangeError::new(
+                ERR_SOLE_APPROVER,
+                "Proposer cannot be the sole approver",
+            ));
+        }
+
         let quorum_met = non_proposer_approvals >= self.min_quorum && required_met;
 
         if quorum_met {
-            // Verify key-role separation.
-            if unique_approvers.len() == 1 && *unique_approvers[0] == record.proposal.proposed_by {
-                return Err(PolicyChangeError::new(
-                    ERR_SOLE_APPROVER,
-                    "Proposer cannot be the sole approver",
-                ));
-            }
             record.state = ProposalState::Approved;
         }
 
@@ -374,7 +378,10 @@ impl PolicyChangeEngine {
         timestamp: &str,
     ) -> Result<(), PolicyChangeError> {
         let record = self.proposals.get_mut(proposal_id).ok_or_else(|| {
-            PolicyChangeError::new(ERR_PROPOSAL_NOT_FOUND, format!("Proposal not found: {proposal_id}"))
+            PolicyChangeError::new(
+                ERR_PROPOSAL_NOT_FOUND,
+                format!("Proposal not found: {proposal_id}"),
+            )
         })?;
 
         let prev_state = record.state;
@@ -402,13 +409,19 @@ impl PolicyChangeEngine {
         timestamp: &str,
     ) -> Result<ChangeEvidencePackage, PolicyChangeError> {
         let record = self.proposals.get_mut(proposal_id).ok_or_else(|| {
-            PolicyChangeError::new(ERR_PROPOSAL_NOT_FOUND, format!("Proposal not found: {proposal_id}"))
+            PolicyChangeError::new(
+                ERR_PROPOSAL_NOT_FOUND,
+                format!("Proposal not found: {proposal_id}"),
+            )
         })?;
 
         if record.state != ProposalState::Approved {
             return Err(PolicyChangeError::new(
                 ERR_INVALID_STATE_TRANSITION,
-                format!("Cannot activate in state {:?}, must be Approved", record.state),
+                format!(
+                    "Cannot activate in state {:?}, must be Approved",
+                    record.state
+                ),
             ));
         }
 
@@ -448,13 +461,19 @@ impl PolicyChangeEngine {
         timestamp: &str,
     ) -> Result<ProposalRecord, PolicyChangeError> {
         let record = self.proposals.get_mut(proposal_id).ok_or_else(|| {
-            PolicyChangeError::new(ERR_PROPOSAL_NOT_FOUND, format!("Proposal not found: {proposal_id}"))
+            PolicyChangeError::new(
+                ERR_PROPOSAL_NOT_FOUND,
+                format!("Proposal not found: {proposal_id}"),
+            )
         })?;
 
         if record.state != ProposalState::Applied {
             return Err(PolicyChangeError::new(
                 ERR_INVALID_STATE_TRANSITION,
-                format!("Cannot rollback in state {:?}, must be Applied", record.state),
+                format!(
+                    "Cannot rollback in state {:?}, must be Applied",
+                    record.state
+                ),
             ));
         }
 
@@ -674,7 +693,8 @@ mod tests {
                 old_value: "300".to_owned(),
                 new_value: "600".to_owned(),
             }],
-            justification: "Increasing grace period for data export during quarantine operations".to_owned(),
+            justification: "Increasing grace period for data export during quarantine operations"
+                .to_owned(),
             risk_assessment: RiskAssessment::Medium,
             required_approvers: approvers.into_iter().map(|s| s.to_owned()).collect(),
             rollback_of: None,
@@ -745,7 +765,9 @@ mod tests {
         let proposal = make_proposal("p-001", "alice", vec!["alice"]);
         engine.propose(proposal).unwrap();
 
-        let err = engine.approve("p-001", make_signature("alice")).unwrap_err();
+        let err = engine
+            .approve("p-001", make_signature("alice"))
+            .unwrap_err();
         assert_eq!(err.code, ERR_SOLE_APPROVER);
     }
 
@@ -757,7 +779,9 @@ mod tests {
         engine.approve("p-001", make_signature("bob")).unwrap();
         engine.approve("p-001", make_signature("charlie")).unwrap();
 
-        let evidence = engine.activate("p-001", "admin", "2026-01-15T02:00:00Z").unwrap();
+        let evidence = engine
+            .activate("p-001", "admin", "2026-01-15T02:00:00Z")
+            .unwrap();
         assert_eq!(evidence.proposal_id, "p-001");
         assert_eq!(evidence.approval_chain.len(), 2);
         assert_eq!(engine.total_activated(), 1);
@@ -772,7 +796,9 @@ mod tests {
         let proposal = make_proposal("p-001", "alice", vec!["bob"]);
         engine.propose(proposal).unwrap();
 
-        let err = engine.activate("p-001", "admin", "2026-01-15T02:00:00Z").unwrap_err();
+        let err = engine
+            .activate("p-001", "admin", "2026-01-15T02:00:00Z")
+            .unwrap_err();
         assert_eq!(err.code, ERR_INVALID_STATE_TRANSITION);
     }
 
@@ -782,7 +808,14 @@ mod tests {
         let proposal = make_proposal("p-001", "alice", vec!["bob"]);
         engine.propose(proposal).unwrap();
 
-        engine.reject("p-001", "reviewer", "Does not meet safety requirements", "2026-01-15T01:30:00Z").unwrap();
+        engine
+            .reject(
+                "p-001",
+                "reviewer",
+                "Does not meet safety requirements",
+                "2026-01-15T01:30:00Z",
+            )
+            .unwrap();
         let record = engine.get_proposal("p-001").unwrap();
         assert_eq!(record.state, ProposalState::Rejected);
         assert!(record.rejection_reason.is_some());
@@ -795,16 +828,23 @@ mod tests {
         engine.propose(proposal).unwrap();
         engine.approve("p-001", make_signature("bob")).unwrap();
         engine.approve("p-001", make_signature("charlie")).unwrap();
-        engine.activate("p-001", "admin", "2026-01-15T02:00:00Z").unwrap();
+        engine
+            .activate("p-001", "admin", "2026-01-15T02:00:00Z")
+            .unwrap();
 
-        let rollback_record = engine.rollback("p-001", "admin", "p-rollback-001", "2026-01-15T03:00:00Z").unwrap();
+        let rollback_record = engine
+            .rollback("p-001", "admin", "p-rollback-001", "2026-01-15T03:00:00Z")
+            .unwrap();
 
         // Original marked as rolled back.
         let original = engine.get_proposal("p-001").unwrap();
         assert_eq!(original.state, ProposalState::RolledBack);
 
         // Rollback proposal has inverse diff.
-        assert_eq!(rollback_record.proposal.rollback_of, Some("p-001".to_owned()));
+        assert_eq!(
+            rollback_record.proposal.rollback_of,
+            Some("p-001".to_owned())
+        );
         assert_eq!(rollback_record.proposal.policy_diff[0].old_value, "600");
         assert_eq!(rollback_record.proposal.policy_diff[0].new_value, "300");
         assert_eq!(engine.total_rollbacks(), 1);
@@ -816,7 +856,9 @@ mod tests {
         let proposal = make_proposal("p-001", "alice", vec!["bob"]);
         engine.propose(proposal).unwrap();
 
-        let err = engine.rollback("p-001", "admin", "p-rb", "2026-01-15T03:00:00Z").unwrap_err();
+        let err = engine
+            .rollback("p-001", "admin", "p-rb", "2026-01-15T03:00:00Z")
+            .unwrap_err();
         assert_eq!(err.code, ERR_INVALID_STATE_TRANSITION);
     }
 
@@ -827,7 +869,9 @@ mod tests {
         engine.propose(proposal).unwrap();
         engine.approve("p-001", make_signature("bob")).unwrap();
         engine.approve("p-001", make_signature("charlie")).unwrap();
-        engine.activate("p-001", "admin", "2026-01-15T02:00:00Z").unwrap();
+        engine
+            .activate("p-001", "admin", "2026-01-15T02:00:00Z")
+            .unwrap();
 
         assert!(engine.verify_audit_chain().unwrap());
         assert!(engine.audit_ledger().len() >= 4);
@@ -899,7 +943,9 @@ mod tests {
         engine.approve("p-001", make_signature("bob")).unwrap();
         engine.approve("p-001", make_signature("charlie")).unwrap();
 
-        let evidence = engine.activate("p-001", "admin", "2026-01-15T02:00:00Z").unwrap();
+        let evidence = engine
+            .activate("p-001", "admin", "2026-01-15T02:00:00Z")
+            .unwrap();
         assert!(!evidence.policy_diff.is_empty());
         assert_eq!(evidence.approval_signatures.len(), 2);
         assert_eq!(evidence.approval_chain, vec!["bob", "charlie"]);
@@ -922,11 +968,21 @@ mod tests {
         let state = engine.approve("p-full", make_signature("charlie")).unwrap();
         assert_eq!(state, ProposalState::Approved);
 
-        engine.activate("p-full", "admin", "2026-01-15T02:00:00Z").unwrap();
-        assert_eq!(engine.get_proposal("p-full").unwrap().state, ProposalState::Applied);
+        engine
+            .activate("p-full", "admin", "2026-01-15T02:00:00Z")
+            .unwrap();
+        assert_eq!(
+            engine.get_proposal("p-full").unwrap().state,
+            ProposalState::Applied
+        );
 
-        engine.rollback("p-full", "admin", "p-rb-full", "2026-01-15T03:00:00Z").unwrap();
-        assert_eq!(engine.get_proposal("p-full").unwrap().state, ProposalState::RolledBack);
+        engine
+            .rollback("p-full", "admin", "p-rb-full", "2026-01-15T03:00:00Z")
+            .unwrap();
+        assert_eq!(
+            engine.get_proposal("p-full").unwrap().state,
+            ProposalState::RolledBack
+        );
     }
 
     #[test]

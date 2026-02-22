@@ -24,9 +24,8 @@
 //!   strictly monotonically increasing.
 
 use crate::security::adversary_graph::{
-    AdversaryGraph, EvidenceEvent, EntityId, EntityType,
-    PolicyThreshold, QuarantineAction, SignedEvidenceEntry,
-    ADV_005_ACTION_TRIGGERED, ADV_008_SIGNED_EVIDENCE,
+    ADV_005_ACTION_TRIGGERED, ADV_008_SIGNED_EVIDENCE, AdversaryGraph, EntityId, EntityType,
+    EvidenceEvent, PolicyThreshold, QuarantineAction, SignedEvidenceEntry,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -150,7 +149,8 @@ impl QuarantineController {
         timestamp: u64,
         trace_id: &str,
     ) -> Result<(), String> {
-        self.graph.add_edge(from, to, relationship, timestamp, trace_id)
+        self.graph
+            .add_edge(from, to, relationship, timestamp, trace_id)
     }
 
     /// Submit evidence against an entity. The evidence is signed, logged,
@@ -224,8 +224,8 @@ impl QuarantineController {
         let seq = self.next_sequence;
         self.next_sequence += 1;
 
-        let canonical = serde_json::to_string(event)
-            .map_err(|e| format!("serialization error: {e}"))?;
+        let canonical =
+            serde_json::to_string(event).map_err(|e| format!("serialization error: {e}"))?;
         let signature = self.hmac_sha256(&canonical);
 
         Ok(SignedEvidenceEntry {
@@ -297,14 +297,16 @@ mod tests {
     #[test]
     fn controller_registers_entities() {
         let mut c = make_controller();
-        c.register_entity("pub-1".into(), EntityType::Publisher, 0, "t").unwrap();
+        c.register_entity("pub-1".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
         assert_eq!(c.graph().node_count(), 1);
     }
 
     #[test]
     fn submit_evidence_signs_and_logs() {
         let mut c = make_controller();
-        c.register_entity("pub-1".into(), EntityType::Publisher, 0, "t").unwrap();
+        c.register_entity("pub-1".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
         let ev = evidence("pub-1", 0.5, 1);
         let (action, posterior) = c.submit_evidence(ev).unwrap();
         assert_eq!(c.evidence_count(), 1);
@@ -316,7 +318,8 @@ mod tests {
     #[test]
     fn evidence_signatures_are_verifiable() {
         let mut c = make_controller();
-        c.register_entity("ext-1".into(), EntityType::Extension, 0, "t").unwrap();
+        c.register_entity("ext-1".into(), EntityType::Extension, 0, "t")
+            .unwrap();
         let ev = evidence("ext-1", 0.3, 1);
         c.submit_evidence(ev).unwrap();
         let entry = &c.evidence_log()[0];
@@ -326,7 +329,8 @@ mod tests {
     #[test]
     fn signature_tamper_detection() {
         let mut c = make_controller();
-        c.register_entity("ext-1".into(), EntityType::Extension, 0, "t").unwrap();
+        c.register_entity("ext-1".into(), EntityType::Extension, 0, "t")
+            .unwrap();
         let ev = evidence("ext-1", 0.3, 1);
         c.submit_evidence(ev).unwrap();
         let mut tampered = c.evidence_log()[0].clone();
@@ -344,11 +348,13 @@ mod tests {
         ];
 
         let mut c1 = make_controller();
-        c1.register_entity("dep-1".into(), EntityType::Dependency, 0, "t").unwrap();
+        c1.register_entity("dep-1".into(), EntityType::Dependency, 0, "t")
+            .unwrap();
         let (snap1, _) = c1.replay_batch(&events, "r1").unwrap();
 
         let mut c2 = make_controller();
-        c2.register_entity("dep-1".into(), EntityType::Dependency, 0, "t").unwrap();
+        c2.register_entity("dep-1".into(), EntityType::Dependency, 0, "t")
+            .unwrap();
         let (snap2, _) = c2.replay_batch(&events, "r2").unwrap();
 
         assert_eq!(snap1["dep-1"].to_bits(), snap2["dep-1"].to_bits());
@@ -357,7 +363,8 @@ mod tests {
     #[test]
     fn sequence_numbers_are_strictly_increasing() {
         let mut c = make_controller();
-        c.register_entity("n1".into(), EntityType::Publisher, 0, "t").unwrap();
+        c.register_entity("n1".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
         for i in 0..5 {
             c.submit_evidence(evidence("n1", 0.5, i)).unwrap();
         }
@@ -369,21 +376,23 @@ mod tests {
     #[test]
     fn policy_thresholds_trigger_correct_actions() {
         let mut c = make_controller();
-        c.register_entity("bad-pub".into(), EntityType::Publisher, 0, "t").unwrap();
+        c.register_entity("bad-pub".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
         // Pump up the posterior with many adverse evidence events
         let mut last_action = QuarantineAction::None;
         for i in 1..=50 {
             let (action, _posterior) = c.submit_evidence(evidence("bad-pub", 1.0, i)).unwrap();
             last_action = action;
         }
-        // After 50 fully-adverse evidence events, posterior should be very high
-        assert_eq!(last_action, QuarantineAction::Quarantine);
+        // After 50 fully-adverse events: posterior = 51/60 ≈ 0.85 → Revoke (≥0.7), not Quarantine (≥0.9).
+        assert_eq!(last_action, QuarantineAction::Revoke);
     }
 
     #[test]
     fn action_log_records_non_none_actions() {
         let mut c = make_controller();
-        c.register_entity("pub-x".into(), EntityType::Publisher, 0, "t").unwrap();
+        c.register_entity("pub-x".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
         // Submit enough adverse evidence to trigger at least throttle
         for i in 1..=10 {
             c.submit_evidence(evidence("pub-x", 1.0, i)).unwrap();
@@ -397,7 +406,8 @@ mod tests {
     #[test]
     fn state_snapshot_is_serializable() {
         let mut c = make_controller();
-        c.register_entity("n1".into(), EntityType::Extension, 0, "t").unwrap();
+        c.register_entity("n1".into(), EntityType::Extension, 0, "t")
+            .unwrap();
         c.submit_evidence(evidence("n1", 0.5, 1)).unwrap();
         let snap = c.state_snapshot();
         let json = serde_json::to_string_pretty(&snap).unwrap();
@@ -408,8 +418,10 @@ mod tests {
     #[test]
     fn trust_edge_registration() {
         let mut c = make_controller();
-        c.register_entity("a".into(), EntityType::Publisher, 0, "t").unwrap();
-        c.register_entity("b".into(), EntityType::Extension, 0, "t").unwrap();
+        c.register_entity("a".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
+        c.register_entity("b".into(), EntityType::Extension, 0, "t")
+            .unwrap();
         c.register_trust_edge("a".into(), "b".into(), "publishes".into(), 1, "t")
             .unwrap();
         assert_eq!(c.graph().edge_count(), 1);
@@ -436,8 +448,10 @@ mod tests {
     #[test]
     fn replay_batch_with_multiple_entities() {
         let mut c = make_controller();
-        c.register_entity("a".into(), EntityType::Publisher, 0, "t").unwrap();
-        c.register_entity("b".into(), EntityType::Extension, 0, "t").unwrap();
+        c.register_entity("a".into(), EntityType::Publisher, 0, "t")
+            .unwrap();
+        c.register_entity("b".into(), EntityType::Extension, 0, "t")
+            .unwrap();
         let events = vec![
             evidence("a", 0.8, 1),
             evidence("b", 0.2, 2),

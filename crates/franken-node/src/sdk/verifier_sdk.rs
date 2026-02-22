@@ -331,10 +331,7 @@ impl VerifierSdk {
             detail: if hash_match {
                 "hash matches".to_string()
             } else {
-                format!(
-                    "expected={}, actual={}",
-                    request.artifact_hash, computed
-                )
+                format!("expected={}, actual={}", request.artifact_hash, computed)
             },
         });
 
@@ -360,10 +357,16 @@ impl VerifierSdk {
         let binding_hash = deterministic_hash(&binding_input);
 
         Ok(VerificationReport {
-            request_id: format!("vreq-{}", deterministic_hash(&request.artifact_id)[..12].to_string()),
+            request_id: format!(
+                "vreq-{}",
+                deterministic_hash(&request.artifact_id)[..24].to_string()
+            ),
             verdict,
             evidence,
-            trace_id: format!("vtrc-{}", deterministic_hash(&binding_input)[..12].to_string()),
+            trace_id: format!(
+                "vtrc-{}",
+                deterministic_hash(&binding_input)[..24].to_string()
+            ),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
             verifier_identity: self.config.verifier_identity.clone(),
@@ -490,10 +493,16 @@ impl VerifierSdk {
         let binding_hash = deterministic_hash(&binding_input);
 
         Ok(VerificationReport {
-            request_id: format!("vcap-{}", deterministic_hash(&capsule.capsule_id)[..12].to_string()),
+            request_id: format!(
+                "vcap-{}",
+                deterministic_hash(&capsule.capsule_id)[..24].to_string()
+            ),
             verdict,
             evidence,
-            trace_id: format!("vtrc-{}", deterministic_hash(&binding_input)[..12].to_string()),
+            trace_id: format!(
+                "vtrc-{}",
+                deterministic_hash(&binding_input)[..24].to_string()
+            ),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
             verifier_identity: self.config.verifier_identity.clone(),
@@ -509,9 +518,7 @@ impl VerifierSdk {
         reports: &[VerificationReport],
     ) -> Result<VerificationReport, SdkError> {
         if reports.is_empty() {
-            return Err(SdkError::BrokenChain(
-                "chain is empty".to_string(),
-            ));
+            return Err(SdkError::BrokenChain("chain is empty".to_string()));
         }
 
         let mut evidence = Vec::new();
@@ -622,10 +629,16 @@ impl VerifierSdk {
         let chain_binding = deterministic_hash(&chain_binding_parts.join("|"));
 
         Ok(VerificationReport {
-            request_id: format!("vchn-{}", deterministic_hash(&chain_binding)[..12].to_string()),
+            request_id: format!(
+                "vchn-{}",
+                deterministic_hash(&chain_binding)[..24].to_string()
+            ),
             verdict,
             evidence,
-            trace_id: format!("vtrc-{}", deterministic_hash(&format!("chain:{chain_binding}"))[..12].to_string()),
+            trace_id: format!(
+                "vtrc-{}",
+                deterministic_hash(&format!("chain:{chain_binding}"))[..24].to_string()
+            ),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
             verifier_identity: self.config.verifier_identity.clone(),
@@ -640,8 +653,8 @@ impl VerifierSdk {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::replay_capsule::*;
+    use super::*;
 
     fn test_sdk() -> VerifierSdk {
         VerifierSdk::with_defaults()
@@ -756,7 +769,11 @@ mod tests {
         let req = valid_request();
         let report = sdk.verify_artifact(&req).unwrap();
         assert!(report.evidence.len() >= 4);
-        let names: Vec<&str> = report.evidence.iter().map(|e| e.check_name.as_str()).collect();
+        let names: Vec<&str> = report
+            .evidence
+            .iter()
+            .map(|e| e.check_name.as_str())
+            .collect();
         assert!(names.contains(&"artifact_id_present"));
         assert!(names.contains(&"artifact_hash_format"));
         assert!(names.contains(&"claims_valid"));
@@ -885,7 +902,11 @@ mod tests {
         let sdk = test_sdk();
         let cap = valid_capsule();
         let report = sdk.verify_capsule(&cap).unwrap();
-        let names: Vec<&str> = report.evidence.iter().map(|e| e.check_name.as_str()).collect();
+        let names: Vec<&str> = report
+            .evidence
+            .iter()
+            .map(|e| e.check_name.as_str())
+            .collect();
         assert!(names.contains(&"capsule_id_present"));
         assert!(names.contains(&"format_version_valid"));
         assert!(names.contains(&"inputs_non_empty"));

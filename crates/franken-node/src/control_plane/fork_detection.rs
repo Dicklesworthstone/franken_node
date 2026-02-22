@@ -58,10 +58,7 @@ pub enum ForkDetectionError {
         actual_parent: String,
     },
     /// Epoch gap exceeds 1 between replicas.
-    RfdGapDetected {
-        local_epoch: u64,
-        remote_epoch: u64,
-    },
+    RfdGapDetected { local_epoch: u64, remote_epoch: u64 },
     /// Marker not found in stream at claimed epoch.
     RfdMarkerNotFound {
         marker_id: String,
@@ -245,9 +242,7 @@ pub enum ReconciliationSuggestion {
         remote_hash: String,
     },
     /// Rollback detected: full proof for operator review.
-    InvestigateRollback {
-        proof: RollbackProof,
-    },
+    InvestigateRollback { proof: RollbackProof },
 }
 
 // ---------------------------------------------------------------------------
@@ -336,10 +331,7 @@ impl DivergenceDetector {
         local: &StateVector,
         remote: &StateVector,
     ) -> (DetectionResult, Option<RollbackProof>) {
-        let trace_id = format!(
-            "rfd-{}-{}-{}",
-            local.node_id, remote.node_id, local.epoch
-        );
+        let trace_id = format!("rfd-{}-{}-{}", local.node_id, remote.node_id, local.epoch);
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -366,6 +358,21 @@ impl DivergenceDetector {
         // Check 1 & 2: epochs match
         if local.epoch == remote.epoch {
             if local.state_hash == remote.state_hash {
+                // Same state but different parent chain → rollback detected.
+                if local.parent_state_hash != remote.parent_state_hash {
+                    self.halted = true;
+                    let proof = RollbackProof {
+                        local_state: local.clone(),
+                        remote_state: remote.clone(),
+                        expected_parent_hash: local.parent_state_hash.clone(),
+                        actual_parent_hash: remote.parent_state_hash.clone(),
+                        detection_timestamp: now,
+                        trace_id,
+                        detection_result: DetectionResult::RollbackDetected,
+                    };
+                    self.last_result = Some(DetectionResult::RollbackDetected);
+                    return (DetectionResult::RollbackDetected, Some(proof));
+                }
                 self.last_result = Some(DetectionResult::Converged);
                 self.halted = false;
                 return (DetectionResult::Converged, None);
@@ -439,10 +446,7 @@ impl DivergenceDetector {
             remote_epoch: remote.epoch,
             local_state_hash: local.state_hash.clone(),
             remote_state_hash: remote.state_hash.clone(),
-            trace_id: format!(
-                "rfd-{}-{}-{}",
-                local.node_id, remote.node_id, local.epoch
-            ),
+            trace_id: format!("rfd-{}-{}-{}", local.node_id, remote.node_id, local.epoch),
             node_id: local.node_id.clone(),
             epoch_id: local.epoch,
             detection_latency_ms: None,
@@ -529,10 +533,7 @@ impl RollbackDetector {
     }
 
     /// Feed a new state vector. Returns Err with RollbackProof if rollback detected.
-    pub fn feed(
-        &mut self,
-        sv: StateVector,
-    ) -> Result<(), ForkDetectionError> {
+    pub fn feed(&mut self, sv: StateVector) -> Result<(), ForkDetectionError> {
         if let Some(ref last) = self.last_known {
             // The new state's parent_state_hash must match the last state's state_hash
             if sv.epoch > last.epoch && sv.parent_state_hash != last.state_hash {
@@ -603,12 +604,13 @@ impl MarkerProofVerifier {
         marker_id: &str,
         claimed_epoch: u64,
     ) -> Result<(), ForkDetectionError> {
-        let marker = stream.get(claimed_epoch).ok_or_else(|| {
-            ForkDetectionError::RfdMarkerNotFound {
-                marker_id: marker_id.to_string(),
-                claimed_epoch,
-            }
-        })?;
+        let marker =
+            stream
+                .get(claimed_epoch)
+                .ok_or_else(|| ForkDetectionError::RfdMarkerNotFound {
+                    marker_id: marker_id.to_string(),
+                    claimed_epoch,
+                })?;
 
         if marker.marker_hash != marker_id {
             return Err(ForkDetectionError::RfdMarkerNotFound {
@@ -667,7 +669,10 @@ mod tests {
         assert_eq!(DetectionResult::Converged.label(), "CONVERGED");
         assert_eq!(DetectionResult::Forked.label(), "FORKED");
         assert_eq!(DetectionResult::GapDetected.label(), "GAP_DETECTED");
-        assert_eq!(DetectionResult::RollbackDetected.label(), "ROLLBACK_DETECTED");
+        assert_eq!(
+            DetectionResult::RollbackDetected.label(),
+            "ROLLBACK_DETECTED"
+        );
     }
 
     #[test]
@@ -947,9 +952,15 @@ mod tests {
     #[test]
     fn reconciliation_no_action_for_converged() {
         let sv1 = make_sv(1, "same", "p", "n1");
-        let sv2 = StateVector { node_id: "n2".to_string(), ..sv1.clone() };
+        let sv2 = StateVector {
+            node_id: "n2".to_string(),
+            ..sv1.clone()
+        };
         let suggestion = DivergenceDetector::suggest_reconciliation(
-            &sv1, &sv2, &DetectionResult::Converged, None,
+            &sv1,
+            &sv2,
+            &DetectionResult::Converged,
+            None,
         );
         assert_eq!(suggestion, ReconciliationSuggestion::NoAction);
     }
@@ -959,7 +970,10 @@ mod tests {
         let sv1 = make_sv(3, "a", "p", "n1");
         let sv2 = make_sv(10, "b", "p2", "n2");
         let suggestion = DivergenceDetector::suggest_reconciliation(
-            &sv1, &sv2, &DetectionResult::GapDetected, None,
+            &sv1,
+            &sv2,
+            &DetectionResult::GapDetected,
+            None,
         );
         match suggestion {
             ReconciliationSuggestion::FillGap {
@@ -977,9 +991,8 @@ mod tests {
     fn reconciliation_resolve_conflict() {
         let sv1 = make_sv(5, "fa", "p", "n1");
         let sv2 = make_sv(5, "fb", "p", "n2");
-        let suggestion = DivergenceDetector::suggest_reconciliation(
-            &sv1, &sv2, &DetectionResult::Forked, None,
-        );
+        let suggestion =
+            DivergenceDetector::suggest_reconciliation(&sv1, &sv2, &DetectionResult::Forked, None);
         match suggestion {
             ReconciliationSuggestion::ResolveConflict { epoch, .. } => {
                 assert_eq!(epoch, 5);
@@ -1007,7 +1020,10 @@ mod tests {
             &DetectionResult::RollbackDetected,
             Some(proof),
         );
-        matches!(suggestion, ReconciliationSuggestion::InvestigateRollback { .. });
+        matches!(
+            suggestion,
+            ReconciliationSuggestion::InvestigateRollback { .. }
+        );
     }
 
     // ---- RollbackProof serialization ----
@@ -1261,8 +1277,14 @@ mod tests {
 
     #[test]
     fn event_codes_defined() {
-        assert_eq!(event_codes::RFD_DIVERGENCE_DETECTED, "RFD_DIVERGENCE_DETECTED");
-        assert_eq!(event_codes::RFD_CONVERGENCE_VERIFIED, "RFD_CONVERGENCE_VERIFIED");
+        assert_eq!(
+            event_codes::RFD_DIVERGENCE_DETECTED,
+            "RFD_DIVERGENCE_DETECTED"
+        );
+        assert_eq!(
+            event_codes::RFD_CONVERGENCE_VERIFIED,
+            "RFD_CONVERGENCE_VERIFIED"
+        );
         assert_eq!(event_codes::RFD_MARKER_VERIFIED, "RFD_MARKER_VERIFIED");
         assert_eq!(
             event_codes::RFD_RECONCILIATION_SUGGESTED,
@@ -1377,7 +1399,11 @@ mod tests {
         // Epochs 0-49 should be converged
         for i in 0..50 {
             let (result, _) = detector.compare(&local_chain[i as usize], &remote_chain[i as usize]);
-            assert_eq!(result, DetectionResult::Converged, "epoch {i} should converge");
+            assert_eq!(
+                result,
+                DetectionResult::Converged,
+                "epoch {i} should converge"
+            );
             detector.operator_reset(); // reset halt between checks for this test
         }
 

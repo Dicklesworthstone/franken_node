@@ -6,7 +6,7 @@ use sha2::{Digest, Sha256};
 use std::cmp::Ordering;
 use std::fs;
 
-const FIXTURE_PATH: &str = "artifacts/10.17/adversary_graph_state.json";
+const FIXTURE_REL: &str = "artifacts/10.17/adversary_graph_state.json";
 
 #[derive(Debug, Deserialize)]
 struct FixtureState {
@@ -43,11 +43,31 @@ struct ActionEntry {
     evidence_signature: String,
 }
 
+fn fixture_path() -> std::path::PathBuf {
+    // Resolve relative to CARGO_MANIFEST_DIR to work reliably regardless of
+    // the test runner's CWD (local builds vs remote rch workers).
+    let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut root = manifest.to_path_buf();
+    loop {
+        let candidate = root.join(FIXTURE_REL);
+        if candidate.exists() {
+            return candidate;
+        }
+        if !root.pop() {
+            break;
+        }
+    }
+    std::path::PathBuf::from(FIXTURE_REL)
+}
+
 fn load_fixture() -> FixtureState {
-    let raw = fs::read_to_string(FIXTURE_PATH)
-        .unwrap_or_else(|err| panic!("failed reading fixture `{FIXTURE_PATH}`: {err}"));
+    let path = fixture_path();
+    let raw = fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed reading fixture `{}`: {err}", path.display()));
     serde_json::from_str::<FixtureState>(&raw)
-        .unwrap_or_else(|err| panic!("failed parsing fixture `{FIXTURE_PATH}` as json: {err}"))
+        .unwrap_or_else(|err| {
+            panic!("failed parsing fixture `{}` as json: {err}", path.display())
+        })
 }
 
 fn posterior_from_beta(alpha: u64, beta: u64) -> f64 {

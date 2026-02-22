@@ -323,8 +323,8 @@ impl TrafficPolicy {
 
     /// Look up the highest-priority rule for a given intent category.
     pub fn match_rule(&self, intent: IntentClassification) -> Option<&TrafficPolicyRule> {
-        // BTreeMap iterates in key order (ascending priority = highest priority first).
-        self.rules.values().find(|r| r.intent == intent)
+        // BTreeMap iterates in ascending key order; reverse to get highest priority first.
+        self.rules.values().rev().find(|r| r.intent == intent)
     }
 }
 
@@ -475,10 +475,7 @@ impl IntentClassifier {
 
         // Rule 9: Data mutation (POST/PUT/PATCH/DELETE).
         let method_upper = effect.method.to_uppercase();
-        if matches!(
-            method_upper.as_str(),
-            "POST" | "PUT" | "PATCH" | "DELETE"
-        ) {
+        if matches!(method_upper.as_str(), "POST" | "PUT" | "PATCH" | "DELETE") {
             return Some(IntentClassification::DataMutation);
         }
 
@@ -542,10 +539,7 @@ impl EffectsFirewall {
     }
 
     /// Add a policy override for a specific extension and intent.
-    pub fn add_override(
-        &mut self,
-        ovr: PolicyOverride,
-    ) -> Result<(), FirewallError> {
+    pub fn add_override(&mut self, ovr: PolicyOverride) -> Result<(), FirewallError> {
         if ovr.justification.is_empty() {
             return Err(FirewallError::OverrideUnauthorized(
                 "override requires non-empty justification".into(),
@@ -569,7 +563,13 @@ impl EffectsFirewall {
         effect.validate()?;
 
         // Emit FW_001: request received.
-        self.emit_event(FW_001, &effect.effect_id, trace_id, "request received", timestamp);
+        self.emit_event(
+            FW_001,
+            &effect.effect_id,
+            trace_id,
+            "request received",
+            timestamp,
+        );
 
         // INV-FW-EXTENSION-SCOPED: only filter extension traffic.
         if !effect.origin.is_extension() {
@@ -587,7 +587,13 @@ impl EffectsFirewall {
                 timestamp: timestamp.to_string(),
                 schema_version: SCHEMA_VERSION.into(),
             };
-            self.emit_event(FW_004, &effect.effect_id, trace_id, "bypass receipt generated", timestamp);
+            self.emit_event(
+                FW_004,
+                &effect.effect_id,
+                trace_id,
+                "bypass receipt generated",
+                timestamp,
+            );
             return Ok(decision);
         }
 
@@ -614,7 +620,13 @@ impl EffectsFirewall {
         let intent = match intent {
             Some(i) => i,
             None => {
-                self.emit_event(FW_009, &effect.effect_id, trace_id, "unclassifiable traffic denied", timestamp);
+                self.emit_event(
+                    FW_009,
+                    &effect.effect_id,
+                    trace_id,
+                    "unclassifiable traffic denied",
+                    timestamp,
+                );
                 let decision = FirewallDecision {
                     receipt_id: format!("rcpt-{}-denied", effect.effect_id),
                     trace_id: trace_id.to_string(),
@@ -628,16 +640,29 @@ impl EffectsFirewall {
                     timestamp: timestamp.to_string(),
                     schema_version: SCHEMA_VERSION.into(),
                 };
-                self.emit_event(FW_004, &effect.effect_id, trace_id, "deny receipt generated", timestamp);
+                self.emit_event(
+                    FW_004,
+                    &effect.effect_id,
+                    trace_id,
+                    "deny receipt generated",
+                    timestamp,
+                );
                 return Ok(decision);
             }
         };
 
         // Check for policy override.
         let override_key = (ext_id.clone(), intent);
-        if let Some(ovr) = self.overrides.get(&override_key) {
-            self.emit_event(FW_010, &effect.effect_id, trace_id, &format!("override applied: {}", ovr.justification), timestamp);
+        if let Some(ovr) = self.overrides.get(&override_key).cloned() {
             let verdict = ovr.new_verdict;
+            let justification = ovr.justification;
+            self.emit_event(
+                FW_010,
+                &effect.effect_id,
+                trace_id,
+                &format!("override applied: {justification}"),
+                timestamp,
+            );
 
             // Apply quarantine check if verdict is quarantine.
             if verdict == FirewallVerdict::Quarantine {
@@ -653,11 +678,17 @@ impl EffectsFirewall {
                 verdict,
                 event_code: FW_010.to_string(),
                 matched_rule_priority: None,
-                rationale: format!("override: {}", ovr.justification),
+                rationale: format!("override: {justification}"),
                 timestamp: timestamp.to_string(),
                 schema_version: SCHEMA_VERSION.into(),
             };
-            self.emit_event(FW_004, &effect.effect_id, trace_id, "override receipt generated", timestamp);
+            self.emit_event(
+                FW_004,
+                &effect.effect_id,
+                trace_id,
+                "override receipt generated",
+                timestamp,
+            );
             return Ok(decision);
         }
 
@@ -689,14 +720,32 @@ impl EffectsFirewall {
         // Emit pathway-specific events.
         match verdict {
             FirewallVerdict::Challenge => {
-                self.emit_event(FW_006, &effect.effect_id, trace_id, "challenge pathway", timestamp);
+                self.emit_event(
+                    FW_006,
+                    &effect.effect_id,
+                    trace_id,
+                    "challenge pathway",
+                    timestamp,
+                );
             }
             FirewallVerdict::Simulate => {
-                self.emit_event(FW_007, &effect.effect_id, trace_id, "simulate pathway", timestamp);
+                self.emit_event(
+                    FW_007,
+                    &effect.effect_id,
+                    trace_id,
+                    "simulate pathway",
+                    timestamp,
+                );
             }
             FirewallVerdict::Quarantine => {
                 self.try_quarantine(&effect.effect_id)?;
-                self.emit_event(FW_008, &effect.effect_id, trace_id, "quarantine pathway", timestamp);
+                self.emit_event(
+                    FW_008,
+                    &effect.effect_id,
+                    trace_id,
+                    "quarantine pathway",
+                    timestamp,
+                );
             }
             _ => {}
         }
@@ -726,7 +775,13 @@ impl EffectsFirewall {
         };
 
         // Emit FW_004: receipt generated.
-        self.emit_event(FW_004, &effect.effect_id, trace_id, "receipt generated", timestamp);
+        self.emit_event(
+            FW_004,
+            &effect.effect_id,
+            trace_id,
+            "receipt generated",
+            timestamp,
+        );
 
         Ok(decision)
     }
@@ -788,14 +843,8 @@ impl EffectsFirewall {
             "quarantine_capacity".into(),
             format!("{}", self.policy.quarantine_capacity),
         );
-        report.insert(
-            "audit_events".into(),
-            format!("{}", self.audit_log.len()),
-        );
-        report.insert(
-            "rule_count".into(),
-            format!("{}", self.policy.rules.len()),
-        );
+        report.insert("audit_events".into(), format!("{}", self.audit_log.len()));
+        report.insert("rule_count".into(), format!("{}", self.policy.rules.len()));
         report
     }
 }
@@ -836,7 +885,9 @@ mod tests {
     #[test]
     fn test_event_codes_exist() {
         // Verify all event code constants are defined.
-        let codes = [FW_001, FW_002, FW_003, FW_004, FW_005, FW_006, FW_007, FW_008, FW_009, FW_010];
+        let codes = [
+            FW_001, FW_002, FW_003, FW_004, FW_005, FW_006, FW_007, FW_008, FW_009, FW_010,
+        ];
         for code in &codes {
             assert!(code.starts_with("FW_"));
         }
@@ -971,7 +1022,9 @@ mod tests {
         assert_eq!(intent, None, "unclassifiable traffic should return None");
 
         let mut fw = make_firewall();
-        let decision = fw.evaluate(&effect, "trace-1", "2026-01-01T00:00:00Z").unwrap();
+        let decision = fw
+            .evaluate(&effect, "trace-1", "2026-01-01T00:00:00Z")
+            .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Deny);
         assert_eq!(decision.event_code, FW_009);
     }
@@ -1031,10 +1084,14 @@ mod tests {
         let effect = make_effect("e-det", "ext-001");
 
         let mut fw1 = make_firewall();
-        let d1 = fw1.evaluate(&effect, "trace-d", "2026-01-01T00:00:00Z").unwrap();
+        let d1 = fw1
+            .evaluate(&effect, "trace-d", "2026-01-01T00:00:00Z")
+            .unwrap();
 
         let mut fw2 = make_firewall();
-        let d2 = fw2.evaluate(&effect, "trace-d", "2026-01-01T00:00:00Z").unwrap();
+        let d2 = fw2
+            .evaluate(&effect, "trace-d", "2026-01-01T00:00:00Z")
+            .unwrap();
 
         assert_eq!(d1.receipt_id, d2.receipt_id);
         assert_eq!(d1.verdict, d2.verdict);
@@ -1121,7 +1178,9 @@ mod tests {
         fw.add_override(ovr).unwrap();
 
         let effect = make_effect("e-ovr", "ext-001");
-        let decision = fw.evaluate(&effect, "trace-o", "2026-01-01T00:00:00Z").unwrap();
+        let decision = fw
+            .evaluate(&effect, "trace-o", "2026-01-01T00:00:00Z")
+            .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Challenge);
         assert!(decision.rationale.contains("manual review required"));
     }
@@ -1145,7 +1204,8 @@ mod tests {
     fn test_audit_log_emitted() {
         let mut fw = make_firewall();
         let effect = make_effect("e-audit", "ext-001");
-        fw.evaluate(&effect, "trace-a", "2026-01-01T00:00:00Z").unwrap();
+        fw.evaluate(&effect, "trace-a", "2026-01-01T00:00:00Z")
+            .unwrap();
         let log = fw.audit_log();
         assert!(!log.is_empty());
         // Should have at least FW_001, FW_002, FW_003, FW_004.
@@ -1207,9 +1267,15 @@ mod tests {
         let mut fw = EffectsFirewall::new(policy);
         fw.register_extension("ext-001");
         let effect = make_effect("e-ch", "ext-001");
-        let decision = fw.evaluate(&effect, "t-ch", "2026-01-01T00:00:00Z").unwrap();
+        let decision = fw
+            .evaluate(&effect, "t-ch", "2026-01-01T00:00:00Z")
+            .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Challenge);
-        let codes: Vec<&str> = fw.audit_log().iter().map(|e| e.event_code.as_str()).collect();
+        let codes: Vec<&str> = fw
+            .audit_log()
+            .iter()
+            .map(|e| e.event_code.as_str())
+            .collect();
         assert!(codes.contains(&FW_006));
     }
 
@@ -1238,9 +1304,15 @@ mod tests {
         let mut fw = EffectsFirewall::new(policy);
         fw.register_extension("ext-001");
         let effect = make_effect("e-sim", "ext-001");
-        let decision = fw.evaluate(&effect, "t-sim", "2026-01-01T00:00:00Z").unwrap();
+        let decision = fw
+            .evaluate(&effect, "t-sim", "2026-01-01T00:00:00Z")
+            .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Simulate);
-        let codes: Vec<&str> = fw.audit_log().iter().map(|e| e.event_code.as_str()).collect();
+        let codes: Vec<&str> = fw
+            .audit_log()
+            .iter()
+            .map(|e| e.event_code.as_str())
+            .collect();
         assert!(codes.contains(&FW_007));
     }
 
@@ -1284,9 +1356,14 @@ mod tests {
         let mut fw = make_firewall();
         let mut effect = make_effect("e-cred", "ext-001");
         effect.carries_credentials = true;
-        let decision = fw.evaluate(&effect, "trace-cf", "2026-01-01T00:00:00Z").unwrap();
+        let decision = fw
+            .evaluate(&effect, "trace-cf", "2026-01-01T00:00:00Z")
+            .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Deny);
-        assert_eq!(decision.intent, Some(IntentClassification::CredentialForward));
+        assert_eq!(
+            decision.intent,
+            Some(IntentClassification::CredentialForward)
+        );
     }
 
     #[test]
@@ -1294,7 +1371,9 @@ mod tests {
         let mut fw = make_firewall();
         let mut effect = make_effect("e-sc", "ext-001");
         effect.metadata.insert("probe_mode".into(), "true".into());
-        let decision = fw.evaluate(&effect, "trace-sc", "2026-01-01T00:00:00Z").unwrap();
+        let decision = fw
+            .evaluate(&effect, "trace-sc", "2026-01-01T00:00:00Z")
+            .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Deny);
         assert_eq!(decision.intent, Some(IntentClassification::SideChannel));
     }

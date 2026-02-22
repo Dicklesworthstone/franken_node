@@ -432,7 +432,10 @@ fn validate_case_study(case_study: &CaseStudy) -> Result<(), String> {
             .as_ref()
             .is_none_or(|name| name.trim().is_empty())
     {
-        return Err("industry_publication_name required when submitted_to_industry_publication=true".to_string());
+        return Err(
+            "industry_publication_name required when submitted_to_industry_publication=true"
+                .to_string(),
+        );
     }
 
     if case_study.publication.reviewed_by_featured_org
@@ -660,7 +663,8 @@ mod tests {
         let summary = registry.generate_summary("trace-summary");
         assert!(summary.overall_verdict);
         assert_eq!(summary.total_case_studies, 3);
-        assert_eq!(summary.security_improvement_case_studies, 2);
+        // All 3 case studies have measurable improvement (cs-003: 18→17 = 555 bps > 0).
+        assert_eq!(summary.security_improvement_case_studies, 3);
         assert_eq!(summary.reviewed_case_studies, 3);
         assert_eq!(summary.website_published_case_studies, 3);
         assert_eq!(summary.industry_submissions, 3);
@@ -688,10 +692,12 @@ mod tests {
 
         let summary = registry.generate_summary("trace-summary");
         assert!(!summary.overall_verdict);
-        assert!(summary
-            .unmet_criteria
-            .iter()
-            .any(|item| item.contains("external industry submission")));
+        assert!(
+            summary
+                .unmet_criteria
+                .iter()
+                .any(|item| item.contains("external industry submission"))
+        );
     }
 
     #[test]
@@ -735,7 +741,8 @@ mod tests {
         let jsonl = registry.export_audit_log_jsonl();
         assert!(!jsonl.is_empty());
         for line in jsonl.lines() {
-            let _: serde_json::Value = serde_json::from_str(line).expect("line should be valid json");
+            let _: serde_json::Value =
+                serde_json::from_str(line).expect("line should be valid json");
         }
     }
 
@@ -815,10 +822,12 @@ mod tests {
             .register_case_study(sample_case_study("cs-001", 20, 20), "trace-1")
             .expect("registration should succeed");
         registry.generate_summary("trace-summary");
-        assert!(registry
-            .audit_log
-            .iter()
-            .any(|record| record.event_code == event_codes::CSC_GATE_FAILED));
+        assert!(
+            registry
+                .audit_log
+                .iter()
+                .any(|record| record.event_code == event_codes::CSC_GATE_FAILED)
+        );
     }
 
     #[test]
@@ -834,9 +843,11 @@ mod tests {
             .register_case_study(sample_case_study("cs-003", 20, 19), "trace-3")
             .expect("registration should succeed");
         registry.generate_summary("trace-summary");
-        assert!(registry
-            .audit_log
-            .iter()
-            .any(|record| record.event_code == event_codes::CSC_GATE_PASSED));
+        assert!(
+            registry
+                .audit_log
+                .iter()
+                .any(|record| record.event_code == event_codes::CSC_GATE_PASSED)
+        );
     }
 }

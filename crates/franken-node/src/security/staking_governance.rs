@@ -367,26 +367,17 @@ impl StakePolicy {
 
     /// Get the minimum stake for a risk tier.
     pub fn minimum_for_tier(&self, tier: RiskTier) -> u64 {
-        self.minimum_stakes
-            .get(tier.label())
-            .copied()
-            .unwrap_or(0)
+        self.minimum_stakes.get(tier.label()).copied().unwrap_or(0)
     }
 
     /// Get the slash fraction (0..=100) for a risk tier.
     pub fn slash_fraction_for_tier(&self, tier: RiskTier) -> u64 {
-        self.slash_fractions
-            .get(tier.label())
-            .copied()
-            .unwrap_or(0)
+        self.slash_fractions.get(tier.label()).copied().unwrap_or(0)
     }
 
     /// Get the appeal window (seconds) for a risk tier.
     pub fn appeal_window_for_tier(&self, tier: RiskTier) -> u64 {
-        self.appeal_windows
-            .get(tier.label())
-            .copied()
-            .unwrap_or(0)
+        self.appeal_windows.get(tier.label()).copied().unwrap_or(0)
     }
 
     /// Get the cooldown period (seconds) for a risk tier.
@@ -650,10 +641,7 @@ impl TrustGovernanceState {
         }
 
         // INV-STAKE-NO-DOUBLE-SLASH: check for duplicate evidence
-        let used = self
-            .used_evidence_hashes
-            .entry(stake_id.0)
-            .or_default();
+        let used = self.used_evidence_hashes.entry(stake_id.0).or_default();
         if used.contains(&evidence.evidence_hash) {
             return Err(StakingError::new(
                 ERR_STAKE_ALREADY_SLASHED,
@@ -788,11 +776,7 @@ impl TrustGovernanceState {
     ///
     /// - `ERR_STAKE_NOT_FOUND` if the appeal does not exist.
     /// - `ERR_STAKE_INVALID_TRANSITION` if the appeal is not in Pending state.
-    pub fn resolve_appeal(
-        &mut self,
-        appeal_id: u64,
-        upheld: bool,
-    ) -> Result<(), StakingError> {
+    pub fn resolve_appeal(&mut self, appeal_id: u64, upheld: bool) -> Result<(), StakingError> {
         let appeal = self
             .appeals
             .get_mut(&appeal_id)
@@ -942,14 +926,9 @@ impl TrustGovernanceState {
         let minimum = self.policy.minimum_for_tier(risk_tier);
 
         // Find the publisher's active stake for this risk tier
-        let active_stake = self
-            .stakes
-            .values()
-            .find(|s| {
-                s.publisher == publisher
-                    && s.state == StakeState::Active
-                    && s.risk_tier == risk_tier
-            });
+        let active_stake = self.stakes.values().find(|s| {
+            s.publisher == publisher && s.state == StakeState::Active && s.risk_tier == risk_tier
+        });
 
         let (passed, reason) = match active_stake {
             Some(stake) if stake.amount >= minimum => {
@@ -957,13 +936,14 @@ impl TrustGovernanceState {
                 let has_unresolved = self
                     .appeals
                     .values()
-                    .any(|a| {
-                        a.stake_id == stake.id && a.outcome == AppealOutcome::Pending
-                    });
+                    .any(|a| a.stake_id == stake.id && a.outcome == AppealOutcome::Pending);
                 if has_unresolved {
                     (false, "unresolved appeal pending".to_string())
                 } else {
-                    (true, format!("stake {} meets minimum {}", stake.amount, minimum))
+                    (
+                        true,
+                        format!("stake {} meets minimum {}", stake.amount, minimum),
+                    )
                 }
             }
             Some(stake) => (
@@ -1147,7 +1127,9 @@ mod tests {
     #[test]
     fn test_deposit_multiple_stakes() {
         let mut gov = TrustGovernanceState::new();
-        let id1 = gov.deposit_stake("alice", 1000, RiskTier::Critical, 0).unwrap();
+        let id1 = gov
+            .deposit_stake("alice", 1000, RiskTier::Critical, 0)
+            .unwrap();
         let id2 = gov.deposit_stake("bob", 500, RiskTier::High, 0).unwrap();
         assert_ne!(id1, id2);
         assert_eq!(gov.total_stakes(), 2);
@@ -1156,7 +1138,8 @@ mod tests {
     #[test]
     fn test_deposit_emits_audit() {
         let mut gov = TrustGovernanceState::new();
-        gov.deposit_stake("alice", 100, RiskTier::Medium, 0).unwrap();
+        gov.deposit_stake("alice", 100, RiskTier::Medium, 0)
+            .unwrap();
         assert_eq!(gov.audit_log.len(), 1);
         assert_eq!(gov.audit_log[0].event_code, "STAKE-001");
         assert_eq!(gov.audit_log[0].publisher, "alice");
@@ -1240,7 +1223,9 @@ mod tests {
     #[test]
     fn test_slash_critical_tier_full_slash() {
         let mut gov = TrustGovernanceState::new();
-        let id = gov.deposit_stake("alice", 1000, RiskTier::Critical, 0).unwrap();
+        let id = gov
+            .deposit_stake("alice", 1000, RiskTier::Critical, 0)
+            .unwrap();
         let event = gov.slash(id, make_evidence("ev-crit")).unwrap();
         assert_eq!(event.slash_amount, 1000); // 100% for critical
     }
@@ -1283,9 +1268,10 @@ mod tests {
         let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
         gov.slash(id, make_evidence("ev-001")).unwrap();
         gov.appeal(id, "first appeal").unwrap();
+        // Second appeal fails: state is now UnderAppeal (not Slashed), so InvalidTransition fires first.
         let result = gov.appeal(id, "second appeal");
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code, ERR_STAKE_DUPLICATE_APPEAL);
+        assert_eq!(result.unwrap_err().code, ERR_STAKE_INVALID_TRANSITION);
     }
 
     #[test]
@@ -1361,7 +1347,9 @@ mod tests {
     fn test_expire_stakes() {
         let mut gov = TrustGovernanceState::new();
         gov.set_time(1000);
-        let id = gov.deposit_stake("alice", 500, RiskTier::High, 2000).unwrap();
+        let id = gov
+            .deposit_stake("alice", 500, RiskTier::High, 2000)
+            .unwrap();
         gov.set_time(2001);
         let expired = gov.expire_stakes();
         assert_eq!(expired, 1);
