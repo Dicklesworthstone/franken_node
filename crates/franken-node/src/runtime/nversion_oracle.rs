@@ -1,91 +1,64 @@
-//! bd-al8i: L2 engine-boundary N-version semantic oracle across franken_engine
-//! and reference runtimes.
+//! bd-al8i: L2 engine-boundary N-version semantic oracle.
 //!
-//! Implements a differential harness that classifies boundary divergences by
-//! risk tier and blocks release on high-risk unresolved deltas. Low-risk deltas
-//! require explicit policy receipts and link back to L1 product-oracle results.
+//! Implements an N-version semantic oracle that dispatches cross-runtime
+//! semantic checks across franken_engine and reference runtimes, classifies
+//! boundary divergences by risk tier, blocks release on high-risk unresolved
+//! deltas, and requires explicit policy receipts (with L1 product-oracle
+//! linkage) for low-risk deltas.
 //!
 //! # Invariants
 //!
-//! - INV-NVO-QUORUM: every cross-runtime check requires quorum agreement from
-//!   participating runtimes.
-//! - INV-NVO-RISK-TIERED: every semantic divergence is classified into a risk
-//!   tier (Critical, High, Medium, Low, Info).
-//! - INV-NVO-BLOCK-HIGH: high-risk and critical unresolved divergences block
+//! - INV-NVO-QUORUM: Every cross-runtime check requires quorum agreement
+//!   from participating runtimes.
+//! - INV-NVO-RISK-TIERED: Every semantic divergence is classified into a
+//!   risk tier (Critical, High, Medium, Low, Info).
+//! - INV-NVO-BLOCK-HIGH: High-risk and critical unresolved divergences block
 //!   release.
-//! - INV-NVO-POLICY-RECEIPT: low-risk deltas require an explicit policy receipt
-//!   before proceeding.
-//! - INV-NVO-L1-LINKAGE: low-risk policy receipts must link back to L1
+//! - INV-NVO-POLICY-RECEIPT: Low-risk deltas require an explicit policy
+//!   receipt before proceeding.
+//! - INV-NVO-L1-LINKAGE: Low-risk policy receipts must link back to L1
 //!   product-oracle results.
-//! - INV-NVO-DETERMINISTIC: oracle results are deterministic for the same
-//!   inputs; BTreeMap is used for ordered output.
+//! - INV-NVO-DETERMINISTIC: Oracle results are deterministic for the same
+//!   inputs; BTreeMap used for ordered output.
 
+use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
-
-/// Schema version for the N-version oracle protocol.
-pub const SCHEMA_VERSION: &str = "nvo-v1.0";
-
-/// Default quorum threshold (fraction expressed as percentage, e.g. 67 = 67%).
-pub const DEFAULT_QUORUM_THRESHOLD_PCT: u8 = 67;
-
-/// Default voting timeout in milliseconds.
-pub const DEFAULT_VOTING_TIMEOUT_MS: u64 = 10_000;
-
-// ── Invariant constants ────────────────────────────────────────────────────
-
-pub mod invariants {
-    /// Every cross-runtime check requires quorum agreement.
-    pub const INV_NVO_QUORUM: &str = "INV-NVO-QUORUM";
-
-    /// Every divergence is classified into a risk tier.
-    pub const INV_NVO_RISK_TIERED: &str = "INV-NVO-RISK-TIERED";
-
-    /// High-risk and critical unresolved divergences block release.
-    pub const INV_NVO_BLOCK_HIGH: &str = "INV-NVO-BLOCK-HIGH";
-
-    /// Low-risk deltas require explicit policy receipts.
-    pub const INV_NVO_POLICY_RECEIPT: &str = "INV-NVO-POLICY-RECEIPT";
-
-    /// Low-risk policy receipts link back to L1 product-oracle results.
-    pub const INV_NVO_L1_LINKAGE: &str = "INV-NVO-L1-LINKAGE";
-
-    /// Oracle results are deterministic; BTreeMap for ordered output.
-    pub const INV_NVO_DETERMINISTIC: &str = "INV-NVO-DETERMINISTIC";
-}
-
-// ── Event codes ────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Event codes
+// ---------------------------------------------------------------------------
 
 pub mod event_codes {
-    /// Oracle instance created.
+    /// N-version oracle instance created.
     pub const FN_NV_001: &str = "FN-NV-001";
-    /// Reference runtime registered.
+    /// Reference runtime registered with oracle.
     pub const FN_NV_002: &str = "FN-NV-002";
     /// Cross-runtime semantic check initiated.
     pub const FN_NV_003: &str = "FN-NV-003";
-    /// Semantic divergence detected.
+    /// Semantic divergence detected between runtimes.
     pub const FN_NV_004: &str = "FN-NV-004";
     /// Divergence classified by risk tier.
     pub const FN_NV_005: &str = "FN-NV-005";
-    /// Quorum agreement reached.
+    /// Quorum agreement reached for a check.
     pub const FN_NV_006: &str = "FN-NV-006";
-    /// Quorum agreement failed.
+    /// Quorum agreement failed for a check.
     pub const FN_NV_007: &str = "FN-NV-007";
     /// Release blocked due to unresolved high-risk divergence.
     pub const FN_NV_008: &str = "FN-NV-008";
     /// Policy receipt issued for low-risk divergence.
     pub const FN_NV_009: &str = "FN-NV-009";
-    /// L1 product-oracle linkage verified.
+    /// L1 product-oracle linkage verified for policy receipt.
     pub const FN_NV_010: &str = "FN-NV-010";
-    /// Voting round completed.
+    /// Voting round completed across runtimes.
     pub const FN_NV_011: &str = "FN-NV-011";
-    /// Oracle divergence report generated.
+    /// Comprehensive oracle divergence report generated.
     pub const FN_NV_012: &str = "FN-NV-012";
 }
 
-// ── Error codes ────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Error codes
+// ---------------------------------------------------------------------------
 
 pub mod error_codes {
     pub const ERR_NVO_NO_RUNTIMES: &str = "ERR_NVO_NO_RUNTIMES";
@@ -100,261 +73,291 @@ pub mod error_codes {
     pub const ERR_NVO_DUPLICATE_RUNTIME: &str = "ERR_NVO_DUPLICATE_RUNTIME";
 }
 
-// ── RiskTier ───────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// Invariants
+// ---------------------------------------------------------------------------
 
-/// Risk classification for a semantic divergence.
+pub mod invariants {
+    pub const INV_NVO_QUORUM: &str = "INV-NVO-QUORUM";
+    pub const INV_NVO_RISK_TIERED: &str = "INV-NVO-RISK-TIERED";
+    pub const INV_NVO_BLOCK_HIGH: &str = "INV-NVO-BLOCK-HIGH";
+    pub const INV_NVO_POLICY_RECEIPT: &str = "INV-NVO-POLICY-RECEIPT";
+    pub const INV_NVO_L1_LINKAGE: &str = "INV-NVO-L1-LINKAGE";
+    pub const INV_NVO_DETERMINISTIC: &str = "INV-NVO-DETERMINISTIC";
+}
+
+/// Schema version for oracle report format.
+pub const SCHEMA_VERSION: &str = "nvo-v1.0";
+
+// ---------------------------------------------------------------------------
+// RiskTier
+// ---------------------------------------------------------------------------
+
+/// Risk classification for semantic divergences.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum RiskTier {
-    /// Informational — no action required.
+    /// Informational divergence; no action required.
     Info,
-    /// Low risk — requires explicit policy receipt with L1 linkage.
+    /// Low-risk divergence; requires explicit policy receipt.
     Low,
-    /// Medium risk — generates warning but does not block release.
+    /// Medium-risk divergence; generates warning but does not block.
     Medium,
-    /// High risk — blocks release if unresolved.
+    /// High-risk divergence; blocks release if unresolved.
     High,
-    /// Critical — always blocks release if unresolved.
+    /// Critical divergence; blocks release if unresolved.
     Critical,
+}
+
+impl RiskTier {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Info => "info",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Critical => "critical",
+        }
+    }
+
+    /// Returns `true` if this tier blocks release when unresolved.
+    pub fn blocks_release(&self) -> bool {
+        matches!(self, Self::High | Self::Critical)
+    }
+
+    /// Returns `true` if this tier requires a policy receipt.
+    pub fn requires_receipt(&self) -> bool {
+        matches!(self, Self::Low)
+    }
 }
 
 impl fmt::Display for RiskTier {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            RiskTier::Info => write!(f, "Info"),
-            RiskTier::Low => write!(f, "Low"),
-            RiskTier::Medium => write!(f, "Medium"),
-            RiskTier::High => write!(f, "High"),
-            RiskTier::Critical => write!(f, "Critical"),
-        }
+        f.write_str(self.label())
     }
 }
 
-impl RiskTier {
-    /// Returns true if this tier blocks release when unresolved.
-    pub fn blocks_release(&self) -> bool {
-        matches!(self, RiskTier::High | RiskTier::Critical)
-    }
+// ---------------------------------------------------------------------------
+// BoundaryScope
+// ---------------------------------------------------------------------------
 
-    /// Returns true if this tier requires a policy receipt.
-    pub fn requires_receipt(&self) -> bool {
-        matches!(self, RiskTier::Low)
-    }
-}
-
-// ── BoundaryScope ──────────────────────────────────────────────────────────
-
-/// Engine boundary scope for semantic checks.
+/// Engine boundary scope categories.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum BoundaryScope {
-    /// Type system boundary checks.
     TypeSystem,
-    /// Memory model boundary checks.
     Memory,
-    /// I/O semantics boundary checks.
     IO,
-    /// Concurrency model boundary checks.
     Concurrency,
-    /// Security policy boundary checks.
     Security,
+}
+
+impl BoundaryScope {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::TypeSystem => "type_system",
+            Self::Memory => "memory",
+            Self::IO => "io",
+            Self::Concurrency => "concurrency",
+            Self::Security => "security",
+        }
+    }
 }
 
 impl fmt::Display for BoundaryScope {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            BoundaryScope::TypeSystem => write!(f, "TypeSystem"),
-            BoundaryScope::Memory => write!(f, "Memory"),
-            BoundaryScope::IO => write!(f, "IO"),
-            BoundaryScope::Concurrency => write!(f, "Concurrency"),
-            BoundaryScope::Security => write!(f, "Security"),
-        }
+        f.write_str(self.label())
     }
 }
 
-// ── CheckOutcome ───────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// CheckOutcome
+// ---------------------------------------------------------------------------
 
 /// Outcome of a single cross-runtime check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CheckOutcome {
-    /// Runtimes agree on the semantic boundary behavior.
-    Agree,
-    /// Runtimes diverge — includes divergence details.
+    /// All participating runtimes agree on the result.
+    Agree { canonical_output: Vec<u8> },
+    /// Runtimes diverge; contains per-runtime outputs.
     Diverge {
-        description: String,
+        outputs: BTreeMap<String, Vec<u8>>,
     },
 }
 
-// ── OracleVerdict ──────────────────────────────────────────────────────────
-
-/// Overall verdict from the oracle evaluation.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OracleVerdict {
-    /// All checks pass; release is permitted.
-    Pass,
-    /// Release is blocked due to unresolved high-risk or critical divergences.
-    BlockRelease {
-        /// IDs of blocking divergences.
-        blocking_divergence_ids: Vec<String>,
-    },
-    /// Low-risk divergences need policy receipts before proceeding.
-    RequiresReceipt {
-        /// IDs of divergences needing receipts.
-        pending_receipt_ids: Vec<String>,
-    },
-}
-
-impl fmt::Display for OracleVerdict {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            OracleVerdict::Pass => write!(f, "PASS"),
-            OracleVerdict::BlockRelease { blocking_divergence_ids } => {
-                write!(f, "BLOCK_RELEASE({})", blocking_divergence_ids.join(", "))
-            }
-            OracleVerdict::RequiresReceipt { pending_receipt_ids } => {
-                write!(f, "REQUIRES_RECEIPT({})", pending_receipt_ids.join(", "))
-            }
-        }
-    }
-}
-
-// ── RuntimeEntry ───────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// RuntimeEntry
+// ---------------------------------------------------------------------------
 
 /// Metadata about a registered reference runtime.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RuntimeEntry {
-    /// Unique identifier for the runtime.
-    pub id: String,
-    /// Human-readable name.
-    pub name: String,
-    /// Version string.
+    pub runtime_id: String,
+    pub runtime_name: String,
     pub version: String,
-    /// Whether this runtime is currently active for checks.
-    pub active: bool,
+    pub is_reference: bool,
 }
 
-// ── SemanticDivergence ─────────────────────────────────────────────────────
-
-/// A recorded divergence between runtimes with classification.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SemanticDivergence {
-    /// Unique divergence identifier.
-    pub id: String,
-    /// ID of the cross-runtime check that detected this divergence.
-    pub check_id: String,
-    /// Boundary scope of the divergence.
-    pub scope: BoundaryScope,
-    /// Risk tier classification.
-    pub risk_tier: RiskTier,
-    /// Human-readable description.
-    pub description: String,
-    /// IDs of the runtimes that diverged.
-    pub diverging_runtimes: Vec<String>,
-    /// Whether this divergence has been resolved.
-    pub resolved: bool,
-    /// Optional policy receipt ID (for low-risk divergences).
-    pub policy_receipt_id: Option<String>,
-}
-
-// ── CrossRuntimeCheck ──────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// CrossRuntimeCheck
+// ---------------------------------------------------------------------------
 
 /// A single cross-runtime semantic boundary check.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrossRuntimeCheck {
-    /// Unique check identifier.
-    pub id: String,
-    /// Boundary scope being checked.
-    pub scope: BoundaryScope,
-    /// Description of the check.
-    pub description: String,
-    /// Per-runtime outcomes, keyed by runtime ID.
-    pub outcomes: BTreeMap<String, CheckOutcome>,
-    /// Whether this check is currently running.
-    pub running: bool,
-    /// Whether voting is complete.
-    pub voting_complete: bool,
-}
-
-// ── VotingResult ───────────────────────────────────────────────────────────
-
-/// Result of a quorum voting round.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct VotingResult {
-    /// Check ID this voting result applies to.
     pub check_id: String,
-    /// Total number of voting runtimes.
-    pub total_voters: usize,
-    /// Number of runtimes that agreed.
-    pub agree_count: usize,
-    /// Number of runtimes that diverged.
-    pub diverge_count: usize,
-    /// Whether quorum was reached (agree_count / total_voters >= threshold).
-    pub quorum_reached: bool,
-    /// The quorum threshold percentage used.
-    pub threshold_pct: u8,
+    pub boundary_scope: BoundaryScope,
+    pub input: Vec<u8>,
+    pub trace_id: String,
+    pub outcome: Option<CheckOutcome>,
 }
 
-// ── PolicyReceipt ──────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// SemanticDivergence
+// ---------------------------------------------------------------------------
 
-/// Explicit acknowledgment for low-risk divergences.
+/// Recorded divergence between runtimes with classification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PolicyReceipt {
-    /// Unique receipt identifier.
-    pub id: String,
-    /// ID of the divergence this receipt covers.
+pub struct SemanticDivergence {
     pub divergence_id: String,
-    /// Justification for accepting the divergence.
-    pub justification: String,
-    /// L1 product-oracle linkage proof.
-    pub l1_linkage: L1LinkageProof,
-    /// Whether this receipt has been verified.
-    pub verified: bool,
-    /// Timestamp when the receipt was issued (ISO-8601).
-    pub issued_at: String,
+    pub check_id: String,
+    pub boundary_scope: BoundaryScope,
+    pub risk_tier: RiskTier,
+    pub runtime_outputs: BTreeMap<String, Vec<u8>>,
+    pub resolved: bool,
+    pub resolution_note: Option<String>,
+    pub trace_id: String,
 }
 
-// ── L1LinkageProof ─────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// L1LinkageProof
+// ---------------------------------------------------------------------------
 
 /// Proof linking a policy receipt to L1 product-oracle results.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct L1LinkageProof {
-    /// L1 oracle result identifier.
-    pub l1_oracle_id: String,
-    /// Hash of the L1 oracle result used as proof.
-    pub result_hash: String,
-    /// Whether the linkage has been verified.
-    pub verified: bool,
+    pub l1_oracle_run_id: String,
+    pub l1_verdict: String,
+    pub linkage_hash: String,
+    pub timestamp_epoch_secs: u64,
 }
 
-// ── DivergenceReport ───────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// PolicyReceipt
+// ---------------------------------------------------------------------------
+
+/// Explicit acknowledgment for low-risk divergences.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyReceipt {
+    pub receipt_id: String,
+    pub divergence_id: String,
+    pub issuer: String,
+    pub rationale: String,
+    pub l1_linkage: L1LinkageProof,
+    pub issued_at_epoch_secs: u64,
+    pub expires_at_epoch_secs: u64,
+}
+
+impl PolicyReceipt {
+    /// Returns `true` if the receipt has expired relative to `now_epoch_secs`.
+    pub fn is_expired(&self, now_epoch_secs: u64) -> bool {
+        now_epoch_secs >= self.expires_at_epoch_secs
+    }
+
+    /// Verify the L1 linkage is non-empty and well-formed.
+    pub fn verify_l1_linkage(&self) -> bool {
+        !self.l1_linkage.l1_oracle_run_id.is_empty()
+            && !self.l1_linkage.linkage_hash.is_empty()
+            && !self.l1_linkage.l1_verdict.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// VotingResult
+// ---------------------------------------------------------------------------
+
+/// Result of a quorum voting round.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VotingResult {
+    pub check_id: String,
+    pub votes: BTreeMap<String, Vec<u8>>,
+    pub quorum_reached: bool,
+    pub quorum_threshold: usize,
+    pub total_voters: usize,
+    pub agreeing_voters: usize,
+}
+
+// ---------------------------------------------------------------------------
+// OracleVerdict
+// ---------------------------------------------------------------------------
+
+/// Overall verdict from the oracle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OracleVerdict {
+    /// All checks passed; no blocking divergences.
+    Pass,
+    /// Release is blocked due to unresolved high/critical divergences.
+    BlockRelease {
+        blocking_divergence_ids: Vec<String>,
+    },
+    /// Low-risk divergences require policy receipts before proceeding.
+    RequiresReceipt {
+        pending_divergence_ids: Vec<String>,
+    },
+}
+
+impl OracleVerdict {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Pass => "pass",
+            Self::BlockRelease { .. } => "block_release",
+            Self::RequiresReceipt { .. } => "requires_receipt",
+        }
+    }
+}
+
+impl fmt::Display for OracleVerdict {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DivergenceReport
+// ---------------------------------------------------------------------------
 
 /// Comprehensive report of all divergences from an oracle run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DivergenceReport {
-    /// Schema version.
     pub schema_version: String,
-    /// Oracle instance ID.
-    pub oracle_id: String,
-    /// Overall verdict.
+    pub trace_id: String,
+    pub runtimes: BTreeMap<String, RuntimeEntry>,
+    pub checks: Vec<CrossRuntimeCheck>,
+    pub divergences: Vec<SemanticDivergence>,
+    pub voting_results: Vec<VotingResult>,
+    pub receipts: Vec<PolicyReceipt>,
     pub verdict: OracleVerdict,
-    /// All divergences found, keyed by divergence ID (BTreeMap for determinism).
-    pub divergences: BTreeMap<String, SemanticDivergence>,
-    /// All checks executed, keyed by check ID.
-    pub checks: BTreeMap<String, CrossRuntimeCheck>,
-    /// All voting results, keyed by check ID.
-    pub voting_results: BTreeMap<String, VotingResult>,
-    /// All policy receipts issued, keyed by receipt ID.
-    pub receipts: BTreeMap<String, PolicyReceipt>,
-    /// Count by risk tier.
-    pub risk_tier_counts: BTreeMap<String, usize>,
+    pub event_log: Vec<OracleEvent>,
 }
 
-// ── OracleError ────────────────────────────────────────────────────────────
+// ---------------------------------------------------------------------------
+// OracleEvent (structured log)
+// ---------------------------------------------------------------------------
 
-/// Error type for oracle operations.
+/// Structured log event from the oracle.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OracleEvent {
+    pub event_code: String,
+    pub trace_id: String,
+    pub message: String,
+    pub details: BTreeMap<String, String>,
+}
+
+// ---------------------------------------------------------------------------
+// OracleError
+// ---------------------------------------------------------------------------
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OracleError {
-    /// Machine-readable error code.
     pub code: &'static str,
-    /// Human-readable message.
     pub message: String,
 }
 
@@ -366,986 +369,941 @@ impl fmt::Display for OracleError {
 
 impl std::error::Error for OracleError {}
 
-impl OracleError {
-    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
-        Self { code, message: message.into() }
-    }
-}
+// ---------------------------------------------------------------------------
+// RuntimeOracle
+// ---------------------------------------------------------------------------
 
-// ── RuntimeOracle ──────────────────────────────────────────────────────────
-
-/// Central N-version oracle coordinating semantic checks across runtimes.
+/// Central N-version oracle coordinating checks across reference runtimes.
 ///
-/// Uses BTreeMap throughout for deterministic ordering (INV-NVO-DETERMINISTIC).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Uses `BTreeMap` for all keyed collections to guarantee deterministic
+/// iteration order (INV-NVO-DETERMINISTIC).
 pub struct RuntimeOracle {
-    /// Unique oracle instance identifier.
-    pub id: String,
-    /// Registered runtimes, keyed by runtime ID.
     runtimes: BTreeMap<String, RuntimeEntry>,
-    /// Cross-runtime checks, keyed by check ID.
     checks: BTreeMap<String, CrossRuntimeCheck>,
-    /// Detected divergences, keyed by divergence ID.
     divergences: BTreeMap<String, SemanticDivergence>,
-    /// Voting results, keyed by check ID.
-    voting_results: BTreeMap<String, VotingResult>,
-    /// Policy receipts, keyed by receipt ID.
     receipts: BTreeMap<String, PolicyReceipt>,
-    /// Quorum threshold percentage.
-    quorum_threshold_pct: u8,
-    /// Next divergence sequence number (for deterministic ID generation).
-    next_divergence_seq: u64,
-    /// Audit log of events.
-    audit_log: Vec<AuditEntry>,
-}
-
-/// Internal audit entry for traceability.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AuditEntry {
-    pub event_code: String,
-    pub message: String,
-    pub trace_id: String,
+    voting_results: BTreeMap<String, VotingResult>,
+    event_log: Vec<OracleEvent>,
+    active_checks: BTreeMap<String, bool>,
+    quorum_threshold_percent: u8,
+    trace_id: String,
 }
 
 impl RuntimeOracle {
-    /// Create a new oracle instance.
-    pub fn new(id: impl Into<String>) -> Self {
-        let id = id.into();
-        let oracle = Self {
-            id: id.clone(),
+    /// Create a new oracle with the given trace ID and quorum threshold (percent).
+    pub fn new(trace_id: &str, quorum_threshold_percent: u8) -> Self {
+        let mut oracle = Self {
             runtimes: BTreeMap::new(),
             checks: BTreeMap::new(),
             divergences: BTreeMap::new(),
-            voting_results: BTreeMap::new(),
             receipts: BTreeMap::new(),
-            quorum_threshold_pct: DEFAULT_QUORUM_THRESHOLD_PCT,
-            next_divergence_seq: 1,
-            audit_log: Vec::new(),
+            voting_results: BTreeMap::new(),
+            event_log: Vec::new(),
+            active_checks: BTreeMap::new(),
+            quorum_threshold_percent,
+            trace_id: trace_id.to_string(),
         };
-        // Event: oracle created  (FN-NV-001)
-        // Note: we cannot log from the constructor since it takes &mut self,
-        // so the caller should check the audit log or rely on the initial state.
+        oracle.emit_event(event_codes::FN_NV_001, "Oracle created", BTreeMap::new());
         oracle
-    }
-
-    /// Set the quorum threshold percentage.
-    pub fn set_quorum_threshold(&mut self, pct: u8) {
-        self.quorum_threshold_pct = pct.min(100);
-    }
-
-    fn log_event(&mut self, code: &str, message: impl Into<String>) {
-        self.audit_log.push(AuditEntry {
-            event_code: code.to_string(),
-            message: message.into(),
-            trace_id: format!("{}-{}", self.id, self.audit_log.len()),
-        });
     }
 
     /// Register a reference runtime for comparison.
     pub fn register_runtime(&mut self, entry: RuntimeEntry) -> Result<(), OracleError> {
-        if self.runtimes.contains_key(&entry.id) {
-            return Err(OracleError::new(
-                error_codes::ERR_NVO_DUPLICATE_RUNTIME,
-                format!("Runtime '{}' is already registered", entry.id),
-            ));
+        if self.runtimes.contains_key(&entry.runtime_id) {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_DUPLICATE_RUNTIME,
+                message: format!("runtime '{}' already registered", entry.runtime_id),
+            });
         }
-        let rt_id = entry.id.clone();
-        self.runtimes.insert(entry.id.clone(), entry);
-        self.log_event(
-            event_codes::FN_NV_002,
-            format!("Registered runtime '{}'", rt_id),
-        );
+        let id = entry.runtime_id.clone();
+        self.runtimes.insert(id.clone(), entry);
+        let mut details = BTreeMap::new();
+        details.insert("runtime_id".to_string(), id);
+        self.emit_event(event_codes::FN_NV_002, "Runtime registered", details);
         Ok(())
     }
 
     /// Remove a runtime from the registry.
     pub fn remove_runtime(&mut self, runtime_id: &str) -> Result<RuntimeEntry, OracleError> {
-        self.runtimes.remove(runtime_id).ok_or_else(|| {
-            OracleError::new(
-                error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
-                format!("Runtime '{}' not found", runtime_id),
-            )
+        self.runtimes.remove(runtime_id).ok_or_else(|| OracleError {
+            code: error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
+            message: format!("runtime '{runtime_id}' not found"),
         })
     }
 
-    /// Get a reference to a registered runtime.
-    pub fn get_runtime(&self, runtime_id: &str) -> Option<&RuntimeEntry> {
-        self.runtimes.get(runtime_id)
-    }
-
-    /// Get the number of registered runtimes.
+    /// Number of registered runtimes.
     pub fn runtime_count(&self) -> usize {
         self.runtimes.len()
     }
 
     /// Execute a cross-runtime semantic check.
     ///
-    /// # Errors
-    /// - `ERR_NVO_NO_RUNTIMES` if fewer than 2 runtimes are registered.
-    /// - `ERR_NVO_CHECK_ALREADY_RUNNING` if a check with this ID is already active.
+    /// `runtime_outputs` provides the pre-computed output from each runtime
+    /// for the given boundary check. The oracle compares outputs to determine
+    /// if they agree or diverge.
     pub fn run_cross_check(
         &mut self,
-        check_id: impl Into<String>,
-        scope: BoundaryScope,
-        description: impl Into<String>,
-    ) -> Result<&CrossRuntimeCheck, OracleError> {
-        let check_id = check_id.into();
-        let description = description.into();
-
-        if self.runtimes.len() < 2 {
-            return Err(OracleError::new(
-                error_codes::ERR_NVO_NO_RUNTIMES,
-                "Need at least 2 runtimes registered to run cross-check",
-            ));
+        check_id: &str,
+        boundary_scope: BoundaryScope,
+        input: &[u8],
+        runtime_outputs: &BTreeMap<String, Vec<u8>>,
+    ) -> Result<CrossRuntimeCheck, OracleError> {
+        if self.runtimes.is_empty() {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_NO_RUNTIMES,
+                message: "no runtimes registered".to_string(),
+            });
         }
 
-        if let Some(existing) = self.checks.get(&check_id) {
-            if existing.running {
-                return Err(OracleError::new(
-                    error_codes::ERR_NVO_CHECK_ALREADY_RUNNING,
-                    format!("Check '{}' is already running", check_id),
-                ));
-            }
+        if self.active_checks.contains_key(check_id) {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_CHECK_ALREADY_RUNNING,
+                message: format!("check '{check_id}' already in progress"),
+            });
         }
 
-        let check = CrossRuntimeCheck {
-            id: check_id.clone(),
-            scope,
-            description,
-            outcomes: BTreeMap::new(),
-            running: true,
-            voting_complete: false,
-        };
+        self.active_checks.insert(check_id.to_string(), true);
 
-        self.checks.insert(check_id.clone(), check);
-        self.log_event(
+        let mut details = BTreeMap::new();
+        details.insert("check_id".to_string(), check_id.to_string());
+        details.insert(
+            "boundary_scope".to_string(),
+            boundary_scope.label().to_string(),
+        );
+        self.emit_event(
             event_codes::FN_NV_003,
-            format!("Cross check '{}' started", check_id),
+            "Cross-runtime check started",
+            details,
         );
 
-        Ok(self.checks.get(&check_id).unwrap())
+        // Determine outcome: all outputs must be byte-identical for agreement.
+        let unique_outputs: std::collections::BTreeSet<&Vec<u8>> =
+            runtime_outputs.values().collect();
+        let outcome = if unique_outputs.len() <= 1 {
+            // All runtimes agree (or only one runtime provided output).
+            let canonical = runtime_outputs.values().next().cloned().unwrap_or_default();
+            CheckOutcome::Agree {
+                canonical_output: canonical,
+            }
+        } else {
+            let mut details = BTreeMap::new();
+            details.insert("check_id".to_string(), check_id.to_string());
+            details.insert(
+                "divergent_count".to_string(),
+                unique_outputs.len().to_string(),
+            );
+            self.emit_event(event_codes::FN_NV_004, "Divergence detected", details);
+
+            CheckOutcome::Diverge {
+                outputs: runtime_outputs.clone(),
+            }
+        };
+
+        let check = CrossRuntimeCheck {
+            check_id: check_id.to_string(),
+            boundary_scope,
+            input: input.to_vec(),
+            trace_id: self.trace_id.clone(),
+            outcome: Some(outcome),
+        };
+
+        self.checks.insert(check_id.to_string(), check.clone());
+        self.active_checks.remove(check_id);
+        Ok(check)
     }
 
-    /// Submit a runtime's vote (outcome) for a cross-check.
+    /// Classify a detected divergence by risk tier.
+    pub fn classify_divergence(
+        &mut self,
+        divergence_id: &str,
+        check_id: &str,
+        boundary_scope: BoundaryScope,
+        risk_tier: RiskTier,
+        runtime_outputs: &BTreeMap<String, Vec<u8>>,
+    ) -> SemanticDivergence {
+        let divergence = SemanticDivergence {
+            divergence_id: divergence_id.to_string(),
+            check_id: check_id.to_string(),
+            boundary_scope,
+            risk_tier,
+            runtime_outputs: runtime_outputs.clone(),
+            resolved: false,
+            resolution_note: None,
+            trace_id: self.trace_id.clone(),
+        };
+
+        let mut details = BTreeMap::new();
+        details.insert("divergence_id".to_string(), divergence_id.to_string());
+        details.insert("risk_tier".to_string(), risk_tier.label().to_string());
+        self.emit_event(event_codes::FN_NV_005, "Divergence classified", details);
+
+        self.divergences
+            .insert(divergence_id.to_string(), divergence.clone());
+        divergence
+    }
+
+    /// Submit a runtime's vote for a cross-check.
     pub fn vote(
         &mut self,
         check_id: &str,
         runtime_id: &str,
-        outcome: CheckOutcome,
+        output: Vec<u8>,
     ) -> Result<(), OracleError> {
         if !self.runtimes.contains_key(runtime_id) {
-            return Err(OracleError::new(
-                error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
-                format!("Runtime '{}' not found", runtime_id),
-            ));
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
+                message: format!("runtime '{runtime_id}' not found"),
+            });
         }
 
-        let check = self.checks.get_mut(check_id).ok_or_else(|| {
-            OracleError::new(
-                error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
-                format!("Check '{}' not found", check_id),
-            )
-        })?;
+        let entry = self
+            .voting_results
+            .entry(check_id.to_string())
+            .or_insert_with(|| VotingResult {
+                check_id: check_id.to_string(),
+                votes: BTreeMap::new(),
+                quorum_reached: false,
+                quorum_threshold: 0,
+                total_voters: 0,
+                agreeing_voters: 0,
+            });
 
-        check.outcomes.insert(runtime_id.to_string(), outcome);
+        entry.votes.insert(runtime_id.to_string(), output);
         Ok(())
     }
 
-    /// Tally votes and determine quorum result for a check.
-    ///
-    /// INV-NVO-QUORUM: every cross-runtime check requires quorum agreement.
+    /// Tally votes and determine quorum result.
     pub fn tally_votes(&mut self, check_id: &str) -> Result<VotingResult, OracleError> {
-        let check = self.checks.get_mut(check_id).ok_or_else(|| {
-            OracleError::new(
-                error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
-                format!("Check '{}' not found", check_id),
-            )
-        })?;
+        let entry = self
+            .voting_results
+            .get(check_id)
+            .ok_or_else(|| OracleError {
+                code: error_codes::ERR_NVO_RUNTIME_NOT_FOUND,
+                message: format!("no votes recorded for check '{check_id}'"),
+            })?;
 
-        let total = check.outcomes.len();
-        if total == 0 {
-            return Err(OracleError::new(
-                error_codes::ERR_NVO_VOTING_TIMEOUT,
-                format!("No votes received for check '{}'", check_id),
-            ));
+        let total = entry.votes.len();
+        let quorum_required = ((total as f64)
+            * (self.quorum_threshold_percent as f64 / 100.0))
+            .ceil() as usize;
+
+        // Count how many runtimes agree with the most common output.
+        let mut output_counts: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+        for output in entry.votes.values() {
+            *output_counts.entry(output.clone()).or_insert(0) += 1;
         }
+        let max_agreement = output_counts.values().max().copied().unwrap_or(0);
 
-        let agree_count = check
-            .outcomes
-            .values()
-            .filter(|o| matches!(o, CheckOutcome::Agree))
-            .count();
-        let diverge_count = total - agree_count;
-
-        let quorum_reached =
-            (agree_count * 100) >= (total * self.quorum_threshold_pct as usize);
-
-        check.running = false;
-        check.voting_complete = true;
+        let quorum_reached = max_agreement >= quorum_required;
 
         let result = VotingResult {
             check_id: check_id.to_string(),
-            total_voters: total,
-            agree_count,
-            diverge_count,
+            votes: entry.votes.clone(),
             quorum_reached,
-            threshold_pct: self.quorum_threshold_pct,
+            quorum_threshold: quorum_required,
+            total_voters: total,
+            agreeing_voters: max_agreement,
         };
 
         if quorum_reached {
-            self.log_event(
-                event_codes::FN_NV_006,
-                format!(
-                    "Quorum reached for check '{}': {}/{} agree",
-                    check_id, agree_count, total
-                ),
-            );
+            let mut details = BTreeMap::new();
+            details.insert("check_id".to_string(), check_id.to_string());
+            details.insert("agreeing".to_string(), max_agreement.to_string());
+            details.insert("threshold".to_string(), quorum_required.to_string());
+            self.emit_event(event_codes::FN_NV_006, "Quorum reached", details);
         } else {
-            self.log_event(
-                event_codes::FN_NV_007,
-                format!(
-                    "Quorum failed for check '{}': {}/{} agree (need {}%)",
-                    check_id, agree_count, total, self.quorum_threshold_pct
-                ),
-            );
+            let mut details = BTreeMap::new();
+            details.insert("check_id".to_string(), check_id.to_string());
+            details.insert("agreeing".to_string(), max_agreement.to_string());
+            details.insert("threshold".to_string(), quorum_required.to_string());
+            self.emit_event(event_codes::FN_NV_007, "Quorum failed", details);
         }
 
-        self.log_event(
-            event_codes::FN_NV_011,
-            format!("Voting completed for check '{}'", check_id),
-        );
+        let mut details = BTreeMap::new();
+        details.insert("check_id".to_string(), check_id.to_string());
+        details.insert("total_voters".to_string(), total.to_string());
+        self.emit_event(event_codes::FN_NV_011, "Voting completed", details);
 
-        self.voting_results.insert(check_id.to_string(), result.clone());
+        self.voting_results
+            .insert(check_id.to_string(), result.clone());
         Ok(result)
     }
 
-    /// Classify a detected divergence by risk tier.
-    ///
-    /// INV-NVO-RISK-TIERED: every divergence must be classified.
-    pub fn classify_divergence(
+    /// Issue a policy receipt for a low-risk divergence.
+    pub fn issue_policy_receipt(
         &mut self,
-        check_id: &str,
-        scope: BoundaryScope,
-        risk_tier: RiskTier,
-        description: impl Into<String>,
-        diverging_runtimes: Vec<String>,
-    ) -> Result<String, OracleError> {
-        let description = description.into();
-        let div_id = format!("div-{}", self.next_divergence_seq);
-        self.next_divergence_seq += 1;
+        receipt: PolicyReceipt,
+    ) -> Result<(), OracleError> {
+        let div = self
+            .divergences
+            .get(&receipt.divergence_id)
+            .ok_or_else(|| OracleError {
+                code: error_codes::ERR_NVO_DIVERGENCE_UNRESOLVED,
+                message: format!("divergence '{}' not found", receipt.divergence_id),
+            })?;
 
-        let divergence = SemanticDivergence {
-            id: div_id.clone(),
-            check_id: check_id.to_string(),
-            scope,
-            risk_tier,
-            description: description.clone(),
-            diverging_runtimes,
-            resolved: false,
-            policy_receipt_id: None,
-        };
+        if !div.risk_tier.requires_receipt() {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_INVALID_RECEIPT,
+                message: format!(
+                    "receipts are only applicable to low-risk divergences; got {}",
+                    div.risk_tier
+                ),
+            });
+        }
 
-        self.divergences.insert(div_id.clone(), divergence);
-        self.log_event(
-            event_codes::FN_NV_004,
-            format!("Divergence '{}' detected in check '{}'", div_id, check_id),
+        let mut details = BTreeMap::new();
+        details.insert("receipt_id".to_string(), receipt.receipt_id.clone());
+        details.insert(
+            "divergence_id".to_string(),
+            receipt.divergence_id.clone(),
         );
-        self.log_event(
-            event_codes::FN_NV_005,
-            format!(
-                "Divergence '{}' classified as {} risk: {}",
-                div_id, risk_tier, description
-            ),
+        self.emit_event(
+            event_codes::FN_NV_009,
+            "Policy receipt issued",
+            details,
         );
 
-        Ok(div_id)
-    }
-
-    /// Resolve a divergence (mark it as resolved).
-    pub fn resolve_divergence(&mut self, divergence_id: &str) -> Result<(), OracleError> {
-        let div = self.divergences.get_mut(divergence_id).ok_or_else(|| {
-            OracleError::new(
-                error_codes::ERR_NVO_DIVERGENCE_UNRESOLVED,
-                format!("Divergence '{}' not found", divergence_id),
-            )
-        })?;
-        div.resolved = true;
+        self.receipts
+            .insert(receipt.receipt_id.clone(), receipt);
         Ok(())
     }
 
-    /// Issue a policy receipt for a low-risk divergence.
-    ///
-    /// INV-NVO-POLICY-RECEIPT: low-risk deltas require explicit receipts.
-    /// INV-NVO-L1-LINKAGE: receipts must link to L1 product-oracle results.
-    pub fn issue_policy_receipt(
+    /// Verify L1 product-oracle linkage for a receipt.
+    pub fn verify_l1_linkage(
         &mut self,
-        receipt_id: impl Into<String>,
-        divergence_id: &str,
-        justification: impl Into<String>,
-        l1_linkage: L1LinkageProof,
-    ) -> Result<&PolicyReceipt, OracleError> {
-        let receipt_id = receipt_id.into();
-        let justification = justification.into();
+        receipt_id: &str,
+    ) -> Result<bool, OracleError> {
+        let receipt =
+            self.receipts.get(receipt_id).ok_or_else(|| OracleError {
+                code: error_codes::ERR_NVO_INVALID_RECEIPT,
+                message: format!("receipt '{receipt_id}' not found"),
+            })?;
 
-        // Verify the divergence exists and is low-risk
-        let div = self.divergences.get_mut(divergence_id).ok_or_else(|| {
-            OracleError::new(
-                error_codes::ERR_NVO_POLICY_MISSING,
-                format!("Divergence '{}' not found", divergence_id),
-            )
-        })?;
-
-        if !div.risk_tier.requires_receipt() {
-            return Err(OracleError::new(
-                error_codes::ERR_NVO_INVALID_RECEIPT,
-                format!(
-                    "Divergence '{}' is {} risk, receipts are for Low risk only",
-                    divergence_id, div.risk_tier
+        let valid = receipt.verify_l1_linkage();
+        if valid {
+            let mut details = BTreeMap::new();
+            details.insert("receipt_id".to_string(), receipt_id.to_string());
+            details.insert(
+                "l1_oracle_run_id".to_string(),
+                receipt.l1_linkage.l1_oracle_run_id.clone(),
+            );
+            self.emit_event(
+                event_codes::FN_NV_010,
+                "L1 linkage verified",
+                details,
+            );
+            Ok(true)
+        } else {
+            Err(OracleError {
+                code: error_codes::ERR_NVO_L1_LINKAGE_BROKEN,
+                message: format!(
+                    "L1 linkage broken for receipt '{receipt_id}': missing oracle run ID, verdict, or linkage hash"
                 ),
-            ));
+            })
         }
-
-        div.policy_receipt_id = Some(receipt_id.clone());
-        div.resolved = true;
-
-        let receipt = PolicyReceipt {
-            id: receipt_id.clone(),
-            divergence_id: divergence_id.to_string(),
-            justification,
-            l1_linkage,
-            verified: false,
-            issued_at: "2026-02-21T00:00:00Z".to_string(),
-        };
-
-        self.receipts.insert(receipt_id.clone(), receipt);
-        self.log_event(
-            event_codes::FN_NV_009,
-            format!(
-                "Policy receipt '{}' issued for divergence '{}'",
-                receipt_id, divergence_id
-            ),
-        );
-
-        Ok(self.receipts.get(&receipt_id).unwrap())
     }
 
-    /// Verify L1 product-oracle linkage for a policy receipt.
-    ///
-    /// INV-NVO-L1-LINKAGE: receipts must link to L1 product-oracle results.
-    pub fn verify_l1_linkage(&mut self, receipt_id: &str) -> Result<bool, OracleError> {
-        let receipt = self.receipts.get_mut(receipt_id).ok_or_else(|| {
-            OracleError::new(
-                error_codes::ERR_NVO_INVALID_RECEIPT,
-                format!("Receipt '{}' not found", receipt_id),
-            )
-        })?;
-
-        // Verify the linkage: l1_oracle_id and result_hash must be non-empty.
-        let valid = !receipt.l1_linkage.l1_oracle_id.is_empty()
-            && !receipt.l1_linkage.result_hash.is_empty();
-
-        if valid {
-            receipt.l1_linkage.verified = true;
-            receipt.verified = true;
-            self.log_event(
-                event_codes::FN_NV_010,
-                format!(
-                    "L1 linkage verified for receipt '{}' -> L1 oracle '{}'",
-                    receipt_id, receipt.l1_linkage.l1_oracle_id
-                ),
-            );
-        } else {
-            return Err(OracleError::new(
-                error_codes::ERR_NVO_L1_LINKAGE_BROKEN,
-                format!("L1 linkage invalid for receipt '{}'", receipt_id),
-            ));
-        }
-
-        Ok(valid)
+    /// Mark a divergence as resolved.
+    pub fn resolve_divergence(
+        &mut self,
+        divergence_id: &str,
+        resolution_note: &str,
+    ) -> Result<(), OracleError> {
+        let div = self
+            .divergences
+            .get_mut(divergence_id)
+            .ok_or_else(|| OracleError {
+                code: error_codes::ERR_NVO_DIVERGENCE_UNRESOLVED,
+                message: format!("divergence '{divergence_id}' not found"),
+            })?;
+        div.resolved = true;
+        div.resolution_note = Some(resolution_note.to_string());
+        Ok(())
     }
 
     /// Evaluate whether release is blocked.
-    ///
-    /// INV-NVO-BLOCK-HIGH: high-risk and critical unresolved divergences block release.
-    /// INV-NVO-POLICY-RECEIPT: low-risk deltas without receipts also affect verdict.
     pub fn check_release_gate(&mut self) -> OracleVerdict {
-        let blocking: Vec<String> = self
-            .divergences
-            .values()
-            .filter(|d| !d.resolved && d.risk_tier.blocks_release())
-            .map(|d| d.id.clone())
-            .collect();
+        let mut blocking = Vec::new();
+        let mut pending_receipt = Vec::new();
+
+        for (id, div) in &self.divergences {
+            if div.resolved {
+                continue;
+            }
+
+            if div.risk_tier.blocks_release() {
+                blocking.push(id.clone());
+            } else if div.risk_tier.requires_receipt() {
+                // Check if a receipt has been issued for this divergence.
+                let has_receipt =
+                    self.receipts.values().any(|r| r.divergence_id == *id);
+                if !has_receipt {
+                    pending_receipt.push(id.clone());
+                }
+            }
+        }
 
         if !blocking.is_empty() {
-            self.log_event(
-                event_codes::FN_NV_008,
-                format!(
-                    "Release blocked: {} unresolved high/critical divergences",
-                    blocking.len()
-                ),
+            let mut details = BTreeMap::new();
+            details.insert(
+                "blocked_count".to_string(),
+                blocking.len().to_string(),
             );
-            return OracleVerdict::BlockRelease {
+            self.emit_event(
+                event_codes::FN_NV_008,
+                "Release blocked",
+                details,
+            );
+            OracleVerdict::BlockRelease {
                 blocking_divergence_ids: blocking,
-            };
+            }
+        } else if !pending_receipt.is_empty() {
+            OracleVerdict::RequiresReceipt {
+                pending_divergence_ids: pending_receipt,
+            }
+        } else {
+            OracleVerdict::Pass
         }
-
-        let pending_receipts: Vec<String> = self
-            .divergences
-            .values()
-            .filter(|d| !d.resolved && d.risk_tier.requires_receipt())
-            .map(|d| d.id.clone())
-            .collect();
-
-        if !pending_receipts.is_empty() {
-            return OracleVerdict::RequiresReceipt {
-                pending_receipt_ids: pending_receipts,
-            };
-        }
-
-        OracleVerdict::Pass
     }
 
     /// Generate the comprehensive divergence report.
     pub fn generate_report(&mut self) -> DivergenceReport {
         let verdict = self.check_release_gate();
 
-        let mut risk_tier_counts: BTreeMap<String, usize> = BTreeMap::new();
-        for div in self.divergences.values() {
-            *risk_tier_counts.entry(div.risk_tier.to_string()).or_insert(0) += 1;
-        }
-
-        self.log_event(
+        let mut details = BTreeMap::new();
+        details.insert("verdict".to_string(), verdict.label().to_string());
+        details.insert(
+            "divergence_count".to_string(),
+            self.divergences.len().to_string(),
+        );
+        self.emit_event(
             event_codes::FN_NV_012,
-            format!(
-                "Oracle report generated: {} divergences, verdict={}",
-                self.divergences.len(),
-                verdict
-            ),
+            "Oracle report generated",
+            details,
         );
 
         DivergenceReport {
             schema_version: SCHEMA_VERSION.to_string(),
-            oracle_id: self.id.clone(),
+            trace_id: self.trace_id.clone(),
+            runtimes: self.runtimes.clone(),
+            checks: self.checks.values().cloned().collect(),
+            divergences: self.divergences.values().cloned().collect(),
+            voting_results: self.voting_results.values().cloned().collect(),
+            receipts: self.receipts.values().cloned().collect(),
             verdict,
-            divergences: self.divergences.clone(),
-            checks: self.checks.clone(),
-            voting_results: self.voting_results.clone(),
-            receipts: self.receipts.clone(),
-            risk_tier_counts,
+            event_log: self.event_log.clone(),
         }
     }
 
-    /// Get the audit log.
-    pub fn audit_log(&self) -> &[AuditEntry] {
-        &self.audit_log
+    // -----------------------------------------------------------------------
+    // Internal helpers
+    // -----------------------------------------------------------------------
+
+    fn emit_event(
+        &mut self,
+        event_code: &str,
+        message: &str,
+        details: BTreeMap<String, String>,
+    ) {
+        self.event_log.push(OracleEvent {
+            event_code: event_code.to_string(),
+            trace_id: self.trace_id.clone(),
+            message: message.to_string(),
+            details,
+        });
     }
 }
 
-// ═══════════════════════════════════════════════════════════════════════════
+// ---------------------------------------------------------------------------
+// Helper: default risk assignment by scope
+// ---------------------------------------------------------------------------
+
+/// Default risk tier assignment by boundary scope.
+pub fn default_risk_for_scope(scope: BoundaryScope) -> RiskTier {
+    match scope {
+        BoundaryScope::Security => RiskTier::Critical,
+        BoundaryScope::Memory => RiskTier::High,
+        BoundaryScope::Concurrency => RiskTier::High,
+        BoundaryScope::IO => RiskTier::Medium,
+        BoundaryScope::TypeSystem => RiskTier::Low,
+    }
+}
+
+// ===========================================================================
 // Tests
-// ═══════════════════════════════════════════════════════════════════════════
+// ===========================================================================
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_runtime(id: &str) -> RuntimeEntry {
+    fn sample_runtime(id: &str) -> RuntimeEntry {
         RuntimeEntry {
-            id: id.to_string(),
-            name: format!("{}_runtime", id),
+            runtime_id: id.to_string(),
+            runtime_name: format!("runtime-{id}"),
             version: "1.0.0".to_string(),
-            active: true,
+            is_reference: true,
         }
     }
 
-    fn setup_oracle_with_runtimes() -> RuntimeOracle {
-        let mut oracle = RuntimeOracle::new("test-oracle");
-        oracle.register_runtime(make_runtime("franken_engine")).unwrap();
-        oracle.register_runtime(make_runtime("ref_runtime_a")).unwrap();
-        oracle.register_runtime(make_runtime("ref_runtime_b")).unwrap();
-        oracle
+    fn sample_receipt(receipt_id: &str, divergence_id: &str) -> PolicyReceipt {
+        PolicyReceipt {
+            receipt_id: receipt_id.to_string(),
+            divergence_id: divergence_id.to_string(),
+            issuer: "test-issuer".to_string(),
+            rationale: "test rationale".to_string(),
+            l1_linkage: L1LinkageProof {
+                l1_oracle_run_id: "l1-run-001".to_string(),
+                l1_verdict: "pass".to_string(),
+                linkage_hash: "abc123".to_string(),
+                timestamp_epoch_secs: 1700000000,
+            },
+            issued_at_epoch_secs: 1700000000,
+            expires_at_epoch_secs: 1700086400,
+        }
     }
 
-    // --- Construction ---
-
+    // 1) Oracle creation emits event
     #[test]
-    fn test_oracle_new() {
-        let oracle = RuntimeOracle::new("oracle-1");
-        assert_eq!(oracle.id, "oracle-1");
-        assert_eq!(oracle.runtime_count(), 0);
-        assert_eq!(oracle.quorum_threshold_pct, DEFAULT_QUORUM_THRESHOLD_PCT);
+    fn oracle_creation_emits_event() {
+        let oracle = RuntimeOracle::new("trace-001", 66);
+        assert_eq!(oracle.event_log.len(), 1);
+        assert_eq!(oracle.event_log[0].event_code, event_codes::FN_NV_001);
     }
 
+    // 2) Register runtime success
     #[test]
-    fn test_schema_version() {
-        assert_eq!(SCHEMA_VERSION, "nvo-v1.0");
-    }
-
-    // --- Runtime registration ---
-
-    #[test]
-    fn test_register_runtime() {
-        let mut oracle = RuntimeOracle::new("oracle-2");
-        let result = oracle.register_runtime(make_runtime("rt-1"));
+    fn register_runtime_success() {
+        let mut oracle = RuntimeOracle::new("trace-002", 66);
+        let result = oracle.register_runtime(sample_runtime("franken"));
         assert!(result.is_ok());
         assert_eq!(oracle.runtime_count(), 1);
+        assert_eq!(
+            oracle.event_log.last().unwrap().event_code,
+            event_codes::FN_NV_002
+        );
     }
 
+    // 3) Duplicate runtime rejected
     #[test]
-    fn test_register_duplicate_runtime_fails() {
-        let mut oracle = RuntimeOracle::new("oracle-3");
-        oracle.register_runtime(make_runtime("rt-1")).unwrap();
-        let err = oracle.register_runtime(make_runtime("rt-1")).unwrap_err();
+    fn duplicate_runtime_rejected() {
+        let mut oracle = RuntimeOracle::new("trace-003", 66);
+        oracle
+            .register_runtime(sample_runtime("franken"))
+            .unwrap();
+        let err = oracle
+            .register_runtime(sample_runtime("franken"))
+            .unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_DUPLICATE_RUNTIME);
     }
 
+    // 4) Remove runtime success
     #[test]
-    fn test_remove_runtime() {
-        let mut oracle = RuntimeOracle::new("oracle-4");
-        oracle.register_runtime(make_runtime("rt-1")).unwrap();
-        let removed = oracle.remove_runtime("rt-1");
-        assert!(removed.is_ok());
+    fn remove_runtime_success() {
+        let mut oracle = RuntimeOracle::new("trace-004", 66);
+        oracle.register_runtime(sample_runtime("ref-a")).unwrap();
+        let removed = oracle.remove_runtime("ref-a").unwrap();
+        assert_eq!(removed.runtime_id, "ref-a");
         assert_eq!(oracle.runtime_count(), 0);
     }
 
+    // 5) Remove missing runtime error
     #[test]
-    fn test_remove_nonexistent_runtime_fails() {
-        let mut oracle = RuntimeOracle::new("oracle-5");
-        let err = oracle.remove_runtime("no-such").unwrap_err();
+    fn remove_missing_runtime_error() {
+        let mut oracle = RuntimeOracle::new("trace-005", 66);
+        let err = oracle.remove_runtime("ghost").unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_RUNTIME_NOT_FOUND);
     }
 
+    // 6) Cross-check requires at least one runtime
     #[test]
-    fn test_get_runtime() {
-        let mut oracle = RuntimeOracle::new("oracle-6");
-        oracle.register_runtime(make_runtime("rt-x")).unwrap();
-        let rt = oracle.get_runtime("rt-x");
-        assert!(rt.is_some());
-        assert_eq!(rt.unwrap().name, "rt-x_runtime");
-        assert!(oracle.get_runtime("no-such").is_none());
-    }
-
-    // --- Cross-runtime checks ---
-
-    #[test]
-    fn test_run_cross_check_requires_two_runtimes() {
-        let mut oracle = RuntimeOracle::new("oracle-7");
-        oracle.register_runtime(make_runtime("rt-1")).unwrap();
+    fn cross_check_requires_runtimes() {
+        let mut oracle = RuntimeOracle::new("trace-006", 66);
+        let outputs = BTreeMap::new();
         let err = oracle
-            .run_cross_check("chk-1", BoundaryScope::Memory, "desc")
+            .run_cross_check("chk-1", BoundaryScope::Memory, b"input", &outputs)
             .unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_NO_RUNTIMES);
     }
 
+    // 7) Cross-check agreement
     #[test]
-    fn test_run_cross_check_success() {
-        let mut oracle = setup_oracle_with_runtimes();
+    fn cross_check_agreement() {
+        let mut oracle = RuntimeOracle::new("trace-007", 66);
+        oracle.register_runtime(sample_runtime("a")).unwrap();
+        oracle.register_runtime(sample_runtime("b")).unwrap();
+
+        let mut outputs = BTreeMap::new();
+        outputs.insert("a".to_string(), vec![1, 2, 3]);
+        outputs.insert("b".to_string(), vec![1, 2, 3]);
+
         let check = oracle
-            .run_cross_check("chk-1", BoundaryScope::TypeSystem, "type boundary test")
+            .run_cross_check("chk-agree", BoundaryScope::IO, b"test", &outputs)
             .unwrap();
-        assert_eq!(check.id, "chk-1");
-        assert!(check.running);
-        assert!(!check.voting_complete);
+
+        match check.outcome.unwrap() {
+            CheckOutcome::Agree { canonical_output } => {
+                assert_eq!(canonical_output, vec![1, 2, 3]);
+            }
+            CheckOutcome::Diverge { .. } => panic!("expected agreement"),
+        }
     }
 
+    // 8) Cross-check divergence
     #[test]
-    fn test_check_already_running_fails() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .run_cross_check("chk-dup", BoundaryScope::IO, "first")
+    fn cross_check_divergence() {
+        let mut oracle = RuntimeOracle::new("trace-008", 66);
+        oracle.register_runtime(sample_runtime("a")).unwrap();
+        oracle.register_runtime(sample_runtime("b")).unwrap();
+
+        let mut outputs = BTreeMap::new();
+        outputs.insert("a".to_string(), vec![1, 2, 3]);
+        outputs.insert("b".to_string(), vec![4, 5, 6]);
+
+        let check = oracle
+            .run_cross_check("chk-div", BoundaryScope::Security, b"test", &outputs)
             .unwrap();
+
+        match check.outcome.unwrap() {
+            CheckOutcome::Diverge { outputs } => {
+                assert_eq!(outputs.len(), 2);
+            }
+            CheckOutcome::Agree { .. } => panic!("expected divergence"),
+        }
+    }
+
+    // 9) Duplicate active check ID rejected
+    #[test]
+    fn duplicate_active_check_rejected() {
+        let mut oracle = RuntimeOracle::new("trace-009", 66);
+        oracle.register_runtime(sample_runtime("a")).unwrap();
+
+        // Force an active-check scenario.
+        oracle
+            .active_checks
+            .insert("chk-active".to_string(), true);
+
+        let outputs = BTreeMap::new();
         let err = oracle
-            .run_cross_check("chk-dup", BoundaryScope::IO, "second")
+            .run_cross_check("chk-active", BoundaryScope::IO, b"in", &outputs)
             .unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_CHECK_ALREADY_RUNNING);
     }
 
-    // --- Voting ---
-
+    // 10) Classify divergence
     #[test]
-    fn test_vote_unknown_runtime_fails() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .run_cross_check("chk-v1", BoundaryScope::Security, "sec check")
-            .unwrap();
-        let err = oracle.vote("chk-v1", "unknown-rt", CheckOutcome::Agree).unwrap_err();
+    fn classify_divergence_records_risk_tier() {
+        let mut oracle = RuntimeOracle::new("trace-010", 66);
+        let outputs = BTreeMap::new();
+        let div = oracle.classify_divergence(
+            "div-1",
+            "chk-1",
+            BoundaryScope::Security,
+            RiskTier::Critical,
+            &outputs,
+        );
+        assert_eq!(div.risk_tier, RiskTier::Critical);
+        assert!(!div.resolved);
+        assert_eq!(oracle.divergences.len(), 1);
+    }
+
+    // 11) Voting and quorum success
+    #[test]
+    fn voting_quorum_success() {
+        let mut oracle = RuntimeOracle::new("trace-011", 66);
+        oracle.register_runtime(sample_runtime("a")).unwrap();
+        oracle.register_runtime(sample_runtime("b")).unwrap();
+        oracle.register_runtime(sample_runtime("c")).unwrap();
+
+        oracle.vote("chk-v1", "a", vec![1, 2]).unwrap();
+        oracle.vote("chk-v1", "b", vec![1, 2]).unwrap();
+        oracle.vote("chk-v1", "c", vec![1, 2]).unwrap();
+
+        let result = oracle.tally_votes("chk-v1").unwrap();
+        assert!(result.quorum_reached);
+        assert_eq!(result.agreeing_voters, 3);
+    }
+
+    // 12) Voting quorum failure
+    #[test]
+    fn voting_quorum_failure() {
+        let mut oracle = RuntimeOracle::new("trace-012", 66);
+        oracle.register_runtime(sample_runtime("a")).unwrap();
+        oracle.register_runtime(sample_runtime("b")).unwrap();
+        oracle.register_runtime(sample_runtime("c")).unwrap();
+
+        oracle.vote("chk-v2", "a", vec![1]).unwrap();
+        oracle.vote("chk-v2", "b", vec![2]).unwrap();
+        oracle.vote("chk-v2", "c", vec![3]).unwrap();
+
+        let result = oracle.tally_votes("chk-v2").unwrap();
+        assert!(!result.quorum_reached);
+        assert_eq!(result.agreeing_voters, 1);
+    }
+
+    // 13) Vote from unknown runtime rejected
+    #[test]
+    fn vote_from_unknown_runtime_rejected() {
+        let mut oracle = RuntimeOracle::new("trace-013", 66);
+        let err = oracle.vote("chk-x", "ghost", vec![1]).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_RUNTIME_NOT_FOUND);
     }
 
+    // 14) Issue policy receipt for low-risk
     #[test]
-    fn test_tally_votes_quorum_reached() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .run_cross_check("chk-q1", BoundaryScope::Memory, "mem check")
-            .unwrap();
-        oracle.vote("chk-q1", "franken_engine", CheckOutcome::Agree).unwrap();
-        oracle.vote("chk-q1", "ref_runtime_a", CheckOutcome::Agree).unwrap();
-        oracle
-            .vote(
-                "chk-q1",
-                "ref_runtime_b",
-                CheckOutcome::Diverge {
-                    description: "minor diff".to_string(),
-                },
-            )
-            .unwrap();
-
-        let result = oracle.tally_votes("chk-q1").unwrap();
-        // 2/3 = 66.7% >= 67%? No, 2*100=200, 3*67=201, so quorum NOT reached.
-        assert!(!result.quorum_reached);
-        assert_eq!(result.agree_count, 2);
-        assert_eq!(result.diverge_count, 1);
+    fn issue_policy_receipt_low_risk() {
+        let mut oracle = RuntimeOracle::new("trace-014", 66);
+        oracle.classify_divergence(
+            "div-low",
+            "chk-1",
+            BoundaryScope::TypeSystem,
+            RiskTier::Low,
+            &BTreeMap::new(),
+        );
+        let receipt = sample_receipt("rcpt-1", "div-low");
+        assert!(oracle.issue_policy_receipt(receipt).is_ok());
+        assert_eq!(oracle.receipts.len(), 1);
     }
 
+    // 15) Issue policy receipt rejected for non-low-risk
     #[test]
-    fn test_tally_votes_quorum_with_lower_threshold() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle.set_quorum_threshold(50);
-        oracle
-            .run_cross_check("chk-q2", BoundaryScope::IO, "io check")
-            .unwrap();
-        oracle.vote("chk-q2", "franken_engine", CheckOutcome::Agree).unwrap();
-        oracle
-            .vote(
-                "chk-q2",
-                "ref_runtime_a",
-                CheckOutcome::Diverge {
-                    description: "diverge".to_string(),
-                },
-            )
-            .unwrap();
-        oracle.vote("chk-q2", "ref_runtime_b", CheckOutcome::Agree).unwrap();
-
-        let result = oracle.tally_votes("chk-q2").unwrap();
-        // 2/3 = 66.7% >= 50% → quorum reached
-        assert!(result.quorum_reached);
-    }
-
-    #[test]
-    fn test_tally_no_votes_fails() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .run_cross_check("chk-empty", BoundaryScope::Concurrency, "conc check")
-            .unwrap();
-        let err = oracle.tally_votes("chk-empty").unwrap_err();
-        assert_eq!(err.code, error_codes::ERR_NVO_VOTING_TIMEOUT);
-    }
-
-    // --- Divergence classification ---
-
-    #[test]
-    fn test_classify_divergence() {
-        let mut oracle = setup_oracle_with_runtimes();
-        let div_id = oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::Security,
-                RiskTier::High,
-                "security boundary mismatch",
-                vec!["franken_engine".into(), "ref_runtime_a".into()],
-            )
-            .unwrap();
-        assert_eq!(div_id, "div-1");
-    }
-
-    #[test]
-    fn test_sequential_divergence_ids() {
-        let mut oracle = setup_oracle_with_runtimes();
-        let id1 = oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::Memory,
-                RiskTier::Low,
-                "d1",
-                vec!["a".into()],
-            )
-            .unwrap();
-        let id2 = oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::IO,
-                RiskTier::Medium,
-                "d2",
-                vec!["b".into()],
-            )
-            .unwrap();
-        assert_eq!(id1, "div-1");
-        assert_eq!(id2, "div-2");
-    }
-
-    // --- Release gate ---
-
-    #[test]
-    fn test_release_gate_pass_no_divergences() {
-        let mut oracle = setup_oracle_with_runtimes();
-        let verdict = oracle.check_release_gate();
-        assert_eq!(verdict, OracleVerdict::Pass);
-    }
-
-    #[test]
-    fn test_release_gate_blocks_on_high_risk() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::Security,
-                RiskTier::High,
-                "high-risk security issue",
-                vec!["franken_engine".into()],
-            )
-            .unwrap();
-
-        let verdict = oracle.check_release_gate();
-        match verdict {
-            OracleVerdict::BlockRelease { blocking_divergence_ids } => {
-                assert_eq!(blocking_divergence_ids, vec!["div-1"]);
-            }
-            _ => panic!("Expected BlockRelease, got {:?}", verdict),
-        }
-    }
-
-    #[test]
-    fn test_release_gate_blocks_on_critical() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::Memory,
-                RiskTier::Critical,
-                "critical memory divergence",
-                vec!["franken_engine".into()],
-            )
-            .unwrap();
-
-        let verdict = oracle.check_release_gate();
-        assert!(matches!(verdict, OracleVerdict::BlockRelease { .. }));
-    }
-
-    #[test]
-    fn test_release_gate_requires_receipt_for_low_risk() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::IO,
-                RiskTier::Low,
-                "minor io difference",
-                vec!["ref_runtime_a".into()],
-            )
-            .unwrap();
-
-        let verdict = oracle.check_release_gate();
-        match verdict {
-            OracleVerdict::RequiresReceipt { pending_receipt_ids } => {
-                assert_eq!(pending_receipt_ids, vec!["div-1"]);
-            }
-            _ => panic!("Expected RequiresReceipt, got {:?}", verdict),
-        }
-    }
-
-    #[test]
-    fn test_release_gate_pass_after_resolve() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::Security,
-                RiskTier::High,
-                "issue",
-                vec!["a".into()],
-            )
-            .unwrap();
-        oracle.resolve_divergence("div-1").unwrap();
-
-        let verdict = oracle.check_release_gate();
-        assert_eq!(verdict, OracleVerdict::Pass);
-    }
-
-    #[test]
-    fn test_medium_risk_does_not_block() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::Concurrency,
-                RiskTier::Medium,
-                "medium conc diff",
-                vec!["a".into()],
-            )
-            .unwrap();
-
-        let verdict = oracle.check_release_gate();
-        // Medium risk neither blocks nor requires receipt
-        assert_eq!(verdict, OracleVerdict::Pass);
-    }
-
-    // --- Policy receipts ---
-
-    #[test]
-    fn test_issue_policy_receipt() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::IO,
-                RiskTier::Low,
-                "low-risk io",
-                vec!["a".into()],
-            )
-            .unwrap();
-
-        let receipt = oracle
-            .issue_policy_receipt(
-                "rcpt-1",
-                "div-1",
-                "accepted per L1 oracle",
-                L1LinkageProof {
-                    l1_oracle_id: "l1-oracle-42".to_string(),
-                    result_hash: "abcdef1234".to_string(),
-                    verified: false,
-                },
-            )
-            .unwrap();
-        assert_eq!(receipt.id, "rcpt-1");
-        assert_eq!(receipt.divergence_id, "div-1");
-
-        // After receipt, release should pass
-        let verdict = oracle.check_release_gate();
-        assert_eq!(verdict, OracleVerdict::Pass);
-    }
-
-    #[test]
-    fn test_policy_receipt_for_non_low_risk_fails() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::Security,
-                RiskTier::High,
-                "high-risk",
-                vec!["a".into()],
-            )
-            .unwrap();
-
-        let err = oracle
-            .issue_policy_receipt(
-                "rcpt-x",
-                "div-1",
-                "invalid",
-                L1LinkageProof {
-                    l1_oracle_id: "l1".to_string(),
-                    result_hash: "hash".to_string(),
-                    verified: false,
-                },
-            )
-            .unwrap_err();
+    fn issue_policy_receipt_rejected_for_high_risk() {
+        let mut oracle = RuntimeOracle::new("trace-015", 66);
+        oracle.classify_divergence(
+            "div-high",
+            "chk-1",
+            BoundaryScope::Memory,
+            RiskTier::High,
+            &BTreeMap::new(),
+        );
+        let receipt = sample_receipt("rcpt-2", "div-high");
+        let err = oracle.issue_policy_receipt(receipt).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_INVALID_RECEIPT);
     }
 
-    // --- L1 linkage ---
-
+    // 16) Verify L1 linkage success
     #[test]
-    fn test_verify_l1_linkage() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::IO,
-                RiskTier::Low,
-                "low io",
-                vec!["a".into()],
-            )
-            .unwrap();
-        oracle
-            .issue_policy_receipt(
-                "rcpt-1",
-                "div-1",
-                "ok",
-                L1LinkageProof {
-                    l1_oracle_id: "l1-42".to_string(),
-                    result_hash: "deadbeef".to_string(),
-                    verified: false,
-                },
-            )
-            .unwrap();
-
-        let result = oracle.verify_l1_linkage("rcpt-1").unwrap();
-        assert!(result);
+    fn verify_l1_linkage_success() {
+        let mut oracle = RuntimeOracle::new("trace-016", 66);
+        oracle.classify_divergence(
+            "div-l",
+            "chk-1",
+            BoundaryScope::TypeSystem,
+            RiskTier::Low,
+            &BTreeMap::new(),
+        );
+        let receipt = sample_receipt("rcpt-l1", "div-l");
+        oracle.issue_policy_receipt(receipt).unwrap();
+        let valid = oracle.verify_l1_linkage("rcpt-l1").unwrap();
+        assert!(valid);
     }
 
+    // 17) Verify L1 linkage broken
     #[test]
-    fn test_verify_l1_linkage_broken() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::IO,
-                RiskTier::Low,
-                "low io",
-                vec!["a".into()],
-            )
-            .unwrap();
-        oracle
-            .issue_policy_receipt(
-                "rcpt-bad",
-                "div-1",
-                "no linkage",
-                L1LinkageProof {
-                    l1_oracle_id: String::new(),
-                    result_hash: String::new(),
-                    verified: false,
-                },
-            )
-            .unwrap();
-
-        let err = oracle.verify_l1_linkage("rcpt-bad").unwrap_err();
+    fn verify_l1_linkage_broken() {
+        let mut oracle = RuntimeOracle::new("trace-017", 66);
+        oracle.classify_divergence(
+            "div-lb",
+            "chk-1",
+            BoundaryScope::TypeSystem,
+            RiskTier::Low,
+            &BTreeMap::new(),
+        );
+        let mut receipt = sample_receipt("rcpt-broken", "div-lb");
+        receipt.l1_linkage.l1_oracle_run_id.clear();
+        oracle.issue_policy_receipt(receipt).unwrap();
+        let err = oracle.verify_l1_linkage("rcpt-broken").unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_L1_LINKAGE_BROKEN);
     }
 
-    // --- Report generation ---
-
+    // 18) Resolve divergence
     #[test]
-    fn test_generate_report_empty() {
-        let mut oracle = setup_oracle_with_runtimes();
+    fn resolve_divergence_success() {
+        let mut oracle = RuntimeOracle::new("trace-018", 66);
+        oracle.classify_divergence(
+            "div-r",
+            "chk-1",
+            BoundaryScope::IO,
+            RiskTier::Medium,
+            &BTreeMap::new(),
+        );
+        oracle
+            .resolve_divergence("div-r", "Accepted as benign")
+            .unwrap();
+        assert!(oracle.divergences["div-r"].resolved);
+        assert_eq!(
+            oracle.divergences["div-r"].resolution_note.as_deref(),
+            Some("Accepted as benign")
+        );
+    }
+
+    // 19) Release gate pass when no divergences
+    #[test]
+    fn release_gate_pass_no_divergences() {
+        let mut oracle = RuntimeOracle::new("trace-019", 66);
+        let verdict = oracle.check_release_gate();
+        assert_eq!(verdict, OracleVerdict::Pass);
+    }
+
+    // 20) Release gate blocked on critical
+    #[test]
+    fn release_gate_blocked_critical() {
+        let mut oracle = RuntimeOracle::new("trace-020", 66);
+        oracle.classify_divergence(
+            "div-crit",
+            "chk-1",
+            BoundaryScope::Security,
+            RiskTier::Critical,
+            &BTreeMap::new(),
+        );
+        let verdict = oracle.check_release_gate();
+        match verdict {
+            OracleVerdict::BlockRelease {
+                blocking_divergence_ids,
+            } => {
+                assert!(
+                    blocking_divergence_ids.contains(&"div-crit".to_string())
+                );
+            }
+            _ => panic!("expected BlockRelease"),
+        }
+    }
+
+    // 21) Release gate blocked on high
+    #[test]
+    fn release_gate_blocked_high() {
+        let mut oracle = RuntimeOracle::new("trace-021", 66);
+        oracle.classify_divergence(
+            "div-high",
+            "chk-1",
+            BoundaryScope::Memory,
+            RiskTier::High,
+            &BTreeMap::new(),
+        );
+        let verdict = oracle.check_release_gate();
+        match verdict {
+            OracleVerdict::BlockRelease { .. } => {}
+            _ => panic!("expected BlockRelease for High risk"),
+        }
+    }
+
+    // 22) Release gate requires receipt for low-risk
+    #[test]
+    fn release_gate_requires_receipt_for_low_risk() {
+        let mut oracle = RuntimeOracle::new("trace-022", 66);
+        oracle.classify_divergence(
+            "div-low",
+            "chk-1",
+            BoundaryScope::TypeSystem,
+            RiskTier::Low,
+            &BTreeMap::new(),
+        );
+        let verdict = oracle.check_release_gate();
+        match verdict {
+            OracleVerdict::RequiresReceipt {
+                pending_divergence_ids,
+            } => {
+                assert!(
+                    pending_divergence_ids.contains(&"div-low".to_string())
+                );
+            }
+            _ => panic!("expected RequiresReceipt"),
+        }
+    }
+
+    // 23) Release gate pass with receipt
+    #[test]
+    fn release_gate_pass_with_receipt() {
+        let mut oracle = RuntimeOracle::new("trace-023", 66);
+        oracle.classify_divergence(
+            "div-low",
+            "chk-1",
+            BoundaryScope::TypeSystem,
+            RiskTier::Low,
+            &BTreeMap::new(),
+        );
+        oracle
+            .issue_policy_receipt(sample_receipt("rcpt-low", "div-low"))
+            .unwrap();
+        let verdict = oracle.check_release_gate();
+        assert_eq!(verdict, OracleVerdict::Pass);
+    }
+
+    // 24) Release gate pass when resolved
+    #[test]
+    fn release_gate_pass_when_resolved() {
+        let mut oracle = RuntimeOracle::new("trace-024", 66);
+        oracle.classify_divergence(
+            "div-high",
+            "chk-1",
+            BoundaryScope::Memory,
+            RiskTier::High,
+            &BTreeMap::new(),
+        );
+        oracle.resolve_divergence("div-high", "fixed").unwrap();
+        let verdict = oracle.check_release_gate();
+        assert_eq!(verdict, OracleVerdict::Pass);
+    }
+
+    // 25) Generate report structure
+    #[test]
+    fn generate_report_structure() {
+        let mut oracle = RuntimeOracle::new("trace-025", 66);
+        oracle.register_runtime(sample_runtime("a")).unwrap();
+        oracle.register_runtime(sample_runtime("b")).unwrap();
+
+        let mut outputs = BTreeMap::new();
+        outputs.insert("a".to_string(), vec![10]);
+        outputs.insert("b".to_string(), vec![20]);
+        oracle
+            .run_cross_check("chk-rpt", BoundaryScope::IO, b"data", &outputs)
+            .unwrap();
+        oracle.classify_divergence(
+            "div-rpt",
+            "chk-rpt",
+            BoundaryScope::IO,
+            RiskTier::Medium,
+            &outputs,
+        );
+
         let report = oracle.generate_report();
         assert_eq!(report.schema_version, SCHEMA_VERSION);
-        assert_eq!(report.verdict, OracleVerdict::Pass);
-        assert!(report.divergences.is_empty());
+        assert_eq!(report.trace_id, "trace-025");
+        assert_eq!(report.runtimes.len(), 2);
+        assert_eq!(report.checks.len(), 1);
+        assert_eq!(report.divergences.len(), 1);
+        assert!(!report.event_log.is_empty());
     }
 
+    // 26) Default risk for scope mapping
     #[test]
-    fn test_generate_report_with_divergences() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::Security,
-                RiskTier::High,
-                "sec issue",
-                vec!["a".into()],
-            )
-            .unwrap();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::IO,
-                RiskTier::Low,
-                "io diff",
-                vec!["b".into()],
-            )
-            .unwrap();
-
-        let report = oracle.generate_report();
-        assert_eq!(report.divergences.len(), 2);
-        assert_eq!(*report.risk_tier_counts.get("High").unwrap(), 1);
-        assert_eq!(*report.risk_tier_counts.get("Low").unwrap(), 1);
-        assert!(matches!(report.verdict, OracleVerdict::BlockRelease { .. }));
+    fn default_risk_for_scope_mapping() {
+        assert_eq!(
+            default_risk_for_scope(BoundaryScope::Security),
+            RiskTier::Critical
+        );
+        assert_eq!(
+            default_risk_for_scope(BoundaryScope::Memory),
+            RiskTier::High
+        );
+        assert_eq!(
+            default_risk_for_scope(BoundaryScope::Concurrency),
+            RiskTier::High
+        );
+        assert_eq!(
+            default_risk_for_scope(BoundaryScope::IO),
+            RiskTier::Medium
+        );
+        assert_eq!(
+            default_risk_for_scope(BoundaryScope::TypeSystem),
+            RiskTier::Low
+        );
     }
 
-    // --- RiskTier methods ---
-
+    // 27) RiskTier blocks_release
     #[test]
-    fn test_risk_tier_blocks_release() {
+    fn risk_tier_blocks_release() {
         assert!(!RiskTier::Info.blocks_release());
         assert!(!RiskTier::Low.blocks_release());
         assert!(!RiskTier::Medium.blocks_release());
@@ -1353,8 +1311,9 @@ mod tests {
         assert!(RiskTier::Critical.blocks_release());
     }
 
+    // 28) RiskTier requires_receipt
     #[test]
-    fn test_risk_tier_requires_receipt() {
+    fn risk_tier_requires_receipt() {
         assert!(!RiskTier::Info.requires_receipt());
         assert!(RiskTier::Low.requires_receipt());
         assert!(!RiskTier::Medium.requires_receipt());
@@ -1362,107 +1321,104 @@ mod tests {
         assert!(!RiskTier::Critical.requires_receipt());
     }
 
-    // --- Determinism (BTreeMap ordering) ---
-
+    // 29) PolicyReceipt expiry
     #[test]
-    fn test_deterministic_ordering() {
-        let mut oracle = setup_oracle_with_runtimes();
+    fn policy_receipt_expiry() {
+        let receipt = sample_receipt("rcpt-exp", "div-1");
+        assert!(!receipt.is_expired(1700000000));
+        assert!(receipt.is_expired(1700086400));
+        assert!(receipt.is_expired(1800000000));
+        assert!(!receipt.is_expired(1700000001));
+    }
+
+    // 30) OracleVerdict display labels
+    #[test]
+    fn oracle_verdict_labels() {
+        assert_eq!(OracleVerdict::Pass.label(), "pass");
+        assert_eq!(
+            OracleVerdict::BlockRelease {
+                blocking_divergence_ids: vec![]
+            }
+            .label(),
+            "block_release"
+        );
+        assert_eq!(
+            OracleVerdict::RequiresReceipt {
+                pending_divergence_ids: vec![]
+            }
+            .label(),
+            "requires_receipt"
+        );
+    }
+
+    // 31) Deterministic report ordering (INV-NVO-DETERMINISTIC)
+    #[test]
+    fn deterministic_report_ordering() {
+        let mut oracle = RuntimeOracle::new("trace-031", 66);
         oracle
-            .classify_divergence(
-                "chk-z",
-                BoundaryScope::Security,
-                RiskTier::Medium,
-                "z-divergence",
-                vec!["a".into()],
-            )
+            .register_runtime(sample_runtime("z-runtime"))
             .unwrap();
         oracle
-            .classify_divergence(
-                "chk-a",
-                BoundaryScope::Memory,
-                RiskTier::Low,
-                "a-divergence",
-                vec!["b".into()],
-            )
+            .register_runtime(sample_runtime("a-runtime"))
+            .unwrap();
+        oracle
+            .register_runtime(sample_runtime("m-runtime"))
             .unwrap();
 
         let report = oracle.generate_report();
-        let keys: Vec<&String> = report.divergences.keys().collect();
-        // div-1 < div-2 lexicographically
-        assert_eq!(keys, vec!["div-1", "div-2"]);
+        let runtime_ids: Vec<&String> = report.runtimes.keys().collect();
+        assert_eq!(
+            runtime_ids,
+            vec!["a-runtime", "m-runtime", "z-runtime"],
+            "runtimes should be sorted by BTreeMap key"
+        );
     }
 
-    // --- Display impls ---
-
+    // 32) Medium-risk divergence does not block release
     #[test]
-    fn test_oracle_verdict_display() {
-        assert_eq!(OracleVerdict::Pass.to_string(), "PASS");
-        assert!(OracleVerdict::BlockRelease {
-            blocking_divergence_ids: vec!["d1".into()]
-        }
-        .to_string()
-        .contains("BLOCK_RELEASE"));
-    }
-
-    #[test]
-    fn test_risk_tier_display() {
-        assert_eq!(RiskTier::Critical.to_string(), "Critical");
-        assert_eq!(RiskTier::Info.to_string(), "Info");
-    }
-
-    #[test]
-    fn test_boundary_scope_display() {
-        assert_eq!(BoundaryScope::TypeSystem.to_string(), "TypeSystem");
-        assert_eq!(BoundaryScope::Security.to_string(), "Security");
-    }
-
-    // --- Error display ---
-
-    #[test]
-    fn test_oracle_error_display() {
-        let err = OracleError::new(error_codes::ERR_NVO_NO_RUNTIMES, "no runtimes");
-        assert!(err.to_string().contains("ERR_NVO_NO_RUNTIMES"));
-        assert!(err.to_string().contains("no runtimes"));
-    }
-
-    // --- Audit log ---
-
-    #[test]
-    fn test_audit_log_populated() {
-        let mut oracle = setup_oracle_with_runtimes();
-        // Registration produces 3 log entries
-        assert_eq!(oracle.audit_log().len(), 3);
-        oracle
-            .run_cross_check("chk-1", BoundaryScope::Memory, "test")
-            .unwrap();
-        // +1 for cross check
-        assert_eq!(oracle.audit_log().len(), 4);
-    }
-
-    // --- Set quorum threshold ---
-
-    #[test]
-    fn test_set_quorum_threshold_caps_at_100() {
-        let mut oracle = RuntimeOracle::new("oracle-cap");
-        oracle.set_quorum_threshold(150);
-        assert_eq!(oracle.quorum_threshold_pct, 100);
-    }
-
-    // --- Info divergence does not block or require receipt ---
-
-    #[test]
-    fn test_info_divergence_is_harmless() {
-        let mut oracle = setup_oracle_with_runtimes();
-        oracle
-            .classify_divergence(
-                "chk-1",
-                BoundaryScope::TypeSystem,
-                RiskTier::Info,
-                "informational note",
-                vec!["a".into()],
-            )
-            .unwrap();
+    fn medium_risk_does_not_block() {
+        let mut oracle = RuntimeOracle::new("trace-032", 66);
+        oracle.classify_divergence(
+            "div-med",
+            "chk-1",
+            BoundaryScope::IO,
+            RiskTier::Medium,
+            &BTreeMap::new(),
+        );
         let verdict = oracle.check_release_gate();
         assert_eq!(verdict, OracleVerdict::Pass);
+    }
+
+    // 33) Info-level divergence has no effect on release gate
+    #[test]
+    fn info_divergence_no_effect() {
+        let mut oracle = RuntimeOracle::new("trace-033", 66);
+        oracle.classify_divergence(
+            "div-info",
+            "chk-1",
+            BoundaryScope::TypeSystem,
+            RiskTier::Info,
+            &BTreeMap::new(),
+        );
+        let verdict = oracle.check_release_gate();
+        assert_eq!(verdict, OracleVerdict::Pass);
+    }
+
+    // 34) BoundaryScope labels
+    #[test]
+    fn boundary_scope_labels() {
+        assert_eq!(BoundaryScope::TypeSystem.label(), "type_system");
+        assert_eq!(BoundaryScope::Memory.label(), "memory");
+        assert_eq!(BoundaryScope::IO.label(), "io");
+        assert_eq!(BoundaryScope::Concurrency.label(), "concurrency");
+        assert_eq!(BoundaryScope::Security.label(), "security");
+    }
+
+    // 35) Tally votes for unknown check returns error
+    #[test]
+    fn tally_unknown_check_error() {
+        let mut oracle = RuntimeOracle::new("trace-035", 66);
+        let err = oracle.tally_votes("nonexistent").unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_NVO_RUNTIME_NOT_FOUND);
     }
 }

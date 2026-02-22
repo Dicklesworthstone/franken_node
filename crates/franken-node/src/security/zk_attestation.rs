@@ -54,6 +54,66 @@ pub const INV_ZKA_AUDIT_TRAIL: &str = "INV-ZKA-AUDIT-TRAIL";
 /// INV-ZKA-SCHEMA-VERSIONED: payloads carry a schema version tag.
 pub const INV_ZKA_SCHEMA_VERSIONED: &str = "INV-ZKA-SCHEMA-VERSIONED";
 
+// ── Task-specified invariant aliases ──────────────────────────────────────────
+
+/// INV-ZK-NO-DISCLOSURE: proofs reveal only compliance predicate result,
+/// never full private metadata.  Alias for INV-ZKA-SELECTIVE.
+pub const INV_ZK_NO_DISCLOSURE: &str = "INV-ZK-NO-DISCLOSURE";
+
+/// INV-ZK-PROOF-SOUNDNESS: forged or corrupted proofs are rejected
+/// deterministically.  Alias for INV-ZKA-SOUNDNESS.
+pub const INV_ZK_PROOF_SOUNDNESS: &str = "INV-ZK-PROOF-SOUNDNESS";
+
+/// INV-ZK-FAIL-CLOSED: on any verification error the system denies admission.
+pub const INV_ZK_FAIL_CLOSED: &str = "INV-ZK-FAIL-CLOSED";
+
+/// INV-ZK-PREDICATE-COMPLETENESS: valid proofs for satisfied predicates
+/// always pass verification.  Alias for INV-ZKA-COMPLETENESS.
+pub const INV_ZK_PREDICATE_COMPLETENESS: &str = "INV-ZK-PREDICATE-COMPLETENESS";
+
+// ── Task-specified event code aliases ─────────────────────────────────────────
+
+/// ZK_ATTESTATION_REQUEST: attestation proof submitted for verification.
+/// Maps to FN-ZK-002.
+pub const ZK_ATTESTATION_REQUEST: &str = "ZK_ATTESTATION_REQUEST";
+
+/// ZK_PROOF_GENERATED: attestation proof generated.  Maps to FN-ZK-001.
+pub const ZK_PROOF_GENERATED: &str = "ZK_PROOF_GENERATED";
+
+/// ZK_PROOF_VERIFIED: verification passed.  Maps to FN-ZK-003.
+pub const ZK_PROOF_VERIFIED: &str = "ZK_PROOF_VERIFIED";
+
+/// ZK_PREDICATE_SATISFIED: compliance predicate satisfied.  Maps to FN-ZK-003.
+pub const ZK_PREDICATE_SATISFIED: &str = "ZK_PREDICATE_SATISFIED";
+
+/// ZK_ATTESTATION_ISSUED: attestation issued.  Maps to FN-ZK-001.
+pub const ZK_ATTESTATION_ISSUED: &str = "ZK_ATTESTATION_ISSUED";
+
+// ── Task-specified error code aliases ─────────────────────────────────────────
+
+/// ERR_ZK_PROOF_INVALID: proof bytes do not parse or signature invalid.
+/// Maps to ERR_ZKA_INVALID_PROOF.
+pub const ERR_ZK_PROOF_INVALID: &str = "ERR_ZK_PROOF_INVALID";
+
+/// ERR_ZK_PROOF_FORGED: proof structure indicates forgery attempt.
+/// Maps to ERR_ZKA_METADATA_LEAK.
+pub const ERR_ZK_PROOF_FORGED: &str = "ERR_ZK_PROOF_FORGED";
+
+/// ERR_ZK_PREDICATE_UNSATISFIED: compliance predicate not met.
+/// Maps to ERR_ZKA_PREDICATE_UNSATISFIED.
+pub const ERR_ZK_PREDICATE_UNSATISFIED: &str = "ERR_ZK_PREDICATE_UNSATISFIED";
+
+/// ERR_ZK_WITNESS_MISSING: required witness data not provided.
+pub const ERR_ZK_WITNESS_MISSING: &str = "ERR_ZK_WITNESS_MISSING";
+
+/// ERR_ZK_CIRCUIT_MISMATCH: proof was generated for different circuit/policy.
+/// Maps to ERR_ZKA_POLICY_MISMATCH.
+pub const ERR_ZK_CIRCUIT_MISMATCH: &str = "ERR_ZK_CIRCUIT_MISMATCH";
+
+/// ERR_ZK_ATTESTATION_EXPIRED: proof exceeded its validity window.
+/// Maps to ERR_ZKA_EXPIRED.
+pub const ERR_ZK_ATTESTATION_EXPIRED: &str = "ERR_ZK_ATTESTATION_EXPIRED";
+
 // ── Event codes ─────────────────────────────────────────────────────────────
 
 pub mod event_codes {

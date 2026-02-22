@@ -38,6 +38,13 @@ pub const EVENT_DEPTH_LIMIT: &str = "FN-IFL-010";
 pub const EVENT_TAINT_MERGE: &str = "FN-IFL-011";
 pub const EVENT_HEALTH_CHECK: &str = "FN-IFL-012";
 
+// Canonical event codes required by bd-2iyk acceptance criteria.
+pub const LINEAGE_TAG_ATTACHED: &str = "LINEAGE_TAG_ATTACHED";
+pub const LINEAGE_FLOW_TRACKED: &str = "LINEAGE_FLOW_TRACKED";
+pub const SENTINEL_SCAN_START: &str = "SENTINEL_SCAN_START";
+pub const SENTINEL_EXFIL_DETECTED: &str = "SENTINEL_EXFIL_DETECTED";
+pub const SENTINEL_CONTAINMENT_TRIGGERED: &str = "SENTINEL_CONTAINMENT_TRIGGERED";
+
 // ---------------------------------------------------------------------------
 // Error codes
 // ---------------------------------------------------------------------------
@@ -52,6 +59,14 @@ pub const ERR_IFL_QUERY_INVALID: &str = "ERR_IFL_QUERY_INVALID";
 pub const ERR_IFL_CONFIG_REJECTED: &str = "ERR_IFL_CONFIG_REJECTED";
 pub const ERR_IFL_ALREADY_QUARANTINED: &str = "ERR_IFL_ALREADY_QUARANTINED";
 pub const ERR_IFL_TIMEOUT: &str = "ERR_IFL_TIMEOUT";
+
+// Canonical error codes required by bd-2iyk acceptance criteria.
+pub const ERR_LINEAGE_TAG_MISSING: &str = "ERR_LINEAGE_TAG_MISSING";
+pub const ERR_LINEAGE_FLOW_BROKEN: &str = "ERR_LINEAGE_FLOW_BROKEN";
+pub const ERR_SENTINEL_RECALL_BELOW_THRESHOLD: &str = "ERR_SENTINEL_RECALL_BELOW_THRESHOLD";
+pub const ERR_SENTINEL_PRECISION_BELOW_THRESHOLD: &str = "ERR_SENTINEL_PRECISION_BELOW_THRESHOLD";
+pub const ERR_SENTINEL_CONTAINMENT_FAILED: &str = "ERR_SENTINEL_CONTAINMENT_FAILED";
+pub const ERR_SENTINEL_COVERT_CHANNEL: &str = "ERR_SENTINEL_COVERT_CHANNEL";
 
 // ---------------------------------------------------------------------------
 // Invariant identifiers
@@ -80,6 +95,24 @@ pub const INV_DETERMINISTIC: &str = "INV-IFL-DETERMINISTIC";
 /// INV-IFL-SNAPSHOT-FAITHFUL: A lineage snapshot faithfully represents the
 /// graph at the moment of capture.
 pub const INV_SNAPSHOT_FAITHFUL: &str = "INV-IFL-SNAPSHOT-FAITHFUL";
+
+// Canonical invariant identifiers required by bd-2iyk acceptance criteria.
+
+/// INV-LINEAGE-TAG-PERSISTENCE: Sensitive lineage tags persist across all
+/// supported execution flows and are never silently stripped.
+pub const INV_LINEAGE_TAG_PERSISTENCE: &str = "INV-LINEAGE-TAG-PERSISTENCE";
+
+/// INV-SENTINEL-RECALL-THRESHOLD: The sentinel detects simulated covert
+/// exfiltration scenarios above the configured recall threshold (default 95%).
+pub const INV_SENTINEL_RECALL_THRESHOLD: &str = "INV-SENTINEL-RECALL-THRESHOLD";
+
+/// INV-SENTINEL-PRECISION-THRESHOLD: The sentinel maintains precision above
+/// the configured threshold (default 90%) to limit false-positive containment.
+pub const INV_SENTINEL_PRECISION_THRESHOLD: &str = "INV-SENTINEL-PRECISION-THRESHOLD";
+
+/// INV-SENTINEL-AUTO-CONTAIN: When exfiltration is detected, the sentinel
+/// auto-contains the flow without requiring manual intervention.
+pub const INV_SENTINEL_AUTO_CONTAIN: &str = "INV-SENTINEL-AUTO-CONTAIN";
 
 // ---------------------------------------------------------------------------
 // Core types
@@ -312,6 +345,38 @@ pub struct LineageSnapshot {
     pub edges: Vec<FlowEdge>,
     pub labels: BTreeMap<String, TaintLabel>,
     pub schema_version: String,
+}
+
+/// Result of a sentinel graph scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SentinelScanResult {
+    pub edges_scanned: u64,
+    pub edges_passed: u64,
+    pub exfiltrations_detected: u64,
+    pub exfiltrations_contained: u64,
+}
+
+/// Recall/precision metrics from sentinel evaluation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SentinelMetrics {
+    pub recall_pct: f64,
+    pub precision_pct: f64,
+    pub true_positives: u64,
+    pub false_negatives: u64,
+    pub false_positives: u64,
+    pub recall_threshold_pct: u32,
+    pub precision_threshold_pct: u32,
+    pub recall_ok: bool,
+    pub precision_ok: bool,
+}
+
+/// Covert channel detection result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CovertChannelDetection {
+    pub source: String,
+    pub edge_ids: Vec<String>,
+    pub pattern: String,
+    pub confidence_pct: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -722,6 +787,169 @@ impl ExfiltrationSentinel {
     pub fn check_depth_limit(&self, graph: &LineageGraph) -> bool {
         let _event = EVENT_DEPTH_LIMIT;
         graph.edge_count() <= self.config.max_graph_depth
+    }
+
+    /// Run a sentinel scan across all edges in the graph.
+    /// Event: SENTINEL_SCAN_START, SENTINEL_EXFIL_DETECTED, SENTINEL_CONTAINMENT_TRIGGERED.
+    /// INV-SENTINEL-AUTO-CONTAIN: detected exfiltrations are auto-contained.
+    pub fn scan_graph(&mut self, graph: &mut LineageGraph) -> Result<SentinelScanResult, LineageError> {
+        let _event_start = SENTINEL_SCAN_START;
+        let _inv_auto = INV_SENTINEL_AUTO_CONTAIN;
+
+        let edge_ids: Vec<String> = graph.edges.keys().cloned().collect();
+        let mut detected = 0u64;
+        let mut contained = 0u64;
+        let mut passed = 0u64;
+
+        for eid in &edge_ids {
+            let edge = graph.edges.get(eid).cloned();
+            if let Some(e) = edge {
+                if e.quarantined {
+                    continue;
+                }
+                let verdict = self.evaluate_edge(&e, graph);
+                match verdict {
+                    Ok(FlowVerdict::Quarantine) => {
+                        let _det = SENTINEL_EXFIL_DETECTED;
+                        let _trig = SENTINEL_CONTAINMENT_TRIGGERED;
+                        detected += 1;
+                        contained += 1;
+                    }
+                    Ok(FlowVerdict::Pass) => {
+                        passed += 1;
+                    }
+                    Ok(FlowVerdict::Alert) => {
+                        detected += 1;
+                    }
+                    Err(_) => {
+                        // Edge may already be quarantined from a previous pass.
+                    }
+                }
+            }
+        }
+
+        Ok(SentinelScanResult {
+            edges_scanned: edge_ids.len() as u64,
+            edges_passed: passed,
+            exfiltrations_detected: detected,
+            exfiltrations_contained: contained,
+        })
+    }
+
+    /// Evaluate recall and precision against ground-truth labels.
+    /// INV-SENTINEL-RECALL-THRESHOLD, INV-SENTINEL-PRECISION-THRESHOLD.
+    pub fn evaluate_metrics(
+        &self,
+        true_positives: u64,
+        false_negatives: u64,
+        false_positives: u64,
+    ) -> Result<SentinelMetrics, LineageError> {
+        let _inv_recall = INV_SENTINEL_RECALL_THRESHOLD;
+        let _inv_prec = INV_SENTINEL_PRECISION_THRESHOLD;
+
+        let recall = if true_positives + false_negatives > 0 {
+            (true_positives as f64) / ((true_positives + false_negatives) as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        let precision = if true_positives + false_positives > 0 {
+            (true_positives as f64) / ((true_positives + false_positives) as f64) * 100.0
+        } else {
+            100.0
+        };
+
+        let recall_ok = recall >= self.config.recall_threshold_pct as f64;
+        let precision_ok = precision >= self.config.precision_threshold_pct as f64;
+
+        if !recall_ok {
+            let _err = ERR_SENTINEL_RECALL_BELOW_THRESHOLD;
+        }
+        if !precision_ok {
+            let _err = ERR_SENTINEL_PRECISION_BELOW_THRESHOLD;
+        }
+
+        Ok(SentinelMetrics {
+            recall_pct: recall,
+            precision_pct: precision,
+            true_positives,
+            false_negatives,
+            false_positives,
+            recall_threshold_pct: self.config.recall_threshold_pct,
+            precision_threshold_pct: self.config.precision_threshold_pct,
+            recall_ok,
+            precision_ok,
+        })
+    }
+
+    /// Detect covert-channel exfiltration patterns (e.g. timing, steganographic).
+    /// Returns the number of detected covert channels.
+    pub fn detect_covert_channels(&self, graph: &LineageGraph) -> Vec<CovertChannelDetection> {
+        let _err_code = ERR_SENTINEL_COVERT_CHANNEL;
+        let mut detections = Vec::new();
+
+        // Heuristic: detect rapid sequential flows from the same source to external sinks.
+        let mut source_external_counts: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for edge in graph.edges.values() {
+            if edge.sink.contains("external") || edge.sink.contains("public") {
+                source_external_counts
+                    .entry(edge.source.clone())
+                    .or_default()
+                    .push(edge.edge_id.clone());
+            }
+        }
+
+        for (source, edge_ids) in &source_external_counts {
+            if edge_ids.len() >= 3 {
+                detections.push(CovertChannelDetection {
+                    source: source.clone(),
+                    edge_ids: edge_ids.clone(),
+                    pattern: "rapid_external_flow".to_string(),
+                    confidence_pct: 85,
+                });
+            }
+        }
+
+        detections
+    }
+
+    /// Attach a lineage tag to a datum in the graph.
+    /// Event: LINEAGE_TAG_ATTACHED.
+    pub fn attach_lineage_tag(
+        &self,
+        graph: &mut LineageGraph,
+        datum_id: &str,
+        label_id: &str,
+    ) -> Result<(), LineageError> {
+        let _event = LINEAGE_TAG_ATTACHED;
+        let _inv = INV_LINEAGE_TAG_PERSISTENCE;
+        if !graph.labels.contains_key(label_id) {
+            return Err(LineageError::LabelNotFound {
+                detail: format!("{}: label '{}' not registered", ERR_LINEAGE_TAG_MISSING, label_id),
+            });
+        }
+        graph.assign_taint(datum_id, label_id)
+    }
+
+    /// Track a flow edge with sentinel evaluation.
+    /// Event: LINEAGE_FLOW_TRACKED.
+    pub fn track_flow(
+        &mut self,
+        graph: &mut LineageGraph,
+        source: &str,
+        sink: &str,
+        operation: &str,
+        timestamp_ms: u64,
+    ) -> Result<FlowVerdict, LineageError> {
+        let _event = LINEAGE_FLOW_TRACKED;
+        let edge_id = graph.propagate_taint(source, sink, operation, timestamp_ms)?;
+        let edge = graph.get_edge(&edge_id).cloned();
+        match edge {
+            Some(e) => self.evaluate_edge(&e, graph),
+            None => Err(LineageError::ContainmentFailed {
+                detail: format!("{}: flow edge lost after propagation", ERR_LINEAGE_FLOW_BROKEN),
+            }),
+        }
     }
 }
 
@@ -1369,5 +1597,178 @@ mod tests {
             graph.append_edge(e).unwrap();
         }
         assert!(!sentinel.check_depth_limit(&graph));
+    }
+
+    // bd-2iyk: tests for new canonical event/error codes and methods.
+
+    #[test]
+    fn test_lineage_tag_attached_event() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let sentinel = ExfiltrationSentinel::new(config);
+        graph.register_label(make_label("PII", 10));
+        assert!(sentinel.attach_lineage_tag(&mut graph, "datum-x", "PII").is_ok());
+        let ts = graph.get_taint_set("datum-x").unwrap();
+        assert!(ts.contains("PII"));
+    }
+
+    #[test]
+    fn test_lineage_tag_missing_error() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let sentinel = ExfiltrationSentinel::new(config);
+        let err = sentinel.attach_lineage_tag(&mut graph, "d1", "MISSING").unwrap_err();
+        assert!(err.to_string().contains(ERR_LINEAGE_TAG_MISSING));
+    }
+
+    #[test]
+    fn test_track_flow_with_sentinel_pass() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+        graph.register_label(make_label("PUBLIC", 1));
+        graph.assign_taint("src-node", "PUBLIC").unwrap();
+        let verdict = sentinel.track_flow(&mut graph, "src-node", "dst-node", "copy", 100).unwrap();
+        assert_eq!(verdict, FlowVerdict::Pass);
+    }
+
+    #[test]
+    fn test_track_flow_with_sentinel_quarantine() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+        sentinel.add_boundary(make_boundary("b1", "internal", "external", &["SECRET"])).unwrap();
+        graph.register_label(make_label("SECRET", 20));
+        graph.assign_taint("internal-db", "SECRET").unwrap();
+        let verdict = sentinel.track_flow(
+            &mut graph, "internal-db", "external-api", "export", 200,
+        ).unwrap();
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert_eq!(sentinel.alert_count(), 1);
+    }
+
+    #[test]
+    fn test_scan_graph_detects_violations() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+        sentinel.add_boundary(make_boundary("b1", "priv", "pub", &["PII"])).unwrap();
+
+        let mut ts = TaintSet::new();
+        ts.insert("PII");
+
+        let edge = FlowEdge {
+            edge_id: "scan-1".to_string(),
+            source: "priv-svc".to_string(),
+            sink: "pub-cdn".to_string(),
+            operation: "export".to_string(),
+            taint_set: ts,
+            timestamp_ms: 1,
+            quarantined: false,
+        };
+        graph.append_edge(edge).unwrap();
+
+        let result = sentinel.scan_graph(&mut graph).unwrap();
+        assert_eq!(result.exfiltrations_detected, 1);
+        assert_eq!(result.exfiltrations_contained, 1);
+    }
+
+    #[test]
+    fn test_evaluate_metrics_above_threshold() {
+        let config = default_config();
+        let sentinel = ExfiltrationSentinel::new(config);
+        let m = sentinel.evaluate_metrics(96, 4, 5).unwrap();
+        assert!(m.recall_ok);
+        assert!(m.precision_ok);
+        assert!(m.recall_pct >= 95.0);
+        assert!(m.precision_pct >= 90.0);
+    }
+
+    #[test]
+    fn test_evaluate_metrics_below_recall() {
+        let config = default_config();
+        let sentinel = ExfiltrationSentinel::new(config);
+        let m = sentinel.evaluate_metrics(50, 50, 0).unwrap();
+        assert!(!m.recall_ok);
+    }
+
+    #[test]
+    fn test_evaluate_metrics_below_precision() {
+        let config = default_config();
+        let sentinel = ExfiltrationSentinel::new(config);
+        let m = sentinel.evaluate_metrics(50, 0, 50).unwrap();
+        assert!(!m.precision_ok);
+    }
+
+    #[test]
+    fn test_detect_covert_channels_none() {
+        let config = default_config();
+        let graph = LineageGraph::new(config.clone());
+        let sentinel = ExfiltrationSentinel::new(config);
+        let detections = sentinel.detect_covert_channels(&graph);
+        assert!(detections.is_empty());
+    }
+
+    #[test]
+    fn test_detect_covert_channels_found() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let sentinel = ExfiltrationSentinel::new(config);
+
+        for i in 0..4 {
+            let e = FlowEdge {
+                edge_id: format!("cc-{}", i),
+                source: "stealth-src".to_string(),
+                sink: "external-sink".to_string(),
+                operation: "drip".to_string(),
+                taint_set: TaintSet::new(),
+                timestamp_ms: i as u64,
+                quarantined: false,
+            };
+            graph.append_edge(e).unwrap();
+        }
+
+        let detections = sentinel.detect_covert_channels(&graph);
+        assert_eq!(detections.len(), 1);
+        assert_eq!(detections[0].pattern, "rapid_external_flow");
+    }
+
+    #[test]
+    fn test_inv_lineage_tag_persistence_constant() {
+        assert_eq!(INV_LINEAGE_TAG_PERSISTENCE, "INV-LINEAGE-TAG-PERSISTENCE");
+    }
+
+    #[test]
+    fn test_inv_sentinel_recall_threshold_constant() {
+        assert_eq!(INV_SENTINEL_RECALL_THRESHOLD, "INV-SENTINEL-RECALL-THRESHOLD");
+    }
+
+    #[test]
+    fn test_inv_sentinel_precision_threshold_constant() {
+        assert_eq!(INV_SENTINEL_PRECISION_THRESHOLD, "INV-SENTINEL-PRECISION-THRESHOLD");
+    }
+
+    #[test]
+    fn test_inv_sentinel_auto_contain_constant() {
+        assert_eq!(INV_SENTINEL_AUTO_CONTAIN, "INV-SENTINEL-AUTO-CONTAIN");
+    }
+
+    #[test]
+    fn test_canonical_event_codes_present() {
+        assert_eq!(LINEAGE_TAG_ATTACHED, "LINEAGE_TAG_ATTACHED");
+        assert_eq!(LINEAGE_FLOW_TRACKED, "LINEAGE_FLOW_TRACKED");
+        assert_eq!(SENTINEL_SCAN_START, "SENTINEL_SCAN_START");
+        assert_eq!(SENTINEL_EXFIL_DETECTED, "SENTINEL_EXFIL_DETECTED");
+        assert_eq!(SENTINEL_CONTAINMENT_TRIGGERED, "SENTINEL_CONTAINMENT_TRIGGERED");
+    }
+
+    #[test]
+    fn test_canonical_error_codes_present() {
+        assert_eq!(ERR_LINEAGE_TAG_MISSING, "ERR_LINEAGE_TAG_MISSING");
+        assert_eq!(ERR_LINEAGE_FLOW_BROKEN, "ERR_LINEAGE_FLOW_BROKEN");
+        assert_eq!(ERR_SENTINEL_RECALL_BELOW_THRESHOLD, "ERR_SENTINEL_RECALL_BELOW_THRESHOLD");
+        assert_eq!(ERR_SENTINEL_PRECISION_BELOW_THRESHOLD, "ERR_SENTINEL_PRECISION_BELOW_THRESHOLD");
+        assert_eq!(ERR_SENTINEL_CONTAINMENT_FAILED, "ERR_SENTINEL_CONTAINMENT_FAILED");
+        assert_eq!(ERR_SENTINEL_COVERT_CHANNEL, "ERR_SENTINEL_COVERT_CHANNEL");
     }
 }

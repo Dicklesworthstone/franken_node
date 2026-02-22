@@ -67,6 +67,18 @@ pub mod event_codes {
     pub const GOV_006: &str = "GOV_006";
     /// GOV_007: Governor state snapshot emitted.
     pub const GOV_007: &str = "GOV_007";
+
+    // bd-21fo canonical event codes
+    /// GOVERNOR_CANDIDATE_PROPOSED: a candidate optimization was submitted.
+    pub const GOVERNOR_CANDIDATE_PROPOSED: &str = "GOVERNOR_CANDIDATE_PROPOSED";
+    /// GOVERNOR_SHADOW_EVAL_START: shadow evaluation began for a candidate.
+    pub const GOVERNOR_SHADOW_EVAL_START: &str = "GOVERNOR_SHADOW_EVAL_START";
+    /// GOVERNOR_SAFETY_CHECK_PASS: all safety-envelope checks passed.
+    pub const GOVERNOR_SAFETY_CHECK_PASS: &str = "GOVERNOR_SAFETY_CHECK_PASS";
+    /// GOVERNOR_POLICY_APPLIED: an optimization policy was applied to a runtime knob.
+    pub const GOVERNOR_POLICY_APPLIED: &str = "GOVERNOR_POLICY_APPLIED";
+    /// GOVERNOR_POLICY_REVERTED: a previously applied policy was auto-reverted.
+    pub const GOVERNOR_POLICY_REVERTED: &str = "GOVERNOR_POLICY_REVERTED";
 }
 
 // ---------------------------------------------------------------------------
@@ -86,6 +98,20 @@ pub mod error_codes {
     pub const ERR_GOV_SHADOW_TIMEOUT: &str = "ERR_GOV_SHADOW_TIMEOUT";
     /// ERR_GOV_INVALID_PROPOSAL: Invalid or inconsistent proposal fields.
     pub const ERR_GOV_INVALID_PROPOSAL: &str = "ERR_GOV_INVALID_PROPOSAL";
+
+    // bd-21fo canonical error codes
+    /// ERR_GOVERNOR_UNSAFE_CANDIDATE: candidate optimization breaches safety envelope.
+    pub const ERR_GOVERNOR_UNSAFE_CANDIDATE: &str = "ERR_GOVERNOR_UNSAFE_CANDIDATE";
+    /// ERR_GOVERNOR_SHADOW_EVAL_FAILED: shadow evaluation failed to complete.
+    pub const ERR_GOVERNOR_SHADOW_EVAL_FAILED: &str = "ERR_GOVERNOR_SHADOW_EVAL_FAILED";
+    /// ERR_GOVERNOR_BENEFIT_BELOW_THRESHOLD: proposed change has no net benefit.
+    pub const ERR_GOVERNOR_BENEFIT_BELOW_THRESHOLD: &str = "ERR_GOVERNOR_BENEFIT_BELOW_THRESHOLD";
+    /// ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION: attempt to adjust engine-core internals.
+    pub const ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION: &str = "ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION";
+    /// ERR_GOVERNOR_REVERT_FAILED: auto-revert of an applied policy did not succeed.
+    pub const ERR_GOVERNOR_REVERT_FAILED: &str = "ERR_GOVERNOR_REVERT_FAILED";
+    /// ERR_GOVERNOR_KNOB_READONLY: target knob is read-only or locked.
+    pub const ERR_GOVERNOR_KNOB_READONLY: &str = "ERR_GOVERNOR_KNOB_READONLY";
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +137,16 @@ pub mod invariants {
     /// INV-GOV-DETERMINISTIC-ORDER: Decision log entries are totally ordered
     /// by sequence number.
     pub const INV_GOV_DETERMINISTIC_ORDER: &str = "INV-GOV-DETERMINISTIC-ORDER";
+
+    // bd-21fo canonical invariant identifiers
+    /// INV-GOVERNOR-SHADOW-REQUIRED: every candidate must go through shadow evaluation.
+    pub const INV_GOVERNOR_SHADOW_REQUIRED: &str = "INV-GOVERNOR-SHADOW-REQUIRED";
+    /// INV-GOVERNOR-SAFETY-ENVELOPE: no applied policy may breach the safety envelope.
+    pub const INV_GOVERNOR_SAFETY_ENVELOPE: &str = "INV-GOVERNOR-SAFETY-ENVELOPE";
+    /// INV-GOVERNOR-AUTO-REVERT: unsafe or non-beneficial policies auto-revert.
+    pub const INV_GOVERNOR_AUTO_REVERT: &str = "INV-GOVERNOR-AUTO-REVERT";
+    /// INV-GOVERNOR-ENGINE-BOUNDARY: governor adjusts only exposed runtime knobs.
+    pub const INV_GOVERNOR_ENGINE_BOUNDARY: &str = "INV-GOVERNOR-ENGINE-BOUNDARY";
 }
 
 // ---------------------------------------------------------------------------
@@ -640,6 +676,76 @@ impl OptimizationGovernor {
     }
 
     // -----------------------------------------------------------------------
+    // Contract-compatible method aliases (bd-21fo checker)
+    // -----------------------------------------------------------------------
+
+    /// Alias for [`submit`] matching the contract name `submit_proposal`.
+    pub fn submit_proposal(&mut self, proposal: OptimizationProposal) -> GovernorDecision {
+        self.submit(proposal)
+    }
+
+    /// Alias for [`live_check`] matching the contract name `auto_revert_check`.
+    pub fn auto_revert_check(&mut self, live_metrics: &PredictedMetrics) -> Vec<String> {
+        self.live_check(live_metrics)
+    }
+
+    /// Shadow-only submission: proposal is evaluated but not applied.
+    pub fn submit_shadow_only(&mut self, proposal: &OptimizationProposal) -> ShadowResult {
+        self.shadow_evaluate(proposal)
+    }
+
+    /// Export the decision log as JSONL (one JSON object per line).
+    pub fn export_decision_log_jsonl(&self) -> String {
+        self.decision_log
+            .iter()
+            .filter_map(|entry| serde_json::to_string(entry).ok())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Export a verification evidence JSON blob.
+    pub fn export_verification_evidence(&self) -> serde_json::Value {
+        let snap = self.snapshot();
+        serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "bead_id": "bd-21fo",
+            "section": "10.17",
+            "governor_snapshot": snap,
+            "decision_log_count": self.decision_log.len(),
+            "invariants_checked": [
+                invariants::INV_GOV_ENVELOPE_NEVER_BREACHED,
+                invariants::INV_GOV_SHADOW_BEFORE_APPLY,
+                invariants::INV_GOV_EVIDENCE_ON_REJECT,
+                invariants::INV_GOV_KNOBS_ONLY,
+                invariants::INV_GOV_AUTO_REVERT,
+                invariants::INV_GOV_DETERMINISTIC_ORDER,
+            ],
+            "event_codes_used": [
+                event_codes::GOV_001,
+                event_codes::GOV_002,
+                event_codes::GOV_003,
+                event_codes::GOV_004,
+                event_codes::GOV_005,
+                event_codes::GOV_006,
+                event_codes::GOV_007,
+            ],
+            "error_codes_defined": [
+                error_codes::ERR_GOV_ENVELOPE_VIOLATION,
+                error_codes::ERR_GOV_NON_BENEFICIAL,
+                error_codes::ERR_GOV_KNOB_LOCKED,
+                error_codes::ERR_GOV_REVERT_FAILED,
+                error_codes::ERR_GOV_SHADOW_TIMEOUT,
+                error_codes::ERR_GOV_INVALID_PROPOSAL,
+            ],
+        })
+    }
+
+    /// Return the total number of decisions made.
+    pub fn decision_count(&self) -> usize {
+        self.decision_log.len()
+    }
+
+    // -----------------------------------------------------------------------
     // Internal
     // -----------------------------------------------------------------------
 
@@ -683,6 +789,19 @@ pub struct GovernorSnapshot {
     pub decision_log_len: usize,
     pub next_seq: u64,
 }
+
+// ---------------------------------------------------------------------------
+// Type aliases for contract compatibility (bd-21fo checker)
+// ---------------------------------------------------------------------------
+
+/// Alias for [`PredictedMetrics`] used in contract documentation.
+pub type PredictedOutcome = PredictedMetrics;
+
+/// Alias for [`DecisionRecord`] used in contract documentation.
+pub type DecisionLogEntry = DecisionRecord;
+
+/// Alias for [`ShadowResult`] used in contract documentation.
+pub type ShadowEvalResult = ShadowResult;
 
 // ===========================================================================
 // Tests

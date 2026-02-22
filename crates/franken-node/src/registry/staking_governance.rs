@@ -81,6 +81,49 @@ pub const INV_STK_AUDITABLE_SLASH: &str = "INV-STK-AUDITABLE-SLASH";
 pub const INV_STK_NO_NEGATIVE_BALANCE: &str = "INV-STK-NO-NEGATIVE-BALANCE";
 
 // ---------------------------------------------------------------------------
+// bd-26mk canonical event codes
+// ---------------------------------------------------------------------------
+
+/// Stake deposit received for a publisher.
+pub const STAKE_DEPOSIT_RECEIVED: &str = "STAKE_DEPOSIT_RECEIVED";
+/// Stake gate evaluated for capability access.
+pub const STAKE_GATE_EVALUATED: &str = "STAKE_GATE_EVALUATED";
+/// Slashing process initiated from evidence.
+pub const SLASH_INITIATED: &str = "SLASH_INITIATED";
+/// Stake successfully slashed.
+pub const SLASH_EXECUTED: &str = "SLASH_EXECUTED";
+/// Publisher filed an appeal against a slash.
+pub const APPEAL_FILED: &str = "APPEAL_FILED";
+
+// ---------------------------------------------------------------------------
+// bd-26mk canonical error codes
+// ---------------------------------------------------------------------------
+
+/// Stake below required minimum for tier.
+pub const ERR_STAKE_GATE_DENIED: &str = "ERR_STAKE_GATE_DENIED";
+/// Evidence hash does not match expected.
+pub const ERR_SLASH_EVIDENCE_INVALID: &str = "ERR_SLASH_EVIDENCE_INVALID";
+/// Slash already processed for this evidence.
+pub const ERR_SLASH_ALREADY_EXECUTED: &str = "ERR_SLASH_ALREADY_EXECUTED";
+/// Appeal filed after the deadline.
+pub const ERR_APPEAL_EXPIRED: &str = "ERR_APPEAL_EXPIRED";
+/// Withdrawal blocked during lock period.
+pub const ERR_STAKE_WITHDRAWAL_LOCKED: &str = "ERR_STAKE_WITHDRAWAL_LOCKED";
+
+// ---------------------------------------------------------------------------
+// bd-26mk canonical invariants
+// ---------------------------------------------------------------------------
+
+/// High-risk capability activation requires minimum stake.
+pub const INV_STAKE_GATE_REQUIRED: &str = "INV-STAKE-GATE-REQUIRED";
+/// Slashing decisions are computed deterministically from evidence.
+pub const INV_SLASH_DETERMINISTIC: &str = "INV-SLASH-DETERMINISTIC";
+/// Every slash event produces an immutable audit trail entry.
+pub const INV_SLASH_AUDIT_TRAIL: &str = "INV-SLASH-AUDIT-TRAIL";
+/// Slashed publishers have a bounded appeal window.
+pub const INV_APPEAL_WINDOW: &str = "INV-APPEAL-WINDOW";
+
+// ---------------------------------------------------------------------------
 // Domain types
 // ---------------------------------------------------------------------------
 

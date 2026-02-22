@@ -1,4 +1,5 @@
 pub mod adversarial_runner;
+pub mod adversary_graph;
 pub mod bpet;
 pub mod challenge_flow;
 pub mod dgis;
@@ -13,6 +14,7 @@ pub mod interface_hash;
 pub mod isolation_backend;
 pub mod isolation_rail_router;
 pub mod network_guard;
+pub mod quarantine_controller;
 pub mod remote_cap;
 pub mod revocation_freshness;
 pub mod revocation_freshness_gate;

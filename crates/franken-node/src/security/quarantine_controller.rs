@@ -24,9 +24,9 @@
 //!   strictly monotonically increasing.
 
 use crate::security::adversary_graph::{
-    self, AdversaryGraph, AdversaryLogEntry, EvidenceEvent, EntityId, EntityType,
+    AdversaryGraph, EvidenceEvent, EntityId, EntityType,
     PolicyThreshold, QuarantineAction, SignedEvidenceEntry,
-    ADV_005_ACTION_TRIGGERED, ADV_006_NODE_REMOVED, ADV_008_SIGNED_EVIDENCE,
+    ADV_005_ACTION_TRIGGERED, ADV_008_SIGNED_EVIDENCE,
 };
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
