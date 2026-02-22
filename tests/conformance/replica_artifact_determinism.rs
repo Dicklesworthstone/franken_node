@@ -50,9 +50,13 @@ impl fmt::Display for Divergence {
         write!(
             f,
             "divergence in '{}' at offset {}: replica_a=0x{:02x} vs replica_b=0x{:02x} ({})\n  context_a: {}\n  context_b: {}",
-            self.artifact_name, self.first_mismatch_offset,
-            self.replica_a, self.replica_b,
-            self.root_cause, self.context_hex_a, self.context_hex_b,
+            self.artifact_name,
+            self.first_mismatch_offset,
+            self.replica_a,
+            self.replica_b,
+            self.root_cause,
+            self.context_hex_a,
+            self.context_hex_b,
         )
     }
 }
@@ -152,10 +156,7 @@ impl Replica {
         let mut artifacts = Vec::new();
         for domain in domains {
             let (seed, _bump) = self.deriver.derive_seed(domain, content_hash, config);
-            artifacts.push((
-                format!("seed_{}", domain.label()),
-                seed.bytes.to_vec(),
-            ));
+            artifacts.push((format!("seed_{}", domain.label()), seed.bytes.to_vec()));
         }
         artifacts
     }
@@ -311,7 +312,11 @@ mod tests {
             .with_param("chunk_size", "65536")
             .with_param("erasure_k", "4")
             .with_param("erasure_m", "2");
-        let domains = vec![DomainTag::Encoding, DomainTag::Repair, DomainTag::Scheduling];
+        let domains = vec![
+            DomainTag::Encoding,
+            DomainTag::Repair,
+            DomainTag::Scheduling,
+        ];
 
         let result = run_fixture("small_encoding", &ch, &domains, &cfg, DEFAULT_REPLICAS);
         assert!(
@@ -329,11 +334,24 @@ mod tests {
             .with_param("chunk_size", "65536")
             .with_param("erasure_k", "4")
             .with_param("erasure_m", "2");
-        let domains = vec![DomainTag::Encoding, DomainTag::Repair, DomainTag::Scheduling];
+        let domains = vec![
+            DomainTag::Encoding,
+            DomainTag::Repair,
+            DomainTag::Scheduling,
+        ];
         let mut expected = BTreeMap::new();
-        expected.insert("encoding".to_string(), "5c3b07805bc7aec22bc2b91ad7aa65c7c8785d5707de02e911fea345fc92d2d2".to_string());
-        expected.insert("repair".to_string(), "3288d4f014f645a3f4cb540f1b20cf88b60e12d6ed312027a1a5937348e03e90".to_string());
-        expected.insert("scheduling".to_string(), "37241cb9f603b259036ffb7a82cfd6d68deaa8a6dd45f54b3810dbdcaa9da9e4".to_string());
+        expected.insert(
+            "encoding".to_string(),
+            "5c3b07805bc7aec22bc2b91ad7aa65c7c8785d5707de02e911fea345fc92d2d2".to_string(),
+        );
+        expected.insert(
+            "repair".to_string(),
+            "3288d4f014f645a3f4cb540f1b20cf88b60e12d6ed312027a1a5937348e03e90".to_string(),
+        );
+        expected.insert(
+            "scheduling".to_string(),
+            "37241cb9f603b259036ffb7a82cfd6d68deaa8a6dd45f54b3810dbdcaa9da9e4".to_string(),
+        );
 
         let results = verify_expected_seeds(&ch, &domains, &cfg, &expected);
         for (label, ok, detail) in &results {
@@ -384,11 +402,26 @@ mod tests {
             DomainTag::Verification,
         ];
         let mut expected = BTreeMap::new();
-        expected.insert("encoding".to_string(), "8d1f2a24520700c91929a66a161c92295f8ff8d024d04d15b0fc4f93fac90d34".to_string());
-        expected.insert("repair".to_string(), "c927cdea6baffc735d855ce39a22a64783e9708b07e417fc39a32ac2c92ca8e5".to_string());
-        expected.insert("scheduling".to_string(), "ea98014f58ab4a3e761bf4815ad980d924ef91cdf8f2750b39c11d7ec7feb0aa".to_string());
-        expected.insert("placement".to_string(), "262a150f6e3b09146a0da27acfe458d8c8d6e3d5a9387f26950d3c723cf0a6c3".to_string());
-        expected.insert("verification".to_string(), "075c510235ca74e2225153c3fb418d2b6259bd7fc9f8f7dea5351b610d190f27".to_string());
+        expected.insert(
+            "encoding".to_string(),
+            "8d1f2a24520700c91929a66a161c92295f8ff8d024d04d15b0fc4f93fac90d34".to_string(),
+        );
+        expected.insert(
+            "repair".to_string(),
+            "c927cdea6baffc735d855ce39a22a64783e9708b07e417fc39a32ac2c92ca8e5".to_string(),
+        );
+        expected.insert(
+            "scheduling".to_string(),
+            "ea98014f58ab4a3e761bf4815ad980d924ef91cdf8f2750b39c11d7ec7feb0aa".to_string(),
+        );
+        expected.insert(
+            "placement".to_string(),
+            "262a150f6e3b09146a0da27acfe458d8c8d6e3d5a9387f26950d3c723cf0a6c3".to_string(),
+        );
+        expected.insert(
+            "verification".to_string(),
+            "075c510235ca74e2225153c3fb418d2b6259bd7fc9f8f7dea5351b610d190f27".to_string(),
+        );
 
         let results = verify_expected_seeds(&ch, &domains, &cfg, &expected);
         for (label, ok, detail) in &results {
@@ -423,8 +456,14 @@ mod tests {
         let cfg = ScheduleConfig::new(1);
         let domains = vec![DomainTag::Encoding, DomainTag::Repair];
         let mut expected = BTreeMap::new();
-        expected.insert("encoding".to_string(), "96f841d435f56cbaff467b6d93b5129dce983a5d243f4dd6d7ca8f82d7b02b7c".to_string());
-        expected.insert("repair".to_string(), "80287ee0edd64bb10d66304b2b61f633ff6e06ef4f5ce385f433446fcadbbb59".to_string());
+        expected.insert(
+            "encoding".to_string(),
+            "96f841d435f56cbaff467b6d93b5129dce983a5d243f4dd6d7ca8f82d7b02b7c".to_string(),
+        );
+        expected.insert(
+            "repair".to_string(),
+            "80287ee0edd64bb10d66304b2b61f633ff6e06ef4f5ce385f433446fcadbbb59".to_string(),
+        );
 
         let results = verify_expected_seeds(&ch, &domains, &cfg, &expected);
         for (label, ok, detail) in &results {
@@ -462,7 +501,10 @@ mod tests {
         let arts_b = replica_b.process_fixture(&ch_b, &domains, &cfg);
 
         let div = compare_artifacts("seed_encoding", &arts_a[0].1, &arts_b[0].1);
-        assert!(div.is_some(), "should detect divergence with different inputs");
+        assert!(
+            div.is_some(),
+            "should detect divergence with different inputs"
+        );
         let div = div.unwrap();
         assert!(!div.context_hex_a.is_empty());
         assert!(!div.context_hex_b.is_empty());
@@ -553,7 +595,11 @@ mod tests {
             (
                 "small_encoding",
                 [0u8; 32],
-                vec![DomainTag::Encoding, DomainTag::Repair, DomainTag::Scheduling],
+                vec![
+                    DomainTag::Encoding,
+                    DomainTag::Repair,
+                    DomainTag::Scheduling,
+                ],
                 ScheduleConfig::new(1)
                     .with_param("chunk_size", "65536")
                     .with_param("erasure_k", "4")
@@ -624,7 +670,13 @@ mod tests {
 
     #[test]
     fn test_parse_all_domains() {
-        for label in &["encoding", "repair", "scheduling", "placement", "verification"] {
+        for label in &[
+            "encoding",
+            "repair",
+            "scheduling",
+            "placement",
+            "verification",
+        ] {
             let domain = parse_domain(label);
             assert_eq!(domain.label(), *label);
         }

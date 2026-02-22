@@ -4,7 +4,7 @@
 //! validating additional edge conditions requested by the bead contract.
 
 #[path = "../../crates/franken-node/src/connector/vef_execution_receipt.rs"]
-mod vef_execution_receipt;
+pub mod vef_execution_receipt;
 
 mod connector {
     pub use super::vef_execution_receipt;
@@ -23,7 +23,9 @@ mod tests {
     use super::proof_scheduler::{
         ProofJobStatus, SchedulerPolicy, VefProofScheduler, WorkloadTier, event_codes,
     };
-    use super::receipt_chain::{ReceiptChain, ReceiptChainConfig, ReceiptChainEntry, ReceiptCheckpoint};
+    use super::receipt_chain::{
+        ReceiptChain, ReceiptChainConfig, ReceiptChainEntry, ReceiptCheckpoint,
+    };
     use super::vef_execution_receipt::{
         ExecutionActionType, ExecutionReceipt, RECEIPT_SCHEMA_VERSION,
     };
@@ -132,7 +134,12 @@ mod tests {
             ..SchedulerPolicy::default()
         });
         let windows_a = scheduler
-            .select_windows(&entries_a, &checkpoints_a, 1_702_000_300_000, "trace-policy-a")
+            .select_windows(
+                &entries_a,
+                &checkpoints_a,
+                1_702_000_300_000,
+                "trace-policy-a",
+            )
             .expect("initial window selection");
         let queued_a = scheduler
             .enqueue_windows(&windows_a, 1_702_000_300_000)
@@ -154,7 +161,12 @@ mod tests {
         }
 
         let windows_b = scheduler
-            .select_windows(&entries_b, &checkpoints_b, 1_702_000_400_000, "trace-policy-b")
+            .select_windows(
+                &entries_b,
+                &checkpoints_b,
+                1_702_000_400_000,
+                "trace-policy-b",
+            )
             .expect("follow-up window selection");
         let queued_b = scheduler
             .enqueue_windows(&windows_b, 1_702_000_400_000)
@@ -247,10 +259,16 @@ mod tests {
             max_memory_mib_per_tick: 100_000,
             ..SchedulerPolicy::default()
         };
-        policy.tier_deadline_millis.insert(WorkloadTier::Critical, 1);
+        policy
+            .tier_deadline_millis
+            .insert(WorkloadTier::Critical, 1);
         policy.tier_deadline_millis.insert(WorkloadTier::High, 1);
-        policy.tier_deadline_millis.insert(WorkloadTier::Standard, 1);
-        policy.tier_deadline_millis.insert(WorkloadTier::Background, 1);
+        policy
+            .tier_deadline_millis
+            .insert(WorkloadTier::Standard, 1);
+        policy
+            .tier_deadline_millis
+            .insert(WorkloadTier::Background, 1);
 
         let mut scheduler = VefProofScheduler::new(policy);
         let windows = scheduler

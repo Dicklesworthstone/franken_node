@@ -111,14 +111,46 @@ pub struct Operation {
 
 pub fn default_operations() -> Vec<Operation> {
     vec![
-        Operation { substrate: Substrate::Frankentui, name: "render_status_panel".into(), budget_ms: 5.0 },
-        Operation { substrate: Substrate::Frankentui, name: "render_tree_view".into(), budget_ms: 8.0 },
-        Operation { substrate: Substrate::Frankensqlite, name: "fencing_token_write".into(), budget_ms: 10.0 },
-        Operation { substrate: Substrate::Frankensqlite, name: "config_read".into(), budget_ms: 5.0 },
-        Operation { substrate: Substrate::SqlmodelRust, name: "typed_model_serialize".into(), budget_ms: 1.0 },
-        Operation { substrate: Substrate::SqlmodelRust, name: "typed_model_deserialize".into(), budget_ms: 1.0 },
-        Operation { substrate: Substrate::FastapiRust, name: "middleware_pipeline".into(), budget_ms: 3.0 },
-        Operation { substrate: Substrate::FastapiRust, name: "health_check_endpoint".into(), budget_ms: 2.0 },
+        Operation {
+            substrate: Substrate::Frankentui,
+            name: "render_status_panel".into(),
+            budget_ms: 5.0,
+        },
+        Operation {
+            substrate: Substrate::Frankentui,
+            name: "render_tree_view".into(),
+            budget_ms: 8.0,
+        },
+        Operation {
+            substrate: Substrate::Frankensqlite,
+            name: "fencing_token_write".into(),
+            budget_ms: 10.0,
+        },
+        Operation {
+            substrate: Substrate::Frankensqlite,
+            name: "config_read".into(),
+            budget_ms: 5.0,
+        },
+        Operation {
+            substrate: Substrate::SqlmodelRust,
+            name: "typed_model_serialize".into(),
+            budget_ms: 1.0,
+        },
+        Operation {
+            substrate: Substrate::SqlmodelRust,
+            name: "typed_model_deserialize".into(),
+            budget_ms: 1.0,
+        },
+        Operation {
+            substrate: Substrate::FastapiRust,
+            name: "middleware_pipeline".into(),
+            budget_ms: 3.0,
+        },
+        Operation {
+            substrate: Substrate::FastapiRust,
+            name: "health_check_endpoint".into(),
+            budget_ms: 2.0,
+        },
     ]
 }
 
@@ -291,7 +323,11 @@ impl SubstrateOverheadGate {
         self.emit_event(
             event_codes::PERF_BENCHMARK_START,
             &record,
-            format!("Benchmark started for {}/{}", record.substrate.label(), record.operation),
+            format!(
+                "Benchmark started for {}/{}",
+                record.substrate.label(),
+                record.operation
+            ),
         );
 
         let mut violations = Vec::new();
@@ -299,19 +335,27 @@ impl SubstrateOverheadGate {
         if !record.within_budget {
             violations.push(format!(
                 "{}/{}: p95 {:.3}ms > budget {:.1}ms",
-                record.substrate.label(), record.operation,
-                record.measured_p95_ms, record.budget_ms
+                record.substrate.label(),
+                record.operation,
+                record.measured_p95_ms,
+                record.budget_ms
             ));
             self.emit_event(
                 event_codes::PERF_BUDGET_FAIL,
                 &record,
-                format!("Over budget: p95={:.3}ms > {:.1}ms", record.measured_p95_ms, record.budget_ms),
+                format!(
+                    "Over budget: p95={:.3}ms > {:.1}ms",
+                    record.measured_p95_ms, record.budget_ms
+                ),
             );
         } else {
             self.emit_event(
                 event_codes::PERF_BUDGET_PASS,
                 &record,
-                format!("Within budget: p95={:.3}ms <= {:.1}ms", record.measured_p95_ms, record.budget_ms),
+                format!(
+                    "Within budget: p95={:.3}ms <= {:.1}ms",
+                    record.measured_p95_ms, record.budget_ms
+                ),
             );
         }
 
@@ -324,7 +368,9 @@ impl SubstrateOverheadGate {
             if record.is_hard_regression() {
                 violations.push(format!(
                     "{}/{}: regression {:.1}% > 25% threshold",
-                    record.substrate.label(), record.operation, record.regression_pct
+                    record.substrate.label(),
+                    record.operation,
+                    record.regression_pct
                 ));
             }
         }
@@ -332,7 +378,11 @@ impl SubstrateOverheadGate {
         self.emit_event(
             event_codes::PERF_BENCHMARK_COMPLETE,
             &record,
-            format!("Benchmark complete for {}/{}", record.substrate.label(), record.operation),
+            format!(
+                "Benchmark complete for {}/{}",
+                record.substrate.label(),
+                record.operation
+            ),
         );
 
         self.records.push(record);
@@ -359,8 +409,16 @@ impl SubstrateOverheadGate {
             total: self.records.len(),
             within_budget: self.records.iter().filter(|r| r.within_budget).count(),
             over_budget: self.records.iter().filter(|r| !r.within_budget).count(),
-            regressions: self.records.iter().filter(|r| r.regression_detected).count(),
-            hard_regressions: self.records.iter().filter(|r| r.is_hard_regression()).count(),
+            regressions: self
+                .records
+                .iter()
+                .filter(|r| r.regression_detected)
+                .count(),
+            hard_regressions: self
+                .records
+                .iter()
+                .filter(|r| r.is_hard_regression())
+                .count(),
         }
     }
 
@@ -430,16 +488,20 @@ mod tests {
     use super::*;
 
     fn make_op(substrate: Substrate, name: &str, budget_ms: f64) -> Operation {
-        Operation { substrate, name: name.into(), budget_ms }
+        Operation {
+            substrate,
+            name: name.into(),
+            budget_ms,
+        }
     }
 
     fn within_budget_record(op: &Operation) -> MeasurementRecord {
         MeasurementRecord::from_benchmark(
             op,
-            op.budget_ms * 0.5,  // p50
-            op.budget_ms * 0.8,  // p95 (within budget)
-            op.budget_ms * 0.9,  // p99
-            op.budget_ms * 0.5,  // baseline (no regression)
+            op.budget_ms * 0.5, // p50
+            op.budget_ms * 0.8, // p95 (within budget)
+            op.budget_ms * 0.9, // p99
+            op.budget_ms * 0.5, // baseline (no regression)
         )
     }
 
@@ -494,14 +556,24 @@ mod tests {
         let ops = default_operations();
         for substrate in Substrate::all() {
             let count = ops.iter().filter(|o| o.substrate == *substrate).count();
-            assert!(count >= 2, "Substrate {} has {} operations", substrate, count);
+            assert!(
+                count >= 2,
+                "Substrate {} has {} operations",
+                substrate,
+                count
+            );
         }
     }
 
     #[test]
     fn test_default_operations_budgets_positive() {
         for op in default_operations() {
-            assert!(op.budget_ms > 0.0, "Budget for {}/{} must be positive", op.substrate, op.name);
+            assert!(
+                op.budget_ms > 0.0,
+                "Budget for {}/{} must be positive",
+                op.substrate,
+                op.name
+            );
         }
     }
 
@@ -574,7 +646,9 @@ mod tests {
 
     #[test]
     fn test_gate_decision_fail() {
-        let d = GateDecision::Fail { violations: vec!["test".into()] };
+        let d = GateDecision::Fail {
+            violations: vec!["test".into()],
+        };
         assert!(d.is_fail());
         assert!(!d.is_pass());
     }
@@ -597,8 +671,11 @@ mod tests {
     #[test]
     fn test_summary_gate_pass() {
         let s = OverheadGateSummary {
-            total: 8, within_budget: 8, over_budget: 0,
-            regressions: 0, hard_regressions: 0,
+            total: 8,
+            within_budget: 8,
+            over_budget: 0,
+            regressions: 0,
+            hard_regressions: 0,
         };
         assert!(s.gate_pass());
     }
@@ -606,8 +683,11 @@ mod tests {
     #[test]
     fn test_summary_gate_fail_over_budget() {
         let s = OverheadGateSummary {
-            total: 8, within_budget: 7, over_budget: 1,
-            regressions: 0, hard_regressions: 0,
+            total: 8,
+            within_budget: 7,
+            over_budget: 1,
+            regressions: 0,
+            hard_regressions: 0,
         };
         assert!(!s.gate_pass());
     }
@@ -615,8 +695,11 @@ mod tests {
     #[test]
     fn test_summary_gate_fail_hard_regression() {
         let s = OverheadGateSummary {
-            total: 8, within_budget: 8, over_budget: 0,
-            regressions: 1, hard_regressions: 1,
+            total: 8,
+            within_budget: 8,
+            over_budget: 0,
+            regressions: 1,
+            hard_regressions: 1,
         };
         assert!(!s.gate_pass());
     }
@@ -624,8 +707,11 @@ mod tests {
     #[test]
     fn test_summary_gate_fail_empty() {
         let s = OverheadGateSummary {
-            total: 0, within_budget: 0, over_budget: 0,
-            regressions: 0, hard_regressions: 0,
+            total: 0,
+            within_budget: 0,
+            over_budget: 0,
+            regressions: 0,
+            hard_regressions: 0,
         };
         assert!(!s.gate_pass());
     }
@@ -633,8 +719,11 @@ mod tests {
     #[test]
     fn test_summary_display() {
         let s = OverheadGateSummary {
-            total: 8, within_budget: 7, over_budget: 1,
-            regressions: 1, hard_regressions: 0,
+            total: 8,
+            within_budget: 7,
+            over_budget: 1,
+            regressions: 1,
+            hard_regressions: 0,
         };
         let display = s.to_string();
         assert!(display.contains("8"));
@@ -693,10 +782,7 @@ mod tests {
     fn test_gate_evaluate_batch_mixed() {
         let mut gate = SubstrateOverheadGate::with_defaults("test-run".into());
         let ops = default_operations();
-        let records = vec![
-            within_budget_record(&ops[0]),
-            over_budget_record(&ops[1]),
-        ];
+        let records = vec![within_budget_record(&ops[0]), over_budget_record(&ops[1])];
         let decisions = gate.evaluate_batch(records);
         assert!(decisions[0].is_pass());
         assert!(decisions[1].is_fail());
@@ -709,7 +795,9 @@ mod tests {
         let op = make_op(Substrate::Frankentui, "render", 5.0);
         let mut gate = SubstrateOverheadGate::with_defaults("test-run".into());
         gate.evaluate(within_budget_record(&op));
-        let starts: Vec<_> = gate.events().iter()
+        let starts: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::PERF_BENCHMARK_START)
             .collect();
         assert_eq!(starts.len(), 1);
@@ -720,7 +808,9 @@ mod tests {
         let op = make_op(Substrate::Frankentui, "render", 5.0);
         let mut gate = SubstrateOverheadGate::with_defaults("test-run".into());
         gate.evaluate(within_budget_record(&op));
-        let completes: Vec<_> = gate.events().iter()
+        let completes: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::PERF_BENCHMARK_COMPLETE)
             .collect();
         assert_eq!(completes.len(), 1);
@@ -731,7 +821,9 @@ mod tests {
         let op = make_op(Substrate::Frankentui, "render", 5.0);
         let mut gate = SubstrateOverheadGate::with_defaults("test-run".into());
         gate.evaluate(within_budget_record(&op));
-        let passes: Vec<_> = gate.events().iter()
+        let passes: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::PERF_BUDGET_PASS)
             .collect();
         assert_eq!(passes.len(), 1);
@@ -742,7 +834,9 @@ mod tests {
         let op = make_op(Substrate::Frankentui, "render", 5.0);
         let mut gate = SubstrateOverheadGate::with_defaults("test-run".into());
         gate.evaluate(over_budget_record(&op));
-        let fails: Vec<_> = gate.events().iter()
+        let fails: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::PERF_BUDGET_FAIL)
             .collect();
         assert_eq!(fails.len(), 1);
@@ -754,7 +848,9 @@ mod tests {
         let mut gate = SubstrateOverheadGate::with_defaults("test-run".into());
         let r = MeasurementRecord::from_benchmark(&op, 3.0, 4.0, 4.5, 2.0);
         gate.evaluate(r);
-        let regressions: Vec<_> = gate.events().iter()
+        let regressions: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::PERF_REGRESSION_DETECTED)
             .collect();
         assert_eq!(regressions.len(), 1);

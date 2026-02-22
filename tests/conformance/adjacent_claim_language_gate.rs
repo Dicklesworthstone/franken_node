@@ -198,7 +198,10 @@ impl ClaimLanguageGate {
                     event_codes::CLAIM_LINKED,
                     &claim.file,
                     &hash,
-                    format!("Claim linked to {}", claim.linked_artifact.as_deref().unwrap_or("?")),
+                    format!(
+                        "Claim linked to {}",
+                        claim.linked_artifact.as_deref().unwrap_or("?")
+                    ),
                 );
             }
             ClaimStatus::Unlinked => {
@@ -214,7 +217,10 @@ impl ClaimLanguageGate {
                     event_codes::CLAIM_LINK_BROKEN,
                     &claim.file,
                     &hash,
-                    format!("BROKEN LINK: {}", claim.linked_artifact.as_deref().unwrap_or("?")),
+                    format!(
+                        "BROKEN LINK: {}",
+                        claim.linked_artifact.as_deref().unwrap_or("?")
+                    ),
                 );
             }
         }
@@ -229,16 +235,27 @@ impl ClaimLanguageGate {
     }
 
     pub fn gate_pass(&self) -> bool {
-        !self.claims.is_empty()
-            && self.claims.iter().all(|c| c.status.is_pass())
+        !self.claims.is_empty() && self.claims.iter().all(|c| c.status.is_pass())
     }
 
     pub fn summary(&self) -> ClaimGateSummary {
         ClaimGateSummary {
             total_claims: self.claims.len(),
-            linked: self.claims.iter().filter(|c| c.status == ClaimStatus::Linked).count(),
-            unlinked: self.claims.iter().filter(|c| c.status == ClaimStatus::Unlinked).count(),
-            broken_links: self.claims.iter().filter(|c| c.status == ClaimStatus::BrokenLink).count(),
+            linked: self
+                .claims
+                .iter()
+                .filter(|c| c.status == ClaimStatus::Linked)
+                .count(),
+            unlinked: self
+                .claims
+                .iter()
+                .filter(|c| c.status == ClaimStatus::Unlinked)
+                .count(),
+            broken_links: self
+                .claims
+                .iter()
+                .filter(|c| c.status == ClaimStatus::BrokenLink)
+                .count(),
         }
     }
 
@@ -395,7 +412,10 @@ mod tests {
     #[test]
     fn test_summary_gate_pass() {
         let s = ClaimGateSummary {
-            total_claims: 4, linked: 4, unlinked: 0, broken_links: 0,
+            total_claims: 4,
+            linked: 4,
+            unlinked: 0,
+            broken_links: 0,
         };
         assert!(s.gate_pass());
     }
@@ -403,7 +423,10 @@ mod tests {
     #[test]
     fn test_summary_gate_fail_unlinked() {
         let s = ClaimGateSummary {
-            total_claims: 4, linked: 3, unlinked: 1, broken_links: 0,
+            total_claims: 4,
+            linked: 3,
+            unlinked: 1,
+            broken_links: 0,
         };
         assert!(!s.gate_pass());
     }
@@ -411,7 +434,10 @@ mod tests {
     #[test]
     fn test_summary_gate_fail_broken() {
         let s = ClaimGateSummary {
-            total_claims: 4, linked: 3, unlinked: 0, broken_links: 1,
+            total_claims: 4,
+            linked: 3,
+            unlinked: 0,
+            broken_links: 1,
         };
         assert!(!s.gate_pass());
     }
@@ -419,7 +445,10 @@ mod tests {
     #[test]
     fn test_summary_gate_fail_empty() {
         let s = ClaimGateSummary {
-            total_claims: 0, linked: 0, unlinked: 0, broken_links: 0,
+            total_claims: 0,
+            linked: 0,
+            unlinked: 0,
+            broken_links: 0,
         };
         assert!(!s.gate_pass());
     }
@@ -427,7 +456,10 @@ mod tests {
     #[test]
     fn test_summary_display() {
         let s = ClaimGateSummary {
-            total_claims: 4, linked: 3, unlinked: 1, broken_links: 0,
+            total_claims: 4,
+            linked: 3,
+            unlinked: 1,
+            broken_links: 0,
         };
         let display = s.to_string();
         assert!(display.contains("4"));
@@ -470,7 +502,10 @@ mod tests {
     #[test]
     fn test_gate_batch_scan() {
         let mut gate = ClaimLanguageGate::new();
-        let claims: Vec<_> = ClaimCategory::all().iter().map(|c| linked_claim(*c)).collect();
+        let claims: Vec<_> = ClaimCategory::all()
+            .iter()
+            .map(|c| linked_claim(*c))
+            .collect();
         gate.scan_batch(claims);
         assert_eq!(gate.claims().len(), 4);
         assert!(gate.gate_pass());
@@ -496,7 +531,9 @@ mod tests {
     fn test_linked_emits_scan_start() {
         let mut gate = ClaimLanguageGate::new();
         gate.scan_claim(linked_claim(ClaimCategory::Tui));
-        let starts: Vec<_> = gate.events().iter()
+        let starts: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::CLAIM_GATE_SCAN_START)
             .collect();
         assert_eq!(starts.len(), 1);
@@ -506,7 +543,9 @@ mod tests {
     fn test_linked_emits_claim_linked() {
         let mut gate = ClaimLanguageGate::new();
         gate.scan_claim(linked_claim(ClaimCategory::Tui));
-        let linked: Vec<_> = gate.events().iter()
+        let linked: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::CLAIM_LINKED)
             .collect();
         assert_eq!(linked.len(), 1);
@@ -516,7 +555,9 @@ mod tests {
     fn test_unlinked_emits_claim_unlinked() {
         let mut gate = ClaimLanguageGate::new();
         gate.scan_claim(unlinked_claim(ClaimCategory::Api));
-        let unlinked: Vec<_> = gate.events().iter()
+        let unlinked: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::CLAIM_UNLINKED)
             .collect();
         assert_eq!(unlinked.len(), 1);
@@ -526,7 +567,9 @@ mod tests {
     fn test_broken_emits_claim_link_broken() {
         let mut gate = ClaimLanguageGate::new();
         gate.scan_claim(broken_link_claim(ClaimCategory::Storage));
-        let broken: Vec<_> = gate.events().iter()
+        let broken: Vec<_> = gate
+            .events()
+            .iter()
             .filter(|e| e.code == event_codes::CLAIM_LINK_BROKEN)
             .collect();
         assert_eq!(broken.len(), 1);
@@ -641,9 +684,7 @@ mod tests {
 
     #[test]
     fn test_determinism_identical_claims() {
-        let claims: Vec<_> = (0..10)
-            .map(|_| linked_claim(ClaimCategory::Tui))
-            .collect();
+        let claims: Vec<_> = (0..10).map(|_| linked_claim(ClaimCategory::Tui)).collect();
         let first = &claims[0];
         for c in &claims[1..] {
             assert_eq!(c.status, first.status);

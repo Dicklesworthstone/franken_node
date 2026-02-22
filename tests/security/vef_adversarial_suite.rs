@@ -155,7 +155,11 @@ fn receipt_hash(receipt: &Receipt) -> String {
     sha256_json(receipt)
 }
 
-fn window_hashes(chain: &ReceiptChainFixture, start: usize, end: usize) -> Result<Vec<String>, DetectionFailure> {
+fn window_hashes(
+    chain: &ReceiptChainFixture,
+    start: usize,
+    end: usize,
+) -> Result<Vec<String>, DetectionFailure> {
     if start > end {
         return Err(fail(
             AttackClass::ReceiptTampering,
@@ -169,13 +173,20 @@ fn window_hashes(chain: &ReceiptChainFixture, start: usize, end: usize) -> Resul
             AttackClass::ReceiptTampering,
             ERR_TAMPER,
             "trace-internal",
-            format!("window {start}..{end} out of bounds for chain length {}", chain.receipts.len()),
+            format!(
+                "window {start}..{end} out of bounds for chain length {}",
+                chain.receipts.len()
+            ),
         )
     })?;
     Ok(slice.iter().map(receipt_hash).collect())
 }
 
-fn compute_window_fingerprint(chain: &ReceiptChainFixture, start: usize, end: usize) -> Result<String, DetectionFailure> {
+fn compute_window_fingerprint(
+    chain: &ReceiptChainFixture,
+    start: usize,
+    end: usize,
+) -> Result<String, DetectionFailure> {
     let hashes = window_hashes(chain, start, end)?;
     Ok(sha256_json(&(chain.chain_id.as_str(), start, end, hashes)))
 }
@@ -187,7 +198,14 @@ fn compute_commitment(
     end: usize,
 ) -> Result<String, DetectionFailure> {
     let hashes = window_hashes(chain, start, end)?;
-    Ok(sha256_json(&("vef-adversarial-commitment-v1", chain.chain_id.as_str(), checkpoint_id, start, end, hashes)))
+    Ok(sha256_json(&(
+        "vef-adversarial-commitment-v1",
+        chain.chain_id.as_str(),
+        checkpoint_id,
+        start,
+        end,
+        hashes,
+    )))
 }
 
 fn mint_proof(
@@ -199,7 +217,8 @@ fn mint_proof(
     policy_hash: &str,
 ) -> ProofEnvelope {
     let window_fingerprint = compute_window_fingerprint(chain, start, end).expect("valid window");
-    let commitment_hash = compute_commitment(chain, checkpoint_id, start, end).expect("valid commitment");
+    let commitment_hash =
+        compute_commitment(chain, checkpoint_id, start, end).expect("valid commitment");
     ProofEnvelope {
         proof_id: proof_id.to_string(),
         chain_id: chain.chain_id.clone(),
@@ -276,8 +295,11 @@ fn verify_proof(
         ));
     }
 
-    let expected_window_fingerprint =
-        compute_window_fingerprint(chain, request.expected_window_start, request.expected_window_end)?;
+    let expected_window_fingerprint = compute_window_fingerprint(
+        chain,
+        request.expected_window_start,
+        request.expected_window_end,
+    )?;
     if proof.window_fingerprint != expected_window_fingerprint {
         return Err(fail(
             AttackClass::ReceiptTampering,
@@ -326,8 +348,8 @@ fn base_request(chain_id: &str, trace_id: &str) -> VerificationRequest {
         expected_chain_id: chain_id.to_string(),
         expected_window_start: 1,
         expected_window_end: 3,
-        active_policy_hash: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-            .to_string(),
+        active_policy_hash:
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
         trace_id: trace_id.to_string(),
     }
 }
@@ -477,7 +499,8 @@ fn proof_replay_variations_fail_closed() {
     different_window.trace_id = "trace-replay-window".to_string();
     different_window.expected_window_start = 0;
     different_window.expected_window_end = 2;
-    let err_1 = verify_proof(&chain_a, &replayed_proof, &different_window, &mut registry).unwrap_err();
+    let err_1 =
+        verify_proof(&chain_a, &replayed_proof, &different_window, &mut registry).unwrap_err();
     assert_error_signature(&err_1, ERR_REPLAY, AttackClass::ProofReplay);
 
     // 2) replay same proof under different active policy binding
@@ -485,14 +508,16 @@ fn proof_replay_variations_fail_closed() {
     different_policy.trace_id = "trace-replay-policy".to_string();
     different_policy.active_policy_hash =
         "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();
-    let err_2 = verify_proof(&chain_a, &replayed_proof, &different_policy, &mut registry).unwrap_err();
+    let err_2 =
+        verify_proof(&chain_a, &replayed_proof, &different_policy, &mut registry).unwrap_err();
     assert_error_signature(&err_2, ERR_REPLAY, AttackClass::ProofReplay);
 
     // 3) replay same proof on different chain
     let mut different_chain = base_request.clone();
     different_chain.trace_id = "trace-replay-chain".to_string();
     different_chain.expected_chain_id = "chain-B".to_string();
-    let err_3 = verify_proof(&chain_b, &replayed_proof, &different_chain, &mut registry).unwrap_err();
+    let err_3 =
+        verify_proof(&chain_b, &replayed_proof, &different_chain, &mut registry).unwrap_err();
     assert_error_signature(&err_3, ERR_REPLAY, AttackClass::ProofReplay);
 }
 
@@ -546,8 +571,7 @@ fn commitment_mismatch_variations_fail_closed() {
         request.expected_window_end,
         &request.active_policy_hash,
     );
-    proof_1.commitment_hash =
-        compute_commitment(&chain_a, 12, 0, 2).expect("alternate commitment");
+    proof_1.commitment_hash = compute_commitment(&chain_a, 12, 0, 2).expect("alternate commitment");
     let mut registry_1 = ReplayRegistry::default();
     let err_1 = verify_proof(&chain_a, &proof_1, &request, &mut registry_1).unwrap_err();
     assert_error_signature(&err_1, ERR_COMMITMENT, AttackClass::CommitmentMismatch);
@@ -688,7 +712,11 @@ fn no_false_positives_for_legitimate_inputs() {
     let policy =
         "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
 
-    let windows = [(0_usize, 2_usize, 21_u64), (1_usize, 3_usize, 22_u64), (3_usize, 5_usize, 23_u64)];
+    let windows = [
+        (0_usize, 2_usize, 21_u64),
+        (1_usize, 3_usize, 22_u64),
+        (3_usize, 5_usize, 23_u64),
+    ];
 
     for (idx, (start, end, checkpoint_id)) in windows.into_iter().enumerate() {
         let request = VerificationRequest {
@@ -714,16 +742,16 @@ fn no_false_positives_for_legitimate_inputs() {
 #[test]
 fn invalid_window_bounds_returns_tamper_with_expect_err() {
     let chain = sample_chain("chain-A");
-    let err = compute_window_fingerprint(&chain, 4, 1)
-        .expect_err("invalid bounds must fail closed");
+    let err =
+        compute_window_fingerprint(&chain, 4, 1).expect_err("invalid bounds must fail closed");
     assert_error_signature(&err, ERR_TAMPER, AttackClass::ReceiptTampering);
 }
 
 #[test]
 fn out_of_bounds_window_returns_tamper_error() {
     let chain = sample_chain("chain-A");
-    let err = compute_commitment(&chain, 21, 2, 9)
-        .expect_err("out-of-bounds window must fail closed");
+    let err =
+        compute_commitment(&chain, 21, 2, 9).expect_err("out-of-bounds window must fail closed");
     assert_error_signature(&err, ERR_TAMPER, AttackClass::ReceiptTampering);
 }
 

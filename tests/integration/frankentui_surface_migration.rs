@@ -198,15 +198,25 @@ impl FrankentuiMigrationGate {
         if self.surfaces.is_empty() {
             return false;
         }
-        let all_complete = self.surfaces.iter().all(|s| s.migration_status.is_complete());
-        let no_raw = !self.events.iter().any(|e| e.code == FRANKENTUI_RAW_OUTPUT_DETECTED);
+        let all_complete = self
+            .surfaces
+            .iter()
+            .all(|s| s.migration_status.is_complete());
+        let no_raw = !self
+            .events
+            .iter()
+            .any(|e| e.code == FRANKENTUI_RAW_OUTPUT_DETECTED);
         all_complete && no_raw
     }
 
     /// Summary of migration status.
     pub fn summary(&self) -> MigrationSummary {
         let total = self.surfaces.len();
-        let complete = self.surfaces.iter().filter(|s| s.migration_status.is_complete()).count();
+        let complete = self
+            .surfaces
+            .iter()
+            .filter(|s| s.migration_status.is_complete())
+            .count();
         let incomplete = total - complete;
         let raw_violations = self
             .events
@@ -455,9 +465,15 @@ mod tests {
 
     #[test]
     fn test_boundary_type_labels() {
-        assert_eq!(BoundaryType::SurfaceDefinition.label(), "surface_definition");
+        assert_eq!(
+            BoundaryType::SurfaceDefinition.label(),
+            "surface_definition"
+        );
         assert_eq!(BoundaryType::Renderer.label(), "renderer");
-        assert_eq!(BoundaryType::DiagnosticRenderer.label(), "diagnostic_renderer");
+        assert_eq!(
+            BoundaryType::DiagnosticRenderer.label(),
+            "diagnostic_renderer"
+        );
     }
 
     #[test]
@@ -697,8 +713,14 @@ mod tests {
     #[test]
     fn test_event_code_constants_defined() {
         assert_eq!(FRANKENTUI_SURFACE_MIGRATED, "FRANKENTUI_SURFACE_MIGRATED");
-        assert_eq!(FRANKENTUI_RAW_OUTPUT_DETECTED, "FRANKENTUI_RAW_OUTPUT_DETECTED");
-        assert_eq!(FRANKENTUI_MIGRATION_INCOMPLETE, "FRANKENTUI_MIGRATION_INCOMPLETE");
+        assert_eq!(
+            FRANKENTUI_RAW_OUTPUT_DETECTED,
+            "FRANKENTUI_RAW_OUTPUT_DETECTED"
+        );
+        assert_eq!(
+            FRANKENTUI_MIGRATION_INCOMPLETE,
+            "FRANKENTUI_MIGRATION_INCOMPLETE"
+        );
     }
 
     // -- Component coverage tests --
@@ -759,8 +781,10 @@ mod tests {
     #[test]
     fn test_canonical_has_all_boundary_types() {
         let surfaces = canonical_surfaces();
-        let types: std::collections::HashSet<String> =
-            surfaces.iter().map(|s| s.boundary_type.label().to_string()).collect();
+        let types: std::collections::HashSet<String> = surfaces
+            .iter()
+            .map(|s| s.boundary_type.label().to_string())
+            .collect();
         assert!(types.contains("surface_definition"));
         assert!(types.contains("renderer"));
         assert!(types.contains("diagnostic_renderer"));
@@ -783,40 +807,50 @@ mod tests {
     #[test]
     fn test_canonical_covers_correctness_envelope() {
         let surfaces = canonical_surfaces();
-        assert!(surfaces
-            .iter()
-            .any(|s| s.module_path == "src/policy/correctness_envelope.rs"));
+        assert!(
+            surfaces
+                .iter()
+                .any(|s| s.module_path == "src/policy/correctness_envelope.rs")
+        );
     }
 
     #[test]
     fn test_canonical_covers_controller_boundary() {
         let surfaces = canonical_surfaces();
-        assert!(surfaces
-            .iter()
-            .any(|s| s.module_path == "src/policy/controller_boundary_checks.rs"));
+        assert!(
+            surfaces
+                .iter()
+                .any(|s| s.module_path == "src/policy/controller_boundary_checks.rs")
+        );
     }
 
     #[test]
     fn test_canonical_covers_evidence_emission() {
         let surfaces = canonical_surfaces();
-        assert!(surfaces
-            .iter()
-            .any(|s| s.module_path == "src/policy/evidence_emission.rs"));
+        assert!(
+            surfaces
+                .iter()
+                .any(|s| s.module_path == "src/policy/evidence_emission.rs")
+        );
     }
 
     #[test]
     fn test_canonical_covers_evidence_ledger() {
         let surfaces = canonical_surfaces();
-        assert!(surfaces
-            .iter()
-            .any(|s| s.module_path == "src/observability/evidence_ledger.rs"));
+        assert!(
+            surfaces
+                .iter()
+                .any(|s| s.module_path == "src/observability/evidence_ledger.rs")
+        );
     }
 
     #[test]
     fn test_canonical_covers_replay_validator() {
         let surfaces = canonical_surfaces();
-        assert!(surfaces
-            .iter()
-            .any(|s| s.module_path == "src/tools/evidence_replay_validator.rs"));
+        assert!(
+            surfaces
+                .iter()
+                .any(|s| s.module_path == "src/tools/evidence_replay_validator.rs")
+        );
     }
 }

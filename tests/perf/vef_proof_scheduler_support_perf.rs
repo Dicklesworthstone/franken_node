@@ -4,7 +4,7 @@
 //! larger synthetic streams without using timing-sensitive assertions.
 
 #[path = "../../crates/franken-node/src/connector/vef_execution_receipt.rs"]
-mod vef_execution_receipt;
+pub mod vef_execution_receipt;
 
 mod connector {
     pub use super::vef_execution_receipt;
@@ -21,7 +21,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::proof_scheduler::{SchedulerPolicy, VefProofScheduler};
-    use super::receipt_chain::{ReceiptChain, ReceiptChainConfig, ReceiptChainEntry, ReceiptCheckpoint};
+    use super::receipt_chain::{
+        ReceiptChain, ReceiptChainConfig, ReceiptChainEntry, ReceiptCheckpoint,
+    };
     use super::vef_execution_receipt::{
         ExecutionActionType, ExecutionReceipt, RECEIPT_SCHEMA_VERSION,
     };
@@ -129,7 +131,12 @@ mod tests {
         };
         let mut scheduler = VefProofScheduler::new(policy.clone());
         let windows = scheduler
-            .select_windows(&entries, &checkpoints, 1_703_000_300_000, "trace-perf-budget")
+            .select_windows(
+                &entries,
+                &checkpoints,
+                1_703_000_300_000,
+                "trace-perf-budget",
+            )
             .expect("window selection");
         scheduler
             .enqueue_windows(&windows, 1_703_000_300_010)

@@ -26,3 +26,6 @@
 # Source image kept out of repo; committed asset is WebP
 /franken_node_illustration.png
 __pycache__/
+
+# bv (beads viewer) local config and caches
+.bv/

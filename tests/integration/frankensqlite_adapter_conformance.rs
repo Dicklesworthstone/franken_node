@@ -335,11 +335,7 @@ impl FrankensqliteAdapter {
     }
 
     /// Append to tier-1 audit log.
-    pub fn tier1_audit_append(
-        &mut self,
-        domain: &str,
-        entry: &[u8],
-    ) -> Result<u64, AdapterError> {
+    pub fn tier1_audit_append(&mut self, domain: &str, entry: &[u8]) -> Result<u64, AdapterError> {
         let log = self
             .tier1_audit
             .get_mut(domain)
@@ -390,12 +386,7 @@ impl FrankensqliteAdapter {
     }
 
     /// Put to tier-3 cache.
-    pub fn tier3_put(
-        &mut self,
-        domain: &str,
-        key: &str,
-        value: &[u8],
-    ) -> Result<(), AdapterError> {
+    pub fn tier3_put(&mut self, domain: &str, key: &str, value: &[u8]) -> Result<(), AdapterError> {
         let store = self
             .tier3_store
             .get_mut(domain)
@@ -435,9 +426,21 @@ impl FrankensqliteAdapter {
     /// Summary of adapter state.
     pub fn summary(&self) -> AdapterSummary {
         let total = self.classes.len();
-        let tier1 = self.classes.iter().filter(|c| c.safety_tier == SafetyTier::Tier1).count();
-        let tier2 = self.classes.iter().filter(|c| c.safety_tier == SafetyTier::Tier2).count();
-        let tier3 = self.classes.iter().filter(|c| c.safety_tier == SafetyTier::Tier3).count();
+        let tier1 = self
+            .classes
+            .iter()
+            .filter(|c| c.safety_tier == SafetyTier::Tier1)
+            .count();
+        let tier2 = self
+            .classes
+            .iter()
+            .filter(|c| c.safety_tier == SafetyTier::Tier2)
+            .count();
+        let tier3 = self
+            .classes
+            .iter()
+            .filter(|c| c.safety_tier == SafetyTier::Tier3)
+            .count();
         let replay_enabled = self.classes.iter().filter(|c| c.replay_support).count();
         let total_tables: usize = self.classes.iter().map(|c| c.tables.len()).sum();
         AdapterSummary {
@@ -500,7 +503,11 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/fencing.rs".into(),
             safety_tier: SafetyTier::Tier1,
             durability_mode: DurabilityMode::WalFull,
-            tables: vec!["fencing_leases".into(), "fencing_state_tokens".into(), "fencing_epoch_scope_log".into()],
+            tables: vec![
+                "fencing_leases".into(),
+                "fencing_state_tokens".into(),
+                "fencing_epoch_scope_log".into(),
+            ],
             replay_support: true,
             replay_strategy: "wal_replay_with_epoch_window_validation".into(),
         },
@@ -509,7 +516,10 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/lease_service.rs".into(),
             safety_tier: SafetyTier::Tier1,
             durability_mode: DurabilityMode::WalFull,
-            tables: vec!["lease_service_records".into(), "lease_service_decisions".into()],
+            tables: vec![
+                "lease_service_records".into(),
+                "lease_service_decisions".into(),
+            ],
             replay_support: true,
             replay_strategy: "ordered_decision_replay_by_lease_id".into(),
         },
@@ -518,7 +528,10 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/lease_coordinator.rs".into(),
             safety_tier: SafetyTier::Tier1,
             durability_mode: DurabilityMode::WalFull,
-            tables: vec!["lease_quorum_selection".into(), "lease_quorum_verification".into()],
+            tables: vec![
+                "lease_quorum_selection".into(),
+                "lease_quorum_verification".into(),
+            ],
             replay_support: true,
             replay_strategy: "deterministic_weighted_hash_replay".into(),
         },
@@ -527,7 +540,10 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/rollout_state.rs".into(),
             safety_tier: SafetyTier::Tier1,
             durability_mode: DurabilityMode::WalFull,
-            tables: vec!["rollout_state_snapshots".into(), "rollout_epoch_events".into()],
+            tables: vec![
+                "rollout_state_snapshots".into(),
+                "rollout_epoch_events".into(),
+            ],
             replay_support: true,
             replay_strategy: "versioned_snapshot_replay".into(),
         },
@@ -545,7 +561,10 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/control_channel.rs".into(),
             safety_tier: SafetyTier::Tier1,
             durability_mode: DurabilityMode::WalFull,
-            tables: vec!["control_channel_state".into(), "control_channel_audit_log".into()],
+            tables: vec![
+                "control_channel_state".into(),
+                "control_channel_audit_log".into(),
+            ],
             replay_support: true,
             replay_strategy: "sequence_monotonicity_replay".into(),
         },
@@ -563,7 +582,11 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/tiered_trust_storage.rs".into(),
             safety_tier: SafetyTier::Tier1,
             durability_mode: DurabilityMode::WalFull,
-            tables: vec!["tiered_trust_artifacts".into(), "tier_authority_map".into(), "tier_recovery_events".into()],
+            tables: vec![
+                "tiered_trust_artifacts".into(),
+                "tier_authority_map".into(),
+                "tier_recovery_events".into(),
+            ],
             replay_support: true,
             replay_strategy: "authoritative_tier_first_recovery_replay".into(),
         },
@@ -581,7 +604,10 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/durability.rs".into(),
             safety_tier: SafetyTier::Tier1,
             durability_mode: DurabilityMode::WalFull,
-            tables: vec!["durability_mode_assignments".into(), "durability_events".into()],
+            tables: vec![
+                "durability_mode_assignments".into(),
+                "durability_events".into(),
+            ],
             replay_support: true,
             replay_strategy: "mode_transition_replay".into(),
         },
@@ -590,7 +616,10 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/durable_claim_gate.rs".into(),
             safety_tier: SafetyTier::Tier1,
             durability_mode: DurabilityMode::WalFull,
-            tables: vec!["durable_claim_events".into(), "durable_claim_evidence".into()],
+            tables: vec![
+                "durable_claim_events".into(),
+                "durable_claim_evidence".into(),
+            ],
             replay_support: true,
             replay_strategy: "proof_gate_decision_replay".into(),
         },
@@ -599,7 +628,11 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/snapshot_policy.rs".into(),
             safety_tier: SafetyTier::Tier2,
             durability_mode: DurabilityMode::WalNormal,
-            tables: vec!["snapshot_policies".into(), "snapshot_records".into(), "snapshot_policy_audit".into()],
+            tables: vec![
+                "snapshot_policies".into(),
+                "snapshot_records".into(),
+                "snapshot_policy_audit".into(),
+            ],
             replay_support: true,
             replay_strategy: "snapshot_plus_mutation_distance_replay".into(),
         },
@@ -617,7 +650,11 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/schema_migration.rs".into(),
             safety_tier: SafetyTier::Tier2,
             durability_mode: DurabilityMode::WalNormal,
-            tables: vec!["schema_versions".into(), "migration_hints".into(), "migration_receipts".into()],
+            tables: vec![
+                "schema_versions".into(),
+                "migration_hints".into(),
+                "migration_receipts".into(),
+            ],
             replay_support: true,
             replay_strategy: "migration_path_and_receipt_replay".into(),
         },
@@ -635,7 +672,10 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/quarantine_promotion.rs".into(),
             safety_tier: SafetyTier::Tier2,
             durability_mode: DurabilityMode::WalNormal,
-            tables: vec!["quarantine_promotion_receipts".into(), "quarantine_promotion_rejections".into()],
+            tables: vec![
+                "quarantine_promotion_receipts".into(),
+                "quarantine_promotion_rejections".into(),
+            ],
             replay_support: true,
             replay_strategy: "schema_gate_decision_replay".into(),
         },
@@ -644,7 +684,11 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/retention_policy.rs".into(),
             safety_tier: SafetyTier::Tier2,
             durability_mode: DurabilityMode::WalNormal,
-            tables: vec!["retention_policies".into(), "retention_messages".into(), "retention_decisions".into()],
+            tables: vec![
+                "retention_policies".into(),
+                "retention_messages".into(),
+                "retention_decisions".into(),
+            ],
             replay_support: true,
             replay_strategy: "class_then_ttl_enforcement_replay".into(),
         },
@@ -653,7 +697,11 @@ fn canonical_classes() -> Vec<PersistenceClass> {
             owner_module: "crates/franken-node/src/connector/offline_coverage.rs".into(),
             safety_tier: SafetyTier::Tier2,
             durability_mode: DurabilityMode::WalNormal,
-            tables: vec!["coverage_events".into(), "coverage_scope_metrics".into(), "coverage_slo_alerts".into()],
+            tables: vec![
+                "coverage_events".into(),
+                "coverage_scope_metrics".into(),
+                "coverage_slo_alerts".into(),
+            ],
             replay_support: true,
             replay_strategy: "event_stream_to_metric_rollup_replay".into(),
         },
@@ -755,9 +803,18 @@ mod tests {
 
     #[test]
     fn test_durability_mode_for_tier() {
-        assert_eq!(DurabilityMode::for_tier(SafetyTier::Tier1), DurabilityMode::WalFull);
-        assert_eq!(DurabilityMode::for_tier(SafetyTier::Tier2), DurabilityMode::WalNormal);
-        assert_eq!(DurabilityMode::for_tier(SafetyTier::Tier3), DurabilityMode::Memory);
+        assert_eq!(
+            DurabilityMode::for_tier(SafetyTier::Tier1),
+            DurabilityMode::WalFull
+        );
+        assert_eq!(
+            DurabilityMode::for_tier(SafetyTier::Tier2),
+            DurabilityMode::WalNormal
+        );
+        assert_eq!(
+            DurabilityMode::for_tier(SafetyTier::Tier3),
+            DurabilityMode::Memory
+        );
     }
 
     #[test]
@@ -767,7 +824,11 @@ mod tests {
 
     #[test]
     fn test_durability_mode_serde_roundtrip() {
-        let modes = [DurabilityMode::WalFull, DurabilityMode::WalNormal, DurabilityMode::Memory];
+        let modes = [
+            DurabilityMode::WalFull,
+            DurabilityMode::WalNormal,
+            DurabilityMode::Memory,
+        ];
         for m in &modes {
             let json = serde_json::to_string(m).unwrap();
             let back: DurabilityMode = serde_json::from_str(&json).unwrap();
@@ -784,19 +845,28 @@ mod tests {
 
     #[test]
     fn test_canonical_tier1_count() {
-        let count = canonical_classes().iter().filter(|c| c.safety_tier == SafetyTier::Tier1).count();
+        let count = canonical_classes()
+            .iter()
+            .filter(|c| c.safety_tier == SafetyTier::Tier1)
+            .count();
         assert_eq!(count, 11);
     }
 
     #[test]
     fn test_canonical_tier2_count() {
-        let count = canonical_classes().iter().filter(|c| c.safety_tier == SafetyTier::Tier2).count();
+        let count = canonical_classes()
+            .iter()
+            .filter(|c| c.safety_tier == SafetyTier::Tier2)
+            .count();
         assert_eq!(count, 9);
     }
 
     #[test]
     fn test_canonical_tier3_count() {
-        let count = canonical_classes().iter().filter(|c| c.safety_tier == SafetyTier::Tier3).count();
+        let count = canonical_classes()
+            .iter()
+            .filter(|c| c.safety_tier == SafetyTier::Tier3)
+            .count();
         assert_eq!(count, 1);
     }
 
@@ -804,7 +874,11 @@ mod tests {
     fn test_canonical_tier1_tier2_replay() {
         for c in canonical_classes() {
             if c.safety_tier == SafetyTier::Tier1 || c.safety_tier == SafetyTier::Tier2 {
-                assert!(c.replay_support, "Tier1/Tier2 class {} must have replay support", c.domain);
+                assert!(
+                    c.replay_support,
+                    "Tier1/Tier2 class {} must have replay support",
+                    c.domain
+                );
             }
         }
     }
@@ -813,7 +887,11 @@ mod tests {
     fn test_canonical_durability_mode_matches_tier() {
         for c in canonical_classes() {
             let expected = DurabilityMode::for_tier(c.safety_tier);
-            assert_eq!(c.durability_mode, expected, "Class {} has wrong durability mode", c.domain);
+            assert_eq!(
+                c.durability_mode, expected,
+                "Class {} has wrong durability mode",
+                c.domain
+            );
         }
     }
 
@@ -888,7 +966,11 @@ mod tests {
             adapter.register_class(c);
         }
         let summary = adapter.summary();
-        assert!(summary.total_tables >= 40, "Expected at least 40 tables, got {}", summary.total_tables);
+        assert!(
+            summary.total_tables >= 40,
+            "Expected at least 40 tables, got {}",
+            summary.total_tables
+        );
     }
 
     // -- Tier 1 read/write tests --
@@ -897,7 +979,9 @@ mod tests {
     fn test_tier1_write_read_roundtrip() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
         adapter.register_class(canonical_classes().into_iter().next().unwrap());
-        adapter.tier1_write("fencing_token_state", "key1", b"value1").unwrap();
+        adapter
+            .tier1_write("fencing_token_state", "key1", b"value1")
+            .unwrap();
         let val = adapter.tier1_read("fencing_token_state", "key1").unwrap();
         assert_eq!(val, Some(b"value1".to_vec()));
     }
@@ -906,7 +990,9 @@ mod tests {
     fn test_tier1_read_missing_key() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
         adapter.register_class(canonical_classes().into_iter().next().unwrap());
-        let val = adapter.tier1_read("fencing_token_state", "missing").unwrap();
+        let val = adapter
+            .tier1_read("fencing_token_state", "missing")
+            .unwrap();
         assert!(val.is_none());
     }
 
@@ -914,8 +1000,14 @@ mod tests {
     fn test_tier1_write_emits_event() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
         adapter.register_class(canonical_classes().into_iter().next().unwrap());
-        adapter.tier1_write("fencing_token_state", "k", b"v").unwrap();
-        let write_events: Vec<_> = adapter.events().iter().filter(|e| e.code == FRANKENSQLITE_WRITE_SUCCESS).collect();
+        adapter
+            .tier1_write("fencing_token_state", "k", b"v")
+            .unwrap();
+        let write_events: Vec<_> = adapter
+            .events()
+            .iter()
+            .filter(|e| e.code == FRANKENSQLITE_WRITE_SUCCESS)
+            .collect();
         assert_eq!(write_events.len(), 1);
     }
 
@@ -932,11 +1024,17 @@ mod tests {
     fn test_tier1_audit_append_read() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
         adapter.register_class(canonical_classes().into_iter().next().unwrap());
-        let seq1 = adapter.tier1_audit_append("fencing_token_state", b"entry1").unwrap();
-        let seq2 = adapter.tier1_audit_append("fencing_token_state", b"entry2").unwrap();
+        let seq1 = adapter
+            .tier1_audit_append("fencing_token_state", b"entry1")
+            .unwrap();
+        let seq2 = adapter
+            .tier1_audit_append("fencing_token_state", b"entry2")
+            .unwrap();
         assert_eq!(seq1, 1);
         assert_eq!(seq2, 2);
-        let entries = adapter.tier1_audit_read("fencing_token_state", 0, 2).unwrap();
+        let entries = adapter
+            .tier1_audit_read("fencing_token_state", 0, 2)
+            .unwrap();
         assert_eq!(entries.len(), 2);
     }
 
@@ -945,9 +1043,18 @@ mod tests {
     #[test]
     fn test_tier2_flush_latest() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
-        adapter.register_class(canonical_classes().into_iter().find(|c| c.safety_tier == SafetyTier::Tier2).unwrap());
-        adapter.tier2_flush("snapshot_policy_state", b"snap1").unwrap();
-        adapter.tier2_flush("snapshot_policy_state", b"snap2").unwrap();
+        adapter.register_class(
+            canonical_classes()
+                .into_iter()
+                .find(|c| c.safety_tier == SafetyTier::Tier2)
+                .unwrap(),
+        );
+        adapter
+            .tier2_flush("snapshot_policy_state", b"snap1")
+            .unwrap();
+        adapter
+            .tier2_flush("snapshot_policy_state", b"snap2")
+            .unwrap();
         let latest = adapter.tier2_latest("snapshot_policy_state").unwrap();
         assert_eq!(latest, Some(b"snap2".to_vec()));
     }
@@ -955,7 +1062,12 @@ mod tests {
     #[test]
     fn test_tier2_latest_empty() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
-        adapter.register_class(canonical_classes().into_iter().find(|c| c.safety_tier == SafetyTier::Tier2).unwrap());
+        adapter.register_class(
+            canonical_classes()
+                .into_iter()
+                .find(|c| c.safety_tier == SafetyTier::Tier2)
+                .unwrap(),
+        );
         let latest = adapter.tier2_latest("snapshot_policy_state").unwrap();
         assert!(latest.is_none());
     }
@@ -965,20 +1077,40 @@ mod tests {
     #[test]
     fn test_tier3_put_get_evict() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
-        adapter.register_class(canonical_classes().into_iter().find(|c| c.safety_tier == SafetyTier::Tier3).unwrap());
-        adapter.tier3_put("lifecycle_transition_cache", "k1", b"cached").unwrap();
-        let val = adapter.tier3_get("lifecycle_transition_cache", "k1").unwrap();
+        adapter.register_class(
+            canonical_classes()
+                .into_iter()
+                .find(|c| c.safety_tier == SafetyTier::Tier3)
+                .unwrap(),
+        );
+        adapter
+            .tier3_put("lifecycle_transition_cache", "k1", b"cached")
+            .unwrap();
+        let val = adapter
+            .tier3_get("lifecycle_transition_cache", "k1")
+            .unwrap();
         assert_eq!(val, Some(b"cached".to_vec()));
-        adapter.tier3_evict("lifecycle_transition_cache", "k1").unwrap();
-        let val = adapter.tier3_get("lifecycle_transition_cache", "k1").unwrap();
+        adapter
+            .tier3_evict("lifecycle_transition_cache", "k1")
+            .unwrap();
+        let val = adapter
+            .tier3_get("lifecycle_transition_cache", "k1")
+            .unwrap();
         assert!(val.is_none());
     }
 
     #[test]
     fn test_tier3_get_missing() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
-        adapter.register_class(canonical_classes().into_iter().find(|c| c.safety_tier == SafetyTier::Tier3).unwrap());
-        let val = adapter.tier3_get("lifecycle_transition_cache", "missing").unwrap();
+        adapter.register_class(
+            canonical_classes()
+                .into_iter()
+                .find(|c| c.safety_tier == SafetyTier::Tier3)
+                .unwrap(),
+        );
+        let val = adapter
+            .tier3_get("lifecycle_transition_cache", "missing")
+            .unwrap();
         assert!(val.is_none());
     }
 
@@ -996,7 +1128,9 @@ mod tests {
     fn test_event_has_transaction_id() {
         let mut adapter = FrankensqliteAdapter::new(AdapterConfig::default());
         adapter.register_class(canonical_classes().into_iter().next().unwrap());
-        adapter.tier1_write("fencing_token_state", "k", b"v").unwrap();
+        adapter
+            .tier1_write("fencing_token_state", "k", b"v")
+            .unwrap();
         let write_events: Vec<_> = adapter
             .events()
             .iter()
@@ -1040,7 +1174,10 @@ mod tests {
         for c in canonical_classes() {
             adapter.register_class(c);
         }
-        let results = adapter.to_report()["conformance_results"].as_array().unwrap().len();
+        let results = adapter.to_report()["conformance_results"]
+            .as_array()
+            .unwrap()
+            .len();
         assert_eq!(results, 21);
     }
 
@@ -1063,7 +1200,10 @@ mod tests {
         assert_eq!(FRANKENSQLITE_WRITE_FAIL, "FRANKENSQLITE_WRITE_FAIL");
         assert_eq!(FRANKENSQLITE_CRASH_RECOVERY, "FRANKENSQLITE_CRASH_RECOVERY");
         assert_eq!(FRANKENSQLITE_REPLAY_START, "FRANKENSQLITE_REPLAY_START");
-        assert_eq!(FRANKENSQLITE_REPLAY_MISMATCH, "FRANKENSQLITE_REPLAY_MISMATCH");
+        assert_eq!(
+            FRANKENSQLITE_REPLAY_MISMATCH,
+            "FRANKENSQLITE_REPLAY_MISMATCH"
+        );
     }
 
     // -- Error type tests --
