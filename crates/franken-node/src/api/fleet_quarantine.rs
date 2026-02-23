@@ -911,17 +911,11 @@ pub fn handle_release(
 ) -> Result<ApiResponse<FleetActionResult>, ApiError> {
     // In a real system this would look up the incident from persistent state
     let result = FleetActionResult {
-        operation_id: format!(
-            "fleet-op-release-{}",
-            utf8_prefix(&trace.trace_id, 8)
-        ),
+        operation_id: format!("fleet-op-release-{}", utf8_prefix(&trace.trace_id, 8)),
         action_type: "release".to_string(),
         success: true,
         receipt: DecisionReceipt {
-            receipt_id: format!(
-                "rcpt-release-{}",
-                utf8_prefix(&trace.trace_id, 8)
-            ),
+            receipt_id: format!("rcpt-release-{}", utf8_prefix(&trace.trace_id, 8)),
             issuer: identity.principal.clone(),
             issued_at: chrono::Utc::now().to_rfc3339(),
             zone_id: "pending-lookup".to_string(),
@@ -1598,8 +1592,14 @@ mod tests {
 
         let result = handle_release(&identity, &trace, &request).expect("release");
         let expected: String = trace.trace_id.chars().take(8).collect();
-        assert_eq!(result.data.operation_id, format!("fleet-op-release-{expected}"));
-        assert_eq!(result.data.receipt.receipt_id, format!("rcpt-release-{expected}"));
+        assert_eq!(
+            result.data.operation_id,
+            format!("fleet-op-release-{expected}")
+        );
+        assert_eq!(
+            result.data.receipt.receipt_id,
+            format!("rcpt-release-{expected}")
+        );
     }
 
     // ── Serde round-trip tests ────────────────────────────────────────────

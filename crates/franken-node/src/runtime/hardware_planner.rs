@@ -121,6 +121,7 @@ pub mod error_codes {
     pub const ERR_HWP_UNKNOWN_PROFILE: &str = "ERR_HWP_UNKNOWN_PROFILE";
     pub const ERR_HWP_EMPTY_CAPABILITIES: &str = "ERR_HWP_EMPTY_CAPABILITIES";
     pub const ERR_HWP_DISPATCH_UNGATED: &str = "ERR_HWP_DISPATCH_UNGATED";
+    pub const ERR_HWP_DISPATCH_NOT_PLACED: &str = "ERR_HWP_DISPATCH_NOT_PLACED";
     pub const ERR_HWP_INVALID_RISK_LEVEL: &str = "ERR_HWP_INVALID_RISK_LEVEL";
     pub const ERR_HWP_FALLBACK_EXHAUSTED: &str = "ERR_HWP_FALLBACK_EXHAUSTED";
 
@@ -394,6 +395,11 @@ pub enum HardwarePlannerError {
     EmptyCapabilities { workload_id: String },
     /// Dispatch attempted without approved interface.
     DispatchUngated { workload_id: String },
+    /// Dispatch attempted for a workload/target pair without successful placement.
+    DispatchNotPlaced {
+        workload_id: String,
+        target_profile_id: String,
+    },
     /// Risk level outside valid range.
     InvalidRiskLevel { profile_id: String, risk_level: u32 },
     /// All fallback paths exhausted.
@@ -411,6 +417,7 @@ impl HardwarePlannerError {
             Self::UnknownProfile { .. } => error_codes::ERR_HWP_UNKNOWN_PROFILE,
             Self::EmptyCapabilities { .. } => error_codes::ERR_HWP_EMPTY_CAPABILITIES,
             Self::DispatchUngated { .. } => error_codes::ERR_HWP_DISPATCH_UNGATED,
+            Self::DispatchNotPlaced { .. } => error_codes::ERR_HWP_DISPATCH_NOT_PLACED,
             Self::InvalidRiskLevel { .. } => error_codes::ERR_HWP_INVALID_RISK_LEVEL,
             Self::FallbackExhausted { .. } => error_codes::ERR_HWP_FALLBACK_EXHAUSTED,
         }
@@ -477,6 +484,18 @@ impl fmt::Display for HardwarePlannerError {
                     "{}: ungated dispatch for workload {}",
                     self.code(),
                     workload_id
+                )
+            }
+            Self::DispatchNotPlaced {
+                workload_id,
+                target_profile_id,
+            } => {
+                write!(
+                    f,
+                    "{}: workload {} was not placed on target {}",
+                    self.code(),
+                    workload_id,
+                    target_profile_id
                 )
             }
             Self::InvalidRiskLevel {
@@ -1002,6 +1021,21 @@ impl HardwarePlanner {
             });
         }
 
+        let has_successful_placement = self.decisions.iter().rev().any(|decision| {
+            decision.workload_id == workload_id
+                && decision.target_profile_id.as_deref() == Some(target_profile_id)
+                && matches!(
+                    decision.outcome,
+                    PlacementOutcome::Placed | PlacementOutcome::PlacedViaFallback
+                )
+        });
+        if !has_successful_placement {
+            return Err(HardwarePlannerError::DispatchNotPlaced {
+                workload_id: workload_id.to_string(),
+                target_profile_id: target_profile_id.to_string(),
+            });
+        }
+
         let token = DispatchToken {
             workload_id: workload_id.to_string(),
             target_profile_id: target_profile_id.to_string(),
@@ -1504,6 +1538,12 @@ mod tests {
         planner
             .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
             .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
+
+        let req = workload("wl-1", &["gpu", "compute"], 50, "default");
+        planner.request_placement(&req, 1500).unwrap();
 
         let token = planner
             .dispatch("wl-1", "hw-1", "franken_engine", 2000, "t1")
@@ -1525,6 +1565,19 @@ mod tests {
             .dispatch("wl-1", "hw-1", "rogue_interface", 2000, "t1")
             .unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_HWP_DISPATCH_UNGATED);
+    }
+
+    #[test]
+    fn dispatch_without_successful_placement_rejected() {
+        let mut planner = make_planner();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
+
+        let err = planner
+            .dispatch("wl-1", "hw-1", "franken_engine", 2000, "t1")
+            .unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_HWP_DISPATCH_NOT_PLACED);
     }
 
     #[test]
@@ -1720,6 +1773,10 @@ mod tests {
             },
             HardwarePlannerError::DispatchUngated {
                 workload_id: "wl-1".into(),
+            },
+            HardwarePlannerError::DispatchNotPlaced {
+                workload_id: "wl-1".into(),
+                target_profile_id: "hw-1".into(),
             },
             HardwarePlannerError::InvalidRiskLevel {
                 profile_id: "hw-1".into(),

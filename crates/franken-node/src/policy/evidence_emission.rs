@@ -12,9 +12,7 @@
 
 use std::fmt;
 
-use crate::observability::evidence_ledger::{
-    DecisionKind, EvidenceEntry, EvidenceLedger,
-};
+use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry, EvidenceLedger};
 
 /// Stable event codes for structured logging.
 pub mod event_codes {

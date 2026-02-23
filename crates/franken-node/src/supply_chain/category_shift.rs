@@ -1286,10 +1286,7 @@ mod tests {
     #[test]
     fn evaluate_threshold_status_logic() {
         // 100.0 >= 95.0 but 100.0 <= 95.0*1.1=104.5 → Met (not Exceeded).
-        assert_eq!(
-            evaluate_threshold_status(100.0, 95.0),
-            ThresholdStatus::Met
-        );
+        assert_eq!(evaluate_threshold_status(100.0, 95.0), ThresholdStatus::Met);
         // 105.0 > 95.0*1.1=104.5 → Exceeded.
         assert_eq!(
             evaluate_threshold_status(105.0, 95.0),

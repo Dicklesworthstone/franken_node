@@ -125,7 +125,8 @@ fn parse_subsystem(code: &str) -> Option<String> {
     let rest = code.strip_prefix("FRANKEN_")?;
     for &sub in VALID_SUBSYSTEMS {
         if let Some(after) = rest.strip_prefix(sub)
-            && after.starts_with('_') && after.len() > 1
+            && after.starts_with('_')
+            && after.len() > 1
         {
             return Some(sub.to_string());
         }
@@ -176,9 +177,7 @@ impl ErrorCodeRegistry {
         }
 
         // INV-ECR-RECOVERY — non-fatal must have recovery fields
-        if !reg.severity.is_fatal()
-            && reg.recovery.recovery_hint.is_empty()
-        {
+        if !reg.severity.is_fatal() && reg.recovery.recovery_hint.is_empty() {
             return Err(RegistryError::MissingRecovery(reg.code.clone()));
         }
 

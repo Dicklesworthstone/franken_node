@@ -21,9 +21,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use crate::control_plane::cancellation_injection::{
-    AwaitPoint, CancelTestOutcome,
-    CancellationInjectionFramework, ResourceSnapshot, StateSnapshot, WorkflowId,
-    WorkflowRegistration,
+    AwaitPoint, CancelTestOutcome, CancellationInjectionFramework, ResourceSnapshot, StateSnapshot,
+    WorkflowId, WorkflowRegistration,
 };
 
 /// Schema version for the control-plane cancellation injection gate.

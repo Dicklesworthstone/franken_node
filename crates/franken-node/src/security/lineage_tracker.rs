@@ -1081,9 +1081,7 @@ pub mod invariants {
             for boundary in boundaries.values() {
                 let crosses = edge.source.contains(&boundary.from_zone)
                     && edge.sink.contains(&boundary.to_zone);
-                if crosses && boundary.is_violated_by(&edge.taint_set)
-                    && !edge.quarantined
-                {
+                if crosses && boundary.is_violated_by(&edge.taint_set) && !edge.quarantined {
                     return false;
                 }
             }

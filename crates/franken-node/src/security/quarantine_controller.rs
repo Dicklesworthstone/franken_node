@@ -27,7 +27,8 @@ use crate::security::adversary_graph::{
     ADV_005_ACTION_TRIGGERED, ADV_008_SIGNED_EVIDENCE, AdversaryGraph, EntityId, EntityType,
     EvidenceEvent, PolicyThreshold, QuarantineAction, SignedEvidenceEntry,
 };
-use sha2::{Digest, Sha256};
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -238,14 +239,10 @@ impl QuarantineController {
 
     /// Compute HMAC-SHA256 over data using the controller's signing key.
     fn hmac_sha256(&self, data: &str) -> String {
-        // Simple HMAC construction: H(key || data)
-        // In production, use proper HMAC from the hmac crate; for this
-        // deterministic-evidence module we use a simplified construction
-        // that is still deterministic and collision-resistant.
-        let mut hasher = Sha256::new();
-        hasher.update(&self.signing_key);
-        hasher.update(data.as_bytes());
-        let result = hasher.finalize();
+        let mut mac =
+            Hmac::<Sha256>::new_from_slice(&self.signing_key).expect("HMAC accepts any key len");
+        mac.update(data.as_bytes());
+        let result = mac.finalize().into_bytes();
         hex::encode(result)
     }
 
@@ -279,6 +276,7 @@ impl QuarantineController {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::{Digest, Sha256};
 
     fn make_controller() -> QuarantineController {
         QuarantineController::with_defaults()
@@ -462,5 +460,20 @@ mod tests {
         assert!(snap.contains_key("b"));
         // 'a' should have higher posterior than 'b'
         assert!(snap["a"] > snap["b"]);
+    }
+
+    #[test]
+    fn signatures_use_hmac_not_plain_keyed_hash() {
+        let c = make_controller();
+        let payload = "{\"probe\":true}";
+
+        let hmac_digest = c.hmac_sha256(payload);
+
+        let mut hasher = Sha256::new();
+        hasher.update(&c.signing_key);
+        hasher.update(payload.as_bytes());
+        let legacy_digest = hex::encode(hasher.finalize());
+
+        assert_ne!(hmac_digest, legacy_digest);
     }
 }

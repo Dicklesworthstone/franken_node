@@ -273,7 +273,7 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
     /// INV-OCH-TRACKED, INV-OCH-DEADLINE
     pub fn send(&mut self, message: T, now_ms: u64, trace_id: &str) -> String {
         let obligation_id = format!("och-{}-{}", self.channel_id, self.next_id);
-        self.next_id += 1;
+        self.next_id = self.next_id.saturating_add(1);
 
         let obligation = ChannelObligation {
             obligation_id: obligation_id.clone(),

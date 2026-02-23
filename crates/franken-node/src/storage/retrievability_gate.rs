@@ -280,7 +280,7 @@ impl RetrievabilityGate {
         target_tier: StorageTier,
         expected_hash: &str,
     ) -> Result<RetrievabilityProof, RetrievabilityError> {
-        self.timestamp_counter += 1;
+        self.timestamp_counter = self.timestamp_counter.saturating_add(1);
         let ts = self.timestamp_counter;
 
         let key = (artifact_id.0.clone(), target_tier.label().to_string());

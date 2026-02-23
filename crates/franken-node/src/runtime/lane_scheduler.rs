@@ -516,7 +516,7 @@ impl LaneScheduler {
         if counters.queued_count > 0 {
             counters.queued_count -= 1;
         }
-        self.task_counter += 1;
+        self.task_counter = self.task_counter.saturating_add(1);
         let task_id = format!("task-{:08}", self.task_counter);
 
         counters.active_count += 1;

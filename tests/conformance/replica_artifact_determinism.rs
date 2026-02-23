@@ -15,8 +15,7 @@
 mod deterministic_seed;
 
 use deterministic_seed::{
-    ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig,
-    derive_seed,
+    ContentHash, DeterministicSeedDeriver, DomainTag, ScheduleConfig, derive_seed,
 };
 use std::collections::BTreeMap;
 use std::fmt;

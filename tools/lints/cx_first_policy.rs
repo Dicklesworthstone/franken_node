@@ -510,7 +510,9 @@ fn visibility_is_public(visibility: &Visibility) -> bool {
     matches!(visibility, Visibility::Public(_))
 }
 
-fn argument_snippets(inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>) -> Vec<AstSnippet> {
+fn argument_snippets(
+    inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>,
+) -> Vec<AstSnippet> {
     inputs.iter().map(fn_arg_snippet).collect()
 }
 

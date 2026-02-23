@@ -52,6 +52,7 @@ pub mod error_codes {
     pub const ERR_CANCEL_ALREADY_FINAL: &str = "ERR_CANCEL_ALREADY_FINAL";
     pub const ERR_CANCEL_DRAIN_TIMEOUT: &str = "ERR_CANCEL_DRAIN_TIMEOUT";
     pub const ERR_CANCEL_LEAK: &str = "ERR_CANCEL_LEAK";
+    pub const ERR_CANCEL_NOT_FOUND: &str = "ERR_CANCEL_NOT_FOUND";
 }
 
 // ---- Cancellation phase ----
@@ -142,6 +143,8 @@ pub enum CancelProtocolError {
         workflow_id: String,
         leaked_resources: Vec<String>,
     },
+    /// Workflow not found in the registry.
+    WorkflowNotFound { workflow_id: String },
 }
 
 impl CancelProtocolError {
@@ -151,6 +154,7 @@ impl CancelProtocolError {
             Self::AlreadyFinal { .. } => error_codes::ERR_CANCEL_ALREADY_FINAL,
             Self::DrainTimeout { .. } => error_codes::ERR_CANCEL_DRAIN_TIMEOUT,
             Self::ResourceLeak { .. } => error_codes::ERR_CANCEL_LEAK,
+            Self::WorkflowNotFound { .. } => error_codes::ERR_CANCEL_NOT_FOUND,
         }
     }
 }
@@ -200,6 +204,9 @@ impl fmt::Display for CancelProtocolError {
                     workflow_id,
                     leaked_resources.join(", ")
                 )
+            }
+            Self::WorkflowNotFound { workflow_id } => {
+                write!(f, "{}: workflow {} not found", self.code(), workflow_id)
             }
         }
     }
@@ -677,9 +684,8 @@ impl CancellationProtocol {
         self.records
             .iter()
             .position(|r| r.workflow_id == workflow_id)
-            .ok_or(CancelProtocolError::InvalidPhase {
-                from: CancelPhase::Idle,
-                to: CancelPhase::CancelRequested,
+            .ok_or(CancelProtocolError::WorkflowNotFound {
+                workflow_id: workflow_id.to_string(),
             })
     }
 }

@@ -4,6 +4,7 @@
 //! cache divergence detection/reconciliation.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
 
 /// The state model type declared by each connector.
@@ -211,13 +212,10 @@ pub fn reconcile_action(check: &DivergenceCheck) -> ReconcileAction {
 
 /// Compute a SHA-256 hash of a JSON value.
 fn compute_hash(value: &serde_json::Value) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-
     let canonical = serde_json::to_string(value).unwrap_or_default();
-    let mut hasher = DefaultHasher::new();
-    canonical.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    format!("{:064x}", hasher.finalize())
 }
 
 fn now_iso8601() -> String {

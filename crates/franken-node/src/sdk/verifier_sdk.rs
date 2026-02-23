@@ -358,16 +358,10 @@ impl VerifierSdk {
         let binding_hash = deterministic_hash(&binding_input);
 
         Ok(VerificationReport {
-            request_id: format!(
-                "vreq-{}",
-                &deterministic_hash(&request.artifact_id)[..24]
-            ),
+            request_id: format!("vreq-{}", &deterministic_hash(&request.artifact_id)[..24]),
             verdict,
             evidence,
-            trace_id: format!(
-                "vtrc-{}",
-                &deterministic_hash(&binding_input)[..24]
-            ),
+            trace_id: format!("vtrc-{}", &deterministic_hash(&binding_input)[..24]),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
             verifier_identity: self.config.verifier_identity.clone(),
@@ -383,8 +377,6 @@ impl VerifierSdk {
         &self,
         capsule: &super::replay_capsule::ReplayCapsule,
     ) -> Result<VerificationReport, SdkError> {
-        
-
         if capsule.capsule_id.is_empty() {
             return Err(SdkError::MalformedCapsule(
                 "capsule_id is empty".to_string(),
@@ -494,16 +486,10 @@ impl VerifierSdk {
         let binding_hash = deterministic_hash(&binding_input);
 
         Ok(VerificationReport {
-            request_id: format!(
-                "vcap-{}",
-                &deterministic_hash(&capsule.capsule_id)[..24]
-            ),
+            request_id: format!("vcap-{}", &deterministic_hash(&capsule.capsule_id)[..24]),
             verdict,
             evidence,
-            trace_id: format!(
-                "vtrc-{}",
-                &deterministic_hash(&binding_input)[..24]
-            ),
+            trace_id: format!("vtrc-{}", &deterministic_hash(&binding_input)[..24]),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
             verifier_identity: self.config.verifier_identity.clone(),
@@ -630,10 +616,7 @@ impl VerifierSdk {
         let chain_binding = deterministic_hash(&chain_binding_parts.join("|"));
 
         Ok(VerificationReport {
-            request_id: format!(
-                "vchn-{}",
-                &deterministic_hash(&chain_binding)[..24]
-            ),
+            request_id: format!("vchn-{}", &deterministic_hash(&chain_binding)[..24]),
             verdict,
             evidence,
             trace_id: format!(

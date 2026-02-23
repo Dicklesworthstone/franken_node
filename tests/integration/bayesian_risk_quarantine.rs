@@ -65,9 +65,7 @@ fn load_fixture() -> FixtureState {
     let raw = fs::read_to_string(&path)
         .unwrap_or_else(|err| panic!("failed reading fixture `{}`: {err}", path.display()));
     serde_json::from_str::<FixtureState>(&raw)
-        .unwrap_or_else(|err| {
-            panic!("failed parsing fixture `{}` as json: {err}", path.display())
-        })
+        .unwrap_or_else(|err| panic!("failed parsing fixture `{}` as json: {err}", path.display()))
 }
 
 fn posterior_from_beta(alpha: u64, beta: u64) -> f64 {

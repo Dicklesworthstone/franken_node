@@ -261,8 +261,8 @@ impl EvidenceLedger {
         }
 
         let id = EntryId(self.next_id);
-        self.next_id += 1;
-        self.total_appended += 1;
+        self.next_id = self.next_id.saturating_add(1);
+        self.total_appended = self.total_appended.saturating_add(1);
         self.current_bytes += entry_size;
 
         eprintln!(

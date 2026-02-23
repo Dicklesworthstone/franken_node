@@ -619,7 +619,10 @@ impl IncidentBundleStore {
             });
         }
 
-        let removed = self.bundles.remove(bundle_id).expect("bundle verified present");
+        let removed = self
+            .bundles
+            .remove(bundle_id)
+            .expect("bundle verified present");
         self.total_bytes = self.total_bytes.saturating_sub(removed.size_bytes);
 
         self.decisions.push(RetentionDecision {
@@ -661,7 +664,12 @@ impl IncidentBundleStore {
                 timestamp: now,
                 event_code: event_codes::IBR_004.into(),
             });
-            decisions.push(self.decisions.last().expect("decisions non-empty after push").clone());
+            decisions.push(
+                self.decisions
+                    .last()
+                    .expect("decisions non-empty after push")
+                    .clone(),
+            );
         }
 
         decisions

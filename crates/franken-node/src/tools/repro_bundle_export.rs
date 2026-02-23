@@ -13,7 +13,7 @@
 
 use std::fmt;
 
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
 /// Stable event codes for structured logging.
@@ -1062,9 +1062,10 @@ mod tests {
         bundle.bundle_id = String::new();
 
         let errs = validate_bundle(&bundle).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, SchemaError::MissingField(f) if f == "bundle_id")));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, SchemaError::MissingField(f) if f == "bundle_id"))
+        );
     }
 
     #[test]
@@ -1074,9 +1075,10 @@ mod tests {
         bundle.schema_version = 0;
 
         let errs = validate_bundle(&bundle).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, SchemaError::InvalidVersion { .. })));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, SchemaError::InvalidVersion { .. }))
+        );
     }
 
     #[test]
@@ -1086,9 +1088,10 @@ mod tests {
         bundle.failure_context.error_message = String::new();
 
         let errs = validate_bundle(&bundle).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, SchemaError::MissingField(f) if f.contains("error_message"))));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, SchemaError::MissingField(f) if f.contains("error_message")))
+        );
     }
 
     #[test]
@@ -1103,9 +1106,10 @@ mod tests {
         });
 
         let errs = validate_bundle(&bundle).unwrap_err();
-        assert!(errs
-            .iter()
-            .any(|e| matches!(e, SchemaError::NonPortablePath(_))));
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, SchemaError::NonPortablePath(_)))
+        );
     }
 
     #[test]

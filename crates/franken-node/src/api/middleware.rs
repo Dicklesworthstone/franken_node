@@ -647,7 +647,11 @@ mod tests {
 
     #[test]
     fn authenticate_bearer_handles_unicode_without_panicking() {
-        let result = authenticate(Some("Bearer 令牌🙂abcXYZ"), &AuthMethod::BearerToken, "t-3u");
+        let result = authenticate(
+            Some("Bearer 令牌🙂abcXYZ"),
+            &AuthMethod::BearerToken,
+            "t-3u",
+        );
         let identity = result.expect("auth bearer");
         let expected: String = "令牌🙂abcXYZ".chars().take(8).collect();
         assert_eq!(identity.principal, format!("token:{expected}"));

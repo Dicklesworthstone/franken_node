@@ -524,7 +524,11 @@ mod tests {
         assert_eq!(e.partners()["p1"].deployment_count, 1);
         assert_eq!(e.deployments().len(), 1);
 
-        let codes: Vec<&str> = e.audit_log().iter().map(|r| r.event_code.as_str()).collect();
+        let codes: Vec<&str> = e
+            .audit_log()
+            .iter()
+            .map(|r| r.event_code.as_str())
+            .collect();
         assert!(codes.contains(&event_codes::PLP_ERR_DUPLICATE_DEPLOYMENT));
     }
 
@@ -576,7 +580,11 @@ mod tests {
         assert_eq!(e.partners()["p1"].outcome_count, 1);
         assert_eq!(e.outcomes().len(), 1);
 
-        let codes: Vec<&str> = e.audit_log().iter().map(|r| r.event_code.as_str()).collect();
+        let codes: Vec<&str> = e
+            .audit_log()
+            .iter()
+            .map(|r| r.event_code.as_str())
+            .collect();
         assert!(codes.contains(&event_codes::PLP_ERR_DUPLICATE_OUTCOME));
     }
 

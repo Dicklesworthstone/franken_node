@@ -51,8 +51,7 @@ struct KeyVector {
 
 #[test]
 fn published_epoch_key_vectors_match_derivation() {
-    let raw = fs::read_to_string(vector_path())
-        .expect("vector artifact must exist");
+    let raw = fs::read_to_string(vector_path()).expect("vector artifact must exist");
     let bundle: VectorBundle = serde_json::from_str(&raw).expect("vector json must parse");
 
     assert!(

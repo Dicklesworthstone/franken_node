@@ -712,13 +712,12 @@ impl TrustGovernanceState {
         }
 
         // INV-STAKE-APPEAL-WINDOW: check deadline
-        let latest_slash = record
-            .slash_events
-            .last()
-            .ok_or_else(|| StakingError::new(
+        let latest_slash = record.slash_events.last().ok_or_else(|| {
+            StakingError::new(
                 ERR_STAKE_INVALID_TRANSITION,
                 "slashed stake has no slash events",
-            ))?;
+            )
+        })?;
         if self.current_time > latest_slash.appeal_deadline {
             return Err(StakingError::new(
                 ERR_STAKE_APPEAL_EXPIRED,

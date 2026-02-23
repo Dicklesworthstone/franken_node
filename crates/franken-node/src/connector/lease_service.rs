@@ -36,9 +36,16 @@ pub struct Lease {
 }
 
 impl Lease {
+    fn expires_at(&self) -> Option<u64> {
+        self.renewed_at.checked_add(self.ttl_secs)
+    }
+
     /// Check if the lease is expired at time `now`.
     pub fn is_expired(&self, now: u64) -> bool {
-        now > self.renewed_at + self.ttl_secs
+        match self.expires_at() {
+            Some(expires_at) => now > expires_at,
+            None => true, // fail closed when expiry arithmetic overflows
+        }
     }
 
     /// Check if the lease is active (not expired and not revoked).
@@ -48,8 +55,10 @@ impl Lease {
 
     /// Remaining seconds until expiry (0 if already expired).
     pub fn remaining(&self, now: u64) -> u64 {
-        let expires_at = self.renewed_at + self.ttl_secs;
-        expires_at.saturating_sub(now)
+        match self.expires_at() {
+            Some(expires_at) => expires_at.saturating_sub(now),
+            None => 0,
+        }
     }
 }
 
@@ -382,6 +391,22 @@ mod tests {
     }
 
     #[test]
+    fn overflowed_expiry_is_treated_as_expired() {
+        let lease = Lease {
+            lease_id: "lease-overflow".into(),
+            holder: "h".into(),
+            purpose: LeasePurpose::Operation,
+            ttl_secs: 10,
+            granted_at: u64::MAX - 1,
+            renewed_at: u64::MAX - 1,
+            revoked: false,
+        };
+
+        assert!(lease.is_expired(u64::MAX - 1));
+        assert_eq!(lease.remaining(u64::MAX - 1), 0);
+    }
+
+    #[test]
     fn renew_extends_ttl() {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::Operation, 60, 100, "tr", "ts");
@@ -423,6 +448,29 @@ mod tests {
         let l = svc.grant("h", LeasePurpose::StateWrite, 60, 100, "tr", "ts");
         let err = svc
             .use_lease(&l.lease_id, LeasePurpose::StateWrite, 200, "tr2", "ts2")
+            .unwrap_err();
+        assert_eq!(err.code(), "LS_STALE_USE");
+    }
+
+    #[test]
+    fn use_lease_with_overflowed_expiry_rejected() {
+        let mut svc = LeaseService::new();
+        let lease_id = "lease-overflow".to_string();
+        svc.leases.insert(
+            lease_id.clone(),
+            Lease {
+                lease_id: lease_id.clone(),
+                holder: "h".into(),
+                purpose: LeasePurpose::Operation,
+                ttl_secs: 10,
+                granted_at: u64::MAX - 1,
+                renewed_at: u64::MAX - 1,
+                revoked: false,
+            },
+        );
+
+        let err = svc
+            .use_lease(&lease_id, LeasePurpose::Operation, u64::MAX - 1, "tr", "ts")
             .unwrap_err();
         assert_eq!(err.code(), "LS_STALE_USE");
     }

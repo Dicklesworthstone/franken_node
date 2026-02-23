@@ -348,7 +348,10 @@ impl KeyRoleRegistry {
         self.events
             .push(KeyRoleEvent::bound(key_id, role, authority, trace_id));
 
-        Ok(self.active.get(key_id).expect("binding present after insert"))
+        Ok(self
+            .active
+            .get(key_id)
+            .expect("binding present after insert"))
     }
 
     /// Look up a binding by key_id. Returns None if not found or revoked.
@@ -435,7 +438,10 @@ impl KeyRoleRegistry {
         }
 
         // Atomic: revoke old, bind new.
-        let old_binding = self.active.remove(old_key_id).expect("old key verified present");
+        let old_binding = self
+            .active
+            .remove(old_key_id)
+            .expect("old key verified present");
         self.revoked.push(old_binding);
 
         let new_binding = KeyRoleBinding {
@@ -452,7 +458,10 @@ impl KeyRoleRegistry {
             old_key_id, new_key_id, role, authority, trace_id,
         ));
 
-        Ok(self.active.get(new_key_id).expect("binding present after insert"))
+        Ok(self
+            .active
+            .get(new_key_id)
+            .expect("binding present after insert"))
     }
 
     /// Verify that a key is bound to the expected role.

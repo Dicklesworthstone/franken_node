@@ -811,7 +811,7 @@ impl OptimizationGovernor {
             evidence,
         };
         self.decision_log.push(rec);
-        self.next_seq += 1;
+        self.next_seq = self.next_seq.saturating_add(1);
     }
 }
 

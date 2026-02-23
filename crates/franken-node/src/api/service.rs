@@ -11,8 +11,8 @@ use std::collections::BTreeMap;
 
 use super::fleet_control_routes;
 use super::middleware::{
-    EndpointGroup, RateLimitConfig, RateLimiter, RequestLog,
-    RouteMetadata, ServiceMetrics, default_rate_limit,
+    EndpointGroup, RateLimitConfig, RateLimiter, RequestLog, RouteMetadata, ServiceMetrics,
+    default_rate_limit,
 };
 use super::operator_routes;
 use super::verifier_routes;

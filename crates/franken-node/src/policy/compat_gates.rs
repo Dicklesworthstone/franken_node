@@ -567,7 +567,8 @@ impl CompatGateEvaluator {
 
         // Check escalation policy
         if let Some(prev) = previous_mode
-            && prev.is_escalation_to(mode) && !approval
+            && prev.is_escalation_to(mode)
+            && !approval
         {
             return Err(CompatGateError::TransitionDenied {
                 from: prev.label().to_string(),
