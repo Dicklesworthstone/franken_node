@@ -690,10 +690,11 @@ impl CertificationRegistry {
 
 fn compute_entry_hash(entry: &CertificationAuditEntry) -> String {
     let payload = format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         entry.sequence,
         entry.prev_hash,
         entry.timestamp,
+        entry.extension_id,
         serde_json::to_string(&entry.event).unwrap_or_default()
     );
     let digest = Sha256::digest(payload.as_bytes());

@@ -143,15 +143,23 @@ pub struct PolicyChangeAuditEntry {
 fn compute_entry_hash(entry: &PolicyChangeAuditEntry) -> String {
     let mut hasher = Sha256::new();
     hasher.update(entry.sequence.to_le_bytes());
+    hasher.update(b"|");
     hasher.update(entry.event_code.as_bytes());
+    hasher.update(b"|");
     hasher.update(entry.proposal_id.as_bytes());
+    hasher.update(b"|");
     hasher.update(entry.actor.as_bytes());
+    hasher.update(b"|");
     hasher.update(entry.timestamp.as_bytes());
+    hasher.update(b"|");
     hasher.update(entry.details.as_bytes());
+    hasher.update(b"|");
     hasher.update(entry.prev_hash.as_bytes());
+    hasher.update(b"|");
     if let Some(ref from) = entry.transition_from {
         hasher.update(format!("{from:?}").as_bytes());
     }
+    hasher.update(b"|");
     hasher.update(format!("{:?}", entry.transition_to).as_bytes());
     format!("{:x}", hasher.finalize())
 }

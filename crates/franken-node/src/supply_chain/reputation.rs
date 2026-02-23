@@ -731,10 +731,11 @@ impl ReputationRegistry {
 /// Compute the SHA-256 hash of an audit entry's content for chaining.
 fn compute_entry_hash(entry: &AuditEntry) -> String {
     let payload = format!(
-        "{}:{}:{}:{}",
+        "{}:{}:{}:{}:{}",
         entry.sequence,
         entry.prev_hash,
         entry.timestamp,
+        entry.publisher_id,
         serde_json::to_string(&entry.event).unwrap_or_default()
     );
     let digest = Sha256::digest(payload.as_bytes());

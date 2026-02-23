@@ -249,10 +249,11 @@ impl OperatorAuthorization {
         let operator_id = operator_id.into();
         let reason = reason.into();
         let mut hasher = Sha256::new();
-        hasher.update(operator_id.as_bytes());
-        hasher.update(resync_checkpoint_epoch.to_le_bytes());
-        hasher.update(timestamp.to_le_bytes());
-        hasher.update(reason.as_bytes());
+        let canonical = format!(
+            "{}|{}|{}|{}",
+            operator_id, resync_checkpoint_epoch, timestamp, reason
+        );
+        hasher.update(canonical.as_bytes());
         let authorization_hash = format!("{:x}", hasher.finalize());
         Self {
             operator_id,
@@ -266,10 +267,11 @@ impl OperatorAuthorization {
     /// Verify the authorization hash is consistent.
     pub fn verify(&self) -> bool {
         let mut hasher = Sha256::new();
-        hasher.update(self.operator_id.as_bytes());
-        hasher.update(self.resync_checkpoint_epoch.to_le_bytes());
-        hasher.update(self.timestamp.to_le_bytes());
-        hasher.update(self.reason.as_bytes());
+        let canonical = format!(
+            "{}|{}|{}|{}",
+            self.operator_id, self.resync_checkpoint_epoch, self.timestamp, self.reason
+        );
+        hasher.update(canonical.as_bytes());
         let expected = format!("{:x}", hasher.finalize());
         self.authorization_hash == expected
     }

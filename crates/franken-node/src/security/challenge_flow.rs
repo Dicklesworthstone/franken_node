@@ -240,11 +240,17 @@ impl ChallengeAuditEntry {
     pub fn hash(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.challenge_id.as_bytes());
+        hasher.update(b"|");
         hasher.update(self.artifact_id.as_bytes());
+        hasher.update(b"|");
         hasher.update(self.from_state.label().as_bytes());
+        hasher.update(b"|");
         hasher.update(self.to_state.label().as_bytes());
+        hasher.update(b"|");
         hasher.update(self.event_code.as_bytes());
+        hasher.update(b"|");
         hasher.update(self.timestamp_ms.to_le_bytes());
+        hasher.update(b"|");
         hasher.update(self.prev_hash.as_bytes());
         format!("{:x}", hasher.finalize())
     }

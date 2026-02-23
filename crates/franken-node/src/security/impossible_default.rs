@@ -182,11 +182,17 @@ impl CapabilityToken {
     pub fn content_hash(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.token_id.as_bytes());
+        hasher.update(b"|");
         hasher.update(self.capability.label().as_bytes());
+        hasher.update(b"|");
         hasher.update(self.issuer.as_bytes());
+        hasher.update(b"|");
         hasher.update(self.subject.as_bytes());
+        hasher.update(b"|");
         hasher.update(self.issued_at_ms.to_le_bytes());
+        hasher.update(b"|");
         hasher.update(self.expires_at_ms.to_le_bytes());
+        hasher.update(b"|");
         hasher.update(self.justification.as_bytes());
         format!("{:x}", hasher.finalize())
     }
@@ -309,13 +315,19 @@ impl EnforcementAuditEntry {
     pub fn hash(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(self.event_code.as_bytes());
+        hasher.update(b"|");
         hasher.update(self.capability.label().as_bytes());
+        hasher.update(b"|");
         hasher.update(self.actor.as_bytes());
+        hasher.update(b"|");
         hasher.update(self.timestamp_ms.to_le_bytes());
+        hasher.update(b"|");
         hasher.update(self.detail.as_bytes());
+        hasher.update(b"|");
         if let Some(tid) = &self.token_id {
             hasher.update(tid.as_bytes());
         }
+        hasher.update(b"|");
         hasher.update(self.prev_hash.as_bytes());
         format!("{:x}", hasher.finalize())
     }
