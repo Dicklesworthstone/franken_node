@@ -1,16 +1,13 @@
 {
   "bead_id": "bd-721z",
   "gate": "ambient_authority_gate",
-  "generated_on": "2026-02-20",
+  "generated_on": "2026-02-23",
   "status": "pass",
-  "modules_scanned": 42,
-  "findings_total": 8,
+  "modules_scanned": 80,
+  "findings_total": 11,
   "violations": 0,
-  "allowlisted": 8,
+  "allowlisted": 11,
   "expired_allowlist": 0,
   "invalid_allowlist": 0,
-  "violation_details": [],
-  "verification_blockers": [
-    "cargo test/check/clippy for frankenengine-node blocked by upstream franken_engine compile failures in remote offload runs"
-  ]
+  "violation_details": []
 }

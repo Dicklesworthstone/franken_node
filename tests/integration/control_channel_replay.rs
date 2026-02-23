@@ -50,7 +50,7 @@ fn inv_acc_auditable() {
     ch.process_message(&msg("m1", Direction::Send, 1, "tok"), "ts").unwrap();
     let _ = ch.process_message(&msg("m2", Direction::Send, 2, ""), "ts"); // auth fail
     let log = ch.audit_log();
-    assert!(log.len() >= 2, "INV-ACC-AUDITABLE: all checks must be logged");
+    assert_eq!(log.len(), 2, "INV-ACC-AUDITABLE: all checks must be logged");
     assert!(log.iter().any(|e| e.verdict == "ACCEPT"));
     assert!(log.iter().any(|e| e.verdict == "REJECT_AUTH"));
 }

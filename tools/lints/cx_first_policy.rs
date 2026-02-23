@@ -367,7 +367,7 @@ fn matches_cx_reference(ty: &str) -> bool {
             }
         }
         rest = if let Some(idx) = split_idx {
-            &without_tick[idx..]
+            without_tick[idx..].trim_start()
         } else {
             ""
         };
@@ -404,6 +404,11 @@ fn run_pattern_with_ast_grep(
     let output = cmd.output()?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        // ast-grep exits non-zero when no matches found (grep-like behavior);
+        // treat empty stderr as "zero matches" rather than a hard error.
+        if stderr.trim().is_empty() {
+            return Ok(Vec::new());
+        }
         return Err(PolicyError::AstGrepFailed(stderr));
     }
 

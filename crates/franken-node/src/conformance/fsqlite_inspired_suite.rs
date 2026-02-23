@@ -881,22 +881,38 @@ mod tests {
 
     #[test]
     fn builtin_determinism_at_least_10() {
-        assert!(builtin_determinism_fixtures().len() >= 10);
+        assert_eq!(
+            builtin_determinism_fixtures().len(),
+            11,
+            "determinism fixture count drift"
+        );
     }
 
     #[test]
     fn builtin_idempotency_at_least_8() {
-        assert!(builtin_idempotency_fixtures().len() >= 8);
+        assert_eq!(
+            builtin_idempotency_fixtures().len(),
+            10,
+            "idempotency fixture count drift"
+        );
     }
 
     #[test]
     fn builtin_epoch_at_least_12() {
-        assert!(builtin_epoch_fixtures().len() >= 12);
+        assert_eq!(
+            builtin_epoch_fixtures().len(),
+            13,
+            "epoch fixture count drift"
+        );
     }
 
     #[test]
     fn builtin_proof_at_least_10() {
-        assert!(builtin_proof_fixtures().len() >= 10);
+        assert_eq!(
+            builtin_proof_fixtures().len(),
+            11,
+            "proof fixture count drift"
+        );
     }
 
     #[test]
@@ -905,7 +921,7 @@ mod tests {
             + builtin_idempotency_fixtures().len()
             + builtin_epoch_fixtures().len()
             + builtin_proof_fixtures().len();
-        assert!(total >= 40, "total={}", total);
+        assert_eq!(total, 45, "total fixture count drift: {total}");
     }
 
     // ---- Runner ----
@@ -913,7 +929,7 @@ mod tests {
     #[test]
     fn runner_registers_builtins() {
         let runner = make_runner_with_builtins();
-        assert!(runner.fixture_count() >= 40);
+        assert_eq!(runner.fixture_count(), 45, "runner fixture count drift");
     }
 
     #[test]
@@ -939,7 +955,7 @@ mod tests {
         let report = runner.run_all(1000, "t1", |_| ConformanceTestResult::Pass);
         assert!(report.release_eligible);
         assert_eq!(report.fail_count, 0);
-        assert!(report.pass_count >= 40);
+        assert_eq!(report.pass_count, 45);
     }
 
     #[test]

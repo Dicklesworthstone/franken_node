@@ -2,7 +2,7 @@
 # Exceptions are temporary and require deterministic signatures.
 #
 # Signature format:
-# sha256({module_path}\n{ambient_api}\n{justification}\n{signer}\n{expires_on})
+# sha256("ambient_authority_signature_v1:" + {module_path}\n{ambient_api}\n{justification}\n{signer}\n{expires_on})
 
 [[exceptions]]
 id = "AAL-001"
@@ -11,7 +11,7 @@ ambient_api = "std::time::Instant"
 justification = "Monotonic latency budget tracking in durable claim gate pending capability-clock adapter."
 signer = "MistyBridge"
 expires_on = "2026-12-31"
-signature = "sha256:b908f7e57ad86d6c4275a553c89782a133cec44a51b393657e6d90946bdc8f33"
+signature = "sha256:e650aa68c3232a664fe0b857d250f60e2a2dcfde5b4e2aeccdc6043c153a96dd"
 
 [[exceptions]]
 id = "AAL-002"
@@ -20,7 +20,7 @@ ambient_api = "std::fs"
 justification = "Atomic rollout snapshot persistence currently uses std::fs until capability-gated storage lands."
 signer = "MistyBridge"
 expires_on = "2026-12-31"
-signature = "sha256:0a28abaea7a1d018161fa494af948c3e0e287a04af703ad0806cbfd8d8b12795"
+signature = "sha256:64ac5584a07ed5cc8b1012b0be43bdf96ffc15fdab3955e430792ddf2061f5d7"
 
 [[exceptions]]
 id = "AAL-003"
@@ -29,7 +29,7 @@ ambient_api = "std::time::SystemTime"
 justification = "Rollout fixture timestamp derivation still uses SystemTime for deterministic artifact naming."
 signer = "MistyBridge"
 expires_on = "2026-12-31"
-signature = "sha256:83d344e6f0b5befc9f6762d695a407705580a5dabe0b33d75014f4a5e00af81b"
+signature = "sha256:441f422ddaea89c35f9e4d3a0b761212eadc1adb311ac17f652d9a9cd1f1fea4"
 
 [[exceptions]]
 id = "AAL-004"
@@ -38,7 +38,7 @@ ambient_api = "std::time::SystemTime"
 justification = "State-model deterministic fixture IDs still derive from SystemTime pending Cx clock wiring."
 signer = "MistyBridge"
 expires_on = "2026-12-31"
-signature = "sha256:6e0c0908fe5ca34e184c2b8c6b1d8d519f758fa960a068db2a57f4d092ae820f"
+signature = "sha256:ad1bd08d2bcb9ed3cfdaa229ef39ba9890524ed974527814aae02dd9627fa33d"
 
 [[exceptions]]
 id = "AAL-005"
@@ -47,7 +47,7 @@ ambient_api = "std::time::SystemTime"
 justification = "Eviction saga uses SystemTime::now() for deadline tracking pending capability-clock adapter."
 signer = "BronzePond"
 expires_on = "2026-12-31"
-signature = "sha256:380d87984839d2047364074f96b6b207937e0108adacf2ea6e7e87e8cff5fe98"
+signature = "sha256:ec820679e27d1073517696227c0fa3e28c4919b91d5997ad5fb1b33ed9c85a82"
 
 [[exceptions]]
 id = "AAL-006"
@@ -56,7 +56,7 @@ ambient_api = "std::time::SystemTime"
 justification = "Policy checkpoint uses SystemTime::now() for checkpoint timestamps pending capability-clock adapter."
 signer = "BronzePond"
 expires_on = "2026-12-31"
-signature = "sha256:4b24488f86de986e922760eefe9f2c8f87d460542092cb50cca1be234a41f15c"
+signature = "sha256:0f4bf99ca3bbe3be1f9eebeaf474427471ad9eed9182e7cd121115eee6cfc83f"
 
 [[exceptions]]
 id = "AAL-007"
@@ -65,4 +65,4 @@ ambient_api = "std::time::Instant"
 justification = "Region ownership uses Instant::now() for latency tracking pending capability-clock adapter."
 signer = "BronzePond"
 expires_on = "2026-12-31"
-signature = "sha256:b602cb686ebf0b960594012ecde8a3d7d6cddedf755b63a789cf36952efab675"
+signature = "sha256:c204ef29c6f1217b663d1351dcb1ded0f0bf611f772c4d3a898009a18ddd6063"

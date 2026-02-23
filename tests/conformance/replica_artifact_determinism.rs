@@ -341,15 +341,15 @@ mod tests {
         let mut expected = BTreeMap::new();
         expected.insert(
             "encoding".to_string(),
-            "5c3b07805bc7aec22bc2b91ad7aa65c7c8785d5707de02e911fea345fc92d2d2".to_string(),
+            "0748011179778c0c10171aae92de082fcfc2dd150c95ab75ef64aad65a40735a".to_string(),
         );
         expected.insert(
             "repair".to_string(),
-            "3288d4f014f645a3f4cb540f1b20cf88b60e12d6ed312027a1a5937348e03e90".to_string(),
+            "da9392eb88b825b03f5bbfcbc86ba70d4e281f04b314cec22a3bd7c4b9881961".to_string(),
         );
         expected.insert(
             "scheduling".to_string(),
-            "37241cb9f603b259036ffb7a82cfd6d68deaa8a6dd45f54b3810dbdcaa9da9e4".to_string(),
+            "893eb9ae333eeac658c041d9acbfe57bc16b8eb653b35ccaac6c7ee471c21128".to_string(),
         );
 
         let results = verify_expected_seeds(&ch, &domains, &cfg, &expected);
@@ -403,23 +403,23 @@ mod tests {
         let mut expected = BTreeMap::new();
         expected.insert(
             "encoding".to_string(),
-            "8d1f2a24520700c91929a66a161c92295f8ff8d024d04d15b0fc4f93fac90d34".to_string(),
+            "d59eaa3f39619a99905e0075949a04d4eb8ec21e9294171ce030a76fd522518c".to_string(),
         );
         expected.insert(
             "repair".to_string(),
-            "c927cdea6baffc735d855ce39a22a64783e9708b07e417fc39a32ac2c92ca8e5".to_string(),
+            "1b5f0a7465fafedab8aac6329918039722204a4209e244e7773a1da09fa37636".to_string(),
         );
         expected.insert(
             "scheduling".to_string(),
-            "ea98014f58ab4a3e761bf4815ad980d924ef91cdf8f2750b39c11d7ec7feb0aa".to_string(),
+            "f1383230bf8e20d61bbda947ea385e63cdebe5a1a8422c4f43018d520f5c543f".to_string(),
         );
         expected.insert(
             "placement".to_string(),
-            "262a150f6e3b09146a0da27acfe458d8c8d6e3d5a9387f26950d3c723cf0a6c3".to_string(),
+            "9b9f69fe614dd2a44c1ae931f39daa97258ba2b682edda4cea289f03094bb22a".to_string(),
         );
         expected.insert(
             "verification".to_string(),
-            "075c510235ca74e2225153c3fb418d2b6259bd7fc9f8f7dea5351b610d190f27".to_string(),
+            "02104d2ddd56b4438c586d29d6bc4bcc5ab0a6db02a2eb8c3654412022fdd32b".to_string(),
         );
 
         let results = verify_expected_seeds(&ch, &domains, &cfg, &expected);
@@ -457,11 +457,11 @@ mod tests {
         let mut expected = BTreeMap::new();
         expected.insert(
             "encoding".to_string(),
-            "96f841d435f56cbaff467b6d93b5129dce983a5d243f4dd6d7ca8f82d7b02b7c".to_string(),
+            "dfc948b0ac66523d9cb27e67f562ff07852431dd3fd8d9bb23351ffbdcf1a92c".to_string(),
         );
         expected.insert(
             "repair".to_string(),
-            "80287ee0edd64bb10d66304b2b61f633ff6e06ef4f5ce385f433446fcadbbb59".to_string(),
+            "4f133fd84af2dc98ca16b357a3a06e51b15d5dbafbaaf9e6ee4089e112fce9e2".to_string(),
         );
 
         let results = verify_expected_seeds(&ch, &domains, &cfg, &expected);
@@ -563,8 +563,16 @@ mod tests {
         b[16] = 255; // flip byte at offset 16
         let div = compare_artifacts("test", &a, &b).unwrap();
         // Context should be 16 bytes (8 before + 8 after), so 32 hex chars
-        assert!(div.context_hex_a.len() <= 32);
-        assert!(div.context_hex_b.len() <= 32);
+        assert_eq!(
+            div.context_hex_a.len(),
+            32,
+            "context_hex_a should be exactly 32 hex chars"
+        );
+        assert_eq!(
+            div.context_hex_b.len(),
+            32,
+            "context_hex_b should be exactly 32 hex chars"
+        );
     }
 
     // -- Event codes exist ---------------------------------------------------

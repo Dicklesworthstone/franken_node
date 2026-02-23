@@ -277,6 +277,7 @@ pub fn compute_allowlist_signature(
 ) -> String {
     let payload = format!("{module_path}\n{ambient_api}\n{justification}\n{signer}\n{expires_on}");
     let mut hasher = Sha256::new();
+    hasher.update(b"ambient_authority_signature_v1:");
     hasher.update(payload.as_bytes());
     format!("sha256:{:x}", hasher.finalize())
 }

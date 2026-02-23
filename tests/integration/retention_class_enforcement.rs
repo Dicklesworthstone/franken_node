@@ -57,7 +57,7 @@ fn inv_cpr_auditable() {
     store.store("m2", "heartbeat", 50, 1000).unwrap();
     store.drop_message("m2", 1001).unwrap();
     let decisions = store.decisions();
-    assert!(decisions.len() >= 3, "INV-CPR-AUDITABLE: must record all decisions");
+    assert_eq!(decisions.len(), 3, "INV-CPR-AUDITABLE: must record all decisions");
     assert!(decisions.iter().any(|d| d.action == "store"), "INV-CPR-AUDITABLE: store decisions");
     assert!(decisions.iter().any(|d| d.action == "drop"), "INV-CPR-AUDITABLE: drop decisions");
 }

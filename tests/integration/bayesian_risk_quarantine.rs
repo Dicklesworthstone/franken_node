@@ -210,12 +210,25 @@ fn fixture_actions_are_sorted_for_replay_determinism() {
             .then_with(|| left.principal_id.cmp(&right.principal_id))
     });
 
+    assert_eq!(
+        fixture.actions.len(),
+        sorted.len(),
+        "fixture action count mismatch"
+    );
     for (idx, expected) in sorted.iter().enumerate() {
         let actual = &fixture.actions[idx];
         assert_eq!(
-            (actual.principal_id.as_str(), actual.decision.as_str()),
-            (expected.principal_id.as_str(), expected.decision.as_str()),
-            "action ordering must remain deterministic for replay traces"
+            (
+                actual.principal_id.as_str(),
+                actual.decision.as_str(),
+                actual.posterior
+            ),
+            (
+                expected.principal_id.as_str(),
+                expected.decision.as_str(),
+                expected.posterior
+            ),
+            "action at index {idx} must match deterministic sort order for replay traces"
         );
     }
 }

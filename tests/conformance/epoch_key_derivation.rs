@@ -54,9 +54,10 @@ fn published_epoch_key_vectors_match_derivation() {
     let raw = fs::read_to_string(vector_path()).expect("vector artifact must exist");
     let bundle: VectorBundle = serde_json::from_str(&raw).expect("vector json must parse");
 
-    assert!(
-        bundle.vectors.len() >= 10,
-        "expected at least 10 key vectors"
+    assert_eq!(
+        bundle.vectors.len(),
+        10,
+        "expected exactly 10 key vectors in published artifact"
     );
 
     for vector in bundle.vectors {
