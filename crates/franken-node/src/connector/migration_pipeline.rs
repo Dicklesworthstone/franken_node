@@ -425,7 +425,7 @@ pub struct PipelineEvent {
 /// deterministically from the cohort definition for INV-PIPE-IDEMPOTENT.
 pub fn new(cohort: &CohortDefinition) -> Result<PipelineState, PipelineError> {
     // Check for duplicate extensions (ERR_PIPE_DUPLICATE_EXTENSION)
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     for ext in &cohort.extensions {
         if !seen.insert(&ext.name) {
             return Err(PipelineError {

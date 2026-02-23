@@ -42,7 +42,7 @@ pub mod event_codes {
 /// - `Encryption`  (0x0002): X25519/AES for protecting confidential payloads.
 /// - `Issuance`    (0x0003): Dedicated key for minting tokens/certificates.
 /// - `Attestation` (0x0004): Dedicated key for operator attestation signatures.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum KeyRole {
     /// Authenticate control-plane messages and attestations.
     Signing,
@@ -602,8 +602,8 @@ mod tests {
 
     #[test]
     fn role_equality_and_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
+        use std::collections::BTreeSet;
+        let mut set = BTreeSet::new();
         for role in KeyRole::all() {
             set.insert(*role);
         }

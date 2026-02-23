@@ -4,12 +4,12 @@
 //! measured test results against the matrix and produces publication metadata.
 //! Unsupported claims are blocked.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 // ── Profile ─────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Profile {
     Mvp,
     Full,
@@ -37,7 +37,7 @@ pub struct CapabilityResult {
 
 #[derive(Debug, Clone)]
 pub struct ProfileMatrix {
-    required: HashMap<Profile, Vec<String>>,
+    required: BTreeMap<Profile, Vec<String>>,
 }
 
 impl ProfileMatrix {
@@ -70,7 +70,7 @@ impl ProfileMatrix {
             .map(|s| s.to_string()),
         );
 
-        let mut required = HashMap::new();
+        let mut required = BTreeMap::new();
         required.insert(Profile::Mvp, mvp);
         required.insert(Profile::Full, full);
         Self { required }
@@ -84,7 +84,7 @@ impl ProfileMatrix {
                     "{profile} has no required capabilities"
                 )));
             }
-            let unique: HashSet<_> = caps.iter().collect();
+            let unique: BTreeSet<_> = caps.iter().collect();
             if unique.len() != caps.len() {
                 return Err(ProfileError::InvalidMatrix(format!(
                     "{profile} has duplicate capabilities"
@@ -172,7 +172,7 @@ pub fn evaluate_claim(
     version: u32,
 ) -> Result<ClaimEvaluation, ProfileError> {
     let required = matrix.required_for(profile)?;
-    let result_map: HashMap<&str, &CapabilityResult> = measured
+    let result_map: BTreeMap<&str, &CapabilityResult> = measured
         .iter()
         .map(|r| (r.capability.as_str(), r))
         .collect();
@@ -376,8 +376,8 @@ mod tests {
     #[test]
     fn matrix_full_is_superset_of_mvp() {
         let m = ProfileMatrix::standard();
-        let mvp_caps: HashSet<_> = m.required_for(Profile::Mvp).unwrap().iter().collect();
-        let full_caps: HashSet<_> = m.required_for(Profile::Full).unwrap().iter().collect();
+        let mvp_caps: BTreeSet<_> = m.required_for(Profile::Mvp).unwrap().iter().collect();
+        let full_caps: BTreeSet<_> = m.required_for(Profile::Full).unwrap().iter().collect();
         assert!(mvp_caps.is_subset(&full_caps));
     }
 

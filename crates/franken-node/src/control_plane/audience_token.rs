@@ -15,7 +15,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -339,7 +339,7 @@ impl TokenChain {
         }
 
         // Audience must be a subset of parent's audience.
-        let parent_aud: HashSet<&str> = parent.audience.iter().map(|s| s.as_str()).collect();
+        let parent_aud: BTreeSet<&str> = parent.audience.iter().map(|s| s.as_str()).collect();
         for aud in &token.audience {
             if !parent_aud.contains(aud.as_str()) {
                 return Err(TokenError::attenuation_violation(format!(
@@ -405,7 +405,7 @@ impl TokenChain {
 /// and audience matching.
 pub struct TokenValidator {
     /// Nonces seen in the current epoch.
-    seen_nonces: HashSet<String>,
+    seen_nonces: BTreeSet<String>,
     /// Current epoch ID for replay scoping.
     epoch_id: u64,
     /// Emitted events.
@@ -420,7 +420,7 @@ pub struct TokenValidator {
 impl TokenValidator {
     pub fn new(epoch_id: u64) -> Self {
         Self {
-            seen_nonces: HashSet::new(),
+            seen_nonces: BTreeSet::new(),
             epoch_id,
             events: Vec::new(),
             tokens_issued: 0,

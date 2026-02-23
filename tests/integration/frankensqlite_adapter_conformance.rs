@@ -6,7 +6,7 @@
 
 #![allow(unused)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -245,10 +245,10 @@ pub struct FrankensqliteAdapter {
     classes: Vec<PersistenceClass>,
     events: Vec<AdapterEvent>,
     // In-memory stores for conformance testing
-    tier1_store: HashMap<String, HashMap<String, Vec<u8>>>,
-    tier1_audit: HashMap<String, Vec<Vec<u8>>>,
-    tier2_store: HashMap<String, Vec<Vec<u8>>>,
-    tier3_store: HashMap<String, HashMap<String, Vec<u8>>>,
+    tier1_store: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
+    tier1_audit: BTreeMap<String, Vec<Vec<u8>>>,
+    tier2_store: BTreeMap<String, Vec<Vec<u8>>>,
+    tier3_store: BTreeMap<String, BTreeMap<String, Vec<u8>>>,
 }
 
 impl FrankensqliteAdapter {
@@ -257,10 +257,10 @@ impl FrankensqliteAdapter {
             config,
             classes: Vec::new(),
             events: Vec::new(),
-            tier1_store: HashMap::new(),
-            tier1_audit: HashMap::new(),
-            tier2_store: HashMap::new(),
-            tier3_store: HashMap::new(),
+            tier1_store: BTreeMap::new(),
+            tier1_audit: BTreeMap::new(),
+            tier2_store: BTreeMap::new(),
+            tier3_store: BTreeMap::new(),
         };
         adapter.events.push(AdapterEvent {
             code: FRANKENSQLITE_ADAPTER_INIT.to_string(),
@@ -899,7 +899,7 @@ mod tests {
     fn test_canonical_unique_domains() {
         let classes = canonical_classes();
         let domains: Vec<&str> = classes.iter().map(|c| c.domain.as_str()).collect();
-        let unique: std::collections::HashSet<&str> = domains.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = domains.iter().copied().collect();
         assert_eq!(domains.len(), unique.len(), "Duplicate domains found");
     }
 
@@ -910,7 +910,7 @@ mod tests {
             .iter()
             .flat_map(|c| c.tables.iter().map(|t| t.as_str()))
             .collect();
-        let unique: std::collections::HashSet<&str> = tables.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = tables.iter().copied().collect();
         assert_eq!(tables.len(), unique.len(), "Duplicate table names found");
     }
 

@@ -996,7 +996,7 @@ mod tests {
             event_codes::TFG_007,
             event_codes::TFG_008,
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for c in &codes {
             assert!(seen.insert(*c), "Duplicate event code: {c}");
         }
@@ -1014,7 +1014,7 @@ mod tests {
             error_codes::ERR_TFG_PARTITION_ERROR,
             error_codes::ERR_TFG_INIT_FAILED,
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for c in &codes {
             assert!(seen.insert(*c), "Duplicate error code: {c}");
         }
@@ -1032,7 +1032,7 @@ mod tests {
             invariants::INV_TFG_FULL_COVERAGE,
             invariants::INV_TFG_PARTITION_CLOSED,
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for i in &invs {
             assert!(seen.insert(*i), "Duplicate invariant: {i}");
         }

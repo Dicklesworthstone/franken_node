@@ -5,7 +5,7 @@
 //! commutative, and idempotent merge operations.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 /// Schema tag for CRDT type identification.
@@ -61,7 +61,7 @@ impl std::error::Error for CrdtError {}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LwwMap {
     pub crdt_type: CrdtType,
-    pub entries: HashMap<String, LwwEntry>,
+    pub entries: BTreeMap<String, LwwEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -74,7 +74,7 @@ impl Default for LwwMap {
     fn default() -> Self {
         Self {
             crdt_type: CrdtType::LwwMap,
-            entries: HashMap::new(),
+            entries: BTreeMap::new(),
         }
     }
 }
@@ -114,16 +114,16 @@ impl LwwMap {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrSet {
     pub crdt_type: CrdtType,
-    pub adds: HashSet<String>,
-    pub removes: HashSet<String>,
+    pub adds: BTreeSet<String>,
+    pub removes: BTreeSet<String>,
 }
 
 impl Default for OrSet {
     fn default() -> Self {
         Self {
             crdt_type: CrdtType::OrSet,
-            adds: HashSet::new(),
-            removes: HashSet::new(),
+            adds: BTreeSet::new(),
+            removes: BTreeSet::new(),
         }
     }
 }
@@ -141,7 +141,7 @@ impl OrSet {
         self.removes.insert(element);
     }
 
-    pub fn elements(&self) -> HashSet<&String> {
+    pub fn elements(&self) -> BTreeSet<&String> {
         self.adds.difference(&self.removes).collect()
     }
 
@@ -166,14 +166,14 @@ impl OrSet {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GCounter {
     pub crdt_type: CrdtType,
-    pub counts: HashMap<String, u64>,
+    pub counts: BTreeMap<String, u64>,
 }
 
 impl Default for GCounter {
     fn default() -> Self {
         Self {
             crdt_type: CrdtType::GCounter,
-            counts: HashMap::new(),
+            counts: BTreeMap::new(),
         }
     }
 }

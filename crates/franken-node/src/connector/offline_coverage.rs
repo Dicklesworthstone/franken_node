@@ -2,7 +2,7 @@
 //!
 //! Continuous coverage metrics, SLO breach alerts, traceable dashboard values.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// SLO target definition.
 #[derive(Debug, Clone)]
@@ -118,14 +118,14 @@ fn validate_event(event: &CoverageEvent) -> Result<(), CoverageError> {
 #[derive(Debug, Clone, Default)]
 struct ScopeState {
     /// Latest status per artifact_id. true = available.
-    artifacts: HashMap<String, bool>,
+    artifacts: BTreeMap<String, bool>,
     event_count: usize,
 }
 
 /// Offline coverage tracker.
 #[derive(Default)]
 pub struct OfflineCoverageTracker {
-    scopes: HashMap<String, ScopeState>,
+    scopes: BTreeMap<String, ScopeState>,
     all_events: Vec<CoverageEvent>,
 }
 

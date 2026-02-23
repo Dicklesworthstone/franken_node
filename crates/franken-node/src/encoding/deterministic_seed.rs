@@ -940,7 +940,7 @@ mod tests {
     #[test]
     fn test_no_collisions_100_samples() {
         let cfg = test_config_v1();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for i in 0u8..100 {
             let mut h = [0u8; 32];
             h[0] = i;
@@ -955,7 +955,7 @@ mod tests {
     fn test_no_collisions_across_domains() {
         let ch = test_content_hash();
         let cfg = test_config_v1();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for domain in DomainTag::all() {
             let s = derive_seed(domain, &ch, &cfg);
             assert!(seen.insert(s.bytes), "collision for domain {:?}", domain);

@@ -10,7 +10,7 @@
 
 #![allow(unused)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 // ---------------------------------------------------------------------------
 
 /// A frankentui component type that renders operator-visible content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Ord, PartialOrd, Serialize, Deserialize)]
 pub enum FrankentuiComponent {
     CommandSurface,
     Panel,
@@ -728,7 +728,7 @@ mod tests {
     #[test]
     fn test_canonical_covers_all_components() {
         let surfaces = canonical_surfaces();
-        let used: std::collections::HashSet<FrankentuiComponent> =
+        let used: std::collections::BTreeSet<FrankentuiComponent> =
             surfaces.iter().map(|s| s.frankentui_component).collect();
         for c in FrankentuiComponent::all() {
             assert!(used.contains(c), "Component {} not covered", c.label());
@@ -781,7 +781,7 @@ mod tests {
     #[test]
     fn test_canonical_has_all_boundary_types() {
         let surfaces = canonical_surfaces();
-        let types: std::collections::HashSet<String> = surfaces
+        let types: std::collections::BTreeSet<String> = surfaces
             .iter()
             .map(|s| s.boundary_type.label().to_string())
             .collect();

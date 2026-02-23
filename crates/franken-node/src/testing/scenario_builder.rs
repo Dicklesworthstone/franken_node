@@ -1189,7 +1189,7 @@ mod tests {
     #[test]
     fn test_all_event_codes_distinct() {
         let codes = [EVT_SB_001, EVT_SB_002, EVT_SB_003, EVT_SB_004, EVT_SB_005];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for c in &codes {
             assert!(seen.insert(*c), "Duplicate event code: {c}");
         }
@@ -1227,7 +1227,7 @@ mod tests {
             ERR_SB_DUPLICATE_LINK,
             ERR_SB_EMPTY_NAME,
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for c in &codes {
             assert!(seen.insert(*c), "Duplicate error code: {c}");
         }
@@ -1259,7 +1259,7 @@ mod tests {
             INV_SB_NONZERO_SEED,
             INV_SB_IMMUTABLE,
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for i in &invs {
             assert!(seen.insert(*i), "Duplicate invariant: {i}");
         }

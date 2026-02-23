@@ -171,7 +171,7 @@ fn type_mismatch_returns_error() {
     // Construct a fake LwwMap with wrong type tag
     let bad = LwwMap {
         crdt_type: CrdtType::OrSet,
-        entries: std::collections::HashMap::new(),
+        entries: std::collections::BTreeMap::new(),
     };
     let result = a.merge(&bad);
     assert!(result.is_err());

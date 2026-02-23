@@ -839,7 +839,7 @@ mod tests {
     #[test]
     fn test_capability_labels_unique() {
         let labels: Vec<&str> = Capability::all().iter().map(|c| c.label()).collect();
-        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
         assert_eq!(labels.len(), unique.len());
     }
 
@@ -955,7 +955,7 @@ mod tests {
     fn test_builtin_patterns_unique_ids() {
         let patterns = builtin_patterns();
         let ids: Vec<&str> = patterns.iter().map(|p| p.id.as_str()).collect();
-        let unique: std::collections::HashSet<&str> = ids.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = ids.iter().copied().collect();
         assert_eq!(ids.len(), unique.len());
     }
 

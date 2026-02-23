@@ -15,7 +15,7 @@ use std::fmt;
 // ── Invariant identity ──────────────────────────────────────────────
 
 /// Stable identifier for a correctness invariant.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct InvariantId(pub String);
 
 impl InvariantId {
@@ -555,7 +555,7 @@ mod tests {
     #[test]
     fn all_invariant_ids_are_unique() {
         let env = CorrectnessEnvelope::canonical();
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for inv in &env.invariants {
             assert!(
                 seen.insert(inv.id.clone()),

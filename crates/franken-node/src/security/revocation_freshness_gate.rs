@@ -10,7 +10,7 @@
 //! - Standard (Tier-2): owner-bypass allowed
 //! - Advisory (Tier-3): proceed-with-warning
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -208,7 +208,7 @@ pub struct GateDecision {
 /// INV-RFG-SESSION: Checks require authenticated sessions.
 pub struct RevocationFreshnessGate {
     /// Consumed nonces for replay detection.
-    consumed_nonces: HashSet<String>,
+    consumed_nonces: BTreeSet<String>,
     /// Expected signature for verification (simplified: real systems use HMAC).
     expected_signature_fn: Box<dyn Fn(&FreshnessProof) -> String + Send + Sync>,
     /// Action-to-tier classification table.
@@ -222,7 +222,7 @@ impl RevocationFreshnessGate {
         tier_table: Vec<(String, SafetyTier)>,
     ) -> Self {
         Self {
-            consumed_nonces: HashSet::new(),
+            consumed_nonces: BTreeSet::new(),
             expected_signature_fn: signature_fn,
             tier_table,
         }

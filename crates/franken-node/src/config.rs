@@ -1225,11 +1225,11 @@ pub enum ConfigError {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     use super::*;
 
-    fn map_lookup(map: HashMap<String, String>) -> impl Fn(&str) -> Option<String> {
+    fn map_lookup(map: BTreeMap<String, String>) -> impl Fn(&str) -> Option<String> {
         move |key| map.get(key).cloned()
     }
 
@@ -1315,7 +1315,7 @@ mod tests {
         let path = dir.path().join("franken_node.toml");
         std::fs::write(&path, "profile = \"legacy-risky\"\n").unwrap();
 
-        let env = HashMap::from([("FRANKEN_NODE_PROFILE".to_string(), "strict".to_string())]);
+        let env = BTreeMap::from([("FRANKEN_NODE_PROFILE".to_string(), "strict".to_string())]);
 
         let resolved = Config::resolve_with_env(
             Some(&path),
@@ -1351,7 +1351,7 @@ require_lockstep_validation = true
         )
         .unwrap();
 
-        let env = HashMap::from([
+        let env = BTreeMap::from([
             ("FRANKEN_NODE_PROFILE".to_string(), "strict".to_string()),
             (
                 "FRANKEN_NODE_MIGRATION_AUTOFIX".to_string(),
@@ -1371,7 +1371,7 @@ require_lockstep_validation = true
 
     #[test]
     fn resolve_rejects_invalid_env_bool() {
-        let env = HashMap::from([(
+        let env = BTreeMap::from([(
             "FRANKEN_NODE_MIGRATION_AUTOFIX".to_string(),
             "not-a-bool".to_string(),
         )]);
@@ -1399,7 +1399,7 @@ quarantine_on_high_risk = false
         let resolved = Config::resolve_with_env(
             Some(&path),
             CliOverrides::default(),
-            &map_lookup(HashMap::new()),
+            &map_lookup(BTreeMap::new()),
         )
         .unwrap();
 
@@ -1438,7 +1438,7 @@ overflow_policy = "reject"
         let resolved = Config::resolve_with_env(
             Some(&path),
             CliOverrides::default(),
-            &map_lookup(HashMap::new()),
+            &map_lookup(BTreeMap::new()),
         )
         .unwrap();
 
@@ -1454,7 +1454,7 @@ overflow_policy = "reject"
 
     #[test]
     fn resolve_applies_runtime_env_overrides() {
-        let env = HashMap::from([
+        let env = BTreeMap::from([
             (
                 "FRANKEN_NODE_RUNTIME_REMOTE_MAX_IN_FLIGHT".to_string(),
                 "66".to_string(),
@@ -1488,7 +1488,7 @@ minimum_assurance_level = 9
         let err = Config::resolve_with_env(
             Some(&path),
             CliOverrides::default(),
-            &map_lookup(HashMap::new()),
+            &map_lookup(BTreeMap::new()),
         )
         .unwrap_err();
         assert!(err.to_string().contains("minimum_assurance_level"));

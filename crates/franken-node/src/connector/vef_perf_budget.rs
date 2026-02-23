@@ -692,14 +692,14 @@ mod tests {
     #[test]
     fn test_hot_path_labels_unique() {
         let labels: Vec<&str> = VefHotPath::all().iter().map(|p| p.label()).collect();
-        let unique: std::collections::HashSet<&&str> = labels.iter().collect();
+        let unique: std::collections::BTreeSet<&&str> = labels.iter().collect();
         assert_eq!(labels.len(), unique.len(), "labels must be unique");
     }
 
     #[test]
     fn test_mode_labels_unique() {
         let labels: Vec<&str> = VefBudgetMode::all().iter().map(|m| m.label()).collect();
-        let unique: std::collections::HashSet<&&str> = labels.iter().collect();
+        let unique: std::collections::BTreeSet<&&str> = labels.iter().collect();
         assert_eq!(labels.len(), unique.len(), "mode labels must be unique");
     }
 

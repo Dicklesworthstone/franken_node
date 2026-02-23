@@ -169,7 +169,7 @@ pub const CAPABILITIES: [&str; 6] = [
 /// Validate that a compiled policy has no conflicts
 /// (e.g., no capability appears with contradictory access levels).
 pub fn validate_policy(policy: &CompiledPolicy) -> Result<(), SandboxError> {
-    let mut seen = std::collections::HashMap::new();
+    let mut seen = std::collections::BTreeMap::new();
     for g in &policy.grants {
         if let Some(prev) = seen.insert(&g.capability, &g.access)
             && prev != &g.access

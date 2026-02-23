@@ -3,7 +3,7 @@
 //! Profiles are schema-validated on registration. Stale profiles are excluded
 //! from placement. Placement evaluation is deterministic.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// A registered device profile.
 #[derive(Debug, Clone)]
@@ -166,7 +166,7 @@ pub fn validate_constraints(constraints: &[PlacementConstraint]) -> Result<(), R
 /// Device profile registry.
 #[derive(Default)]
 pub struct DeviceProfileRegistry {
-    profiles: HashMap<String, DeviceProfile>,
+    profiles: BTreeMap<String, DeviceProfile>,
 }
 
 impl DeviceProfileRegistry {

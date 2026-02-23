@@ -4,7 +4,8 @@
 //! then projects stable surface-level representations for CLI/API/protocol/log/SDK.
 //! It also provides compatibility checks for append-only error evolution.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -346,13 +347,13 @@ pub fn compatibility_report(
     new_entries: &[ErrorCodeEntry],
     policy: &ErrorCompatibilityPolicy,
 ) -> CompatibilityReport {
-    let old_map: HashMap<&str, &ErrorCodeEntry> =
+    let old_map: BTreeMap<&str, &ErrorCodeEntry> =
         old_entries.iter().map(|e| (e.code.as_str(), e)).collect();
-    let new_map: HashMap<&str, &ErrorCodeEntry> =
+    let new_map: BTreeMap<&str, &ErrorCodeEntry> =
         new_entries.iter().map(|e| (e.code.as_str(), e)).collect();
 
-    let old_codes: HashSet<&str> = old_map.keys().copied().collect();
-    let new_codes: HashSet<&str> = new_map.keys().copied().collect();
+    let old_codes: BTreeSet<&str> = old_map.keys().copied().collect();
+    let new_codes: BTreeSet<&str> = new_map.keys().copied().collect();
 
     let mut added: Vec<String> = new_codes
         .difference(&old_codes)

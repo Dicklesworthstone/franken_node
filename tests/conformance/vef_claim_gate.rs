@@ -6,8 +6,6 @@
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     // -----------------------------------------------------------------------
     // Inline domain types (mirrors crates/franken-node/src/connector/vef_claim_integration.rs)
     // -----------------------------------------------------------------------
@@ -94,7 +92,7 @@ mod tests {
         proofs: &[VefProof],
         max_age_secs: u64,
     ) -> CoverageSnapshot {
-        let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut covered: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for proof in proofs {
             if proof.valid && proof.age_secs <= max_age_secs {
                 for ac in all_action_classes {

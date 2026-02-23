@@ -7,7 +7,7 @@ use durable_claim_gate::{
     ClaimDenialReason, DurableClaim, DurableClaimGate, DurableClaimGateConfig, ProofArtifact,
     ProofType, VerificationInput,
 };
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 fn gate() -> DurableClaimGate {
     DurableClaimGate::new(DurableClaimGateConfig::default()).expect("gate")
@@ -30,7 +30,7 @@ fn claim() -> DurableClaim {
 }
 
 fn valid_input() -> VerificationInput {
-    let mut markers = HashSet::new();
+    let mut markers = BTreeSet::new();
     markers.insert("marker-security".to_string());
     VerificationInput {
         available_markers: markers,
@@ -135,7 +135,7 @@ fn denial_codes_are_stable_for_all_variants() {
         },
     ];
 
-    let mut codes = HashSet::new();
+    let mut codes = BTreeSet::new();
     for variant in variants {
         codes.insert(variant.code().to_string());
     }

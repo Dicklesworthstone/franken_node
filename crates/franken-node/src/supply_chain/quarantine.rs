@@ -257,7 +257,7 @@ fn compute_entry_hash(entry: &QuarantineAuditEntry) -> String {
     hasher.update(entry.event_code.as_bytes());
     hasher.update(entry.order_id.as_bytes());
     hasher.update(entry.extension_id.as_bytes());
-    
+
     let severity_str = match entry.severity {
         QuarantineSeverity::Low => "low",
         QuarantineSeverity::Medium => "medium",
@@ -265,7 +265,7 @@ fn compute_entry_hash(entry: &QuarantineAuditEntry) -> String {
         QuarantineSeverity::Critical => "critical",
     };
     hasher.update(severity_str.as_bytes());
-    
+
     hasher.update(entry.trace_id.as_bytes());
     hasher.update(entry.timestamp.as_bytes());
     hasher.update(entry.details.as_bytes());

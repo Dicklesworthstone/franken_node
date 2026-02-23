@@ -6,7 +6,7 @@
 //! - mandatory audit ticks are enforced with missed-event alerts,
 //! - recovery requires all criteria to hold for a stabilization window.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -27,8 +27,8 @@ const DEFAULT_MAX_DEGRADED_DURATION_SECS: u64 = 3_600;
 pub struct DegradedModePolicy {
     pub mode_name: String,
     pub trigger_conditions: Vec<TriggerCondition>,
-    pub permitted_actions: HashSet<String>,
-    pub denied_actions: HashSet<String>,
+    pub permitted_actions: BTreeSet<String>,
+    pub denied_actions: BTreeSet<String>,
     pub mandatory_audit_events: Vec<AuditEventSpec>,
     pub auto_recovery_criteria: Vec<RecoveryCriterion>,
     pub mandatory_audit_interval_secs: u64,
@@ -42,8 +42,8 @@ impl DegradedModePolicy {
         Self {
             mode_name: mode_name.into(),
             trigger_conditions: Vec::new(),
-            permitted_actions: HashSet::new(),
-            denied_actions: HashSet::new(),
+            permitted_actions: BTreeSet::new(),
+            denied_actions: BTreeSet::new(),
             mandatory_audit_events: Vec::new(),
             auto_recovery_criteria: Vec::new(),
             mandatory_audit_interval_secs: DEFAULT_MANDATORY_AUDIT_INTERVAL_SECS,
@@ -159,10 +159,10 @@ pub enum RecoveryCriterion {
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct RecoveryStatus {
-    pub healthy_gates: HashSet<String>,
-    pub available_capabilities: HashSet<String>,
+    pub healthy_gates: BTreeSet<String>,
+    pub available_capabilities: BTreeSet<String>,
     pub observed_error_rate: Option<f64>,
-    pub acknowledged_operators: HashSet<String>,
+    pub acknowledged_operators: BTreeSet<String>,
 }
 
 impl RecoveryStatus {

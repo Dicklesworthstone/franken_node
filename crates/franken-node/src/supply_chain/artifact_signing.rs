@@ -482,7 +482,7 @@ pub fn collect_threshold_signatures(
     required: usize,
 ) -> Result<Vec<PartialSignature>, ArtifactSigningError> {
     let mut valid: Vec<PartialSignature> = Vec::new();
-    let mut seen_keys = std::collections::HashSet::new();
+    let mut seen_keys = std::collections::BTreeSet::new();
 
     for partial in partials {
         if seen_keys.contains(&partial.key_id) {

@@ -7,7 +7,7 @@
 //! This suite is self-contained and uses only sha2, serde, serde_json from
 //! workspace deps -- no crate:: imports that might break due to other modules.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 // =============================================================================
 // Domain 1: Determinism (FSQL-DET-*)
@@ -188,7 +188,7 @@ fn fsql_det_011_base64_encoding_stability() {
 #[test]
 fn fsql_idp_001_insert_with_idempotency_key() {
     // FSQL-IDP-001: Inserting the same idempotency key twice deduplicates.
-    let mut store: HashMap<String, String> = HashMap::new();
+    let mut store: BTreeMap<String, String> = BTreeMap::new();
     let key = "idem-key-001".to_string();
     let val = "result-001".to_string();
 

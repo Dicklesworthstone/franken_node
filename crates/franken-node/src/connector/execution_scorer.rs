@@ -3,7 +3,7 @@
 //! Deterministic scoring with explicit tie-breakers and explainable factor weights.
 //! Identical inputs always produce identical rankings.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
@@ -374,7 +374,7 @@ pub fn sensitivity_analysis(
         .iter()
         .enumerate()
         .map(|(index, score)| (score.action.clone(), index + 1))
-        .collect::<HashMap<_, _>>();
+        .collect::<BTreeMap<_, _>>();
 
     let mut records = Vec::new();
 
@@ -389,7 +389,7 @@ pub fn sensitivity_analysis(
                 .iter()
                 .enumerate()
                 .map(|(index, score)| (score.action.clone(), index + 1))
-                .collect::<HashMap<_, _>>();
+                .collect::<BTreeMap<_, _>>();
 
             for action in actions {
                 let Some(original_rank) = baseline_rank.get(*action) else {

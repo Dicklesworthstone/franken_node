@@ -19,7 +19,7 @@
 //! - **INV-SPS-SYBIL**: 100 Sybil identities < influence of 5 honest nodes.
 //! - **INV-SPS-ADVERSARIAL**: >= 10 adversarial test scenarios pass in CI.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -379,7 +379,7 @@ impl StakeWeighter {
     pub fn apply_weights(
         &self,
         signals: &[TrustSignal],
-        nodes: &HashMap<String, TrustNode>,
+        nodes: &BTreeMap<String, TrustNode>,
     ) -> Vec<(f64, f64)> {
         // Returns (weighted_value, weight) pairs
         signals
@@ -398,7 +398,7 @@ impl StakeWeighter {
     pub fn weighted_average(
         &self,
         signals: &[TrustSignal],
-        nodes: &HashMap<String, TrustNode>,
+        nodes: &BTreeMap<String, TrustNode>,
     ) -> Result<f64, SybilDefenseError> {
         if signals.is_empty() {
             return Err(SybilDefenseError::aggregation_failed(
@@ -467,13 +467,13 @@ impl SybilDetector {
     pub fn detect_sybil_cluster(
         &mut self,
         signals: &[TrustSignal],
-        nodes: &HashMap<String, TrustNode>,
+        nodes: &BTreeMap<String, TrustNode>,
         timestamp_ms: u64,
-    ) -> HashSet<String> {
-        let mut sybil_ids: HashSet<String> = HashSet::new();
+    ) -> BTreeSet<String> {
+        let mut sybil_ids: BTreeSet<String> = BTreeSet::new();
 
         // Strategy 1: Burst detection -- many signals in a short window
-        let mut by_source: HashMap<&str, Vec<&TrustSignal>> = HashMap::new();
+        let mut by_source: BTreeMap<&str, Vec<&TrustSignal>> = BTreeMap::new();
         for sig in signals {
             by_source
                 .entry(sig.source_node_id.as_str())
@@ -502,7 +502,7 @@ impl SybilDetector {
 
         // Strategy 2: Coordinated value similarity -- many different nodes
         // submitting nearly identical values within a time window
-        let mut by_target: HashMap<&str, Vec<&TrustSignal>> = HashMap::new();
+        let mut by_target: BTreeMap<&str, Vec<&TrustSignal>> = BTreeMap::new();
         for sig in signals {
             by_target
                 .entry(sig.target_id.as_str())
@@ -579,7 +579,7 @@ impl SybilDetector {
     pub fn attenuate_sybil_signals(
         &self,
         signals: &[TrustSignal],
-        sybil_ids: &HashSet<String>,
+        sybil_ids: &BTreeSet<String>,
     ) -> Vec<(TrustSignal, f64)> {
         let sybil_attenuation = 0.001; // 0.1% of normal weight
 
@@ -603,9 +603,9 @@ impl SybilDetector {
         signals: &[TrustSignal],
         node_ids: &[String],
         weighter: &StakeWeighter,
-        nodes: &HashMap<String, TrustNode>,
+        nodes: &BTreeMap<String, TrustNode>,
     ) -> f64 {
-        let id_set: HashSet<&String> = node_ids.iter().collect();
+        let id_set: BTreeSet<&String> = node_ids.iter().collect();
         signals
             .iter()
             .filter(|s| id_set.contains(&s.source_node_id))
@@ -642,7 +642,7 @@ pub struct SybilDefensePipeline {
     pub weighter: StakeWeighter,
     pub detector: SybilDetector,
     /// Registered nodes in the trust graph.
-    nodes: HashMap<String, TrustNode>,
+    nodes: BTreeMap<String, TrustNode>,
     /// Audit event log.
     events: Vec<SybilDefenseEvent>,
 }
@@ -664,7 +664,7 @@ impl SybilDefensePipeline {
     }
 
     /// Get all registered nodes.
-    pub fn nodes(&self) -> &HashMap<String, TrustNode> {
+    pub fn nodes(&self) -> &BTreeMap<String, TrustNode> {
         &self.nodes
     }
 
@@ -991,7 +991,7 @@ mod tests {
             make_signal("s1", "est-1", "target", 0.8, 1000),
             make_signal("s2", "new-1", "target", 0.9, 1001),
         ];
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
         nodes.insert("est-1".to_string(), make_established_node("est-1"));
         nodes.insert("new-1".to_string(), make_new_node("new-1"));
 
@@ -1005,7 +1005,7 @@ mod tests {
     fn test_weighted_average() {
         let w = StakeWeighter::default();
         let signals = vec![make_signal("s1", "est-1", "target", 0.8, 1000)];
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
         nodes.insert("est-1".to_string(), make_established_node("est-1"));
 
         let avg = w.weighted_average(&signals, &nodes).unwrap();
@@ -1015,7 +1015,7 @@ mod tests {
     #[test]
     fn test_weighted_average_empty() {
         let w = StakeWeighter::default();
-        let result = w.weighted_average(&[], &HashMap::new());
+        let result = w.weighted_average(&[], &BTreeMap::new());
         assert!(result.is_err());
     }
 
@@ -1036,7 +1036,7 @@ mod tests {
             })
             .collect();
 
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
         nodes.insert("attacker".to_string(), make_new_node("attacker"));
 
         let sybils = detector.detect_sybil_cluster(&signals, &nodes, 10_000);
@@ -1047,7 +1047,7 @@ mod tests {
     fn test_detect_coordinated_sybil() {
         let mut detector = SybilDetector::new(100, 60_000, 0.95);
         let mut signals = Vec::new();
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
 
         // 20 new nodes all submitting very similar values at similar times
         for i in 0..20 {
@@ -1073,7 +1073,7 @@ mod tests {
     fn test_no_sybil_honest_nodes() {
         let mut detector = SybilDetector::default();
         let signals = honest_signals(5, "target");
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
         for sig in &signals {
             nodes.insert(
                 sig.source_node_id.clone(),
@@ -1092,7 +1092,7 @@ mod tests {
             make_signal("s1", "honest", "target", 0.8, 1000),
             make_signal("s2", "sybil", "target", 0.99, 1001),
         ];
-        let sybil_ids: HashSet<String> = ["sybil".to_string()].into_iter().collect();
+        let sybil_ids: BTreeSet<String> = ["sybil".to_string()].into_iter().collect();
 
         let attenuated = detector.attenuate_sybil_signals(&signals, &sybil_ids);
         assert_eq!(attenuated.len(), 2);
@@ -1107,7 +1107,7 @@ mod tests {
         let detector = SybilDetector::default();
         let weighter = StakeWeighter::default();
 
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
 
         // 5 established honest nodes
         let honest_node_ids: Vec<String> = (0..5)
@@ -1167,7 +1167,7 @@ mod tests {
                 )
             })
             .collect();
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
         nodes.insert("attacker".to_string(), make_new_node("attacker"));
 
         detector.detect_sybil_cluster(&signals, &nodes, 10_000);
@@ -1211,7 +1211,7 @@ mod tests {
         // Create 100 Sybil identities all endorsing a malicious extension;
         // verify it does not enter the top-50% trust tier.
         let weighter = StakeWeighter::default();
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
 
         // 20 established honest nodes scoring a malicious extension low
         let mut honest_sigs = Vec::new();
@@ -1442,7 +1442,7 @@ mod tests {
     fn test_adversarial_03_sybil_flood() {
         // Attack: 100 Sybil vs 5 honest
         let w = StakeWeighter::default();
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
         for i in 0..5 {
             nodes.insert(format!("h-{i}"), make_established_node(&format!("h-{i}")));
         }
@@ -1517,7 +1517,7 @@ mod tests {
                 )
             })
             .collect();
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
         nodes.insert(
             "single-attacker".to_string(),
             make_new_node("single-attacker"),
@@ -1632,7 +1632,7 @@ mod tests {
         let signals: Vec<TrustSignal> = (0..10)
             .map(|i| make_signal(&format!("s-{i}"), "a", "t", 0.9, 5000 + i * 5))
             .collect();
-        let mut nodes = HashMap::new();
+        let mut nodes = BTreeMap::new();
         nodes.insert("a".to_string(), make_new_node("a"));
 
         detector.detect_sybil_cluster(&signals, &nodes, 10_000);

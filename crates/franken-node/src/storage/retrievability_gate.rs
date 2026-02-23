@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -225,7 +225,7 @@ pub struct TargetTierState {
 pub struct RetrievabilityGate {
     config: RetrievabilityConfig,
     /// Simulated target tier contents: (artifact_id, target_tier) -> state
-    target_state: HashMap<(String, String), TargetTierState>,
+    target_state: BTreeMap<(String, String), TargetTierState>,
     receipts: Vec<ProofReceipt>,
     events: Vec<GateEvent>,
     /// Monotonic timestamp counter for deterministic testing.
@@ -236,7 +236,7 @@ impl RetrievabilityGate {
     pub fn new(config: RetrievabilityConfig) -> Self {
         let mut gate = Self {
             config,
-            target_state: HashMap::new(),
+            target_state: BTreeMap::new(),
             receipts: Vec::new(),
             events: Vec::new(),
             timestamp_counter: 1000,

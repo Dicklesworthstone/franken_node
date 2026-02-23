@@ -267,10 +267,10 @@ impl ControllerBoundaryChecker {
     /// Generate a JSON rejection report with per-invariant counts and error
     /// class distribution.
     pub fn rejection_report(&self) -> serde_json::Value {
-        let mut per_invariant: std::collections::HashMap<String, u64> =
-            std::collections::HashMap::new();
-        let mut per_class: std::collections::HashMap<String, u64> =
-            std::collections::HashMap::new();
+        let mut per_invariant: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
+        let mut per_class: std::collections::BTreeMap<String, u64> =
+            std::collections::BTreeMap::new();
 
         for record in &self.rejected_mutations {
             *per_invariant

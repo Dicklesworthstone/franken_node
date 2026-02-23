@@ -442,7 +442,7 @@ mod tests {
             .iter()
             .map(|c| default_tuning(c).unwrap().symbol_size_bytes)
             .collect();
-        let unique: std::collections::HashSet<u32> = sizes.iter().copied().collect();
+        let unique: std::collections::BTreeSet<u32> = sizes.iter().copied().collect();
         assert_eq!(
             sizes.len(),
             unique.len(),

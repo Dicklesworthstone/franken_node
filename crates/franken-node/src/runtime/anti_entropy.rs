@@ -6,7 +6,7 @@
 //
 // bd-390 — Section 10.11
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -163,7 +163,7 @@ impl TrustRecord {
 /// Local trust state: an ordered collection of trust records.
 #[derive(Debug, Clone)]
 pub struct TrustState {
-    records: HashMap<String, TrustRecord>,
+    records: BTreeMap<String, TrustRecord>,
     current_epoch: u64,
     /// MMR root digest (simplified as XOR of all record digests).
     root_digest: [u8; 32],
@@ -172,7 +172,7 @@ pub struct TrustState {
 impl TrustState {
     pub fn new(epoch: u64) -> Self {
         Self {
-            records: HashMap::new(),
+            records: BTreeMap::new(),
             current_epoch: epoch,
             root_digest: [0u8; 32],
         }
@@ -208,7 +208,7 @@ impl TrustState {
     }
 
     /// Get all record IDs.
-    pub fn record_ids(&self) -> HashSet<String> {
+    pub fn record_ids(&self) -> BTreeSet<String> {
         self.records.keys().cloned().collect()
     }
 

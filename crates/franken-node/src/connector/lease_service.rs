@@ -3,7 +3,7 @@
 //!
 //! Leases have deterministic expiry and renewal. Stale lease usage is rejected.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Purpose for which a lease is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -127,7 +127,7 @@ impl std::fmt::Display for LeaseError {
 
 /// Generic lease service.
 pub struct LeaseService {
-    leases: HashMap<String, Lease>,
+    leases: BTreeMap<String, Lease>,
     pub decisions: Vec<LeaseDecision>,
     next_id: u64,
 }
@@ -135,7 +135,7 @@ pub struct LeaseService {
 impl Default for LeaseService {
     fn default() -> Self {
         Self {
-            leases: HashMap::new(),
+            leases: BTreeMap::new(),
             decisions: Vec::new(),
             next_id: 1,
         }

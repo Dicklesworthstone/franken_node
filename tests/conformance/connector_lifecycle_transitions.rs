@@ -59,7 +59,7 @@ fn total_pair_count() {
 /// Verify: illegal transition count = 56 - 17 = 39.
 #[test]
 fn illegal_transition_count() {
-    let mut legal_set = std::collections::HashSet::new();
+    let mut legal_set = std::collections::BTreeSet::new();
     for (from, to) in &LEGAL_TRANSITIONS {
         legal_set.insert((*from, *to));
     }
@@ -79,7 +79,7 @@ fn illegal_transition_count() {
 /// Verify: no duplicate transitions in the spec.
 #[test]
 fn no_duplicate_transitions() {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     for (from, to) in &LEGAL_TRANSITIONS {
         assert!(seen.insert((*from, *to)), "duplicate transition: {from} → {to}");
     }
@@ -107,7 +107,7 @@ fn every_state_has_incoming() {
 #[test]
 fn happy_path_reachable() {
     let path = ["discovered", "verified", "installed", "configured", "active"];
-    let legal_set: std::collections::HashSet<_> = LEGAL_TRANSITIONS.iter().collect();
+    let legal_set: std::collections::BTreeSet<_> = LEGAL_TRANSITIONS.iter().collect();
     for window in path.windows(2) {
         assert!(
             legal_set.contains(&(&window[0], &window[1])),

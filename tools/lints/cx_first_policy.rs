@@ -2,7 +2,7 @@
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -155,7 +155,7 @@ pub fn run_policy(config: &PolicyConfig, today: NaiveDate) -> Result<LintReport,
     let mut raw_matches = run_pattern(config, PATTERN_NO_RETURN)?;
     raw_matches.extend(run_pattern(config, PATTERN_WITH_RETURN)?);
 
-    let mut unique = HashSet::new();
+    let mut unique = BTreeSet::new();
     let mut checks = Vec::new();
     let mut events = Vec::new();
     let mut violations = Vec::new();

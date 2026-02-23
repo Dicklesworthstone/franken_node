@@ -4,7 +4,7 @@
 //! and decode-DoS.  A campaign runner triages crashes into reproducible fixtures
 //! and a gate enforces minimum health budgets.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ── Fuzz target categories ──────────────────────────────────────────────────
@@ -141,16 +141,16 @@ impl fmt::Display for FuzzError {
 
 #[derive(Debug)]
 pub struct FuzzCorpus {
-    targets: HashMap<String, FuzzTarget>,
-    seeds: HashMap<String, Vec<FuzzSeed>>,
+    targets: BTreeMap<String, FuzzTarget>,
+    seeds: BTreeMap<String, Vec<FuzzSeed>>,
     min_seeds: usize,
 }
 
 impl FuzzCorpus {
     pub fn new(min_seeds: usize) -> Self {
         Self {
-            targets: HashMap::new(),
-            seeds: HashMap::new(),
+            targets: BTreeMap::new(),
+            seeds: BTreeMap::new(),
             min_seeds,
         }
     }

@@ -6,7 +6,7 @@
 
 #![allow(unused)]
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -407,7 +407,7 @@ mod tests {
     fn test_canonical_unique_model_names() {
         let models = canonical_models();
         let names: Vec<&str> = models.iter().map(|m| m.model_name.as_str()).collect();
-        let unique: HashSet<&str> = names.iter().copied().collect();
+        let unique: BTreeSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len(), "Duplicate model names");
     }
 
@@ -415,7 +415,7 @@ mod tests {
     fn test_canonical_unique_domains() {
         let models = canonical_models();
         let domains: Vec<&str> = models.iter().map(|m| m.domain.as_str()).collect();
-        let unique: HashSet<&str> = domains.iter().copied().collect();
+        let unique: BTreeSet<&str> = domains.iter().copied().collect();
         assert_eq!(domains.len(), unique.len(), "Duplicate domains");
     }
 

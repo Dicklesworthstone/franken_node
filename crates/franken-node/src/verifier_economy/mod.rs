@@ -13,7 +13,7 @@
 // Event codes: VEP-001 .. VEP-008
 // Invariants:  INV-VEP-ATTESTATION, INV-VEP-SIGNATURE, INV-VEP-REPUTATION, INV-VEP-PUBLISH
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -321,16 +321,16 @@ pub type VepResult<T> = Result<T, VepError>;
 
 /// Central registry for the verifier economy.
 pub struct VerifierEconomyRegistry {
-    verifiers: HashMap<String, Verifier>,
-    attestations: HashMap<String, Attestation>,
-    disputes: HashMap<String, Dispute>,
-    replay_capsules: HashMap<String, ReplayCapsule>,
+    verifiers: BTreeMap<String, Verifier>,
+    attestations: BTreeMap<String, Attestation>,
+    disputes: BTreeMap<String, Dispute>,
+    replay_capsules: BTreeMap<String, ReplayCapsule>,
     events: Vec<VerifierEconomyEvent>,
     next_verifier_id: u64,
     next_attestation_id: u64,
     next_dispute_id: u64,
     /// Sybil resistance: track submission counts per verifier per window.
-    submission_counts: HashMap<String, u32>,
+    submission_counts: BTreeMap<String, u32>,
     /// Maximum submissions per verifier per window.
     max_submissions_per_window: u32,
 }
@@ -344,15 +344,15 @@ impl Default for VerifierEconomyRegistry {
 impl VerifierEconomyRegistry {
     pub fn new() -> Self {
         Self {
-            verifiers: HashMap::new(),
-            attestations: HashMap::new(),
-            disputes: HashMap::new(),
-            replay_capsules: HashMap::new(),
+            verifiers: BTreeMap::new(),
+            attestations: BTreeMap::new(),
+            disputes: BTreeMap::new(),
+            replay_capsules: BTreeMap::new(),
             events: Vec::new(),
             next_verifier_id: 1,
             next_attestation_id: 1,
             next_dispute_id: 1,
-            submission_counts: HashMap::new(),
+            submission_counts: BTreeMap::new(),
             max_submissions_per_window: 100,
         }
     }
@@ -824,7 +824,7 @@ impl VerifierEconomyRegistry {
                     a.verifier_id == verifier.verifier_id && a.state == AttestationState::Published
                 })
                 .map(|a| a.claim.dimension.clone())
-                .collect::<std::collections::HashSet<_>>()
+                .collect::<std::collections::BTreeSet<_>>()
                 .into_iter()
                 .collect();
 
@@ -869,7 +869,7 @@ impl VerifierEconomyRegistry {
     /// Check whether a verifier has been selectively reporting.
     /// Returns true if the verifier's dimension coverage is below threshold.
     pub fn check_selective_reporting(&self, verifier_id: &str, min_dimensions: usize) -> bool {
-        let dims: std::collections::HashSet<_> = self
+        let dims: std::collections::BTreeSet<_> = self
             .attestations
             .values()
             .filter(|a| a.verifier_id == verifier_id)

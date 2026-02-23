@@ -29,7 +29,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -316,7 +316,7 @@ impl ParticipationWeightEngine {
 
         // Step 2: Detect Sybil clusters and apply attenuation
         let clusters = self.detect_sybil_clusters(participants);
-        let sybil_member_ids: HashSet<String> = clusters
+        let sybil_member_ids: BTreeSet<String> = clusters
             .iter()
             .flat_map(|c| c.member_ids.iter().cloned())
             .collect();
@@ -463,7 +463,7 @@ impl ParticipationWeightEngine {
 
     fn detect_sybil_clusters(&self, participants: &[ParticipantIdentity]) -> Vec<SybilCluster> {
         // Group by cluster_hint for participants that share one
-        let mut hint_groups: HashMap<String, Vec<String>> = HashMap::new();
+        let mut hint_groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for p in participants {
             if let Some(ref hint) = p.cluster_hint {
                 hint_groups

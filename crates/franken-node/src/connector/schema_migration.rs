@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// A semantic version (major.minor.patch).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SchemaVersion {
     pub major: u32,
     pub minor: u32,
@@ -181,7 +181,7 @@ impl MigrationRegistry {
         }
 
         let mut queue: Vec<(SchemaVersion, Vec<MigrationHint>)> = vec![(from.clone(), Vec::new())];
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = std::collections::BTreeSet::new();
         visited.insert(from.clone());
 
         while let Some((current, path)) = queue.first().cloned() {

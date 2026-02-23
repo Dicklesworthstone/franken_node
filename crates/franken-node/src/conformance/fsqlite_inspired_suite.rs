@@ -1068,7 +1068,7 @@ mod tests {
 
     #[test]
     fn all_builtin_ids_are_unique() {
-        let mut ids = std::collections::HashSet::new();
+        let mut ids = std::collections::BTreeSet::new();
         for f in builtin_determinism_fixtures()
             .into_iter()
             .chain(builtin_idempotency_fixtures())

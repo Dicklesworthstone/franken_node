@@ -5,7 +5,7 @@
 //
 // bd-5si — Section 10.12
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -131,11 +131,11 @@ impl std::error::Error for TrustFabricError {}
 
 /// Cryptographic digest of trust state (simplified XOR hash).
 fn compute_digest(
-    trust_cards: &HashSet<String>,
+    trust_cards: &BTreeSet<String>,
     revocation_ver: u64,
-    extensions: &HashSet<String>,
+    extensions: &BTreeSet<String>,
     policy_epoch: u64,
-    anchor_fps: &HashSet<String>,
+    anchor_fps: &BTreeSet<String>,
 ) -> [u8; 32] {
     let mut hash = [0u8; 32];
     for card in trust_cards {
@@ -170,17 +170,17 @@ pub struct TrustStateVector {
     /// Cryptographic digest.
     pub digest: [u8; 32],
     /// Active trust card IDs.
-    pub trust_cards: HashSet<String>,
+    pub trust_cards: BTreeSet<String>,
     /// Revocation list version.
     pub revocation_ver: u64,
     /// Authorized extension IDs.
-    pub extensions: HashSet<String>,
+    pub extensions: BTreeSet<String>,
     /// Policy checkpoint epoch.
     pub policy_epoch: u64,
     /// Trust anchor fingerprints.
-    pub anchor_fps: HashSet<String>,
+    pub anchor_fps: BTreeSet<String>,
     /// Revoked artifact IDs.
-    pub revocations: HashSet<String>,
+    pub revocations: BTreeSet<String>,
 }
 
 impl TrustStateVector {
@@ -188,12 +188,12 @@ impl TrustStateVector {
         Self {
             version: 0,
             digest: [0u8; 32],
-            trust_cards: HashSet::new(),
+            trust_cards: BTreeSet::new(),
             revocation_ver: 0,
-            extensions: HashSet::new(),
+            extensions: BTreeSet::new(),
             policy_epoch,
-            anchor_fps: HashSet::new(),
-            revocations: HashSet::new(),
+            anchor_fps: BTreeSet::new(),
+            revocations: BTreeSet::new(),
         }
     }
 
@@ -238,17 +238,17 @@ impl TrustStateVector {
 
     /// Compute delta: items in self but not in other.
     pub fn delta_from(&self, other: &TrustStateVector) -> TrustStateDelta {
-        let new_cards: HashSet<String> = self
+        let new_cards: BTreeSet<String> = self
             .trust_cards
             .difference(&other.trust_cards)
             .cloned()
             .collect();
-        let new_extensions: HashSet<String> = self
+        let new_extensions: BTreeSet<String> = self
             .extensions
             .difference(&other.extensions)
             .cloned()
             .collect();
-        let new_revocations: HashSet<String> = self
+        let new_revocations: BTreeSet<String> = self
             .revocations
             .difference(&other.revocations)
             .cloned()
@@ -269,9 +269,9 @@ impl TrustStateVector {
 /// Delta between two trust states.
 #[derive(Debug, Clone)]
 pub struct TrustStateDelta {
-    pub new_cards: HashSet<String>,
-    pub new_extensions: HashSet<String>,
-    pub new_revocations: HashSet<String>,
+    pub new_cards: BTreeSet<String>,
+    pub new_extensions: BTreeSet<String>,
+    pub new_revocations: BTreeSet<String>,
     pub new_revocation_ver: Option<u64>,
 }
 
@@ -417,9 +417,9 @@ impl TrustFabricNode {
 
         if self.state.digest == remote.digest {
             return Ok(TrustStateDelta {
-                new_cards: HashSet::new(),
-                new_extensions: HashSet::new(),
-                new_revocations: HashSet::new(),
+                new_cards: BTreeSet::new(),
+                new_extensions: BTreeSet::new(),
+                new_revocations: BTreeSet::new(),
                 new_revocation_ver: None,
             });
         }
@@ -585,7 +585,7 @@ impl TrustFabricNode {
 /// Simulated fleet of trust fabric nodes.
 #[derive(Debug, Default)]
 pub struct TrustFabricFleet {
-    nodes: HashMap<String, TrustFabricNode>,
+    nodes: BTreeMap<String, TrustFabricNode>,
 }
 
 impl TrustFabricFleet {

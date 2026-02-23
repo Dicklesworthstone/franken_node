@@ -11,7 +11,7 @@
 //! - INV-AUTOTRIG-IDEMPOTENT: duplicate rejections at same level produce one escalation
 //! - INV-AUTOTRIG-CAUSAL: every trigger event links to its originating rejection
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 
 use super::guardrail_monitor::GuardrailRejection;
@@ -112,7 +112,7 @@ impl TriggerEvent {
 // ── Idempotency key ───────────────────────────────────────────────
 
 /// Idempotency key derived from (current_level, budget_id, epoch_id).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct IdempotencyKey {
     level: HardeningLevel,
     budget_id: String,
@@ -173,7 +173,7 @@ fn next_level(current: HardeningLevel) -> Option<HardeningLevel> {
 pub struct HardeningAutoTrigger {
     config: TriggerConfig,
     /// Set of already-processed idempotency keys.
-    processed_keys: HashSet<IdempotencyKey>,
+    processed_keys: BTreeSet<IdempotencyKey>,
     /// Trigger event log.
     events: Vec<TriggerEvent>,
     /// Counter for generating trigger IDs.
@@ -185,7 +185,7 @@ impl HardeningAutoTrigger {
     pub fn new(config: TriggerConfig) -> Self {
         Self {
             config,
-            processed_keys: HashSet::new(),
+            processed_keys: BTreeSet::new(),
             events: Vec::new(),
             trigger_counter: 0,
         }

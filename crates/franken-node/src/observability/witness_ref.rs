@@ -26,7 +26,7 @@ pub mod event_codes {
 // ── WitnessId ──────────────────────────────────────────────────────
 
 /// Stable, unique identifier for a witness observation.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WitnessId(pub String);
 
 impl WitnessId {
@@ -164,7 +164,7 @@ impl WitnessSet {
 
     /// Check for duplicate witness IDs.
     pub fn has_duplicates(&self) -> bool {
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for w in &self.refs {
             if !seen.insert(&w.witness_id) {
                 return true;
@@ -364,7 +364,7 @@ impl WitnessValidator {
         if witnesses.has_duplicates() {
             self.rejected_count += 1;
             // Find the first duplicate
-            let mut seen = std::collections::HashSet::new();
+            let mut seen = std::collections::BTreeSet::new();
             for w in witnesses.refs() {
                 if !seen.insert(&w.witness_id) {
                     return Err(WitnessValidationError::DuplicateWitnessId {
@@ -425,7 +425,7 @@ impl WitnessValidator {
         let mut high_impact_entries = 0u64;
         let mut high_impact_with_witnesses = 0u64;
         let mut total_witnesses = 0u64;
-        let mut witness_kind_counts = std::collections::HashMap::new();
+        let mut witness_kind_counts = std::collections::BTreeMap::new();
 
         for (entry, witnesses) in entries_with_witnesses {
             total_entries += 1;
@@ -474,7 +474,7 @@ pub struct WitnessAudit {
     pub high_impact_with_witnesses: u64,
     pub total_witnesses: u64,
     pub coverage_pct: f64,
-    pub witness_kind_counts: std::collections::HashMap<String, u64>,
+    pub witness_kind_counts: std::collections::BTreeMap<String, u64>,
 }
 
 impl WitnessAudit {

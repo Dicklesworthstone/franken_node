@@ -5,7 +5,7 @@
 
 #![allow(unused)]
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -310,7 +310,7 @@ impl FastapiSkeletonGate {
             }).collect::<Vec<_>>(),
             "middleware_coverage": MiddlewareLayer::all().iter().map(|m| {
                 (m.label().to_string(), self.middleware.contains(m))
-            }).collect::<HashMap<String, bool>>()
+            }).collect::<BTreeMap<String, bool>>()
         })
     }
 }
@@ -455,7 +455,7 @@ mod tests {
     fn test_canonical_unique_paths() {
         let eps = canonical_endpoints();
         let paths: Vec<&str> = eps.iter().map(|e| e.path.as_str()).collect();
-        let unique: std::collections::HashSet<&str> = paths.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = paths.iter().copied().collect();
         assert_eq!(paths.len(), unique.len());
     }
 

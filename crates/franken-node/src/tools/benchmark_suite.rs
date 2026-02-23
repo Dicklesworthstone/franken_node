@@ -58,7 +58,7 @@ pub const DEFAULT_REGRESSION_THRESHOLD_PCT: f64 = 10.0;
 // ---------------------------------------------------------------------------
 
 /// The six required benchmark dimensions from Section 14.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BenchmarkDimension {
     CompatibilityCorrectness,
@@ -291,7 +291,7 @@ impl BenchmarkReport {
             .scenarios
             .iter()
             .map(|s| s.dimension)
-            .collect::<std::collections::HashSet<_>>()
+            .collect::<std::collections::BTreeSet<_>>()
             .into_iter()
             .collect();
         dims.sort_by_key(|d| format!("{d}"));
@@ -697,7 +697,7 @@ impl BenchmarkSuite {
     /// `measurements` maps scenario name to raw measurement values.
     pub fn run(
         &mut self,
-        measurements: &std::collections::HashMap<String, Vec<f64>>,
+        measurements: &std::collections::BTreeMap<String, Vec<f64>>,
     ) -> BenchmarkReport {
         let mut results = Vec::new();
 
@@ -779,7 +779,7 @@ pub fn from_json(json: &str) -> Result<BenchmarkReport, serde_json::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
+    use std::collections::BTreeMap;
 
     #[test]
     fn test_scoring_lower_is_better_perfect() {
@@ -905,7 +905,7 @@ mod tests {
         let mut suite = BenchmarkSuite::new(config);
         suite.load_default_scenarios();
 
-        let dims: std::collections::HashSet<_> =
+        let dims: std::collections::BTreeSet<_> =
             suite.scenarios().iter().map(|s| s.dimension).collect();
         for d in BenchmarkDimension::all() {
             assert!(dims.contains(d), "Missing dimension: {d}");
@@ -918,7 +918,7 @@ mod tests {
         let mut suite = BenchmarkSuite::new(config);
         suite.load_default_scenarios();
 
-        let mut measurements = HashMap::new();
+        let mut measurements = BTreeMap::new();
         for s in suite.scenarios().to_vec() {
             measurements.insert(s.name.clone(), vec![150.0, 152.0, 148.0, 151.0, 149.0]);
         }
@@ -936,7 +936,7 @@ mod tests {
         let mut suite = BenchmarkSuite::new(config);
         suite.load_default_scenarios();
 
-        let mut measurements = HashMap::new();
+        let mut measurements = BTreeMap::new();
         for s in suite.scenarios().to_vec() {
             measurements.insert(s.name.clone(), vec![50.0; 5]);
         }
@@ -1093,7 +1093,7 @@ mod tests {
             scoring: ScoringConfig::lower_is_better(1.0, 10.0),
         });
 
-        let mut measurements = HashMap::new();
+        let mut measurements = BTreeMap::new();
         measurements.insert("test_scenario".to_string(), vec![5.0; 5]);
         let _report = suite.run(&measurements);
 
@@ -1167,7 +1167,7 @@ mod tests {
             scoring: ScoringConfig::higher_is_better(1000.0, 200.0),
         });
 
-        let mut measurements = HashMap::new();
+        let mut measurements = BTreeMap::new();
         // cold_start: 100ms = ideal = score 100
         measurements.insert("cold_start_latency".to_string(), vec![100.0; 5]);
         // migration: 1000 fixtures/s = ideal = score 100

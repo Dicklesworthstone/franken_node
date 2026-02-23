@@ -289,7 +289,7 @@ pub struct CampaignCorpus {
 impl CampaignCorpus {
     /// Count of distinct categories in the corpus.
     pub fn category_count(&self) -> usize {
-        let mut categories: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut categories: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
         for c in &self.campaigns {
             categories.insert(c.category.id());
         }
@@ -644,7 +644,7 @@ mod tests {
     #[test]
     fn test_category_ids_unique() {
         let ids: Vec<&str> = CampaignCategory::all().iter().map(|c| c.id()).collect();
-        let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+        let unique: std::collections::BTreeSet<&&str> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
     }
 
@@ -656,7 +656,7 @@ mod tests {
     #[test]
     fn test_mutation_ids_unique() {
         let ids: Vec<&str> = MutationStrategy::all().iter().map(|m| m.id()).collect();
-        let unique: std::collections::HashSet<&&str> = ids.iter().collect();
+        let unique: std::collections::BTreeSet<&&str> = ids.iter().collect();
         assert_eq!(ids.len(), unique.len());
     }
 

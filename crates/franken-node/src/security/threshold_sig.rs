@@ -5,7 +5,7 @@
 //! machine-readable failure reasons.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 use std::hash::{DefaultHasher, Hash, Hasher};
 
@@ -166,13 +166,13 @@ pub fn verify_threshold(
         };
     }
 
-    let known_key_ids: HashSet<&str> = config
+    let known_key_ids: BTreeSet<&str> = config
         .signer_keys
         .iter()
         .map(|k| k.key_id.as_str())
         .collect();
-    let mut seen_signers: HashSet<&str> = HashSet::new();
-    let mut seen_key_ids: HashSet<&str> = HashSet::new();
+    let mut seen_signers: BTreeSet<&str> = BTreeSet::new();
+    let mut seen_key_ids: BTreeSet<&str> = BTreeSet::new();
     let mut valid_count = 0u32;
     let mut first_failure: Option<FailureReason> = None;
 

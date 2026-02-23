@@ -3,7 +3,7 @@
 //! Durable claims are accepted only when required markers and proof artifacts
 //! are present, valid, fresh, and verification-complete.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -112,7 +112,7 @@ pub struct ProofArtifact {
 /// Inputs available to the gate at evaluation time.
 #[derive(Debug, Clone, Default)]
 pub struct VerificationInput {
-    pub available_markers: HashSet<String>,
+    pub available_markers: BTreeSet<String>,
     pub proofs: Vec<ProofArtifact>,
     pub verification_complete: bool,
     pub simulated_elapsed_ms: u64,
@@ -484,7 +484,7 @@ mod tests {
     }
 
     fn valid_input() -> VerificationInput {
-        let mut markers = HashSet::new();
+        let mut markers = BTreeSet::new();
         markers.insert("marker-a".to_string());
         VerificationInput {
             available_markers: markers,

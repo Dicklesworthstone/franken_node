@@ -535,7 +535,7 @@ mod tests {
     #[test]
     fn test_domain_prefixes_unique() {
         let prefixes: Vec<&str> = DomainPrefix::all().iter().map(|d| d.prefix()).collect();
-        let unique: std::collections::HashSet<&str> = prefixes.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = prefixes.iter().copied().collect();
         assert_eq!(prefixes.len(), unique.len());
     }
 
@@ -556,7 +556,7 @@ mod tests {
     #[test]
     fn test_domain_labels_unique() {
         let labels: Vec<&str> = DomainPrefix::all().iter().map(|d| d.label()).collect();
-        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
         assert_eq!(labels.len(), unique.len());
     }
 
@@ -929,7 +929,7 @@ mod tests {
     #[test]
     fn test_cross_domain_collision_impossible() {
         let data = b"identical";
-        let mut full_forms = std::collections::HashSet::new();
+        let mut full_forms = std::collections::BTreeSet::new();
         for domain in DomainPrefix::all() {
             let id = TrustObjectId::derive_content_addressed(*domain, data);
             let inserted = full_forms.insert(id.full_form());
@@ -941,7 +941,7 @@ mod tests {
     #[test]
     fn test_within_domain_no_collisions_random() {
         // Test 1000 random inputs in the same domain
-        let mut digests = std::collections::HashSet::new();
+        let mut digests = std::collections::BTreeSet::new();
         for i in 0..1000 {
             let data = format!("random-input-{i}");
             let id =

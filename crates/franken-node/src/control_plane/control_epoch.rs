@@ -581,8 +581,8 @@ mod tests {
 
     #[test]
     fn epoch_hash_consistency() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
+        use std::collections::BTreeSet;
+        let mut set = BTreeSet::new();
         set.insert(ControlEpoch::new(1));
         set.insert(ControlEpoch::new(2));
         set.insert(ControlEpoch::new(1)); // duplicate

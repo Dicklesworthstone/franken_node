@@ -11,7 +11,7 @@
 use crate::remote::computation_registry::ComputationRegistry;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::fmt;
 
 pub const IDEMPOTENCY_DOMAIN_PREFIX: &[u8] = b"franken_node.idempotency.v1";
@@ -26,7 +26,7 @@ pub mod event_codes {
 }
 
 /// Fixed-size idempotency key (SHA-256 digest).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct IdempotencyKey([u8; IDEMPOTENCY_KEY_LEN]);
 
 impl IdempotencyKey {
@@ -223,7 +223,7 @@ impl IdempotencyKeyDeriver {
         epoch: u64,
         payloads: &[Vec<u8>],
     ) -> Result<usize, IdempotencyError> {
-        let mut seen = HashSet::with_capacity(payloads.len());
+        let mut seen = BTreeSet::new();
         let mut collisions = 0_usize;
         for payload in payloads {
             let key = self.derive_key(computation_name, epoch, payload)?;

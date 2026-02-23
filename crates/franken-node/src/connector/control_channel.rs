@@ -3,7 +3,7 @@
 //!
 //! Prevents replay attacks and out-of-order processing on control channels.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 
 /// Direction of a control channel message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -141,8 +141,8 @@ pub struct ControlChannel {
     config: ChannelConfig,
     last_send_seq: Option<u64>,
     last_recv_seq: Option<u64>,
-    send_window: HashSet<u64>,
-    recv_window: HashSet<u64>,
+    send_window: BTreeSet<u64>,
+    recv_window: BTreeSet<u64>,
     open: bool,
     audit_log: Vec<ChannelAuditEntry>,
 }
@@ -154,8 +154,8 @@ impl ControlChannel {
             config,
             last_send_seq: None,
             last_recv_seq: None,
-            send_window: HashSet::new(),
-            recv_window: HashSet::new(),
+            send_window: BTreeSet::new(),
+            recv_window: BTreeSet::new(),
             open: true,
             audit_log: Vec::new(),
         })
@@ -171,14 +171,14 @@ impl ControlChannel {
     }
 
     /// Get the replay window for a direction.
-    fn replay_window(&self, direction: Direction) -> &HashSet<u64> {
+    fn replay_window(&self, direction: Direction) -> &BTreeSet<u64> {
         match direction {
             Direction::Send => &self.send_window,
             Direction::Receive => &self.recv_window,
         }
     }
 
-    fn replay_window_mut(&mut self, direction: Direction) -> &mut HashSet<u64> {
+    fn replay_window_mut(&mut self, direction: Direction) -> &mut BTreeSet<u64> {
         match direction {
             Direction::Send => &mut self.send_window,
             Direction::Receive => &mut self.recv_window,

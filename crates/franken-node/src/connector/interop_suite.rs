@@ -4,12 +4,12 @@
 //! Each suite validates cross-implementation compatibility.  Failures produce
 //! minimal reproducer fixtures.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ── Interop classes ─────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum InteropClass {
     Serialization,
     ObjectId,
@@ -269,8 +269,8 @@ pub fn run_suite(cases: &[InteropTestCase]) -> Vec<InteropResult> {
 }
 
 /// Summarize results by class.
-pub fn summarize(results: &[InteropResult]) -> HashMap<InteropClass, (usize, usize)> {
-    let mut summary: HashMap<InteropClass, (usize, usize)> = HashMap::new();
+pub fn summarize(results: &[InteropResult]) -> BTreeMap<InteropClass, (usize, usize)> {
+    let mut summary: BTreeMap<InteropClass, (usize, usize)> = BTreeMap::new();
     for r in results {
         let entry = summary.entry(r.class).or_insert((0, 0));
         entry.1 += 1;

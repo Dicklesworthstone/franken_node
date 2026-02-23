@@ -1239,14 +1239,14 @@ mod tests {
     #[test]
     fn operation_labels_unique() {
         let labels: Vec<&str> = VefOperation::all().iter().map(|o| o.label()).collect();
-        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
         assert_eq!(labels.len(), unique.len());
     }
 
     #[test]
     fn mode_labels_unique() {
         let labels: Vec<&str> = BudgetMode::all().iter().map(|m| m.label()).collect();
-        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
         assert_eq!(labels.len(), unique.len());
     }
 }

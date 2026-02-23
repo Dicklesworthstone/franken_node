@@ -86,7 +86,7 @@ fn error_code_prefix() {
 /// Verify: error codes are unique.
 #[test]
 fn error_codes_unique() {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     for code in &ERROR_CODES {
         assert!(seen.insert(code), "duplicate error code: {code}");
     }
@@ -108,7 +108,7 @@ fn event_type_labels_snake_case() {
 /// Verify: event types are unique.
 #[test]
 fn event_types_unique() {
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::BTreeSet::new();
     for label in &EVENT_TYPES {
         assert!(seen.insert(label), "duplicate event type: {label}");
     }

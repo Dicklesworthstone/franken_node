@@ -12,7 +12,7 @@
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt;
 use uuid::Uuid;
 
@@ -463,9 +463,9 @@ impl RolloutState {
 /// The barrier enforcement engine manages applied barriers and produces audit receipts.
 #[derive(Debug, Clone)]
 pub struct BarrierEngine {
-    barriers: HashMap<String, Barrier>,
-    node_barriers: HashMap<String, Vec<String>>,
-    rollout_states: HashMap<String, RolloutState>,
+    barriers: BTreeMap<String, Barrier>,
+    node_barriers: BTreeMap<String, Vec<String>>,
+    rollout_states: BTreeMap<String, RolloutState>,
     audit_log: Vec<BarrierAuditReceipt>,
 }
 
@@ -478,9 +478,9 @@ impl Default for BarrierEngine {
 impl BarrierEngine {
     pub fn new() -> Self {
         Self {
-            barriers: HashMap::new(),
-            node_barriers: HashMap::new(),
-            rollout_states: HashMap::new(),
+            barriers: BTreeMap::new(),
+            node_barriers: BTreeMap::new(),
+            rollout_states: BTreeMap::new(),
             audit_log: Vec::new(),
         }
     }

@@ -4,7 +4,7 @@
 //! and optional `parent_span_id`.  Missing context is a conformance failure.
 //! Traces can be stitched across services via shared `trace_id`.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fmt;
 
 // ── Trace context ───────────────────────────────────────────────────────────
@@ -133,7 +133,7 @@ impl fmt::Display for TraceError {
 #[derive(Debug, Default)]
 pub struct TraceStore {
     /// trace_id → list of spans in insertion order.
-    traces: HashMap<String, Vec<TraceContext>>,
+    traces: BTreeMap<String, Vec<TraceContext>>,
 }
 
 impl TraceStore {

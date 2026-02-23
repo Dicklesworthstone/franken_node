@@ -13,7 +13,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 use super::trust_object_id::DomainPrefix;
 
@@ -47,7 +47,7 @@ pub mod error_codes {
 // ---------------------------------------------------------------------------
 
 /// The six product trust object types that require canonical serialization.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum TrustObjectType {
     PolicyCheckpoint,
     DelegationToken,
@@ -288,7 +288,7 @@ impl std::fmt::Display for SerializerError {
 /// Serialization uses sorted keys, fixed-width integers in big-endian,
 /// length-prefixed byte strings, and no optional whitespace.
 pub struct CanonicalSerializer {
-    schemas: HashMap<TrustObjectType, CanonicalSchema>,
+    schemas: BTreeMap<TrustObjectType, CanonicalSchema>,
     events: Vec<SerializerEvent>,
 }
 
@@ -296,7 +296,7 @@ impl CanonicalSerializer {
     /// Create an empty serializer.
     pub fn new() -> Self {
         Self {
-            schemas: HashMap::new(),
+            schemas: BTreeMap::new(),
             events: Vec::new(),
         }
     }
@@ -635,7 +635,7 @@ mod tests {
     #[test]
     fn test_object_type_labels_unique() {
         let labels: Vec<&str> = TrustObjectType::all().iter().map(|t| t.label()).collect();
-        let unique: std::collections::HashSet<&str> = labels.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = labels.iter().copied().collect();
         assert_eq!(labels.len(), unique.len());
     }
 
@@ -645,7 +645,7 @@ mod tests {
             .iter()
             .map(|t| t.domain_tag())
             .collect();
-        let unique: std::collections::HashSet<[u8; 2]> = tags.iter().copied().collect();
+        let unique: std::collections::BTreeSet<[u8; 2]> = tags.iter().copied().collect();
         assert_eq!(tags.len(), unique.len());
     }
 

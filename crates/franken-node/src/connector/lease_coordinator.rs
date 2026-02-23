@@ -3,7 +3,7 @@
 //! Coordinator selection is deterministic via weighted hashing.
 //! Quorum thresholds vary by safety tier. Failures are classified.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
@@ -166,10 +166,10 @@ pub fn verify_quorum(
     timestamp: &str,
 ) -> QuorumVerification {
     let threshold = config.threshold_for_tier(tier);
-    let known_set: HashSet<&str> = known_signers.iter().map(|s| s.as_str()).collect();
+    let known_set: BTreeSet<&str> = known_signers.iter().map(|s| s.as_str()).collect();
     let mut failures = Vec::new();
     let mut valid_count: u32 = 0;
-    let mut seen_signers = HashSet::new();
+    let mut seen_signers = BTreeSet::new();
 
     for sig in signatures {
         // Check for unknown signer

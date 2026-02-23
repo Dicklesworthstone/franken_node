@@ -12,7 +12,6 @@
 //! - INV-IBR-INTEGRITY:  SHA-256 hash validates on every read/export
 
 use std::collections::BTreeMap;
-use std::collections::HashMap;
 use std::fmt;
 
 // ── Event codes ────────────────────────────────────────────────────
@@ -389,7 +388,7 @@ pub fn export_sarif(bundle: &IncidentBundle) -> BTreeMap<String, String> {
 #[derive(Debug)]
 pub struct IncidentBundleStore {
     config: RetentionConfig,
-    bundles: HashMap<String, IncidentBundle>,
+    bundles: BTreeMap<String, IncidentBundle>,
     total_bytes: u64,
     max_bytes: u64,
     decisions: Vec<RetentionDecision>,
@@ -409,7 +408,7 @@ impl IncidentBundleStore {
         }
         Ok(Self {
             config,
-            bundles: HashMap::new(),
+            bundles: BTreeMap::new(),
             total_bytes: 0,
             max_bytes,
             decisions: Vec::new(),

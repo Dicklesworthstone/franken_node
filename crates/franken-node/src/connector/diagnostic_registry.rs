@@ -9,7 +9,7 @@
 // storm protection (conservative mode), and dynamic budget adjustment
 // after BOCPD regime shifts (bd-3u4).
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeMap, VecDeque};
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -264,8 +264,8 @@ pub struct VoiEvent {
 #[derive(Debug)]
 pub struct VoiScheduler {
     config: VoiConfig,
-    diagnostics: HashMap<String, DiagnosticDef>,
-    states: HashMap<String, DiagnosticState>,
+    diagnostics: BTreeMap<String, DiagnosticDef>,
+    states: BTreeMap<String, DiagnosticState>,
     /// Consecutive windows where demand exceeded storm threshold.
     consecutive_storm_windows: usize,
     /// Whether conservative mode is active.
@@ -284,8 +284,8 @@ impl VoiScheduler {
         config.validate()?;
         Ok(Self {
             config,
-            diagnostics: HashMap::new(),
-            states: HashMap::new(),
+            diagnostics: BTreeMap::new(),
+            states: BTreeMap::new(),
             consecutive_storm_windows: 0,
             conservative_mode: false,
             regime_boost_until: 0,

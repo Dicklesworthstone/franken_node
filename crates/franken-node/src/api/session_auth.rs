@@ -14,7 +14,7 @@
 //! - INV-SCC-TERMINATED: Terminated sessions reject all further messages.
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::connector::control_channel::Direction;
 use crate::control_plane::key_role_separation::KeyRole;
@@ -212,7 +212,7 @@ pub struct AuthenticatedMessage {
 }
 
 /// Direction of an authenticated message. Maps to connector::Direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum MessageDirection {
     Send,
     Receive,
@@ -377,9 +377,9 @@ impl std::fmt::Display for SessionError {
 /// Once terminated, a session rejects all further messages.
 pub struct SessionManager {
     config: SessionConfig,
-    sessions: HashMap<String, AuthenticatedSession>,
+    sessions: BTreeMap<String, AuthenticatedSession>,
     /// Per-session, per-direction replay windows (for replay_window > 0).
-    replay_windows: HashMap<(String, MessageDirection), HashSet<u64>>,
+    replay_windows: BTreeMap<(String, MessageDirection), BTreeSet<u64>>,
     events: Vec<SessionEvent>,
 }
 
@@ -388,8 +388,8 @@ impl SessionManager {
     pub fn new(config: SessionConfig) -> Self {
         Self {
             config,
-            sessions: HashMap::new(),
-            replay_windows: HashMap::new(),
+            sessions: BTreeMap::new(),
+            replay_windows: BTreeMap::new(),
             events: Vec::new(),
         }
     }

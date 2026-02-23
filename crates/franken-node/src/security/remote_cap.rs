@@ -6,7 +6,7 @@
 //! - `CapabilityGate` as the single validation/enforcement point
 //! - structured audit events for issuance/consumption/denials
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::BTreeSet;
 use std::fmt;
 
 use hmac::{Hmac, Mac};
@@ -355,8 +355,8 @@ impl CapabilityProvider {
 pub struct CapabilityGate {
     verification_secret: String,
     connectivity_mode: ConnectivityMode,
-    consumed_tokens: HashSet<String>,
-    revoked_tokens: HashSet<String>,
+    consumed_tokens: BTreeSet<String>,
+    revoked_tokens: BTreeSet<String>,
     audit_log: Vec<RemoteCapAuditEvent>,
 }
 
@@ -366,8 +366,8 @@ impl CapabilityGate {
         Self {
             verification_secret: verification_secret.to_string(),
             connectivity_mode: ConnectivityMode::Connected,
-            consumed_tokens: HashSet::new(),
-            revoked_tokens: HashSet::new(),
+            consumed_tokens: BTreeSet::new(),
+            revoked_tokens: BTreeSet::new(),
             audit_log: Vec::new(),
         }
     }
@@ -506,7 +506,9 @@ impl CapabilityGate {
             return Err(err);
         }
 
-        if now_epoch_secs > cap.expires_at_epoch_secs {
+        // Expiry is fail-closed at the exact boundary: once `now` reaches
+        // `expires_at`, the capability is no longer valid.
+        if now_epoch_secs >= cap.expires_at_epoch_secs {
             let err = RemoteCapError::Expired {
                 now_epoch_secs,
                 expires_at_epoch_secs: cap.expires_at_epoch_secs,
@@ -738,6 +740,34 @@ mod tests {
                 "trace-4",
             )
             .expect_err("expired token must fail");
+        assert_eq!(err.code(), "REMOTECAP_EXPIRED");
+    }
+
+    #[test]
+    fn token_is_denied_at_exact_expiry_boundary() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                10,
+                true,
+                false,
+                "trace-4b",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-4c",
+            )
+            .expect_err("token must be expired at the boundary");
         assert_eq!(err.code(), "REMOTECAP_EXPIRED");
     }
 

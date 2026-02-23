@@ -927,7 +927,7 @@ mod tests {
     #[test]
     fn test_taxonomy_names_unique() {
         let names: Vec<&str> = CAPABILITY_TAXONOMY.iter().map(|e| e.name).collect();
-        let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = names.iter().copied().collect();
         assert_eq!(names.len(), unique.len());
     }
 

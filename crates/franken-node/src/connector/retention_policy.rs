@@ -3,7 +3,7 @@
 //! Retention class is mandatory per message type. Required objects are durably stored.
 //! Ephemeral objects may be dropped only under policy (TTL or storage pressure).
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Retention class for a control-plane message.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -32,7 +32,7 @@ pub struct RetentionPolicy {
 /// Registry of retention policies per message type.
 #[derive(Debug, Default)]
 pub struct RetentionRegistry {
-    policies: HashMap<String, RetentionPolicy>,
+    policies: BTreeMap<String, RetentionPolicy>,
 }
 
 impl RetentionRegistry {
@@ -131,7 +131,7 @@ impl std::fmt::Display for RetentionError {
 #[derive(Debug)]
 pub struct RetentionStore {
     registry: RetentionRegistry,
-    messages: HashMap<String, StoredMessage>,
+    messages: BTreeMap<String, StoredMessage>,
     total_bytes: u64,
     max_bytes: u64,
     decisions: Vec<RetentionDecision>,
@@ -146,7 +146,7 @@ impl RetentionStore {
         }
         Ok(Self {
             registry,
-            messages: HashMap::new(),
+            messages: BTreeMap::new(),
             total_bytes: 0,
             max_bytes,
             decisions: Vec::new(),

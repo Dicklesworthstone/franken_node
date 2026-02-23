@@ -3,7 +3,7 @@
 //! Respects per-cycle work caps. Guarantees no tenant starvation via fairness minimum.
 //! Every cycle produces an auditable record.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Configuration for the repair controller.
 #[derive(Debug, Clone)]
@@ -129,7 +129,7 @@ pub fn run_cycle(
     }
 
     // Group by tenant, sorted by tenant_id for determinism
-    let mut by_tenant: HashMap<String, Vec<&RepairItem>> = HashMap::new();
+    let mut by_tenant: BTreeMap<String, Vec<&RepairItem>> = BTreeMap::new();
     for item in pending {
         by_tenant
             .entry(item.tenant_id.clone())
@@ -152,7 +152,7 @@ pub fn run_cycle(
         .collect();
     let skipped = by_tenant.len() - active_tenants.len();
 
-    let mut allocations: HashMap<String, RepairAllocation> = HashMap::new();
+    let mut allocations: BTreeMap<String, RepairAllocation> = BTreeMap::new();
     let mut total_used: u64 = 0;
 
     // First pass: fairness minimum for each tenant

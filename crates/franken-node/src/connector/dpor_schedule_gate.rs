@@ -1107,7 +1107,7 @@ mod tests {
             INV_DSG_DETERMINISTIC,
             INV_DSG_SAFETY,
         ];
-        let unique: std::collections::HashSet<&str> = invs.iter().copied().collect();
+        let unique: std::collections::BTreeSet<&str> = invs.iter().copied().collect();
         assert_eq!(unique.len(), invs.len());
     }
 

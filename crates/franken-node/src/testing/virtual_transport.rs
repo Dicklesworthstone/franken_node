@@ -1021,7 +1021,7 @@ mod tests {
             event_codes::VT_007,
             event_codes::VT_008,
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for c in &codes {
             assert!(seen.insert(*c), "Duplicate event code: {c}");
         }
@@ -1037,7 +1037,7 @@ mod tests {
             error_codes::ERR_VT_INVALID_PROBABILITY,
             error_codes::ERR_VT_PARTITIONED,
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for c in &codes {
             assert!(seen.insert(*c), "Duplicate error code: {c}");
         }
@@ -1053,7 +1053,7 @@ mod tests {
             invariants::INV_VT_DROP_RATE,
             invariants::INV_VT_CORRUPT_BITS,
         ];
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = std::collections::BTreeSet::new();
         for i in &invs {
             assert!(seen.insert(*i), "Duplicate invariant: {i}");
         }
