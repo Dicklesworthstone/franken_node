@@ -950,7 +950,7 @@ mod tests {
         proto.drain(100).unwrap();
         proto.finalize().unwrap();
         // CAN-001 + CAN-002 + CAN-003 + CAN-005 = 4 events minimum
-        assert!(proto.audit_log().len() >= 4);
+        assert_eq!(proto.audit_log().len(), 4);
     }
 
     #[test]

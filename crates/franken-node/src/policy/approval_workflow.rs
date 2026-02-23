@@ -324,6 +324,32 @@ impl PolicyChangeEngine {
         // Key-role separation: proposer cannot be sole approver.
         let signer = signature.signer.clone();
         let signed_at = signature.signed_at.clone();
+
+        // Verify key-role separation BEFORE mutation: proposer cannot be sole approver.
+        if record.approvals.is_empty() && signer == record.proposal.proposed_by {
+            return Err(PolicyChangeError::new(
+                ERR_SOLE_APPROVER,
+                "Proposer cannot be the sole approver",
+            ));
+        }
+        if !record.approvals.is_empty()
+            && record.approvals.iter().all(|a| a.signer == record.proposal.proposed_by)
+            && signer == record.proposal.proposed_by
+        {
+            return Err(PolicyChangeError::new(
+                ERR_SOLE_APPROVER,
+                "Proposer cannot be the sole approver",
+            ));
+        }
+
+        // Deduplicate: reject if this approver already signed.
+        if record.approvals.iter().any(|a| a.signer == signer) {
+            return Err(PolicyChangeError::new(
+                ERR_INVALID_STATE_TRANSITION,
+                format!("Approver {signer} has already signed this proposal"),
+            ));
+        }
+
         record.approvals.push(signature);
 
         // Transition to UnderReview if first approval.
@@ -345,14 +371,6 @@ impl PolicyChangeEngine {
             .required_approvers
             .iter()
             .all(|req| unique_approvers.contains(&req));
-
-        // Verify key-role separation EARLY: proposer cannot be sole approver.
-        if unique_approvers.len() == 1 && *unique_approvers[0] == record.proposal.proposed_by {
-            return Err(PolicyChangeError::new(
-                ERR_SOLE_APPROVER,
-                "Proposer cannot be the sole approver",
-            ));
-        }
 
         let quorum_met = non_proposer_approvals >= self.min_quorum && required_met;
 

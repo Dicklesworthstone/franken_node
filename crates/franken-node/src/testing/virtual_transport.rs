@@ -992,7 +992,7 @@ mod tests {
         vt.heal_partition("a->b").unwrap();
 
         let log = vt.event_log();
-        assert!(log.len() >= 4); // link_created, message_sent, partition_activated, partition_healed
+        assert_eq!(log.len(), 4); // link_created, message_sent, partition_activated, partition_healed
 
         // Check partition events.
         let partition_events: Vec<_> = log

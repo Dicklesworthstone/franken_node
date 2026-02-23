@@ -558,9 +558,12 @@ impl LatencyMetrics {
             return 0.0;
         }
         let mut sorted = self.samples.clone();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let idx = (f64::from(pct) / 100.0 * (sorted.len() as f64 - 1.0)).round() as usize;
-        sorted[idx.min(sorted.len() - 1)]
+        let target_idx = idx.min(sorted.len() - 1);
+        let (_, val, _) = sorted.select_nth_unstable_by(target_idx, |a, b| {
+            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+        });
+        *val
     }
 }
 

@@ -517,7 +517,7 @@ mod tests {
             requested_at_epoch: 1100,
         };
         mgr.request_transition(&req).unwrap();
-        assert!(mgr.audit_log().len() >= 2);
+        assert_eq!(mgr.audit_log().len(), 2);
     }
 
     #[test]

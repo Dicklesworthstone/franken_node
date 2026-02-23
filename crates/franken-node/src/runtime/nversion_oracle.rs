@@ -583,9 +583,9 @@ impl RuntimeOracle {
             ((total as f64) * (self.quorum_threshold_percent as f64 / 100.0)).ceil() as usize;
 
         // Count how many runtimes agree with the most common output.
-        let mut output_counts: BTreeMap<Vec<u8>, usize> = BTreeMap::new();
+        let mut output_counts: BTreeMap<&[u8], usize> = BTreeMap::new();
         for output in entry.votes.values() {
-            *output_counts.entry(output.clone()).or_insert(0) += 1;
+            *output_counts.entry(output.as_slice()).or_insert(0) += 1;
         }
         let max_agreement = output_counts.values().max().copied().unwrap_or(0);
 

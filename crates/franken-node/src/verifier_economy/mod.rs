@@ -876,7 +876,7 @@ impl VerifierEconomyRegistry {
             .map(|a| a.claim.dimension.clone())
             .collect();
 
-        dims.len() >= min_dimensions
+        dims.len() < min_dimensions
     }
 
     /// Reset submission counts (call at window boundaries).

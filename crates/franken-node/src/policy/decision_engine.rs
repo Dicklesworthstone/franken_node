@@ -395,7 +395,7 @@ mod tests {
         // Candidate A has both per-candidate and system guardrail
         let a_blocked = &outcome.blocked[0];
         assert_eq!(a_blocked.candidate, c("A"));
-        assert!(a_blocked.blocked_by.len() >= 2);
+        assert_eq!(a_blocked.blocked_by.len(), 2);
     }
 
     // ── Candidate order matches Bayesian rank ──
@@ -653,7 +653,7 @@ mod tests {
         let outcome = engine().decide(&candidates, &default_monitors(), &state);
         assert!(outcome.chosen.is_none());
         // Should have at least 2 blocking guardrails on the candidate
-        assert!(outcome.blocked[0].blocked_by.len() >= 2);
+        assert_eq!(outcome.blocked[0].blocked_by.len(), 2);
     }
 
     // ── Fallback picks first passing, not last ──

@@ -214,13 +214,13 @@ impl std::fmt::Display for SybilDefenseError {
 /// what fraction of extreme values are removed before computing the mean.
 pub struct TrustAggregator {
     /// Fraction of values to trim from each tail (0.0..0.5).
-    /// Default: 0.2 (20% from each side = 40% total trim).
+    /// Default: 0.1 (10% from each side = 20% total trim).
     pub trim_ratio: f64,
 }
 
 impl Default for TrustAggregator {
     fn default() -> Self {
-        Self { trim_ratio: 0.2 }
+        Self { trim_ratio: 0.1 }
     }
 }
 

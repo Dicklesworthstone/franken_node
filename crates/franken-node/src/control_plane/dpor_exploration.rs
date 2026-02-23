@@ -555,13 +555,16 @@ impl DporExplorer {
             results.push(current.clone());
             return;
         }
-        let done_ids: BTreeSet<String> = current.iter().map(|op| op.id.clone()).collect();
         for (i, op) in ops.iter().enumerate() {
             if used[i] {
                 continue;
             }
             // Check all deps are satisfied
-            if op.depends_on.iter().all(|d| done_ids.contains(d)) {
+            if op.depends_on.iter().all(|d| {
+                ops.iter()
+                    .position(|o| &o.id == d)
+                    .map_or(false, |idx| used[idx])
+            }) {
                 used[i] = true;
                 current.push(op.clone());
                 self.permute_topo(ops, used, current, results, max);

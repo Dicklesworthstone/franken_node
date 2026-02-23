@@ -883,7 +883,7 @@ mod tests {
         policy.tick(1, 2, 3, 10, "trace-csv");
         let csv = policy.export_csv();
         assert!(csv.starts_with("tick,cancel_lane_tasks_run"));
-        assert!(csv.lines().count() >= 2); // header + 1 row
+        assert_eq!(csv.lines().count(), 2); // header + 1 row
     }
 
     #[test]
