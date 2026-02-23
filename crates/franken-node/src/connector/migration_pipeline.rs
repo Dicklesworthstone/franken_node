@@ -589,10 +589,14 @@ pub fn is_idempotent(a: &PipelineState, b: &PipelineState) -> bool {
 fn compute_idempotency_key(cohort: &CohortDefinition) -> String {
     let mut hasher = Sha256::new();
     hasher.update(cohort.cohort_id.as_bytes());
+    hasher.update(b"|");
     for ext in &cohort.extensions {
         hasher.update(ext.name.as_bytes());
+        hasher.update(b"|");
         hasher.update(ext.source_version.as_bytes());
+        hasher.update(b"|");
         hasher.update(ext.target_version.as_bytes());
+        hasher.update(b"|");
     }
     hex::encode(hasher.finalize())
 }
@@ -632,12 +636,14 @@ fn generate_plan(
         let pre_hash = {
             let mut h = Sha256::new();
             h.update(name.as_bytes());
+            h.update(b"|");
             h.update(version.as_bytes());
             hex::encode(h.finalize())
         };
         let post_hash = {
             let mut h = Sha256::new();
             h.update(name.as_bytes());
+            h.update(b"|");
             h.update(b"migrated");
             hex::encode(h.finalize())
         };
@@ -656,8 +662,11 @@ fn generate_plan(
         let mut h = Sha256::new();
         for step in &steps {
             h.update(step.target.as_bytes());
+            h.update(b"|");
             h.update(step.pre_state_hash.as_bytes());
+            h.update(b"|");
             h.update(step.post_state_hash.as_bytes());
+            h.update(b"|");
         }
         format!("plan-{}", &hex::encode(h.finalize())[..16])
     };
@@ -715,7 +724,9 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
         let mut h = Sha256::new();
         for (name, ver) in &state.extensions {
             h.update(name.as_bytes());
+            h.update(b"|");
             h.update(ver.as_bytes());
+            h.update(b"|");
         }
         hex::encode(h.finalize())
     };
@@ -729,6 +740,7 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
     let post_hash = {
         let mut h = Sha256::new();
         h.update(pre_hash.as_bytes());
+        h.update(b"|");
         h.update(b"migrated");
         hex::encode(h.finalize())
     };
@@ -742,7 +754,9 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
     let signature = {
         let mut h = Sha256::new();
         h.update(pre_hash.as_bytes());
+        h.update(b"|");
         h.update(plan_fingerprint.as_bytes());
+        h.update(b"|");
         h.update(post_hash.as_bytes());
         format!("sig_{}", hex::encode(h.finalize()))
     };
