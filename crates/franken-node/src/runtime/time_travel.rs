@@ -239,9 +239,13 @@ impl WorkflowSnapshot {
         let mut hasher = Sha256::new();
         for f in frames {
             hasher.update(f.frame_index.to_le_bytes());
+            hasher.update(b"|");
             hasher.update(f.clock_tick.to_le_bytes());
+            hasher.update(b"|");
             hasher.update(f.input_hash.as_bytes());
+            hasher.update(b"|");
             hasher.update(f.decision.digest().as_bytes());
+            hasher.update(b"|");
         }
         hex::encode(hasher.finalize())
     }
@@ -711,7 +715,9 @@ fn hash_bytes(input: &[u8]) -> String {
 pub fn deterministic_decision(seed: u64, tick: u64, input: &[u8]) -> ControlDecision {
     let mut hasher = Sha256::new();
     hasher.update(seed.to_le_bytes());
+    hasher.update(b"|");
     hasher.update(tick.to_le_bytes());
+    hasher.update(b"|");
     hasher.update(input);
     let digest = hex::encode(hasher.finalize());
     let decision_id = format!("dec-{}-{}", tick, &digest[..8]);

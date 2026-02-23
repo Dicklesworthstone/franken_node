@@ -329,7 +329,9 @@ impl IncidentLab {
         let mut hasher = Sha256::new();
         for ev in &trace.events {
             hasher.update(ev.seq.to_le_bytes());
+            hasher.update(b"|");
             hasher.update(ev.payload_hex.as_bytes());
+            hasher.update(b"|");
         }
         let replay_digest = hex::encode(hasher.finalize());
 
