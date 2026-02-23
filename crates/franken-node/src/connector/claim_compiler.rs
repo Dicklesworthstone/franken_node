@@ -690,6 +690,7 @@ fn summarize_claim_text(normalised_text: &str) -> String {
 /// Compute SHA-256 digest binding claim text to evidence links.
 fn compute_compilation_digest(normalised_text: &str, evidence_links: &[EvidenceLink]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"claim_text_hash_v1:");
     hasher.update(normalised_text.as_bytes());
     hasher.update(b"|");
     for link in evidence_links {
@@ -706,6 +707,7 @@ fn compute_compilation_digest(normalised_text: &str, evidence_links: &[EvidenceL
 /// Compute SHA-256 digest of all scoreboard entries for snapshot signing.
 fn compute_scoreboard_digest(entries: &BTreeMap<String, ScoreEntry>) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"claim_evidence_hash_v1:");
     // BTreeMap iteration is deterministic (INV-CLMC-DETERMINISTIC)
     for (claim_id, entry) in entries {
         hasher.update(claim_id.as_bytes());

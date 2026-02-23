@@ -419,7 +419,7 @@ mod tests {
                 author: "author@example.com".to_string(),
             },
             entrypoint: "dist/main.js".to_string(),
-            capabilities: vec![cap("fs_read"), cap("network_egress")],
+            capabilities: vec![cap("fs_read"), cap("net_client")],
             behavioral_profile: BehavioralProfile {
                 risk_tier: RiskTier::Medium,
                 summary: "Reads local policy and performs outbound calls to policy oracle"

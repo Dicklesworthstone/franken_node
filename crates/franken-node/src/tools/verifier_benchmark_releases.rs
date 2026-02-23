@@ -325,7 +325,13 @@ impl VerifierBenchmarkReleases {
                 .or_default() += r.download_count;
         }
         let hash_input = format!("{total}:{published}:{total_dl}:{}", &self.schema_version);
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"verifier_benchmark_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::VBR_METRICS_COMPUTED,

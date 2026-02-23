@@ -228,7 +228,7 @@ impl LeaseService {
             });
         }
 
-        let lease = self.leases.get_mut(lease_id).unwrap();
+        let lease = self.leases.get_mut(lease_id).expect("lease existence verified above");
         lease.renewed_at = now;
 
         self.decisions.push(LeaseDecision {

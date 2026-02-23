@@ -333,6 +333,7 @@ impl EnforcementEngine {
 
 fn digest_bytes(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"artifact_contract_digest_v1:");
     hasher.update(input);
     hex::encode(hasher.finalize())
 }

@@ -5,6 +5,8 @@
 //
 // bd-y0v — Section 10.12
 
+use sha2::{Digest, Sha256};
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -167,27 +169,15 @@ impl OperatorContext {
 
     /// Compute a fingerprint of this context for audit trail.
     pub fn fingerprint(&self) -> [u8; 32] {
-        let mut hash = [0u8; 32];
-        // Deterministic hash: XOR each field's bytes into hash.
-        for (i, b) in self.compatibility_pass.to_le_bytes().iter().enumerate() {
-            hash[i % 32] ^= b;
-        }
-        for (i, b) in self.migration_success.to_le_bytes().iter().enumerate() {
-            hash[(i + 8) % 32] ^= b;
-        }
-        for (i, b) in self.trust_valid.to_le_bytes().iter().enumerate() {
-            hash[(i + 16) % 32] ^= b;
-        }
-        for (i, b) in self.error_rate.to_le_bytes().iter().enumerate() {
-            hash[(i + 24) % 32] ^= b;
-        }
-        for (i, b) in self.pending_ops.to_le_bytes().iter().enumerate() {
-            hash[i % 32] ^= b;
-        }
-        for (i, b) in self.active_alerts.to_le_bytes().iter().enumerate() {
-            hash[(i + 4) % 32] ^= b;
-        }
-        hash
+        let mut hasher = Sha256::new();
+        hasher.update(b"operator_intelligence_ctx_v1:");
+        hasher.update(self.compatibility_pass.to_le_bytes());
+        hasher.update(self.migration_success.to_le_bytes());
+        hasher.update(self.trust_valid.to_le_bytes());
+        hasher.update(self.error_rate.to_le_bytes());
+        hasher.update(self.pending_ops.to_le_bytes());
+        hasher.update(self.active_alerts.to_le_bytes());
+        hasher.finalize().into()
     }
 }
 
@@ -503,7 +493,7 @@ impl RecommendationEngine {
         }
 
         // Sort by expected loss (highest first) for ranking.
-        recommendations.sort_by(|a, b| b.expected_loss.partial_cmp(&a.expected_loss).unwrap());
+        recommendations.sort_by(|a, b| b.expected_loss.partial_cmp(&a.expected_loss).unwrap_or(std::cmp::Ordering::Equal));
 
         // Re-assign priority after sort.
         for (i, rec) in recommendations.iter_mut().enumerate() {

@@ -459,7 +459,7 @@ impl CancellationProtocol {
         ));
 
         self.records.push(record);
-        Ok(self.records.last().unwrap())
+        Ok(self.records.last().expect("records non-empty: just pushed"))
     }
 
     /// Phase 2a: DRAIN start — begin draining in-flight operations.
@@ -521,7 +521,7 @@ impl CancellationProtocol {
         let force = self.records[idx].drain_config.force_on_timeout;
 
         // INV-CANP-DRAIN-BOUNDED: check timeout
-        if elapsed > timeout {
+        if elapsed >= timeout {
             self.records[idx].drain_timed_out = true;
             self.records[idx].drain_complete_ms = Some(timestamp_ms);
 
@@ -866,7 +866,7 @@ mod tests {
         let mut proto = CancellationProtocol::default();
         // No record exists for wf-1
         let err = proto.start_drain("wf-1", 1000, "t1").unwrap_err();
-        assert_eq!(err.code(), error_codes::ERR_CANCEL_INVALID_PHASE);
+        assert_eq!(err.code(), error_codes::ERR_CANCEL_NOT_FOUND);
     }
 
     #[test]

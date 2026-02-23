@@ -541,7 +541,9 @@ impl SignedExtensionRegistry {
             "registry_version": &self.config.registry_version,
         })
         .to_string();
-        hex::encode(Sha256::digest(state.as_bytes()))
+        hex::encode(Sha256::digest(
+            [b"extension_registry_hash_v1:" as &[u8], state.as_bytes()].concat(),
+        ))
     }
 
     /// Export audit log as JSONL.
@@ -914,7 +916,7 @@ mod tests {
         let mut reg = SignedExtensionRegistry::default();
         reg.register(valid_request("ext-a"), &make_trace());
         // sig verified + provenance validated + registered = 3
-        assert!(reg.audit_log().len() >= 3);
+        assert_eq!(reg.audit_log().len(), 3);
     }
 
     #[test]

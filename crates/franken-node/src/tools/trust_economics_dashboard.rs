@@ -443,7 +443,9 @@ impl TrustEconomicsDashboard {
             "loss": loss_summary,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [b"trust_economics_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
+        ));
 
         let report = TrustEconomicsReport {
             report_id: Uuid::now_v7().to_string(),

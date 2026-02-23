@@ -605,7 +605,16 @@ impl TransportFaultGate {
 
         // Content hash of all results for reproducibility.
         let results_json = serde_json::to_string(&results).unwrap_or_default();
-        let content_hash = format!("{:x}", Sha256::digest(results_json.as_bytes()));
+        let content_hash = format!(
+            "{:x}",
+            Sha256::digest(
+                [
+                    b"transport_fault_gate_hash_v1:" as &[u8],
+                    results_json.as_bytes()
+                ]
+                .concat()
+            )
+        );
 
         let verdict = GateVerdict {
             schema_version: SCHEMA_VERSION.to_string(),

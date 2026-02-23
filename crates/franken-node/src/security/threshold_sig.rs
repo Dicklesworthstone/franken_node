@@ -5,9 +5,9 @@
 //! machine-readable failure reasons.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fmt;
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 // ── Types ───────────────────────────────────────────────────────────
 
@@ -123,24 +123,34 @@ impl fmt::Display for FailureReason {
 /// Simulate signature verification. In production this would use Ed25519
 /// or similar. Here we verify: H(key || content_hash) == signature.
 fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature) -> bool {
-    let mut hasher = DefaultHasher::new();
-    key.public_key_hex.hash(&mut hasher);
-    ":".hash(&mut hasher);
-    content_hash.hash(&mut hasher);
-    let expected = format!("{:016x}", hasher.finish());
+    let mut h = Sha256::new();
+    h.update(b"threshold_sig_verify_v1:");
+    h.update(key.public_key_hex.as_bytes());
+    h.update(b":");
+    h.update(content_hash.as_bytes());
+    let digest = h.finalize();
+    let expected = format!(
+        "{:016x}",
+        u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
+    );
     sig.signature_hex == expected
 }
 
 /// Create a valid signature for testing.
 pub fn sign(key: &SignerKey, content_hash: &str) -> PartialSignature {
-    let mut hasher = DefaultHasher::new();
-    key.public_key_hex.hash(&mut hasher);
-    ":".hash(&mut hasher);
-    content_hash.hash(&mut hasher);
+    let mut h = Sha256::new();
+    h.update(b"threshold_sig_verify_v1:");
+    h.update(key.public_key_hex.as_bytes());
+    h.update(b":");
+    h.update(content_hash.as_bytes());
+    let digest = h.finalize();
     PartialSignature {
         signer_id: key.key_id.clone(),
         key_id: key.key_id.clone(),
-        signature_hex: format!("{:016x}", hasher.finish()),
+        signature_hex: format!(
+            "{:016x}",
+            u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
+        ),
     }
 }
 

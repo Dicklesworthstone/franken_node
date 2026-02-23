@@ -217,7 +217,8 @@ impl WeightAuditRecord {
     /// Compute a deterministic content hash over the audit record.
     pub fn compute_hash(weights: &[ParticipationWeight]) -> String {
         let canonical = serde_json::to_string(weights).unwrap_or_default();
-        let digest = Sha256::digest(canonical.as_bytes());
+        let digest =
+            Sha256::digest([b"atc_participation_hash_v1:" as &[u8], canonical.as_bytes()].concat());
         hex::encode(digest)
     }
 }

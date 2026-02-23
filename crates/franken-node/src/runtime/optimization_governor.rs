@@ -215,6 +215,8 @@ impl SafetyEnvelope {
     }
 
     /// Return all violations as a list of human-readable strings.
+    /// Uses `!(a <= b)` to stay consistent with `contains()` on NaN inputs.
+    #[allow(clippy::neg_cmp_op_on_partial_ord)]
     pub fn violations(&self, metrics: &PredictedMetrics) -> Vec<String> {
         let mut vs = Vec::new();
         if metrics.latency_ms > self.max_latency_ms {
@@ -229,7 +231,7 @@ impl SafetyEnvelope {
                 metrics.throughput_rps, self.min_throughput_rps
             ));
         }
-        if metrics.error_rate_pct > self.max_error_rate_pct {
+        if !(metrics.error_rate_pct <= self.max_error_rate_pct) {
             vs.push(format!(
                 "error rate {:.2}% > ceiling {:.2}%",
                 metrics.error_rate_pct, self.max_error_rate_pct
@@ -666,7 +668,9 @@ impl OptimizationGovernor {
         }
 
         // All currently applied proposals are suspect; revert them all.
-        let to_revert: Vec<AppliedProposal> = self.applied.values().cloned().collect();
+        // Reverse so last-applied proposals revert first and earliest old_value wins.
+        let mut to_revert: Vec<AppliedProposal> = self.applied.values().cloned().collect();
+        to_revert.reverse();
         let mut reverted_ids = Vec::new();
 
         for ap in &to_revert {

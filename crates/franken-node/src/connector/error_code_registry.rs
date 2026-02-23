@@ -165,7 +165,10 @@ impl ErrorCodeRegistry {
                 if !same_severity || !same_recovery {
                     return Err(RegistryError::FrozenConflict(reg.code.clone()));
                 }
-                // Same shape — allow version bump only.
+                // Same shape — allow version bump only (must be strictly increasing).
+                if reg.version <= existing.version {
+                    return Err(RegistryError::FrozenConflict(reg.code.clone()));
+                }
                 let mut updated = existing.clone();
                 updated.version = reg.version;
                 updated.description = reg.description.clone();

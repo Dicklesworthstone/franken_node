@@ -481,6 +481,7 @@ fn compute_bundle_id(
     config_entries: &[(String, String)],
 ) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"repro_bundle_hash_v1:" as &[u8]);
     update_u64(&mut hasher, seed);
     update_u64(&mut hasher, epoch_id);
     update_u64(&mut hasher, timestamp_ms);
@@ -566,6 +567,10 @@ pub fn validate_bundle(bundle: &ReproBundle) -> Result<(), Vec<SchemaError>> {
         errors.push(SchemaError::MissingField(
             "failure_context.error_message".into(),
         ));
+    }
+
+    if bundle.event_trace.is_empty() {
+        errors.push(SchemaError::EmptyEventTrace);
     }
 
     if !bundle.is_portable() {

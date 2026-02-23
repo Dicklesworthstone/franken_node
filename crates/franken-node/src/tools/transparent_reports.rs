@@ -306,7 +306,13 @@ impl TransparentReports {
             "sections": &report.sections,
         })
         .to_string();
-        report.content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        report.content_hash = hex::encode(Sha256::digest(
+            [
+                b"transparent_reports_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
         report.report_version = self.report_version.clone();
         report.created_at = Utc::now().to_rfc3339();
 
@@ -452,7 +458,13 @@ impl TransparentReports {
             "report_version": &self.report_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"transparent_reports_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::TR_CATALOG_GENERATED,
@@ -795,7 +807,7 @@ mod tests {
                 &trace(),
             )
             .unwrap();
-        assert!(engine.audit_log().len() >= 5);
+        assert_eq!(engine.audit_log().len(), 7);
     }
 
     #[test]

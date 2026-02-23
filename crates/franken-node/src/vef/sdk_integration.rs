@@ -274,7 +274,7 @@ impl std::error::Error for VsiError {}
 
 /// Compute SHA-256 hex digest of arbitrary input bytes.
 fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
+    let digest = Sha256::digest([b"vef_sdk_hash_v1:" as &[u8], data].concat());
     format!("sha256:{digest:x}")
 }
 
@@ -329,19 +329,12 @@ impl VersionNegotiator {
 
     /// Negotiate the best version given a set of client-offered versions.
     /// INV-VSI-BACKWARD-COMPAT: selects highest mutually supported version.
-    pub fn negotiate(
-        &self,
-        client_versions: &[String],
-    ) -> Result<NegotiationResult, VsiError> {
+    pub fn negotiate(&self, client_versions: &[String]) -> Result<NegotiationResult, VsiError> {
         if client_versions.is_empty() {
-            return Err(VsiError::version_unsupported(
-                "client offered no versions",
-            ));
+            return Err(VsiError::version_unsupported("client offered no versions"));
         }
         if self.supported_versions.is_empty() {
-            return Err(VsiError::version_unsupported(
-                "server supports no versions",
-            ));
+            return Err(VsiError::version_unsupported("server supports no versions"));
         }
 
         // Find highest version that both sides support.
@@ -571,8 +564,7 @@ impl ExternalVerificationEndpoint {
             submitted_at_millis: submission.submitted_at_millis,
             trace_id: submission.trace_id.clone(),
         };
-        self.store
-            .insert(submission.submission_id.clone(), record);
+        self.store.insert(submission.submission_id.clone(), record);
 
         self.next_seq = self.next_seq.wrapping_add(1);
 
@@ -595,11 +587,7 @@ impl ExternalVerificationEndpoint {
     }
 
     /// Query stored evidence by filters.
-    pub fn query(
-        &mut self,
-        query: &EvidenceQuery,
-        trace_id: &str,
-    ) -> Vec<EvidenceRecord> {
+    pub fn query(&mut self, query: &EvidenceQuery, trace_id: &str) -> Vec<EvidenceRecord> {
         let mut results: Vec<EvidenceRecord> = self
             .store
             .values()
@@ -632,11 +620,7 @@ impl ExternalVerificationEndpoint {
 
     /// Export all accepted evidence as a bundle for external consumption.
     /// INV-VSI-VERSIONED: bundle carries schema and format version.
-    pub fn export_evidence(
-        &mut self,
-        now_millis: u64,
-        trace_id: &str,
-    ) -> ExportedEvidenceBundle {
+    pub fn export_evidence(&mut self, now_millis: u64, trace_id: &str) -> ExportedEvidenceBundle {
         let records: Vec<EvidenceRecord> = self
             .store
             .values()
@@ -667,18 +651,14 @@ impl ExternalVerificationEndpoint {
         trace_id: &str,
     ) -> Result<(), VsiError> {
         let record = self.store.get_mut(submission_id).ok_or_else(|| {
-            VsiError::submission_rejected(format!(
-                "unknown submission_id '{submission_id}'"
-            ))
+            VsiError::submission_rejected(format!("unknown submission_id '{submission_id}'"))
         })?;
         record.status = new_status;
 
         self.events.push(VsiEvent {
             event_code: event_codes::VSI_002_EVIDENCE_SUBMITTED.to_string(),
             trace_id: trace_id.to_string(),
-            detail: format!(
-                "submission={submission_id} status_updated={new_status:?}"
-            ),
+            detail: format!("submission={submission_id} status_updated={new_status:?}"),
         });
 
         Ok(())
@@ -722,7 +702,13 @@ mod tests {
     fn embed_carries_format_version() {
         let mut embedder = VefCapsuleEmbed::new();
         let embedding = embedder
-            .embed("proof-001", "capsule-payload-data", sample_metadata(), 1_000, "t1")
+            .embed(
+                "proof-001",
+                "capsule-payload-data",
+                sample_metadata(),
+                1_000,
+                "t1",
+            )
             .unwrap();
         assert_eq!(embedding.format_version, VSI_FORMAT_VERSION);
     }
@@ -798,7 +784,13 @@ mod tests {
     fn validate_embedding_fails_for_wrong_payload() {
         let mut embedder = VefCapsuleEmbed::new();
         let embedding = embedder
-            .embed("proof-006", "original-payload", BTreeMap::new(), 1_000, "t7")
+            .embed(
+                "proof-006",
+                "original-payload",
+                BTreeMap::new(),
+                1_000,
+                "t7",
+            )
             .unwrap();
         let err = embedder
             .validate_embedding(&embedding, "tampered-payload", "t7-validate")
@@ -826,9 +818,7 @@ mod tests {
     #[test]
     fn version_negotiator_selects_highest_mutual() {
         let negotiator = VersionNegotiator::new();
-        let result = negotiator
-            .negotiate(&["1.0.0".to_string()])
-            .unwrap();
+        let result = negotiator.negotiate(&["1.0.0".to_string()]).unwrap();
         assert_eq!(result.selected_version, "1.0.0");
     }
 
@@ -837,9 +827,7 @@ mod tests {
     #[test]
     fn version_negotiator_rejects_no_mutual() {
         let negotiator = VersionNegotiator::new();
-        let err = negotiator
-            .negotiate(&["99.99.99".to_string()])
-            .unwrap_err();
+        let err = negotiator.negotiate(&["99.99.99".to_string()]).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_VSI_VERSION_UNSUPPORTED);
     }
 
@@ -856,10 +844,8 @@ mod tests {
 
     #[test]
     fn version_negotiator_custom_versions() {
-        let negotiator = VersionNegotiator::with_versions(vec![
-            "2.0.0".to_string(),
-            "1.0.0".to_string(),
-        ]);
+        let negotiator =
+            VersionNegotiator::with_versions(vec!["2.0.0".to_string(), "1.0.0".to_string()]);
         let result = negotiator
             .negotiate(&["1.0.0".to_string(), "2.0.0".to_string()])
             .unwrap();
@@ -1050,7 +1036,13 @@ mod tests {
     fn capsule_embedding_serde_roundtrip() {
         let mut embedder = VefCapsuleEmbed::new();
         let embedding = embedder
-            .embed("proof-serde", "payload-serde", sample_metadata(), 2_000, "t-serde")
+            .embed(
+                "proof-serde",
+                "payload-serde",
+                sample_metadata(),
+                2_000,
+                "t-serde",
+            )
             .unwrap();
         let json = serde_json::to_string(&embedding).unwrap();
         let parsed: CapsuleEmbedding = serde_json::from_str(&json).unwrap();
@@ -1090,9 +1082,7 @@ mod tests {
     #[test]
     fn negotiation_result_serde_roundtrip() {
         let negotiator = VersionNegotiator::new();
-        let result = negotiator
-            .negotiate(&["1.0.0".to_string()])
-            .unwrap();
+        let result = negotiator.negotiate(&["1.0.0".to_string()]).unwrap();
         let json = serde_json::to_string(&result).unwrap();
         let parsed: NegotiationResult = serde_json::from_str(&json).unwrap();
         assert_eq!(result, parsed);
@@ -1127,7 +1117,7 @@ mod tests {
         );
         endpoint.export_evidence(4_000, "t-ev-exp");
         // submit + query + export = 3 events
-        assert!(endpoint.events().len() >= 3);
+        assert_eq!(endpoint.events().len(), 3);
     }
 
     // ── 31. Invariant constants are correctly defined ──
@@ -1159,7 +1149,11 @@ mod tests {
             event_codes::VSI_006_EVIDENCE_EXPORTED,
         ];
         let unique: std::collections::BTreeSet<_> = codes.iter().collect();
-        assert_eq!(unique.len(), codes.len(), "all event codes must be distinct");
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "all event codes must be distinct"
+        );
     }
 
     // ── 34. Error codes are all distinct ──
@@ -1175,7 +1169,11 @@ mod tests {
             error_codes::ERR_VSI_INTERNAL,
         ];
         let unique: std::collections::BTreeSet<_> = codes.iter().collect();
-        assert_eq!(unique.len(), codes.len(), "all error codes must be distinct");
+        assert_eq!(
+            unique.len(),
+            codes.len(),
+            "all error codes must be distinct"
+        );
     }
 
     // ── 35. EvidenceStatus serde round-trip ──
@@ -1224,9 +1222,7 @@ mod tests {
     #[test]
     fn version_negotiator_empty_server() {
         let negotiator = VersionNegotiator::with_versions(vec![]);
-        let err = negotiator
-            .negotiate(&["1.0.0".to_string()])
-            .unwrap_err();
+        let err = negotiator.negotiate(&["1.0.0".to_string()]).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_VSI_VERSION_UNSUPPORTED);
     }
 

@@ -253,6 +253,7 @@ pub struct QuarantineAuditEntry {
 /// Compute the SHA-256 hash for an audit entry (excluding entry_hash field).
 fn compute_entry_hash(entry: &QuarantineAuditEntry) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"quarantine_entry_v1:");
     hasher.update(entry.sequence.to_le_bytes());
     hasher.update(entry.event_code.as_bytes());
     hasher.update(entry.order_id.as_bytes());
@@ -432,7 +433,7 @@ impl QuarantineRegistry {
             .insert(node_id.to_owned(), timestamp.to_owned());
 
         // Transition to Propagated if still in Initiated state.
-        let record = self.records.get_mut(order_id).unwrap();
+        let record = self.records.get_mut(order_id).expect("order existence verified above");
         if record.state == QuarantineState::Initiated {
             record.state = QuarantineState::Propagated;
             record
@@ -471,7 +472,7 @@ impl QuarantineRegistry {
             )
         };
 
-        let record = self.records.get_mut(order_id).unwrap();
+        let record = self.records.get_mut(order_id).expect("order existence verified above");
         if record.state != QuarantineState::Enforced {
             record.state = QuarantineState::Enforced;
             record
@@ -506,7 +507,7 @@ impl QuarantineRegistry {
             )
         };
 
-        let record = self.records.get_mut(order_id).unwrap();
+        let record = self.records.get_mut(order_id).expect("order existence verified above");
         record.state = QuarantineState::Draining;
         record
             .state_history
@@ -543,7 +544,7 @@ impl QuarantineRegistry {
             )
         };
 
-        let record = self.records.get_mut(order_id).unwrap();
+        let record = self.records.get_mut(order_id).expect("order existence verified above");
         record.state = QuarantineState::Isolated;
         record
             .state_history
@@ -618,7 +619,7 @@ impl QuarantineRegistry {
         let trace_id = recall.trace_id.clone();
         let timestamp = recall.issued_at.clone();
 
-        let record = self.records.get_mut(&quarantine_order_id).unwrap();
+        let record = self.records.get_mut(&quarantine_order_id).expect("order existence verified above");
         record.state = QuarantineState::RecallTriggered;
         record
             .state_history
@@ -658,7 +659,7 @@ impl QuarantineRegistry {
         let node_id = receipt.node_id.clone();
         let timestamp = receipt.removed_at.clone();
 
-        let record = self.records.get_mut(order_id).unwrap();
+        let record = self.records.get_mut(order_id).expect("order existence verified above");
         record.recall_receipts.push(receipt);
 
         self.append_audit(
@@ -691,7 +692,7 @@ impl QuarantineRegistry {
                 record.order.trace_id.clone(),
             )
         };
-        let record = self.records.get_mut(order_id).unwrap();
+        let record = self.records.get_mut(order_id).expect("order existence verified above");
 
         record.state = QuarantineState::RecallCompleted;
         record
@@ -743,7 +744,7 @@ impl QuarantineRegistry {
         let trace_id = clearance.trace_id.clone();
         let timestamp = clearance.cleared_at.clone();
 
-        let record = self.records.get_mut(&order_id).unwrap();
+        let record = self.records.get_mut(&order_id).expect("order existence verified above");
         record.state = QuarantineState::Lifted;
         record
             .state_history
@@ -803,7 +804,7 @@ impl QuarantineRegistry {
 
     /// Verify audit trail integrity (hash chain).
     pub fn verify_audit_integrity(&self) -> Result<bool, QuarantineError> {
-        let genesis_hash = format!("{:x}", Sha256::digest(b""));
+        let genesis_hash = format!("{:x}", Sha256::digest(b"quarantine_genesis_v1:"));
 
         for (i, entry) in self.audit_trail.iter().enumerate() {
             // Check prev_hash.
@@ -889,7 +890,7 @@ impl QuarantineRegistry {
         timestamp: &str,
         details: &str,
     ) {
-        let genesis_hash = format!("{:x}", Sha256::digest(b""));
+        let genesis_hash = format!("{:x}", Sha256::digest(b"quarantine_genesis_v1:"));
         let prev_hash = self
             .audit_trail
             .last()
@@ -1186,7 +1187,7 @@ mod tests {
         reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
 
         assert!(reg.verify_audit_integrity().unwrap());
-        assert!(reg.audit_trail().len() >= 3);
+        assert_eq!(reg.audit_trail().len(), 3);
     }
 
     #[test]

@@ -337,19 +337,19 @@ impl SharedEvidenceLedger {
     }
 
     pub fn append(&self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
-        self.inner.lock().unwrap().append(entry)
+        self.inner.lock().expect("evidence ledger lock poisoned").append(entry)
     }
 
     pub fn len(&self) -> usize {
-        self.inner.lock().unwrap().len()
+        self.inner.lock().expect("evidence ledger lock poisoned").len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner.lock().unwrap().is_empty()
+        self.inner.lock().expect("evidence ledger lock poisoned").is_empty()
     }
 
     pub fn snapshot(&self) -> LedgerSnapshot {
-        self.inner.lock().unwrap().snapshot()
+        self.inner.lock().expect("evidence ledger lock poisoned").snapshot()
     }
 }
 

@@ -867,7 +867,7 @@ impl VerifierEconomyRegistry {
     // -- Anti-gaming: selective reporting detection ----------------------------
 
     /// Check whether a verifier has been selectively reporting.
-    /// Returns true if the verifier's dimension coverage is below threshold.
+    /// Returns true if the verifier's dimension coverage meets the threshold.
     pub fn check_selective_reporting(&self, verifier_id: &str, min_dimensions: usize) -> bool {
         let dims: std::collections::BTreeSet<_> = self
             .attestations

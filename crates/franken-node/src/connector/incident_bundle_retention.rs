@@ -175,6 +175,8 @@ pub struct IncidentBundle {
     pub integrity_hash: String,
     pub size_bytes: u64,
     pub created_at_epoch: u64,
+    /// Epoch when the bundle last changed retention tier (used for accurate tier timing).
+    pub last_tier_change_epoch: u64,
 }
 
 // ── Retention configuration ────────────────────────────────────────
@@ -289,24 +291,39 @@ impl fmt::Display for IncidentBundleError {
 /// Uses a deterministic representation: sorted keys, no extra whitespace.
 /// INV-IBR-INTEGRITY.
 pub fn compute_integrity_hash(bundle: &IncidentBundle) -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
 
-    let mut hasher = DefaultHasher::new();
-    bundle.bundle_id.hash(&mut hasher);
-    bundle.incident_id.hash(&mut hasher);
-    bundle.created_at.hash(&mut hasher);
-    bundle.severity.label().hash(&mut hasher);
-    bundle.retention_tier.label().hash(&mut hasher);
-    bundle.metadata.title.hash(&mut hasher);
-    bundle.metadata.detected_by.hash(&mut hasher);
-    bundle.log_count.hash(&mut hasher);
-    bundle.trace_count.hash(&mut hasher);
-    bundle.metric_snapshot_count.hash(&mut hasher);
-    bundle.evidence_ref_count.hash(&mut hasher);
-    bundle.export_format_version.hash(&mut hasher);
+    let mut hasher = Sha256::new();
+    hasher.update(b"incident_bundle_retention_hash_v1:");
+    hasher.update(bundle.bundle_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.incident_id.as_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.created_at.as_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.severity.label().as_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.retention_tier.label().as_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.metadata.title.as_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.metadata.detected_by.as_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.log_count.to_le_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.trace_count.to_le_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.metric_snapshot_count.to_le_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.evidence_ref_count.to_le_bytes());
+    hasher.update(b"|");
+    hasher.update(bundle.export_format_version.to_le_bytes());
 
-    format!("{:016x}", hasher.finish())
+    let digest = hasher.finalize();
+    format!(
+        "{:016x}",
+        u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
+    )
 }
 
 // ── Validate completeness ──────────────────────────────────────────
@@ -567,13 +584,12 @@ impl IncidentBundleStore {
 
         for bundle in self.bundles.values_mut() {
             let age = now.saturating_sub(bundle.created_at_epoch);
+            let time_in_tier = now.saturating_sub(bundle.last_tier_change_epoch);
             let old_tier = bundle.retention_tier;
 
             let new_tier = match old_tier {
                 RetentionTier::Hot if age >= hot_seconds => Some(RetentionTier::Cold),
-                RetentionTier::Cold if age >= hot_seconds + cold_seconds => {
-                    Some(RetentionTier::Archive)
-                }
+                RetentionTier::Cold if time_in_tier >= cold_seconds => Some(RetentionTier::Archive),
                 _ => None,
             };
 
@@ -588,6 +604,7 @@ impl IncidentBundleStore {
                     event_code: event_codes::IBR_002.into(),
                 };
                 bundle.retention_tier = tier;
+                bundle.last_tier_change_epoch = now;
                 self.decisions.push(decision.clone());
                 transitions.push(decision);
             }
@@ -730,6 +747,7 @@ mod tests {
             integrity_hash: String::new(),
             size_bytes: 1000,
             created_at_epoch: epoch,
+            last_tier_change_epoch: epoch,
         };
         bundle.integrity_hash = compute_integrity_hash(&bundle);
         bundle

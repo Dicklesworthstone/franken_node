@@ -451,7 +451,7 @@ mod tests {
         r.declared_bound.max_items = 50;
         let (v, _) = check_response_bound(&r, &policy(), "tr", "ts").unwrap();
         assert!(!v.allowed);
-        assert!(v.violations.len() >= 3); // response too large, ratio, unauth, items
+        assert_eq!(v.violations.len(), 4); // response too large, ratio, unauth, items
     }
 
     #[test]

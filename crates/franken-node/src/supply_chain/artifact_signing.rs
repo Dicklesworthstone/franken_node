@@ -101,7 +101,7 @@ pub struct KeyId(pub String);
 impl KeyId {
     /// Derive a key ID from a verifying (public) key: first 8 bytes of SHA-256, hex-encoded.
     pub fn from_verifying_key(vk: &VerifyingKey) -> Self {
-        let hash = Sha256::digest(vk.as_bytes());
+        let hash = Sha256::digest([b"artifact_signing_keyid_v1:" as &[u8], vk.as_bytes()].concat());
         Self(hex::encode(&hash[..8]))
     }
 }
@@ -267,7 +267,7 @@ impl KeyRing {
 
 /// Compute SHA-256 of arbitrary bytes, returned as hex string.
 pub fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
+    let digest = Sha256::digest([b"artifact_signing_hash_v1:" as &[u8], data].concat());
     hex::encode(digest)
 }
 

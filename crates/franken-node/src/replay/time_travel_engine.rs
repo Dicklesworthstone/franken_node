@@ -382,6 +382,7 @@ impl TraceStep {
     /// Compute a SHA-256 digest of the step's output for comparison.
     pub fn output_digest(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"replay_step_output_v1:");
         hasher.update(&self.output);
         hex::encode(hasher.finalize())
     }
@@ -389,9 +390,12 @@ impl TraceStep {
     /// Compute a SHA-256 digest of the step's side-effects for comparison.
     pub fn side_effects_digest(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"replay_step_effects_v1:");
         for effect in &self.side_effects {
             hasher.update(effect.kind.as_bytes());
+            hasher.update(b"|");
             hasher.update(&effect.payload);
+            hasher.update(b"|");
         }
         hex::encode(hasher.finalize())
     }
@@ -419,13 +423,19 @@ impl WorkflowTrace {
     /// Compute the canonical trace digest from steps.
     pub fn compute_digest(steps: &[TraceStep]) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"replay_trace_digest_v1:");
         for step in steps {
             hasher.update(step.seq.to_le_bytes());
+            hasher.update(b"|");
             hasher.update(&step.input);
+            hasher.update(b"|");
             hasher.update(&step.output);
+            hasher.update(b"|");
             for effect in &step.side_effects {
                 hasher.update(effect.kind.as_bytes());
+                hasher.update(b"|");
                 hasher.update(&effect.payload);
+                hasher.update(b"|");
             }
         }
         hex::encode(hasher.finalize())
@@ -789,17 +799,21 @@ impl ReplayEngine {
             let original_output_digest = step.output_digest();
             let original_effects_digest = step.side_effects_digest();
 
-            // Compute replayed digests
+            // Compute replayed digests (must use same domain prefix as TraceStep methods)
             let replayed_output_digest = {
                 let mut hasher = Sha256::new();
+                hasher.update(b"replay_step_output_v1:");
                 hasher.update(&replayed_output);
                 hex::encode(hasher.finalize())
             };
             let replayed_effects_digest = {
                 let mut hasher = Sha256::new();
+                hasher.update(b"replay_step_effects_v1:");
                 for effect in &replayed_effects {
                     hasher.update(effect.kind.as_bytes());
+                    hasher.update(b"|");
                     hasher.update(&effect.payload);
+                    hasher.update(b"|");
                 }
                 hex::encode(hasher.finalize())
             };
@@ -1124,7 +1138,7 @@ mod tests {
         let env = demo_env();
         let builder = TraceBuilder::new("b2", "wf", env);
         let log = builder.audit_log();
-        assert!(log.len() >= 2);
+        assert_eq!(log.len(), 2);
         assert_eq!(log[0].event_code, event_codes::TTR_001);
         assert_eq!(log[1].event_code, event_codes::TTR_008);
     }

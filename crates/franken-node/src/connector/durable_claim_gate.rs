@@ -243,7 +243,7 @@ impl DurableClaimGate {
             input.proofs.len(),
         );
 
-        if input.simulated_elapsed_ms > self.config.verification_timeout_ms
+        if input.simulated_elapsed_ms >= self.config.verification_timeout_ms
             || !input.verification_complete
         {
             let reason = ClaimDenialReason::ProofVerificationTimeout {
@@ -320,10 +320,11 @@ impl DurableClaimGate {
                 ));
             }
 
+            let issued_in_future = current_epoch < proof.issued_at_epoch;
             let stale_by_ttl = current_epoch > proof.expires_at_epoch;
             let stale_by_window = current_epoch.saturating_sub(proof.issued_at_epoch)
                 > self.config.freshness_window_epochs;
-            if stale_by_ttl || stale_by_window {
+            if issued_in_future || stale_by_ttl || stale_by_window {
                 return Ok(self.deny(
                     claim,
                     ClaimDenialReason::ProofExpired {
@@ -456,6 +457,7 @@ fn validate_claim(claim: &DurableClaim) -> Result<(), DurableClaimGateError> {
 
 fn hash_witnesses(proof_hashes: &[String]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"durable_claim_merkle_v1:");
     for proof_hash in proof_hashes {
         hasher.update(proof_hash.as_bytes());
         hasher.update(b"|");

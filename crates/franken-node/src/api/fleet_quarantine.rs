@@ -537,8 +537,8 @@ impl FleetControlManager {
                 zone_id: scope.zone_id.clone(),
                 active_quarantines: 0,
                 active_revocations: 0,
-                healthy_nodes: 10,
-                total_nodes: 10,
+                healthy_nodes: 0,
+                total_nodes: 0,
                 activated: true,
                 pending_convergences: Vec::new(),
             });

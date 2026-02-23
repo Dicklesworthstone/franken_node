@@ -520,7 +520,7 @@ fn compute_chain_hash(
     };
     let bytes = serde_json::to_vec(&material)
         .map_err(|err| ChainError::internal(format!("failed to serialize link material: {err}")))?;
-    let digest = Sha256::digest(&bytes);
+    let digest = Sha256::digest([b"receipt_chain_hash_v1:" as &[u8], &bytes[..]].concat());
     Ok(format!("sha256:{digest:x}"))
 }
 
@@ -560,7 +560,7 @@ fn compute_checkpoint_commitment(
     let bytes = serde_json::to_vec(&material).map_err(|err| {
         ChainError::internal(format!("failed to serialize checkpoint material: {err}"))
     })?;
-    let digest = Sha256::digest(&bytes);
+    let digest = Sha256::digest([b"receipt_chain_hash_v1:" as &[u8], &bytes[..]].concat());
     Ok(format!("sha256:{digest:x}"))
 }
 

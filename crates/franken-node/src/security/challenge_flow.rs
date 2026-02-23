@@ -239,6 +239,7 @@ impl ChallengeAuditEntry {
     /// Compute the hash of this entry for chain integrity.
     pub fn hash(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"challenge_flow_hash_v1:");
         hasher.update(self.challenge_id.as_bytes());
         hasher.update(b"|");
         hasher.update(self.artifact_id.as_bytes());
@@ -996,7 +997,7 @@ mod tests {
         let cid = issue_basic(&mut ctrl, 1000);
         ctrl.submit_proof(&cid, make_proof(2000), "p", 2000)
             .unwrap();
-        assert!(ctrl.audit_log().len() >= 2);
+        assert_eq!(ctrl.audit_log().len(), 2);
     }
 
     #[test]

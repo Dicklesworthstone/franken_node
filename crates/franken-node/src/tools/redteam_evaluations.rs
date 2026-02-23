@@ -413,7 +413,13 @@ impl RedTeamEvaluations {
             "schema_version": &self.schema_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"redteam_evaluations_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::RTE_CATALOG_GENERATED,
@@ -749,7 +755,7 @@ mod tests {
         engine
             .create_engagement(sample_engagement("eng-1"), &trace())
             .unwrap();
-        assert!(engine.audit_log().len() >= 4);
+        assert_eq!(engine.audit_log().len(), 4);
     }
 
     #[test]

@@ -279,7 +279,13 @@ impl AdversarialResilienceMetrics {
             0.0
         };
         let hash_input = serde_json::json!({"total": self.metrics.len(), "campaigns": campaigns.len(), "version": &self.metric_version}).to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"adversarial_resilience_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::ARM_REPORT_GENERATED,
@@ -462,7 +468,7 @@ mod tests {
         let mut e = AdversarialResilienceMetrics::default();
         e.submit_metric(sample("m1", CampaignType::BruteForce), &trace())
             .unwrap();
-        assert!(e.audit_log().len() >= 5);
+        assert_eq!(e.audit_log().len(), 5);
     }
     #[test]
     fn audit_has_codes() {

@@ -989,7 +989,7 @@ mod tests {
         assert_eq!(t.count_in_state(ObligationState::Committed), 1);
 
         // Verify audit trail is complete
-        assert!(t.audit_log_count() >= 2);
+        assert_eq!(t.audit_log_count(), 2);
     }
 
     // 31. full two-phase lifecycle: reserve -> rollback

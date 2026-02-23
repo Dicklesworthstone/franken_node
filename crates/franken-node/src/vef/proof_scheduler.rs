@@ -311,9 +311,10 @@ impl VefProofScheduler {
                 .copied()
                 .unwrap_or_else(|| window.tier.default_deadline_millis());
 
-            let estimated_compute_millis = 100 * window.entry_count;
-            let estimated_memory_mib = 8 * window.entry_count;
-            if estimated_compute_millis > self.policy.max_compute_millis_per_tick * 8 {
+            let estimated_compute_millis = 100_u64.saturating_mul(window.entry_count);
+            let estimated_memory_mib = 8_u64.saturating_mul(window.entry_count);
+            if estimated_compute_millis > self.policy.max_compute_millis_per_tick.saturating_mul(8)
+            {
                 return Err(SchedulerError::budget(format!(
                     "window {} estimated compute {}ms exceeds configured envelope",
                     window.window_id, estimated_compute_millis
@@ -331,7 +332,7 @@ impl VefProofScheduler {
                 window_id: window.window_id.clone(),
                 tier: window.tier,
                 priority_score: window.tier.priority_score(),
-                deadline_millis: now_millis + deadline_span,
+                deadline_millis: now_millis.saturating_add(deadline_span),
                 estimated_compute_millis,
                 estimated_memory_mib,
                 status: ProofJobStatus::Pending,

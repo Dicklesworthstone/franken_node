@@ -317,7 +317,7 @@ mod tests {
         let r = req("obj1", false, "2.0", false, false);
         let result = evaluate_promotion(&r, &rule(), "v1", "tr", "ts").unwrap();
         assert!(!result.promoted);
-        assert!(result.rejection_reasons.len() >= 3);
+        assert_eq!(result.rejection_reasons.len(), 3);
     }
 
     #[test]

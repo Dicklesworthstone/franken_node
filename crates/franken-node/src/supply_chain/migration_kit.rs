@@ -305,7 +305,9 @@ impl MigrationKitEcosystem {
             "kit_version": &self.config.kit_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [b"migration_kit_hash_v1:", hash_input.as_bytes()].concat(),
+        ));
 
         let kit = MigrationKit {
             kit_id: kit_id.clone(),
@@ -514,7 +516,9 @@ impl MigrationKitEcosystem {
             "failed": failed,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [b"migration_kit_hash_v1:", hash_input.as_bytes()].concat(),
+        ));
 
         let report = MigrationReport {
             report_id: Uuid::now_v7().to_string(),
@@ -915,7 +919,7 @@ mod tests {
             &make_trace(),
         )
         .unwrap();
-        assert!(eco.audit_log().len() >= 2);
+        assert_eq!(eco.audit_log().len(), 2);
     }
 
     #[test]

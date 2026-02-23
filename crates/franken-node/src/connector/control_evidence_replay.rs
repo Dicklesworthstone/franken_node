@@ -123,7 +123,7 @@ pub fn build_replay_context(
             candidates.push(Candidate {
                 id: candidate_name.clone(),
                 decision_kind: ledger_kind,
-                score: 0.5 - (i as f64 * 0.01),
+                score: (0.5 - (i as f64 * 0.01)).max(0.0),
                 metadata: serde_json::json!({}),
             });
         }

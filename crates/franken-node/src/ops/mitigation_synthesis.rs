@@ -77,6 +77,7 @@ impl IncidentTrace {
     #[must_use]
     pub fn compute_hash(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"mitigation_synthesis_hash_v1:");
         for d in &self.decisions {
             hasher.update(d.sequence_number.to_le_bytes());
             hasher.update(d.action.as_bytes());
@@ -454,6 +455,7 @@ impl IncidentLab {
 
 fn sign_payload(payload: &str, secret: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"mitigation_synthesis_sign_v1:");
     hasher.update(secret.as_bytes());
     hasher.update(b"|");
     hasher.update(payload.as_bytes());

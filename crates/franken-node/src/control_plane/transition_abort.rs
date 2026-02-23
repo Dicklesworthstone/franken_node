@@ -199,6 +199,7 @@ impl ForceTransitionPolicy {
             self.audit_reason,
         );
         let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, b"transition_abort_policy_v1:");
         sha2::Digest::update(&mut hasher, canonical.as_bytes());
         format!("policy:{:x}", sha2::Digest::finalize(hasher))
     }

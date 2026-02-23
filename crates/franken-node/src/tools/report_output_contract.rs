@@ -208,7 +208,9 @@ impl ReportOutputContract {
         );
 
         let hash_input = serde_json::json!({"title": &bundle.title, "type": bundle.report_type.label(), "artifacts": bundle.artifacts.len()}).to_string();
-        bundle.bundle_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        bundle.bundle_hash = hex::encode(Sha256::digest(
+            [b"report_output_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
+        ));
         bundle.contract_version = self.contract_version.clone();
         bundle.created_at = Utc::now().to_rfc3339();
 
@@ -241,7 +243,9 @@ impl ReportOutputContract {
         }
 
         let hash_input = serde_json::json!({"total": self.bundles.len(), "by_type": &by_type, "version": &self.contract_version}).to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [b"report_output_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
+        ));
 
         self.log(
             event_codes::ROC_CATALOG_GENERATED,
@@ -411,7 +415,7 @@ mod tests {
     fn audit_populated() {
         let mut e = ReportOutputContract::default();
         e.create_bundle(complete_bundle("b-1"), &trace()).unwrap();
-        assert!(e.audit_log().len() >= 5);
+        assert_eq!(e.audit_log().len(), 5);
     }
     #[test]
     fn audit_has_codes() {

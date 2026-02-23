@@ -340,7 +340,10 @@ impl SafeExtensionOnboarding {
             overall_friction,
             bottleneck_phases.len()
         );
-        let content_hash = format!("{:x}", Sha256::digest(hash_input.as_bytes()));
+        let content_hash = format!(
+            "{:x}",
+            Sha256::digest([b"safe_extension_hash_v1:" as &[u8], hash_input.as_bytes()].concat())
+        );
 
         self.log(
             event_codes::SEO_REPORT_GENERATED,
@@ -453,7 +456,7 @@ mod tests {
     fn record_step_produces_audit() {
         let mut e = SafeExtensionOnboarding::new();
         e.record_step(sample_step("s1", "sess1", OnboardingPhase::Install));
-        assert!(e.audit_log.len() >= 2);
+        assert_eq!(e.audit_log.len(), 3);
     }
 
     #[test]

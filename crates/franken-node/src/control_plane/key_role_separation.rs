@@ -1320,7 +1320,7 @@ mod tests {
         )
         .unwrap();
         // bind + rotate = 2 events
-        assert!(reg.event_count() >= 2);
+        assert_eq!(reg.event_count(), 2);
         let last = reg.events().last().unwrap();
         assert_eq!(last.event_code, event_codes::KRS_KEY_ROLE_ROTATED);
         assert_eq!(last.severity, "INFO");

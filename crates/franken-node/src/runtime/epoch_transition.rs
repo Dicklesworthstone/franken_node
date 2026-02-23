@@ -558,7 +558,8 @@ fn manifest_hash_for_transition(
     target_epoch: u64,
 ) -> String {
     let canonical = format!("epoch-manifest|{transition_id}|{initiator}|{reason}|{target_epoch}");
-    let digest = Sha256::digest(canonical.as_bytes());
+    let digest =
+        Sha256::digest([b"epoch_transition_hash_v1:" as &[u8], canonical.as_bytes()].concat());
     format!("{digest:x}")
 }
 

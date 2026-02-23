@@ -216,12 +216,17 @@ impl GateEngine {
 
     fn sign(&self, payload: &str) -> String {
         // Simplified HMAC for demonstration; production uses ring/hmac.
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut h = DefaultHasher::new();
-        self.signing_key.hash(&mut h);
-        payload.hash(&mut h);
-        format!("{:016x}", h.finish())
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(b"compat_gate_sign_v1:");
+        h.update(&self.signing_key);
+        h.update(b"|");
+        h.update(payload.as_bytes());
+        let digest = h.finalize();
+        format!(
+            "{:016x}",
+            u64::from_le_bytes(digest[..8].try_into().unwrap())
+        )
     }
 
     fn emit_audit(&mut self, event_code: &str, scope_id: &str, detail: &str, trace_id: &str) {
@@ -710,7 +715,7 @@ mod tests {
             .iter()
             .filter(|e| e.event_code == PCG_004)
             .count();
-        assert!(pcg4 >= 1);
+        assert_eq!(pcg4, 1);
     }
 
     #[test]
@@ -730,7 +735,7 @@ mod tests {
             .iter()
             .filter(|e| e.event_code == PCG_003)
             .count();
-        assert!(pcg3 >= 1);
+        assert_eq!(pcg3, 1);
     }
 
     #[test]

@@ -394,6 +394,7 @@ pub struct StakingAuditEntry {
 /// Satisfies INV-STK-DETERMINISTIC-PENALTY and INV-STAKE-SLASH-DETERMINISTIC.
 pub fn compute_evidence_hash(payload: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"staking_governance_evidence_v1:");
     hasher.update(payload.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -407,6 +408,7 @@ pub fn compute_penalty_hash(
     stake_amount: u64,
 ) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"staking_governance_penalty_v1:");
     hasher.update(evidence_hash.as_bytes());
     hasher.update(b"|");
     hasher.update(slash_fraction_bps.to_le_bytes());
@@ -841,7 +843,7 @@ impl StakingLedger {
         let post_balance = pre_balance.saturating_sub(slash_amount);
 
         // Update stake record
-        let stake_record = self.state.stakes.get_mut(&stake_id.0).unwrap();
+        let stake_record = self.state.stakes.get_mut(&stake_id.0).expect("stake existence verified above");
         stake_record.state = StakeState::Slashed;
         stake_record.slashed_at = Some(timestamp);
         stake_record.amount = post_balance;
@@ -964,7 +966,7 @@ impl StakingLedger {
         }
 
         // Transition to UnderAppeal
-        self.state.stakes.get_mut(&stake_id.0).unwrap().state = StakeState::UnderAppeal;
+        self.state.stakes.get_mut(&stake_id.0).expect("stake existence verified above").state = StakeState::UnderAppeal;
 
         let appeal = AppealRecord {
             appeal_id: self.state.next_appeal_id,
@@ -1065,10 +1067,10 @@ impl StakingLedger {
 
         if upheld {
             // Appeal denied: remain slashed
-            self.state.stakes.get_mut(&stake_id.0).unwrap().state = StakeState::Slashed;
+            self.state.stakes.get_mut(&stake_id.0).expect("stake existence verified above").state = StakeState::Slashed;
         } else {
             // Appeal granted: restore to active and return slashed amount
-            let stake_record = self.state.stakes.get_mut(&stake_id.0).unwrap();
+            let stake_record = self.state.stakes.get_mut(&stake_id.0).expect("stake existence verified above");
             stake_record.state = StakeState::Active;
 
             // Find the slash event and restore

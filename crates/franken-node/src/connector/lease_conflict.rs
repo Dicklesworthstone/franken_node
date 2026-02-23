@@ -245,10 +245,12 @@ pub fn resolve_conflict(
     } else {
         // Fallback: deterministic hash-based
         let mut ha = sha2::Sha256::new();
+        sha2::Digest::update(&mut ha, b"lease_conflict_v1:");
         sha2::Digest::update(&mut ha, a.lease_id.as_bytes());
         let score_a = format!("{:x}", sha2::Digest::finalize(ha));
 
         let mut hb = sha2::Sha256::new();
+        sha2::Digest::update(&mut hb, b"lease_conflict_v1:");
         sha2::Digest::update(&mut hb, b.lease_id.as_bytes());
         let score_b = format!("{:x}", sha2::Digest::finalize(hb));
 
@@ -296,6 +298,7 @@ pub fn fork_log_entry(
 
     // Deterministic entry_id from conflict + trace
     let mut hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut hasher, b"lease_conflict_resolution_v1:");
     sha2::Digest::update(&mut hasher, conflict.lease_a.as_bytes());
     sha2::Digest::update(&mut hasher, b"|");
     sha2::Digest::update(&mut hasher, conflict.lease_b.as_bytes());

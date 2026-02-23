@@ -385,7 +385,7 @@ impl RegionTree {
         self.nodes.insert(id.as_str().to_string(), node);
 
         // Attach to parent
-        let parent = self.nodes.get_mut(parent_id.as_str()).unwrap();
+        let parent = self.nodes.get_mut(parent_id.as_str()).expect("node existence verified above");
         parent.children.push(id.clone());
         let child_count = parent.children.len();
 
@@ -527,7 +527,7 @@ impl RegionTree {
         let task_count;
         let parent_id_str;
         {
-            let node = self.nodes.get_mut(region_id.as_str()).unwrap();
+            let node = self.nodes.get_mut(region_id.as_str()).expect("node existence verified above");
             node.state = RegionState::Draining;
             drain_budget_ms = node.drain_budget_ms;
             task_count = node.tasks.len();
@@ -553,7 +553,7 @@ impl RegionTree {
         // For synchronous operation, we check if tasks remain and force-terminate.
         let remaining;
         {
-            let node = self.nodes.get(region_id.as_str()).unwrap();
+            let node = self.nodes.get(region_id.as_str()).expect("node existence verified above");
             remaining = node.tasks.len();
         }
 
@@ -573,7 +573,7 @@ impl RegionTree {
             all_events.push(force_event);
 
             // Clear tasks
-            let node = self.nodes.get_mut(region_id.as_str()).unwrap();
+            let node = self.nodes.get_mut(region_id.as_str()).expect("node existence verified above");
             node.tasks.clear();
         }
 
@@ -596,7 +596,7 @@ impl RegionTree {
 
         // Step 6: Mark closed
         {
-            let node = self.nodes.get_mut(region_id.as_str()).unwrap();
+            let node = self.nodes.get_mut(region_id.as_str()).expect("node existence verified above");
             node.state = RegionState::Closed;
         }
 
@@ -1044,7 +1044,7 @@ mod tests {
         tree.open_region(&root_id(), 0).unwrap();
         tree.register_task(&root_id(), TaskId::new("t1"), 1)
             .unwrap();
-        assert!(tree.event_log().len() >= 2);
+        assert_eq!(tree.event_log().len(), 2);
         assert_eq!(tree.event_log()[0].event_code, event_codes::REG_001);
         assert_eq!(tree.event_log()[1].event_code, event_codes::REG_002);
     }

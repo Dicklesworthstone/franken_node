@@ -108,6 +108,7 @@ impl fmt::Display for RollbackBundleError {
 /// SHA-256 hex digest helper.
 pub fn sha256_hex(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"rollback_bundle_hash_v1:");
     hasher.update(data);
     format!("{:x}", hasher.finalize())
 }
@@ -325,7 +326,7 @@ impl RollbackBundle {
             });
         }
 
-        // Verify every component checksum
+        // Verify every manifest component exists in bundle with correct checksum
         for mc in &self.manifest.components {
             let component = self
                 .components
@@ -352,6 +353,24 @@ impl RollbackBundle {
                 });
             }
         }
+
+        // Verify every bundle component is listed in the manifest (reverse check)
+        for component in &self.components {
+            if !self
+                .manifest
+                .components
+                .iter()
+                .any(|mc| mc.name == component.name)
+            {
+                return Err(RollbackBundleError::ManifestInvalid {
+                    reason: format!(
+                        "component '{}' present in bundle but not listed in manifest",
+                        component.name
+                    ),
+                });
+            }
+        }
+
         Ok(())
     }
 
@@ -486,7 +505,7 @@ impl BundleStore {
             detail: "rollback bundle generated successfully".to_string(),
         });
 
-        self.bundles.get(target_version).unwrap().clone()
+        self.bundles.get(target_version).expect("bundle just inserted above").clone()
     }
 
     /// Apply a rollback bundle, or dry-run to preview actions.
@@ -645,6 +664,10 @@ impl BundleStore {
                 ),
             });
         } else {
+            // Revert state to pre-rollback snapshot on health check failure
+            if mode == RollbackMode::Apply {
+                self.current_state = pre_snapshot.clone();
+            }
             self.events
                 .push(event_codes::RRB_004_ROLLBACK_FAILED.to_string());
             self.audit_log.push(RollbackAuditEntry {
@@ -679,11 +702,19 @@ impl BundleStore {
         self.bundles.keys().cloned().collect()
     }
 
-    /// Prune bundles, keeping only the last `keep` bundles.
+    /// Prune bundles, keeping only the most recent `keep` bundles (by timestamp).
     pub fn prune(&mut self, keep: usize) {
         while self.bundles.len() > keep {
-            if let Some(oldest) = self.bundles.keys().next().cloned() {
-                self.bundles.remove(&oldest);
+            // Find the bundle with the oldest timestamp, not lex-first key
+            let oldest_key = self
+                .bundles
+                .iter()
+                .min_by(|(_, a), (_, b)| a.timestamp.cmp(&b.timestamp))
+                .map(|(k, _)| k.clone());
+            if let Some(key) = oldest_key {
+                self.bundles.remove(&key);
+            } else {
+                break;
             }
         }
     }
@@ -1262,7 +1293,7 @@ mod tests {
             "2026-02-20T13:00:00Z",
         );
         let log = store.audit_log();
-        assert!(log.len() >= 2);
+        assert_eq!(log.len(), 2);
         assert_eq!(
             log.last().unwrap().event_code,
             event_codes::RRB_003_ROLLBACK_COMPLETED

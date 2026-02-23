@@ -510,10 +510,7 @@ impl ConstraintCompiler {
     fn compile_rule(&self, rule: &PolicyRule, policy_id: &str) -> Predicate {
         let expression = self.build_expression(&rule.conditions);
         let expression_hash = self.sha256_hex(&expression);
-        let predicate_id = format!(
-            "{}.{}.{}",
-            policy_id, rule.action_class, rule.rule_id
-        );
+        let predicate_id = format!("{}.{}.{}", policy_id, rule.action_class, rule.rule_id);
 
         Predicate {
             predicate_id,
@@ -554,14 +551,14 @@ impl ConstraintCompiler {
     /// Compute SHA-256 hash of the canonical policy serialization.
     /// Uses BTreeMap-based serde_json for deterministic output. INV-VEF-DETERMINISTIC
     fn compute_policy_hash(&self, policy: &PolicyDefinition) -> String {
-        let canonical =
-            serde_json::to_string(policy).unwrap_or_default();
+        let canonical = serde_json::to_string(policy).unwrap_or_default();
         self.sha256_hex(&canonical)
     }
 
     /// Compute SHA-256 hex digest.
     fn sha256_hex(&self, input: &str) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"constraint_compiler_hash_v1:");
         hasher.update(input.as_bytes());
         hex::encode(hasher.finalize())
     }
@@ -668,7 +665,11 @@ pub fn demo_full_coverage_policy() -> PolicyDefinition {
                 "Allow network egress to internal endpoints",
                 PolicyEffect::Allow,
             )
-            .with_condition("destination.host", ComparisonOp::Matches, "*.internal.local")
+            .with_condition(
+                "destination.host",
+                ComparisonOp::Matches,
+                "*.internal.local",
+            )
             .with_priority(10),
         )
         .with_rule(
@@ -678,7 +679,11 @@ pub fn demo_full_coverage_policy() -> PolicyDefinition {
                 "Deny network egress to external endpoints by default",
                 PolicyEffect::Deny,
             )
-            .with_condition("destination.host", ComparisonOp::NotContains, ".internal.local")
+            .with_condition(
+                "destination.host",
+                ComparisonOp::NotContains,
+                ".internal.local",
+            )
             .with_priority(100),
         )
         .with_rule(
@@ -768,13 +773,8 @@ mod tests {
 
     fn minimal_policy() -> PolicyDefinition {
         PolicyDefinition::new("test-policy", "Test Policy", "1.0.0").with_rule(
-            PolicyRule::new(
-                "r1",
-                ActionClass::Network,
-                "test rule",
-                PolicyEffect::Deny,
-            )
-            .with_condition("destination.host", ComparisonOp::Equals, "evil.com"),
+            PolicyRule::new("r1", ActionClass::Network, "test rule", PolicyEffect::Deny)
+                .with_condition("destination.host", ComparisonOp::Equals, "evil.com"),
         )
     }
 
@@ -822,7 +822,12 @@ mod tests {
             );
         let result = compiler.compile(&policy);
         assert!(!result.success);
-        assert!(result.errors.iter().any(|e| e.code == error_codes::ERR_VEF_DUPLICATE_RULE));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == error_codes::ERR_VEF_DUPLICATE_RULE)
+        );
     }
 
     // ── 4. Rule with no conditions produces error ──
@@ -830,12 +835,21 @@ mod tests {
     #[test]
     fn test_compile_rule_no_conditions() {
         let compiler = test_compiler();
-        let policy = PolicyDefinition::new("no-cond", "NoCond", "1.0.0").with_rule(
-            PolicyRule::new("r1", ActionClass::Network, "no conditions", PolicyEffect::Deny),
-        );
+        let policy =
+            PolicyDefinition::new("no-cond", "NoCond", "1.0.0").with_rule(PolicyRule::new(
+                "r1",
+                ActionClass::Network,
+                "no conditions",
+                PolicyEffect::Deny,
+            ));
         let result = compiler.compile(&policy);
         assert!(!result.success);
-        assert!(result.errors.iter().any(|e| e.code == error_codes::ERR_VEF_NO_CONDITIONS));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == error_codes::ERR_VEF_NO_CONDITIONS)
+        );
     }
 
     // ── 5. Empty field in condition produces error ──
@@ -843,16 +857,19 @@ mod tests {
     #[test]
     fn test_compile_empty_field_condition() {
         let compiler = test_compiler();
-        let policy = PolicyDefinition::new("bad-field", "BadField", "1.0.0").with_rule(
-            PolicyRule::new("r1", ActionClass::Network, "bad", PolicyEffect::Deny)
-                .with_condition("", ComparisonOp::Equals, "x"),
-        );
+        let policy =
+            PolicyDefinition::new("bad-field", "BadField", "1.0.0").with_rule(
+                PolicyRule::new("r1", ActionClass::Network, "bad", PolicyEffect::Deny)
+                    .with_condition("", ComparisonOp::Equals, "x"),
+            );
         let result = compiler.compile(&policy);
         assert!(!result.success);
-        assert!(result
-            .errors
-            .iter()
-            .any(|e| e.code == error_codes::ERR_VEF_INVALID_PREDICATE));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == error_codes::ERR_VEF_INVALID_PREDICATE)
+        );
     }
 
     // ── 6. Deterministic output (INV-VEF-DETERMINISTIC) ──
@@ -972,7 +989,10 @@ mod tests {
                 "Predicate must have a source_rule_id"
             );
             assert!(
-                policy.rules.iter().any(|r| r.rule_id == predicate.source_rule_id),
+                policy
+                    .rules
+                    .iter()
+                    .any(|r| r.rule_id == predicate.source_rule_id),
                 "source_rule_id must match a rule in the policy"
             );
         }
@@ -1021,12 +1041,30 @@ mod tests {
 
     #[test]
     fn test_action_class_from_token() {
-        assert_eq!(ActionClass::from_token("network"), Some(ActionClass::Network));
-        assert_eq!(ActionClass::from_token("FileSystem"), Some(ActionClass::FileSystem));
-        assert_eq!(ActionClass::from_token("file_system"), Some(ActionClass::FileSystem));
-        assert_eq!(ActionClass::from_token("process"), Some(ActionClass::Process));
-        assert_eq!(ActionClass::from_token("secret_access"), Some(ActionClass::SecretAccess));
-        assert_eq!(ActionClass::from_token("secret"), Some(ActionClass::SecretAccess));
+        assert_eq!(
+            ActionClass::from_token("network"),
+            Some(ActionClass::Network)
+        );
+        assert_eq!(
+            ActionClass::from_token("FileSystem"),
+            Some(ActionClass::FileSystem)
+        );
+        assert_eq!(
+            ActionClass::from_token("file_system"),
+            Some(ActionClass::FileSystem)
+        );
+        assert_eq!(
+            ActionClass::from_token("process"),
+            Some(ActionClass::Process)
+        );
+        assert_eq!(
+            ActionClass::from_token("secret_access"),
+            Some(ActionClass::SecretAccess)
+        );
+        assert_eq!(
+            ActionClass::from_token("secret"),
+            Some(ActionClass::SecretAccess)
+        );
         assert_eq!(
             ActionClass::from_token("policy_transition"),
             Some(ActionClass::PolicyTransition)
@@ -1044,12 +1082,30 @@ mod tests {
     fn test_comparison_op_from_token() {
         assert_eq!(ComparisonOp::from_token("eq"), Some(ComparisonOp::Equals));
         assert_eq!(ComparisonOp::from_token("=="), Some(ComparisonOp::Equals));
-        assert_eq!(ComparisonOp::from_token("neq"), Some(ComparisonOp::NotEquals));
-        assert_eq!(ComparisonOp::from_token("contains"), Some(ComparisonOp::Contains));
-        assert_eq!(ComparisonOp::from_token(">"), Some(ComparisonOp::GreaterThan));
-        assert_eq!(ComparisonOp::from_token("<="), Some(ComparisonOp::LessOrEqual));
-        assert_eq!(ComparisonOp::from_token("matches"), Some(ComparisonOp::Matches));
-        assert_eq!(ComparisonOp::from_token("one_of"), Some(ComparisonOp::OneOf));
+        assert_eq!(
+            ComparisonOp::from_token("neq"),
+            Some(ComparisonOp::NotEquals)
+        );
+        assert_eq!(
+            ComparisonOp::from_token("contains"),
+            Some(ComparisonOp::Contains)
+        );
+        assert_eq!(
+            ComparisonOp::from_token(">"),
+            Some(ComparisonOp::GreaterThan)
+        );
+        assert_eq!(
+            ComparisonOp::from_token("<="),
+            Some(ComparisonOp::LessOrEqual)
+        );
+        assert_eq!(
+            ComparisonOp::from_token("matches"),
+            Some(ComparisonOp::Matches)
+        );
+        assert_eq!(
+            ComparisonOp::from_token("one_of"),
+            Some(ComparisonOp::OneOf)
+        );
         assert_eq!(ComparisonOp::from_token("garbage"), None);
     }
 
@@ -1211,7 +1267,10 @@ mod tests {
     fn test_action_class_display() {
         assert_eq!(format!("{}", ActionClass::Network), "network");
         assert_eq!(format!("{}", ActionClass::FileSystem), "file_system");
-        assert_eq!(format!("{}", ActionClass::ArtifactPromotion), "artifact_promotion");
+        assert_eq!(
+            format!("{}", ActionClass::ArtifactPromotion),
+            "artifact_promotion"
+        );
     }
 
     // ── 29. Demo policy has expected rule count ──

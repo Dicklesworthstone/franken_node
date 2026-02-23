@@ -252,6 +252,7 @@ fn compute_contract_digest(
     source_id: &str,
 ) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"claim_compiler_hash_v1:");
     hasher.update(claim_id.as_bytes());
     hasher.update(b"|");
     hasher.update(claim_text.as_bytes());
@@ -267,6 +268,7 @@ fn compute_contract_digest(
 
 fn sign_contract(digest: &str, signer_id: &str, signing_key: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"claim_compiler_sign_v1:");
     hasher.update(digest.as_bytes());
     hasher.update(b"|");
     hasher.update(signer_id.as_bytes());
@@ -501,6 +503,7 @@ fn compute_entry_digest(
     signing_key: &str,
 ) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"claim_compiler_entry_v1:");
     hasher.update(entry_id.as_bytes());
     hasher.update(b"|");
     hasher.update(claim_id.as_bytes());
@@ -518,6 +521,7 @@ fn compute_snapshot_digest(
     entries: &BTreeMap<String, ScoreboardEntry>,
 ) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"claim_compiler_snapshot_v1:");
     hasher.update(snapshot_id.as_bytes());
     for (key, entry) in entries {
         hasher.update(b"|");

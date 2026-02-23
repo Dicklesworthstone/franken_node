@@ -947,7 +947,7 @@ mod tests {
     #[test]
     fn test_claim_matrix_has_entries() {
         let matrix = DurabilityController::claim_matrix();
-        assert!(matrix.len() >= 7); // 1 local + 3 success + 3 failure
+        assert_eq!(matrix.len(), 7); // 1 local + 3 success + 3 failure
     }
 
     #[test]

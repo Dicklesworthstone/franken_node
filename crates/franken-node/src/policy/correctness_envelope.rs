@@ -806,7 +806,7 @@ mod tests {
         let env = CorrectnessEnvelope::canonical();
         let manifest = env.to_manifest_json();
         let fields = manifest["immutable_fields"].as_array().unwrap();
-        assert!(fields.len() >= 20, "expected >= 20 immutable fields");
+        assert_eq!(fields.len(), 25, "expected exactly 25 immutable fields");
     }
 
     // ── Serialization round-trip ──

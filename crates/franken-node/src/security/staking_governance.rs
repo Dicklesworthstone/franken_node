@@ -515,7 +515,7 @@ impl TrustGovernanceState {
 
     /// Advance the logical clock by `delta` seconds.
     pub fn advance_time(&mut self, delta: u64) {
-        self.current_time += delta;
+        self.current_time = self.current_time.saturating_add(delta);
     }
 
     // -- Audit helper -------------------------------------------------------
@@ -633,10 +633,10 @@ impl TrustGovernanceState {
         }
 
         // ERR_STAKE_ALREADY_SLASHED
-        if record.state == StakeState::Slashed {
+        if record.state == StakeState::Slashed || record.state == StakeState::UnderAppeal {
             return Err(StakingError::new(
                 ERR_STAKE_ALREADY_SLASHED,
-                "stake already slashed",
+                format!("stake already in {} state", record.state),
             ));
         }
 
@@ -655,7 +655,7 @@ impl TrustGovernanceState {
 
         // INV-STAKE-SLASH-DETERMINISTIC: compute slash amount from policy
         let fraction = self.policy.slash_fraction_for_tier(record.risk_tier);
-        let slash_amount = record.amount * fraction / 100;
+        let slash_amount = (record.amount as u128 * fraction as u128 / 100) as u64;
         let appeal_window = self.policy.appeal_window_for_tier(record.risk_tier);
 
         let event = SlashEvent {
@@ -663,7 +663,7 @@ impl TrustGovernanceState {
             evidence: evidence.clone(),
             slash_amount,
             slashed_at: self.current_time,
-            appeal_deadline: self.current_time + appeal_window,
+            appeal_deadline: self.current_time.saturating_add(appeal_window),
         };
 
         record.state = StakeState::Slashed;

@@ -370,7 +370,13 @@ impl PerformanceHardeningMetrics {
             "metric_version": &self.metric_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"perf_hardening_metrics_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::PHM_REPORT_GENERATED,
@@ -613,7 +619,7 @@ mod tests {
         engine
             .submit_metric(sample_metric("m1", OperationCategory::Request), &trace())
             .unwrap();
-        assert!(engine.audit_log().len() >= 5);
+        assert_eq!(engine.audit_log().len(), 5);
     }
 
     #[test]

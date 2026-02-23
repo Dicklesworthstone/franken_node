@@ -909,7 +909,7 @@ mod tests {
     #[test]
     fn test_inventory_default() {
         let inv = SecurityCriticalInventory::default_inventory();
-        assert!(inv.module_count() >= 8);
+        assert_eq!(inv.module_count(), 8);
         assert_eq!(inv.version, SCHEMA_VERSION);
     }
 
@@ -948,7 +948,7 @@ mod tests {
     #[test]
     fn test_builtin_patterns_count() {
         let patterns = builtin_patterns();
-        assert!(patterns.len() >= 6);
+        assert_eq!(patterns.len(), 6);
     }
 
     #[test]
@@ -1014,7 +1014,7 @@ mod tests {
     #[test]
     fn test_guard_with_default_inventory() {
         let guard = AuthorityAuditGuard::with_default_inventory(true);
-        assert!(guard.inventory.module_count() >= 8);
+        assert_eq!(guard.inventory.module_count(), 8);
         assert!(guard.strict_mode);
         assert!(guard.events.is_empty());
         assert!(guard.violations.is_empty());
@@ -1106,7 +1106,7 @@ mod tests {
         assert_eq!(report.verdict, "PASS");
         assert_eq!(report.failed, 0);
         assert_eq!(report.schema_version, SCHEMA_VERSION);
-        assert!(report.total_modules >= 8);
+        assert_eq!(report.total_modules, 8);
     }
 
     #[test]

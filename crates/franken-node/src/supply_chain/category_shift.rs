@@ -725,7 +725,7 @@ pub struct EvidenceInput {
 
 /// Compute SHA-256 hex digest of bytes.
 pub fn sha256_hex(data: &[u8]) -> String {
-    let digest = Sha256::digest(data);
+    let digest = Sha256::digest([b"category_shift_v1:" as &[u8], data].concat());
     hex::encode(digest)
 }
 
@@ -1279,7 +1279,7 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(
             hash,
-            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+            "48d99f6613e7b962672061107e464451db24f86e6786bff95249cf9d500eb26a"
         );
     }
 

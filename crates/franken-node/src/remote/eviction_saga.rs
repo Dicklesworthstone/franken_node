@@ -330,6 +330,21 @@ impl EvictionSagaManager {
                 .sagas
                 .get(saga_id)
                 .ok_or_else(|| format!("saga not found: {saga_id}"))?;
+
+            // Guard: cannot cancel already-terminal sagas
+            match saga.phase {
+                SagaPhase::Complete | SagaPhase::Compensated | SagaPhase::Failed => {
+                    return Err(format!(
+                        "saga {saga_id} is in terminal phase {} and cannot be cancelled",
+                        saga.phase
+                    ));
+                }
+                SagaPhase::Compensating => {
+                    return Err(format!("saga {saga_id} is already compensating"));
+                }
+                _ => {}
+            }
+
             let action = saga.compensation_action();
             let phase_str = format!("{}", saga.phase);
             (action, phase_str)
@@ -339,7 +354,7 @@ impl EvictionSagaManager {
             serde_json::json!({"saga_id": saga_id, "phase": phase_str, "action": format!("{action}")}));
 
         // Re-borrow mutably for state updates
-        let saga = self.sagas.get_mut(saga_id).unwrap();
+        let saga = self.sagas.get_mut(saga_id).expect("saga existence verified above");
         saga.record_transition(SagaPhase::Compensating, &format!("compensation: {action}"));
 
         // Apply compensation
@@ -378,14 +393,37 @@ impl EvictionSagaManager {
         saga_id: &str,
         trace_id: &str,
     ) -> Result<CompensationAction, String> {
-        let saga = self
-            .sagas
-            .get(saga_id)
-            .ok_or_else(|| format!("saga not found: {saga_id}"))?;
+        let action = {
+            let saga = self
+                .sagas
+                .get(saga_id)
+                .ok_or_else(|| format!("saga not found: {saga_id}"))?;
+            let action = saga.compensation_action();
+            self.log(event_codes::ES_CRASH_RECOVERY, trace_id,
+                serde_json::json!({"saga_id": saga_id, "phase": format!("{}", saga.phase), "action": format!("{action}")}));
+            action
+        };
 
-        let action = saga.compensation_action();
-        self.log(event_codes::ES_CRASH_RECOVERY, trace_id,
-            serde_json::json!({"saga_id": saga_id, "phase": format!("{}", saga.phase), "action": format!("{action}")}));
+        // Actually apply the compensation (cancel_saga equivalent for crash recovery)
+        match &action {
+            CompensationAction::AbortUpload => {
+                let saga = self.sagas.get_mut(saga_id).expect("saga existence verified above");
+                saga.l3_present = false;
+                saga.record_transition(SagaPhase::Compensated, "crash_recovery: abort_upload");
+            }
+            CompensationAction::CleanupL3 => {
+                let saga = self.sagas.get_mut(saga_id).expect("saga existence verified above");
+                saga.l3_present = false;
+                saga.l3_verified = false;
+                saga.record_transition(SagaPhase::Compensated, "crash_recovery: cleanup_l3");
+            }
+            CompensationAction::CompleteRetirement => {
+                let saga = self.sagas.get_mut(saga_id).expect("saga existence verified above");
+                saga.l2_present = false;
+                saga.record_transition(SagaPhase::Complete, "crash_recovery: complete_retirement");
+            }
+            CompensationAction::None => {}
+        }
 
         Ok(action)
     }
@@ -451,7 +489,10 @@ impl EvictionSagaManager {
     /// Content hash.
     pub fn content_hash(&self) -> String {
         let content = serde_json::to_string(&self.sagas).unwrap_or_default();
-        format!("{:x}", Sha256::digest(content.as_bytes()))
+        format!(
+            "{:x}",
+            Sha256::digest([b"eviction_saga_content_v1:" as &[u8], content.as_bytes()].concat())
+        )
     }
 
     /// Saga count.
@@ -601,7 +642,7 @@ mod tests {
         let mut mgr = EvictionSagaManager::init("t1");
         mgr.start_saga("a", true, "t2").unwrap();
         let jsonl = mgr.export_audit_log_jsonl();
-        assert!(jsonl.lines().count() >= 2);
+        assert_eq!(jsonl.lines().count(), 2);
     }
 
     #[test]
@@ -611,7 +652,7 @@ mod tests {
         mgr.begin_upload(&id, "t2").unwrap();
         mgr.complete_upload(&id, "t3").unwrap();
         let jsonl = mgr.export_saga_trace_jsonl();
-        assert!(jsonl.lines().count() >= 2);
+        assert_eq!(jsonl.lines().count(), 2);
     }
 
     #[test]

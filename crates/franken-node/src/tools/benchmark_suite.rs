@@ -188,6 +188,7 @@ impl HardwareProfile {
     /// Compute a deterministic fingerprint of this hardware profile.
     pub fn fingerprint(&self) -> String {
         let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, b"benchmark_suite_fingerprint_v1:" as &[u8]);
         sha2::Digest::update(&mut hasher, self.cpu.as_bytes());
         sha2::Digest::update(&mut hasher, self.memory_mb.to_le_bytes());
         sha2::Digest::update(&mut hasher, self.os.as_bytes());
@@ -281,6 +282,7 @@ impl BenchmarkReport {
         report_for_hash.provenance_hash = String::new();
         let json = serde_json::to_string(&report_for_hash).unwrap_or_default();
         let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, b"benchmark_suite_json_v1:" as &[u8]);
         sha2::Digest::update(&mut hasher, json.as_bytes());
         format!("sha256:{:x}", sha2::Digest::finalize(hasher))
     }

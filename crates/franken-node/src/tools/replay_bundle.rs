@@ -442,7 +442,7 @@ fn deterministic_bundle_id(
         "$.bundle_seed",
     )?;
     let seed_bytes = canonical_json_bytes(&canonical_seed)?;
-    let digest = Sha256::digest(seed_bytes);
+    let digest = Sha256::digest([b"replay_bundle_seed_v1:" as &[u8], &seed_bytes].concat());
     let mut entropy = [0_u8; 32];
     entropy.copy_from_slice(&digest);
 
@@ -585,6 +585,7 @@ fn canonical_json_bytes(value: &Value) -> Result<Vec<u8>, ReplayBundleError> {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"replay_bundle_hash_v1:" as &[u8]);
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }

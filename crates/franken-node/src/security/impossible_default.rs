@@ -181,6 +181,7 @@ impl CapabilityToken {
     /// verification purposes.
     pub fn content_hash(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"impossible_default_hash_v1:");
         hasher.update(self.token_id.as_bytes());
         hasher.update(b"|");
         hasher.update(self.capability.label().as_bytes());
@@ -314,6 +315,7 @@ impl EnforcementAuditEntry {
     /// Compute the hash of this entry for chain integrity.
     pub fn hash(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"impossible_default_hash_v1:");
         hasher.update(self.event_code.as_bytes());
         hasher.update(b"|");
         hasher.update(self.capability.label().as_bytes());
@@ -1357,7 +1359,7 @@ mod tests {
 
         // 6. Verify audit completeness.
         let log = enforcer.audit_log();
-        assert!(log.len() >= 5); // Multiple events logged.
+        assert_eq!(log.len(), 10); // Multiple events logged.
 
         // Verify hash chain integrity.
         for i in 1..log.len() {

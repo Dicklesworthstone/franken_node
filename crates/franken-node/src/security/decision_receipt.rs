@@ -443,12 +443,14 @@ fn canonicalize_value(value: Value) -> Value {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"decision_receipt_hash_v1:");
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
 
 fn compute_chain_hash(previous_hash: Option<&str>, payload: &str) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"decision_receipt_chain_v1:");
     hasher.update(previous_hash.unwrap_or("GENESIS").as_bytes());
     hasher.update(b":");
     hasher.update(payload.as_bytes());

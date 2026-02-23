@@ -791,7 +791,7 @@ mod tests {
         sup.add_child(make_spec("w")).unwrap();
         sup.handle_failure("w").unwrap();
         let events = sup.events();
-        assert!(events.len() >= 2); // at least ChildStarted + ChildFailed + ChildRestarted
+        assert_eq!(events.len(), 3); // ChildStarted + ChildFailed + ChildRestarted
         assert!(matches!(&events[0], SupervisionEvent::ChildStarted { .. }));
     }
 

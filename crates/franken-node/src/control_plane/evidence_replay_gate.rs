@@ -83,6 +83,7 @@ impl CapturedEvidence {
     #[must_use]
     pub fn compute_input_hash(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"evidence_replay_input_v1:");
         hasher.update(self.decision_id.as_bytes());
         hasher.update(b"|");
         hasher.update(self.decision_type_str().as_bytes());
@@ -296,7 +297,10 @@ impl EvidenceReplayGate {
                 "original={}, replayed={}",
                 evidence.chosen_action, replayed_action
             );
-            let diff_hash = format!("{:x}", Sha256::digest(diff.as_bytes()));
+            let diff_hash = format!(
+                "{:x}",
+                Sha256::digest([b"evidence_replay_diff_v1:" as &[u8], diff.as_bytes()].concat())
+            );
             let diff_size = diff.len();
 
             self.replay_log.push(ReplayLogEntry {
@@ -532,7 +536,7 @@ mod tests {
         gate.replay_decision(&ev, "admit", "2026-01-15T01:00:00Z");
 
         let log = gate.replay_log();
-        assert!(log.len() >= 2); // RPL-001 + RPL-002
+        assert_eq!(log.len(), 2); // RPL-001 + RPL-002
         assert_eq!(log[0].event_code, RPL_001_REPLAY_INITIATED);
         assert_eq!(log[1].event_code, RPL_002_REPRODUCED);
     }

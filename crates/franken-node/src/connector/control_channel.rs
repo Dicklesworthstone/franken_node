@@ -435,7 +435,7 @@ mod tests {
         ch.process_message(&msg("m1", Direction::Send, 1, "tok"), "ts")
             .unwrap();
         let _ = ch.process_message(&msg("m2", Direction::Send, 1, ""), "ts"); // auth fail
-        assert!(ch.audit_log().len() >= 2);
+        assert_eq!(ch.audit_log().len(), 2);
     }
 
     #[test]

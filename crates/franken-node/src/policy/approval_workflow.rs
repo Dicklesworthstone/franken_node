@@ -142,6 +142,7 @@ pub struct PolicyChangeAuditEntry {
 /// Compute the SHA-256 hash for an audit entry (excluding entry_hash).
 fn compute_entry_hash(entry: &PolicyChangeAuditEntry) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"approval_workflow_entry_v1:");
     hasher.update(entry.sequence.to_le_bytes());
     hasher.update(b"|");
     hasher.update(entry.event_code.as_bytes());
@@ -544,7 +545,7 @@ impl PolicyChangeEngine {
 
     /// Verify audit chain integrity.
     pub fn verify_audit_chain(&self) -> Result<bool, PolicyChangeError> {
-        let genesis_hash = format!("{:x}", Sha256::digest(b""));
+        let genesis_hash = format!("{:x}", Sha256::digest(b"approval_workflow_genesis_v1:"));
 
         for (i, entry) in self.audit_ledger.iter().enumerate() {
             let expected_prev = if i == 0 {
@@ -620,7 +621,7 @@ impl PolicyChangeEngine {
         timestamp: &str,
         details: &str,
     ) {
-        let genesis_hash = format!("{:x}", Sha256::digest(b""));
+        let genesis_hash = format!("{:x}", Sha256::digest(b"approval_workflow_genesis_v1:"));
         let prev_hash = self
             .audit_ledger
             .last()
@@ -883,7 +884,7 @@ mod tests {
             .unwrap();
 
         assert!(engine.verify_audit_chain().unwrap());
-        assert!(engine.audit_ledger().len() >= 4);
+        assert_eq!(engine.audit_ledger().len(), 4);
     }
 
     #[test]

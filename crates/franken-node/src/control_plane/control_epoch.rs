@@ -111,6 +111,7 @@ impl EpochTransition {
         );
 
         let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, b"control_epoch_mac_v1:");
         sha2::Digest::update(&mut hasher, canonical.as_bytes());
         format!("mac:{:x}", sha2::Digest::finalize(hasher))
     }

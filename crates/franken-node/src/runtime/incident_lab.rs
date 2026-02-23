@@ -265,11 +265,16 @@ impl IncidentLab {
     /// INV-ILAB-TRACE-INTEGRITY: Traces are hash-verified before replay.
     pub fn compute_trace_hash(trace: &IncidentTrace) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"incident_lab_trace_v1:");
         for ev in &trace.events {
             hasher.update(ev.seq.to_le_bytes());
+            hasher.update(b"|");
             hasher.update(ev.label.as_bytes());
+            hasher.update(b"|");
             hasher.update(ev.payload_hex.as_bytes());
+            hasher.update(b"|");
             hasher.update(ev.timestamp_ms.to_le_bytes());
+            hasher.update(b"|");
         }
         hex::encode(hasher.finalize())
     }
@@ -327,6 +332,7 @@ impl IncidentLab {
         self.validate_trace(trace)?;
 
         let mut hasher = Sha256::new();
+        hasher.update(b"incident_lab_replay_v1:");
         for ev in &trace.events {
             hasher.update(ev.seq.to_le_bytes());
             hasher.update(b"|");
@@ -455,6 +461,7 @@ impl IncidentLab {
     /// Compute a signature for a rollout contract body.
     fn sign_contract(contract_id: &str, plan_id: &str, signer_id: &str) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"incident_lab_contract_v1:");
         hasher.update(contract_id.as_bytes());
         hasher.update(b"|");
         hasher.update(plan_id.as_bytes());

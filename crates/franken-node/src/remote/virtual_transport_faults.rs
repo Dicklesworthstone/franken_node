@@ -176,7 +176,7 @@ impl FaultSchedule {
     /// Create a deterministic schedule from seed and config.
     pub fn from_seed(seed: u64, config: &FaultConfig, total_messages: usize) -> Self {
         let mut faults = Vec::new();
-        let mut rng_state = seed;
+        let mut rng_state = if seed == 0 { 1 } else { seed };
         let mut fault_count = 0;
 
         for msg_idx in 0..total_messages {
@@ -446,7 +446,16 @@ impl VirtualTransportFaultHarness {
             .count();
 
         let hash_input = serde_json::to_string(&schedule.faults).unwrap_or_default();
-        let content_hash = format!("{:x}", Sha256::digest(hash_input.as_bytes()));
+        let content_hash = format!(
+            "{:x}",
+            Sha256::digest(
+                [
+                    b"virtual_transport_faults_content_v1:" as &[u8],
+                    hash_input.as_bytes()
+                ]
+                .concat()
+            )
+        );
 
         self.log_audit(
             event_codes::FAULT_CAMPAIGN_COMPLETE,

@@ -332,7 +332,13 @@ impl ReproducibleDatasets {
             "schema_version": &self.config.schema_version,
         })
         .to_string();
-        let bundle_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let bundle_hash = hex::encode(Sha256::digest(
+            [
+                b"migration_incident_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         let bundle = DatasetBundle {
             bundle_id: Uuid::now_v7().to_string(),
@@ -375,7 +381,13 @@ impl ReproducibleDatasets {
             "schema_version": &self.config.schema_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"migration_incident_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         let catalog = DatasetCatalog {
             catalog_id: Uuid::now_v7().to_string(),
@@ -648,7 +660,7 @@ mod tests {
                 &make_trace(),
             )
             .unwrap();
-        assert!(engine.audit_log().len() >= 4);
+        assert_eq!(engine.audit_log().len(), 5);
     }
 
     #[test]

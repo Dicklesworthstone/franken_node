@@ -920,7 +920,7 @@ mod tests {
             make_measurement("lifecycle_transition", 100.0, 200.0, 60.0), // both p95 and cold-start
         ];
         let result = guard.evaluate(&measurements).unwrap();
-        assert!(result.path_results[0].violations.len() >= 2);
+        assert_eq!(result.path_results[0].violations.len(), 3);
     }
 
     // -- Exactly at budget boundary --

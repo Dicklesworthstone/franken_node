@@ -263,19 +263,24 @@ impl CapabilityEnvelope {
     ///
     /// # INV-CART-DIGEST-BOUND
     pub fn compute_digest(&self, identity: &ArtifactIdentity) -> String {
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
+        use sha2::{Digest, Sha256};
 
         // Deterministic canonical representation for hashing.
-        let mut hasher = DefaultHasher::new();
-        identity.canonical_repr().hash(&mut hasher);
-        self.schema_version.hash(&mut hasher);
+        let mut hasher = Sha256::new();
+        hasher.update(b"capability_artifact_digest_v1:");
+        hasher.update(identity.canonical_repr().as_bytes());
+        hasher.update(b"|");
+        hasher.update(self.schema_version.as_bytes());
         for (name, req) in &self.requirements {
-            name.hash(&mut hasher);
-            req.justification.hash(&mut hasher);
-            req.mandatory.hash(&mut hasher);
+            hasher.update(b"|");
+            hasher.update(name.as_bytes());
+            hasher.update(b"|");
+            hasher.update(req.justification.as_bytes());
+            hasher.update(b"|");
+            hasher.update([req.mandatory as u8]);
         }
-        format!("sha256:{:016x}", hasher.finish())
+        let digest = hasher.finalize();
+        format!("sha256:{}", hex::encode(digest))
     }
 
     /// Bind this envelope to an artifact identity by computing and storing the digest.
@@ -1076,7 +1081,7 @@ mod tests {
         let artifact = build_test_artifact("ext-1", &[("cap:fs:read", "read config")]);
         gate.admit(&artifact, "2026-02-21T00:00:00Z").unwrap();
         // At least: submission, schema-ok, digest-ok, envelope-ok, admitted
-        assert!(gate.audit_log().len() >= 4);
+        assert_eq!(gate.audit_log().len(), 5);
         // Should include CART-002 (admitted)
         assert!(
             gate.audit_log()

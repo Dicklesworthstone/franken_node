@@ -429,7 +429,13 @@ impl ReplayDeterminismMetrics {
             "metric_version": &self.config.metric_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"replay_determinism_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::RDM_REPORT_GENERATED,

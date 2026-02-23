@@ -179,6 +179,7 @@ impl SignaturePreimage {
     /// for logging).
     pub fn content_hash_prefix(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"canonical_serializer_hash_v1:");
         hasher.update(self.to_bytes());
         let digest = hex::encode(hasher.finalize());
         digest[..8].to_string()
@@ -599,6 +600,7 @@ fn contains_float_marker(payload: &[u8]) -> bool {
 /// Content hash prefix for logging.
 fn content_hash_prefix(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"canonical_serializer_hash_v1:");
     hasher.update(data);
     let digest = hex::encode(hasher.finalize());
     digest[..8].to_string()
@@ -1031,7 +1033,7 @@ mod tests {
         let events = demo_canonical_serialization();
         // 6 types × (2 serialize for round-trip + 1 serialize for preimage + 1 preimage event)
         // = 6 × 4 = 24 minimum events
-        assert!(events.len() >= 24, "got {} events", events.len());
+        assert_eq!(events.len(), 24, "got {} events", events.len());
     }
 
     // ── Serde roundtrip ─────────────────────────────────────────────

@@ -176,11 +176,16 @@ impl ControlDecision {
     /// Compute a SHA-256 digest of this decision for comparison.
     pub fn digest(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"time_travel_decision_v1:");
         hasher.update(self.decision_id.as_bytes());
+        hasher.update(b"|");
         hasher.update(&self.payload);
+        hasher.update(b"|");
         for (k, v) in &self.metadata {
             hasher.update(k.as_bytes());
+            hasher.update(b"=");
             hasher.update(v.as_bytes());
+            hasher.update(b"|");
         }
         hex::encode(hasher.finalize())
     }
@@ -237,6 +242,7 @@ impl WorkflowSnapshot {
     /// Compute the integrity digest from the frame sequence.
     pub fn compute_integrity_digest(frames: &[CaptureFrame]) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"time_travel_integrity_v1:");
         for f in frames {
             hasher.update(f.frame_index.to_le_bytes());
             hasher.update(b"|");
@@ -704,6 +710,7 @@ impl Default for TimeTravelRuntime {
 /// Compute a SHA-256 hex digest of raw bytes.
 fn hash_bytes(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"time_travel_hash_v1:");
     hasher.update(input);
     hex::encode(hasher.finalize())
 }
@@ -714,6 +721,7 @@ fn hash_bytes(input: &[u8]) -> String {
 /// replay equivalence.
 pub fn deterministic_decision(seed: u64, tick: u64, input: &[u8]) -> ControlDecision {
     let mut hasher = Sha256::new();
+    hasher.update(b"time_travel_det_decision_v1:");
     hasher.update(seed.to_le_bytes());
     hasher.update(b"|");
     hasher.update(tick.to_le_bytes());

@@ -531,6 +531,7 @@ fn derive_checkpoint_id(
     _previous_checkpoint_hash: Option<&str>,
 ) -> CheckpointId {
     let mut hasher = Sha256::new();
+    hasher.update(b"checkpoint_content_v1:");
     hasher.update(orchestration_id.as_bytes());
     hasher.update([0x00]);
     hasher.update(iteration_count.to_le_bytes());
@@ -545,6 +546,7 @@ fn derive_checkpoint_id(
 
 fn hash_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"checkpoint_hash_v1:");
     hasher.update(bytes);
     format!("{:x}", hasher.finalize())
 }

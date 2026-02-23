@@ -149,6 +149,7 @@ impl StateVector {
     #[must_use]
     pub fn compute_state_hash(payload: &str) -> String {
         let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, b"fork_detection_state_v1:");
         sha2::Digest::update(&mut hasher, payload.as_bytes());
         format!("{:x}", sha2::Digest::finalize(hasher))
     }
@@ -374,7 +375,7 @@ impl DivergenceDetector {
                     return (DetectionResult::RollbackDetected, Some(proof));
                 }
                 self.last_result = Some(DetectionResult::Converged);
-                self.halted = false;
+                // Do NOT reset halted here — only operator_reset() clears halt.
                 return (DetectionResult::Converged, None);
             }
 
@@ -415,7 +416,7 @@ impl DivergenceDetector {
 
         // Adjacent epochs with valid parent chain
         self.last_result = Some(DetectionResult::Converged);
-        self.halted = false;
+        // Do NOT reset halted here — only operator_reset() clears halt.
         (DetectionResult::Converged, None)
     }
 
@@ -467,9 +468,9 @@ impl DivergenceDetector {
             DetectionResult::Converged => ReconciliationSuggestion::NoAction,
             DetectionResult::GapDetected => {
                 let (lo, hi) = if local.epoch < remote.epoch {
-                    (local.epoch + 1, remote.epoch)
+                    (local.epoch.saturating_add(1), remote.epoch)
                 } else {
-                    (remote.epoch + 1, local.epoch)
+                    (remote.epoch.saturating_add(1), local.epoch)
                 };
                 ReconciliationSuggestion::FillGap {
                     missing_start: lo,
@@ -535,8 +536,26 @@ impl RollbackDetector {
     /// Feed a new state vector. Returns Err with RollbackProof if rollback detected.
     pub fn feed(&mut self, sv: StateVector) -> Result<(), ForkDetectionError> {
         if let Some(ref last) = self.last_known {
+            // Reject backward or same-epoch state vectors as rollbacks.
+            if sv.epoch <= last.epoch {
+                let proof = RollbackProof {
+                    local_state: last.clone(),
+                    remote_state: sv.clone(),
+                    expected_parent_hash: last.state_hash.clone(),
+                    actual_parent_hash: sv.parent_state_hash.clone(),
+                    detection_timestamp: sv.timestamp,
+                    trace_id: format!("rbd-{}-{}", last.epoch, sv.epoch),
+                    detection_result: DetectionResult::RollbackDetected,
+                };
+                self.proofs.push(proof);
+                return Err(ForkDetectionError::RfdRollbackDetected {
+                    epoch: sv.epoch,
+                    expected_parent: last.state_hash.clone(),
+                    actual_parent: sv.parent_state_hash.clone(),
+                });
+            }
             // The new state's parent_state_hash must match the last state's state_hash
-            if sv.epoch > last.epoch && sv.parent_state_hash != last.state_hash {
+            if sv.parent_state_hash != last.state_hash {
                 let proof = RollbackProof {
                     local_state: last.clone(),
                     remote_state: sv.clone(),
@@ -1020,10 +1039,10 @@ mod tests {
             &DetectionResult::RollbackDetected,
             Some(proof),
         );
-        matches!(
+        assert!(matches!(
             suggestion,
             ReconciliationSuggestion::InvestigateRollback { .. }
-        );
+        ));
     }
 
     // ---- RollbackProof serialization ----

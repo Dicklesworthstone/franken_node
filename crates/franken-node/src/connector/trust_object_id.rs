@@ -205,6 +205,7 @@ impl TrustObjectId {
         data: &[u8],
     ) -> Self {
         let mut hasher = Sha256::new();
+        hasher.update(b"trust_object_derive_v1:");
         hasher.update(epoch.to_be_bytes());
         hasher.update(sequence.to_be_bytes());
         hasher.update(data);
@@ -456,6 +457,7 @@ pub struct IdEvent {
 /// Compute SHA-256 digest as hex string.
 pub fn sha256_digest(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"trust_object_hash_v1:");
     hasher.update(data);
     hex::encode(hasher.finalize())
 }

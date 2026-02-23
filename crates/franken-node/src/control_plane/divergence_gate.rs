@@ -249,6 +249,7 @@ impl OperatorAuthorization {
         let operator_id = operator_id.into();
         let reason = reason.into();
         let mut hasher = Sha256::new();
+        hasher.update(b"divergence_gate_auth_v1:");
         let canonical = format!(
             "{}|{}|{}|{}",
             operator_id, resync_checkpoint_epoch, timestamp, reason
@@ -267,6 +268,7 @@ impl OperatorAuthorization {
     /// Verify the authorization hash is consistent.
     pub fn verify(&self) -> bool {
         let mut hasher = Sha256::new();
+        hasher.update(b"divergence_gate_auth_v1:");
         let canonical = format!(
             "{}|{}|{}|{}",
             self.operator_id, self.resync_checkpoint_epoch, self.timestamp, self.reason

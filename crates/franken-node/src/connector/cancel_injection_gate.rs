@@ -682,7 +682,7 @@ mod tests {
         let gate = make_gate();
         let jsonl = gate.export_audit_log_jsonl();
         let lines: Vec<&str> = jsonl.lines().collect();
-        assert!(lines.len() >= 6, "Expected >= 6 registration events");
+        assert_eq!(lines.len(), 6, "Expected exactly 6 registration events");
     }
 
     #[test]
@@ -737,7 +737,7 @@ mod tests {
         // Verify it has the default 10.14 workflows registered too
         let total = gate.framework().total_test_cases();
         // 24 (default) + 21 (control) = 45
-        assert!(total >= 40, "Expected >= 40 total cases, got {}", total);
+        assert_eq!(total, 45, "Expected 45 total cases (24 default + 21 control), got {}", total);
     }
 
     // ---- Schema version ----

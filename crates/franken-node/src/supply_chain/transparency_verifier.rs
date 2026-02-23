@@ -5,26 +5,36 @@
 //! or invalid. Log roots are pinned per policy.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fmt;
-use std::hash::{DefaultHasher, Hash, Hasher};
 
 // ── Hash helper ─────────────────────────────────────────────────────
 
 /// Compute a deterministic hash of two hex strings combined.
 /// In production this would use SHA-256; here we use SipHash.
 fn hash_pair(left: &str, right: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    left.hash(&mut hasher);
-    right.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut h = Sha256::new();
+    h.update(b"transparency_interior_v1:");
+    h.update(left.as_bytes());
+    h.update(b"|");
+    h.update(right.as_bytes());
+    let digest = h.finalize();
+    format!(
+        "{:016x}",
+        u64::from_le_bytes(digest[..8].try_into().unwrap())
+    )
 }
 
 /// Compute the leaf hash for a piece of data.
 pub fn leaf_hash(data: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    "leaf:".hash(&mut hasher);
-    data.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut h = Sha256::new();
+    h.update(b"leaf:");
+    h.update(data.as_bytes());
+    let digest = h.finalize();
+    format!(
+        "{:016x}",
+        u64::from_le_bytes(digest[..8].try_into().unwrap())
+    )
 }
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -195,7 +205,7 @@ pub fn verify_inclusion(
             artifact_id: artifact_id.into(),
             verified: false,
             log_root_matched: false,
-            proof_valid: true,
+            proof_valid: false,
             failure_reason: Some(ProofFailure::RootNotPinned {
                 root_hash: computed_root,
             }),

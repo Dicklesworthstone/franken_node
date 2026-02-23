@@ -6,6 +6,7 @@
 //
 // bd-390 — Section 10.11
 
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
@@ -140,19 +141,15 @@ pub struct TrustRecord {
 }
 
 impl TrustRecord {
-    /// Compute a simple hash of the record for digest comparison.
+    /// Compute a SHA-256 hash of the record for digest comparison.
     pub fn digest(&self) -> [u8; 32] {
-        // Simple hash: XOR all proof hashes with payload hash.
-        let mut hash = [0u8; 32];
-        for (i, b) in self.payload.iter().enumerate() {
-            hash[i % 32] ^= b;
-        }
+        let mut hasher = Sha256::new();
+        hasher.update(b"anti_entropy_record_v1:");
+        hasher.update(&self.payload);
         for proof_hash in &self.mmr_proof {
-            for (i, b) in proof_hash.iter().enumerate() {
-                hash[i] ^= b;
-            }
+            hasher.update(proof_hash);
         }
-        hash
+        hasher.finalize().into()
     }
 }
 
@@ -178,13 +175,20 @@ impl TrustState {
         }
     }
 
-    /// Insert a record into the state.
+    /// Insert a record into the state and recompute root digest.
     pub fn insert(&mut self, record: TrustRecord) {
-        let digest = record.digest();
-        for (i, b) in digest.iter().enumerate() {
-            self.root_digest[i] ^= b;
-        }
         self.records.insert(record.id.clone(), record);
+        self.recompute_root_digest();
+    }
+
+    /// Recompute root digest as SHA-256 over all record digests in deterministic order.
+    fn recompute_root_digest(&mut self) {
+        let mut hasher = Sha256::new();
+        hasher.update(b"anti_entropy_root_v1:");
+        for rec in self.records.values() {
+            hasher.update(rec.digest());
+        }
+        self.root_digest = hasher.finalize().into();
     }
 
     /// Get the MMR root digest.

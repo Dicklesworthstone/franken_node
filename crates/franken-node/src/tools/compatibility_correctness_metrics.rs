@@ -410,7 +410,13 @@ impl CompatibilityCorrectnessMetrics {
             "metric_version": &self.config.metric_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"compat_correctness_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::CCM_REPORT_GENERATED,
@@ -682,7 +688,7 @@ mod tests {
                 &trace(),
             )
             .unwrap();
-        assert!(engine.audit_log().len() >= 3);
+        assert_eq!(engine.audit_log().len(), 3);
     }
 
     #[test]

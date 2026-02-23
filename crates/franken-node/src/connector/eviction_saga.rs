@@ -543,6 +543,7 @@ impl EvictionSaga {
     #[must_use]
     pub fn content_hash(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"eviction_saga_hash_v1:");
         hasher.update(self.saga_id.as_bytes());
         hasher.update(b"|");
         hasher.update(self.artifact_id.as_bytes());

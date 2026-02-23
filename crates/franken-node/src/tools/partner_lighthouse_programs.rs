@@ -318,6 +318,7 @@ impl PartnerLighthousePrograms {
             .get_mut(partner_id)
             .ok_or_else(|| format!("partner not found: {partner_id}"))?;
         partner.tier = next;
+        partner.outcome_count = 0; // Reset so next promotion requires fresh outcomes
         self.log(
             event_codes::PLP_TIER_PROMOTED,
             trace_id,
@@ -337,7 +338,13 @@ impl PartnerLighthousePrograms {
         let total_d = self.deployments.len();
         let total_o = self.outcomes.len();
         let hash_input = format!("{total_p}:{total_d}:{total_o}:{}", &self.schema_version);
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"partner_lighthouse_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::PLP_FUNNEL_COMPUTED,

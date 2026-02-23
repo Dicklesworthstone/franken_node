@@ -6,6 +6,8 @@
 // Integrates VEF coverage metrics into the claim compiler gate and publishes
 // real-time VEF metrics on the trust scoreboard with signed evidence links.
 
+use sha2::{Digest, Sha256};
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -154,20 +156,13 @@ pub struct VefMetrics {
 impl VefMetrics {
     /// Compute a deterministic digest of the metrics for reproducibility.
     pub fn digest(&self) -> [u8; 32] {
-        let mut hash = [0u8; 32];
-        for (i, b) in self.coverage_pct.to_le_bytes().iter().enumerate() {
-            hash[i % 32] ^= b;
-        }
-        for (i, b) in self.validity_rate.to_le_bytes().iter().enumerate() {
-            hash[(i + 8) % 32] ^= b;
-        }
-        for (i, b) in self.proof_count.to_le_bytes().iter().enumerate() {
-            hash[(i + 16) % 32] ^= b;
-        }
-        for (i, b) in self.gap_count.to_le_bytes().iter().enumerate() {
-            hash[(i + 24) % 32] ^= b;
-        }
-        hash
+        let mut hasher = Sha256::new();
+        hasher.update(b"vef_metrics_v1:");
+        hasher.update(self.coverage_pct.to_le_bytes());
+        hasher.update(self.validity_rate.to_le_bytes());
+        hasher.update(self.proof_count.to_le_bytes());
+        hasher.update(self.gap_count.to_le_bytes());
+        hasher.finalize().into()
     }
 }
 
@@ -223,15 +218,16 @@ pub struct ScoreboardEntry {
 }
 
 impl ScoreboardEntry {
-    /// Compute signed digest (simplified: XOR of metrics digest and evidence).
+    /// Compute signed digest using SHA-256 over metrics and evidence.
     fn compute_digest(metrics: &VefMetrics, evidence_links: &[EvidenceLink]) -> [u8; 32] {
-        let mut hash = metrics.digest();
+        let mut hasher = Sha256::new();
+        hasher.update(b"vef_scoreboard_v1:");
+        hasher.update(metrics.digest());
         for link in evidence_links {
-            for (i, b) in link.proof_id.bytes().enumerate() {
-                hash[i % 32] ^= b;
-            }
+            hasher.update(link.proof_id.as_bytes());
+            hasher.update(b"\x00");
         }
-        hash
+        hasher.finalize().into()
     }
 }
 

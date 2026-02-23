@@ -139,7 +139,13 @@ impl ComplianceEvidenceStore {
     /// Compute the content-addressed hash for a piece of content.
     #[must_use]
     pub fn compute_content_hash(content: &str) -> String {
-        let digest = Sha256::digest(content.as_bytes());
+        let digest = Sha256::digest(
+            [
+                b"ecosystem_compliance_hash_v1:" as &[u8],
+                content.as_bytes(),
+            ]
+            .concat(),
+        );
         format!("sha256:{}", hex::encode(digest))
     }
 

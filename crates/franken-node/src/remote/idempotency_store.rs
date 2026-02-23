@@ -52,6 +52,8 @@ pub mod event_codes {
 
 /// Error code for payload-mismatch conflicts.
 pub const ERR_IDEMPOTENCY_CONFLICT: &str = "ERR_IDEMPOTENCY_CONFLICT";
+/// Error code for corrupted persisted entries that violate completion invariants.
+pub const ERR_IDEMPOTENCY_CORRUPT_ENTRY: &str = "ERR_IDEMPOTENCY_CORRUPT_ENTRY";
 
 // ── Invariant constants ──────────────────────────────────────────────────
 
@@ -157,7 +159,10 @@ pub struct IdsAuditRecord {
 /// SHA-256 hex digest of a payload byte slice.
 #[must_use]
 pub fn hash_payload(payload: &[u8]) -> String {
-    format!("{:x}", Sha256::digest(payload))
+    format!(
+        "{:x}",
+        Sha256::digest([b"idempotency_payload_v1:" as &[u8], payload].concat())
+    )
 }
 
 // ── Dedupe store ─────────────────────────────────────────────────────────
@@ -247,6 +252,7 @@ impl IdempotencyDedupeStore {
         enum Action {
             InsertNew,
             Expired,
+            CorruptComplete { expected_hash: String },
             Conflict { expected_hash: String },
             Duplicate(CachedOutcome),
             InFlight,
@@ -262,12 +268,13 @@ impl IdempotencyDedupeStore {
                 }
             } else {
                 match &entry.status {
-                    EntryStatus::Complete => Action::Duplicate(
-                        entry
-                            .outcome
-                            .clone()
-                            .expect("complete entry must have outcome"),
-                    ),
+                    EntryStatus::Complete => match entry.outcome.clone() {
+                        Some(outcome) => Action::Duplicate(outcome),
+                        // Corrupted persisted state: fail closed instead of panicking.
+                        None => Action::CorruptComplete {
+                            expected_hash: entry.payload_hash.clone(),
+                        },
+                    },
                     EntryStatus::Processing => Action::InFlight,
                     EntryStatus::Abandoned => Action::RetryAbandoned,
                 }
@@ -289,6 +296,26 @@ impl IdempotencyDedupeStore {
                     }),
                 );
                 // Fall through to insert as new
+            }
+            Action::CorruptComplete { expected_hash } => {
+                self.total_conflict += 1;
+                self.log(
+                    event_codes::ID_ENTRY_CONFLICT,
+                    trace_id,
+                    serde_json::json!({
+                        "key_hex": &key_hex,
+                        "expected_hash": &expected_hash,
+                        "actual_hash": &payload_hash,
+                        "error_code": ERR_IDEMPOTENCY_CORRUPT_ENTRY,
+                        "detail": "complete_entry_missing_outcome",
+                        "invariant": invariants::INV_IDS_AT_MOST_ONCE,
+                    }),
+                );
+                return DedupeResult::Conflict {
+                    key_hex,
+                    expected_hash,
+                    actual_hash: payload_hash,
+                };
             }
             Action::Conflict { expected_hash } => {
                 self.total_conflict += 1;
@@ -464,6 +491,7 @@ impl IdempotencyDedupeStore {
     #[must_use]
     pub fn content_hash(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"idempotency_content_hash_v1:");
         hasher.update(SCHEMA_VERSION.as_bytes());
         hasher.update(b"|");
         for (k, entry) in &self.entries {
@@ -617,6 +645,49 @@ mod tests {
     }
 
     #[test]
+    fn test_corrupted_complete_entry_fails_closed_without_panic() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(92);
+        let payload = b"corrupt-payload";
+        let payload_hash = hash_payload(payload);
+
+        store.entries.insert(
+            key.to_hex(),
+            DedupeEntry {
+                key,
+                payload_hash: payload_hash.clone(),
+                status: EntryStatus::Complete,
+                outcome: None,
+                created_at_secs: 1000,
+                ttl_secs: 3600,
+            },
+        );
+
+        let result = store.check_or_insert(key, payload, 1001, "t-corrupt");
+        match result {
+            DedupeResult::Conflict {
+                expected_hash,
+                actual_hash,
+                ..
+            } => {
+                assert_eq!(expected_hash, payload_hash);
+                assert_eq!(actual_hash, payload_hash);
+            }
+            other => panic!("expected Conflict for corrupted complete entry, got {other:?}"),
+        }
+
+        let has_corrupt_conflict_audit = store.audit_log().iter().any(|record| {
+            record.event_code == event_codes::ID_ENTRY_CONFLICT
+                && record
+                    .detail
+                    .get("error_code")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(ERR_IDEMPOTENCY_CORRUPT_ENTRY)
+        });
+        assert!(has_corrupt_conflict_audit);
+    }
+
+    #[test]
     fn test_ttl_expiration() {
         let ttl = 100;
         let mut store = IdempotencyDedupeStore::new(ttl);
@@ -709,7 +780,7 @@ mod tests {
             .unwrap();
 
         // At least 3 events: recovery, new entry, inflight resolved.
-        assert!(store.audit_log_len() >= 3);
+        assert_eq!(store.audit_log_len(), 3);
 
         let jsonl = store.export_audit_log_jsonl();
         assert!(!jsonl.is_empty());

@@ -323,7 +323,7 @@ impl RemoteBulkhead {
 
     fn evict_expired_queue_entries(&mut self, now_ms: u64) {
         while let Some(front) = self.queue.front() {
-            if now_ms <= front.expires_at_ms {
+            if now_ms < front.expires_at_ms {
                 break;
             }
             let expired = self.queue.pop_front().expect("front existed");
@@ -483,7 +483,7 @@ impl RemoteBulkhead {
         };
 
         let queued = &self.queue[position];
-        if now_ms > queued.expires_at_ms {
+        if now_ms >= queued.expires_at_ms {
             return Err(BulkheadError::QueueTimeout {
                 request_id: request_id.to_string(),
             });
@@ -526,7 +526,7 @@ impl RemoteBulkhead {
         );
 
         if let Some(target_cap) = self.draining_target {
-            if self.in_flight < target_cap {
+            if self.in_flight <= target_cap {
                 self.draining_target = None;
             } else {
                 self.log_event(

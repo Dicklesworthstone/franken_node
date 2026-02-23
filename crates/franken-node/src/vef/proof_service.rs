@@ -45,7 +45,7 @@ fn sha256_json<T: Serialize>(value: &T) -> Result<String, ProofServiceError> {
     let bytes = serde_json::to_vec(value).map_err(|err| {
         ProofServiceError::input_error(format!("unable to serialize canonical material: {err}"))
     })?;
-    let digest = Sha256::digest(bytes);
+    let digest = Sha256::digest([b"proof_service_hash_v1:" as &[u8], &bytes[..]].concat());
     Ok(format!("sha256:{digest:x}"))
 }
 

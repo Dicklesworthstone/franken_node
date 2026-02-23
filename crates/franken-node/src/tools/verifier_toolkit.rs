@@ -285,7 +285,9 @@ impl VerifierToolkit {
             "toolkit_version": &self.config.toolkit_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [b"verifier_toolkit_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
+        ));
 
         let report = ValidationReport {
             report_id: Uuid::now_v7().to_string(),
@@ -563,7 +565,9 @@ impl VerifierToolkit {
 
     fn step_hash(&self, claim_id: &str, step: &str, passed: bool) -> String {
         let input = format!("{}:{}:{}", claim_id, step, passed);
-        hex::encode(Sha256::digest(input.as_bytes()))
+        hex::encode(Sha256::digest(
+            [b"verifier_toolkit_hash_v1:" as &[u8], input.as_bytes()].concat(),
+        ))
     }
 
     fn log(&mut self, event_code: &str, trace_id: &str, details: serde_json::Value) {
@@ -840,7 +844,7 @@ mod tests {
         let mut toolkit = VerifierToolkit::default();
         toolkit.validate_claims(&[sample_claim("c1")], &make_trace());
         // 1 ingest + 4 step events + 1 report = 6
-        assert!(toolkit.audit_log().len() >= 6);
+        assert_eq!(toolkit.audit_log().len(), 6);
     }
 
     #[test]

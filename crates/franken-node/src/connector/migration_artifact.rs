@@ -363,7 +363,9 @@ pub fn compute_content_hash(artifact: &MigrationArtifact) -> String {
         "verifier_metadata": artifact.verifier_metadata,
     });
     let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    hex::encode(Sha256::digest(&bytes))
+    hex::encode(Sha256::digest(
+        [b"migration_artifact_hash_v1:" as &[u8], bytes.as_slice()].concat(),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -970,6 +972,6 @@ mod tests {
         let result = validate_artifact(&artifact);
         assert!(!result.valid);
         // Should have multiple errors
-        assert!(result.errors.len() >= 4);
+        assert_eq!(result.errors.len(), 6);
     }
 }

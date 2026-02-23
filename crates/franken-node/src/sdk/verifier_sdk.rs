@@ -34,6 +34,7 @@
 //!   needed for offline, independent re-execution without external lookups.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -207,14 +208,13 @@ pub struct SdkEvent {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Deterministic XOR-based hash (hex-encoded, 64 chars).
+/// Deterministic SHA-256 hash (hex-encoded, 64 chars).
 /// INV-VSK-DETERMINISTIC-VERIFY: same input always produces same output.
 fn deterministic_hash(data: &str) -> String {
-    let mut hash = [0u8; 32];
-    for (i, b) in data.bytes().enumerate() {
-        hash[i % 32] ^= b;
-    }
-    hex::encode(hash)
+    let mut hasher = Sha256::new();
+    hasher.update(b"verifier_sdk_v1:");
+    hasher.update(data.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 #[allow(dead_code)]
@@ -393,7 +393,7 @@ impl VerifierSdk {
         });
 
         // format_version check
-        let version_ok = capsule.format_version >= 1;
+        let version_ok = capsule.format_version == 1;
         evidence.push(EvidenceEntry {
             check_name: "format_version_valid".to_string(),
             passed: version_ok,
@@ -752,7 +752,7 @@ mod tests {
         let sdk = test_sdk();
         let req = valid_request();
         let report = sdk.verify_artifact(&req).unwrap();
-        assert!(report.evidence.len() >= 4);
+        assert_eq!(report.evidence.len(), 6);
         let names: Vec<&str> = report
             .evidence
             .iter()

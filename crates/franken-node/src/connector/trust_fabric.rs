@@ -5,6 +5,7 @@
 //
 // bd-5si — Section 10.12
 
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 // ---------------------------------------------------------------------------
@@ -129,7 +130,7 @@ impl std::error::Error for TrustFabricError {}
 // Trust state vector
 // ---------------------------------------------------------------------------
 
-/// Cryptographic digest of trust state (simplified XOR hash).
+/// Cryptographic digest of trust state using SHA-256.
 fn compute_digest(
     trust_cards: &BTreeSet<String>,
     revocation_ver: u64,
@@ -137,29 +138,23 @@ fn compute_digest(
     policy_epoch: u64,
     anchor_fps: &BTreeSet<String>,
 ) -> [u8; 32] {
-    let mut hash = [0u8; 32];
+    let mut hasher = Sha256::new();
+    hasher.update(b"trust_fabric_v1:");
     for card in trust_cards {
-        for (i, b) in card.bytes().enumerate() {
-            hash[i % 32] ^= b;
-        }
+        hasher.update(card.as_bytes());
+        hasher.update(b"\x00");
     }
-    for (i, b) in revocation_ver.to_le_bytes().iter().enumerate() {
-        hash[i % 32] ^= b;
-    }
+    hasher.update(revocation_ver.to_le_bytes());
     for ext in extensions {
-        for (i, b) in ext.bytes().enumerate() {
-            hash[(i + 8) % 32] ^= b;
-        }
+        hasher.update(ext.as_bytes());
+        hasher.update(b"\x00");
     }
-    for (i, b) in policy_epoch.to_le_bytes().iter().enumerate() {
-        hash[(i + 16) % 32] ^= b;
-    }
+    hasher.update(policy_epoch.to_le_bytes());
     for fp in anchor_fps {
-        for (i, b) in fp.bytes().enumerate() {
-            hash[(i + 24) % 32] ^= b;
-        }
+        hasher.update(fp.as_bytes());
+        hasher.update(b"\x00");
     }
-    hash
+    hasher.finalize().into()
 }
 
 /// Trust state vector for a single node.

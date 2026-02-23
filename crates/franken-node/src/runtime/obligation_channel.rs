@@ -432,7 +432,7 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
     pub fn sweep_timeouts(&mut self, now_ms: u64, trace_id: &str) -> Vec<String> {
         let mut timed_out = Vec::new();
         for (obligation, _) in &mut self.queue {
-            if obligation.status == ObligationStatus::Created && now_ms > obligation.deadline {
+            if obligation.status == ObligationStatus::Created && now_ms >= obligation.deadline {
                 obligation.status = ObligationStatus::TimedOut;
                 obligation.resolved_at_ms = Some(now_ms);
                 timed_out.push(obligation.obligation_id.clone());
@@ -711,7 +711,7 @@ impl TwoPhaseFlow {
         // Check deadlines
         for id in &self.obligation_ids {
             if let Some(o) = self.ledger.get(id)
-                && now_ms > o.deadline
+                && now_ms >= o.deadline
             {
                 return PrepareResult::Failed {
                     flow_id: self.flow_id.clone(),
@@ -1200,7 +1200,7 @@ mod tests {
         ch.fulfill(&id, 1050, "trace-2").unwrap();
 
         let log = ch.audit_log();
-        assert!(log.len() >= 3); // create + send + fulfill
+        assert_eq!(log.len(), 3); // create + send + fulfill
         assert!(log.iter().any(|r| r.event_code == event_codes::FN_OB_001));
         assert!(log.iter().any(|r| r.event_code == event_codes::FN_OB_003));
     }

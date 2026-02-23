@@ -875,7 +875,7 @@ pub fn verify_card_signature(card: &TrustCard, registry_key: &[u8]) -> Result<()
 pub fn compute_card_hash(card: &TrustCard) -> Result<String, TrustCardError> {
     let canonical = canonical_card_without_hash_and_signature(card)?;
     let encoded = serde_json::to_vec(&canonical)?;
-    let digest = Sha256::digest(encoded);
+    let digest = Sha256::digest([b"trust_card_hash_v1:" as &[u8], &encoded].concat());
     Ok(hex::encode(digest))
 }
 

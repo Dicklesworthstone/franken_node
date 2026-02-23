@@ -146,11 +146,12 @@ impl ScheduleConfig {
     /// Used for version bump detection and as input to seed derivation.
     pub fn config_hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
+        hasher.update(b"deterministic_seed_config_v1:");
         hasher.update(self.version.to_le_bytes());
         for (k, v) in &self.parameters {
-            hasher.update((k.len() as u32).to_le_bytes());
+            hasher.update((k.len() as u64).to_le_bytes());
             hasher.update(k.as_bytes());
-            hasher.update((v.len() as u32).to_le_bytes());
+            hasher.update((v.len() as u64).to_le_bytes());
             hasher.update(v.as_bytes());
         }
         hasher.finalize().into()
@@ -273,8 +274,8 @@ pub fn derive_seed(
 /// records when a config change would alter derived seeds.
 #[derive(Debug)]
 pub struct DeterministicSeedDeriver {
-    /// Last known config hash per domain, for bump detection.
-    last_config_hashes: BTreeMap<DomainTag, [u8; 32]>,
+    /// Last known config hash and version per domain, for bump detection.
+    last_config_hashes: BTreeMap<DomainTag, ([u8; 32], u32)>,
     /// Accumulated version bump records.
     bump_records: Vec<VersionBumpRecord>,
 }
@@ -304,23 +305,23 @@ impl DeterministicSeedDeriver {
         // Fields: domain, content_hash_prefix, config_version, seed_hash_prefix, trace_id
         let _event = EVENT_SEED_DERIVED;
 
-        let bump = if let Some(old_hash) = self.last_config_hashes.get(domain) {
-            if *old_hash != new_config_hash {
+        let bump = if let Some(&(old_hash, old_version)) = self.last_config_hashes.get(domain) {
+            if old_hash != new_config_hash {
                 // Config changed — compute old seed for the record
                 // We need to reconstruct what the old seed was. Since we only
                 // stored the config hash (not the full config), we record the
                 // hashes and the new seed. The old_seed_hex is computed by
                 // re-deriving with the old config hash directly.
-                let old_seed = derive_seed_raw(domain, content_hash, old_hash);
+                let old_seed = derive_seed_raw(domain, content_hash, &old_hash);
 
                 let record = VersionBumpRecord {
                     domain: *domain,
                     content_hash_hex: content_hash.to_hex(),
-                    old_config_hash: hex::encode(old_hash),
+                    old_config_hash: hex::encode(old_hash.as_slice()),
                     new_config_hash: hex::encode(new_config_hash),
                     old_seed_hex: hex::encode(old_seed),
                     new_seed_hex: seed.to_hex(),
-                    old_version: config.version.saturating_sub(1),
+                    old_version,
                     new_version: config.version,
                     bump_reason: format!("Config hash changed for domain '{}'", domain.label()),
                     timestamp: chrono::Utc::now().to_rfc3339(),
@@ -330,14 +331,16 @@ impl DeterministicSeedDeriver {
                 let _event = EVENT_SEED_VERSION_BUMP;
 
                 self.bump_records.push(record.clone());
-                self.last_config_hashes.insert(*domain, new_config_hash);
+                self.last_config_hashes
+                    .insert(*domain, (new_config_hash, config.version));
                 Some(record)
             } else {
                 None
             }
         } else {
-            // First derivation for this domain — just record the config hash
-            self.last_config_hashes.insert(*domain, new_config_hash);
+            // First derivation for this domain — just record the config hash and version
+            self.last_config_hashes
+                .insert(*domain, (new_config_hash, config.version));
             None
         };
 
@@ -861,7 +864,7 @@ mod tests {
         let s = derive_seed(&DomainTag::Encoding, &ch, &cfg);
         assert_eq!(
             s.to_hex(),
-            "d8b83283a0d2c3f033349b6b33dc708e84da3cb59d43700a6b2ae82878abd604",
+            "9ab81d9ee4da4554e8344da711703db7998a071dba947601b7e4acf5dc6d46cb",
             "golden vector v-encoding-zero"
         );
     }
@@ -873,7 +876,7 @@ mod tests {
         let s = derive_seed(&DomainTag::Repair, &ch, &cfg);
         assert_eq!(
             s.to_hex(),
-            "122136b2aa720cacf89b40cb210a695803bf645d8f9d22f36e4f3888bad1a7f7",
+            "9ffc3022492ba2bb2a4cc22987b045ec638abe4e449fcdba4cb0d8cee3be9927",
             "golden vector v-repair-zero"
         );
     }
@@ -885,7 +888,7 @@ mod tests {
         let s = derive_seed(&DomainTag::Repair, &ch, &cfg);
         assert_eq!(
             s.to_hex(),
-            "2d1f002b6dc5667c40fbf7e54d6ce2fc56fdb9f71717f838828feb597362d5f6",
+            "16c1e3a2da470b2852261ecf3bfd51f2a82d89b4a229d058e446fe6dbe26edc2",
             "golden vector v-repair-ff"
         );
     }
@@ -904,7 +907,7 @@ mod tests {
         let s = derive_seed(&DomainTag::Encoding, &ch, &cfg);
         assert_eq!(
             s.to_hex(),
-            "18a575885ba28992305779428226b4941fb0bf732aa42f769f8513fee168c1e3",
+            "eccd9f55f0e832e0bc45aec1e369ebe5c1961cd1bc16099a73010dd57056561e",
             "golden vector v-encoding-seq-v2"
         );
     }
@@ -916,7 +919,7 @@ mod tests {
         let s = derive_seed(&DomainTag::Scheduling, &ch, &cfg);
         assert_eq!(
             s.to_hex(),
-            "61f252f03ede3e2706969fc4c626583e9782f8eb455c3702285f3b9c26432f0d",
+            "49166fa13e6e9b3efab1c771501b1673a2efd1154992cd5b1be8296908520052",
             "golden vector v-scheduling-empty-params"
         );
     }
@@ -930,7 +933,7 @@ mod tests {
         let s = derive_seed(&DomainTag::Verification, &ch, &cfg);
         assert_eq!(
             s.to_hex(),
-            "211f46e576b22b720ec6083f568d26e91b0bb374f9d08b14beb19df2fcda6e7f",
+            "7ae1c0c6171a83e573fae38249c147f81ca324a0618f1d362dc927f21178e0cc",
             "golden vector v-verification-singlebit"
         );
     }

@@ -368,7 +368,13 @@ impl MigrationSpeedFailureMetrics {
             "total": total, "success": success, "failure": failure, "version": &self.metric_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"migration_speed_metrics_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::MSF_REPORT_GENERATED,

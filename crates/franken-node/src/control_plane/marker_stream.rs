@@ -87,6 +87,7 @@ impl Marker {
         );
 
         let mut hasher = sha2::Sha256::new();
+        sha2::Digest::update(&mut hasher, b"marker_stream_v1:");
         sha2::Digest::update(&mut hasher, canonical.as_bytes());
         format!("{:x}", sha2::Digest::finalize(hasher))
     }

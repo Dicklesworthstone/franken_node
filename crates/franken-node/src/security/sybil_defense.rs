@@ -214,7 +214,7 @@ impl std::fmt::Display for SybilDefenseError {
 /// what fraction of extreme values are removed before computing the mean.
 pub struct TrustAggregator {
     /// Fraction of values to trim from each tail (0.0..0.5).
-    /// Default: 0.1 (10% from each side = 20% total trim).
+    /// Default: 0.2 (20% from each side = 40% total trim).
     pub trim_ratio: f64,
 }
 
@@ -343,7 +343,7 @@ impl StakeWeighter {
     /// The weight is monotonically non-decreasing with history length.
     /// Returns a value in [base_weight, max_weight].
     pub fn compute_weight(&self, node: &TrustNode) -> f64 {
-        if node.verified_history_len == 0 {
+        if node.verified_history_len == 0 || self.established_threshold == 0 {
             return self.base_weight;
         }
 

@@ -24,6 +24,7 @@
 //! - **INV-VER-TRANSPARENCY-APPEND**: Transparency log entries are append-only and hash-chained.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -276,14 +277,13 @@ impl std::error::Error for VerifierSdkError {}
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Compute a simple deterministic hash over a string (hex-encoded XOR-based).
+/// Compute a deterministic hash over a string (hex-encoded SHA-256).
 /// INV-VER-DETERMINISTIC: same inputs always produce the same output.
 fn deterministic_hash(data: &str) -> String {
-    let mut hash = [0u8; 32];
-    for (i, b) in data.bytes().enumerate() {
-        hash[i % 32] ^= b;
-    }
-    hex::encode(hash)
+    let mut hasher = Sha256::new();
+    hasher.update(b"connector_verifier_sdk_v1:");
+    hasher.update(data.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 /// Compute the binding hash for a claim and its evidence items.

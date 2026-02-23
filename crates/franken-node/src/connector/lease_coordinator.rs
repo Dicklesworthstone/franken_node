@@ -3,9 +3,8 @@
 //! Coordinator selection is deterministic via weighted hashing.
 //! Quorum thresholds vary by safety tier. Failures are classified.
 
+use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 /// A candidate node for coordinator selection.
 #[derive(Debug, Clone)]
@@ -130,10 +129,13 @@ pub fn select_coordinator(
     let mut best_score: u64 = 0;
 
     for candidate in candidates {
-        let mut hasher = DefaultHasher::new();
-        lease_id.hash(&mut hasher);
-        candidate.node_id.hash(&mut hasher);
-        let hash = hasher.finish();
+        let mut h = Sha256::new();
+        h.update(b"lease_coord_hash_v1:");
+        h.update(lease_id.as_bytes());
+        h.update(b"|");
+        h.update(candidate.node_id.as_bytes());
+        let digest = h.finalize();
+        let hash = u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"));
         // Multiply by weight to favor higher-weighted candidates
         let score = hash.wrapping_mul(candidate.weight.max(1));
         if best_node.is_empty() || score > best_score {
@@ -186,11 +188,16 @@ pub fn verify_quorum(
         }
 
         // Simulate signature verification: H(signer_id || ":" || content_hash)
-        let mut hasher = DefaultHasher::new();
-        sig.signer_id.hash(&mut hasher);
-        ":".hash(&mut hasher);
-        expected_content_hash.hash(&mut hasher);
-        let expected_sig = format!("{:016x}", hasher.finish());
+        let mut h = Sha256::new();
+        h.update(b"lease_coord_sign_v1:");
+        h.update(sig.signer_id.as_bytes());
+        h.update(b":");
+        h.update(expected_content_hash.as_bytes());
+        let digest = h.finalize();
+        let expected_sig = format!(
+            "{:016x}",
+            u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
+        );
 
         if sig.signature == expected_sig {
             valid_count += 1;
@@ -227,11 +234,16 @@ pub fn verify_quorum(
 
 /// Helper: compute a simulated signature for testing.
 pub fn compute_test_signature(signer_id: &str, content_hash: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    signer_id.hash(&mut hasher);
-    ":".hash(&mut hasher);
-    content_hash.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut h = Sha256::new();
+    h.update(b"lease_coord_sign_v1:");
+    h.update(signer_id.as_bytes());
+    h.update(b":");
+    h.update(content_hash.as_bytes());
+    let digest = h.finalize();
+    format!(
+        "{:016x}",
+        u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
+    )
 }
 
 #[cfg(test)]

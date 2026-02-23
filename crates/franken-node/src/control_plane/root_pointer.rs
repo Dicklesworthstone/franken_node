@@ -628,12 +628,14 @@ fn sync_directory(dir: &Path) -> Result<(), RootPointerError> {
 
 fn hash_hex(payload: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"root_pointer_hash_v1:");
     hasher.update(payload);
     hex::encode(hasher.finalize())
 }
 
 fn sign_payload(payload: &str, signing_key: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"root_pointer_sign_v1:");
     hasher.update(signing_key);
     hasher.update(b":");
     hasher.update(payload.as_bytes());
@@ -800,12 +802,14 @@ mod tests {
                 &root(2, 2, "h2"),
                 &key_for_thread,
                 "thread-1",
-                Duration::from_millis(220),
+                Duration::from_millis(400),
             )
             .expect("thread-1 publish")
         });
 
-        thread::sleep(Duration::from_millis(40));
+        // Give thread-1 enough time to spawn and acquire the lock.
+        // 40ms was too tight and caused flaky failures on loaded machines.
+        thread::sleep(Duration::from_millis(120));
 
         let start = Instant::now();
         let t2_outcome =

@@ -419,7 +419,7 @@ pub mod invariants {
             return true; // expired/revoked proofs are allowed to fail
         }
         // Must not be expired by wall clock
-        now_ms <= attestation.expires_at_ms
+        now_ms < attestation.expires_at_ms
     }
 
     /// Check INV-ZKA-AUDIT-TRAIL: audit record has required fields.
@@ -632,7 +632,7 @@ impl AttestationLedger {
         }
 
         // Check expiry
-        if now_ms > attestation.expires_at_ms {
+        if now_ms >= attestation.expires_at_ms {
             self.record_audit(
                 format!("audit-{}-exp", aid),
                 event_codes::FN_ZK_004.to_string(),
@@ -836,7 +836,7 @@ impl AttestationLedger {
     #[must_use]
     pub fn is_valid(&self, attestation_id: &str, now_ms: u64) -> bool {
         self.attestations.get(attestation_id).is_some_and(|att| {
-            att.status == AttestationStatus::Active && now_ms <= att.expires_at_ms
+            att.status == AttestationStatus::Active && now_ms < att.expires_at_ms
         })
     }
 
@@ -844,7 +844,7 @@ impl AttestationLedger {
     pub fn sweep_expired(&mut self, now_ms: u64) -> Vec<String> {
         let mut expired = Vec::new();
         for (id, att) in &mut self.attestations {
-            if att.status == AttestationStatus::Active && now_ms > att.expires_at_ms {
+            if att.status == AttestationStatus::Active && now_ms >= att.expires_at_ms {
                 att.status = AttestationStatus::Expired;
                 expired.push(id.clone());
             }
@@ -879,16 +879,16 @@ impl AttestationLedger {
             if att.policy_id != policy_id {
                 continue;
             }
-            *report.get_mut("total").unwrap() += 1;
+            *report.get_mut("total").expect("key initialized above") += 1;
             match att.status {
-                AttestationStatus::Active => *report.get_mut("active").unwrap() += 1,
-                AttestationStatus::Expired => *report.get_mut("expired").unwrap() += 1,
-                AttestationStatus::Revoked => *report.get_mut("revoked").unwrap() += 1,
+                AttestationStatus::Active => *report.get_mut("active").expect("key initialized above") += 1,
+                AttestationStatus::Expired => *report.get_mut("expired").expect("key initialized above") += 1,
+                AttestationStatus::Revoked => *report.get_mut("revoked").expect("key initialized above") += 1,
             }
             match att.outcome {
-                PredicateOutcome::Pass => *report.get_mut("outcome_pass").unwrap() += 1,
-                PredicateOutcome::Fail => *report.get_mut("outcome_fail").unwrap() += 1,
-                PredicateOutcome::Error => *report.get_mut("outcome_error").unwrap() += 1,
+                PredicateOutcome::Pass => *report.get_mut("outcome_pass").expect("key initialized above") += 1,
+                PredicateOutcome::Fail => *report.get_mut("outcome_fail").expect("key initialized above") += 1,
+                PredicateOutcome::Error => *report.get_mut("outcome_error").expect("key initialized above") += 1,
             }
         }
         report

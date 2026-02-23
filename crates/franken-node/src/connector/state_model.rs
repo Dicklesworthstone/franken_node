@@ -214,6 +214,7 @@ pub fn reconcile_action(check: &DivergenceCheck) -> ReconcileAction {
 fn compute_hash(value: &serde_json::Value) -> String {
     let canonical = serde_json::to_string(value).unwrap_or_default();
     let mut hasher = Sha256::new();
+    hasher.update(b"state_model_hash_v1:");
     hasher.update(canonical.as_bytes());
     format!("{:064x}", hasher.finalize())
 }
@@ -223,7 +224,30 @@ fn now_iso8601() -> String {
     let duration = SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
         .unwrap_or_default();
-    format!("{}Z", duration.as_secs())
+    let secs = duration.as_secs();
+    let days = secs / 86400;
+    let remaining = secs % 86400;
+    let hours = remaining / 3600;
+    let minutes = (remaining % 3600) / 60;
+    let seconds = remaining % 60;
+
+    // Convert days since epoch to date components
+    // Algorithm: civil_from_days (Howard Hinnant)
+    let z = days as i64 + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z.rem_euclid(146097) as u64;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, hours, minutes, seconds
+    )
 }
 
 #[cfg(test)]

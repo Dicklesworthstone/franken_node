@@ -20,6 +20,7 @@
 //! - **INV-VSK-STABLE-API**: The capsule schema is versioned for forward compatibility.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 // ---------------------------------------------------------------------------
@@ -159,14 +160,13 @@ impl std::error::Error for CapsuleError {}
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Deterministic XOR-based hash (hex-encoded, 64 chars).
+/// Deterministic SHA-256 hash (hex-encoded, 64 chars).
 /// INV-VSK-DETERMINISTIC-VERIFY: same input always produces same output.
 fn deterministic_hash(data: &str) -> String {
-    let mut hash = [0u8; 32];
-    for (i, b) in data.bytes().enumerate() {
-        hash[i % 32] ^= b;
-    }
-    hex::encode(hash)
+    let mut hasher = Sha256::new();
+    hasher.update(b"replay_capsule_v1:");
+    hasher.update(data.as_bytes());
+    hex::encode(hasher.finalize())
 }
 
 // ---------------------------------------------------------------------------

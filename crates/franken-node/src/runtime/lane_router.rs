@@ -118,11 +118,12 @@ impl LaneMetrics {
             return 0;
         }
         let mut values = self.queue_wait_samples_ms.clone();
-        values.sort_unstable();
         // Use nearest-rank quantile: ceil(0.99 * n), then convert to 0-based index.
         // This avoids underestimating p99 on small sample sets.
         let idx = (99 * values.len()).div_ceil(100).saturating_sub(1);
-        values[idx]
+        let target_idx = idx.min(values.len() - 1);
+        let (_, val, _) = values.select_nth_unstable(target_idx);
+        *val
     }
 }
 
@@ -792,7 +793,7 @@ impl LaneRouter {
                     let mut expired_queue_ids = Vec::new();
 
                     while let Some(front) = lane_state.queue.front() {
-                        if now_ms > front.expires_at_ms {
+                        if now_ms >= front.expires_at_ms {
                             let expired = lane_state.queue.pop_front().expect("queue front exists");
                             expired_queue_ids.push(expired.operation_id);
                             lane_state.metrics.rejected =

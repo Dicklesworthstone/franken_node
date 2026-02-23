@@ -167,8 +167,8 @@ fn gate_event(code: &str, level: &str, trace_id: &str, message: String) -> GateE
 
 fn lower_risk_than_blocked(blocked: HealthDelta, candidate: HealthDelta) -> bool {
     candidate.cascade_risk_delta < blocked.cascade_risk_delta
-        || candidate.new_fragility_findings < blocked.new_fragility_findings
-        || candidate.new_articulation_points < blocked.new_articulation_points
+        && candidate.new_fragility_findings < blocked.new_fragility_findings
+        && candidate.new_articulation_points < blocked.new_articulation_points
 }
 
 pub fn suggest_replans(

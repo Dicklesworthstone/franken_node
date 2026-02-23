@@ -157,6 +157,7 @@ impl AudienceBoundToken {
     /// Compute the SHA-256 hash of this token for chain integrity.
     pub fn hash(&self) -> String {
         let mut hasher = Sha256::new();
+        hasher.update(b"audience_token_v1:");
         hasher.update(self.token_id.as_str().as_bytes());
         hasher.update(b"|");
         hasher.update(self.issuer.as_bytes());
@@ -302,7 +303,7 @@ impl TokenChain {
 
     /// Append a delegated token to the chain, enforcing attenuation invariants.
     pub fn append(&mut self, token: AudienceBoundToken) -> Result<(), TokenError> {
-        let parent = self.tokens.last().unwrap();
+        let parent = self.tokens.last().expect("tokens non-empty: chain always has root");
 
         // Check parent_token_hash links to parent.
         let parent_hash = parent.hash();
@@ -388,7 +389,7 @@ impl TokenChain {
 
     /// The leaf (most recently delegated) token.
     pub fn leaf(&self) -> &AudienceBoundToken {
-        self.tokens.last().unwrap()
+        self.tokens.last().expect("tokens non-empty: chain always has root")
     }
 
     /// All tokens in chain order.

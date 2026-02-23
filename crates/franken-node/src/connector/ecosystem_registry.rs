@@ -536,7 +536,8 @@ fn compute_audit_hash(entry: &RegistryAuditEntry) -> String {
         entry.event_code,
         entry.detail,
     );
-    let digest = Sha256::digest(payload.as_bytes());
+    let digest =
+        Sha256::digest([b"ecosystem_registry_hash_v1:" as &[u8], payload.as_bytes()].concat());
     format!("sha256:{}", hex::encode(digest))
 }
 
@@ -731,7 +732,7 @@ mod tests {
         let mut reg = EcosystemRegistry::new();
         let meta = make_metadata("ext-1", "pub-1", "key-1");
         reg.register_extension(meta, &ts(1), "t").unwrap();
-        assert!(reg.audit_trail_len() >= 1);
+        assert_eq!(reg.audit_trail_len(), 1);
         assert_eq!(reg.audit_trail()[0].event_code, ENE_001_REGISTRY_MUTATION);
     }
 
@@ -845,6 +846,6 @@ mod tests {
 
         // All entries should chain correctly
         reg.verify_audit_integrity().unwrap();
-        assert!(reg.audit_trail_len() >= 4);
+        assert_eq!(reg.audit_trail_len(), 4);
     }
 }

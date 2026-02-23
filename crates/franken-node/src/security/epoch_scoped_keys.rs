@@ -80,7 +80,8 @@ impl DerivedKey {
     }
 
     pub fn fingerprint(&self) -> String {
-        let digest = Sha256::digest(self.0);
+        let digest =
+            Sha256::digest([b"epoch_scoped_key_fingerprint_v1:" as &[u8], &self.0].concat());
         hex::encode(digest)[..16].to_string()
     }
 }

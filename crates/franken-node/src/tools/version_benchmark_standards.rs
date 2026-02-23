@@ -314,7 +314,13 @@ impl BenchmarkVersioning {
             "steps": &steps,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"version_benchmark_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         let guide = MigrationGuide {
             from_version: from.clone(),
@@ -390,7 +396,13 @@ impl BenchmarkVersioning {
             "deprecations": &deprecations,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"version_benchmark_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         let report = VersioningReport {
             report_id: Uuid::now_v7().to_string(),
@@ -727,7 +739,7 @@ mod tests {
         let guide = engine
             .compute_migration(&SemVer::new(1, 0, 0), &SemVer::new(2, 0, 0), &make_trace())
             .unwrap();
-        assert!(guide.migration_steps.len() >= 3);
+        assert_eq!(guide.migration_steps.len(), 5);
     }
 
     #[test]

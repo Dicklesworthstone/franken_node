@@ -106,6 +106,7 @@ pub struct HardwareFingerprint(pub String);
 impl HardwareFingerprint {
     pub fn from_info(info: &str) -> Self {
         let mut hasher = Sha256::new();
+        hasher.update(b"profile_tuning_fingerprint_v1:" as &[u8]);
         hasher.update(info.as_bytes());
         HardwareFingerprint(format!("{:x}", hasher.finalize()))
     }
@@ -143,6 +144,7 @@ impl SignedPolicyBundle {
     pub fn bundle_hash(&self) -> String {
         let json = serde_json::to_string(self).unwrap_or_default();
         let mut hasher = Sha256::new();
+        hasher.update(b"profile_tuning_json_v1:" as &[u8]);
         hasher.update(json.as_bytes());
         format!("{:x}", hasher.finalize())
     }

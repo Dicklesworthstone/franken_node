@@ -218,7 +218,7 @@ impl RetentionStore {
             });
         }
 
-        let msg = self.messages.remove(message_id).unwrap();
+        let msg = self.messages.remove(message_id).expect("message existence verified above");
         self.total_bytes = self.total_bytes.saturating_sub(msg.size_bytes);
 
         self.decisions.push(RetentionDecision {
@@ -406,7 +406,7 @@ mod tests {
         let mut store = RetentionStore::new(registry(), 10000).unwrap();
         store.store("m1", "invoke", 100, 1000).unwrap();
         store.store("m2", "heartbeat", 50, 1000).unwrap();
-        assert!(store.decisions().len() >= 2);
+        assert_eq!(store.decisions().len(), 2);
         assert!(
             store
                 .decisions()

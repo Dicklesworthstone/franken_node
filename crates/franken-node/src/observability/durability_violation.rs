@@ -10,9 +10,8 @@
 //! - INV-VIOLATION-CAUSAL: bundle includes complete causal event chain
 //! - INV-VIOLATION-HALT: gating operations blocked after emission
 
-use std::collections::hash_map::DefaultHasher;
+use sha2::{Digest, Sha256};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 
 use serde_json::json;
 
@@ -371,7 +370,7 @@ impl DurabilityViolationDetector {
         }
 
         self.bundles.push(bundle);
-        self.bundles.last().unwrap()
+        self.bundles.last().expect("just pushed a bundle")
     }
 
     /// Check if a durable operation is allowed.
@@ -384,12 +383,12 @@ impl DurabilityViolationDetector {
 
         match &self.halt_policy {
             HaltPolicy::HaltAll => Err(DurabilityHaltedError {
-                bundle_id: self.active_halts.last().unwrap().clone(),
+                bundle_id: self.active_halts.last().expect("active_halts checked non-empty above").clone(),
                 scope: scope.to_string(),
             }),
             HaltPolicy::HaltScope(halt_scope) if halt_scope == scope => {
                 Err(DurabilityHaltedError {
-                    bundle_id: self.active_halts.last().unwrap().clone(),
+                    bundle_id: self.active_halts.last().expect("active_halts checked non-empty above").clone(),
                     scope: scope.to_string(),
                 })
             }
@@ -429,23 +428,35 @@ impl std::error::Error for DurabilityHaltedError {}
 /// Generate a violation bundle deterministically from context.
 pub fn generate_bundle(context: &ViolationContext) -> ViolationBundle {
     // Derive bundle_id deterministically from content
-    let mut hasher = DefaultHasher::new();
-    context.epoch_id.hash(&mut hasher);
-    context.timestamp_ms.hash(&mut hasher);
-    context.hardening_level.hash(&mut hasher);
+    let mut hasher = Sha256::new();
+    hasher.update(b"durability_violation_bundle_v1:");
+    hasher.update(context.epoch_id.to_le_bytes());
+    hasher.update(b"|");
+    hasher.update(context.timestamp_ms.to_le_bytes());
+    hasher.update(b"|");
+    hasher.update(context.hardening_level.as_bytes());
     for event in &context.events {
-        event.event_type.label().hash(&mut hasher);
-        event.timestamp_ms.hash(&mut hasher);
-        event.description.hash(&mut hasher);
-        event.evidence_ref.hash(&mut hasher);
+        hasher.update(b"|");
+        hasher.update(event.event_type.label().as_bytes());
+        hasher.update(b"|");
+        hasher.update(event.timestamp_ms.to_le_bytes());
+        hasher.update(b"|");
+        hasher.update(event.description.as_bytes());
+        hasher.update(b"|");
+        hasher.update(event.evidence_ref.as_deref().unwrap_or("").as_bytes());
     }
     for artifact in &context.artifacts {
-        artifact.artifact_path.hash(&mut hasher);
-        artifact.expected_hash.hash(&mut hasher);
-        artifact.actual_hash.hash(&mut hasher);
-        artifact.failure_reason.hash(&mut hasher);
+        hasher.update(b"|");
+        hasher.update(artifact.artifact_path.as_bytes());
+        hasher.update(b"|");
+        hasher.update(artifact.expected_hash.as_bytes());
+        hasher.update(b"|");
+        hasher.update(artifact.actual_hash.as_bytes());
+        hasher.update(b"|");
+        hasher.update(artifact.failure_reason.as_bytes());
     }
-    let hash = hasher.finish();
+    let digest = hasher.finalize();
+    let hash = u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"));
     let bundle_id = BundleId::new(format!("VB-{hash:016x}"));
 
     ViolationBundle {

@@ -193,7 +193,7 @@ impl IdempotencyKeyDeriver {
         request_bytes: &[u8],
     ) -> Result<IdempotencyKey, IdempotencyError> {
         let canonical = self.canonical_input(computation_name, epoch, request_bytes)?;
-        let digest = Sha256::digest(canonical);
+        let digest = Sha256::digest([b"idempotency_key_derive_v1:" as &[u8], &canonical].concat());
         let mut out = [0_u8; IDEMPOTENCY_KEY_LEN];
         out.copy_from_slice(&digest);
         Ok(IdempotencyKey::from_bytes(out))
@@ -237,7 +237,7 @@ impl IdempotencyKeyDeriver {
 
 #[must_use]
 pub fn key_fingerprint(key: &IdempotencyKey) -> String {
-    let digest = Sha256::digest(key.as_bytes());
+    let digest = Sha256::digest([b"idempotency_fingerprint_v1:" as &[u8], key.as_bytes()].concat());
     hex::encode(digest)[..16].to_string()
 }
 

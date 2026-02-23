@@ -69,6 +69,7 @@ pub struct Fragment {
 impl Fragment {
     pub fn hash(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
+        hasher.update(b"proof_carrying_fragment_v1:");
         hasher.update(&self.data);
         let result = hasher.finalize();
         let mut hash = [0u8; 32];
@@ -282,6 +283,7 @@ impl ProofCarryingDecoder {
         // Compute output hash
         let output_hash = {
             let mut hasher = Sha256::new();
+            hasher.update(b"proof_carrying_output_v1:");
             hasher.update(&output_data);
             hex::encode(hasher.finalize())
         };
@@ -289,6 +291,7 @@ impl ProofCarryingDecoder {
         // Create attestation
         let payload_hash = {
             let mut hasher = Sha256::new();
+            hasher.update(b"proof_carrying_payload_v1:");
             for h in &input_fragment_hashes {
                 hasher.update(h.as_bytes());
                 hasher.update(b"|");
@@ -301,6 +304,7 @@ impl ProofCarryingDecoder {
 
         let signature = {
             let mut hasher = Sha256::new();
+            hasher.update(b"proof_carrying_signature_v1:");
             hasher.update(self.signing_secret.as_bytes());
             hasher.update(b"|");
             hasher.update(payload_hash.as_bytes());
@@ -410,6 +414,7 @@ impl ProofVerificationApi {
         // (d) Verify signature
         let expected_payload_hash = {
             let mut hasher = Sha256::new();
+            hasher.update(b"proof_carrying_payload_v1:");
             for h in &proof.input_fragment_hashes {
                 hasher.update(h.as_bytes());
                 hasher.update(b"|");
@@ -426,6 +431,7 @@ impl ProofVerificationApi {
 
         let expected_signature = {
             let mut hasher = Sha256::new();
+            hasher.update(b"proof_carrying_signature_v1:");
             hasher.update(self.signing_secret.as_bytes());
             hasher.update(b"|");
             hasher.update(expected_payload_hash.as_bytes());
@@ -753,6 +759,7 @@ mod tests {
         let original_hashes: Vec<String> = frags.iter().map(|f| hex::encode(f.hash())).collect();
 
         let mut hasher = Sha256::new();
+        hasher.update(b"proof_carrying_output_v1:");
         hasher.update(&result.output_data);
         let recomputed = hex::encode(hasher.finalize());
 
@@ -849,6 +856,7 @@ mod tests {
         let original_hashes: Vec<String> = frags.iter().map(|f| hex::encode(f.hash())).collect();
 
         let mut hasher = Sha256::new();
+        hasher.update(b"proof_carrying_output_v1:");
         hasher.update(&result.output_data);
         let recomputed = hex::encode(hasher.finalize());
 

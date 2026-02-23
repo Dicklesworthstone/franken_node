@@ -779,7 +779,7 @@ mod tests {
     #[test]
     fn test_register_diagnostics() {
         let sched = make_scheduler();
-        assert!(sched.diagnostic_count() >= 10);
+        assert_eq!(sched.diagnostic_count(), 12);
     }
 
     #[test]
@@ -1141,7 +1141,7 @@ mod tests {
     #[test]
     fn test_default_diagnostics_count() {
         let diags = default_diagnostics();
-        assert!(diags.len() >= 10);
+        assert_eq!(diags.len(), 12);
     }
 
     #[test]

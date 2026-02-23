@@ -104,6 +104,11 @@ fn endpoint_matches_prefix(endpoint: &str, prefix: &str) -> bool {
         return false;
     }
 
+    // If the prefix already ends with a URL delimiter, any continuation is valid
+    if prefix.ends_with('/') || prefix.ends_with(':') {
+        return true;
+    }
+
     match endpoint.as_bytes().get(prefix.len()) {
         None => true,
         Some(b'/') | Some(b'?') | Some(b'#') | Some(b':') => true,
@@ -661,6 +666,7 @@ fn keyed_digest(secret: &str, payload: &str) -> String {
 
 fn sha256_hex(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"remote_cap_hash_v1:");
     hasher.update(input);
     hex::encode(hasher.finalize())
 }

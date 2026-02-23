@@ -259,7 +259,13 @@ impl CoMetricReport {
             "trust": trust,
         })
         .to_string();
-        let digest = Sha256::digest(canonical.as_bytes());
+        let digest = Sha256::digest(
+            [
+                b"security_trust_metrics_hash_v1:" as &[u8],
+                canonical.as_bytes(),
+            ]
+            .concat(),
+        );
         hex::encode(digest)
     }
 }

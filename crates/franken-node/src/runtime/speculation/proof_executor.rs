@@ -257,6 +257,7 @@ pub fn deterministic_baseline_digest(input: &[u8]) -> String {
 
 fn digest_bytes(input: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"proof_executor_digest_v1:");
     hasher.update(input);
     hex::encode(hasher.finalize())
 }

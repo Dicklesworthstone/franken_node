@@ -970,7 +970,7 @@ mod tests {
     #[test]
     fn default_library_has_motifs() {
         let lib = default_motif_library();
-        assert!(lib.len() >= 3);
+        assert_eq!(lib.len(), 3);
         for motif in &lib {
             assert!(!motif.indicators.is_empty());
         }

@@ -239,8 +239,8 @@ impl DownstreamGateRequirements {
     #[must_use]
     pub fn deny_all() -> Self {
         Self {
-            threshold_signature_required: false,
-            transparency_log_required: false,
+            threshold_signature_required: true,
+            transparency_log_required: true,
         }
     }
 }
@@ -807,6 +807,7 @@ fn canonicalize_value(value: Value) -> Value {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"provenance_hash_v1:");
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }

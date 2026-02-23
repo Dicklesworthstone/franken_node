@@ -218,7 +218,7 @@ pub fn serialize_canonical(receipt: &ExecutionReceipt) -> Result<Vec<u8>, Execut
 
 pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, ExecutionReceiptError> {
     let bytes = serialize_canonical(receipt)?;
-    let digest = Sha256::digest(&bytes);
+    let digest = Sha256::digest([b"vef_exec_receipt_v1:" as &[u8], bytes.as_slice()].concat());
     Ok(format!("sha256:{digest:x}"))
 }
 

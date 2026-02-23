@@ -18,6 +18,7 @@ use std::fmt;
 pub fn compute_hash(domain: &str, data: &[u8]) -> InterfaceHash {
     let mut hasher = sha2::Sha256::new();
     // Domain separation: hash domain tag first, then separator, then data
+    sha2::Digest::update(&mut hasher, b"interface_hash_v1:");
     sha2::Digest::update(&mut hasher, domain.as_bytes());
     sha2::Digest::update(&mut hasher, b":");
     sha2::Digest::update(&mut hasher, data);

@@ -199,10 +199,7 @@ pub trait ProofBackend: Send + Sync {
     fn backend_name(&self) -> &str;
 
     /// Generate a compliance proof for the given request.
-    fn generate(
-        &self,
-        request: &ProofRequest,
-    ) -> Result<ComplianceProof, ProofGeneratorError>;
+    fn generate(&self, request: &ProofRequest) -> Result<ComplianceProof, ProofGeneratorError>;
 
     /// Verify a previously generated compliance proof.
     /// Returns `true` if the proof is valid for the given entries.
@@ -231,15 +228,14 @@ impl MockProofBackend {
     }
 
     pub fn with_name(name: impl Into<String>) -> Self {
-        Self {
-            name: name.into(),
-        }
+        Self { name: name.into() }
     }
 
     /// Compute deterministic proof data from entries.
     /// INV-PGN-DETERMINISTIC: identical entries produce identical proof bytes.
     fn compute_proof_bytes(&self, entries: &[ReceiptChainEntry]) -> Vec<u8> {
         let mut hasher = Sha256::new();
+        hasher.update(b"proof_generator_hash_v1:");
         hasher.update(b"mock-proof-v1:");
         for entry in entries {
             hasher.update(entry.chain_hash.as_bytes());
@@ -249,7 +245,7 @@ impl MockProofBackend {
     }
 
     fn hash_bytes(data: &[u8]) -> String {
-        let digest = Sha256::digest(data);
+        let digest = Sha256::digest([b"proof_generator_hash_v1:" as &[u8], data].concat());
         format!("sha256:{digest:x}")
     }
 }
@@ -265,10 +261,7 @@ impl ProofBackend for MockProofBackend {
         &self.name
     }
 
-    fn generate(
-        &self,
-        request: &ProofRequest,
-    ) -> Result<ComplianceProof, ProofGeneratorError> {
+    fn generate(&self, request: &ProofRequest) -> Result<ComplianceProof, ProofGeneratorError> {
         if request.entries.is_empty() {
             return Err(ProofGeneratorError::window_empty(
                 "cannot generate proof for empty receipt window",
@@ -471,12 +464,9 @@ impl ProofGenerator {
         entries: &[ReceiptChainEntry],
         now_millis: u64,
     ) -> Result<ComplianceProof, ProofGeneratorError> {
-        let status = self
-            .requests
-            .get_mut(request_id)
-            .ok_or_else(|| {
-                ProofGeneratorError::internal(format!("unknown request_id {request_id}"))
-            })?;
+        let status = self.requests.get_mut(request_id).ok_or_else(|| {
+            ProofGeneratorError::internal(format!("unknown request_id {request_id}"))
+        })?;
 
         // Transition to Generating
         status.status = ProofStatus::Generating;
@@ -565,9 +555,12 @@ impl ProofGenerator {
     pub fn enforce_timeouts(&mut self, now_millis: u64) -> Vec<String> {
         let mut timed_out = Vec::new();
         for status in self.requests.values_mut() {
-            if matches!(status.status, ProofStatus::Pending | ProofStatus::Generating) {
+            if matches!(
+                status.status,
+                ProofStatus::Pending | ProofStatus::Generating
+            ) {
                 let elapsed = now_millis.saturating_sub(status.created_at_millis);
-                if elapsed > self.config.default_timeout_millis {
+                if elapsed >= self.config.default_timeout_millis {
                     status.status = ProofStatus::Failed;
                     status.error = Some(ProofGeneratorError::timeout(format!(
                         "request {} exceeded timeout of {}ms",
@@ -607,11 +600,7 @@ impl ProofGenerator {
 
     /// Swap the backend to a new implementation.
     /// INV-PGN-BACKEND-AGNOSTIC: backends are interchangeable at runtime.
-    pub fn swap_backend(
-        &mut self,
-        new_backend: Arc<dyn ProofBackend>,
-        trace_id: &str,
-    ) {
+    pub fn swap_backend(&mut self, new_backend: Arc<dyn ProofBackend>, trace_id: &str) {
         let new_name = new_backend.backend_name().to_string();
         self.backend = new_backend;
         self.events.push(ProofGeneratorEvent {
@@ -673,12 +662,12 @@ impl Clone for ConcurrentProofGenerator {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::connector::vef_execution_receipt::{
         ExecutionActionType, ExecutionReceipt, RECEIPT_SCHEMA_VERSION,
     };
     use super::super::proof_scheduler::{ProofWindow, WorkloadTier};
     use super::super::receipt_chain::{ReceiptChain, ReceiptChainConfig};
+    use super::*;
     use std::collections::BTreeMap;
 
     fn receipt(action: ExecutionActionType, n: u64) -> ExecutionReceipt {

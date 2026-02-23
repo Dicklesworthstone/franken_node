@@ -217,7 +217,9 @@ impl ReproducibilityManifest {
             "timing_per_gate": &self.timing_per_gate,
         });
         let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-        hex::encode(Sha256::digest(&bytes))
+        hex::encode(Sha256::digest(
+            [b"frontier_demo_hash_v1:" as &[u8], &bytes[..]].concat(),
+        ))
     }
 
     /// Validate that the stored fingerprint matches the computed one.
@@ -244,7 +246,9 @@ impl ExternalVerifierBootstrap {
     /// Create a bootstrap from a manifest and results.
     pub fn new(manifest: ReproducibilityManifest, gate_results: Vec<DemoGateResult>) -> Self {
         let hash_input = serde_json::to_string(&gate_results).unwrap_or_default();
-        let expected_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let expected_hash = hex::encode(Sha256::digest(
+            [b"frontier_demo_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
+        ));
         Self {
             schema_version: SCHEMA_VERSION.to_string(),
             manifest,
@@ -263,7 +267,9 @@ impl ExternalVerifierBootstrap {
     /// Verify that the provided results match the expected hash.
     pub fn verify_results(&self, results: &[DemoGateResult]) -> bool {
         let hash_input = serde_json::to_string(results).unwrap_or_default();
-        let computed = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let computed = hex::encode(Sha256::digest(
+            [b"frontier_demo_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
+        ));
         computed == self.expected_output_hash
     }
 }
@@ -358,7 +364,9 @@ impl DemoGateRunner {
 
             // Compute input fingerprint from corpus
             let corpus_json = serde_json::to_string(&corpus).unwrap_or_default();
-            let input_fp = hex::encode(Sha256::digest(corpus_json.as_bytes()));
+            let input_fp = hex::encode(Sha256::digest(
+                [b"frontier_demo_hash_v1:" as &[u8], corpus_json.as_bytes()].concat(),
+            ));
             input_fps.insert(label.clone(), input_fp);
             output_fps.insert(label.clone(), result.output_fingerprint.clone());
             timing.insert(label, result.timing_ms);
@@ -451,7 +459,9 @@ impl FrontierDemoGate for DefaultDemoGate {
 
     fn execute(&self) -> DemoGateResult {
         let corpus_json = serde_json::to_string(&self.corpus).unwrap_or_default();
-        let output_fp = hex::encode(Sha256::digest(corpus_json.as_bytes()));
+        let output_fp = hex::encode(Sha256::digest(
+            [b"frontier_demo_hash_v1:" as &[u8], corpus_json.as_bytes()].concat(),
+        ));
         DemoGateResult {
             program: self.program,
             passed: self.should_pass,
@@ -477,7 +487,9 @@ impl FrontierDemoGate for DefaultDemoGate {
 
     fn attestation(&self) -> String {
         let input = format!("{}:{}", self.program.label(), SCHEMA_VERSION);
-        hex::encode(Sha256::digest(input.as_bytes()))
+        hex::encode(Sha256::digest(
+            [b"frontier_demo_hash_v1:" as &[u8], input.as_bytes()].concat(),
+        ))
     }
 }
 
@@ -487,7 +499,9 @@ impl FrontierDemoGate for DefaultDemoGate {
 
 /// Compute SHA-256 fingerprint of an arbitrary byte slice.
 pub fn sha256_fingerprint(data: &[u8]) -> String {
-    hex::encode(Sha256::digest(data))
+    hex::encode(Sha256::digest(
+        [b"frontier_demo_hash_v1:" as &[u8], data].concat(),
+    ))
 }
 
 // ---------------------------------------------------------------------------

@@ -311,6 +311,7 @@ impl RetrievabilityGate {
                     expected_hash,
                     ts,
                     &reason,
+                    0,
                 );
                 return Err(err);
             }
@@ -337,6 +338,7 @@ impl RetrievabilityGate {
                     expected_hash,
                     ts,
                     &reason,
+                    0,
                 );
                 return Err(err);
             }
@@ -364,6 +366,7 @@ impl RetrievabilityGate {
                 expected_hash,
                 ts,
                 &reason,
+                state.fetch_latency_ms,
             );
             return Err(err);
         }
@@ -389,6 +392,7 @@ impl RetrievabilityGate {
                 expected_hash,
                 ts,
                 &reason,
+                state.fetch_latency_ms,
             );
             return Err(err);
         }
@@ -509,6 +513,7 @@ impl RetrievabilityGate {
         expected_hash: &str,
         ts: u64,
         reason: &ProofFailureReason,
+        latency_ms: u64,
     ) {
         self.receipts.push(ProofReceipt {
             artifact_id: artifact_id.0.clone(),
@@ -517,7 +522,7 @@ impl RetrievabilityGate {
             target_tier: target_tier.label().to_string(),
             content_hash: expected_hash.to_string(),
             proof_timestamp: ts,
-            latency_ms: 0,
+            latency_ms,
             passed: false,
             failure_reason: Some(reason.to_string()),
         });
@@ -548,6 +553,7 @@ pub struct EvictionPermit {
 /// Compute SHA-256 content hash for a byte slice.
 pub fn content_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"retrievability_gate_hash_v1:");
     hasher.update(data);
     format!("{:x}", hasher.finalize())
 }

@@ -697,7 +697,7 @@ fn compute_entry_hash(entry: &CertificationAuditEntry) -> String {
         entry.extension_id,
         serde_json::to_string(&entry.event).unwrap_or_default()
     );
-    let digest = Sha256::digest(payload.as_bytes());
+    let digest = Sha256::digest([b"certification_hash_v1:" as &[u8], payload.as_bytes()].concat());
     format!("sha256:{}", hex::encode(digest))
 }
 
@@ -989,7 +989,7 @@ mod tests {
         .unwrap();
 
         reg.verify_audit_integrity().unwrap();
-        assert!(reg.audit_trail_len() >= 2);
+        assert_eq!(reg.audit_trail_len(), 2);
     }
 
     #[test]

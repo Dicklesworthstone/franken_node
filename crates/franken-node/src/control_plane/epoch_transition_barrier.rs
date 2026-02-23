@@ -514,7 +514,7 @@ impl EpochTransitionBarrier {
         // INV-BARRIER-SERIALIZED: reject concurrent barriers
         if self.is_barrier_active() {
             return Err(BarrierError::ConcurrentBarrier {
-                active_barrier_id: self.active_barrier.as_ref().unwrap().barrier_id.clone(),
+                active_barrier_id: self.active_barrier.as_ref().expect("active_barrier set: is_barrier_active() returned true").barrier_id.clone(),
             });
         }
 
@@ -567,7 +567,7 @@ impl EpochTransitionBarrier {
         };
 
         self.active_barrier = Some(instance);
-        Ok(self.active_barrier.as_ref().unwrap())
+        Ok(self.active_barrier.as_ref().expect("active_barrier set: just assigned above"))
     }
 
     /// Record a drain ACK from a participant.

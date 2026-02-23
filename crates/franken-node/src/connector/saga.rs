@@ -494,7 +494,10 @@ impl SagaExecutor {
     /// Compute a deterministic content hash over all saga state.
     pub fn content_hash(&self) -> String {
         let content = serde_json::to_string(&self.sagas).unwrap_or_default();
-        format!("{:x}", Sha256::digest(content.as_bytes()))
+        format!(
+            "{:x}",
+            Sha256::digest([b"saga_content_hash_v1:" as &[u8], content.as_bytes()].concat())
+        )
     }
 
     /// Return the number of sagas tracked by this executor.

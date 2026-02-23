@@ -489,10 +489,7 @@ impl ProofVerifier {
             self.events.push(VerifierEvent {
                 event_code: event_codes::PVF_005_DEGRADE_LOGGED.to_string(),
                 trace_id: trace_id.to_string(),
-                detail: format!(
-                    "proof={} DEGRADE level={}",
-                    proof.proof_id, degrade_level
-                ),
+                detail: format!("proof={} DEGRADE level={}", proof.proof_id, degrade_level),
             });
             TrustDecision::Degrade(degrade_level)
         } else if all_satisfied {
@@ -762,7 +759,7 @@ fn compute_report_digest(
     let bytes = serde_json::to_vec(&material).map_err(|err| {
         VerifierError::internal(format!("failed to serialize digest material: {err}"))
     })?;
-    let digest = Sha256::digest(&bytes);
+    let digest = Sha256::digest([b"proof_verifier_hash_v1:" as &[u8], &bytes[..]].concat());
     Ok(format!("sha256:{digest:x}"))
 }
 
@@ -1226,10 +1223,7 @@ mod tests {
     #[test]
     fn verifier_error_display() {
         let err = VerifierError::proof_expired("test expired");
-        assert_eq!(
-            format!("{err}"),
-            "[ERR-PVF-PROOF-EXPIRED] test expired"
-        );
+        assert_eq!(format!("{err}"), "[ERR-PVF-PROOF-EXPIRED] test expired");
     }
 
     // ── 29. Empty action class in proof is rejected ────────────────────────

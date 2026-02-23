@@ -396,7 +396,7 @@ fn expression_for_decision(effect: RuleEffect, action: ActionClass) -> String {
 }
 
 fn predicate_hash_id(seed: &str) -> String {
-    let digest = Sha256::digest(seed.as_bytes());
+    let digest = Sha256::digest([b"vef_predicate_hash_v1:" as &[u8], seed.as_bytes()].concat());
     let mut hex = String::with_capacity(16);
     for b in &digest[..8] {
         hex.push_str(&format!("{b:02x}"));
@@ -413,7 +413,7 @@ fn snapshot_hash(normalized: &NormalizedPolicy) -> Result<String, ConstraintComp
             None,
         )
     })?;
-    let digest = Sha256::digest(canonical);
+    let digest = Sha256::digest([b"vef_snapshot_hash_v1:" as &[u8], &canonical[..]].concat());
     Ok(format!("sha256:{digest:x}"))
 }
 

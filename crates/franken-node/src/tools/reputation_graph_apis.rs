@@ -253,7 +253,9 @@ impl ReputationGraphApis {
             "{node_id}:{composite}:{edge_count}:{}",
             &self.schema_version
         );
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [b"reputation_graph_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
+        ));
 
         self.log(
             event_codes::RGA_SCORE_COMPUTED,
@@ -338,7 +340,9 @@ impl ReputationGraphApis {
             self.schema_version,
             self.audit_log.len()
         );
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [b"reputation_graph_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
+        ));
         self.log(
             event_codes::RGA_GRAPH_EXPORTED,
             trace_id,

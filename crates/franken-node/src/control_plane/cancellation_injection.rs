@@ -893,7 +893,7 @@ mod tests {
     fn default_workflows_registered() {
         let f = make_framework();
         assert_eq!(f.registered_workflows().len(), 5);
-        assert!(f.total_test_cases() >= 20);
+        assert_eq!(f.total_test_cases(), 24);
     }
 
     #[test]

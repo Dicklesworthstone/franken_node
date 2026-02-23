@@ -408,7 +408,13 @@ impl BarrierAuditReceipt {
     /// Compute a deterministic hash of this receipt for chain-linking.
     pub fn content_hash(&self) -> String {
         let canonical = serde_json::to_string(self).unwrap_or_default();
-        let digest = Sha256::digest(canonical.as_bytes());
+        let digest = Sha256::digest(
+            [
+                b"barrier_primitives_hash_v1:" as &[u8],
+                canonical.as_bytes(),
+            ]
+            .concat(),
+        );
         hex::encode(digest)
     }
 }

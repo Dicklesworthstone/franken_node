@@ -145,6 +145,7 @@ impl CanonicalObject {
     pub fn new(id: impl Into<String>, content: Vec<u8>, creation_level: HardeningLevel) -> Self {
         let content_hash = {
             let mut hasher = Sha256::new();
+            hasher.update(b"retroactive_hardening_hash_v1:");
             hasher.update(&content);
             let result = hasher.finalize();
             let mut hash = [0u8; 32];
@@ -357,6 +358,7 @@ impl RetroactiveHardeningPipeline {
             ProtectionType::Checksum => {
                 // SHA-256 over content + epoch for domain separation
                 let mut hasher = Sha256::new();
+                hasher.update(b"retroactive_hardening_hash_v1:");
                 hasher.update(b"RETROHARDEN-CHECKSUM\x00");
                 hasher.update(&object.content);
                 hasher.update(self.epoch_id.to_le_bytes());
@@ -375,6 +377,7 @@ impl RetroactiveHardeningPipeline {
             ProtectionType::IntegrityProof => {
                 // Simplified Merkle proof: hash of (content_hash || epoch)
                 let mut hasher = Sha256::new();
+                hasher.update(b"retroactive_hardening_hash_v1:");
                 hasher.update(b"RETROHARDEN-MERKLE\x00");
                 hasher.update(object.content_hash);
                 hasher.update(self.epoch_id.to_le_bytes());

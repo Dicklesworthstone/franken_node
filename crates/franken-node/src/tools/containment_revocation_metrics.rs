@@ -335,7 +335,13 @@ impl ContainmentRevocationMetrics {
             "metric_version": &self.metric_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"containment_revocation_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::CRM_REPORT_GENERATED,
@@ -608,7 +614,7 @@ mod tests {
         engine
             .record_event(sample_event("e1", EventCategory::Revocation), &trace())
             .unwrap();
-        assert!(engine.audit_log().len() >= 3);
+        assert_eq!(engine.audit_log().len(), 3);
     }
 
     #[test]

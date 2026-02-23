@@ -588,6 +588,7 @@ pub fn is_idempotent(a: &PipelineState, b: &PipelineState) -> bool {
 /// Compute a deterministic idempotency key from a cohort definition.
 fn compute_idempotency_key(cohort: &CohortDefinition) -> String {
     let mut hasher = Sha256::new();
+    hasher.update(b"migration_idempotency_v1:");
     hasher.update(cohort.cohort_id.as_bytes());
     hasher.update(b"|");
     for ext in &cohort.extensions {
@@ -635,6 +636,7 @@ fn generate_plan(
     for (name, version) in extensions {
         let pre_hash = {
             let mut h = Sha256::new();
+            h.update(b"migration_pre_hash_v1:");
             h.update(name.as_bytes());
             h.update(b"|");
             h.update(version.as_bytes());
@@ -642,6 +644,7 @@ fn generate_plan(
         };
         let post_hash = {
             let mut h = Sha256::new();
+            h.update(b"migration_post_hash_v1:");
             h.update(name.as_bytes());
             h.update(b"|");
             h.update(b"migrated");
@@ -660,6 +663,7 @@ fn generate_plan(
     // Deterministic plan ID from content
     let plan_id = {
         let mut h = Sha256::new();
+        h.update(b"migration_plan_id_v1:");
         for step in &steps {
             h.update(step.target.as_bytes());
             h.update(b"|");
@@ -708,7 +712,7 @@ fn run_verification(state: &PipelineState) -> VerificationReport {
 
     let total = per_extension_results.len() as f64;
     let passing = per_extension_results.values().filter(|v| **v).count() as f64;
-    let pass_rate = if total > 0.0 { passing / total } else { 1.0 };
+    let pass_rate = if total > 0.0 { passing / total } else { 0.0 };
     let meets_threshold = pass_rate >= VERIFICATION_THRESHOLD;
 
     VerificationReport {
@@ -722,6 +726,7 @@ fn run_verification(state: &PipelineState) -> VerificationReport {
 fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
     let pre_hash = {
         let mut h = Sha256::new();
+        h.update(b"migration_receipt_pre_v1:");
         for (name, ver) in &state.extensions {
             h.update(name.as_bytes());
             h.update(b"|");
@@ -739,6 +744,7 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
 
     let post_hash = {
         let mut h = Sha256::new();
+        h.update(b"migration_receipt_post_v1:");
         h.update(pre_hash.as_bytes());
         h.update(b"|");
         h.update(b"migrated");
@@ -753,6 +759,7 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
 
     let signature = {
         let mut h = Sha256::new();
+        h.update(b"migration_receipt_sig_v1:");
         h.update(pre_hash.as_bytes());
         h.update(b"|");
         h.update(plan_fingerprint.as_bytes());

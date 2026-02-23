@@ -503,6 +503,7 @@ fn hash_pair(left: &str, right: &str) -> Hash {
 
 fn sha256_hex(input: &[u8]) -> Hash {
     let mut hasher = Sha256::new();
+    hasher.update(b"mmr_proofs_v1:");
     hasher.update(input);
     hex::encode(hasher.finalize())
 }

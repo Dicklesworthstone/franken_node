@@ -280,7 +280,13 @@ impl BenchmarkMethodology {
             "sections": &pub_entry.sections,
         })
         .to_string();
-        pub_entry.content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        pub_entry.content_hash = hex::encode(Sha256::digest(
+            [
+                b"benchmark_methodology_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
         pub_entry.pub_version = self.pub_version.clone();
         pub_entry.status = PubStatus::Draft;
         pub_entry.created_at = Utc::now().to_rfc3339();
@@ -419,7 +425,13 @@ impl BenchmarkMethodology {
             "pub_version": &self.pub_version,
         })
         .to_string();
-        let content_hash = hex::encode(Sha256::digest(hash_input.as_bytes()));
+        let content_hash = hex::encode(Sha256::digest(
+            [
+                b"benchmark_methodology_hash_v1:" as &[u8],
+                hash_input.as_bytes(),
+            ]
+            .concat(),
+        ));
 
         self.log(
             event_codes::BMP_CATALOG_GENERATED,
@@ -789,7 +801,7 @@ mod tests {
                 &trace(),
             )
             .unwrap();
-        assert!(engine.audit_log().len() >= 4);
+        assert_eq!(engine.audit_log().len(), 5);
     }
 
     #[test]

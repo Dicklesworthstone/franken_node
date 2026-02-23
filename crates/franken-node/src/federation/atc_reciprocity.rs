@@ -186,7 +186,8 @@ pub struct AccessAuditEntry {
 impl AccessAuditEntry {
     pub fn compute_hash(decision: &AccessDecision) -> String {
         let canonical = serde_json::to_string(decision).unwrap_or_default();
-        let digest = Sha256::digest(canonical.as_bytes());
+        let digest =
+            Sha256::digest([b"atc_reciprocity_hash_v1:" as &[u8], canonical.as_bytes()].concat());
         hex::encode(digest)
     }
 }
@@ -418,7 +419,9 @@ impl ReciprocityEngine {
 
         let content_hash = {
             let canonical = serde_json::to_string(&entries).unwrap_or_default();
-            let digest = Sha256::digest(canonical.as_bytes());
+            let digest = Sha256::digest(
+                [b"atc_reciprocity_hash_v1:" as &[u8], canonical.as_bytes()].concat(),
+            );
             hex::encode(digest)
         };
 
@@ -570,7 +573,7 @@ mod tests {
     #[test]
     fn full_tier_has_all_feeds() {
         let feeds = AccessTier::Full.accessible_feeds();
-        assert!(feeds.len() >= 4);
+        assert_eq!(feeds.len(), 4);
         assert!(feeds.contains(&"raw_signals"));
     }
 
@@ -744,7 +747,7 @@ mod tests {
 
         assert_eq!(matrix.total_participants, 4);
         assert_eq!(matrix.entries.len(), 4);
-        assert!(matrix.freeriders_blocked >= 1);
+        assert_eq!(matrix.freeriders_blocked, 1);
         assert!(!matrix.content_hash.is_empty());
     }
 
