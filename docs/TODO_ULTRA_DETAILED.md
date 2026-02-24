@@ -51,3 +51,18 @@
 - [ ] Add crash recovery and persistent session snapshots.
 - [ ] Add release pipeline with checksums and signatures.
 - [ ] Add installer/uninstaller lifecycle for local deployment.
+
+## 6. franken_engine Integration (Roadmap)
+- [x] **Execution Dispatcher** (`franken-node run`):
+  - [x] Create `ops::engine_dispatcher` to spawn the `/dp/franken_engine` process securely.
+  - [x] Implement IPC serialization of policy payloads and application limits.
+  - [x] Wire up `Command::Run` in `src/main.rs`.
+  - [x] Implement non-blocking bidirectional IPC for robust telemetry flow via Unix Domain Sockets.
+- [x] **N-Version Oracle Harness** (`franken-node verify lockstep`):
+  - [x] Create `runtime::lockstep_harness` to concurrently spawn `node`, `bun`, and `franken_engine`.
+  - [x] Intercept outputs (stdout, stderr) from runtimes.
+  - [x] Wire into `RuntimeOracle::run_cross_check` to detect divergence.
+  - [x] Implement robust file system and network mutation tracking via `strace` wrappers and deterministic sanitization.
+- [x] **Replay and Telemetry Bridge**:
+  - [x] Stream execution boundaries back to `franken_node`.
+  - [x] Persist real-time logs to `frankensqlite` for `time_travel_engine.rs` replay.

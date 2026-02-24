@@ -13,6 +13,7 @@ pub mod incident_lab;
 pub mod isolation_mesh;
 pub mod lane_router;
 pub mod lane_scheduler;
+pub mod lockstep_harness;
 pub mod nversion_oracle;
 pub mod obligation_channel;
 pub mod optimization_governor;

@@ -1402,12 +1402,18 @@ async fn main() -> Result<()> {
         }
 
         Command::Run(args) => {
-            eprintln!(
-                "franken-node run: app={} policy={}",
-                args.app_path.display(),
-                args.policy
-            );
-            eprintln!("[not yet implemented]");
+            let profile_override = parse_profile_override(Some(&args.policy))?;
+            let resolved = config::Config::resolve(
+                args.config.as_deref(),
+                CliOverrides {
+                    profile: profile_override,
+                },
+            )
+            .context("failed resolving configuration for run")?;
+
+            let dispatcher = ops::engine_dispatcher::EngineDispatcher::default();
+            eprintln!("Dispatching to franken_engine for {}", args.app_path.display());
+            dispatcher.dispatch_run(&args.app_path, &resolved.config, &args.policy)?;
         }
 
         Command::Migrate(sub) => match sub {
@@ -1461,12 +1467,13 @@ async fn main() -> Result<()> {
                 std::process::exit(code);
             }
             VerifyCommand::Lockstep(args) => {
-                eprintln!(
-                    "franken-node verify lockstep: project={} runtimes={}",
-                    args.project_path.display(),
-                    args.runtimes
-                );
-                eprintln!("[not yet implemented]");
+                let runtimes: Vec<String> = args.runtimes.split(',').map(|s| s.trim().to_string()).collect();
+                let harness = runtime::lockstep_harness::LockstepHarness::new(runtimes);
+                eprintln!("Running lockstep verification on {}", args.project_path.display());
+                if let Err(e) = harness.verify_lockstep(&args.project_path) {
+                    eprintln!("Lockstep harness failed: {}", e);
+                    std::process::exit(1);
+                }
             }
             VerifyCommand::Release(args) => {
                 handle_verify_release(&args);
