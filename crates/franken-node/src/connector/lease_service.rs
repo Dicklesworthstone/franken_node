@@ -43,7 +43,7 @@ impl Lease {
     /// Check if the lease is expired at time `now`.
     pub fn is_expired(&self, now: u64) -> bool {
         match self.expires_at() {
-            Some(expires_at) => now > expires_at,
+            Some(expires_at) => now >= expires_at,
             None => true, // fail closed when expiry arithmetic overflows
         }
     }
@@ -389,8 +389,8 @@ mod tests {
     fn lease_expires_after_ttl() {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::Operation, 60, 100, "tr", "ts");
-        assert!(!l.is_expired(160)); // at TTL boundary
-        assert!(l.is_expired(161)); // past TTL
+        assert!(!l.is_expired(159)); // just before TTL boundary
+        assert!(l.is_expired(160)); // at TTL boundary (fail-closed: 0 remaining = expired)
     }
 
     #[test]
@@ -414,8 +414,8 @@ mod tests {
         let mut svc = LeaseService::new();
         let l = svc.grant("h", LeasePurpose::Operation, 60, 100, "tr", "ts");
         let renewed = svc.renew(&l.lease_id, 150, "tr2", "ts2").unwrap();
-        assert!(!renewed.is_expired(210)); // 150 + 60 = 210
-        assert!(renewed.is_expired(211));
+        assert!(!renewed.is_expired(209)); // 150 + 60 = 210, one before boundary
+        assert!(renewed.is_expired(210)); // at boundary (fail-closed)
     }
 
     #[test]

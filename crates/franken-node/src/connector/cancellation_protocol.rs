@@ -540,13 +540,17 @@ impl CancellationProtocol {
                             elapsed_ms, self.budget.timeout_ms
                         ),
                     );
-                    self.force_finalize_internal();
+                    let force_res = self.force_finalize_internal();
+                    let mut err_str = error_codes::ERR_CANCEL_DRAIN_TIMEOUT.to_string();
+                    if let Some(leak_err) = force_res.error {
+                        err_str = format!("{}; {}", err_str, leak_err);
+                    }
                     return Ok(PhaseTransitionResult {
                         from,
                         to: self.phase,
                         force_finalized: true,
                         event_code: event_codes::CAN_004.to_string(),
-                        error: Some(error_codes::ERR_CANCEL_DRAIN_TIMEOUT.to_string()),
+                        error: Some(err_str),
                     });
                 }
 
@@ -870,6 +874,16 @@ mod tests {
         assert_eq!(result.event_code, "CAN-004");
         assert!(proto.is_completed());
         assert!(proto.was_force_finalized());
+    }
+
+    #[test]
+    fn drain_timeout_with_leak_preserves_leak_error() {
+        let mut proto = make_protocol("publish", 2000);
+        proto.resource_guard_mut().acquire("leaked_conn");
+        proto.request().unwrap();
+        let result = proto.drain(3000).unwrap();
+        assert!(result.force_finalized);
+        assert!(result.error.unwrap().contains("ERR_CANCEL_LEAK"));
     }
 
     // ── Protocol: leak detection ─────────────────────────────────────────

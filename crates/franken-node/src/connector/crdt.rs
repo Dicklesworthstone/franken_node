@@ -85,12 +85,19 @@ impl LwwMap {
     }
 
     pub fn set(&mut self, key: String, value: serde_json::Value, timestamp: u64) {
-        match self.entries.get(&key) {
-            Some(existing) if existing.timestamp >= timestamp => {}
-            _ => {
-                self.entries.insert(key, LwwEntry { value, timestamp });
+        if let Some(existing) = self.entries.get(&key) {
+            if existing.timestamp > timestamp {
+                return;
+            }
+            if existing.timestamp == timestamp {
+                let current_str = serde_json::to_string(&existing.value).unwrap_or_default();
+                let new_str = serde_json::to_string(&value).unwrap_or_default();
+                if current_str >= new_str {
+                    return;
+                }
             }
         }
+        self.entries.insert(key, LwwEntry { value, timestamp });
     }
 
     pub fn merge(&self, other: &LwwMap) -> Result<LwwMap, CrdtError> {
@@ -310,6 +317,17 @@ mod tests {
         a.set("k".into(), json!("v"), 1);
         let aa = a.merge(&a).unwrap();
         assert_eq!(aa.entries, a.entries);
+    }
+
+    #[test]
+    fn lww_map_merge_equal_timestamp_commutative() {
+        let mut a = LwwMap::new();
+        a.set("k".into(), json!("a"), 1);
+        let mut b = LwwMap::new();
+        b.set("k".into(), json!("b"), 1);
+        let ab = a.merge(&b).unwrap();
+        let ba = b.merge(&a).unwrap();
+        assert_eq!(ab.entries["k"].value, ba.entries["k"].value);
     }
 
     // === OR-Set tests ===

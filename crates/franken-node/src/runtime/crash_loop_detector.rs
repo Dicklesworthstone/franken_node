@@ -316,8 +316,9 @@ impl CrashLoopDetector {
 
         // All checks pass — automatic rollback
         self.last_rollback_epoch = now;
-        // Clear crash window after rollback
+        // Clear crash window and incident history after rollback
         self.crash_times.clear();
+        self.incidents.clear();
 
         let decision = RollbackDecision {
             connector_id: connector_id.to_string(),

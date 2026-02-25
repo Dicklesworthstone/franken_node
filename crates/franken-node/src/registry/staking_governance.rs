@@ -640,17 +640,8 @@ impl CapabilityStakeGate {
             );
         }
 
-        // Check no unresolved slash events
-        if record.state == StakeState::Slashed || record.state == StakeState::UnderAppeal {
-            return (
-                false,
-                STAKE_007,
-                format!(
-                    "publisher {publisher_id} has unresolved slash (state={})",
-                    record.state
-                ),
-            );
-        }
+        // Note: slashed/under-appeal stakes are caught in the None branch
+        // above via get_any_stake_for_publisher. Here `record` is always Active.
 
         // Check cooldown has elapsed
         if let Some(account) = ledger.accounts.get(publisher_id)

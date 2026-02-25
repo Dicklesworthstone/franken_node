@@ -296,6 +296,15 @@ impl RevocationFreshnessGate {
         // Verify proof integrity
         self.verify_proof(proof)?;
 
+        if proof.epoch > current_epoch {
+            return Err(FreshnessError::ProofTampered {
+                detail: format!(
+                    "proof epoch {} is in the future (current={})",
+                    proof.epoch, current_epoch
+                ),
+            });
+        }
+
         let max_staleness = tier.max_staleness_epochs();
         let staleness = current_epoch.saturating_sub(proof.epoch);
 
@@ -810,7 +819,12 @@ mod tests {
     fn very_large_epoch() {
         let mut g = gate();
         let p = proof(SafetyTier::Advisory, u64::MAX - 5, "n-large");
-        let d = g.check(&p, u64::MAX - 5, true, false, "act", "tr").unwrap();
-        assert!(d.allowed);
+        let err = g.check(&p, u64::MAX - 10, true, false, "act", "tr").unwrap_err();
+        match err {
+            FreshnessError::ProofTampered { detail } => {
+                assert!(detail.contains("in the future"));
+            }
+            _ => panic!("Expected ProofTampered error"),
+        }
     }
 }

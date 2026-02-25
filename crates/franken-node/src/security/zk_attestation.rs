@@ -651,6 +651,25 @@ impl AttestationLedger {
             };
         }
 
+        if now_ms < attestation.generated_at_ms {
+            self.record_audit(
+                format!("audit-{}-future", aid),
+                event_codes::FN_ZK_004.to_string(),
+                Some(aid.clone()),
+                Some(pid.clone()),
+                trace_id.clone(),
+                now_ms,
+                "Attestation generated in the future".to_string(),
+            );
+            return ZkVerificationResult::Rejected {
+                attestation_id: aid,
+                policy_id: pid,
+                trace_id,
+                reason: "Proof generated in the future".to_string(),
+                error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+            };
+        }
+
         // INV-ZKA-SELECTIVE: check proof structure
         if !invariants::check_selective(attestation) {
             self.record_audit(
@@ -1229,6 +1248,28 @@ mod tests {
         match &result {
             ZkVerificationResult::Rejected { error_code, .. } => {
                 assert_eq!(error_code, error_codes::ERR_ZKA_REVOKED);
+            }
+            _ => unreachable!("Expected Rejected"),
+        }
+    }
+
+    #[test]
+    fn test_verify_future_proof_rejected() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let att = generate_test_attestation(
+            &mut ledger,
+            "att-future",
+            &policy,
+            PredicateOutcome::Pass,
+            1_000_000,
+        );
+        // Verify with a `now_ms` that is *before* the generation time
+        let result = ledger.verify_proof(&att, &policy, 999_999, "trace-future".to_string());
+        assert!(!result.is_verified());
+        match &result {
+            ZkVerificationResult::Rejected { error_code, .. } => {
+                assert_eq!(error_code, error_codes::ERR_ZKA_INVALID_PROOF);
             }
             _ => unreachable!("Expected Rejected"),
         }
