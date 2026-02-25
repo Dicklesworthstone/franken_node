@@ -2,6 +2,7 @@ pub mod adversarial_runner;
 pub mod adversary_graph;
 pub mod bpet;
 pub mod challenge_flow;
+pub mod constant_time;
 pub mod copilot_engine;
 pub mod decision_receipt;
 pub mod degraded_mode_audit;

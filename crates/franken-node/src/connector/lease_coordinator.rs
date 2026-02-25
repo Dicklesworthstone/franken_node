@@ -199,7 +199,7 @@ pub fn verify_quorum(
             u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
         );
 
-        if sig.signature == expected_sig {
+        if crate::security::constant_time::ct_eq(&sig.signature, &expected_sig) {
             valid_count += 1;
         } else {
             failures.push(VerificationFailure::InvalidSignature {

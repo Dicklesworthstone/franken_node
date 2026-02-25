@@ -201,9 +201,9 @@ pub fn hmac_sign(payload: &str, key: &str) -> String {
     format!("{:x}", hasher.finalize())
 }
 
-/// Verify an HMAC signature.
+/// Verify an HMAC signature (constant-time comparison).
 pub fn hmac_verify(payload: &str, key: &str, signature: &str) -> bool {
-    hmac_sign(payload, key) == signature
+    crate::security::constant_time::ct_eq(&hmac_sign(payload, key), signature)
 }
 
 // ---------------------------------------------------------------------------

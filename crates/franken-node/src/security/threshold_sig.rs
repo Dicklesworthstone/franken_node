@@ -133,7 +133,7 @@ fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature)
         "{:016x}",
         u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
     );
-    sig.signature_hex == expected
+    crate::security::constant_time::ct_eq(&sig.signature_hex, &expected)
 }
 
 /// Create a valid signature for testing.

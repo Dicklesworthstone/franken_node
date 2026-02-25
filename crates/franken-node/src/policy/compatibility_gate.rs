@@ -475,7 +475,7 @@ impl GateEngine {
             receipt.scope_id, receipt.shim_id, receipt.divergence_description
         );
         let expected = self.sign(&payload);
-        receipt.signature == expected
+        crate::security::constant_time::ct_eq(&receipt.signature, &expected)
     }
 
     // ---- Audit trail ----

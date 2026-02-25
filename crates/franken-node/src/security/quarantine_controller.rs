@@ -265,7 +265,7 @@ impl QuarantineController {
             Err(_) => return false,
         };
         let expected = self.hmac_sha256(&canonical);
-        expected == entry.signature
+        crate::security::constant_time::ct_eq(&expected, &entry.signature)
     }
 }
 

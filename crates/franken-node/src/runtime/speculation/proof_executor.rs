@@ -270,7 +270,7 @@ fn verify_signature(receipt: &ProofReceipt) -> bool {
         )
         .as_bytes(),
     );
-    receipt.signature == expected
+    crate::security::constant_time::ct_eq(&receipt.signature, &expected)
 }
 
 pub fn make_receipt(

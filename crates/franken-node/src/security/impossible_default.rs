@@ -398,7 +398,7 @@ pub struct HashSignatureVerifier;
 
 impl SignatureVerifier for HashSignatureVerifier {
     fn verify(&self, token: &CapabilityToken) -> bool {
-        token.signature == token.content_hash()
+        crate::security::constant_time::ct_eq(&token.signature, &token.content_hash())
     }
 }
 

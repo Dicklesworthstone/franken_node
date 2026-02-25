@@ -340,7 +340,7 @@ fn digest_bytes(input: &[u8]) -> String {
 
 fn verify_contract_signature(contract: &CapabilityContract) -> bool {
     let expected = compute_contract_signature(contract);
-    contract.signature == expected
+    crate::security::constant_time::ct_eq(&contract.signature, &expected)
 }
 
 /// Compute the expected signature for a capability contract.
