@@ -2,7 +2,7 @@
   "gate": "degraded_mode_audit_verification",
   "bead": "bd-w0jq",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "DM-IMPL",
@@ -33,8 +33,8 @@
     {
       "id": "DM-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "19 tests passed"
+      "status": "FAIL",
+      "details": "0 tests passed"
     },
     {
       "id": "DM-SPEC",
@@ -44,7 +44,7 @@
   ],
   "summary": {
     "total_checks": 7,
-    "passing_checks": 7,
-    "failing_checks": 0
+    "passing_checks": 6,
+    "failing_checks": 1
   }
 }

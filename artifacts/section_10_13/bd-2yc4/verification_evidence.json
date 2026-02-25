@@ -2,7 +2,7 @@
   "gate": "crash_loop_detector_verification",
   "bead": "bd-2yc4",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "CLD-IMPL",
@@ -38,8 +38,8 @@
     {
       "id": "CLD-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "16 tests passed"
+      "status": "FAIL",
+      "details": "0 tests passed"
     },
     {
       "id": "CLD-SPEC",
@@ -49,7 +49,7 @@
   ],
   "summary": {
     "total_checks": 8,
-    "passing_checks": 8,
-    "failing_checks": 0
+    "passing_checks": 7,
+    "failing_checks": 1
   }
 }

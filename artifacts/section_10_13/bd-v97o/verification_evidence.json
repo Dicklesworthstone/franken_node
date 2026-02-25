@@ -2,7 +2,7 @@
   "gate": "control_channel_verification",
   "bead": "bd-v97o",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "ACC-IMPL",
@@ -28,8 +28,8 @@
     {
       "id": "ACC-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "15 tests passed"
+      "status": "FAIL",
+      "details": "0 tests passed"
     },
     {
       "id": "ACC-SPEC",
@@ -39,7 +39,7 @@
   ],
   "summary": {
     "total_checks": 6,
-    "passing_checks": 6,
-    "failing_checks": 0
+    "passing_checks": 5,
+    "failing_checks": 1
   }
 }

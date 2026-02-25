@@ -29,7 +29,7 @@
       "id": "CPM-TESTS",
       "description": "Rust unit tests pass",
       "status": "FAIL",
-      "details": "Command '['cargo', 'test', '--', 'connector::conformance_profile']' timed out after 120 seconds"
+      "details": "0 tests passed"
     },
     {
       "id": "CPM-SPEC",
