@@ -1245,6 +1245,19 @@ mod tests {
     }
 
     #[test]
+    fn timestamp_from_secs_uses_rfc3339_and_not_unix_seconds() {
+        let secs = 1_700_000_000_u64;
+        let formatted = timestamp_from_secs(secs);
+
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&formatted).is_ok(),
+            "expected RFC3339 timestamp, got {formatted}"
+        );
+        assert!(formatted.ends_with('Z'));
+        assert_ne!(formatted, format!("{secs}Z"));
+    }
+
+    #[test]
     fn telemetry_includes_cache_miss_and_hit() {
         let mut registry = TrustCardRegistry::new(60, DEFAULT_REGISTRY_KEY);
         registry

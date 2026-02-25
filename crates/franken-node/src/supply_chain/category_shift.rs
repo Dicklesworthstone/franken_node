@@ -1368,7 +1368,24 @@ mod tests {
     fn report_generated_at_iso_format() {
         let now = 1_000_000;
         let (_, report) = demo_pipeline(now).unwrap();
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&report.generated_at_iso).is_ok(),
+            "expected RFC3339 timestamp, got {}",
+            report.generated_at_iso
+        );
         assert!(report.generated_at_iso.ends_with('Z'));
+    }
+
+    #[test]
+    fn format_iso_timestamp_uses_rfc3339_and_not_unix_seconds() {
+        let secs = 1_700_000_000_u64;
+        let formatted = format_iso_timestamp(secs);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&formatted).is_ok(),
+            "expected RFC3339 timestamp, got {formatted}"
+        );
+        assert!(formatted.ends_with('Z'));
+        assert_ne!(formatted, format!("{secs}Z"));
     }
 
     #[test]
