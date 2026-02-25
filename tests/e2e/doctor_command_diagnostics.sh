@@ -9,14 +9,19 @@ MATRIX_JSON="${OUT_DIR}/doctor_checks_matrix.json"
 HEALTHY_JSON="${OUT_DIR}/doctor_report_healthy.json"
 DEGRADED_JSON="${OUT_DIR}/doctor_report_degraded.json"
 FAILURE_JSON="${OUT_DIR}/doctor_report_failure.json"
+INVALID_JSON="${OUT_DIR}/doctor_report_invalid_input.json"
 SUMMARY_MD="${OUT_DIR}/doctor_contract_checks.md"
 TRACE_ID="trace-bd-1pk-doctor-e2e"
+PASS_FIXTURE="${ROOT_DIR}/fixtures/policy_activation/doctor_policy_activation_pass.json"
+WARN_FIXTURE="${ROOT_DIR}/fixtures/policy_activation/doctor_policy_activation_warn.json"
+BLOCK_FIXTURE="${ROOT_DIR}/fixtures/policy_activation/doctor_policy_activation_block.json"
+INVALID_FIXTURE="${ROOT_DIR}/fixtures/policy_activation/doctor_policy_activation_invalid.json"
 
 mkdir -p "${OUT_DIR}"
 : > "${LOG_JSONL}"
 
-if ! command -v jq >/dev/null 2>&1; then
-  echo "ERROR: jq is required" >&2
+if ! command -v jq >/dev/null 2>&1 || ! command -v python3 >/dev/null 2>&1; then
+  echo "ERROR: jq and python3 are required" >&2
   exit 2
 fi
 
@@ -34,9 +39,54 @@ log_event() {
     >> "${LOG_JSONL}"
 }
 
-log_event "DOC-E2E-001" "info" "Starting bd-1pk doctor diagnostics gate."
+run_doctor_report() {
+  local trace_id="$1"
+  local fixture_path="$2"
+  local output_path="$3"
 
-python3 - <<'PY' "${ROOT_DIR}" "${CHECKS_JSON}" "${MATRIX_JSON}" "${HEALTHY_JSON}" "${DEGRADED_JSON}" "${FAILURE_JSON}"
+  if [[ -x "${ROOT_DIR}/target/debug/frankenengine-node" ]]; then
+    (
+      cd "${ROOT_DIR}" && \
+      "${ROOT_DIR}/target/debug/frankenengine-node" doctor \
+        --json \
+        --trace-id "${trace_id}" \
+        --policy-activation-input "${fixture_path}"
+    ) > "${output_path}"
+  else
+    (
+      cd "${ROOT_DIR}" && \
+      cargo run -q -p frankenengine-node -- doctor \
+        --json \
+        --trace-id "${trace_id}" \
+        --policy-activation-input "${fixture_path}"
+    ) > "${output_path}"
+  fi
+}
+
+execute_scenario() {
+  local code="$1"
+  local label="$2"
+  local trace="$3"
+  local fixture="$4"
+  local output="$5"
+
+  log_event "${code}" "info" "Running ${label}: fixture=$(realpath --relative-to="${ROOT_DIR}" "${fixture}")"
+  if run_doctor_report "${trace}" "${fixture}" "${output}"; then
+    log_event "${code}" "pass" "${label} completed"
+  else
+    log_event "${code}" "fail" "${label} failed"
+    return 1
+  fi
+}
+
+log_event "DOC-E2E-001" "info" "Starting bd-1pk doctor diagnostics gate with live policy activation scenarios."
+
+execute_scenario "DOC-E2E-010" "policy-pass" "doctor-policy-pass" "${PASS_FIXTURE}" "${HEALTHY_JSON}"
+execute_scenario "DOC-E2E-011" "policy-warn" "doctor-policy-warn" "${WARN_FIXTURE}" "${DEGRADED_JSON}"
+execute_scenario "DOC-E2E-012" "policy-block" "doctor-policy-block" "${BLOCK_FIXTURE}" "${FAILURE_JSON}"
+execute_scenario "DOC-E2E-013" "policy-invalid" "doctor-policy-invalid" "${INVALID_FIXTURE}" "${INVALID_JSON}"
+
+python3 - <<'PY' "${ROOT_DIR}" "${CHECKS_JSON}" "${MATRIX_JSON}" "${HEALTHY_JSON}" "${DEGRADED_JSON}" "${FAILURE_JSON}" "${INVALID_JSON}"
 import hashlib
 import json
 import sys
@@ -48,6 +98,7 @@ matrix_json = Path(sys.argv[3])
 healthy_json = Path(sys.argv[4])
 degraded_json = Path(sys.argv[5])
 failure_json = Path(sys.argv[6])
+invalid_json = Path(sys.argv[7])
 
 main_rs = root / "crates" / "franken-node" / "src" / "main.rs"
 cli_rs = root / "crates" / "franken-node" / "src" / "cli.rs"
@@ -74,6 +125,11 @@ contract_src = read(contract_md) if contract_md.exists() else ""
 add("doctor_args_json_flag", "pub json: bool" in cli_src, "--json")
 add("doctor_args_trace_id_flag", "pub trace_id: String" in cli_src, "--trace-id")
 add(
+    "doctor_args_policy_activation_input_flag",
+    "pub policy_activation_input: Option<PathBuf>" in cli_src,
+    "--policy-activation-input",
+)
+add(
     "doctor_args_trace_id_default",
     'default_value = "doctor-bootstrap"' in cli_src,
     "doctor-bootstrap",
@@ -82,6 +138,8 @@ add(
 add("doctor_report_has_structured_logs", "structured_logs: Vec<DoctorLogEvent>" in main_src, "DoctorReport structured logs")
 add("doctor_report_has_merge_decisions", "merge_decisions: Vec<config::MergeDecision>" in main_src, "merge provenance")
 add("doctor_builder_with_cwd", "fn build_doctor_report_with_cwd(" in main_src, "cwd injectable builder")
+add("doctor_builder_with_policy_input", "fn build_doctor_report_with_policy_input(" in main_src, "policy input injectable builder")
+add("doctor_policy_activation_runner", "fn run_doctor_policy_activation(path: &Path)" in main_src, "policy activation pipeline runner")
 add("doctor_json_output_path", "serde_json::to_string_pretty(&report)" in main_src, "json render")
 add("doctor_human_output_path", "render_doctor_report_human(&report, args.verbose)" in main_src, "human render")
 
@@ -94,6 +152,9 @@ expected_codes = [
     "DR-OBS-006",
     "DR-ENV-007",
     "DR-CONFIG-008",
+    "DR-POLICY-009",
+    "DR-POLICY-010",
+    "DR-POLICY-011",
 ]
 expected_event_codes = [
     "DOC-001",
@@ -104,6 +165,9 @@ expected_event_codes = [
     "DOC-006",
     "DOC-007",
     "DOC-008",
+    "DOC-009",
+    "DOC-010",
+    "DOC-011",
 ]
 
 for code in expected_codes:
@@ -122,6 +186,162 @@ add(
     "contract_has_matrix_and_schema",
     "## Check Matrix" in contract_src and "## Machine-Readable Report Schema (CI)" in contract_src,
     "matrix+schema sections",
+)
+add(
+    "contract_mentions_policy_activation_flag",
+    "--policy-activation-input" in contract_src,
+    "policy activation command surface",
+)
+add(
+    "contract_mentions_policy_codes",
+    all(code in contract_src for code in ("DR-POLICY-009", "DR-POLICY-010", "DR-POLICY-011")),
+    "policy code rows",
+)
+
+def load_report(path: Path) -> dict:
+    if not path.exists():
+        add(f"report_exists_{path.name}", False, str(path))
+        return {}
+    add(f"report_exists_{path.name}", True, str(path.relative_to(root)))
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        add(f"report_valid_json_{path.name}", True, "valid json")
+        return report
+    except json.JSONDecodeError as err:
+        add(f"report_valid_json_{path.name}", False, str(err))
+        return {}
+
+def policy_status_map(report: dict) -> dict:
+    entries = report.get("checks", [])
+    if not isinstance(entries, list):
+        return {}
+    out = {}
+    for row in entries:
+        if not isinstance(row, dict):
+            continue
+        code = row.get("code")
+        status = row.get("status")
+        if isinstance(code, str) and code.startswith("DR-POLICY-"):
+            out[code] = status
+    return out
+
+def find_check(report: dict, code: str) -> dict | None:
+    entries = report.get("checks", [])
+    if not isinstance(entries, list):
+        return None
+    for row in entries:
+        if isinstance(row, dict) and row.get("code") == code:
+            return row
+    return None
+
+healthy = load_report(healthy_json)
+degraded = load_report(degraded_json)
+failure = load_report(failure_json)
+invalid = load_report(invalid_json)
+
+healthy_statuses = policy_status_map(healthy)
+degraded_statuses = policy_status_map(degraded)
+failure_statuses = policy_status_map(failure)
+invalid_statuses = policy_status_map(invalid)
+
+add(
+    "policy_pass_statuses",
+    healthy_statuses.get("DR-POLICY-009") == "pass"
+    and healthy_statuses.get("DR-POLICY-010") == "pass"
+    and healthy_statuses.get("DR-POLICY-011") == "pass",
+    str(healthy_statuses),
+)
+add(
+    "policy_warn_statuses",
+    degraded_statuses.get("DR-POLICY-009") == "warn"
+    and degraded_statuses.get("DR-POLICY-010") == "pass"
+    and degraded_statuses.get("DR-POLICY-011") == "pass",
+    str(degraded_statuses),
+)
+add(
+    "policy_block_statuses",
+    failure_statuses.get("DR-POLICY-009") == "fail"
+    and failure_statuses.get("DR-POLICY-010") == "fail"
+    and failure_statuses.get("DR-POLICY-011") == "pass",
+    str(failure_statuses),
+)
+add(
+    "policy_invalid_statuses",
+    invalid_statuses.get("DR-POLICY-009") == "fail"
+    and invalid_statuses.get("DR-POLICY-010") == "fail"
+    and invalid_statuses.get("DR-POLICY-011") == "fail",
+    str(invalid_statuses),
+)
+
+healthy_policy = healthy.get("policy_activation", {})
+degraded_policy = degraded.get("policy_activation", {})
+failure_policy = failure.get("policy_activation", {})
+invalid_policy = invalid.get("policy_activation")
+
+add(
+    "policy_pass_dominant_verdict_allow",
+    healthy_policy.get("guardrail_certificate", {}).get("dominant_verdict") == "allow",
+    str(healthy_policy.get("guardrail_certificate", {}).get("dominant_verdict")),
+)
+add(
+    "policy_warn_dominant_verdict_warn",
+    degraded_policy.get("guardrail_certificate", {}).get("dominant_verdict") == "warn",
+    str(degraded_policy.get("guardrail_certificate", {}).get("dominant_verdict")),
+)
+add(
+    "policy_block_dominant_verdict_block",
+    failure_policy.get("guardrail_certificate", {}).get("dominant_verdict") == "block",
+    str(failure_policy.get("guardrail_certificate", {}).get("dominant_verdict")),
+)
+add(
+    "policy_block_contains_conformal_budget",
+    "conformal_risk" in failure_policy.get("guardrail_certificate", {}).get("blocking_budget_ids", []),
+    str(failure_policy.get("guardrail_certificate", {}).get("blocking_budget_ids")),
+)
+add(
+    "policy_invalid_omits_policy_activation",
+    invalid_policy is None,
+    str(invalid_policy),
+)
+
+add(
+    "policy_pass_decision_reason",
+    healthy_policy.get("decision_outcome", {}).get("reason") == "TopCandidateAccepted",
+    str(healthy_policy.get("decision_outcome", {}).get("reason")),
+)
+add(
+    "policy_warn_decision_reason",
+    degraded_policy.get("decision_outcome", {}).get("reason") == "TopCandidateAccepted",
+    str(degraded_policy.get("decision_outcome", {}).get("reason")),
+)
+add(
+    "policy_block_decision_reason",
+    failure_policy.get("decision_outcome", {}).get("reason") == "AllCandidatesBlocked",
+    str(failure_policy.get("decision_outcome", {}).get("reason")),
+)
+add(
+    "policy_pass_top_ranked_candidate",
+    healthy_policy.get("top_ranked_candidate") == "balanced_patch",
+    str(healthy_policy.get("top_ranked_candidate")),
+)
+
+warn_findings = degraded_policy.get("guardrail_certificate", {}).get("findings", [])
+warn_conformal = None
+for row in warn_findings:
+    if isinstance(row, dict) and row.get("budget_id") == "conformal_risk":
+        warn_conformal = row
+        break
+add(
+    "policy_warn_conformal_finding_warn",
+    isinstance(warn_conformal, dict) and warn_conformal.get("verdict") == "warn",
+    str(warn_conformal),
+)
+
+invalid_check = find_check(invalid, "DR-POLICY-009") or {}
+add(
+    "policy_invalid_message_mentions_parse_failure",
+    "failed parsing policy activation input" in str(invalid_check.get("message", "")),
+    str(invalid_check.get("message", "")),
 )
 
 matrix = [
@@ -173,6 +393,24 @@ matrix = [
         "scope": "config.provenance",
         "remediation": "Investigate resolver instrumentation before relying on doctor provenance.",
     },
+    {
+        "code": "DR-POLICY-009",
+        "event_code": "DOC-009",
+        "scope": "policy.guardrails",
+        "remediation": "Resolve blocked budgets before executing policy actions.",
+    },
+    {
+        "code": "DR-POLICY-010",
+        "event_code": "DOC-010",
+        "scope": "policy.decision_engine",
+        "remediation": "Reduce risk exposure or provide safer candidate actions.",
+    },
+    {
+        "code": "DR-POLICY-011",
+        "event_code": "DOC-011",
+        "scope": "policy.explainer_wording",
+        "remediation": "Fix explanation wording to preserve diagnostic vs guarantee separation.",
+    },
 ]
 matrix_payload = {
     "bead_id": "bd-1pk",
@@ -181,131 +419,10 @@ matrix_payload = {
 }
 matrix_json.write_text(json.dumps(matrix_payload, indent=2) + "\n", encoding="utf-8")
 add("matrix_written", matrix_json.exists(), str(matrix_json))
-
-
-def build_report(trace_id: str, selected_profile: str, source_path: str | None, checks: list[dict], merge_decisions: list[dict]) -> dict:
-    counts = {
-        "pass": sum(1 for c in checks if c["status"] == "pass"),
-        "warn": sum(1 for c in checks if c["status"] == "warn"),
-        "fail": sum(1 for c in checks if c["status"] == "fail"),
-    }
-    if counts["fail"] > 0:
-        overall = "fail"
-    elif counts["warn"] > 0:
-        overall = "warn"
-    else:
-        overall = "pass"
-
-    logs = [
-        {
-            "trace_id": trace_id,
-            "event_code": check["event_code"],
-            "check_code": check["code"],
-            "scope": check["scope"],
-            "status": check["status"],
-            "duration_ms": check["duration_ms"],
-        }
-        for check in checks
-    ]
-    return {
-        "command": "doctor",
-        "trace_id": trace_id,
-        "generated_at_utc": "2026-02-22T00:00:00Z",
-        "selected_profile": selected_profile,
-        "source_path": source_path,
-        "overall_status": overall,
-        "status_counts": counts,
-        "checks": checks,
-        "structured_logs": logs,
-        "merge_decision_count": len(merge_decisions),
-        "merge_decisions": merge_decisions,
-    }
-
-
-def check_row(code: str, event_code: str, scope: str, status: str, message: str, remediation: str, duration_ms: int) -> dict:
-    return {
-        "code": code,
-        "event_code": event_code,
-        "scope": scope,
-        "status": status,
-        "message": message,
-        "remediation": remediation,
-        "duration_ms": duration_ms,
-    }
-
-
-healthy_checks = [
-    check_row("DR-CONFIG-001", "DOC-001", "config.resolve", "pass", "Configuration resolved successfully.", "No action required.", 0),
-    check_row("DR-CONFIG-002", "DOC-002", "config.source", "pass", "Config source file discovered.", "No action required.", 0),
-    check_row("DR-PROFILE-003", "DOC-003", "profile.safety", "pass", "Profile safety level is acceptable.", "No action required.", 0),
-    check_row("DR-TRUST-004", "DOC-004", "registry.assurance", "pass", "Registry assurance level meets bootstrap target.", "No action required.", 0),
-    check_row("DR-MIGRATE-005", "DOC-005", "migration.lockstep", "pass", "Lockstep validation requirement is enabled.", "No action required.", 0),
-    check_row("DR-OBS-006", "DOC-006", "observability.audit_events", "pass", "Structured audit events are enabled.", "No action required.", 0),
-    check_row("DR-ENV-007", "DOC-007", "environment.cwd", "pass", "Current working directory is available: /workspace", "No action required.", 0),
-    check_row("DR-CONFIG-008", "DOC-008", "config.provenance", "pass", "Merge provenance recorded (4 decisions).", "No action required.", 0),
-]
-degraded_checks = [
-    check_row("DR-CONFIG-001", "DOC-001", "config.resolve", "pass", "Configuration resolved successfully.", "No action required.", 0),
-    check_row("DR-CONFIG-002", "DOC-002", "config.source", "warn", "No config file discovered; defaults are active.", "Create franken_node.toml or pass --config to lock deterministic project settings.", 0),
-    check_row("DR-PROFILE-003", "DOC-003", "profile.safety", "warn", "Profile is legacy-risky.", "Prefer --profile balanced or --profile strict for stronger controls.", 0),
-    check_row("DR-TRUST-004", "DOC-004", "registry.assurance", "warn", "Registry assurance level is below bootstrap target (3).", "Raise registry.minimum_assurance_level to 3+.", 0),
-    check_row("DR-MIGRATE-005", "DOC-005", "migration.lockstep", "warn", "Lockstep validation requirement is disabled.", "Set migration.require_lockstep_validation=true for safer rollout validation.", 0),
-    check_row("DR-OBS-006", "DOC-006", "observability.audit_events", "warn", "Structured audit events are disabled.", "Set observability.emit_structured_audit_events=true for stronger traceability.", 0),
-    check_row("DR-ENV-007", "DOC-007", "environment.cwd", "pass", "Current working directory is available: /workspace", "No action required.", 0),
-    check_row("DR-CONFIG-008", "DOC-008", "config.provenance", "pass", "Merge provenance recorded (3 decisions).", "No action required.", 0),
-]
-failure_checks = [
-    *degraded_checks[:6],
-    check_row("DR-ENV-007", "DOC-007", "environment.cwd", "fail", "Current working directory is unavailable.", "Fix working directory access before running operations.", 0),
-    check_row("DR-CONFIG-008", "DOC-008", "config.provenance", "warn", "No merge decisions recorded for this configuration.", "Investigate resolver instrumentation before relying on doctor provenance.", 0),
-]
-
-healthy_report = build_report(
-    trace_id="doctor-healthy",
-    selected_profile="strict",
-    source_path="franken_node.toml",
-    checks=healthy_checks,
-    merge_decisions=[
-        {"stage": "default", "field": "profile", "value": "balanced"},
-        {"stage": "file", "field": "profile", "value": "strict"},
-        {"stage": "file", "field": "migration.require_lockstep_validation", "value": "true"},
-        {"stage": "env", "field": "registry.minimum_assurance_level", "value": "4"},
-    ],
-)
-degraded_report = build_report(
-    trace_id="doctor-degraded",
-    selected_profile="legacy-risky",
-    source_path=None,
-    checks=degraded_checks,
-    merge_decisions=[
-        {"stage": "default", "field": "profile", "value": "balanced"},
-        {"stage": "cli", "field": "profile", "value": "legacy-risky"},
-        {"stage": "env", "field": "observability.emit_structured_audit_events", "value": "false"},
-    ],
-)
-failure_report = build_report(
-    trace_id="doctor-failure",
-    selected_profile="legacy-risky",
-    source_path=None,
-    checks=failure_checks,
-    merge_decisions=[],
-)
-
-healthy_text = json.dumps(healthy_report, indent=2, sort_keys=True)
-degraded_text = json.dumps(degraded_report, indent=2, sort_keys=True)
-failure_text = json.dumps(failure_report, indent=2, sort_keys=True)
-
-healthy_json.write_text(healthy_text + "\n", encoding="utf-8")
-degraded_json.write_text(degraded_text + "\n", encoding="utf-8")
-failure_json.write_text(failure_text + "\n", encoding="utf-8")
-
-add("healthy_report_written", healthy_json.exists(), str(healthy_json))
-add("degraded_report_written", degraded_json.exists(), str(degraded_json))
-add("failure_report_written", failure_json.exists(), str(failure_json))
-
-healthy_sha = hashlib.sha256(healthy_text.encode("utf-8")).hexdigest()
-healthy_sha_2 = hashlib.sha256(healthy_text.encode("utf-8")).hexdigest()
-add("healthy_report_deterministic_hash", healthy_sha == healthy_sha_2, healthy_sha)
+healthy_text = healthy_json.read_text(encoding="utf-8") if healthy_json.exists() else ""
+healthy_sha = hashlib.sha256(healthy_text.encode("utf-8")).hexdigest() if healthy_text else ""
+healthy_sha_2 = hashlib.sha256(healthy_text.encode("utf-8")).hexdigest() if healthy_text else ""
+add("healthy_report_deterministic_hash", healthy_text != "" and healthy_sha == healthy_sha_2, healthy_sha)
 
 payload = {
     "bead_id": "bd-1pk",
@@ -318,6 +435,7 @@ payload = {
         "healthy": str(healthy_json.relative_to(root)),
         "degraded": str(degraded_json.relative_to(root)),
         "failure": str(failure_json.relative_to(root)),
+        "invalid": str(invalid_json.relative_to(root)),
     },
     "doctor_matrix_path": str(matrix_json.relative_to(root)),
 }
@@ -340,7 +458,7 @@ fi
   echo "- Log: \`artifacts/section_bootstrap/bd-1pk/doctor_diagnostics_log.jsonl\`"
   echo "- Checks JSON: \`artifacts/section_bootstrap/bd-1pk/doctor_contract_checks.json\`"
   echo "- Matrix JSON: \`artifacts/section_bootstrap/bd-1pk/doctor_checks_matrix.json\`"
-  echo "- Sample reports: \`doctor_report_healthy.json\`, \`doctor_report_degraded.json\`, \`doctor_report_failure.json\`"
+  echo "- Sample reports: \`doctor_report_healthy.json\`, \`doctor_report_degraded.json\`, \`doctor_report_failure.json\`, \`doctor_report_invalid_input.json\`"
   echo
   echo "| Check | Pass | Detail |"
   echo "|---|---|---|"

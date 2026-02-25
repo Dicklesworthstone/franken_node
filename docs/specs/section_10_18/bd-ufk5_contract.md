@@ -114,7 +114,9 @@ in CI with reproducible profiling evidence.
 | `VEF-PERF-003` | Budget exceeded — gate fails |
 | `VEF-PERF-004` | Baseline measurement recorded |
 | `VEF-PERF-005` | Noise tolerance applied (unstable measurement) |
+| `VEF-PERF-006` | Mode budget scaling applied |
 | `VEF-PERF-ERR-001` | Benchmark infrastructure failure |
+| `VEF-PERF-ERR-002` | Mode transition error |
 
 ## Acceptance Criteria
 

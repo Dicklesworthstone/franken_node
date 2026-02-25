@@ -6,10 +6,11 @@ Define deterministic diagnostics output for `franken-node doctor` so operators a
 
 ## Command Surface
 
-- `franken-node doctor [--config <path>] [--profile <profile>] [--json] [--trace-id <id>] [--verbose]`
+- `franken-node doctor [--config <path>] [--profile <profile>] [--policy-activation-input <path>] [--json] [--trace-id <id>] [--verbose]`
 - `--json` emits machine-readable report.
 - default output is human-readable text.
 - `--trace-id` binds all check log events to a stable correlation identifier.
+- `--policy-activation-input` activates live policy pipeline diagnostics (guardrails, decision engine, explainer wording) from JSON input.
 
 ## Determinism Contract
 
@@ -34,6 +35,11 @@ Runtime metadata (`generated_at_utc`, per-check `duration_ms`) may vary, but doe
 | `DR-OBS-006` | `DOC-006` | `observability.audit_events` | structured audit events enabled | Warn when disabled | set `observability.emit_structured_audit_events=true` |
 | `DR-ENV-007` | `DOC-007` | `environment.cwd` | working directory accessible | Fail when cwd unavailable | restore directory access / permissions |
 | `DR-CONFIG-008` | `DOC-008` | `config.provenance` | merge decisions present | Warn when missing | repair resolver provenance instrumentation |
+| `DR-POLICY-009` | `DOC-009` | `policy.guardrails` | dominant guardrail verdict is `allow` | Warn on dominant `warn`; Fail on dominant `block` or invalid input | resolve blocked budgets and telemetry anomalies before policy activation |
+| `DR-POLICY-010` | `DOC-010` | `policy.decision_engine` | top candidate accepted | Warn when fallback candidate used; Fail when all candidates blocked/no candidates/invalid input | provide safer candidates or reduce risk exposure |
+| `DR-POLICY-011` | `DOC-011` | `policy.explainer_wording` | wording validator passes | Fail when wording separation fails or policy pipeline cannot execute | fix diagnostic-vs-guarantee wording and input integrity |
+
+`DR-POLICY-009..011` are emitted only when `--policy-activation-input` is supplied.
 
 ## Status Aggregation
 
@@ -69,6 +75,16 @@ Top-level fields:
   - `duration_ms`
 - `merge_decision_count`
 - `merge_decisions[]`
+- optional `policy_activation` object (present when policy activation input parses and executes):
+  - `input_path`
+  - `candidate_count`
+  - `observation_count`
+  - `prefiltered_candidate_count`
+  - `top_ranked_candidate`
+  - `guardrail_certificate.{epoch_id,dominant_verdict,findings[],blocking_budget_ids[]}`
+  - `decision_outcome`
+  - `explanation`
+  - `wording_validation`
 
 ## CI Artifacts
 
@@ -79,5 +95,6 @@ Top-level fields:
 - `artifacts/section_bootstrap/bd-1pk/doctor_report_healthy.json`
 - `artifacts/section_bootstrap/bd-1pk/doctor_report_degraded.json`
 - `artifacts/section_bootstrap/bd-1pk/doctor_report_failure.json`
+- `artifacts/section_bootstrap/bd-1pk/doctor_report_invalid_input.json`
 - `artifacts/section_bootstrap/bd-1pk/verification_evidence.json`
 - `artifacts/section_bootstrap/bd-1pk/verification_summary.md`

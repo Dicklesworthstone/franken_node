@@ -1,0 +1,212 @@
+{
+  "command": "doctor",
+  "trace_id": "doctor-policy-invalid",
+  "generated_at_utc": "2026-02-25T06:29:47.582636441+00:00",
+  "selected_profile": "balanced",
+  "source_path": null,
+  "overall_status": "fail",
+  "status_counts": {
+    "pass": 7,
+    "warn": 1,
+    "fail": 3
+  },
+  "checks": [
+    {
+      "code": "DR-CONFIG-001",
+      "event_code": "DOC-001",
+      "scope": "config.resolve",
+      "status": "pass",
+      "message": "Configuration resolved successfully.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-CONFIG-002",
+      "event_code": "DOC-002",
+      "scope": "config.source",
+      "status": "warn",
+      "message": "No config file discovered; defaults are active.",
+      "remediation": "Create franken_node.toml or pass --config to lock deterministic project settings.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-PROFILE-003",
+      "event_code": "DOC-003",
+      "scope": "profile.safety",
+      "status": "pass",
+      "message": "Profile safety level is acceptable.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-TRUST-004",
+      "event_code": "DOC-004",
+      "scope": "registry.assurance",
+      "status": "pass",
+      "message": "Registry assurance level meets bootstrap target.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-MIGRATE-005",
+      "event_code": "DOC-005",
+      "scope": "migration.lockstep",
+      "status": "pass",
+      "message": "Lockstep validation requirement is enabled.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-OBS-006",
+      "event_code": "DOC-006",
+      "scope": "observability.audit_events",
+      "status": "pass",
+      "message": "Structured audit events are enabled.",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-ENV-007",
+      "event_code": "DOC-007",
+      "scope": "environment.cwd",
+      "status": "pass",
+      "message": "Current working directory is available: /data/projects/franken_node",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-CONFIG-008",
+      "event_code": "DOC-008",
+      "scope": "config.provenance",
+      "status": "pass",
+      "message": "Merge provenance recorded (1 decisions).",
+      "remediation": "No action required.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-POLICY-009",
+      "event_code": "DOC-009",
+      "scope": "policy.guardrails",
+      "status": "fail",
+      "message": "Policy activation input failed to load: failed parsing policy activation input /data/projects/franken_node/fixtures/policy_activation/doctor_policy_activation_invalid.json as JSON",
+      "remediation": "Provide a valid JSON input via --policy-activation-input.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-POLICY-010",
+      "event_code": "DOC-010",
+      "scope": "policy.decision_engine",
+      "status": "fail",
+      "message": "Decision engine check skipped because policy activation input failed.",
+      "remediation": "Fix policy activation input errors first.",
+      "duration_ms": 0
+    },
+    {
+      "code": "DR-POLICY-011",
+      "event_code": "DOC-011",
+      "scope": "policy.explainer_wording",
+      "status": "fail",
+      "message": "Policy explanation check skipped because decision pipeline did not run.",
+      "remediation": "Fix policy activation input errors first.",
+      "duration_ms": 0
+    }
+  ],
+  "structured_logs": [
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-001",
+      "check_code": "DR-CONFIG-001",
+      "scope": "config.resolve",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-002",
+      "check_code": "DR-CONFIG-002",
+      "scope": "config.source",
+      "status": "warn",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-003",
+      "check_code": "DR-PROFILE-003",
+      "scope": "profile.safety",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-004",
+      "check_code": "DR-TRUST-004",
+      "scope": "registry.assurance",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-005",
+      "check_code": "DR-MIGRATE-005",
+      "scope": "migration.lockstep",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-006",
+      "check_code": "DR-OBS-006",
+      "scope": "observability.audit_events",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-007",
+      "check_code": "DR-ENV-007",
+      "scope": "environment.cwd",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-008",
+      "check_code": "DR-CONFIG-008",
+      "scope": "config.provenance",
+      "status": "pass",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-009",
+      "check_code": "DR-POLICY-009",
+      "scope": "policy.guardrails",
+      "status": "fail",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-010",
+      "check_code": "DR-POLICY-010",
+      "scope": "policy.decision_engine",
+      "status": "fail",
+      "duration_ms": 0
+    },
+    {
+      "trace_id": "doctor-policy-invalid",
+      "event_code": "DOC-011",
+      "check_code": "DR-POLICY-011",
+      "scope": "policy.explainer_wording",
+      "status": "fail",
+      "duration_ms": 0
+    }
+  ],
+  "merge_decision_count": 1,
+  "merge_decisions": [
+    {
+      "stage": "default",
+      "field": "profile",
+      "value": "balanced"
+    }
+  ]
+}

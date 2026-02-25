@@ -184,7 +184,10 @@ fn doctor_policy_activation_block_path_blocks_on_conformal_risk() {
         report["policy_activation"]["decision_outcome"]["reason"],
         "AllCandidatesBlocked"
     );
-    assert_eq!(report["policy_activation"]["decision_outcome"]["chosen"], Value::Null);
+    assert_eq!(
+        report["policy_activation"]["decision_outcome"]["chosen"],
+        Value::Null
+    );
 
     let blocked_budgets =
         report["policy_activation"]["guardrail_certificate"]["blocking_budget_ids"]
