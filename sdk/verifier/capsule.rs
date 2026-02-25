@@ -326,7 +326,7 @@ mod tests {
         capsule.manifest.schema_version = "bad".to_string();
         match validate_manifest(&capsule.manifest) {
             Err(CapsuleError::SchemaMismatch(_)) => {}
-            other => unreachable!("expected SchemaMismatch, got {other:?}"),
+            other => panic!("expected SchemaMismatch, got {other:?}"),
         }
     }
 
@@ -349,7 +349,7 @@ mod tests {
         capsule.signature = "tampered".to_string();
         match verify_signature(&capsule) {
             Err(CapsuleError::SignatureInvalid(_)) => {}
-            other => unreachable!("expected SignatureInvalid, got {other:?}"),
+            other => panic!("expected SignatureInvalid, got {other:?}"),
         }
     }
 
@@ -387,7 +387,7 @@ mod tests {
         sign_capsule(&mut capsule);
         match replay(&capsule, "v1") {
             Err(CapsuleError::EmptyPayload(_)) => {}
-            other => unreachable!("expected EmptyPayload, got {other:?}"),
+            other => panic!("expected EmptyPayload, got {other:?}"),
         }
     }
 
@@ -397,7 +397,7 @@ mod tests {
         capsule.signature = "tampered".to_string();
         match replay(&capsule, "v1") {
             Err(CapsuleError::SignatureInvalid(_)) => {}
-            other => unreachable!("expected SignatureInvalid, got {other:?}"),
+            other => panic!("expected SignatureInvalid, got {other:?}"),
         }
     }
 

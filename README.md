@@ -173,7 +173,7 @@ franken-node incident list --severity high
 | `franken-node registry publish` | Publish signed extension artifact | `franken-node registry publish ./dist/plugin.fnext` |
 | `franken-node registry search` | Query extension registry with trust filters | `franken-node registry search auth --min-assurance 3` |
 | `franken-node bench run` | Run benchmark suite and emit signed report | `franken-node bench run --scenario secure-extension-heavy` |
-| `franken-node doctor` | Diagnose environment and policy setup | `franken-node doctor --verbose` |
+| `franken-node doctor` | Diagnose environment and policy setup (optionally with live policy activation telemetry) | `franken-node doctor --verbose --policy-activation-input ./fixtures/policy_activation/doctor_policy_activation_pass.json` |
 
 ## Configuration
 
