@@ -4,7 +4,6 @@ import importlib.util
 import json
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_ownership_violations.py"

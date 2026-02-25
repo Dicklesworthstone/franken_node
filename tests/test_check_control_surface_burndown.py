@@ -1,15 +1,12 @@
 #!/usr/bin/env python3
 """Unit tests for check_control_surface_burndown.py (bd-2h2s)."""
 
-import csv
 import json
 import subprocess
 import sys
 import tempfile
 import unittest
-from io import StringIO
 from pathlib import Path
-from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 import check_control_surface_burndown as csb

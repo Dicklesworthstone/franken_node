@@ -1,7 +1,10 @@
 """Tests for scripts/check_section_14_gate.py (bd-2l4i)."""
 
-import importlib.util, json, os, subprocess, sys
-import pytest
+import importlib.util
+import json
+import os
+import subprocess
+import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "check_section_14_gate.py")
@@ -75,7 +78,7 @@ class TestJsonOutput:
 
 
 class TestNoExec:
-    def test_no_exec_runs(self):
+    def test_no_execution_runs(self):
         result = subprocess.run(
             [sys.executable, SCRIPT, "--json", "--no-exec"],
             capture_output=True, text=True, cwd=ROOT, timeout=60,

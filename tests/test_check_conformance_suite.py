@@ -117,12 +117,12 @@ class TestLoadFixtures(unittest.TestCase):
     def test_all_fixtures_have_conformance_id(self):
         fixtures, _ = mod.load_fixtures()
         for f in fixtures:
-            self.assertIn("conformance_id", f, f"Missing conformance_id in fixture")
+            self.assertIn("conformance_id", f, "Missing conformance_id in fixture")
 
     def test_all_fixtures_have_domain(self):
         fixtures, _ = mod.load_fixtures()
         for f in fixtures:
-            self.assertIn("domain", f, f"Missing domain in fixture")
+            self.assertIn("domain", f, "Missing domain in fixture")
 
 
 class TestFixtureCount(unittest.TestCase):

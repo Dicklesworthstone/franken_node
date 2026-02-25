@@ -62,7 +62,7 @@ class TestHelpers(TestCase):
 
 
 class TestReportAssembly(TestCase):
-    def test_build_report_no_exec_passes(self) -> None:
+    def test_build_report_no_execution_passes(self) -> None:
         report = mod.build_report(execute=False, write_outputs=False)
         self.assertTrue(report["gate_pass"])
         self.assertEqual(report["verdict"], "PASS")

@@ -5,13 +5,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import os
-import sys
-import tempfile
-import textwrap
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 # ---------------------------------------------------------------------------
 # Import the verification script as a module

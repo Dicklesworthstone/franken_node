@@ -1,6 +1,5 @@
 """Unit tests for check_repair_controller.py verification logic."""
 
-import json
 import os
 import unittest
 

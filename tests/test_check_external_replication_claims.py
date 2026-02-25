@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Tests for bd-e5cz: Externally replicated high-impact claims gate."""
-import importlib.util, json, os, subprocess, sys, pytest
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "check_external_replication_claims.py")

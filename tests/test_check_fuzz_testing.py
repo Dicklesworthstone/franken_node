@@ -6,10 +6,8 @@ import importlib.util
 import json
 import subprocess
 import sys
-import tempfile
 from pathlib import Path
 from unittest import TestCase, main
-from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 

@@ -1,6 +1,10 @@
 """Tests for scripts/check_cancellation_protocol.py (bd-1cs7)."""
 
-import importlib.util, json, os, subprocess, sys
+import importlib.util
+import json
+import os
+import subprocess
+import sys
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

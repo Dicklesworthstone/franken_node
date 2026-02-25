@@ -7,7 +7,6 @@ import json
 import sys
 from pathlib import Path
 
-import pytest
 
 # Add scripts directory to path.
 SCRIPTS_DIR = Path(__file__).resolve().parent.parent / "scripts"

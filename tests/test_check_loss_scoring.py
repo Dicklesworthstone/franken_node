@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for scripts/check_loss_scoring.py."""
 
-import os
 import sys
 import unittest
 from pathlib import Path

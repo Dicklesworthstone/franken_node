@@ -9,7 +9,6 @@ import sys
 import tempfile
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_idempotency_key_derivation.py"

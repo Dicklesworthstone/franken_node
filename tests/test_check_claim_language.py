@@ -1,6 +1,5 @@
 """Tests for scripts/check_claim_language.py."""
 
-import json
 import sys
 import textwrap
 from pathlib import Path

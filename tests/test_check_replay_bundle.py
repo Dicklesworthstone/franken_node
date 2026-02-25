@@ -1,7 +1,6 @@
 """Unit tests for scripts/check_replay_bundle.py."""
 
 import importlib.util
-import json
 from pathlib import Path
 from unittest import TestCase, main
 

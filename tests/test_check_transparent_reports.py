@@ -1,6 +1,10 @@
 """Tests for scripts/check_transparent_reports.py (bd-10ee)."""
 
-import importlib.util, json, os, subprocess, sys
+import importlib.util
+import json
+import os
+import subprocess
+import sys
 import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

@@ -1,11 +1,7 @@
 """Unit tests for check_high_assurance_promotion.py verification script."""
 
 import importlib.util
-import json
 import os
-import sys
-import tempfile
-import textwrap
 
 import pytest
 

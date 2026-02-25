@@ -9,7 +9,6 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from fixture_runner import (
     canonicalize,
     validate_fixture,
-    load_fixtures,
     check_schema_exists,
     check_fixtures_dir,
     check_fixtures_valid,

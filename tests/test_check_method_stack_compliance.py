@@ -1,12 +1,9 @@
 #!/usr/bin/env python3
 """Unit tests for scripts/check_method_stack_compliance.py"""
 
-import json
-import os
 import sys
 import unittest
 from pathlib import Path
-from unittest.mock import patch
 
 # Add scripts to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))

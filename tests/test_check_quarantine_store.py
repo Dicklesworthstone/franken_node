@@ -1,6 +1,5 @@
 """Unit tests for check_quarantine_store.py verification logic."""
 
-import json
 import os
 import unittest
 

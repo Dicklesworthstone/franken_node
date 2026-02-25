@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for failure_replay.py."""
 
-import json
 import sys
 import tempfile
 import unittest

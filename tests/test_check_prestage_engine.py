@@ -1,6 +1,5 @@
 """Unit tests for check_prestage_engine.py verification logic."""
 
-import json
 import os
 import unittest
 

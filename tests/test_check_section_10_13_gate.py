@@ -5,9 +5,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from unittest.mock import patch
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_section_10_13_gate.py"
@@ -111,7 +109,7 @@ def test_cli_self_test_json():
     data = json.loads(result.stdout)
     assert data["self_test_passed"] is True
 
-def test_cli_no_exec_json():
+def test_cli_no_execution_json():
     result = subprocess.run(
         [sys.executable, str(SCRIPT), "--no-exec", "--json"],
         capture_output=True, text=True, timeout=60, cwd=ROOT,

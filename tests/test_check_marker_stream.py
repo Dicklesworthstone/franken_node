@@ -1,10 +1,8 @@
 """Tests for scripts/check_marker_stream.py (bd-126h marker stream verification)."""
 
 import importlib.util
-import json
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_marker_stream.py"

@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Tests for bd-31tg: Partner and lighthouse programs gate."""
-import importlib.util, json, os, subprocess, sys, pytest
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import pytest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SCRIPT = os.path.join(ROOT, "scripts", "check_partner_lighthouse_programs.py")

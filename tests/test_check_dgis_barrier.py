@@ -6,7 +6,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
 
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "check_dgis_barrier.py"
 ROOT = Path(__file__).resolve().parent.parent

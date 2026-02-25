@@ -100,7 +100,7 @@ class TestRunAll(unittest.TestCase):
 class TestSelfTest(unittest.TestCase):
     def test_passes(self):
         ok, checks = mod.self_test()
-        self.assertTrue(ok, f"self_test failed")
+        self.assertTrue(ok, "self_test failed")
 
 
 class TestJsonOutput(unittest.TestCase):

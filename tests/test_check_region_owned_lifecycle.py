@@ -7,7 +7,6 @@ import sys
 from pathlib import Path
 from unittest import mock
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_region_owned_lifecycle.py"

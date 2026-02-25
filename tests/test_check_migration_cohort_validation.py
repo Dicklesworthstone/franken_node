@@ -1,8 +1,6 @@
 """Tests for scripts/check_migration_cohort_validation.py (bd-sxt5)."""
 
 import importlib.util
-import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -180,7 +178,7 @@ class TestCheckResultsStructure:
 # build_report (no execution)
 # ---------------------------------------------------------------------------
 
-def test_build_report_no_exec_structure():
+def test_build_report_no_execution_structure():
     report = mcv.build_report(execute=False)
     assert "bead_id" in report
     assert report["bead_id"] == "bd-sxt5"
@@ -191,7 +189,7 @@ def test_build_report_no_exec_structure():
     assert isinstance(report["checks_total"], int)
 
 
-def test_build_report_no_exec_passes():
+def test_build_report_no_execution_passes():
     """If all artifacts exist, no-exec report should pass."""
     report = mcv.build_report(execute=False)
     # This depends on whether artifacts exist on disk; skip if missing

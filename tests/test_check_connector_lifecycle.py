@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Unit tests for check_connector_lifecycle.py."""
 
-import json
 import sys
 import unittest
 from pathlib import Path

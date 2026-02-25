@@ -1,10 +1,8 @@
 """Tests for scripts/check_error_coverage.py (bd-13q error coverage audit)."""
 
 import importlib.util
-import json
 from pathlib import Path
 
-import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "check_error_coverage.py"
