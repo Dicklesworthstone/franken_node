@@ -578,7 +578,13 @@ impl RuntimeOracle {
                 message: format!("no votes recorded for check '{check_id}'"),
             })?;
 
-        let total = entry.votes.len();
+        let total = self.runtimes.len();
+        if total == 0 {
+            return Err(OracleError {
+                code: error_codes::ERR_NVO_NO_RUNTIMES,
+                message: "no runtimes registered".to_string(),
+            });
+        }
         let quorum_required =
             ((total as f64) * (self.quorum_threshold_percent as f64 / 100.0)).ceil() as usize;
 

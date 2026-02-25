@@ -547,22 +547,21 @@ impl TokenValidator {
             }
         }
 
-        // Check nonce replay.
-        for token in tokens.iter() {
-            if self.seen_nonces.contains(&token.nonce) {
-                self.tokens_rejected += 1;
-                let err = TokenError::replay_detected(&token.nonce);
-                self.events.push(TokenEvent {
-                    event_code: ABT_004.to_string(),
-                    token_id: token.token_id.as_str().to_string(),
-                    trace_id: trace_id.to_string(),
-                    epoch_id: self.epoch_id,
-                    action_id: format!("verify-replay-{}", token.token_id),
-                    detail: format!("Nonce '{}' replay detected", token.nonce),
-                    timestamp_ms: now_ms,
-                });
-                return Err(err);
-            }
+        // Check nonce replay on the leaf token.
+        let leaf = chain.leaf();
+        if self.seen_nonces.contains(&leaf.nonce) {
+            self.tokens_rejected += 1;
+            let err = TokenError::replay_detected(&leaf.nonce);
+            self.events.push(TokenEvent {
+                event_code: ABT_004.to_string(),
+                token_id: leaf.token_id.as_str().to_string(),
+                trace_id: trace_id.to_string(),
+                epoch_id: self.epoch_id,
+                action_id: format!("verify-replay-{}", leaf.token_id),
+                detail: format!("Nonce '{}' replay detected", leaf.nonce),
+                timestamp_ms: now_ms,
+            });
+            return Err(err);
         }
 
         // Verify chain hash integrity.
@@ -603,10 +602,8 @@ impl TokenValidator {
             return Err(err);
         }
 
-        // All checks passed: record nonces and emit success event.
-        for token in tokens.iter() {
-            self.seen_nonces.insert(token.nonce.clone());
-        }
+        // All checks passed: record leaf nonce and emit success event.
+        self.seen_nonces.insert(leaf.nonce.clone());
         self.tokens_verified += 1;
         self.events.push(TokenEvent {
             event_code: ABT_003.to_string(),
