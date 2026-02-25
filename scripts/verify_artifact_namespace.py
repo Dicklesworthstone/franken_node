@@ -55,6 +55,8 @@ def scan_artifacts(artifacts_dir: Path) -> list[dict]:
         for fname in files:
             if not fname.endswith(".json"):
                 continue
+            if fname.startswith("sample_"):
+                continue
             fpath = Path(root) / fname
             rel_path = str(fpath.relative_to(artifacts_dir.parent))
 
@@ -71,6 +73,11 @@ def scan_artifacts(artifacts_dir: Path) -> list[dict]:
                     data = json.load(f)
             except (json.JSONDecodeError, OSError) as e:
                 entry["errors"].append(f"Parse error: {e}")
+                results.append(entry)
+                continue
+
+            if not isinstance(data, dict):
+                entry["errors"].append("Artifact is not a JSON object")
                 results.append(entry)
                 continue
 

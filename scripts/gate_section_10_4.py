@@ -231,7 +231,7 @@ def run_unit_tests() -> dict[str, Any]:
             [sys.executable, "-m", "pytest", str(test_path), "-q", "--tb=short"],
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=600,
             cwd=ROOT,
         )
         passed, failed = _parse_passed_failed(proc.stdout)

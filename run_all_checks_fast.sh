@@ -1,12 +1,9 @@
 #!/bin/bash
-export CARGO_TERM_COLOR=always
-ls scripts/check_*.py | xargs -n 1 -P 16 -I {} bash -c '
-    output=$(python3 "$1" 2>&1)
-    status=$?
-    if [ $status -ne 0 ]; then
-        echo "FAILED: $1"
-        echo "$output" > "fail_${1##*/}.log"
-    else
-        echo "PASSED: $1"
+FAILED=0
+for script in scripts/check_*.py; do
+    if ! python3 "$script" > "fail_${script##*/}.log" 2>&1; then
+        echo "FAILED: $script"
+        FAILED=$((FAILED+1))
     fi
-' _ {}
+done
+echo "Total failed: $FAILED"
