@@ -169,7 +169,7 @@ fn parse_domain(s: &str) -> DomainTag {
         "scheduling" => DomainTag::Scheduling,
         "placement" => DomainTag::Placement,
         "verification" => DomainTag::Verification,
-        other => unreachable!("unknown domain: {}", other),
+        other => panic!("unknown domain: {}", other),
     }
 }
 

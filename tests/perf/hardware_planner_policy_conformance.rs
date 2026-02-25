@@ -230,7 +230,7 @@ fn dispatch_through_approved_interface() {
     let mut planner = HardwarePlanner::default();
     planner.register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1").unwrap();
 
-    let auth_tkn = planner.dispatch("wl-1", "hw-1", "franken_engine", 2000, "t1").unwrap();
+    let token = planner.dispatch("wl-1", "hw-1", "franken_engine", 2000, "t1").unwrap();
     assert_eq!(token.approved_interface, "franken_engine");
     assert_eq!(token.schema_version, SCHEMA_VERSION);
 }

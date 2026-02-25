@@ -522,7 +522,7 @@ impl TestPersistence {
                 });
             }
         }
-        self.auth_fencing_tkn = Some(auth_tkn.clone());
+        self.fencing_token = Some(token.clone());
         self.store.insert(key.to_string(), value.to_string());
         Ok(())
     }
@@ -633,7 +633,7 @@ impl TestService {
             },
         });
         self.clock.advance(1);
-        Ok(auth_tkn.clone())
+        Ok(token.clone())
     }
 
     /// Get the audit log.
@@ -789,7 +789,7 @@ pub fn scenario_operator_status(clock: &TestClock, seed: u64) -> ScenarioResult 
     let trace = build_cross_substrate_trace(&trace_id, clock, &substrates, "operator_status");
 
     let mut service = TestService::new(clock.clone());
-    let auth_tkn = FencingToken::new(1, 1, "op-1");
+    let token = FencingToken::new(1, 1, "op-1");
     let mut tui = TestTui::new();
 
     // TUI initiates -> service processes -> persistence stores -> TUI renders
@@ -859,7 +859,7 @@ pub fn scenario_lease_management(clock: &TestClock, seed: u64) -> ScenarioResult
     let trace = build_cross_substrate_trace(&trace_id, clock, &substrates, "lease_management");
 
     let mut service = TestService::new(clock.clone());
-    let auth_tkn = FencingToken::new(1, 1, "op-lease");
+    let token = FencingToken::new(1, 1, "op-lease");
     let mut tui = TestTui::new();
 
     match service.acquire_lease("op-lease", &token, &trace_id) {
@@ -920,7 +920,7 @@ pub fn scenario_audit_log(clock: &TestClock, seed: u64) -> ScenarioResult {
     let trace = build_cross_substrate_trace(&trace_id, clock, &substrates, "audit_log");
 
     let mut service = TestService::new(clock.clone());
-    let auth_tkn = FencingToken::new(1, 1, "op-audit");
+    let token = FencingToken::new(1, 1, "op-audit");
     let mut tui = TestTui::new();
 
     // Perform an action that generates audit entries
@@ -989,12 +989,12 @@ pub fn scenario_error_propagation(clock: &TestClock, seed: u64) -> ScenarioResul
     let mut tui = TestTui::new();
 
     // Use a stale fencing token to trigger an error
-    let auth_stale_tkn = FencingToken::new(1, 1, "op-err");
-    let _ = service.update_operator_status("op-err", "active", &auth_stale_tkn, &trace_id);
+    let stale_token = FencingToken::new(1, 1, "op-err");
+    let _ = service.update_operator_status("op-err", "active", &stale_token, &trace_id);
 
     // Now try with an older token — should fail
-    let auth_older_tkn = FencingToken::new(0, 0, "op-err-stale");
-    match service.update_operator_status("op-err", "draining", &auth_older_tkn, &trace_id) {
+    let older_token = FencingToken::new(0, 0, "op-err-stale");
+    match service.update_operator_status("op-err", "draining", &older_token, &trace_id) {
         Ok(_) => {
             events.push(E2E_SCENARIO_FAIL.to_string());
             ScenarioResult {
@@ -1481,7 +1481,7 @@ mod tests {
     #[test]
     fn test_persistence_write_read() {
         let mut store = TestPersistence::new();
-        let auth_tkn = FencingToken::new(1, 1, "op");
+        let token = FencingToken::new(1, 1, "op");
         store.write("key1", "value1", &token).unwrap();
         assert_eq!(store.read("key1"), Some(&"value1".to_string()));
     }
@@ -1516,7 +1516,7 @@ mod tests {
     fn test_service_update_and_get_status() {
         let clock = TestClock::new(1000);
         let mut svc = TestService::new(clock);
-        let auth_tkn = FencingToken::new(1, 1, "op-1");
+        let token = FencingToken::new(1, 1, "op-1");
         svc.update_operator_status("op-1", "active", &token, "trace-1")
             .unwrap();
         let status = svc.get_operator_status("op-1").unwrap();
@@ -1527,7 +1527,7 @@ mod tests {
     fn test_service_audit_log_populated() {
         let clock = TestClock::new(1000);
         let mut svc = TestService::new(clock);
-        let auth_tkn = FencingToken::new(1, 1, "op-1");
+        let token = FencingToken::new(1, 1, "op-1");
         svc.update_operator_status("op-1", "active", &token, "trace-1")
             .unwrap();
         assert_eq!(svc.audit_log().len(), 1);
@@ -1849,8 +1849,8 @@ mod tests {
     fn test_invariant_fencing() {
         // INV-E2E-FENCING
         let mut store = TestPersistence::new();
-        let auth_new_tkn = FencingToken::new(2, 1, "op");
-        store.write("k", "v", &auth_new_tkn).unwrap();
+        let new_token = FencingToken::new(2, 1, "op");
+        store.write("k", "v", &new_token).unwrap();
         let stale = FencingToken::new(1, 1, "op");
         assert!(store.write("k", "v2", &stale).is_err());
     }
@@ -1860,7 +1860,7 @@ mod tests {
         // INV-E2E-AUDIT
         let clock = TestClock::new(1000);
         let mut svc = TestService::new(clock);
-        let auth_tkn = FencingToken::new(1, 1, "op");
+        let token = FencingToken::new(1, 1, "op");
         svc.update_operator_status("op", "a", &token, "t").unwrap();
         svc.update_operator_status("op", "b", &token, "t").unwrap();
         assert!(svc.audit_log().verify_chain().is_ok());
@@ -1870,8 +1870,8 @@ mod tests {
     fn test_invariant_error_fidelity() {
         // INV-E2E-ERROR-FIDELITY
         let mut store = TestPersistence::new();
-        let auth_new_tkn = FencingToken::new(2, 1, "op");
-        store.write("k", "v", &auth_new_tkn).unwrap();
+        let new_token = FencingToken::new(2, 1, "op");
+        store.write("k", "v", &new_token).unwrap();
         let stale = FencingToken::new(1, 1, "op");
         let err = store.write("k", "v2", &stale).unwrap_err();
         assert_eq!(err.code, ERR_E2E_FENCING_REJECTED);

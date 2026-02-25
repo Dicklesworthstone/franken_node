@@ -130,7 +130,7 @@ fn fixture_path(snapshot_name: &str) -> PathBuf {
 fn read_fixture(snapshot_name: &str) -> String {
     let path = fixture_path(snapshot_name);
     fs::read_to_string(&path)
-        .unwrap_or_else(|e| unreachable!("failed reading snapshot fixture {}: {e}", path.display()))
+        .unwrap_or_else(|e| panic!("failed reading snapshot fixture {}: {e}", path.display()))
 }
 
 fn render_surface_snapshot(surface_name: &str) -> String {
@@ -147,7 +147,7 @@ fn render_surface_snapshot(surface_name: &str) -> String {
         "ledger_log_stream" => ("LogStreamPanel", "e3f4180d"),
         "replay_diff_panel" => ("DiffPanel", "fbe9c8d9"),
         "replay_alert" => ("AlertBanner", "3c3205ba"),
-        other => unreachable!("unknown surface `{other}`"),
+        other => panic!("unknown surface `{other}`"),
     };
 
     format!(

@@ -278,7 +278,7 @@ mod tests {
         let outcome = evaluate_budget(&budget, &measurement);
         match outcome {
             BudgetOutcome::Degraded { code, .. } => assert_eq!(code, event_codes::DGIS_PERF_005),
-            _ => unreachable!("expected degraded outcome"),
+            _ => panic!("expected degraded outcome"),
         }
     }
 
@@ -293,7 +293,7 @@ mod tests {
         let outcome = evaluate_budget(&budget, &measurement);
         match outcome {
             BudgetOutcome::Fail { code, .. } => assert_eq!(code, event_codes::DGIS_PERF_003),
-            _ => unreachable!("expected failure outcome"),
+            _ => panic!("expected failure outcome"),
         }
     }
 
@@ -308,7 +308,7 @@ mod tests {
         let outcome = evaluate_budget(&budget, &measurement);
         match outcome {
             BudgetOutcome::Fail { code, .. } => assert_eq!(code, event_codes::DGIS_PERF_004),
-            _ => unreachable!("expected failure outcome"),
+            _ => panic!("expected failure outcome"),
         }
     }
 

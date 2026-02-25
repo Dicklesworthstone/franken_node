@@ -89,7 +89,7 @@ fn rejection_reason_contains_error_codes() {
         assert!(reason.contains("MANIFEST_FEATURE_MISSING"));
         assert!(reason.contains("MANIFEST_TRANSPORT_MISMATCH"));
     } else {
-        unreachable!("expected rejected");
+        panic!("expected rejected");
     }
 }
 

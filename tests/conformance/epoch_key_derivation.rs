@@ -61,9 +61,9 @@ fn published_epoch_key_vectors_match_derivation() {
     );
 
     for vector in bundle.vectors {
-        let sec_root_val = RootSecret::from_hex(&vector.root_secret_hex).expect("sec hex hex");
+        let root_secret = RootSecret::from_hex(&vector.root_secret_hex).expect("sec hex hex");
         let key = derive_epoch_key(
-            &sec_root_val,
+            &root_secret,
             ControlEpoch::new(vector.epoch),
             &vector.domain,
         );
@@ -79,12 +79,12 @@ fn published_epoch_key_vectors_match_derivation() {
 
 #[test]
 fn verify_rejects_cross_epoch_and_cross_domain_signatures() {
-    let sec_root_val =
+    let root_secret =
         RootSecret::from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
             .expect("sec hex");
     let artifact = b"vector-artifact";
 
-    let sig = sign_epoch_artifact(artifact, ControlEpoch::new(21), "marker", &sec_root_val)
+    let sig = sign_epoch_artifact(artifact, ControlEpoch::new(21), "marker", &root_secret)
         .expect("signature");
 
     let epoch_mismatch = verify_epoch_signature(
@@ -92,7 +92,7 @@ fn verify_rejects_cross_epoch_and_cross_domain_signatures() {
         &sig,
         ControlEpoch::new(22),
         "marker",
-        &sec_root_val,
+        &root_secret,
     );
     assert!(epoch_mismatch.is_err());
 
@@ -101,14 +101,14 @@ fn verify_rejects_cross_epoch_and_cross_domain_signatures() {
         &sig,
         ControlEpoch::new(21),
         "manifest",
-        &sec_root_val,
+        &root_secret,
     );
     assert!(domain_mismatch.is_err());
 }
 
 #[test]
 fn derivation_throughput_meets_minimum_budget() {
-    let sec_root_val =
+    let root_secret =
         RootSecret::from_hex("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f")
             .expect("sec hex");
     let iterations: u64 = 10_000;
@@ -117,7 +117,7 @@ fn derivation_throughput_meets_minimum_budget() {
     for i in 0..iterations {
         let epoch = ControlEpoch::new(1 + (i % 257));
         let domain = if i % 2 == 0 { "marker" } else { "manifest" };
-        let _ = derive_epoch_key(&sec_root_val, epoch, domain);
+        let _ = derive_epoch_key(&root_secret, epoch, domain);
     }
     let elapsed = start.elapsed().as_secs_f64();
     let keys_per_second = iterations as f64 / elapsed.max(f64::MIN_POSITIVE);

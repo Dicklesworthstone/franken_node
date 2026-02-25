@@ -279,7 +279,7 @@ mod tests {
                     reason
                 );
             }
-            ClaimVerdict::Pass => unreachable!("expected claim to be blocked with 50% coverage"),
+            ClaimVerdict::Pass => panic!("expected claim to be blocked with 50% coverage"),
         }
     }
 

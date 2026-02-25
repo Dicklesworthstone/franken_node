@@ -131,7 +131,7 @@ fn forged_proof_policy_mismatch_rejected() {
         ZkVerificationResult::Rejected { error_code, .. } => {
             assert_eq!(error_code, error_codes::ERR_ZKA_POLICY_MISMATCH);
         }
-        _ => unreachable!("Expected Rejected for policy mismatch"),
+        _ => panic!("Expected Rejected for policy mismatch"),
     }
 }
 
@@ -148,7 +148,7 @@ fn revoked_proof_rejected_deterministically() {
         ZkVerificationResult::Rejected { error_code, .. } => {
             assert_eq!(error_code, error_codes::ERR_ZKA_REVOKED);
         }
-        _ => unreachable!("Expected Rejected for revoked attestation"),
+        _ => panic!("Expected Rejected for revoked attestation"),
     }
 }
 
@@ -192,7 +192,7 @@ fn expired_proof_is_fail_closed() {
         ZkVerificationResult::Rejected { error_code, .. } => {
             assert_eq!(error_code, error_codes::ERR_ZKA_EXPIRED);
         }
-        _ => unreachable!("Expected Rejected for expired attestation"),
+        _ => panic!("Expected Rejected for expired attestation"),
     }
 }
 
@@ -211,7 +211,7 @@ fn failing_predicate_is_fail_closed() {
         ZkVerificationResult::Rejected { error_code, .. } => {
             assert_eq!(error_code, error_codes::ERR_ZKA_PREDICATE_UNSATISFIED);
         }
-        _ => unreachable!("Expected Rejected for failing predicate"),
+        _ => panic!("Expected Rejected for failing predicate"),
     }
 }
 

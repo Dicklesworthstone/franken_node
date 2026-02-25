@@ -1021,7 +1021,7 @@ mod tests {
             assert!(!violations.is_empty());
             assert!(violations[0].contains("frankentui"));
         } else {
-            unreachable!("Expected Fail");
+            panic!("Expected Fail");
         }
     }
 

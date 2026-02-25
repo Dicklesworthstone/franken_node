@@ -108,7 +108,7 @@ fn future_epoch_fencing_token_is_rejected_fail_closed() {
                 Some(fencing_epv::FUTURE_EPOCH_REJECTED)
             );
         }
-        _ => unreachable!("expected epoch rejection"),
+        _ => panic!("expected epoch rejection"),
     }
 }
 
@@ -136,7 +136,7 @@ fn expired_rollout_epoch_is_rejected() {
             assert_eq!(rejection.artifact_epoch, ControlEpoch::new(8));
             assert_eq!(rejection.current_epoch, ControlEpoch::new(12));
         }
-        _ => unreachable!("expected stale epoch rejection"),
+        _ => panic!("expected stale epoch rejection"),
     }
 }
 

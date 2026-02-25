@@ -263,7 +263,7 @@ fn network_guard_is_enforced_by_capability_gate() {
         } => {
             assert_eq!(code, "REMOTECAP_MISSING");
         }
-        other => unreachable!("expected GuardError::RemoteCapDenied, got {other:?}"),
+        other => panic!("expected GuardError::RemoteCapDenied, got {other:?}"),
     }
 
     let cap = issue_cap(false);

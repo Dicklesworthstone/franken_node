@@ -62,9 +62,9 @@ fn repo_root() -> PathBuf {
 fn load_report() -> StakingReport {
     let path = repo_root().join("artifacts/10.17/staking_ledger_snapshot.json");
     let raw = std::fs::read_to_string(&path)
-        .unwrap_or_else(|e| unreachable!("failed to read {}: {e}", path.display()));
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
     serde_json::from_str::<StakingReport>(&raw)
-        .unwrap_or_else(|e| unreachable!("failed to parse {}: {e}", path.display()))
+        .unwrap_or_else(|e| panic!("failed to parse {}: {e}", path.display()))
 }
 
 #[test]

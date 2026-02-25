@@ -86,7 +86,7 @@ fn test_over_budget_has_violations() {
     if let GateDecision::Fail { violations } = d {
         assert!(!violations.is_empty());
     } else {
-        unreachable!("Expected Fail");
+        panic!("Expected Fail");
     }
 }
 

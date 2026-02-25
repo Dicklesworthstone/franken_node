@@ -59,9 +59,9 @@ fn load_gate_report() -> GateReport {
     let root = repo_root();
     let report_path = root.join("artifacts/10.16/adjacent_substrate_gate_report.json");
     let raw = std::fs::read_to_string(&report_path)
-        .unwrap_or_else(|e| unreachable!("failed to read report {}: {e}", report_path.display()));
+        .unwrap_or_else(|e| panic!("failed to read report {}: {e}", report_path.display()));
     serde_json::from_str::<GateReport>(&raw)
-        .unwrap_or_else(|e| unreachable!("failed to parse report {}: {e}", report_path.display()))
+        .unwrap_or_else(|e| panic!("failed to parse report {}: {e}", report_path.display()))
 }
 
 #[test]
