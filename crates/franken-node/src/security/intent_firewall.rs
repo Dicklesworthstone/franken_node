@@ -38,6 +38,19 @@ pub const FW_009: &str = "FW_009";
 /// Policy override applied with justification.
 pub const FW_010: &str = "FW_010";
 
+// ── Semantic event aliases (bd-3l2p acceptance criteria) ────────────
+
+/// FIREWALL_REQUEST_CLASSIFIED: request has been classified by intent.
+pub const FIREWALL_REQUEST_CLASSIFIED: &str = "FIREWALL_REQUEST_CLASSIFIED";
+/// FIREWALL_INTENT_BENIGN: classified intent is non-risky.
+pub const FIREWALL_INTENT_BENIGN: &str = "FIREWALL_INTENT_BENIGN";
+/// FIREWALL_INTENT_RISKY: classified intent is risky.
+pub const FIREWALL_INTENT_RISKY: &str = "FIREWALL_INTENT_RISKY";
+/// FIREWALL_CHALLENGE_ISSUED: challenge pathway triggered.
+pub const FIREWALL_CHALLENGE_ISSUED: &str = "FIREWALL_CHALLENGE_ISSUED";
+/// FIREWALL_VERDICT_RENDERED: final verdict produced with receipt.
+pub const FIREWALL_VERDICT_RENDERED: &str = "FIREWALL_VERDICT_RENDERED";
+
 // ── Error codes ─────────────────────────────────────────────────────
 
 /// Request could not be classified into any intent category.
@@ -57,6 +70,21 @@ pub const ERR_FW_OVERRIDE_UNAUTHORIZED: &str = "ERR_FW_OVERRIDE_UNAUTHORIZED";
 /// Quarantine capacity exceeded; traffic denied.
 pub const ERR_FW_QUARANTINE_FULL: &str = "ERR_FW_QUARANTINE_FULL";
 
+// ── Semantic error aliases (bd-3l2p acceptance criteria) ────────────
+
+/// ERR_FIREWALL_CLASSIFICATION_FAILED: intent classification could not complete.
+pub const ERR_FIREWALL_CLASSIFICATION_FAILED: &str = "ERR_FIREWALL_CLASSIFICATION_FAILED";
+/// ERR_FIREWALL_CHALLENGE_TIMEOUT: challenge pathway timed out waiting for response.
+pub const ERR_FIREWALL_CHALLENGE_TIMEOUT: &str = "ERR_FIREWALL_CHALLENGE_TIMEOUT";
+/// ERR_FIREWALL_SIMULATE_FAILED: simulation sandbox execution failed.
+pub const ERR_FIREWALL_SIMULATE_FAILED: &str = "ERR_FIREWALL_SIMULATE_FAILED";
+/// ERR_FIREWALL_QUARANTINE_FULL: quarantine capacity exhausted.
+pub const ERR_FIREWALL_QUARANTINE_FULL: &str = "ERR_FIREWALL_QUARANTINE_FULL";
+/// ERR_FIREWALL_RECEIPT_UNSIGNED: decision receipt lacks required signature.
+pub const ERR_FIREWALL_RECEIPT_UNSIGNED: &str = "ERR_FIREWALL_RECEIPT_UNSIGNED";
+/// ERR_FIREWALL_POLICY_MISSING: no traffic policy loaded for evaluation.
+pub const ERR_FIREWALL_POLICY_MISSING: &str = "ERR_FIREWALL_POLICY_MISSING";
+
 // ── Invariants ──────────────────────────────────────────────────────
 
 /// INV-FW-FAIL-CLOSED: Unclassifiable traffic is denied.
@@ -69,6 +97,17 @@ pub const INV_FW_RISKY_DEFAULT_DENY: &str = "INV-FW-RISKY-DEFAULT-DENY";
 pub const INV_FW_DETERMINISTIC: &str = "INV-FW-DETERMINISTIC";
 /// INV-FW-EXTENSION-SCOPED: Firewall applies only to extension traffic.
 pub const INV_FW_EXTENSION_SCOPED: &str = "INV-FW-EXTENSION-SCOPED";
+
+// ── Semantic invariant aliases (bd-3l2p acceptance criteria) ────────
+
+/// INV-FIREWALL-STABLE-CLASSIFICATION: same input always yields same classification.
+pub const INV_FIREWALL_STABLE_CLASSIFICATION: &str = "INV-FIREWALL-STABLE-CLASSIFICATION";
+/// INV-FIREWALL-DETERMINISTIC-RECEIPT: identical inputs produce identical receipts.
+pub const INV_FIREWALL_DETERMINISTIC_RECEIPT: &str = "INV-FIREWALL-DETERMINISTIC-RECEIPT";
+/// INV-FIREWALL-FAIL-DENY: unclassifiable traffic is denied (fail-closed).
+pub const INV_FIREWALL_FAIL_DENY: &str = "INV-FIREWALL-FAIL-DENY";
+/// INV-FIREWALL-RISKY-PATHWAY: risky categories trigger challenge/simulate/deny/quarantine.
+pub const INV_FIREWALL_RISKY_PATHWAY: &str = "INV-FIREWALL-RISKY-PATHWAY";
 
 // ── Intent classification ───────────────────────────────────────────
 
@@ -1402,5 +1441,109 @@ mod tests {
             .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Deny);
         assert_eq!(decision.intent, Some(IntentClassification::SideChannel));
+    }
+
+    // ── Tests for semantic event/error/invariant aliases (bd-3l2p) ──
+
+    #[test]
+    fn test_semantic_event_codes_defined() {
+        // FIREWALL_REQUEST_CLASSIFIED, FIREWALL_INTENT_BENIGN, FIREWALL_INTENT_RISKY,
+        // FIREWALL_CHALLENGE_ISSUED, FIREWALL_VERDICT_RENDERED
+        assert_eq!(FIREWALL_REQUEST_CLASSIFIED, "FIREWALL_REQUEST_CLASSIFIED");
+        assert_eq!(FIREWALL_INTENT_BENIGN, "FIREWALL_INTENT_BENIGN");
+        assert_eq!(FIREWALL_INTENT_RISKY, "FIREWALL_INTENT_RISKY");
+        assert_eq!(FIREWALL_CHALLENGE_ISSUED, "FIREWALL_CHALLENGE_ISSUED");
+        assert_eq!(FIREWALL_VERDICT_RENDERED, "FIREWALL_VERDICT_RENDERED");
+    }
+
+    #[test]
+    fn test_semantic_error_codes_defined() {
+        // ERR_FIREWALL_CLASSIFICATION_FAILED, ERR_FIREWALL_CHALLENGE_TIMEOUT,
+        // ERR_FIREWALL_SIMULATE_FAILED, ERR_FIREWALL_QUARANTINE_FULL,
+        // ERR_FIREWALL_RECEIPT_UNSIGNED, ERR_FIREWALL_POLICY_MISSING
+        assert_eq!(ERR_FIREWALL_CLASSIFICATION_FAILED, "ERR_FIREWALL_CLASSIFICATION_FAILED");
+        assert_eq!(ERR_FIREWALL_CHALLENGE_TIMEOUT, "ERR_FIREWALL_CHALLENGE_TIMEOUT");
+        assert_eq!(ERR_FIREWALL_SIMULATE_FAILED, "ERR_FIREWALL_SIMULATE_FAILED");
+        assert_eq!(ERR_FIREWALL_QUARANTINE_FULL, "ERR_FIREWALL_QUARANTINE_FULL");
+        assert_eq!(ERR_FIREWALL_RECEIPT_UNSIGNED, "ERR_FIREWALL_RECEIPT_UNSIGNED");
+        assert_eq!(ERR_FIREWALL_POLICY_MISSING, "ERR_FIREWALL_POLICY_MISSING");
+    }
+
+    #[test]
+    fn test_semantic_invariants_defined() {
+        // INV-FIREWALL-STABLE-CLASSIFICATION, INV-FIREWALL-DETERMINISTIC-RECEIPT,
+        // INV-FIREWALL-FAIL-DENY, INV-FIREWALL-RISKY-PATHWAY
+        assert_eq!(INV_FIREWALL_STABLE_CLASSIFICATION, "INV-FIREWALL-STABLE-CLASSIFICATION");
+        assert_eq!(INV_FIREWALL_DETERMINISTIC_RECEIPT, "INV-FIREWALL-DETERMINISTIC-RECEIPT");
+        assert_eq!(INV_FIREWALL_FAIL_DENY, "INV-FIREWALL-FAIL-DENY");
+        assert_eq!(INV_FIREWALL_RISKY_PATHWAY, "INV-FIREWALL-RISKY-PATHWAY");
+    }
+
+    #[test]
+    fn test_inv_firewall_stable_classification() {
+        // INV-FIREWALL-STABLE-CLASSIFICATION: same input always yields same classification.
+        let effect = make_effect("e-stable", "ext-001");
+        let c1 = IntentClassifier::classify(&effect);
+        let c2 = IntentClassifier::classify(&effect);
+        let c3 = IntentClassifier::classify(&effect);
+        assert_eq!(c1, c2);
+        assert_eq!(c2, c3);
+    }
+
+    #[test]
+    fn test_inv_firewall_deterministic_receipt() {
+        // INV-FIREWALL-DETERMINISTIC-RECEIPT: identical inputs produce identical receipts.
+        let effect = make_effect("e-dreceipt", "ext-001");
+        let ts = "2026-02-21T00:00:00Z";
+        let tid = "trace-dr";
+
+        let mut fw1 = make_firewall();
+        let d1 = fw1.evaluate(&effect, tid, ts).unwrap();
+
+        let mut fw2 = make_firewall();
+        let d2 = fw2.evaluate(&effect, tid, ts).unwrap();
+
+        assert_eq!(d1.receipt_id, d2.receipt_id);
+        assert_eq!(d1.verdict, d2.verdict);
+        assert_eq!(d1.intent, d2.intent);
+        assert_eq!(d1.schema_version, d2.schema_version);
+    }
+
+    #[test]
+    fn test_inv_firewall_fail_deny_unknown_method() {
+        // INV-FIREWALL-FAIL-DENY: unclassifiable traffic is denied.
+        let mut effect = make_effect("e-fd", "ext-001");
+        effect.method = "FOOBAR".into();
+        effect.path = "/unknown/path".into();
+        let c = IntentClassifier::classify(&effect);
+        assert!(c.is_none());
+
+        let mut fw = make_firewall();
+        let d = fw.evaluate(&effect, "trace-fd", "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(d.verdict, FirewallVerdict::Deny);
+    }
+
+    #[test]
+    fn test_inv_firewall_risky_pathway_all_risky_denied() {
+        // INV-FIREWALL-RISKY-PATHWAY: all risky categories default to deny.
+        let mut fw = make_firewall();
+
+        // Exfiltration
+        let mut e1 = make_effect("e-rp1", "ext-001");
+        e1.has_sensitive_payload = true;
+        let d1 = fw.evaluate(&e1, "t1", "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(d1.verdict, FirewallVerdict::Deny);
+
+        // Credential forward
+        let mut e2 = make_effect("e-rp2", "ext-001");
+        e2.carries_credentials = true;
+        let d2 = fw.evaluate(&e2, "t2", "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(d2.verdict, FirewallVerdict::Deny);
+
+        // Side channel
+        let mut e3 = make_effect("e-rp3", "ext-001");
+        e3.metadata.insert("probe_mode".into(), "1".into());
+        let d3 = fw.evaluate(&e3, "t3", "2026-01-01T00:00:00Z").unwrap();
+        assert_eq!(d3.verdict, FirewallVerdict::Deny);
     }
 }
