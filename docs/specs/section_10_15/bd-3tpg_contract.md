@@ -44,6 +44,17 @@ half-commit outcomes, or quiescence violations.
 | CIJ-005 | Gate verdict emitted |
 | CIJ-006 | Rust lab model exercised and validated |
 
+## Error Codes
+
+| Code | Description |
+|------|-------------|
+| CIG-ERR-001 | Injection setup failure |
+| CIG-ERR-002 | Workflow registry error |
+| CIG-ERR-003 | Await point unresolvable |
+| CIG-ERR-004 | Obligation leak detected |
+| CIG-ERR-005 | Half-commit detected |
+| CIG-ERR-006 | Quiescence timeout |
+
 ## Acceptance Criteria
 
 - Canonical cancellation injection runs on every critical protocol flow
