@@ -2,7 +2,7 @@
   "gate": "conformance_profile_verification",
   "bead": "bd-ck2h",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "CPM-IMPL",
@@ -28,8 +28,8 @@
     {
       "id": "CPM-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "13 tests passed"
+      "status": "FAIL",
+      "details": "Command '['cargo', 'test', '--', 'connector::conformance_profile']' timed out after 120 seconds"
     },
     {
       "id": "CPM-SPEC",
@@ -39,7 +39,7 @@
   ],
   "summary": {
     "total_checks": 6,
-    "passing_checks": 6,
-    "failing_checks": 0
+    "passing_checks": 5,
+    "failing_checks": 1
   }
 }
