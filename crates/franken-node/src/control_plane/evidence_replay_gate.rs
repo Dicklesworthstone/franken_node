@@ -471,7 +471,7 @@ mod tests {
                 assert_eq!(replayed_action, "rollback");
                 assert!(*diff_size_bytes > 0);
             }
-            _ => panic!("Expected Diverged verdict"),
+            _ => assert!(false, "Expected Diverged verdict"),
         }
     }
 

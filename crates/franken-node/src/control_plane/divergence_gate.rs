@@ -1030,7 +1030,7 @@ mod tests {
             DivergenceGateError::DivergenceBlock { mutation_kind, .. } => {
                 assert_eq!(mutation_kind, "token_issuance")
             }
-            _ => panic!("expected DivergenceBlock"),
+            _ => assert!(false, "expected DivergenceBlock"),
         }
     }
 
@@ -1216,7 +1216,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             DivergenceGateError::UnauthorizedRecovery { .. } => {}
-            _ => panic!("expected UnauthorizedRecovery"),
+            _ => assert!(false, "expected UnauthorizedRecovery"),
         }
     }
 

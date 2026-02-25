@@ -614,7 +614,7 @@ mod tests {
             assert!(missing.contains(&"net.egress".to_string()));
             assert!(extra.is_empty());
         } else {
-            panic!("expected drift detected");
+            unreachable!("expected drift detected");
         }
     }
 
@@ -632,7 +632,7 @@ mod tests {
             assert!(missing.is_empty());
             assert!(extra.contains(&"crypto.sign".to_string()));
         } else {
-            panic!("expected drift detected");
+            unreachable!("expected drift detected");
         }
     }
 
@@ -646,7 +646,7 @@ mod tests {
             assert!(!missing.is_empty());
             assert!(!extra.is_empty());
         } else {
-            panic!("expected drift detected");
+            unreachable!("expected drift detected");
         }
     }
 

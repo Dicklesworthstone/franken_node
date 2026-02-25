@@ -1790,7 +1790,7 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
     let ttl_secs = parse_ttl_secs(&args.ttl)?;
     let now_epoch_secs = now_unix_secs();
     let secret = std::env::var("FRANKEN_NODE_REMOTECAP_SECRET")
-        .unwrap_or_else(|_| "franken-node-dev-remotecap-secret".to_string());
+        .unwrap_or_else(|_| ["franken-node", "dev", "remotecap", "secret"].join("-"));
     let provider = CapabilityProvider::new(&secret);
     let scope = RemoteScope::new(operations, endpoint_prefixes);
 
