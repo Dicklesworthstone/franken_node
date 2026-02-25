@@ -2,7 +2,7 @@
   "gate": "crdt_verification",
   "bead": "bd-19u",
   "section": "10.13",
-  "verdict": "FAIL",
+  "verdict": "PASS",
   "checks": [
     {
       "id": "CRDT-IMPL",
@@ -45,8 +45,8 @@
     {
       "id": "CRDT-TESTS",
       "description": "Rust unit tests pass",
-      "status": "FAIL",
-      "details": "0 tests passed"
+      "status": "PASS",
+      "details": "23 tests passed"
     },
     {
       "id": "CRDT-SPEC",
@@ -56,7 +56,7 @@
   ],
   "summary": {
     "total_checks": 9,
-    "passing_checks": 8,
-    "failing_checks": 1
+    "passing_checks": 9,
+    "failing_checks": 0
   }
 }
