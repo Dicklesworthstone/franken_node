@@ -126,6 +126,9 @@ fn parse_ipv4(ip: &str) -> Option<[u8; 4]> {
     }
     let mut octets = [0u8; 4];
     for (i, part) in parts.iter().enumerate() {
+        if part.starts_with('0') && part.len() > 1 {
+            return None;
+        }
         octets[i] = part.parse::<u8>().ok()?;
     }
     Some(octets)
