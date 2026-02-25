@@ -122,6 +122,16 @@ impl EngineDispatcher {
             .start_listener()
             .context("Failed to start telemetry bridge")?;
 
+        struct SocketCleanup(String);
+        impl Drop for SocketCleanup {
+            fn drop(&mut self) {
+                if Path::new(&self.0).exists() {
+                    let _ = std::fs::remove_file(&self.0);
+                }
+            }
+        }
+        let _cleanup_guard = SocketCleanup(socket_path.clone());
+
         let mut cmd = Command::new(&bin_path);
         cmd.arg("run")
             .arg(app_path)
@@ -134,11 +144,6 @@ impl EngineDispatcher {
         let status = cmd
             .status()
             .context("Failed to spawn franken_engine process")?;
-
-        // Cleanup
-        if Path::new(&socket_path).exists() {
-            let _ = std::fs::remove_file(&socket_path);
-        }
 
         if !status.success() {
             if let Some(code) = status.code() {

@@ -31,6 +31,7 @@ pub mod verifier_economy;
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -1984,56 +1985,366 @@ fn render_fleet_action_human(action: &FleetActionResult) -> String {
     lines.join("\n")
 }
 
-fn handle_verify_release(args: &VerifyReleaseArgs) {
-    use supply_chain::artifact_signing::{
-        ASV_002_VERIFICATION_OK, ASV_003_VERIFICATION_FAILED, AuditLogEntry,
+const RELEASE_MANIFEST_FILE: &str = "SHA256SUMS";
+const RELEASE_MANIFEST_SIGNATURE_FILE: &str = "SHA256SUMS.sig";
+
+struct ReleaseVerificationContext {
+    manifest: supply_chain::artifact_signing::ChecksumManifest,
+    artifacts: BTreeMap<String, Vec<u8>>,
+    detached_signatures: BTreeMap<String, Vec<u8>>,
+    key_ring: supply_chain::artifact_signing::KeyRing,
+    unlisted_artifacts: Vec<String>,
+}
+
+fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
+    use base64::Engine;
+
+    if let Ok(text) = std::str::from_utf8(raw) {
+        let trimmed = text.trim();
+        if !trimmed.is_empty() {
+            if let Ok(decoded_hex) = hex::decode(trimmed)
+                && decoded_hex.len() == 64
+            {
+                return decoded_hex;
+            }
+
+            if let Ok(decoded_b64) = base64::engine::general_purpose::STANDARD.decode(trimmed)
+                && decoded_b64.len() == 64
+            {
+                return decoded_b64;
+            }
+        }
+    }
+
+    raw.to_vec()
+}
+
+fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingKey> {
+    use base64::Engine;
+
+    if raw.len() == 32
+        && let Ok(bytes) = <[u8; 32]>::try_from(raw)
+        && let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+    {
+        return Some(key);
+    }
+
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return None;
     };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
 
-    let release_dir = &args.release_path;
-    eprintln!(
-        "franken-node verify release: path={} key_dir={:?}",
-        release_dir.display(),
-        args.key_dir
-    );
+    let mut candidates = vec![trimmed.to_string()];
+    if trimmed.starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        for field in ["public_key", "verifying_key", "key", "ed25519_public_key"] {
+            if let Some(entry) = value.get(field).and_then(serde_json::Value::as_str) {
+                candidates.push(entry.to_string());
+            }
+        }
+    }
 
-    // In a full implementation, this would:
-    // 1. Read SHA256SUMS manifest and its .sig from release_dir.
-    // 2. Load public keys from key_dir.
-    // 3. Verify the manifest signature.
-    // 4. Iterate manifest entries, verify each checksum and .sig file.
-    // 5. Output structured JSON (--json) or human-readable report.
-    //
-    // Placeholder emits a structured stub so CLI wiring can be tested.
-    let stub_result = serde_json::json!({
-        "release_path": release_dir.display().to_string(),
-        "manifest_signature_ok": false,
-        "results": [],
-        "overall_pass": false,
-        "error": "release directory verification not yet wired to filesystem I/O"
-    });
+    for candidate in candidates {
+        let normalized = candidate.trim().trim_start_matches("ed25519:").trim();
+        if normalized.is_empty() {
+            continue;
+        }
 
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&stub_result).unwrap_or_default()
-        );
+        if let Ok(decoded_hex) = hex::decode(normalized)
+            && let Ok(bytes) = <[u8; 32]>::try_from(decoded_hex.as_slice())
+            && let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        {
+            return Some(key);
+        }
+
+        if let Ok(decoded_b64) = base64::engine::general_purpose::STANDARD.decode(normalized)
+            && let Ok(bytes) = <[u8; 32]>::try_from(decoded_b64.as_slice())
+            && let Ok(key) = ed25519_dalek::VerifyingKey::from_bytes(&bytes)
+        {
+            return Some(key);
+        }
+    }
+
+    None
+}
+
+fn load_verifying_keys(key_dir: Option<&Path>) -> Result<Vec<ed25519_dalek::VerifyingKey>> {
+    if let Some(key_dir) = key_dir {
+        if !key_dir.is_dir() {
+            anyhow::bail!("--key-dir must point to a directory: {}", key_dir.display());
+        }
+
+        let mut paths = std::fs::read_dir(key_dir)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.is_file())
+            .collect::<Vec<_>>();
+        paths.sort();
+
+        let mut keys = Vec::new();
+        for path in paths {
+            let raw = std::fs::read(&path)
+                .with_context(|| format!("failed reading {}", path.display()))?;
+            if let Some(key) = parse_verifying_key_from_blob(&raw) {
+                keys.push(key);
+            }
+        }
+
+        if keys.is_empty() {
+            anyhow::bail!(
+                "no usable Ed25519 public keys found in key directory {}",
+                key_dir.display()
+            );
+        }
+        Ok(keys)
     } else {
-        eprintln!("[verify-release stub] — filesystem I/O not yet wired.");
-        eprintln!(
-            "  Use the library API `supply_chain::artifact_signing::verify_release` for full verification."
+        Ok(vec![
+            supply_chain::artifact_signing::demo_signing_key().verifying_key(),
+        ])
+    }
+}
+
+fn collect_release_files(root: &Path) -> Result<Vec<String>> {
+    let mut files = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+
+    while let Some(current) = stack.pop() {
+        let mut entries = std::fs::read_dir(&current)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        for path in entries {
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                let relative = path
+                    .strip_prefix(root)
+                    .with_context(|| {
+                        format!("failed deriving relative path for {}", path.display())
+                    })?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                files.push(relative);
+            }
+        }
+    }
+
+    files.sort();
+    Ok(files)
+}
+
+fn find_unlisted_artifacts(
+    release_dir: &Path,
+    manifest: &supply_chain::artifact_signing::ChecksumManifest,
+) -> Result<Vec<String>> {
+    let mut allowed = BTreeSet::new();
+    allowed.insert(RELEASE_MANIFEST_FILE.to_string());
+    allowed.insert(RELEASE_MANIFEST_SIGNATURE_FILE.to_string());
+    for name in manifest.entries.keys() {
+        allowed.insert(name.clone());
+        allowed.insert(format!("{name}.sig"));
+    }
+
+    let mut extras = collect_release_files(release_dir)?
+        .into_iter()
+        .filter(|path| !allowed.contains(path))
+        .collect::<Vec<_>>();
+    extras.sort();
+    Ok(extras)
+}
+
+fn load_release_verification_context(
+    release_dir: &Path,
+    key_dir: Option<&Path>,
+) -> Result<ReleaseVerificationContext> {
+    use supply_chain::artifact_signing::{ChecksumManifest, KeyRing, verify_signature};
+
+    if !release_dir.is_dir() {
+        anyhow::bail!(
+            "release path must be a directory: {}",
+            release_dir.display()
         );
     }
 
-    let _log = AuditLogEntry::now(
-        ASV_003_VERIFICATION_FAILED,
-        &release_dir.display().to_string(),
-        "none",
-        "verify-release",
-        "stub",
+    let manifest_path = release_dir.join(RELEASE_MANIFEST_FILE);
+    let manifest_raw = std::fs::read_to_string(&manifest_path)
+        .with_context(|| format!("failed reading {}", manifest_path.display()))?;
+    let parsed_entries = ChecksumManifest::parse_canonical(&manifest_raw);
+    if parsed_entries.is_empty() {
+        anyhow::bail!("manifest {} contains no entries", manifest_path.display());
+    }
+
+    let mut entries = BTreeMap::new();
+    for entry in parsed_entries {
+        entries.insert(entry.name.clone(), entry);
+    }
+
+    let manifest_signature_path = release_dir.join(RELEASE_MANIFEST_SIGNATURE_FILE);
+    let manifest_signature_raw = std::fs::read(&manifest_signature_path)
+        .with_context(|| format!("failed reading {}", manifest_signature_path.display()))?;
+    let manifest_signature = decode_signature_blob(&manifest_signature_raw);
+
+    let verifying_keys = load_verifying_keys(key_dir)?;
+    let mut key_ring = KeyRing::new();
+    let mut key_ids = Vec::new();
+    for verifying_key in verifying_keys {
+        let key_id = key_ring.add_key(verifying_key);
+        key_ids.push(key_id);
+    }
+
+    let default_key_id = key_ids
+        .first()
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("no verifying keys available"))?;
+
+    let mut manifest = ChecksumManifest {
+        entries,
+        key_id: default_key_id,
+        signature: manifest_signature,
+    };
+    let canonical_manifest = manifest.canonical_bytes();
+    if let Some(matched_key_id) = key_ids
+        .iter()
+        .find(|key_id| {
+            key_ring.get_key(key_id).is_some_and(|key| {
+                verify_signature(key, &canonical_manifest, &manifest.signature).is_ok()
+            })
+        })
+        .cloned()
+    {
+        manifest.key_id = matched_key_id;
+    }
+
+    let mut artifacts = BTreeMap::new();
+    let mut detached_signatures = BTreeMap::new();
+    for artifact_name in manifest.entries.keys() {
+        let artifact_path = release_dir.join(artifact_name);
+        if artifact_path.is_file() {
+            let artifact_bytes = std::fs::read(&artifact_path)
+                .with_context(|| format!("failed reading {}", artifact_path.display()))?;
+            artifacts.insert(artifact_name.clone(), artifact_bytes);
+        }
+
+        let signature_path = release_dir.join(format!("{artifact_name}.sig"));
+        if signature_path.is_file() {
+            let detached_bytes = std::fs::read(&signature_path)
+                .with_context(|| format!("failed reading {}", signature_path.display()))?;
+            detached_signatures.insert(
+                artifact_name.clone(),
+                decode_signature_blob(&detached_bytes),
+            );
+        }
+    }
+
+    let unlisted_artifacts = find_unlisted_artifacts(release_dir, &manifest)?;
+
+    Ok(ReleaseVerificationContext {
+        manifest,
+        artifacts,
+        detached_signatures,
+        key_ring,
+        unlisted_artifacts,
+    })
+}
+
+fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
+    use supply_chain::artifact_signing::{
+        ASV_002_VERIFICATION_OK, ASV_003_VERIFICATION_FAILED, ArtifactVerificationResult,
+        AuditLogEntry, verify_release,
+    };
+
+    let release_dir = &args.release_path;
+    let context = load_release_verification_context(release_dir, args.key_dir.as_deref())?;
+    let mut report = verify_release(
+        &context.manifest,
+        &context.artifacts,
+        &context.detached_signatures,
+        &context.key_ring,
     );
 
-    // Suppress unused-import warnings for the success event code.
-    let _ = ASV_002_VERIFICATION_OK;
+    for artifact_name in &context.unlisted_artifacts {
+        report.results.push(ArtifactVerificationResult {
+            artifact_name: artifact_name.clone(),
+            passed: false,
+            key_id: context.manifest.key_id.0.clone(),
+            failure_reason: Some("artifact present but not listed in SHA256SUMS".to_string()),
+        });
+    }
+
+    report
+        .results
+        .sort_by(|left, right| left.artifact_name.cmp(&right.artifact_name));
+
+    let overall_pass = report.manifest_signature_ok && report.results.iter().all(|row| row.passed);
+    let result_rows = report
+        .results
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "artifact_name": row.artifact_name,
+                "passed": row.passed,
+                "key_id": row.key_id,
+                "failure_reason": row.failure_reason,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    let payload = serde_json::json!({
+        "release_path": release_dir.display().to_string(),
+        "manifest_signature_ok": report.manifest_signature_ok,
+        "results": result_rows,
+        "overall_pass": overall_pass,
+        "unlisted_artifact_count": context.unlisted_artifacts.len(),
+    });
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!(
+            "verify release: {} manifest_signature_ok={} overall_pass={}",
+            release_dir.display(),
+            report.manifest_signature_ok,
+            overall_pass
+        );
+        for row in &report.results {
+            if row.passed {
+                println!("  [ok] {}", row.artifact_name);
+            } else {
+                println!(
+                    "  [fail] {}: {}",
+                    row.artifact_name,
+                    row.failure_reason
+                        .clone()
+                        .unwrap_or_else(|| "verification failed".to_string())
+                );
+            }
+        }
+    }
+
+    let event_code = if overall_pass {
+        ASV_002_VERIFICATION_OK
+    } else {
+        ASV_003_VERIFICATION_FAILED
+    };
+    let _audit_log = AuditLogEntry::now(
+        event_code,
+        &release_dir.display().to_string(),
+        &context.manifest.key_id.0,
+        "verify-release",
+        if overall_pass { "passed" } else { "failed" },
+    );
+
+    if !overall_pass {
+        anyhow::bail!("release verification failed");
+    }
+
+    Ok(())
 }
 
 fn emit_verify_contract_stub(command: &str, json: bool, compat_version: Option<u16>) -> i32 {
@@ -2363,7 +2674,7 @@ async fn main() -> Result<()> {
                 }
             }
             VerifyCommand::Release(args) => {
-                handle_verify_release(&args);
+                handle_verify_release(&args)?;
             }
         },
 

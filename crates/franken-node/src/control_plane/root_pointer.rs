@@ -247,6 +247,8 @@ pub enum RootPointerError {
     },
     #[error("crash injected after step {0:?}")]
     CrashInjected(PublishStep),
+    #[error("publish mutex poisoned")]
+    LockPoisoned,
 }
 
 impl RootPointerError {
@@ -267,6 +269,7 @@ impl RootPointerError {
             },
             Self::EpochRegression { .. } => "EPOCH_REGRESSION_BLOCKED",
             Self::CrashInjected(_) => "ROOT_CRASH_INJECTED",
+            Self::LockPoisoned => "ROOT_LOCK_POISONED",
         }
     }
 }
@@ -457,7 +460,9 @@ fn publish_root_internal(
     trace_id: &str,
     options: PublishOptions,
 ) -> Result<RootPublishOutcome, RootPointerError> {
-    let _guard = publish_lock().lock().expect("publish mutex poisoned");
+    let _guard = publish_lock()
+        .lock()
+        .map_err(|_| RootPointerError::LockPoisoned)?;
     if let Some(delay) = options.delay_after_lock {
         thread::sleep(delay);
     }

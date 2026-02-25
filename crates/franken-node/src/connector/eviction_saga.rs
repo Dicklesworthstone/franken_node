@@ -393,6 +393,7 @@ impl EvictionSaga {
 
     /// Mark upload as successful and transition to verification.
     pub fn upload_complete(&mut self, has_remote_cap: bool) -> Result<(), EvictionSagaError> {
+        self.ensure_transition_allowed(SagaPhase::Verifying)?;
         self.require_remote_cap_recheck(SagaPhase::Uploading, has_remote_cap, "upload_complete")?;
         self.tier_presence.l3_present = true;
         self.transition(SagaPhase::Verifying, ES_PHASE_VERIFY, "upload_done")
@@ -400,20 +401,27 @@ impl EvictionSaga {
 
     /// Mark verification as successful and transition to retirement.
     pub fn verify_complete(&mut self, has_remote_cap: bool) -> Result<(), EvictionSagaError> {
-        self.require_remote_cap_recheck(SagaPhase::Verifying, has_remote_cap, "verify_complete")?;
-        self.tier_presence.l3_verified = true;
-        // INV-ES-NO-PARTIAL-RETIRE: only proceed if L3 is verified
-        if !self.tier_presence.can_retire_l2() {
+        self.ensure_transition_allowed(SagaPhase::Retiring)?;
+        if !self.tier_presence.l3_present {
             return Err(EvictionSagaError::new(
                 ERR_ES_VERIFY_FAILED,
-                "L3 not verified; cannot proceed to retirement",
+                "L3 not present; cannot verify retrievability",
             ));
         }
+        self.require_remote_cap_recheck(SagaPhase::Verifying, has_remote_cap, "verify_complete")?;
+        self.tier_presence.l3_verified = true;
         self.transition(SagaPhase::Retiring, ES_PHASE_RETIRE, "verified")
     }
 
     /// Mark retirement complete; saga is done.
     pub fn retire_complete(&mut self, has_remote_cap: bool) -> Result<(), EvictionSagaError> {
+        self.ensure_transition_allowed(SagaPhase::Complete)?;
+        if !self.tier_presence.can_retire_l2() {
+            return Err(EvictionSagaError::new(
+                ERR_ES_RETIRE_FAILED,
+                "L3 not verified; cannot retire L2",
+            ));
+        }
         self.require_remote_cap_recheck(SagaPhase::Retiring, has_remote_cap, "retire_complete")?;
         self.tier_presence.l2_present = false;
         self.transition(SagaPhase::Complete, ES_SAGA_COMPLETE, "retired")
@@ -520,6 +528,16 @@ impl EvictionSaga {
     }
 
     // -- Internal helpers ----------------------------------------------------
+
+    fn ensure_transition_allowed(&self, to: SagaPhase) -> Result<(), EvictionSagaError> {
+        if self.current_phase.can_transition_to(to) {
+            return Ok(());
+        }
+        Err(EvictionSagaError::new(
+            ERR_ES_ILLEGAL_TRANSITION,
+            format!("cannot transition from {} to {}", self.current_phase, to),
+        ))
+    }
 
     fn transition(
         &mut self,
@@ -857,6 +875,60 @@ mod tests {
         // Cannot go directly to verifying
         let err = saga.upload_complete(true).unwrap_err();
         assert_eq!(err.code(), ERR_ES_ILLEGAL_TRANSITION);
+        assert!(!saga.tier_presence().l3_present);
+        assert!(!saga.tier_presence().l3_verified);
+        assert!(saga.tier_presence().l2_present);
+    }
+
+    #[test]
+    fn illegal_transition_does_not_mutate_on_verify_complete() {
+        let mut saga = EvictionSaga::new("saga-003b", "artifact-xyz");
+        saga.begin_upload(true).unwrap();
+        // Cannot go Uploading -> Retiring directly.
+        let err = saga.verify_complete(true).unwrap_err();
+        assert_eq!(err.code(), ERR_ES_ILLEGAL_TRANSITION);
+        assert_eq!(saga.current_phase(), SagaPhase::Uploading);
+        assert!(!saga.tier_presence().l3_verified);
+    }
+
+    #[test]
+    fn illegal_transition_does_not_mutate_on_retire_complete() {
+        let mut saga = EvictionSaga::new("saga-003c", "artifact-xyz");
+        saga.begin_upload(true).unwrap();
+        saga.upload_complete(true).unwrap();
+        // Cannot go Verifying -> Complete directly.
+        let err = saga.retire_complete(true).unwrap_err();
+        assert_eq!(err.code(), ERR_ES_ILLEGAL_TRANSITION);
+        assert_eq!(saga.current_phase(), SagaPhase::Verifying);
+        assert!(saga.tier_presence().l2_present);
+    }
+
+    #[test]
+    fn verify_complete_does_not_mutate_when_l3_missing() {
+        let mut saga = EvictionSaga::new("saga-003d", "artifact-xyz");
+        saga.begin_upload(true).unwrap();
+        saga.upload_complete(true).unwrap();
+        saga.tier_presence.l3_present = false;
+        saga.tier_presence.l3_verified = false;
+
+        let err = saga.verify_complete(true).unwrap_err();
+        assert_eq!(err.code(), ERR_ES_VERIFY_FAILED);
+        assert_eq!(saga.current_phase(), SagaPhase::Verifying);
+        assert!(!saga.tier_presence().l3_verified);
+    }
+
+    #[test]
+    fn retire_complete_requires_verified_l3() {
+        let mut saga = EvictionSaga::new("saga-003e", "artifact-xyz");
+        saga.begin_upload(true).unwrap();
+        saga.upload_complete(true).unwrap();
+        saga.verify_complete(true).unwrap();
+        saga.tier_presence.l3_verified = false;
+
+        let err = saga.retire_complete(true).unwrap_err();
+        assert_eq!(err.code(), ERR_ES_RETIRE_FAILED);
+        assert_eq!(saga.current_phase(), SagaPhase::Retiring);
+        assert!(saga.tier_presence().l2_present);
     }
 
     // -- Compensation tests --------------------------------------------------
