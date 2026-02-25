@@ -10,6 +10,19 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut result = 0;
+    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
+        result |= x ^ y;
+    }
+    result == 0
+}
+
 use super::fork_detection::{
     DetectionResult, DivergenceDetector, DivergenceLogEvent, MarkerProofVerifier, RollbackProof,
     StateVector,
@@ -233,18 +246,20 @@ impl fmt::Display for DivergenceGateError {
 pub struct OperatorAuthorization {
     pub operator_id: String,
     pub authorization_hash: String,
+    pub signature: String,
     pub resync_checkpoint_epoch: u64,
     pub timestamp: u64,
     pub reason: String,
 }
 
 impl OperatorAuthorization {
-    /// Create a new authorization with a computed hash.
+    /// Create a new authorization with a computed hash and signature.
     pub fn new(
         operator_id: impl Into<String>,
         resync_checkpoint_epoch: u64,
         timestamp: u64,
         reason: impl Into<String>,
+        signing_key: &[u8],
     ) -> Self {
         let operator_id = operator_id.into();
         let reason = reason.into();
@@ -256,17 +271,25 @@ impl OperatorAuthorization {
         );
         hasher.update(canonical.as_bytes());
         let authorization_hash = format!("{:x}", hasher.finalize());
+
+        use hmac::{Hmac, Mac};
+        let mut mac = Hmac::<Sha256>::new_from_slice(signing_key).expect("HMAC accepts any key length");
+        mac.update(b"divergence_gate_sign_v1:");
+        mac.update(authorization_hash.as_bytes());
+        let signature = hex::encode(mac.finalize().into_bytes());
+
         Self {
             operator_id,
             authorization_hash,
+            signature,
             resync_checkpoint_epoch,
             timestamp,
             reason,
         }
     }
 
-    /// Verify the authorization hash is consistent.
-    pub fn verify(&self) -> bool {
+    /// Verify the authorization hash and signature are consistent.
+    pub fn verify(&self, verification_key: &[u8]) -> bool {
         let mut hasher = Sha256::new();
         hasher.update(b"divergence_gate_auth_v1:");
         let canonical = format!(
@@ -275,7 +298,17 @@ impl OperatorAuthorization {
         );
         hasher.update(canonical.as_bytes());
         let expected = format!("{:x}", hasher.finalize());
-        self.authorization_hash == expected
+        if self.authorization_hash != expected {
+            return false;
+        }
+
+        use hmac::{Hmac, Mac};
+        let mut mac = Hmac::<Sha256>::new_from_slice(verification_key).expect("HMAC accepts any key length");
+        mac.update(b"divergence_gate_sign_v1:");
+        mac.update(self.authorization_hash.as_bytes());
+        let expected_sig = hex::encode(mac.finalize().into_bytes());
+
+        constant_time_eq(&self.signature, &expected_sig)
     }
 }
 
@@ -754,6 +787,7 @@ impl ControlPlaneDivergenceGate {
     pub fn respond_recover(
         &mut self,
         authorization: &OperatorAuthorization,
+        verification_key: &[u8],
         markers_replayed: u64,
         timestamp: u64,
         trace_id: &str,
@@ -771,7 +805,7 @@ impl ControlPlaneDivergenceGate {
         }
 
         // Verify authorization
-        if !authorization.verify() {
+        if !authorization.verify(verification_key) {
             return Err(DivergenceGateError::UnauthorizedRecovery {
                 reason: "authorization hash verification failed".to_string(),
             });
@@ -1139,8 +1173,8 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        let auth = OperatorAuthorization::new("operator-1", 9, 2001, "fix fork");
-        let result = gate.respond_recover(&auth, 10, 2001, "trace-2");
+        let auth = OperatorAuthorization::new("operator-1", 9, 2001, "fix fork", b"test-key");
+        let result = gate.respond_recover(&auth, b"test-key", 10, 2001, "trace-2");
         assert!(result.is_ok());
         let recovery = result.unwrap();
         assert!(recovery.success);
@@ -1155,8 +1189,8 @@ mod tests {
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
         gate.respond_alert(2001, "trace-2").unwrap();
-        let auth = OperatorAuthorization::new("operator-1", 9, 2002, "fix fork");
-        let result = gate.respond_recover(&auth, 10, 2002, "trace-3");
+        let auth = OperatorAuthorization::new("operator-1", 9, 2002, "fix fork", b"test-key");
+        let result = gate.respond_recover(&auth, b"test-key", 10, 2002, "trace-3");
         assert!(result.is_ok());
         assert_eq!(gate.state(), GateState::Normal);
     }
@@ -1164,8 +1198,8 @@ mod tests {
     #[test]
     fn test_recover_from_normal_fails() {
         let mut gate = ControlPlaneDivergenceGate::new("test");
-        let auth = OperatorAuthorization::new("operator-1", 9, 2000, "fix");
-        let result = gate.respond_recover(&auth, 10, 2000, "trace-1");
+        let auth = OperatorAuthorization::new("operator-1", 9, 2000, "fix", b"test-key");
+        let result = gate.respond_recover(&auth, b"test-key", 10, 2000, "trace-1");
         assert!(result.is_err());
     }
 
@@ -1174,9 +1208,9 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        let mut auth = OperatorAuthorization::new("operator-1", 9, 2001, "fix");
+        let mut auth = OperatorAuthorization::new("operator-1", 9, 2001, "fix", b"test-key");
         auth.authorization_hash = "tampered".to_string();
-        let result = gate.respond_recover(&auth, 10, 2001, "trace-2");
+        let result = gate.respond_recover(&auth, b"test-key", 10, 2001, "trace-2");
         assert!(result.is_err());
         match result.unwrap_err() {
             DivergenceGateError::UnauthorizedRecovery { .. } => {}
@@ -1189,8 +1223,8 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        let auth = OperatorAuthorization::new("", 9, 2001, "fix");
-        let result = gate.respond_recover(&auth, 10, 2001, "trace-2");
+        let auth = OperatorAuthorization::new("", 9, 2001, "fix", b"test-key");
+        let result = gate.respond_recover(&auth, b"test-key", 10, 2001, "trace-2");
         assert!(result.is_err());
     }
 
@@ -1198,20 +1232,20 @@ mod tests {
 
     #[test]
     fn test_operator_authorization_verify() {
-        let auth = OperatorAuthorization::new("op-1", 50, 3000, "reason");
-        assert!(auth.verify());
+        let auth = OperatorAuthorization::new("op-1", 50, 3000, "reason", b"test-key");
+        assert!(auth.verify(b"test-key"));
     }
 
     #[test]
     fn test_operator_authorization_tampered() {
-        let mut auth = OperatorAuthorization::new("op-1", 50, 3000, "reason");
+        let mut auth = OperatorAuthorization::new("op-1", 50, 3000, "reason", b"test-key");
         auth.authorization_hash = "bad".to_string();
-        assert!(!auth.verify());
+        assert!(!auth.verify(b"test-key"));
     }
 
     #[test]
     fn test_operator_authorization_serde() {
-        let auth = OperatorAuthorization::new("op-1", 50, 3000, "reason");
+        let auth = OperatorAuthorization::new("op-1", 50, 3000, "reason", b"test-key");
         let json = serde_json::to_string(&auth).unwrap();
         let decoded: OperatorAuthorization = serde_json::from_str(&json).unwrap();
         assert_eq!(auth, decoded);
@@ -1379,8 +1413,8 @@ mod tests {
         let mut gate = ControlPlaneDivergenceGate::new("test");
         let (local, remote) = forked_pair();
         gate.check_propagation(&local, &remote, 2000, "trace-1");
-        let auth = OperatorAuthorization::new("op-1", 9, 2001, "fix");
-        gate.respond_recover(&auth, 10, 2001, "trace-2").unwrap();
+        let auth = OperatorAuthorization::new("op-1", 9, 2001, "fix", b"test-key");
+        gate.respond_recover(&auth, b"test-key", 10, 2001, "trace-2").unwrap();
         let last = gate.audit_log().last().unwrap();
         assert_eq!(last.event_code, event_codes::DG_004_RECOVERY_COMPLETED);
     }
@@ -1410,8 +1444,8 @@ mod tests {
         assert!(blocked.is_err());
 
         // Recover
-        let auth = OperatorAuthorization::new("admin", 9, 2004, "approved fix");
-        gate.respond_recover(&auth, 10, 2004, "trace-5").unwrap();
+        let auth = OperatorAuthorization::new("admin", 9, 2004, "approved fix", b"test-key");
+        gate.respond_recover(&auth, b"test-key", 10, 2004, "trace-5").unwrap();
         assert_eq!(gate.state(), GateState::Normal);
 
         // Now mutations work

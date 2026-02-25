@@ -131,6 +131,46 @@ fn parse_ipv4(ip: &str) -> Option<[u8; 4]> {
     Some(octets)
 }
 
+fn parse_ipv4_lax(ip: &str) -> Option<[u8; 4]> {
+    let parts: Vec<&str> = ip.split('.').collect();
+    if parts.len() > 4 || parts.is_empty() {
+        return None;
+    }
+    let mut parsed_parts = Vec::new();
+    for part in &parts {
+        let val = if part.starts_with("0x") || part.starts_with("0X") {
+            u32::from_str_radix(&part[2..], 16).ok()?
+        } else if part.starts_with('0') && part.len() > 1 {
+            u32::from_str_radix(part, 8).ok()?
+        } else {
+            part.parse::<u32>().ok()?
+        };
+        parsed_parts.push(val);
+    }
+    match parsed_parts.len() {
+        1 => {
+            let val = parsed_parts[0];
+            Some([(val >> 24) as u8, (val >> 16) as u8, (val >> 8) as u8, val as u8])
+        }
+        2 => {
+            let (a, b) = (parsed_parts[0], parsed_parts[1]);
+            if a > 255 || b > 0xFFFFFF { return None; }
+            Some([a as u8, (b >> 16) as u8, (b >> 8) as u8, b as u8])
+        }
+        3 => {
+            let (a, b, c) = (parsed_parts[0], parsed_parts[1], parsed_parts[2]);
+            if a > 255 || b > 255 || c > 0xFFFF { return None; }
+            Some([a as u8, b as u8, (c >> 8) as u8, c as u8])
+        }
+        4 => {
+            let (a, b, c, d) = (parsed_parts[0], parsed_parts[1], parsed_parts[2], parsed_parts[3]);
+            if a > 255 || b > 255 || c > 255 || d > 255 { return None; }
+            Some([a as u8, b as u8, c as u8, d as u8])
+        }
+        _ => None
+    }
+}
+
 impl SsrfPolicyTemplate {
     /// Create the default template with all standard blocked CIDRs.
     pub fn default_template(connector_id: String) -> Self {
@@ -151,6 +191,9 @@ impl SsrfPolicyTemplate {
         let octets = match parse_ipv4(ip) {
             Some(o) => o,
             None => {
+                if parse_ipv4_lax(ip).is_some() {
+                    return true; // Treat as private to deny invalid IP formats
+                }
                 let clean_ip = ip.trim_start_matches('[').trim_end_matches(']');
                 if clean_ip.parse::<std::net::IpAddr>().is_ok() {
                     return true; // Deny unsupported IP literals (like IPv6) by treating them as private
@@ -217,6 +260,20 @@ impl SsrfPolicyTemplate {
                     return Err(SsrfError::SsrfDenied {
                         host: host.to_string(),
                         cidr: "ipv6_unsupported".to_string(),
+                    });
+                }
+                if parse_ipv4_lax(host).is_some() {
+                    self.emit_audit(
+                        host,
+                        port,
+                        Action::Deny,
+                        Some("invalid_ip_format"),
+                        false,
+                        trace_id,
+                        timestamp,
+                    );
+                    return Err(SsrfError::SsrfInvalidIp {
+                        host: host.to_string(),
                     });
                 }
                 // Not an IP literal — allow through (DNS names handled by network guard)

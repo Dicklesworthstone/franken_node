@@ -354,6 +354,22 @@ impl TokenChain {
         }
 
         // Check delegation depth.
+        if parent.max_delegation_depth == 0 {
+            return Err(TokenError::new(
+                ERR_ABT_ATTENUATION_VIOLATION,
+                "Parent token has max_delegation_depth of 0 and cannot be delegated",
+            ));
+        }
+        if token.max_delegation_depth >= parent.max_delegation_depth {
+            return Err(TokenError::new(
+                ERR_ABT_ATTENUATION_VIOLATION,
+                format!(
+                    "Delegated token max_delegation_depth {} must be strictly less than parent's {}",
+                    token.max_delegation_depth, parent.max_delegation_depth
+                ),
+            ));
+        }
+
         let root = &self.tokens[0];
         let max_chain_len = root.max_delegation_depth as usize + 1;
         if self.tokens.len() >= max_chain_len {
@@ -721,7 +737,7 @@ mod tests {
             nonce: format!("nonce-{}", id),
             parent_token_hash: Some(parent.hash()),
             signature: format!("sig-{}", id),
-            max_delegation_depth: 0,
+            max_delegation_depth: parent.max_delegation_depth.saturating_sub(1),
         }
     }
 
