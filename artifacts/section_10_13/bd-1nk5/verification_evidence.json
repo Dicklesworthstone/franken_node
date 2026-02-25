@@ -45,7 +45,7 @@
       "id": "SSRF-TESTS",
       "description": "Rust unit tests pass",
       "status": "FAIL",
-      "details": "[Errno 2] No such file or directory: 'cargo'"
+      "details": "Command '['cargo', 'test', '-p', 'frankenengine-node', '--', 'security::ssrf_policy']' timed out after 120 seconds"
     },
     {
       "id": "SSRF-SPEC",

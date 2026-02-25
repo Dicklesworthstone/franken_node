@@ -39,7 +39,7 @@
       "id": "TS-TESTS",
       "description": "Rust unit tests pass",
       "status": "FAIL",
-      "details": "[Errno 2] No such file or directory: 'cargo'"
+      "details": "Command '['cargo', 'test', '-p', 'frankenengine-node', '--', 'security::threshold_sig']' timed out after 120 seconds"
     },
     {
       "id": "TS-SPEC",

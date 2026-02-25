@@ -2,7 +2,7 @@
   "bead_id": "bd-tyr2",
   "section": "10.15",
   "title": "Control-Plane Evidence Replay Gate",
-  "timestamp": "2026-02-25T05:42:56.716722+00:00",
+  "timestamp": "2026-02-25T06:13:35.706846+00:00",
   "overall_pass": true,
   "checks": {
     "files": {

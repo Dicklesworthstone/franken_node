@@ -39,7 +39,7 @@
       "id": "TL-TESTS",
       "description": "Rust unit tests pass",
       "status": "FAIL",
-      "details": "[Errno 2] No such file or directory: 'cargo'"
+      "details": "Command '['cargo', 'test', '-p', 'frankenengine-node', '--', 'supply_chain::transparency_verifier']' timed out after 120 seconds"
     },
     {
       "id": "TL-SPEC",
