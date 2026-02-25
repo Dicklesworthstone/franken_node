@@ -33,6 +33,8 @@ pub mod event_codes {
     pub const SAG_STEP_SKIPPED: &str = "SAG-007";
     /// Compensation trace exported for audit/replay.
     pub const SAG_TRACE_EXPORTED: &str = "SAG-008";
+    /// A forward step failed (will trigger compensation).
+    pub const SAG_STEP_FAILED: &str = "SAG-009";
 }
 
 // ── Invariants ───────────────────────────────────────────────────────────────
@@ -276,9 +278,9 @@ impl SagaExecutor {
         // Determine the event code based on outcome
         let event_code = match &outcome {
             StepOutcome::Success { .. } => event_codes::SAG_STEP_FORWARD,
-            StepOutcome::Failed { .. } => event_codes::SAG_STEP_FORWARD,
+            StepOutcome::Failed { .. } => event_codes::SAG_STEP_FAILED,
             StepOutcome::Skipped { .. } => event_codes::SAG_STEP_SKIPPED,
-            StepOutcome::Compensated => event_codes::SAG_STEP_FORWARD,
+            StepOutcome::Compensated => event_codes::SAG_STEP_COMPENSATED,
         };
 
         let record = StepRecord {
@@ -795,6 +797,75 @@ mod tests {
             assert!(parsed.get("trace_id").is_some());
             assert!(parsed.get("saga_id").is_some());
         }
+    }
+
+    // 12b. test_audit_event_codes_for_failed_step
+    #[test]
+    fn test_audit_event_codes_for_failed_step() {
+        let mut exec = SagaExecutor::new();
+        let steps = make_steps(&["a", "b"]);
+        let id = exec.create_saga(steps, "t1");
+        exec.execute_step(&id, success_outcome(), 1, "t2").unwrap();
+        exec.execute_step(
+            &id,
+            StepOutcome::Failed {
+                reason: "oops".to_string(),
+            },
+            1,
+            "t3",
+        )
+        .unwrap();
+
+        let jsonl = exec.export_audit_log_jsonl();
+        let events: Vec<serde_json::Value> = jsonl
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        // Find the forward step event
+        let forward = events
+            .iter()
+            .find(|e| e["event_code"].as_str() == Some(event_codes::SAG_STEP_FORWARD))
+            .expect("should have a SAG_STEP_FORWARD event");
+        assert_eq!(forward["detail"]["step_name"].as_str(), Some("a"));
+
+        // Find the failed step event
+        let failed = events
+            .iter()
+            .find(|e| e["event_code"].as_str() == Some(event_codes::SAG_STEP_FAILED))
+            .expect("should have a SAG_STEP_FAILED event");
+        assert_eq!(failed["detail"]["step_name"].as_str(), Some("b"));
+    }
+
+    // 12c. test_audit_event_codes_for_compensated_step
+    #[test]
+    fn test_audit_event_codes_for_compensated_step() {
+        let mut exec = SagaExecutor::new();
+        let steps = make_steps(&["a"]);
+        let id = exec.create_saga(steps, "t1");
+        exec.execute_step(&id, StepOutcome::Compensated, 1, "t2")
+            .unwrap();
+
+        let jsonl = exec.export_audit_log_jsonl();
+        let events: Vec<serde_json::Value> = jsonl
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+
+        let compensated = events
+            .iter()
+            .find(|e| e["event_code"].as_str() == Some(event_codes::SAG_STEP_COMPENSATED))
+            .expect("should have a SAG_STEP_COMPENSATED event");
+        assert_eq!(compensated["detail"]["step_name"].as_str(), Some("a"));
+
+        let forward_for_same_step = events.iter().find(|event| {
+            event["event_code"].as_str() == Some(event_codes::SAG_STEP_FORWARD)
+                && event["detail"]["step_name"].as_str() == Some("a")
+        });
+        assert!(
+            forward_for_same_step.is_none(),
+            "compensated outcomes must not be logged as forward progress"
+        );
     }
 
     // 13. test_saga_state_transitions

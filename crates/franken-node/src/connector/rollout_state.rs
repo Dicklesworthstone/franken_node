@@ -372,12 +372,7 @@ pub fn verify_replay(expected: &RolloutState, actual: &RolloutState) -> Result<(
 }
 
 fn now_iso8601() -> String {
-    // Simple UTC timestamp without external crate dependency
-    use std::time::SystemTime;
-    let duration = SystemTime::now()
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{}Z", duration.as_secs())
+    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 #[cfg(test)]
@@ -404,6 +399,19 @@ mod tests {
         let state = sample_state();
         assert_eq!(state.version, 1);
         assert_eq!(state.rollout_epoch, ControlEpoch::new(6));
+    }
+
+    #[test]
+    fn persisted_at_uses_rfc3339_and_not_unix_seconds() {
+        let state = sample_state();
+        chrono::DateTime::parse_from_rfc3339(&state.persisted_at)
+            .expect("persisted_at should be RFC3339");
+        assert!(state.persisted_at.contains('T'));
+        assert!(state.persisted_at.ends_with('Z'));
+        assert!(
+            state.persisted_at.parse::<u64>().is_err(),
+            "persisted_at must not be a unix-seconds integer string"
+        );
     }
 
     #[test]
