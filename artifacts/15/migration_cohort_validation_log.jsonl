@@ -1,12 +1,12 @@
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-001","status":"info","detail":"Starting deterministic migration cohort validation."}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"cohort_size_gte_10: cohort has at least 10 projects"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"required_archetypes_present: required archetype coverage is complete"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"baseline_results_complete: every project has complete baseline test evidence"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"migration_artifacts_present: every project includes audit/rewrite/lockstep/rollback artifacts"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"post_validation_deterministic: repeated validation runs are deterministic (flaky rate < 1%)"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"per_project_success_rule: each project either reaches >=95% pass or documents known incompatibilities"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"cohort_success_rate_rule: cohort-wide success rate is at least 80%"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"aggregate_consistency: aggregate counters match project-level data"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"version_pinning_complete: each cohort project is pinned to a repo+commit"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"ci_reproducibility_flags: artifact explicitly marks deterministic and CI-reproducible outcomes"}
-{"ts":"2026-02-25T03:05:46Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-004","status":"info","detail":"Completed validation with verdict=PASS."}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-001","status":"info","detail":"Starting deterministic migration cohort validation."}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"cohort_size_gte_10: cohort has at least 10 projects"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"required_archetypes_present: required archetype coverage is complete"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"baseline_results_complete: every project has complete baseline test evidence"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"migration_artifacts_present: every project includes audit/rewrite/lockstep/rollback artifacts"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"post_validation_deterministic: repeated validation runs are deterministic (flaky rate < 1%)"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"per_project_success_rule: each project either reaches >=95% pass or documents known incompatibilities"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"cohort_success_rate_rule: cohort-wide success rate is at least 80%"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"aggregate_consistency: aggregate counters match project-level data"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"version_pinning_complete: each cohort project is pinned to a repo+commit"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-002","status":"pass","detail":"ci_reproducibility_flags: artifact explicitly marks deterministic and CI-reproducible outcomes"}
+{"ts":"2026-02-25T04:09:11Z","trace_id":"trace-bd-sxt5-e2e","event_code":"MCV-004","status":"info","detail":"Completed validation with verdict=PASS."}
