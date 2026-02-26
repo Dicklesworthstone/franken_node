@@ -113,7 +113,7 @@ impl LockstepHarness {
         }
 
         // Generate and print the report
-        let report = oracle.generate_report();
+        let report = oracle.generate_report(0);
         let canonical_json = serde_json::to_string_pretty(&report)?;
         println!("{}", canonical_json);
 
@@ -264,16 +264,12 @@ impl LockstepHarness {
         for line in raw_str.lines() {
             let mut current = line.trim();
             // Strip [pid NNN] prefix
-            if current.starts_with("[pid ") {
-                if let Some(idx) = current.find(']') {
-                    current = current[idx + 1..].trim();
-                }
+            if current.starts_with("[pid ") && let Some(idx) = current.find(']') {
+                current = current[idx + 1..].trim();
             }
             // Strip leading numeric timestamp (can contain digits and dots)
-            if let Some(idx) = current.find(' ') {
-                if current[..idx].chars().all(|c| c.is_ascii_digit() || c == '.') {
-                    current = current[idx + 1..].trim();
-                }
+            if let Some(idx) = current.find(' ') && current[..idx].chars().all(|c| c.is_ascii_digit() || c == '.') {
+                current = current[idx + 1..].trim();
             }
 
             let Some((syscall_expr, return_expr)) = current.rsplit_once(" = ") else {
@@ -544,7 +540,7 @@ mod tests {
         }
 
         // node and bun are reference, franken runtimes are not
-        let report = oracle.generate_report();
+        let report = oracle.generate_report(0);
         let json = serde_json::to_value(&report).expect("serialize");
         assert!(json.get("schema_version").is_some());
     }
@@ -659,7 +655,7 @@ mod tests {
     #[test]
     fn harness_oracle_report_contains_schema_version() {
         let mut oracle = RuntimeOracle::new("test-trace", 100);
-        let report = oracle.generate_report();
+        let report = oracle.generate_report(0);
         assert_eq!(
             report.schema_version,
             crate::runtime::nversion_oracle::SCHEMA_VERSION

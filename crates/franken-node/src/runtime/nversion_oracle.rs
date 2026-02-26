@@ -705,7 +705,7 @@ impl RuntimeOracle {
     }
 
     /// Evaluate whether release is blocked.
-    pub fn check_release_gate(&mut self) -> OracleVerdict {
+    pub fn check_release_gate(&mut self, now_epoch_secs: u64) -> OracleVerdict {
         let mut blocking = Vec::new();
         let mut pending_receipt = Vec::new();
 
@@ -717,8 +717,12 @@ impl RuntimeOracle {
             if div.risk_tier.blocks_release() {
                 blocking.push(id.clone());
             } else if div.risk_tier.requires_receipt() {
-                // Check if a receipt has been issued for this divergence.
-                let has_receipt = self.receipts.values().any(|r| r.divergence_id == *id);
+                // Check if a receipt has been issued for this divergence and is valid.
+                let has_receipt = self.receipts.values().any(|r| {
+                    r.divergence_id == *id
+                        && !r.is_expired(now_epoch_secs)
+                        && r.verify_l1_linkage()
+                });
                 if !has_receipt {
                     pending_receipt.push(id.clone());
                 }
@@ -742,8 +746,8 @@ impl RuntimeOracle {
     }
 
     /// Generate the comprehensive divergence report.
-    pub fn generate_report(&mut self) -> DivergenceReport {
-        let verdict = self.check_release_gate();
+    pub fn generate_report(&mut self, now_epoch_secs: u64) -> DivergenceReport {
+        let verdict = self.check_release_gate(now_epoch_secs);
 
         let mut details = BTreeMap::new();
         details.insert("verdict".to_string(), verdict.label().to_string());
@@ -1103,7 +1107,7 @@ mod tests {
     #[test]
     fn release_gate_pass_no_divergences() {
         let mut oracle = RuntimeOracle::new("trace-019", 66);
-        let verdict = oracle.check_release_gate();
+        let verdict = oracle.check_release_gate(0);
         assert_eq!(verdict, OracleVerdict::Pass);
     }
 
@@ -1118,7 +1122,7 @@ mod tests {
             RiskTier::Critical,
             &BTreeMap::new(),
         );
-        let verdict = oracle.check_release_gate();
+        let verdict = oracle.check_release_gate(0);
         match verdict {
             OracleVerdict::BlockRelease {
                 blocking_divergence_ids,
@@ -1140,7 +1144,7 @@ mod tests {
             RiskTier::High,
             &BTreeMap::new(),
         );
-        let verdict = oracle.check_release_gate();
+        let verdict = oracle.check_release_gate(0);
         match verdict {
             OracleVerdict::BlockRelease { .. } => {}
             _ => panic!("expected BlockRelease for High risk"),
@@ -1158,7 +1162,7 @@ mod tests {
             RiskTier::Low,
             &BTreeMap::new(),
         );
-        let verdict = oracle.check_release_gate();
+        let verdict = oracle.check_release_gate(0);
         match verdict {
             OracleVerdict::RequiresReceipt {
                 pending_divergence_ids,
@@ -1183,7 +1187,7 @@ mod tests {
         oracle
             .issue_policy_receipt(sample_receipt("rcpt-low", "div-low"))
             .unwrap();
-        let verdict = oracle.check_release_gate();
+        let verdict = oracle.check_release_gate(0);
         assert_eq!(verdict, OracleVerdict::Pass);
     }
 
@@ -1199,7 +1203,7 @@ mod tests {
             &BTreeMap::new(),
         );
         oracle.resolve_divergence("div-high", "fixed").unwrap();
-        let verdict = oracle.check_release_gate();
+        let verdict = oracle.check_release_gate(0);
         assert_eq!(verdict, OracleVerdict::Pass);
     }
 
@@ -1224,7 +1228,7 @@ mod tests {
             &outputs,
         );
 
-        let report = oracle.generate_report();
+        let report = oracle.generate_report(0);
         assert_eq!(report.schema_version, SCHEMA_VERSION);
         assert_eq!(report.trace_id, "trace-025");
         assert_eq!(report.runtimes.len(), 2);
@@ -1319,7 +1323,7 @@ mod tests {
             .register_runtime(sample_runtime("m-runtime"))
             .unwrap();
 
-        let report = oracle.generate_report();
+        let report = oracle.generate_report(0);
         let runtime_ids: Vec<&String> = report.runtimes.keys().collect();
         assert_eq!(
             runtime_ids,
@@ -1339,7 +1343,7 @@ mod tests {
             RiskTier::Medium,
             &BTreeMap::new(),
         );
-        let verdict = oracle.check_release_gate();
+        let verdict = oracle.check_release_gate(0);
         assert_eq!(verdict, OracleVerdict::Pass);
     }
 
@@ -1354,7 +1358,7 @@ mod tests {
             RiskTier::Info,
             &BTreeMap::new(),
         );
-        let verdict = oracle.check_release_gate();
+        let verdict = oracle.check_release_gate(0);
         assert_eq!(verdict, OracleVerdict::Pass);
     }
 
