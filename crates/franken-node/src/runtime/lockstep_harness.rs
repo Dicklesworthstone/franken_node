@@ -268,9 +268,10 @@ impl LockstepHarness {
                 if let Some(idx) = current.find(']') {
                     current = current[idx + 1..].trim();
                 }
-            } else if let Some(idx) = current.find(' ') {
-                // Strip leading numeric timestamp
-                if current[..idx].chars().all(|c| c.is_ascii_digit()) {
+            }
+            // Strip leading numeric timestamp (can contain digits and dots)
+            if let Some(idx) = current.find(' ') {
+                if current[..idx].chars().all(|c| c.is_ascii_digit() || c == '.') {
                     current = current[idx + 1..].trim();
                 }
             }

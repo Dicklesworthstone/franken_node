@@ -246,17 +246,17 @@ impl VefProofScheduler {
         let mut start = 0usize;
         while start < entries.len() {
             let max_end = (start + self.policy.max_receipts_per_window - 1).min(entries.len() - 1);
+            let global_start = entries[start].index;
+            let global_max_end = entries[max_end].index;
+
             let aligned = checkpoints
                 .iter()
                 .filter(|checkpoint| {
-                    let end = checkpoint.end_index as usize;
-                    end >= start && end <= max_end
+                    checkpoint.end_index >= global_start && checkpoint.end_index <= global_max_end
                 })
                 .map(|checkpoint| {
-                    (
-                        checkpoint.end_index as usize,
-                        Some(checkpoint.checkpoint_id),
-                    )
+                    let slice_end = start + (checkpoint.end_index - global_start) as usize;
+                    (slice_end, Some(checkpoint.checkpoint_id))
                 })
                 .max_by_key(|(end, _)| *end);
 
@@ -371,8 +371,9 @@ impl VefProofScheduler {
         let mut compute_used = 0_u64;
         let mut memory_used = 0_u64;
         for job in pending.into_iter().take(available_slots) {
-            if compute_used + job.estimated_compute_millis > self.policy.max_compute_millis_per_tick
-                || memory_used + job.estimated_memory_mib > self.policy.max_memory_mib_per_tick
+            if (compute_used + job.estimated_compute_millis > self.policy.max_compute_millis_per_tick
+                || memory_used + job.estimated_memory_mib > self.policy.max_memory_mib_per_tick)
+                && (compute_used > 0 || memory_used > 0)
             {
                 break;
             }
