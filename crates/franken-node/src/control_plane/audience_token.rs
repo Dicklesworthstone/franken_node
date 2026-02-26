@@ -278,9 +278,35 @@ pub struct TokenEvent {
 /// The first token is the root; each subsequent token's `parent_token_hash`
 /// links to the hash of its predecessor. Capabilities are monotonically
 /// narrowing.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TokenChain {
     tokens: Vec<AudienceBoundToken>,
+}
+
+impl<'de> Deserialize<'de> for TokenChain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct RawTokenChain {
+            tokens: Vec<AudienceBoundToken>,
+        }
+
+        let raw = RawTokenChain::deserialize(deserializer)?;
+        if raw.tokens.is_empty() {
+            return Err(serde::de::Error::custom("token chain cannot be empty"));
+        }
+
+        let mut chain = TokenChain::new(raw.tokens[0].clone())
+            .map_err(|e| serde::de::Error::custom(e.message))?;
+
+        for token in raw.tokens.into_iter().skip(1) {
+            chain.append(token).map_err(|e| serde::de::Error::custom(e.message))?;
+        }
+
+        Ok(chain)
+    }
 }
 
 impl TokenChain {
@@ -576,21 +602,22 @@ impl TokenValidator {
             }
         }
 
-        // Check nonce replay on the leaf token.
-        let leaf = chain.leaf().unwrap();
-        if self.seen_nonces.contains(&leaf.nonce) {
-            self.tokens_rejected += 1;
-            let err = TokenError::replay_detected(&leaf.nonce);
-            self.events.push(TokenEvent {
-                event_code: ABT_004.to_string(),
-                token_id: leaf.token_id.as_str().to_string(),
-                trace_id: trace_id.to_string(),
-                epoch_id: self.epoch_id,
-                action_id: format!("verify-replay-{}", leaf.token_id),
-                detail: format!("Nonce '{}' replay detected", leaf.nonce),
-                timestamp_ms: now_ms,
-            });
-            return Err(err);
+        // Check nonce replay for all tokens in the chain.
+        for token in tokens.iter() {
+            if self.seen_nonces.contains(&token.nonce) {
+                self.tokens_rejected += 1;
+                let err = TokenError::replay_detected(&token.nonce);
+                self.events.push(TokenEvent {
+                    event_code: ABT_004.to_string(),
+                    token_id: token.token_id.as_str().to_string(),
+                    trace_id: trace_id.to_string(),
+                    epoch_id: self.epoch_id,
+                    action_id: format!("verify-replay-{}", token.token_id),
+                    detail: format!("Nonce '{}' replay detected", token.nonce),
+                    timestamp_ms: now_ms,
+                });
+                return Err(err);
+            }
         }
 
         // Verify chain hash integrity.
@@ -631,9 +658,11 @@ impl TokenValidator {
             return Err(err);
         }
 
-        // All checks passed: record the leaf nonce and emit success event.
+        // All checks passed: record all nonces and emit success event.
+        for token in tokens.iter() {
+            self.seen_nonces.insert(token.nonce.clone());
+        }
         let leaf = chain.leaf().unwrap();
-        self.seen_nonces.insert(leaf.nonce.clone());
         self.tokens_verified += 1;
         self.events.push(TokenEvent {
             event_code: ABT_003.to_string(),
