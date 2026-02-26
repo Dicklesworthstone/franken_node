@@ -34,7 +34,7 @@
       "id": "GSV-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "13 tests passed"
     },
     {
       "id": "GSV-SPEC",

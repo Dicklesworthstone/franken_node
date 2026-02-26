@@ -397,6 +397,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "thiserror",
+ "toml",
  "uuid",
 ]
 

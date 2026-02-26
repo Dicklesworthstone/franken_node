@@ -1,7 +1,7 @@
 # Verification Summary: Control-Plane Evidence Replay Gate
 
 **Bead:** bd-tyr2 | **Section:** 10.15
-**Timestamp:** 2026-02-25T06:30:53.378950+00:00
+**Timestamp:** 2026-02-26T01:26:26.367442+00:00
 **Overall:** PASS
 **Checks:** 10/10 passed
 

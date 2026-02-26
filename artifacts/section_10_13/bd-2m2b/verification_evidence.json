@@ -2,7 +2,7 @@
   "gate": "network_guard_verification",
   "bead": "bd-2m2b",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "GUARD-IMPL",
@@ -38,8 +38,8 @@
     {
       "id": "GUARD-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "999 tests passed"
+      "status": "FAIL",
+      "details": "Command '['/home/ubuntu/.cargo/bin/cargo', 'test', '-p', 'frankenengine-node', '--', 'security::network_guard']' timed out after 120 seconds"
     },
     {
       "id": "GUARD-SPEC",
@@ -49,7 +49,7 @@
   ],
   "summary": {
     "total_checks": 8,
-    "passing_checks": 8,
-    "failing_checks": 0
+    "passing_checks": 7,
+    "failing_checks": 1
   }
 }

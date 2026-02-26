@@ -39,7 +39,7 @@
       "id": "IH-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "23 tests passed"
     },
     {
       "id": "IH-SPEC",

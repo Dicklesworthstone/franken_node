@@ -29,7 +29,7 @@
       "id": "ACC-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "15 tests passed"
     },
     {
       "id": "ACC-SPEC",

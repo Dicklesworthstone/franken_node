@@ -45,7 +45,7 @@
       "id": "MN-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "21 tests passed"
     },
     {
       "id": "MN-SPEC",

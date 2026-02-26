@@ -29,7 +29,7 @@
       "id": "QPR-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "16 tests passed"
     },
     {
       "id": "QPR-SPEC",

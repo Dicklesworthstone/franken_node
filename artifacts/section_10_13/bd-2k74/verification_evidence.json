@@ -29,7 +29,7 @@
       "id": "PAB-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "28 tests passed"
     },
     {
       "id": "PAB-SPEC",

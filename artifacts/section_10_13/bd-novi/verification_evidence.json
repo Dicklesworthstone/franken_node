@@ -29,7 +29,7 @@
       "id": "ECR-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "17 tests passed"
     },
     {
       "id": "ECR-SPEC",

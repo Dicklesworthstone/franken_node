@@ -40,7 +40,7 @@
       "id": "AP-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "20 tests passed"
     },
     {
       "id": "AP-SPEC",

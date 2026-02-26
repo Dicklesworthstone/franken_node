@@ -29,7 +29,7 @@
       "id": "FCG-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "11 tests passed"
     },
     {
       "id": "FCG-SPEC",

@@ -2,7 +2,7 @@
   "gate": "sandbox_profile_verification",
   "bead": "bd-3ua7",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "SANDBOX-IMPL",
@@ -46,8 +46,8 @@
     {
       "id": "SANDBOX-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "999 tests passed"
+      "status": "FAIL",
+      "details": "[Errno 2] No such file or directory: 'cargo'"
     },
     {
       "id": "SANDBOX-SPEC",
@@ -57,7 +57,7 @@
   ],
   "summary": {
     "total_checks": 9,
-    "passing_checks": 9,
-    "failing_checks": 0
+    "passing_checks": 8,
+    "failing_checks": 1
   }
 }

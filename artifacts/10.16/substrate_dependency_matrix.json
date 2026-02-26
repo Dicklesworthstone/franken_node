@@ -31,174 +31,106 @@
       "justification": "product boundary spanning all integration planes"
     },
     {
-      "path": "crates/franken-node/src/conformance",
+      "path": "crates/franken-node/src/api",
       "kind": "directory",
       "substrates": [],
-      "justification": "none - internal only"
+      "justification": "auto-filled"
     },
     {
-      "path": "crates/franken-node/src/connector",
-      "kind": "directory",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "connector family coordinates persisted control state and service contracts"
+      "path": "crates/franken-node/src/api/compat_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
-      "path": "crates/franken-node/src/control_plane",
-      "kind": "directory",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "control-plane publication and validation requires durable state and service semantics"
+      "path": "crates/franken-node/src/api/error.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
-      "path": "crates/franken-node/src/encoding",
+      "path": "crates/franken-node/src/api/fleet_control_routes.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/api/fleet_quarantine.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/api/middleware.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/api/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/api/operator_routes.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/api/service.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/api/session_auth.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/api/trust_card_routes.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/api/verifier_routes.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/atc",
       "kind": "directory",
       "substrates": [],
-      "justification": "none - internal only"
+      "justification": "auto-filled"
     },
     {
-      "path": "crates/franken-node/src/observability",
-      "kind": "directory",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "observability/evidence ledger durability and typed evidence records"
+      "path": "crates/franken-node/src/atc/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
-      "path": "crates/franken-node/src/policy",
+      "path": "crates/franken-node/src/claims",
       "kind": "directory",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "policy layer exposes typed policy decisions to service consumers"
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
-      "path": "crates/franken-node/src/repair",
-      "kind": "directory",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "repair pipeline uses typed proof/state models"
+      "path": "crates/franken-node/src/claims/claim_compiler.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
-      "path": "crates/franken-node/src/runtime",
-      "kind": "directory",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "runtime recovery and crash-loop state should remain durable"
-    },
-    {
-      "path": "crates/franken-node/src/security",
-      "kind": "directory",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/supply_chain",
-      "kind": "directory",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "supply-chain data model and service access are first-class"
-    },
-    {
-      "path": "crates/franken-node/src/tools",
-      "kind": "directory",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+      "path": "crates/franken-node/src/claims/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/cli.rs",
@@ -225,10 +157,22 @@
       "justification": "typed configuration model boundary"
     },
     {
+      "path": "crates/franken-node/src/conformance",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
       "path": "crates/franken-node/src/conformance/connector_method_validator.rs",
       "kind": "file",
       "substrates": [],
       "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/conformance/fsqlite_inspired_suite.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/conformance/mod.rs",
@@ -241,6 +185,28 @@
       "kind": "file",
       "substrates": [],
       "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/connector",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
       "path": "crates/franken-node/src/connector/activation_pipeline.rs",
@@ -331,6 +297,48 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/bocpd.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/cancel_injection_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/cancellation_protocol.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/canonical_serializer.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/capability_artifact.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/capability_guard.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/claim_compiler.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/conformance_profile.rs",
       "kind": "file",
       "substrates": [
@@ -373,6 +381,18 @@
         }
       ],
       "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/control_evidence.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/control_evidence_replay.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/connector/crdt.rs",
@@ -419,6 +439,18 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/diagnostic_registry.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/dpor_schedule_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/durability.rs",
       "kind": "file",
       "substrates": [
@@ -463,6 +495,24 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/ecosystem_compliance.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/ecosystem_registry.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/ecosystem_reputation.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/error_code_registry.rs",
       "kind": "file",
       "substrates": [
@@ -483,6 +533,18 @@
         }
       ],
       "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/error_surface.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/eviction_saga.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/connector/execution_scorer.rs",
@@ -639,6 +701,12 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/incident_bundle_retention.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/interop_suite.rs",
       "kind": "file",
       "substrates": [
@@ -771,6 +839,18 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/migration_artifact.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/migration_pipeline.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/mod.rs",
       "kind": "file",
       "substrates": [
@@ -793,6 +873,18 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/n_version_oracle.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/obligation_tracker.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/offline_coverage.rs",
       "kind": "file",
       "substrates": [
@@ -813,6 +905,24 @@
         }
       ],
       "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/operator_intelligence.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/perf_budget_guard.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/policy_checkpoint.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/connector/prestage_engine.rs",
@@ -881,6 +991,12 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/region_ownership.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/repair_controller.rs",
       "kind": "file",
       "substrates": [
@@ -925,6 +1041,12 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/rollback_bundle.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/rollout_state.rs",
       "kind": "file",
       "substrates": [
@@ -945,6 +1067,12 @@
         }
       ],
       "justification": "connector family coordinates persisted control state and service contracts"
+    },
+    {
+      "path": "crates/franken-node/src/connector/saga.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/connector/schema_migration.rs",
@@ -1013,6 +1141,12 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/supervision.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/connector/telemetry_namespace.rs",
       "kind": "file",
       "substrates": [
@@ -1079,6 +1213,106 @@
       "justification": "connector family coordinates persisted control state and service contracts"
     },
     {
+      "path": "crates/franken-node/src/connector/transport_fault_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/trust_fabric.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/trust_object_id.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/trust_zone.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/universal_verifier_sdk.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/vef_claim_integration.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/vef_execution_receipt.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/vef_perf_budget.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/vef_policy_constraints.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/connector/verifier_sdk.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "control-plane publication and validation requires durable state and service semantics"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/audience_token.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/cancellation_injection.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/cancellation_protocol.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/control_plane/control_epoch.rs",
       "kind": "file",
       "substrates": [
@@ -1099,6 +1333,54 @@
         }
       ],
       "justification": "control-plane publication and validation requires durable state and service semantics"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/control_lane_mapping.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/control_lane_policy.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/divergence_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/dpor_exploration.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/epoch_transition_barrier.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/evidence_replay_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/fork_detection.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/control_plane/key_role_separation.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/control_plane/marker_stream.rs",
@@ -1189,6 +1471,18 @@
       "justification": "control-plane publication and validation requires durable state and service semantics"
     },
     {
+      "path": "crates/franken-node/src/control_plane/transition_abort.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/encoding",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "none - internal only"
+    },
+    {
       "path": "crates/franken-node/src/encoding/deterministic_seed.rs",
       "kind": "file",
       "substrates": [],
@@ -1199,6 +1493,54 @@
       "kind": "file",
       "substrates": [],
       "justification": "none - internal only"
+    },
+    {
+      "path": "crates/franken-node/src/extensions",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/extensions/artifact_contract.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/extensions/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/federation",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/federation/atc_participation_weighting.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/federation/atc_reciprocity.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/federation/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/lib.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/main.rs",
@@ -1216,6 +1558,47 @@
         }
       ],
       "justification": "entrypoint orchestrates operator and service flows"
+    },
+    {
+      "path": "crates/franken-node/src/migration",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/migration/bpet_migration_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/migration/dgis_migration_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/migration/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/observability",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "observability/evidence ledger durability and typed evidence records"
     },
     {
       "path": "crates/franken-node/src/observability/durability_violation.rs",
@@ -1286,6 +1669,77 @@
       "justification": "observability/evidence ledger durability and typed evidence records"
     },
     {
+      "path": "crates/franken-node/src/ops",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/ops/engine_dispatcher.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/ops/mitigation_synthesis.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/ops/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/ops/telemetry_bridge.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/perf",
+      "kind": "directory",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/perf/mod.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/perf/optimization_governor.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/policy",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/approval_workflow.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/policy/bayesian_diagnostics.rs",
       "kind": "file",
       "substrates": [
@@ -1301,6 +1755,18 @@
         }
       ],
       "justification": "policy layer exposes typed policy decisions to service consumers"
+    },
+    {
+      "path": "crates/franken-node/src/policy/compat_gates.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/policy/compatibility_gate.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/policy/controller_boundary_checks.rs",
@@ -1473,6 +1939,18 @@
       "justification": "policy layer exposes typed policy decisions to service consumers"
     },
     {
+      "path": "crates/franken-node/src/policy/object_class_tuning.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/policy/perf_budget_guard.rs",
+      "kind": "file",
+      "substrates": [],
+      "justification": "auto-filled"
+    },
+    {
       "path": "crates/franken-node/src/policy/policy_explainer.rs",
       "kind": "file",
       "substrates": [
@@ -1505,1072 +1983,6 @@
         }
       ],
       "justification": "policy layer exposes typed policy decisions to service consumers"
-    },
-    {
-      "path": "crates/franken-node/src/repair/mod.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "repair pipeline uses typed proof/state models"
-    },
-    {
-      "path": "crates/franken-node/src/repair/proof_carrying_decode.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "repair pipeline uses typed proof/state models"
-    },
-    {
-      "path": "crates/franken-node/src/runtime/crash_loop_detector.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "runtime recovery and crash-loop state should remain durable"
-    },
-    {
-      "path": "crates/franken-node/src/runtime/mod.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "runtime recovery and crash-loop state should remain durable"
-    },
-    {
-      "path": "crates/franken-node/src/security/decision_receipt.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/degraded_mode_audit.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/degraded_mode_policy.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/epoch_scoped_keys.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/interface_hash.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/isolation_backend.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/mod.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/network_guard.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/remote_cap.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/revocation_freshness.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/sandbox_policy_compiler.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/ssrf_policy.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/security/threshold_sig.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "security contracts are model-heavy with optional service exposure"
-    },
-    {
-      "path": "crates/franken-node/src/supply_chain/manifest.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "supply-chain data model and service access are first-class"
-    },
-    {
-      "path": "crates/franken-node/src/supply_chain/mod.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "supply-chain data model and service access are first-class"
-    },
-    {
-      "path": "crates/franken-node/src/supply_chain/provenance.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "supply-chain data model and service access are first-class"
-    },
-    {
-      "path": "crates/franken-node/src/supply_chain/provenance_gate.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "supply-chain data model and service access are first-class"
-    },
-    {
-      "path": "crates/franken-node/src/supply_chain/revocation_integration.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "supply-chain data model and service access are first-class"
-    },
-    {
-      "path": "crates/franken-node/src/supply_chain/revocation_registry.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "supply-chain data model and service access are first-class"
-    },
-    {
-      "path": "crates/franken-node/src/supply_chain/transparency_verifier.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "sqlmodel_rust",
-          "plane": "model",
-          "integration_type": "mandatory"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "should_use"
-        }
-      ],
-      "justification": "supply-chain data model and service access are first-class"
-    },
-    {
-      "path": "crates/franken-node/src/tools/counterfactual_replay.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
-    },
-    {
-      "path": "crates/franken-node/src/tools/evidence_replay_validator.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
-    },
-    {
-      "path": "crates/franken-node/src/tools/mod.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
-    },
-    {
-      "path": "crates/franken-node/src/tools/replay_bundle.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
-    },
-    {
-      "path": "crates/franken-node/src/tools/repro_bundle_export.rs",
-      "kind": "file",
-      "substrates": [
-        {
-          "name": "frankensqlite",
-          "plane": "persistence",
-          "integration_type": "should_use"
-        },
-        {
-          "name": "fastapi_rust",
-          "plane": "service",
-          "integration_type": "optional"
-        }
-      ],
-      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
-    },
-    {
-      "path": "crates/franken-node/src/api",
-      "kind": "directory",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/compat_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/error.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/fleet_control_routes.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/fleet_quarantine.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/middleware.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/mod.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/operator_routes.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/service.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/session_auth.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/trust_card_routes.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/api/verifier_routes.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/atc",
-      "kind": "directory",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/atc/mod.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/claims",
-      "kind": "directory",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/claims/claim_compiler.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/claims/mod.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/conformance/fsqlite_inspired_suite.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/bocpd.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/cancel_injection_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/cancellation_protocol.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/canonical_serializer.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/capability_artifact.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/capability_guard.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/claim_compiler.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/control_evidence.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/control_evidence_replay.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/diagnostic_registry.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/dpor_schedule_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/ecosystem_compliance.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/ecosystem_registry.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/ecosystem_reputation.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/error_surface.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/eviction_saga.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/incident_bundle_retention.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/migration_artifact.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/migration_pipeline.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/n_version_oracle.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/obligation_tracker.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/operator_intelligence.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/perf_budget_guard.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/policy_checkpoint.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/region_ownership.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/rollback_bundle.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/saga.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/supervision.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/transport_fault_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/trust_fabric.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/trust_object_id.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/trust_zone.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/universal_verifier_sdk.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/vef_claim_integration.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/vef_execution_receipt.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/vef_perf_budget.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/vef_policy_constraints.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/connector/verifier_sdk.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/audience_token.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/cancellation_injection.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/cancellation_protocol.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/control_lane_mapping.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/control_lane_policy.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/divergence_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/dpor_exploration.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/epoch_transition_barrier.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/evidence_replay_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/fork_detection.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/key_role_separation.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/control_plane/transition_abort.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/extensions",
-      "kind": "directory",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/extensions/artifact_contract.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/extensions/mod.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/federation",
-      "kind": "directory",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/federation/atc_participation_weighting.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/federation/atc_reciprocity.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/federation/mod.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/lib.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/migration",
-      "kind": "directory",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/migration/bpet_migration_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/migration/dgis_migration_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/migration/mod.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/ops",
-      "kind": "directory",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/ops/engine_dispatcher.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/ops/mitigation_synthesis.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/ops/mod.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/ops/telemetry_bridge.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/perf",
-      "kind": "directory",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/perf/mod.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/perf/optimization_governor.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/policy/approval_workflow.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/policy/compat_gates.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/policy/compatibility_gate.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/policy/object_class_tuning.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
-    },
-    {
-      "path": "crates/franken-node/src/policy/perf_budget_guard.rs",
-      "kind": "file",
-      "substrates": [],
-      "justification": "auto-filled"
     },
     {
       "path": "crates/franken-node/src/registry",
@@ -2639,6 +2051,42 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/repair",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "repair pipeline uses typed proof/state models"
+    },
+    {
+      "path": "crates/franken-node/src/repair/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "repair pipeline uses typed proof/state models"
+    },
+    {
+      "path": "crates/franken-node/src/repair/proof_carrying_decode.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "repair pipeline uses typed proof/state models"
+    },
+    {
       "path": "crates/franken-node/src/replay",
       "kind": "directory",
       "substrates": [],
@@ -2655,6 +2103,18 @@
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/runtime",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "runtime recovery and crash-loop state should remain durable"
     },
     {
       "path": "crates/franken-node/src/runtime/anti_entropy.rs",
@@ -2697,6 +2157,18 @@
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/runtime/crash_loop_detector.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "runtime recovery and crash-loop state should remain durable"
     },
     {
       "path": "crates/franken-node/src/runtime/epoch_guard.rs",
@@ -2745,6 +2217,18 @@
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/runtime/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "runtime recovery and crash-loop state should remain durable"
     },
     {
       "path": "crates/franken-node/src/runtime/nversion_oracle.rs",
@@ -2825,6 +2309,23 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/security",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
       "path": "crates/franken-node/src/security/adversarial_runner.rs",
       "kind": "file",
       "substrates": [],
@@ -2861,10 +2362,78 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/security/constant_time.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
       "path": "crates/franken-node/src/security/copilot_engine.rs",
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/security/decision_receipt.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/degraded_mode_audit.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/degraded_mode_policy.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
     },
     {
       "path": "crates/franken-node/src/security/dgis",
@@ -2891,6 +2460,23 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/security/epoch_scoped_keys.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
       "path": "crates/franken-node/src/security/impossible_default.rs",
       "kind": "file",
       "substrates": [],
@@ -2901,6 +2487,40 @@
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/security/interface_hash.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/isolation_backend.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
     },
     {
       "path": "crates/franken-node/src/security/isolation_rail_router.rs",
@@ -2915,16 +2535,118 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/security/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/network_guard.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
       "path": "crates/franken-node/src/security/quarantine_controller.rs",
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/security/remote_cap.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/revocation_freshness.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
       "path": "crates/franken-node/src/security/revocation_freshness_gate.rs",
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/security/sandbox_policy_compiler.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
+    },
+    {
+      "path": "crates/franken-node/src/security/ssrf_policy.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
     },
     {
       "path": "crates/franken-node/src/security/staking_governance.rs",
@@ -2937,6 +2659,23 @@
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/security/threshold_sig.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "security contracts are model-heavy with optional service exposure"
     },
     {
       "path": "crates/franken-node/src/security/trust_complexity.rs",
@@ -2993,6 +2732,28 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/supply_chain",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
       "path": "crates/franken-node/src/supply_chain/artifact_signing.rs",
       "kind": "file",
       "substrates": [],
@@ -3023,10 +2784,98 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/supply_chain/manifest.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
       "path": "crates/franken-node/src/supply_chain/migration_kit.rs",
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/provenance.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/provenance_gate.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
     },
     {
       "path": "crates/franken-node/src/supply_chain/quarantine.rs",
@@ -3039,6 +2888,72 @@
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/revocation_integration.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/revocation_registry.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
+    },
+    {
+      "path": "crates/franken-node/src/supply_chain/transparency_verifier.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "sqlmodel_rust",
+          "plane": "model",
+          "integration_type": "mandatory"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "should_use"
+        }
+      ],
+      "justification": "supply-chain data model and service access are first-class"
     },
     {
       "path": "crates/franken-node/src/supply_chain/trust_card.rs",
@@ -3077,6 +2992,23 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/tools",
+      "kind": "directory",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
       "path": "crates/franken-node/src/tools/adversarial_resilience_metrics.rs",
       "kind": "file",
       "substrates": [],
@@ -3107,10 +3039,44 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/tools/counterfactual_replay.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
       "path": "crates/franken-node/src/tools/enterprise_governance.rs",
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/tools/evidence_replay_validator.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
     },
     {
       "path": "crates/franken-node/src/tools/external_replication_claims.rs",
@@ -3143,6 +3109,23 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/tools/mod.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
       "path": "crates/franken-node/src/tools/partner_lighthouse_programs.rs",
       "kind": "file",
       "substrates": [],
@@ -3167,6 +3150,23 @@
       "justification": "auto-filled"
     },
     {
+      "path": "crates/franken-node/src/tools/replay_bundle.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
+    },
+    {
       "path": "crates/franken-node/src/tools/replay_determinism_metrics.rs",
       "kind": "file",
       "substrates": [],
@@ -3177,6 +3177,23 @@
       "kind": "file",
       "substrates": [],
       "justification": "auto-filled"
+    },
+    {
+      "path": "crates/franken-node/src/tools/repro_bundle_export.rs",
+      "kind": "file",
+      "substrates": [
+        {
+          "name": "frankensqlite",
+          "plane": "persistence",
+          "integration_type": "should_use"
+        },
+        {
+          "name": "fastapi_rust",
+          "plane": "service",
+          "integration_type": "optional"
+        }
+      ],
+      "justification": "tooling exports/replays durable evidence and may expose service endpoints"
     },
     {
       "path": "crates/franken-node/src/tools/reputation_graph_apis.rs",
@@ -3325,9 +3342,20 @@
   ],
   "unmapped_modules": [],
   "coverage_summary": {
-    "total_modules": 327,
-    "mapped_modules": 327,
-    "unmapped_modules": 0,
-    "coverage_percentage": 100.0
+    "module_count": 328,
+    "directory_count": 31,
+    "file_count": 297,
+    "planes": {
+      "service": 90,
+      "persistence": 68,
+      "presentation": 3,
+      "model": 92
+    },
+    "substrates": {
+      "fastapi_rust": 90,
+      "frankensqlite": 68,
+      "sqlmodel_rust": 92,
+      "frankentui": 3
+    }
   }
 }

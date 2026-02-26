@@ -29,7 +29,7 @@
       "id": "CPR-TESTS",
       "description": "Rust unit tests pass",
       "status": "PASS",
-      "details": "999 tests passed"
+      "details": "18 tests passed"
     },
     {
       "id": "CPR-SPEC",
