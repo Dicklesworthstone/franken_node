@@ -27,6 +27,9 @@ pub mod error_codes {
     pub const CONFIG_INVALID: &str = "CONFIG_INVALID";
 }
 
+const MAX_OPERATION_ID_LEN: usize = 256;
+const MAX_QUEUE_WAIT_SAMPLES: usize = 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ProductLane {
     Cancel,
@@ -412,6 +415,37 @@ impl LaneRouter {
         self.unknown_lane_default_count
     }
 
+    fn lane_config(&self, lane: ProductLane) -> Result<&LaneConfigSnapshot, LaneRouterError> {
+        self.config
+            .lanes
+            .get(&lane)
+            .ok_or_else(|| LaneRouterError::InvalidConfig {
+                detail: format!("missing lane config for {}", lane.as_str()),
+            })
+    }
+
+    fn lane_state(&self, lane: ProductLane) -> Result<&LaneState, LaneRouterError> {
+        self.lanes
+            .get(&lane)
+            .ok_or_else(|| LaneRouterError::InvalidConfig {
+                detail: format!("missing lane state for {}", lane.as_str()),
+            })
+    }
+
+    fn lane_state_mut(&mut self, lane: ProductLane) -> Result<&mut LaneState, LaneRouterError> {
+        self.lanes
+            .get_mut(&lane)
+            .ok_or_else(|| LaneRouterError::InvalidConfig {
+                detail: format!("missing lane state for {}", lane.as_str()),
+            })
+    }
+
+    fn background_in_flight(&self) -> usize {
+        self.lanes
+            .get(&ProductLane::Background)
+            .map_or(0, |state| state.metrics.in_flight)
+    }
+
     pub fn assign_operation(
         &mut self,
         cx: &CapabilityContext,
@@ -419,6 +453,20 @@ impl LaneRouter {
         lane_hint: Option<&str>,
         now_ms: u64,
     ) -> Result<AssignmentOutcome, LaneRouterError> {
+        if operation_id.trim().is_empty() {
+            return Err(LaneRouterError::InvalidConfig {
+                detail: "operation_id must not be empty".to_string(),
+            });
+        }
+        if operation_id.len() > MAX_OPERATION_ID_LEN {
+            return Err(LaneRouterError::InvalidConfig {
+                detail: format!(
+                    "operation_id length {} exceeds max {}",
+                    operation_id.len(),
+                    MAX_OPERATION_ID_LEN
+                ),
+            });
+        }
         if self.active.contains_key(operation_id)
             || self.queued_operation_ids.contains(operation_id)
         {
@@ -428,122 +476,106 @@ impl LaneRouter {
         }
 
         let lane = self.resolve_lane(cx, lane_hint, operation_id, now_ms);
-        let lane_cfg = self
-            .config
-            .lanes
-            .get(&lane)
-            .expect("lane config must exist");
-        let lane_in_flight_before = {
-            let lane_state = self.lanes.get_mut(&lane).expect("lane state must exist");
+        let lane_cfg = self.lane_config(lane)?.clone();
+        let mut saturated_detail: Option<String> = None;
+        let mut saturated_in_flight = 0usize;
+        let mut queued_insert = false;
+        let mut dropped_queue_id: Option<String> = None;
+        let lane_in_flight_before;
+
+        {
+            let lane_state = self.lane_state_mut(lane)?;
+            lane_in_flight_before = lane_state.metrics.in_flight;
 
             if lane_state.metrics.in_flight >= lane_cfg.max_concurrent {
                 match lane_cfg.overflow_policy {
                     LaneOverflowPolicy::Reject => {
                         lane_state.metrics.rejected = lane_state.metrics.rejected.saturating_add(1);
-                        self.events.push(LaneEvent {
-                            event_code: event_codes::LANE_SATURATED.to_string(),
-                            operation_id: operation_id.to_string(),
-                            lane_name: lane.as_str().to_string(),
-                            now_ms,
-                            lane_in_flight: lane_state.metrics.in_flight,
-                            total_in_flight: self.bulkhead.in_flight(),
-                            detail: format!("max_concurrent={}", lane_cfg.max_concurrent),
-                        });
-                        return Err(LaneRouterError::LaneSaturated {
-                            lane,
-                            max_concurrent: lane_cfg.max_concurrent,
-                            in_flight: lane_state.metrics.in_flight,
-                        });
+                        saturated_in_flight = lane_state.metrics.in_flight;
+                        saturated_detail =
+                            Some(format!("max_concurrent={}", lane_cfg.max_concurrent));
                     }
                     LaneOverflowPolicy::EnqueueWithTimeout => {
                         if lane_state.queue.len() >= lane_cfg.queue_limit {
                             lane_state.metrics.rejected =
                                 lane_state.metrics.rejected.saturating_add(1);
-                            self.events.push(LaneEvent {
-                                event_code: event_codes::LANE_SATURATED.to_string(),
+                            saturated_in_flight = lane_state.metrics.in_flight;
+                            saturated_detail = Some("queue_limit_reached".to_string());
+                        } else {
+                            lane_state.queue.push_back(QueuedOperation {
                                 operation_id: operation_id.to_string(),
-                                lane_name: lane.as_str().to_string(),
-                                now_ms,
-                                lane_in_flight: lane_state.metrics.in_flight,
-                                total_in_flight: self.bulkhead.in_flight(),
-                                detail: "queue_limit_reached".to_string(),
+                                enqueued_at_ms: now_ms,
+                                expires_at_ms: now_ms.saturating_add(lane_cfg.enqueue_timeout_ms),
+                                cx_id: cx.cx_id.clone(),
+                                principal: cx.principal.clone(),
                             });
-                            return Err(LaneRouterError::LaneSaturated {
-                                lane,
-                                max_concurrent: lane_cfg.max_concurrent,
-                                in_flight: lane_state.metrics.in_flight,
-                            });
+                            lane_state.metrics.queued = lane_state.queue.len();
+                            queued_insert = true;
                         }
-
-                        lane_state.queue.push_back(QueuedOperation {
-                            operation_id: operation_id.to_string(),
-                            enqueued_at_ms: now_ms,
-                            expires_at_ms: now_ms.saturating_add(lane_cfg.enqueue_timeout_ms),
-                            cx_id: cx.cx_id.clone(),
-                            principal: cx.principal.clone(),
-                        });
-                        self.queued_operation_ids.insert(operation_id.to_string());
-                        lane_state.metrics.queued = lane_state.queue.len();
-                        return Ok(AssignmentOutcome {
-                            operation_id: operation_id.to_string(),
-                            lane,
-                            queued: true,
-                        });
                     }
                     LaneOverflowPolicy::ShedOldest => {
                         if lane != ProductLane::Background {
                             lane_state.metrics.rejected =
                                 lane_state.metrics.rejected.saturating_add(1);
-                            self.events.push(LaneEvent {
-                                event_code: event_codes::LANE_SATURATED.to_string(),
-                                operation_id: operation_id.to_string(),
-                                lane_name: lane.as_str().to_string(),
-                                now_ms,
-                                lane_in_flight: lane_state.metrics.in_flight,
-                                total_in_flight: self.bulkhead.in_flight(),
-                                detail: format!(
-                                    "max_concurrent={} overflow_policy=shed_oldest_non_background",
-                                    lane_cfg.max_concurrent
-                                ),
-                            });
-                            return Err(LaneRouterError::LaneSaturated {
-                                lane,
-                                max_concurrent: lane_cfg.max_concurrent,
-                                in_flight: lane_state.metrics.in_flight,
-                            });
-                        }
-
-                        if lane_state.queue.len() >= lane_cfg.queue_limit {
-                            if let Some(dropped) = lane_state.queue.pop_front() {
-                                self.queued_operation_ids.remove(&dropped.operation_id);
+                            saturated_in_flight = lane_state.metrics.in_flight;
+                            saturated_detail = Some(format!(
+                                "max_concurrent={} overflow_policy=shed_oldest_non_background",
+                                lane_cfg.max_concurrent
+                            ));
+                        } else {
+                            if lane_state.queue.len() >= lane_cfg.queue_limit {
+                                dropped_queue_id =
+                                    lane_state.queue.pop_front().map(|op| op.operation_id);
+                                lane_state.metrics.rejected =
+                                    lane_state.metrics.rejected.saturating_add(1);
                             }
-                            lane_state.metrics.rejected =
-                                lane_state.metrics.rejected.saturating_add(1);
+                            lane_state.queue.push_back(QueuedOperation {
+                                operation_id: operation_id.to_string(),
+                                enqueued_at_ms: now_ms,
+                                expires_at_ms: now_ms.saturating_add(lane_cfg.enqueue_timeout_ms),
+                                cx_id: cx.cx_id.clone(),
+                                principal: cx.principal.clone(),
+                            });
+                            lane_state.metrics.queued = lane_state.queue.len();
+                            queued_insert = true;
                         }
-                        lane_state.queue.push_back(QueuedOperation {
-                            operation_id: operation_id.to_string(),
-                            enqueued_at_ms: now_ms,
-                            expires_at_ms: now_ms.saturating_add(lane_cfg.enqueue_timeout_ms),
-                            cx_id: cx.cx_id.clone(),
-                            principal: cx.principal.clone(),
-                        });
-                        self.queued_operation_ids.insert(operation_id.to_string());
-                        lane_state.metrics.queued = lane_state.queue.len();
-                        return Ok(AssignmentOutcome {
-                            operation_id: operation_id.to_string(),
-                            lane,
-                            queued: true,
-                        });
                     }
                 }
             }
+        }
 
-            lane_state.metrics.in_flight
-        };
+        if let Some(detail) = saturated_detail {
+            self.events.push(LaneEvent {
+                event_code: event_codes::LANE_SATURATED.to_string(),
+                operation_id: operation_id.to_string(),
+                lane_name: lane.as_str().to_string(),
+                now_ms,
+                lane_in_flight: saturated_in_flight,
+                total_in_flight: self.bulkhead.in_flight(),
+                detail,
+            });
+            return Err(LaneRouterError::LaneSaturated {
+                lane,
+                max_concurrent: lane_cfg.max_concurrent,
+                in_flight: saturated_in_flight,
+            });
+        }
+
+        if queued_insert {
+            if let Some(dropped) = dropped_queue_id {
+                self.queued_operation_ids.remove(&dropped);
+            }
+            self.queued_operation_ids.insert(operation_id.to_string());
+            return Ok(AssignmentOutcome {
+                operation_id: operation_id.to_string(),
+                lane,
+                queued: true,
+            });
+        }
 
         let permit = self.acquire_bulkhead(operation_id, lane, now_ms, lane_in_flight_before)?;
         let lane_in_flight_after = {
-            let lane_state = self.lanes.get_mut(&lane).expect("lane state must exist");
+            let lane_state = self.lane_state_mut(lane)?;
             lane_state.metrics.in_flight = lane_state.metrics.in_flight.saturating_add(1);
             lane_state.metrics.in_flight
         };
@@ -593,10 +625,7 @@ impl LaneRouter {
             .release(&active.permit_id, operation_id, now_ms)
             .map_err(map_bulkhead_err)?;
 
-        let lane_state = self
-            .lanes
-            .get_mut(&active.lane)
-            .expect("lane state must exist");
+        let lane_state = self.lane_state_mut(active.lane)?;
         lane_state.metrics.in_flight = lane_state.metrics.in_flight.saturating_sub(1);
         lane_state.metrics.completed = lane_state.metrics.completed.saturating_add(1);
 
@@ -647,14 +676,14 @@ impl LaneRouter {
     pub fn metrics_snapshot(&self) -> RouterMetricsSnapshot {
         let mut lanes = Vec::new();
         for lane in ProductLane::all() {
-            let state = self.lanes.get(lane).expect("lane state must exist");
+            let state = self.lane_state(*lane).ok();
             lanes.push(LaneMetricsSnapshot {
                 lane: *lane,
-                in_flight: state.metrics.in_flight,
-                queued: state.queue.len(),
-                completed: state.metrics.completed,
-                rejected: state.metrics.rejected,
-                p99_queue_wait_ms: state.metrics.p99_queue_wait_ms(),
+                in_flight: state.map_or(0, |s| s.metrics.in_flight),
+                queued: state.map_or(0, |s| s.queue.len()),
+                completed: state.map_or(0, |s| s.metrics.completed),
+                rejected: state.map_or(0, |s| s.metrics.rejected),
+                p99_queue_wait_ms: state.map_or(0, |s| s.metrics.p99_queue_wait_ms()),
             });
         }
 
@@ -683,7 +712,7 @@ impl LaneRouter {
                     operation_id: operation_id.to_string(),
                     lane_name: ProductLane::Background.as_str().to_string(),
                     now_ms,
-                    lane_in_flight: self.lanes[&ProductLane::Background].metrics.in_flight,
+                    lane_in_flight: self.background_in_flight(),
                     total_in_flight: self.bulkhead.in_flight(),
                     detail: format!("lane_hint_scope_mismatch={raw}"),
                 });
@@ -695,7 +724,7 @@ impl LaneRouter {
                 operation_id: operation_id.to_string(),
                 lane_name: ProductLane::Background.as_str().to_string(),
                 now_ms,
-                lane_in_flight: self.lanes[&ProductLane::Background].metrics.in_flight,
+                lane_in_flight: self.background_in_flight(),
                 total_in_flight: self.bulkhead.in_flight(),
                 detail: format!("unknown_lane_hint={raw}"),
             });
@@ -721,7 +750,7 @@ impl LaneRouter {
             operation_id: operation_id.to_string(),
             lane_name: ProductLane::Background.as_str().to_string(),
             now_ms,
-            lane_in_flight: self.lanes[&ProductLane::Background].metrics.in_flight,
+            lane_in_flight: self.background_in_flight(),
             total_in_flight: self.bulkhead.in_flight(),
             detail: "missing_lane_annotation".to_string(),
         });
@@ -751,7 +780,7 @@ impl LaneRouter {
                 current_in_flight,
                 retry_after_ms,
             }) => {
-                let lane_state = self.lanes.get_mut(&lane).expect("lane state must exist");
+                let lane_state = self.lane_state_mut(lane)?;
                 lane_state.metrics.rejected = lane_state.metrics.rejected.saturating_add(1);
                 self.events.push(LaneEvent {
                     event_code: event_codes::BULKHEAD_OVERLOAD.to_string(),
@@ -780,21 +809,18 @@ impl LaneRouter {
         lanes.sort_by_key(ProductLane::priority_rank);
 
         for lane in lanes {
-            let lane_cfg = self
-                .config
-                .lanes
-                .get(&lane)
-                .expect("lane config must exist")
-                .clone();
+            let lane_cfg = self.lane_config(lane)?.clone();
 
             loop {
                 let (next, expired_queue_ids) = {
-                    let lane_state = self.lanes.get_mut(&lane).expect("lane state must exist");
+                    let lane_state = self.lane_state_mut(lane)?;
                     let mut expired_queue_ids = Vec::new();
 
                     while let Some(front) = lane_state.queue.front() {
                         if now_ms >= front.expires_at_ms {
-                            let expired = lane_state.queue.pop_front().expect("queue front exists");
+                            let Some(expired) = lane_state.queue.pop_front() else {
+                                break;
+                            };
                             expired_queue_ids.push(expired.operation_id);
                             lane_state.metrics.rejected =
                                 lane_state.metrics.rejected.saturating_add(1);
@@ -810,14 +836,14 @@ impl LaneRouter {
                     } else if lane_state.metrics.in_flight >= lane_cfg.max_concurrent {
                         lane_state.metrics.queued = lane_state.queue.len();
                         (None, expired_queue_ids)
-                    } else {
+                    } else if let Some(front) = lane_state.queue.front().cloned() {
                         (
-                            Some((
-                                lane_state.queue.front().expect("queue item exists").clone(),
-                                lane_state.metrics.in_flight,
-                            )),
+                            Some((front, lane_state.metrics.in_flight)),
                             expired_queue_ids,
                         )
+                    } else {
+                        lane_state.metrics.queued = 0;
+                        (None, expired_queue_ids)
                     }
                 };
                 for expired_id in expired_queue_ids {
@@ -835,26 +861,47 @@ impl LaneRouter {
                 ) {
                     Ok(permit) => permit,
                     Err(LaneRouterError::BulkheadOverload { .. }) => {
-                        let lane_state = self.lanes.get_mut(&lane).expect("lane state must exist");
+                        let lane_state = self.lane_state_mut(lane)?;
                         lane_state.metrics.queued = lane_state.queue.len();
                         break;
                     }
                     Err(other) => return Err(other),
                 };
 
-                let lane_in_flight_after = {
-                    let lane_state = self.lanes.get_mut(&lane).expect("lane state must exist");
-                    let promoted = lane_state.queue.pop_front().expect("queue item exists");
-                    self.queued_operation_ids.remove(&promoted.operation_id);
+                let (promoted_op_id, lane_in_flight_after) = {
+                    let lane_state = self.lane_state_mut(lane)?;
+                    let promoted = lane_state.queue.pop_front().ok_or_else(|| {
+                        LaneRouterError::InvalidConfig {
+                            detail: format!(
+                                "missing queued operation for promotion in lane {}",
+                                lane.as_str()
+                            ),
+                        }
+                    })?;
+                    let op_id = promoted.operation_id;
                     lane_state.metrics.queued = lane_state.queue.len();
                     lane_state.metrics.in_flight = lane_state.metrics.in_flight.saturating_add(1);
                     lane_state
                         .metrics
                         .queue_wait_samples_ms
                         .push(now_ms.saturating_sub(queued.enqueued_at_ms));
-                    lane_state.metrics.in_flight
+                    if lane_state.metrics.queue_wait_samples_ms.len() > MAX_QUEUE_WAIT_SAMPLES {
+                        let overflow =
+                            lane_state.metrics.queue_wait_samples_ms.len() - MAX_QUEUE_WAIT_SAMPLES;
+                        lane_state.metrics.queue_wait_samples_ms.drain(0..overflow);
+                    }
+                    (op_id, lane_state.metrics.in_flight)
                 };
+                self.queued_operation_ids.remove(&promoted_op_id);
                 let queued_operation_id = queued.operation_id.clone();
+                if promoted_op_id != queued_operation_id {
+                    return Err(LaneRouterError::InvalidConfig {
+                        detail: format!(
+                            "queued promotion mismatch: expected={} actual={}",
+                            queued_operation_id, promoted_op_id
+                        ),
+                    });
+                }
 
                 self.active.insert(
                     queued_operation_id.clone(),
@@ -1030,6 +1077,29 @@ mod tests {
             .assign_operation(&timed, "timed-dup", None, 3)
             .expect_err("queued duplicate must be rejected");
         assert_eq!(err.code(), error_codes::OPERATION_DUPLICATE);
+    }
+
+    #[test]
+    fn empty_operation_id_is_rejected() {
+        let mut router = LaneRouter::from_runtime_config(&runtime_config()).expect("router");
+        let cx = cx_with_scope("lane.realtime");
+
+        let err = router
+            .assign_operation(&cx, "   ", None, 1)
+            .expect_err("empty operation id should be rejected");
+        assert_eq!(err.code(), error_codes::CONFIG_INVALID);
+    }
+
+    #[test]
+    fn overlong_operation_id_is_rejected() {
+        let mut router = LaneRouter::from_runtime_config(&runtime_config()).expect("router");
+        let cx = cx_with_scope("lane.realtime");
+        let long_id = "x".repeat(MAX_OPERATION_ID_LEN + 1);
+
+        let err = router
+            .assign_operation(&cx, &long_id, None, 1)
+            .expect_err("overlong operation id should be rejected");
+        assert_eq!(err.code(), error_codes::CONFIG_INVALID);
     }
 
     #[test]
@@ -1269,6 +1339,44 @@ mod tests {
 
         let state = router.lanes.get(&ProductLane::Background).expect("state");
         assert!(state.queue.len() <= 2);
+    }
+
+    #[test]
+    fn promotion_queue_wait_samples_are_bounded() {
+        let mut router = LaneRouter::from_runtime_config(&runtime_config()).expect("router");
+
+        let total = MAX_QUEUE_WAIT_SAMPLES + 32;
+        for i in 0..total {
+            let op_id = format!("queued-{i}");
+            {
+                let lane_state = router
+                    .lanes
+                    .get_mut(&ProductLane::Background)
+                    .expect("background lane exists");
+                lane_state.queue.push_back(QueuedOperation {
+                    operation_id: op_id.clone(),
+                    enqueued_at_ms: i as u64,
+                    expires_at_ms: (i as u64).saturating_add(10_000),
+                    cx_id: "cx-bounded".to_string(),
+                    principal: "op".to_string(),
+                });
+                lane_state.metrics.queued = lane_state.queue.len();
+            }
+            router.queued_operation_ids.insert(op_id.clone());
+
+            router
+                .promote_queued((i as u64).saturating_add(1_000))
+                .expect("promotion");
+            router
+                .complete_operation(&op_id, (i as u64).saturating_add(1_001), false)
+                .expect("completion");
+        }
+
+        let lane_state = router
+            .lanes
+            .get(&ProductLane::Background)
+            .expect("background lane exists");
+        assert!(lane_state.metrics.queue_wait_samples_ms.len() <= MAX_QUEUE_WAIT_SAMPLES);
     }
 
     #[test]
