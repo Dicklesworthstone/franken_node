@@ -36,6 +36,28 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     result == 0
 }
 
+/// RAII guard that removes a temp file on drop (unless defused after rename).
+struct TempFileGuard(Option<PathBuf>);
+
+impl TempFileGuard {
+    fn new(path: PathBuf) -> Self {
+        Self(Some(path))
+    }
+
+    /// Prevent cleanup after a successful rename (file no longer at this path).
+    fn defuse(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = &self.0 {
+            let _ = fs::remove_file(path);
+        }
+    }
+}
+
 /// Canonical root pointer filename.
 pub const ROOT_POINTER_FILE: &str = "root_pointer.json";
 /// Canonical detached auth record filename for root pointer bootstrap checks.
@@ -470,6 +492,7 @@ fn publish_root_internal(
     let start = Instant::now();
     let root_path = root_pointer_path(dir);
     let temp_path = dir.join(format!(".{}.tmp.{}", ROOT_POINTER_FILE, Uuid::now_v7()));
+    let mut _temp_guard = TempFileGuard::new(temp_path.clone());
     let old_root = match read_root(dir) {
         Ok(r) => Some(r),
         Err(RootPointerError::MissingRoot { .. }) => None,
@@ -505,6 +528,7 @@ fn publish_root_internal(
         ROOT_POINTER_AUTH_FILE,
         Uuid::now_v7()
     ));
+    let mut _temp_auth_guard = TempFileGuard::new(temp_auth_path.clone());
     let auth_path = root_auth_path(dir);
 
     let mut temp_file = OpenOptions::new()
@@ -580,11 +604,13 @@ fn publish_root_internal(
         path: root_path.display().to_string(),
         source,
     })?;
+    _temp_guard.defuse(); // temp file no longer exists at original path
     fs::rename(&temp_auth_path, &auth_path).map_err(|source| RootPointerError::Io {
         step: "rename_root_auth",
         path: auth_path.display().to_string(),
         source,
     })?;
+    _temp_auth_guard.defuse();
 
     trace.steps.push(PublishStep::Rename);
     maybe_crash(options.crash_after, PublishStep::Rename)?;

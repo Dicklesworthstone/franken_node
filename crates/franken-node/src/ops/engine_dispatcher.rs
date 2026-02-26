@@ -125,9 +125,8 @@ impl EngineDispatcher {
         struct SocketCleanup(String);
         impl Drop for SocketCleanup {
             fn drop(&mut self) {
-                if Path::new(&self.0).exists() {
-                    let _ = std::fs::remove_file(&self.0);
-                }
+                // Remove directly without exists() check to avoid TOCTOU race.
+                let _ = std::fs::remove_file(&self.0);
             }
         }
         let _cleanup_guard = SocketCleanup(socket_path.clone());

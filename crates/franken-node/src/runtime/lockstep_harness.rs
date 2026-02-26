@@ -194,6 +194,9 @@ impl LockstepHarness {
             if start.elapsed() > timeout {
                 let _ = child.kill();
                 let _ = child.wait(); // Reclaim resources
+                // Join reader threads to avoid leaking them after kill.
+                let _ = stdout_thread.join();
+                let _ = stderr_thread.join();
                 anyhow::bail!(
                     "Execution timeout for runtime {} (exceeded 30s limit)",
                     runtime

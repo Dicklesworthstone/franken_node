@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use crate::control_plane::control_epoch::{
     ControlEpoch, EpochArtifactEvent, EpochRejection, EpochRejectionReason, ValidityWindowPolicy,
@@ -296,11 +297,21 @@ pub fn persist_epoch_scoped(
     })
 }
 
+/// Serialize concurrent persist() calls to prevent TOCTOU races on the version check.
+fn persist_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 /// Save rollout state to a JSON file atomically.
 ///
 /// If a file already exists at `path`, the version in it must be less than
 /// the version in `state`, otherwise `StaleVersion` is returned.
 pub fn persist(state: &RolloutState, path: &Path) -> Result<(), PersistError> {
+    let _guard = persist_lock().lock().map_err(|_| PersistError::IoError {
+        message: "persist lock poisoned".to_string(),
+    })?;
+
     // Check for stale version if file exists
     if path.exists() {
         let existing = load(path)?;
@@ -316,8 +327,8 @@ pub fn persist(state: &RolloutState, path: &Path) -> Result<(), PersistError> {
         message: e.to_string(),
     })?;
 
-    // Write to temp file then rename for atomicity
-    let tmp_path = path.with_extension("tmp");
+    // Write to temp file then rename for atomicity (UUID suffix avoids collisions).
+    let tmp_path = path.with_extension(format!("tmp.{}", uuid::Uuid::now_v7()));
     std::fs::write(&tmp_path, &json).map_err(|e| PersistError::IoError {
         message: e.to_string(),
     })?;
