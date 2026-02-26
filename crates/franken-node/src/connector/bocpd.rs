@@ -505,13 +505,18 @@ impl BocpdDetector {
                 ObservationModel::Poisson(_) => {
                     if r < self.poisson_stats.len() {
                         self.poisson_stats[r] = self.poisson_stats[r - 1].clone();
-                        self.poisson_stats[r].update(x);
+                        self.poisson_stats[r].update(x.max(0.0));
                     }
                 }
                 ObservationModel::Categorical(_) => {
                     if r < self.categorical_stats.len() {
                         self.categorical_stats[r] = self.categorical_stats[r - 1].clone();
-                        self.categorical_stats[r].update(x as usize);
+                        let cat = if x < 0.0 || x.is_nan() {
+                            usize::MAX
+                        } else {
+                            x as usize
+                        };
+                        self.categorical_stats[r].update(cat);
                     }
                 }
             }
@@ -523,12 +528,17 @@ impl BocpdDetector {
         }
         if !self.poisson_stats.is_empty() {
             self.poisson_stats[0] = PoissonSuffStats::new();
-            self.poisson_stats[0].update(x);
+            self.poisson_stats[0].update(x.max(0.0));
         }
         if !self.categorical_stats.is_empty() {
             let k = self.categorical_stats[0].counts.len();
             self.categorical_stats[0] = CategoricalSuffStats::new(k);
-            self.categorical_stats[0].update(x as usize);
+            let cat = if x < 0.0 || x.is_nan() {
+                usize::MAX
+            } else {
+                x as usize
+            };
+            self.categorical_stats[0].update(cat);
         }
 
         // Track regime statistics.

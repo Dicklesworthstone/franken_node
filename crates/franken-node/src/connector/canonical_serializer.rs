@@ -540,9 +540,10 @@ fn default_schema(object_type: TrustObjectType) -> CanonicalSchema {
 
 /// Canonical encoding: 4-byte big-endian length prefix + payload.
 fn canonical_encode(payload: &[u8]) -> Result<Vec<u8>, SerializerError> {
-    let len = u32::try_from(payload.len()).map_err(|_| SerializerError::PreimageConstructionFailed {
-        reason: "payload too large for canonical encoding (exceeds 4GB)".to_string(),
-    })?;
+    let len =
+        u32::try_from(payload.len()).map_err(|_| SerializerError::PreimageConstructionFailed {
+            reason: "payload too large for canonical encoding (exceeds 4GB)".to_string(),
+        })?;
     let mut encoded = Vec::with_capacity(4 + payload.len());
     encoded.extend_from_slice(&len.to_be_bytes());
     encoded.extend_from_slice(payload);

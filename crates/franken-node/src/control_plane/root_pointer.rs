@@ -476,17 +476,12 @@ fn publish_root_internal(
         Err(e) => return Err(e),
     };
 
-    let epoch_regression = old_root
-        .as_ref()
-        .is_some_and(|previous| root.epoch <= previous.epoch);
-    if epoch_regression {
-        let current = old_root
-            .as_ref()
-            .map(|previous| previous.epoch)
-            .expect("regression check requires old root");
+    if let Some(previous) = &old_root
+        && root.epoch <= previous.epoch
+    {
         return Err(RootPointerError::EpochRegression {
             attempted: root.epoch,
-            current,
+            current: previous.epoch,
         });
     }
 

@@ -620,8 +620,10 @@ impl TokenValidator {
             return Err(err);
         }
 
-        // All checks passed: record leaf nonce and emit success event.
-        self.seen_nonces.insert(leaf.nonce.clone());
+        // All checks passed: record all nonces and emit success event.
+        for token in tokens.iter() {
+            self.seen_nonces.insert(token.nonce.clone());
+        }
         self.tokens_verified += 1;
         self.events.push(TokenEvent {
             event_code: ABT_003.to_string(),

@@ -1483,8 +1483,8 @@ mod tests {
 
     #[test]
     fn format_iso_timestamp_fallback_is_valid_iso8601() {
-        // u64::MAX overflows i64, triggering the fallback path
-        let ts = format_iso_timestamp(u64::MAX);
+        // 10 trillion seconds exceeds chrono's max supported date, triggering the fallback path
+        let ts = format_iso_timestamp(10_000_000_000_000);
         assert!(ts.contains('T'), "fallback must be valid ISO8601: {ts}");
         assert!(ts.ends_with('Z'), "fallback must end with Z: {ts}");
     }

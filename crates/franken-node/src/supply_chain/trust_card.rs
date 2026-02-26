@@ -1291,8 +1291,8 @@ mod tests {
 
     #[test]
     fn timestamp_from_secs_fallback_is_valid_iso8601() {
-        // u64::MAX overflows i64, so from_timestamp returns None → fallback fires
-        let ts = timestamp_from_secs(u64::MAX);
+        // 10 trillion seconds exceeds chrono's max supported date, so from_timestamp returns None → fallback fires
+        let ts = timestamp_from_secs(10_000_000_000_000);
         assert!(ts.contains('T'), "fallback must be valid ISO8601: {ts}");
         assert!(ts.ends_with('Z'), "fallback must end with Z: {ts}");
         assert!(

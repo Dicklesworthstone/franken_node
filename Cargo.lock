@@ -429,6 +429,7 @@ dependencies = [
  "serde_cbor",
  "serde_json",
  "sha2",
+ "subtle",
  "syn",
  "tempfile",
  "thiserror",

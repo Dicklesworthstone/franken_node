@@ -18,11 +18,8 @@ pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let mut acc: u8 = 0;
-    for (x, y) in a.iter().zip(b.iter()) {
-        acc |= x ^ y;
-    }
-    acc == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 #[cfg(test)]
