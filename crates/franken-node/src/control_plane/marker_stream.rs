@@ -143,8 +143,13 @@ fn compare_marker_hash_at(
     comparisons: &mut Vec<DivergenceComparison>,
 ) -> bool {
     let index = sequence as usize;
-    let local_hash = &local.markers[index].marker_hash;
-    let remote_hash = &remote.markers[index].marker_hash;
+    let (Some(local_marker), Some(remote_marker)) =
+        (local.markers.get(index), remote.markers.get(index))
+    else {
+        return false;
+    };
+    let local_hash = &local_marker.marker_hash;
+    let remote_hash = &remote_marker.marker_hash;
     let matched = crate::security::constant_time::ct_eq(local_hash, remote_hash);
 
     comparisons.push(DivergenceComparison {

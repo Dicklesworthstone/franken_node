@@ -315,8 +315,13 @@ impl DivergenceDetector {
         self.history.len()
     }
 
-    /// Record a state vector into history.
+    /// Record a state vector into history. Bounded to 10 000 entries to prevent unbounded growth.
     pub fn record_state(&mut self, sv: StateVector) {
+        const MAX_HISTORY: usize = 10_000;
+        if self.history.len() >= MAX_HISTORY {
+            // Drop the oldest half to amortize the cost.
+            self.history.drain(..MAX_HISTORY / 2);
+        }
         self.history.push(sv);
     }
 

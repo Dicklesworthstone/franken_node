@@ -290,7 +290,13 @@ pub fn mmr_inclusion_proof(
         .collect();
 
     let leaf_index = seq as usize;
-    let leaf_hash = leaf_hashes[leaf_index].clone();
+    let leaf_hash = leaf_hashes
+        .get(leaf_index)
+        .cloned()
+        .ok_or(ProofError::SequenceOutOfRange {
+            sequence: seq,
+            tree_size: leaf_hashes.len() as u64,
+        })?;
     let audit_path =
         merkle_audit_path(&leaf_hashes, leaf_index).ok_or(ProofError::InvalidProof {
             reason: format!("failed to construct audit path for seq {seq}"),

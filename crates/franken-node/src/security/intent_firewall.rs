@@ -489,28 +489,33 @@ impl IntentClassifier {
             return Some(IntentClassification::SideChannel);
         }
 
+        // Path segment matching: check that the keyword appears as a path segment
+        // (preceded by '/') to prevent injection via substrings like "/data/health/steal".
+        let path_lower = effect.path.to_lowercase();
+        let has_segment = |seg: &str| path_lower.split('/').any(|s| s == seg);
+
         // Rule 4: Health check.
-        if effect.path.contains("/health") || effect.path.contains("/ping") {
+        if has_segment("health") || has_segment("ping") {
             return Some(IntentClassification::HealthCheck);
         }
 
         // Rule 5: Config sync.
-        if effect.path.contains("/config") || effect.path.contains("/settings") {
+        if has_segment("config") || has_segment("settings") {
             return Some(IntentClassification::ConfigSync);
         }
 
         // Rule 6: Webhook dispatch.
-        if effect.path.contains("/webhook") || effect.path.contains("/hook") {
+        if has_segment("webhook") || has_segment("hook") {
             return Some(IntentClassification::WebhookDispatch);
         }
 
         // Rule 7: Analytics export.
-        if effect.path.contains("/analytics") || effect.path.contains("/telemetry") {
+        if has_segment("analytics") || has_segment("telemetry") {
             return Some(IntentClassification::AnalyticsExport);
         }
 
         // Rule 8: Service discovery.
-        if effect.path.contains("/discover") || effect.path.contains("/services") {
+        if has_segment("discover") || has_segment("services") {
             return Some(IntentClassification::ServiceDiscovery);
         }
 

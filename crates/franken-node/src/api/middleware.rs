@@ -276,6 +276,11 @@ pub struct RateLimiter {
 
 impl RateLimiter {
     pub fn new(config: RateLimitConfig) -> Self {
+        // Ensure sustained_rps >= 1 to prevent division-by-zero in check().
+        let mut config = config;
+        if config.sustained_rps == 0 {
+            config.sustained_rps = 1;
+        }
         Self {
             tokens: f64::from(config.burst_size),
             last_check: Instant::now(),

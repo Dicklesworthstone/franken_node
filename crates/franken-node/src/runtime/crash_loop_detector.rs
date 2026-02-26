@@ -163,6 +163,9 @@ impl CrashLoopDetector {
     /// Record a crash event. Returns the current crash count within the window.
     pub fn record_crash(&mut self, _event: &CrashEvent, epoch_secs: u64) -> u32 {
         self.crash_times.push(epoch_secs);
+        // Prune timestamps outside the sliding window to bound memory.
+        let cutoff = epoch_secs.saturating_sub(self.config.window_secs);
+        self.crash_times.retain(|&t| t >= cutoff);
         self.crashes_in_window(epoch_secs)
     }
 
