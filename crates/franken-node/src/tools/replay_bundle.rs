@@ -318,7 +318,10 @@ pub fn generate_replay_bundle(
 
 pub fn validate_bundle_integrity(bundle: &ReplayBundle) -> Result<bool, ReplayBundleError> {
     let recomputed = compute_integrity_hash(bundle)?;
-    Ok(recomputed == bundle.integrity_hash)
+    Ok(crate::security::constant_time::ct_eq(
+        &recomputed,
+        &bundle.integrity_hash,
+    ))
 }
 
 pub fn replay_bundle(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundleError> {
@@ -345,7 +348,10 @@ pub fn replay_bundle(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundl
     Ok(ReplayOutcome {
         incident_id: bundle.incident_id.clone(),
         expected_sequence_hash: bundle.manifest.decision_sequence_hash.clone(),
-        matched: replayed_sequence_hash == bundle.manifest.decision_sequence_hash,
+        matched: crate::security::constant_time::ct_eq(
+            &replayed_sequence_hash,
+            &bundle.manifest.decision_sequence_hash,
+        ),
         replayed_sequence_hash,
         event_count: replay_timeline.len(),
     })

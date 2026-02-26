@@ -322,7 +322,7 @@ impl VerifierSdk {
         // Hash match check (compare artifact_hash to self-computed hash of artifact_id)
         let computed = deterministic_hash(&request.artifact_id);
         let hash_match = if self.config.require_hash_match {
-            computed == request.artifact_hash
+            crate::security::constant_time::ct_eq(&computed, &request.artifact_hash)
         } else {
             true
         };
@@ -450,7 +450,7 @@ impl VerifierSdk {
         let replay_hash = deterministic_hash(&input_data);
 
         let replay_match = if let Some(first_output) = capsule.expected_outputs.first() {
-            first_output.output_hash == replay_hash
+            crate::security::constant_time::ct_eq(&first_output.output_hash, &replay_hash)
         } else {
             false
         };

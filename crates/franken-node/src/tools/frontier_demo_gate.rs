@@ -224,7 +224,10 @@ impl ReproducibilityManifest {
 
     /// Validate that the stored fingerprint matches the computed one.
     pub fn validate_fingerprint(&self) -> bool {
-        self.manifest_fingerprint == self.compute_fingerprint()
+        crate::security::constant_time::ct_eq(
+            &self.manifest_fingerprint,
+            &self.compute_fingerprint(),
+        )
     }
 }
 
@@ -270,7 +273,7 @@ impl ExternalVerifierBootstrap {
         let computed = hex::encode(Sha256::digest(
             [b"frontier_demo_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
         ));
-        computed == self.expected_output_hash
+        crate::security::constant_time::ct_eq(&computed, &self.expected_output_hash)
     }
 }
 

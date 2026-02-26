@@ -235,7 +235,10 @@ pub fn replay_and_verify(capsule: &ReplayCapsule) -> Result<bool, CapsuleError> 
     let actual_hash = replay(capsule)?;
 
     if let Some(first_output) = capsule.expected_outputs.first() {
-        Ok(first_output.output_hash == actual_hash)
+        Ok(crate::security::constant_time::ct_eq(
+            &first_output.output_hash,
+            &actual_hash,
+        ))
     } else {
         Err(CapsuleError::NoOutputs)
     }
