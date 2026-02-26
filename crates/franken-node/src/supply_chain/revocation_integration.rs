@@ -231,8 +231,9 @@ impl RevocationIntegrationEngine {
     }
 
     pub fn init_zone(&mut self, zone_id: &str) {
-        // init_zone returns Err only for empty zone_id; production callers use non-empty literals
-        let _ = self.registry.init_zone(zone_id);
+        self.registry
+            .init_zone(zone_id)
+            .expect("zone_id must not be empty");
         self.last_seen_heads.entry(zone_id.to_string()).or_insert(0);
     }
 

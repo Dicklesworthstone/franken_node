@@ -221,7 +221,7 @@ pub struct ManifestComponent {
 impl RestoreManifest {
     /// Compute canonical bytes for hashing/signing.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        serde_json::to_vec(self).unwrap_or_default()
+        serde_json::to_vec(self).expect("RestoreManifest contains only String/BTreeMap/u32 fields")
     }
 
     /// Compute SHA-256 of the canonical manifest bytes.
@@ -246,7 +246,8 @@ pub struct StateSnapshot {
 impl StateSnapshot {
     /// Compute a deterministic hash of this snapshot.
     pub fn snapshot_hash(&self) -> String {
-        let data = serde_json::to_vec(self).unwrap_or_default();
+        let data =
+            serde_json::to_vec(self).expect("StateSnapshot contains only String/BTreeMap fields");
         sha256_hex(&data)
     }
 

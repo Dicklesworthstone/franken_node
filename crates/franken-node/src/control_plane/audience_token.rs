@@ -641,7 +641,13 @@ impl TokenValidator {
         }
 
         // INV-ABT-AUDIENCE: Check audience match on leaf token.
-        let leaf = chain.leaf().unwrap();
+        let Some(leaf) = chain.leaf() else {
+            self.tokens_rejected += 1;
+            return Err(TokenError::new(
+                ERR_ABT_ATTENUATION_VIOLATION,
+                "token chain missing leaf token".to_string(),
+            ));
+        };
         if !leaf.audience_contains(requester_id) {
             self.tokens_rejected += 1;
             let err = TokenError::audience_mismatch(requester_id, &leaf.audience);
@@ -664,7 +670,6 @@ impl TokenValidator {
         for token in tokens.iter() {
             self.seen_nonces.insert(token.nonce.clone());
         }
-        let leaf = chain.leaf().unwrap();
         self.tokens_verified += 1;
         self.events.push(TokenEvent {
             event_code: ABT_003.to_string(),

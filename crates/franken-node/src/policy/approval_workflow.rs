@@ -269,7 +269,10 @@ impl PolicyChangeEngine {
                 new_value: d.old_value.clone(),
             })
             .collect();
-        let rollback_command = serde_json::to_string(&rollback_diff).ok();
+        let rollback_command = Some(
+            serde_json::to_string(&rollback_diff)
+                .expect("PolicyDiffEntry contains only String fields"),
+        );
 
         let proposal_id = proposal.proposal_id.clone();
         let proposed_by = proposal.proposed_by.clone();
@@ -326,7 +329,9 @@ impl PolicyChangeEngine {
         let signed_at = signature.signed_at.clone();
 
         // Verify key-role separation BEFORE mutation: proposer cannot be sole approver.
-        if record.approvals.is_empty() && signer == record.proposal.proposed_by {
+        if record.approvals.is_empty()
+            && signer.to_lowercase() == record.proposal.proposed_by.to_lowercase()
+        {
             return Err(PolicyChangeError::new(
                 ERR_SOLE_APPROVER,
                 "Proposer cannot be the sole approver",
