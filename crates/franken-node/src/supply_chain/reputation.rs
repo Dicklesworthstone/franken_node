@@ -540,7 +540,7 @@ impl ReputationRegistry {
         let rate = config.daily_rate;
 
         // Exponential decay toward baseline.
-        let decay_factor = (1.0 - rate).powi(days_elapsed as i32);
+        let decay_factor = (1.0 - rate).powi(days_elapsed.min(i32::MAX as u32) as i32);
         let new_score = (baseline + (old_score - baseline) * decay_factor).clamp(0.0, 100.0);
         let new_tier = ReputationTier::from_score(new_score);
 

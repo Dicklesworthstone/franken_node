@@ -500,7 +500,7 @@ impl IncidentBundleStore {
         if self.max_bytes == 0 {
             return 100;
         }
-        ((self.total_bytes * 100) / self.max_bytes) as u8
+        ((self.total_bytes as u128 * 100) / self.max_bytes as u128) as u8
     }
 
     /// Check if storage is at warning level.

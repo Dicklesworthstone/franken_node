@@ -433,9 +433,10 @@ impl Supervisor {
             .retain(|&ts| now_ms.saturating_sub(ts) < self.time_window_ms);
 
         // INV-SUP-BUDGET-BOUND: check budget.
-        if self.restart_timestamps.len() as u32 >= self.max_restarts {
+        let restart_count = u32::try_from(self.restart_timestamps.len()).unwrap_or(u32::MAX);
+        if restart_count >= self.max_restarts {
             self.events.push(SupervisionEvent::BudgetExhausted {
-                restart_count: self.restart_timestamps.len() as u32,
+                restart_count,
                 max_restarts: self.max_restarts,
             });
 
@@ -509,7 +510,7 @@ impl Supervisor {
     ///
     /// Enforces `INV-SUP-SHUTDOWN-ORDER` and `INV-SUP-TIMEOUT-ENFORCED`.
     pub fn shutdown(&mut self) -> ShutdownReport {
-        let child_count = self.children.len() as u32;
+        let child_count = u32::try_from(self.children.len()).unwrap_or(u32::MAX);
         self.events
             .push(SupervisionEvent::ShutdownStarted { child_count });
 
@@ -562,13 +563,15 @@ impl Supervisor {
     ///
     /// Emits `SUP-008` (supervisor.health_report).
     pub fn health_status(&self) -> SupervisorHealth {
-        let active_children = self
-            .children
-            .values()
-            .filter(|r| r.state == ChildState::Running)
-            .count() as u32;
+        let active_children = u32::try_from(
+            self.children
+                .values()
+                .filter(|r| r.state == ChildState::Running)
+                .count(),
+        )
+        .unwrap_or(u32::MAX);
 
-        let restart_count = self.restart_timestamps.len() as u32;
+        let restart_count = u32::try_from(self.restart_timestamps.len()).unwrap_or(u32::MAX);
         let budget_remaining = self.max_restarts.saturating_sub(restart_count);
 
         SupervisorHealth {

@@ -128,11 +128,13 @@ impl ResourceSnapshot {
 
     /// Compute delta between two snapshots for leak detection.
     pub fn delta(&self, after: &ResourceSnapshot) -> ResourceDelta {
+        // Use i128 intermediate to avoid wrapping when u64 values exceed i64::MAX.
         ResourceDelta {
-            file_handles: after.file_handles as i64 - self.file_handles as i64,
-            locks_held: after.locks_held as i64 - self.locks_held as i64,
-            memory_allocations: after.memory_allocations as i64 - self.memory_allocations as i64,
-            temp_files: after.temp_files as i64 - self.temp_files as i64,
+            file_handles: (after.file_handles as i128 - self.file_handles as i128) as i64,
+            locks_held: (after.locks_held as i128 - self.locks_held as i128) as i64,
+            memory_allocations: (after.memory_allocations as i128 - self.memory_allocations as i128)
+                as i64,
+            temp_files: (after.temp_files as i128 - self.temp_files as i128) as i64,
         }
     }
 }
