@@ -719,9 +719,7 @@ impl RuntimeOracle {
             } else if div.risk_tier.requires_receipt() {
                 // Check if a receipt has been issued for this divergence and is valid.
                 let has_receipt = self.receipts.values().any(|r| {
-                    r.divergence_id == *id
-                        && !r.is_expired(now_epoch_secs)
-                        && r.verify_l1_linkage()
+                    r.divergence_id == *id && !r.is_expired(now_epoch_secs) && r.verify_l1_linkage()
                 });
                 if !has_receipt {
                     pending_receipt.push(id.clone());

@@ -264,11 +264,17 @@ impl LockstepHarness {
         for line in raw_str.lines() {
             let mut current = line.trim();
             // Strip [pid NNN] prefix
-            if current.starts_with("[pid ") && let Some(idx) = current.find(']') {
+            if current.starts_with("[pid ")
+                && let Some(idx) = current.find(']')
+            {
                 current = current[idx + 1..].trim();
             }
             // Strip leading numeric timestamp (can contain digits and dots)
-            if let Some(idx) = current.find(' ') && current[..idx].chars().all(|c| c.is_ascii_digit() || c == '.') {
+            if let Some(idx) = current.find(' ')
+                && current[..idx]
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || c == '.')
+            {
                 current = current[idx + 1..].trim();
             }
 

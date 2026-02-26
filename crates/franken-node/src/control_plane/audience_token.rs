@@ -302,7 +302,9 @@ impl<'de> Deserialize<'de> for TokenChain {
             .map_err(|e| serde::de::Error::custom(e.message))?;
 
         for token in raw.tokens.into_iter().skip(1) {
-            chain.append(token).map_err(|e| serde::de::Error::custom(e.message))?;
+            chain
+                .append(token)
+                .map_err(|e| serde::de::Error::custom(e.message))?;
         }
 
         Ok(chain)

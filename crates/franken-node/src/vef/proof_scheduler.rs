@@ -371,7 +371,8 @@ impl VefProofScheduler {
         let mut compute_used = 0_u64;
         let mut memory_used = 0_u64;
         for job in pending.into_iter().take(available_slots) {
-            if (compute_used + job.estimated_compute_millis > self.policy.max_compute_millis_per_tick
+            if (compute_used + job.estimated_compute_millis
+                > self.policy.max_compute_millis_per_tick
                 || memory_used + job.estimated_memory_mib > self.policy.max_memory_mib_per_tick)
                 && (compute_used > 0 || memory_used > 0)
             {

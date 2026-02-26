@@ -755,7 +755,10 @@ mod tests {
         // Overall should FAIL because extra.bin is injected unlisted malware.
         assert!(!report.overall_pass);
         assert!(
-            report.results.iter().any(|r| r.artifact_name == "extra.bin" && !r.passed)
+            report
+                .results
+                .iter()
+                .any(|r| r.artifact_name == "extra.bin" && !r.passed)
         );
     }
 
