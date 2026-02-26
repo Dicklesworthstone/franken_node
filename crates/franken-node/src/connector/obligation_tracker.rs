@@ -423,7 +423,7 @@ impl ObligationTracker {
             .iter()
             .filter(|(_, o)| {
                 o.state == ObligationState::Reserved
-                    && now_ms.saturating_sub(o.reserved_at_ms) > timeout_ms
+                    && now_ms.saturating_sub(o.reserved_at_ms) >= timeout_ms
             })
             .map(|(k, _)| k.clone())
             .collect();
@@ -1017,12 +1017,12 @@ mod tests {
         // Commit id2 so it's no longer reserved
         t.commit(&id2, 2050, "t4").unwrap();
 
-        // Scan at 5000ms: id1 reserved at 1000 -> 4s elapsed > 2s timeout -> leaked
-        //                  id3 reserved at 3000 -> 2s elapsed = timeout -> NOT leaked (must exceed)
+        // Scan at 5000ms: id1 reserved at 1000 -> 4s elapsed >= 2s timeout -> leaked
+        //                  id3 reserved at 3000 -> 2s elapsed >= 2s timeout -> leaked (fail-closed at boundary)
         let result = t.run_leak_scan(5000, "scan1");
-        assert_eq!(result.leaked, 1);
+        assert_eq!(result.leaked, 2);
         assert!(result.leaked_ids.contains(&id1.0));
-        assert!(!result.leaked_ids.contains(&id3.0));
+        assert!(result.leaked_ids.contains(&id3.0));
     }
 
     // 33. ObligationGuard marks committed
@@ -1142,5 +1142,20 @@ mod tests {
     #[test]
     fn test_budget_exceeded_error_code() {
         assert!(!error_codes::ERR_OBL_BUDGET_EXCEEDED.is_empty());
+    }
+
+    // 43. Regression: obligation reserved exactly at timeout boundary must be detected as leaked.
+    // Before fix: `>` missed the exact boundary, requiring timeout_ms + 1 to detect.
+    #[test]
+    fn test_leak_scan_exact_timeout_boundary() {
+        let mut t = ObligationTracker::with_leak_timeout(2); // 2s = 2000ms timeout
+        let id = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        // Scan at exactly reserved_at + timeout = 1000 + 2000 = 3000
+        let result = t.run_leak_scan(3000, "boundary-scan");
+        assert_eq!(
+            result.leaked, 1,
+            "obligation at exact timeout boundary must be detected as leaked (fail-closed)"
+        );
+        assert!(result.leaked_ids.contains(&id.0));
     }
 }

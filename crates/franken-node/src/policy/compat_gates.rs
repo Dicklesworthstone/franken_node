@@ -738,7 +738,9 @@ impl CompatGateEvaluator {
             return Ok(());
         }
 
-        let mode_b = config_b.unwrap().mode;
+        let mode_b = config_b
+            .expect("guarded: is_none() returns Ok(()) above")
+            .mode;
 
         // For each shim, the decision in scope_b must be determined solely by
         // scope_b's mode, not scope_a's state. Since our gate evaluation is

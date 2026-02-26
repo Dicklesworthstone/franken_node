@@ -162,8 +162,14 @@ impl LockstepHarness {
             })?;
 
         // Drain stdout and stderr in background threads to prevent pipe buffer deadlock
-        let mut stdout_handle = child.stdout.take().unwrap();
-        let mut stderr_handle = child.stderr.take().unwrap();
+        let mut stdout_handle = child
+            .stdout
+            .take()
+            .expect("invariant: stdout piped via Stdio::piped()");
+        let mut stderr_handle = child
+            .stderr
+            .take()
+            .expect("invariant: stderr piped via Stdio::piped()");
 
         let stdout_thread = thread::spawn(move || {
             let mut buf = Vec::new();

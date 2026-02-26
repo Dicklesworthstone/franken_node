@@ -250,7 +250,11 @@ impl MigrationValidationCohorts {
             .collect();
 
         let det = prior_hashes.is_empty() || prior_hashes.iter().all(|h| *h == outcome_hash);
-        let run = self.runs.iter_mut().find(|r| r.run_id == run_id).unwrap();
+        let run = self
+            .runs
+            .iter_mut()
+            .find(|r| r.run_id == run_id)
+            .expect("validated: run checked via find() at function entry");
         run.deterministic = det;
 
         self.log(

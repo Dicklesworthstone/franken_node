@@ -393,7 +393,7 @@ impl TrustFabricNode {
 
     /// Compare digests with another node.
     pub fn compare_digest(&self, remote: &TrustStateVector) -> bool {
-        self.state.digest == remote.digest
+        crate::security::constant_time::ct_eq_bytes(&self.state.digest, &remote.digest)
     }
 
     /// Gossip: receive remote state and merge.
@@ -410,7 +410,7 @@ impl TrustFabricNode {
             });
         }
 
-        if self.state.digest == remote.digest {
+        if crate::security::constant_time::ct_eq_bytes(&self.state.digest, &remote.digest) {
             return Ok(TrustStateDelta {
                 new_cards: BTreeSet::new(),
                 new_extensions: BTreeSet::new(),

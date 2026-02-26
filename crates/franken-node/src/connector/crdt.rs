@@ -251,8 +251,8 @@ impl PnCounter {
         self.negative.increment(replica_id, amount);
     }
 
-    pub fn value(&self) -> i64 {
-        self.positive.value() as i64 - self.negative.value() as i64
+    pub fn value(&self) -> i128 {
+        self.positive.value() as i128 - self.negative.value() as i128
     }
 
     pub fn merge(&self, other: &PnCounter) -> Result<PnCounter, CrdtError> {

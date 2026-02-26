@@ -359,8 +359,11 @@ impl BenchmarkMethodology {
             ));
         }
 
-        // Now mutate
-        let pub_entry = self.publications.get_mut(pub_id).unwrap();
+        // Now mutate — publication validated via immutable get() above
+        let pub_entry = self
+            .publications
+            .get_mut(pub_id)
+            .expect("validated: publication checked via immutable get()");
         pub_entry.status = new_status;
         pub_entry.updated_at = Utc::now().to_rfc3339();
 
@@ -399,7 +402,7 @@ impl BenchmarkMethodology {
 
         self.publications
             .get_mut(pub_id)
-            .unwrap()
+            .expect("validated: publication existence checked via get() above")
             .citations
             .push(citation);
         Ok(())

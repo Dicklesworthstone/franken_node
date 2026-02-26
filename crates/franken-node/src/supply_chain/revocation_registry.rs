@@ -33,6 +33,9 @@ pub enum RevocationError {
     RecoveryFailed {
         reason: String,
     },
+    InvalidInput {
+        detail: String,
+    },
 }
 
 impl RevocationError {
@@ -41,6 +44,7 @@ impl RevocationError {
             Self::StaleHead { .. } => "REV_STALE_HEAD",
             Self::ZoneNotFound { .. } => "REV_ZONE_NOT_FOUND",
             Self::RecoveryFailed { .. } => "REV_RECOVERY_FAILED",
+            Self::InvalidInput { .. } => "REV_INVALID_INPUT",
         }
     }
 }
@@ -63,6 +67,9 @@ impl std::fmt::Display for RevocationError {
             }
             Self::RecoveryFailed { reason } => {
                 write!(f, "REV_RECOVERY_FAILED: {reason}")
+            }
+            Self::InvalidInput { detail } => {
+                write!(f, "REV_INVALID_INPUT: {detail}")
             }
         }
     }
@@ -97,9 +104,15 @@ impl RevocationRegistry {
     }
 
     /// Initialize a zone with head at sequence 0.
-    pub fn init_zone(&mut self, zone_id: &str) {
+    pub fn init_zone(&mut self, zone_id: &str) -> Result<(), RevocationError> {
+        if zone_id.is_empty() {
+            return Err(RevocationError::InvalidInput {
+                detail: "zone_id must not be empty".to_string(),
+            });
+        }
         self.heads.entry(zone_id.to_string()).or_insert(0);
         self.revoked.entry(zone_id.to_string()).or_default();
+        Ok(())
     }
 
     /// Get the current head sequence for a zone.
@@ -118,6 +131,11 @@ impl RevocationRegistry {
     /// INV-REV-STALE-REJECT: rejects offered <= current.
     /// INV-REV-ZONE-ISOLATED: operates on a single zone.
     pub fn advance_head(&mut self, head: RevocationHead) -> Result<u64, RevocationError> {
+        if head.zone_id.is_empty() {
+            return Err(RevocationError::InvalidInput {
+                detail: "zone_id must not be empty".to_string(),
+            });
+        }
         let current = self.heads.get(&head.zone_id).copied().unwrap_or(0);
 
         // INV-REV-MONOTONIC + INV-REV-STALE-REJECT
@@ -182,7 +200,11 @@ impl RevocationRegistry {
 
         for entry in log {
             // During recovery, initialize zone if needed
-            registry.init_zone(&entry.zone_id);
+            registry
+                .init_zone(&entry.zone_id)
+                .map_err(|e| RevocationError::RecoveryFailed {
+                    reason: format!("invalid zone_id in log: {e}"),
+                })?;
             // Re-apply each log entry; must succeed in log order
             let current = registry.heads.get(&entry.zone_id).copied().unwrap_or(0);
             if entry.sequence <= current {
@@ -239,7 +261,7 @@ mod tests {
     #[test]
     fn advance_head_succeeds() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         let result = reg.advance_head(head("zone-a", 1, "art-1"));
         assert_eq!(result.unwrap(), 1);
         assert_eq!(reg.current_head("zone-a").unwrap(), 1);
@@ -248,7 +270,7 @@ mod tests {
     #[test]
     fn monotonic_advance() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 1, "art-1")).unwrap();
         reg.advance_head(head("zone-a", 2, "art-2")).unwrap();
         reg.advance_head(head("zone-a", 5, "art-3")).unwrap();
@@ -258,7 +280,7 @@ mod tests {
     #[test]
     fn stale_head_rejected() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 3, "art-1")).unwrap();
         let result = reg.advance_head(head("zone-a", 2, "art-2"));
         let err = result.unwrap_err();
@@ -268,7 +290,7 @@ mod tests {
     #[test]
     fn equal_sequence_rejected() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 3, "art-1")).unwrap();
         let result = reg.advance_head(head("zone-a", 3, "art-2"));
         assert_eq!(result.unwrap_err().code(), "REV_STALE_HEAD");
@@ -277,8 +299,8 @@ mod tests {
     #[test]
     fn zone_isolation() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
-        reg.init_zone("zone-b");
+        reg.init_zone("zone-a").unwrap();
+        reg.init_zone("zone-b").unwrap();
         reg.advance_head(head("zone-a", 5, "art-1")).unwrap();
         reg.advance_head(head("zone-b", 1, "art-2")).unwrap();
         assert_eq!(reg.current_head("zone-a").unwrap(), 5);
@@ -295,7 +317,7 @@ mod tests {
     #[test]
     fn is_revoked_true() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 1, "art-bad")).unwrap();
         assert!(reg.is_revoked("zone-a", "art-bad").unwrap());
     }
@@ -303,7 +325,7 @@ mod tests {
     #[test]
     fn is_revoked_false() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 1, "art-bad")).unwrap();
         assert!(!reg.is_revoked("zone-a", "art-good").unwrap());
     }
@@ -348,7 +370,7 @@ mod tests {
     #[test]
     fn canonical_log_preserved() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 1, "art-1")).unwrap();
         reg.advance_head(head("zone-a", 2, "art-2")).unwrap();
         assert_eq!(reg.canonical_log().len(), 2);
@@ -357,7 +379,7 @@ mod tests {
     #[test]
     fn audit_trail_on_advance() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 1, "art-1")).unwrap();
         assert_eq!(reg.audits.len(), 1);
         assert_eq!(reg.audits[0].action, "advanced");
@@ -366,7 +388,7 @@ mod tests {
     #[test]
     fn audit_trail_on_stale_reject() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 2, "art-1")).unwrap();
         let _ = reg.advance_head(head("zone-a", 1, "art-2"));
         assert_eq!(reg.audits.len(), 2);
@@ -376,15 +398,15 @@ mod tests {
     #[test]
     fn zone_count() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("a");
-        reg.init_zone("b");
+        reg.init_zone("a").unwrap();
+        reg.init_zone("b").unwrap();
         assert_eq!(reg.zone_count(), 2);
     }
 
     #[test]
     fn total_revocations() {
         let mut reg = RevocationRegistry::new();
-        reg.init_zone("zone-a");
+        reg.init_zone("zone-a").unwrap();
         reg.advance_head(head("zone-a", 1, "art-1")).unwrap();
         reg.advance_head(head("zone-a", 2, "art-2")).unwrap();
         assert_eq!(reg.total_revocations(), 2);

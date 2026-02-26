@@ -189,7 +189,7 @@ impl ProofExecutor {
             };
         }
 
-        if receipt.expires_epoch_ms < self.config.now_epoch_ms {
+        if receipt.expires_epoch_ms <= self.config.now_epoch_ms {
             return ActivationDecision::Degraded {
                 reason: GuardFailureReason::ExpiredReceipt,
                 baseline_mode: BaselineMode::DeterministicSafe,
@@ -510,6 +510,36 @@ mod tests {
         assert_eq!(
             out.output_digest,
             deterministic_baseline_digest(b"safe-baseline")
+        );
+    }
+
+    #[test]
+    fn receipt_at_exact_expiry_boundary_degrades() {
+        let ex = executor(10_000);
+        let receipt = make_receipt(
+            "r-boundary",
+            SpeculationTransform::BranchPredict,
+            "franken_engine::hotpath",
+            "validator-A",
+            10_000, // expires_epoch_ms == now_epoch_ms
+            "trace-boundary",
+        );
+        let out = ex.execute_with_fallback(
+            SpeculationTransform::BranchPredict,
+            "franken_engine::hotpath",
+            Some(&receipt),
+            true,
+            b"safe",
+        );
+        assert!(
+            matches!(
+                out.decision,
+                ActivationDecision::Degraded {
+                    reason: GuardFailureReason::ExpiredReceipt,
+                    ..
+                }
+            ),
+            "receipt at exact expiry boundary must degrade (fail-closed)"
         );
     }
 }

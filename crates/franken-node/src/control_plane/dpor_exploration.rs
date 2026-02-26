@@ -609,7 +609,8 @@ impl DporExplorer {
             "commit_requires_all_drains",
             "Commit only after all participants drain",
         ));
-        let _ = self.register_model(m1);
+        self.register_model(m1)
+            .expect("invariant: default EpochBarrier model passes validation");
 
         // Remote capability operations
         let mut m2 = ProtocolModel::new(
@@ -641,7 +642,8 @@ impl DporExplorer {
             "release_after_execute",
             "Capability released only after execution completes",
         ));
-        let _ = self.register_model(m2);
+        self.register_model(m2)
+            .expect("invariant: default RemoteCapabilityOps model passes validation");
 
         // Marker stream mutations
         let mut m3 = ProtocolModel::new(
@@ -660,7 +662,8 @@ impl DporExplorer {
             "hash_chain_valid",
             "Hash chain is valid after all operations",
         ));
-        let _ = self.register_model(m3);
+        self.register_model(m3)
+            .expect("invariant: default MarkerStreamMutations model passes validation");
     }
 
     /// Get exploration results.

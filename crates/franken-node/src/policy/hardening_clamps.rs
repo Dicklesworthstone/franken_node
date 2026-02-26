@@ -223,7 +223,7 @@ impl HardeningClampPolicy {
         let window_start = now_ms.saturating_sub(self.budget.window_duration_ms);
         self.escalation_history
             .iter()
-            .filter(|r| r.timestamp_ms > window_start)
+            .filter(|r| r.timestamp_ms >= window_start)
             .count() as u32
     }
 
@@ -929,5 +929,31 @@ mod tests {
             reason: "negative window".into(),
         };
         assert!(err.to_string().contains("negative window"));
+    }
+
+    // Regression: escalation at exact window boundary must be counted (fail-closed).
+    // Before fix: `>` excluded boundary events, allowing one extra escalation.
+    #[test]
+    fn escalation_at_exact_window_boundary_is_counted() {
+        let budget = EscalationBudget {
+            max_escalations_per_window: 1,
+            window_duration_ms: 1000,
+            max_level: HardeningLevel::Maximum,
+            min_level: HardeningLevel::Baseline,
+            max_overhead_pct: 50.0,
+        };
+        let mut policy = HardeningClampPolicy::new(budget);
+        // Record one escalation at t=500
+        policy.record_escalation(500, HardeningLevel::Standard);
+        // At t=1500, window_start = 1500 - 1000 = 500.
+        // The escalation at t=500 is exactly at the boundary.
+        // Fail-closed: must count it, so budget is exhausted (1/1).
+        // Attempting another escalation at t=1500 should be rate-limited.
+        let (result, _) =
+            policy.check_escalation(HardeningLevel::Enhanced, HardeningLevel::Standard, 1500);
+        assert!(
+            matches!(result, ClampResult::Denied { .. }),
+            "boundary event must count toward rate limit (fail-closed)"
+        );
     }
 }

@@ -183,7 +183,8 @@ pub fn evaluate_freshness(
         });
     }
 
-    let max_age_secs = max_age.unwrap(); // Safe: only Standard returns None
+    let max_age_secs =
+        max_age.expect("invariant: only Standard returns None, and Standard returns early above");
 
     // Fresh enough: allow
     if check.revocation_age_secs <= max_age_secs {

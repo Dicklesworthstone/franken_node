@@ -296,6 +296,9 @@ impl PoissonSuffStats {
 impl PoissonModel {
     /// Negative binomial predictive probability.
     pub(crate) fn predictive_prob(&self, stats: &PoissonSuffStats, x: f64) -> f64 {
+        if x < 0.0 {
+            return 0.0;
+        }
         let alpha_n = self.alpha0 + stats.sum;
         let beta_n = self.beta0 + stats.n;
         let k = x.round() as u64;

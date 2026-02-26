@@ -414,6 +414,14 @@ impl PolicyChangeEngine {
             )
         })?;
 
+        // Guard: only Proposed or UnderReview proposals can be rejected.
+        if record.state != ProposalState::Proposed && record.state != ProposalState::UnderReview {
+            return Err(PolicyChangeError::new(
+                ERR_INVALID_STATE_TRANSITION,
+                format!("Cannot reject in state {:?}", record.state),
+            ));
+        }
+
         let prev_state = record.state;
         record.state = ProposalState::Rejected;
         record.rejection_reason = Some(reason.to_owned());
@@ -1029,6 +1037,28 @@ mod tests {
 
         assert!(engine.verify_audit_chain().unwrap());
         assert_eq!(engine.audit_ledger().len(), 100); // 50 proposals + 50 approvals
+    }
+
+    #[test]
+    fn reject_applied_proposal_is_denied() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let proposal = make_proposal("p-applied", "alice", vec!["bob", "charlie"]);
+        engine.propose(proposal).unwrap();
+        engine.approve("p-applied", make_signature("bob")).unwrap();
+        engine
+            .approve("p-applied", make_signature("charlie"))
+            .unwrap();
+        engine
+            .activate("p-applied", "admin", "2026-01-15T02:00:00Z")
+            .unwrap();
+
+        let err = engine
+            .reject("p-applied", "reviewer", "too late", "2026-01-15T03:00:00Z")
+            .unwrap_err();
+        assert_eq!(
+            err.code, ERR_INVALID_STATE_TRANSITION,
+            "rejecting an Applied proposal must be denied (state guard)"
+        );
     }
 }
 

@@ -344,7 +344,10 @@ impl MigrationKitEcosystem {
             serde_json::json!({"kit_id": kit_id}),
         );
 
-        Ok(self.kits.get(kit_id).unwrap())
+        Ok(self
+            .kits
+            .get(kit_id)
+            .expect("validated: kit existence checked via contains_key() above"))
     }
 
     /// Start a migration step.
@@ -408,7 +411,7 @@ impl MigrationKitEcosystem {
         let all_done = self
             .kits
             .get(kit_id)
-            .unwrap()
+            .expect("validated: kit checked via get_mut().ok_or_else() above")
             .steps
             .iter()
             .all(|s| s.status == StepStatus::Completed);

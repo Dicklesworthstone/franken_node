@@ -255,7 +255,8 @@ impl EvidenceLedger {
         while self.entries.len() >= self.capacity.max_entries && !self.entries.is_empty() {
             self.evict_oldest();
         }
-        while self.current_bytes + entry_size > self.capacity.max_bytes && !self.entries.is_empty()
+        while self.current_bytes.saturating_add(entry_size) > self.capacity.max_bytes
+            && !self.entries.is_empty()
         {
             self.evict_oldest();
         }
@@ -263,7 +264,7 @@ impl EvidenceLedger {
         let id = EntryId(self.next_id);
         self.next_id = self.next_id.saturating_add(1);
         self.total_appended = self.total_appended.saturating_add(1);
-        self.current_bytes += entry_size;
+        self.current_bytes = self.current_bytes.saturating_add(entry_size);
 
         eprintln!(
             "{}: entry={}, decision={}, epoch={}, size={}",

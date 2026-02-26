@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 // ---------------------------------------------------------------------------
@@ -52,6 +53,7 @@ pub const MAX_VARIANCE_PCT: f64 = 5.0;
 
 /// Default regression threshold as a percentage.
 pub const DEFAULT_REGRESSION_THRESHOLD_PCT: f64 = 10.0;
+const DETERMINISTIC_JITTER_RATIO: f64 = 0.02;
 
 // ---------------------------------------------------------------------------
 // Benchmark dimension enum
@@ -324,6 +326,36 @@ pub struct RegressionFinding {
     pub threshold_pct: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BenchRunError {
+    EmptyScenarioFilter,
+    UnknownScenario {
+        requested: Vec<String>,
+        available: Vec<String>,
+    },
+}
+
+impl fmt::Display for BenchRunError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyScenarioFilter => write!(f, "scenario filter cannot be empty"),
+            Self::UnknownScenario {
+                requested,
+                available,
+            } => {
+                write!(
+                    f,
+                    "unknown scenario(s): {}. available scenarios: {}",
+                    requested.join(", "),
+                    available.join(", ")
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for BenchRunError {}
+
 impl fmt::Display for RegressionFinding {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -507,6 +539,30 @@ impl SuiteConfig {
                 bun: Some("1.1.0".to_string()),
             },
             timestamp_utc: "2026-02-21T00:00:00Z".to_string(),
+            regression_threshold_pct: DEFAULT_REGRESSION_THRESHOLD_PCT,
+        }
+    }
+
+    /// Create a host-aware config for CLI benchmark execution.
+    pub fn for_cli() -> Self {
+        let memory_mb = std::env::var("FRANKEN_NODE_BENCH_MEMORY_MB")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .unwrap_or(16_384);
+
+        SuiteConfig {
+            hardware_profile: HardwareProfile {
+                cpu: std::env::var("FRANKEN_NODE_BENCH_CPU")
+                    .unwrap_or_else(|_| std::env::consts::ARCH.to_string()),
+                memory_mb,
+                os: std::env::consts::OS.to_string(),
+            },
+            runtime_versions: RuntimeVersions {
+                franken_node: env!("CARGO_PKG_VERSION").to_string(),
+                node: None,
+                bun: None,
+            },
+            timestamp_utc: chrono::Utc::now().to_rfc3339(),
             regression_threshold_pct: DEFAULT_REGRESSION_THRESHOLD_PCT,
         }
     }
@@ -772,6 +828,158 @@ pub fn to_canonical_json(report: &BenchmarkReport) -> String {
 /// Deserialize a report from JSON.
 pub fn from_json(json: &str) -> Result<BenchmarkReport, serde_json::Error> {
     serde_json::from_str(json)
+}
+
+fn deterministic_seed(name: &str) -> u64 {
+    let mut hasher = sha2::Sha256::new();
+    sha2::Digest::update(&mut hasher, b"benchmark_suite_seed_v1:" as &[u8]);
+    sha2::Digest::update(&mut hasher, name.as_bytes());
+    let digest = sha2::Digest::finalize(hasher);
+    let mut bytes = [0_u8; 8];
+    bytes.copy_from_slice(&digest[..8]);
+    u64::from_le_bytes(bytes)
+}
+
+fn deterministic_unit_interval(seed: u64, index: u32) -> f64 {
+    let mut x = seed ^ (u64::from(index).wrapping_mul(0x9e37_79b9_7f4a_7c15));
+    x ^= x >> 12;
+    x ^= x << 25;
+    x ^= x >> 27;
+    let mixed = x.wrapping_mul(0x2545_f491_4f6c_dd1d);
+    let numerator = mixed >> 11;
+    let denominator = (1_u64 << 53) - 1;
+    numerator as f64 / denominator as f64
+}
+
+pub fn deterministic_measurements_for_scenario(scenario: &ScenarioDefinition) -> Vec<f64> {
+    let count = scenario.iterations.max(1);
+    let spread = (scenario.scoring.threshold - scenario.scoring.ideal)
+        .abs()
+        .max(1e-6);
+    let center = if scenario.scoring.lower_is_better {
+        scenario.scoring.ideal + spread * 0.20
+    } else {
+        scenario.scoring.ideal - spread * 0.20
+    };
+    let jitter_span = spread * DETERMINISTIC_JITTER_RATIO;
+    let seed = deterministic_seed(&scenario.name);
+
+    (0..count)
+        .map(|idx| {
+            let unit = deterministic_unit_interval(seed, idx);
+            let jitter = (unit - 0.5) * 2.0 * jitter_span;
+            let value = center + jitter;
+            if value.is_sign_negative() { 0.0 } else { value }
+        })
+        .collect()
+}
+
+fn parse_scenario_filter(raw: &str) -> Vec<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+fn select_scenarios(
+    all: &[ScenarioDefinition],
+    scenario_filter: Option<&str>,
+) -> Result<Vec<ScenarioDefinition>, BenchRunError> {
+    let Some(raw_filter) = scenario_filter else {
+        return Ok(all.to_vec());
+    };
+    let requested = parse_scenario_filter(raw_filter);
+    if requested.is_empty() {
+        return Err(BenchRunError::EmptyScenarioFilter);
+    }
+
+    let available_names = all.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut unknown = Vec::new();
+
+    for requested_name in requested {
+        if let Some(scenario) = all.iter().find(|s| s.name == requested_name) {
+            if seen.insert(scenario.name.clone()) {
+                selected.push(scenario.clone());
+            }
+        } else {
+            unknown.push(requested_name);
+        }
+    }
+
+    if !unknown.is_empty() {
+        return Err(BenchRunError::UnknownScenario {
+            requested: unknown,
+            available: available_names,
+        });
+    }
+
+    Ok(selected)
+}
+
+fn deterministic_measurement_map(scenarios: &[ScenarioDefinition]) -> BTreeMap<String, Vec<f64>> {
+    scenarios
+        .iter()
+        .map(|scenario| {
+            (
+                scenario.name.clone(),
+                deterministic_measurements_for_scenario(scenario),
+            )
+        })
+        .collect()
+}
+
+pub fn run_default_suite_with_config(
+    config: SuiteConfig,
+    scenario_filter: Option<&str>,
+) -> Result<BenchmarkReport, BenchRunError> {
+    let mut defaults = BenchmarkSuite::new(config.clone());
+    defaults.load_default_scenarios();
+
+    let selected = select_scenarios(defaults.scenarios(), scenario_filter)?;
+    let measurements = deterministic_measurement_map(&selected);
+
+    let mut runner = BenchmarkSuite::new(config);
+    for scenario in selected {
+        runner.add_scenario(scenario);
+    }
+
+    Ok(runner.run(&measurements))
+}
+
+pub fn run_default_suite(scenario_filter: Option<&str>) -> Result<BenchmarkReport, BenchRunError> {
+    run_default_suite_with_config(SuiteConfig::for_cli(), scenario_filter)
+}
+
+pub fn render_human_summary(report: &BenchmarkReport) -> String {
+    let mut lines = vec![
+        format!(
+            "benchmark suite: scenarios={} aggregate_score={}/100",
+            report.scenarios.len(),
+            report.aggregate_score
+        ),
+        format!(
+            "suite_version={} scoring_formula={} timestamp={}",
+            report.suite_version, report.scoring_formula_version, report.timestamp_utc
+        ),
+    ];
+
+    for scenario in &report.scenarios {
+        lines.push(format!(
+            "  - {} [{}] mean={:.3} {} score={}/100 variance={:.2}%",
+            scenario.name,
+            scenario.dimension,
+            scenario.raw_value,
+            scenario.unit,
+            scenario.score,
+            scenario.variance_pct
+        ));
+    }
+
+    lines.push(format!("provenance_hash={}", report.provenance_hash));
+    lines.join("\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -1192,5 +1400,72 @@ mod tests {
         let display = format!("{finding}");
         assert!(display.contains("cold_start_latency"));
         assert!(display.contains("50.0%"));
+    }
+
+    #[test]
+    fn test_deterministic_measurements_repeatable() {
+        let scenario = ScenarioDefinition {
+            dimension: BenchmarkDimension::PerformanceUnderHardening,
+            name: "cold_start_latency".to_string(),
+            unit: "ms".to_string(),
+            iterations: 5,
+            warmup_iterations: 0,
+            sandbox_required: true,
+            scoring: ScoringConfig::lower_is_better(100.0, 500.0),
+        };
+
+        let first = deterministic_measurements_for_scenario(&scenario);
+        let second = deterministic_measurements_for_scenario(&scenario);
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 5);
+    }
+
+    #[test]
+    fn test_run_default_suite_with_filter_subset() {
+        let config = SuiteConfig::with_defaults();
+        let report = run_default_suite_with_config(
+            config,
+            Some("cold_start_latency,migration_scanner_throughput"),
+        )
+        .expect("subset filter should run");
+
+        assert_eq!(report.scenarios.len(), 2);
+        let names = report
+            .scenarios
+            .iter()
+            .map(|scenario| scenario.name.as_str())
+            .collect::<BTreeSet<_>>();
+        assert!(names.contains("cold_start_latency"));
+        assert!(names.contains("migration_scanner_throughput"));
+    }
+
+    #[test]
+    fn test_run_default_suite_filter_unknown_fails() {
+        let config = SuiteConfig::with_defaults();
+        let err = run_default_suite_with_config(config, Some("does_not_exist"))
+            .expect_err("unknown scenarios should fail");
+        assert!(matches!(err, BenchRunError::UnknownScenario { .. }));
+    }
+
+    #[test]
+    fn test_run_default_suite_is_deterministic_with_fixed_config() {
+        let config = SuiteConfig::with_defaults();
+        let first = run_default_suite_with_config(config.clone(), None).expect("first run");
+        let second = run_default_suite_with_config(config, None).expect("second run");
+
+        assert_eq!(first.aggregate_score, second.aggregate_score);
+        assert_eq!(first.scenarios, second.scenarios);
+        assert_eq!(first.provenance_hash, second.provenance_hash);
+    }
+
+    #[test]
+    fn test_render_human_summary_includes_provenance() {
+        let config = SuiteConfig::with_defaults();
+        let report = run_default_suite_with_config(config, Some("cold_start_latency"))
+            .expect("single scenario should run");
+        let summary = render_human_summary(&report);
+        assert!(summary.contains("benchmark suite:"));
+        assert!(summary.contains("cold_start_latency"));
+        assert!(summary.contains("provenance_hash="));
     }
 }

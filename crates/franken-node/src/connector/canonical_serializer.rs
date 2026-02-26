@@ -369,7 +369,7 @@ impl CanonicalSerializer {
         }
 
         // Canonical form: [length_prefix: 4 bytes BE] [payload]
-        let canonical = canonical_encode(payload);
+        let canonical = canonical_encode(payload)?;
 
         let hash_prefix = content_hash_prefix(&canonical);
         self.events.push(SerializerEvent {
@@ -539,12 +539,14 @@ fn default_schema(object_type: TrustObjectType) -> CanonicalSchema {
 }
 
 /// Canonical encoding: 4-byte big-endian length prefix + payload.
-fn canonical_encode(payload: &[u8]) -> Vec<u8> {
-    let len = payload.len() as u32;
+fn canonical_encode(payload: &[u8]) -> Result<Vec<u8>, SerializerError> {
+    let len = u32::try_from(payload.len()).map_err(|_| SerializerError::PreimageConstructionFailed {
+        reason: "payload too large for canonical encoding (exceeds 4GB)".to_string(),
+    })?;
     let mut encoded = Vec::with_capacity(4 + payload.len());
     encoded.extend_from_slice(&len.to_be_bytes());
     encoded.extend_from_slice(payload);
-    encoded
+    Ok(encoded)
 }
 
 /// Decode canonical encoding.
@@ -740,7 +742,7 @@ mod tests {
     #[test]
     fn test_canonical_encode_decode_round_trip() {
         let original = b"hello world";
-        let encoded = canonical_encode(original);
+        let encoded = canonical_encode(original).unwrap();
         let decoded = canonical_decode(&encoded).unwrap();
         assert_eq!(decoded, original);
     }
@@ -748,7 +750,7 @@ mod tests {
     #[test]
     fn test_canonical_encode_length_prefix() {
         let data = b"test";
-        let encoded = canonical_encode(data);
+        let encoded = canonical_encode(data).unwrap();
         assert_eq!(encoded.len(), 4 + 4); // 4-byte prefix + 4-byte payload
         let len = u32::from_be_bytes([encoded[0], encoded[1], encoded[2], encoded[3]]);
         assert_eq!(len, 4);
@@ -771,15 +773,15 @@ mod tests {
 
     #[test]
     fn test_canonical_encode_empty() {
-        let encoded = canonical_encode(b"");
+        let encoded = canonical_encode(b"").unwrap();
         let decoded = canonical_decode(&encoded).unwrap();
         assert!(decoded.is_empty());
     }
 
     #[test]
     fn test_canonical_encode_deterministic() {
-        let e1 = canonical_encode(b"same data");
-        let e2 = canonical_encode(b"same data");
+        let e1 = canonical_encode(b"same data").unwrap();
+        let e2 = canonical_encode(b"same data").unwrap();
         assert_eq!(e1, e2);
     }
 

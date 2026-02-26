@@ -303,15 +303,17 @@ impl TokenChain {
 
     /// Append a delegated token to the chain, enforcing attenuation invariants.
     pub fn append(&mut self, token: AudienceBoundToken) -> Result<(), TokenError> {
-        let parent = self
-            .tokens
-            .last()
-            .expect("tokens non-empty: chain always has root");
+        let parent = self.tokens.last().ok_or_else(|| {
+            TokenError::new(
+                ERR_ABT_ATTENUATION_VIOLATION,
+                "cannot append to an empty token chain".to_string(),
+            )
+        })?;
 
         // Check parent_token_hash links to parent.
         let parent_hash = parent.hash();
         match &token.parent_token_hash {
-            Some(h) if h == &parent_hash => {}
+            Some(h) if crate::security::constant_time::ct_eq(h, &parent_hash) => {}
             Some(h) => {
                 return Err(TokenError::new(
                     ERR_ABT_ATTENUATION_VIOLATION,
@@ -384,6 +386,17 @@ impl TokenChain {
             ));
         }
 
+        // INV-ABT-EXPIRY-ATTENUATION: child must not outlive parent.
+        if token.expires_at > parent.expires_at {
+            return Err(TokenError::new(
+                ERR_ABT_ATTENUATION_VIOLATION,
+                format!(
+                    "Delegated token expires_at {} exceeds parent's {}",
+                    token.expires_at, parent.expires_at
+                ),
+            ));
+        }
+
         // Validity window check.
         if !token.has_valid_window() {
             return Err(TokenError::new(
@@ -402,15 +415,13 @@ impl TokenChain {
     }
 
     /// The root token.
-    pub fn root(&self) -> &AudienceBoundToken {
-        &self.tokens[0]
+    pub fn root(&self) -> Option<&AudienceBoundToken> {
+        self.tokens.first()
     }
 
     /// The leaf (most recently delegated) token.
-    pub fn leaf(&self) -> &AudienceBoundToken {
-        self.tokens
-            .last()
-            .expect("tokens non-empty: chain always has root")
+    pub fn leaf(&self) -> Option<&AudienceBoundToken> {
+        self.tokens.last()
     }
 
     /// All tokens in chain order.
@@ -512,6 +523,13 @@ impl TokenValidator {
     ) -> Result<(), TokenError> {
         let tokens = chain.tokens();
 
+        if tokens.is_empty() {
+            return Err(TokenError::new(
+                ERR_ABT_ATTENUATION_VIOLATION,
+                "token chain is empty".to_string(),
+            ));
+        }
+
         // Check all tokens for expiry.
         for (i, token) in tokens.iter().enumerate() {
             if token.is_expired(now_ms) {
@@ -548,7 +566,7 @@ impl TokenValidator {
         }
 
         // Check nonce replay on the leaf token.
-        let leaf = chain.leaf();
+        let leaf = chain.leaf().unwrap();
         if self.seen_nonces.contains(&leaf.nonce) {
             self.tokens_rejected += 1;
             let err = TokenError::replay_detected(&leaf.nonce);
@@ -568,7 +586,7 @@ impl TokenValidator {
         for i in 1..tokens.len() {
             let parent_hash = tokens[i - 1].hash();
             match &tokens[i].parent_token_hash {
-                Some(h) if h == &parent_hash => {}
+                Some(h) if crate::security::constant_time::ct_eq(h, &parent_hash) => {}
                 _ => {
                     self.tokens_rejected += 1;
                     return Err(TokenError::new(
@@ -583,7 +601,7 @@ impl TokenValidator {
         }
 
         // INV-ABT-AUDIENCE: Check audience match on leaf token.
-        let leaf = chain.leaf();
+        let leaf = chain.leaf().unwrap();
         if !leaf.audience_contains(requester_id) {
             self.tokens_rejected += 1;
             let err = TokenError::audience_mismatch(requester_id, &leaf.audience);
@@ -903,8 +921,8 @@ mod tests {
         let root = root_token("root-1", 3);
         let chain = TokenChain::new(root.clone()).unwrap();
         assert_eq!(chain.depth(), 1);
-        assert_eq!(chain.root().token_id, root.token_id);
-        assert_eq!(chain.leaf().token_id, root.token_id);
+        assert_eq!(chain.root().unwrap().token_id, root.token_id);
+        assert_eq!(chain.leaf().unwrap().token_id, root.token_id);
     }
 
     #[test]
@@ -1088,7 +1106,7 @@ mod tests {
         );
         let mut chain = TokenChain::new(root).unwrap();
         chain.append(child).unwrap();
-        assert!(chain.leaf().capabilities.is_empty());
+        assert!(chain.leaf().unwrap().capabilities.is_empty());
     }
 
     #[test]

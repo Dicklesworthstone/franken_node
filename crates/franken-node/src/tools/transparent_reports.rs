@@ -371,7 +371,7 @@ impl TransparentReports {
 
         self.reports
             .get_mut(report_id)
-            .unwrap()
+            .expect("validated: report existence checked above")
             .corrective_actions
             .push(action);
         Ok(())
@@ -413,12 +413,15 @@ impl TransparentReports {
             ));
         }
 
-        let report_mut = self.reports.get_mut(report_id).unwrap();
+        let report_mut = self
+            .reports
+            .get_mut(report_id)
+            .expect("validated: report checked via immutable get()");
         let action_mut = report_mut
             .corrective_actions
             .iter_mut()
             .find(|a| a.action_id == action_id)
-            .unwrap();
+            .expect("validated: action checked via immutable find()");
         action_mut.status = new_status;
 
         self.log(

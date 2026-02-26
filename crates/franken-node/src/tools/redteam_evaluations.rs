@@ -327,7 +327,7 @@ impl RedTeamEvaluations {
 
         self.engagements
             .get_mut(engagement_id)
-            .unwrap()
+            .expect("validated: engagement existence checked above")
             .findings
             .push(finding);
         Ok(())
@@ -369,13 +369,16 @@ impl RedTeamEvaluations {
             ));
         }
 
-        // Apply mutation
-        let engagement_mut = self.engagements.get_mut(engagement_id).unwrap();
+        // Apply mutation — both engagement and finding validated via immutable get() above
+        let engagement_mut = self
+            .engagements
+            .get_mut(engagement_id)
+            .expect("validated: engagement checked via immutable get()");
         let finding_mut = engagement_mut
             .findings
             .iter_mut()
             .find(|f| f.finding_id == finding_id)
-            .unwrap();
+            .expect("validated: finding checked via immutable find()");
         finding_mut.remediation_status = new_status;
 
         self.log(

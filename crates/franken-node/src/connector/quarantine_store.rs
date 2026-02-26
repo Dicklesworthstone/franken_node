@@ -228,7 +228,7 @@ impl QuarantineStore {
 
         // Step 2: if still over quota, evict oldest
         if self.entries.len() >= self.config.max_objects
-            || self.total_bytes + size_bytes > self.config.max_bytes
+            || self.total_bytes.saturating_add(size_bytes) > self.config.max_bytes
         {
             evictions.extend(self.evict_for_quota(size_bytes, now));
         }
@@ -250,7 +250,7 @@ impl QuarantineStore {
                 source_peer: source_peer.to_string(),
             },
         );
-        self.total_bytes += size_bytes;
+        self.total_bytes = self.total_bytes.saturating_add(size_bytes);
 
         Ok(evictions)
     }

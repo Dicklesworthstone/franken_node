@@ -168,10 +168,10 @@ impl RetentionStore {
         let class = policy.retention_class;
 
         // Check storage capacity
-        if self.total_bytes + size_bytes > self.max_bytes {
+        if self.total_bytes.saturating_add(size_bytes) > self.max_bytes {
             // Try ephemeral cleanup first
             self.cleanup_ephemeral(now);
-            if self.total_bytes + size_bytes > self.max_bytes {
+            if self.total_bytes.saturating_add(size_bytes) > self.max_bytes {
                 return Err(RetentionError::StorageFull {
                     current_bytes: self.total_bytes,
                     max_bytes: self.max_bytes,
@@ -196,7 +196,7 @@ impl RetentionStore {
             timestamp: now,
         });
 
-        self.total_bytes += size_bytes;
+        self.total_bytes = self.total_bytes.saturating_add(size_bytes);
         self.messages.insert(message_id.to_string(), msg);
         Ok(())
     }

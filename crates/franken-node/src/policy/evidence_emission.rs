@@ -314,7 +314,7 @@ impl EvidenceConformanceChecker {
                     action,
                     action_id
                 );
-                self.rejected_count += 1;
+                self.rejected_count = self.rejected_count.saturating_add(1);
                 self.action_log.push(outcome.clone());
                 return outcome;
             }
@@ -328,7 +328,7 @@ impl EvidenceConformanceChecker {
                     reason: "decision_id is empty".into(),
                 },
             };
-            self.rejected_count += 1;
+            self.rejected_count = self.rejected_count.saturating_add(1);
             self.action_log.push(outcome.clone());
             return outcome;
         }
@@ -340,7 +340,7 @@ impl EvidenceConformanceChecker {
                     reason: "trace_id is empty".into(),
                 },
             };
-            self.rejected_count += 1;
+            self.rejected_count = self.rejected_count.saturating_add(1);
             self.action_log.push(outcome.clone());
             return outcome;
         }
@@ -363,7 +363,7 @@ impl EvidenceConformanceChecker {
                 expected_kind.label(),
                 entry.decision_kind.label()
             );
-            self.rejected_count += 1;
+            self.rejected_count = self.rejected_count.saturating_add(1);
             self.action_log.push(outcome.clone());
             return outcome;
         }
@@ -383,7 +383,7 @@ impl EvidenceConformanceChecker {
                 action_id,
                 entry.decision_id
             );
-            self.rejected_count += 1;
+            self.rejected_count = self.rejected_count.saturating_add(1);
             self.action_log.push(outcome.clone());
             return outcome;
         }
@@ -403,7 +403,7 @@ impl EvidenceConformanceChecker {
                     action_id: action_id.clone(),
                     evidence_decision_id: entry.decision_id.clone(),
                 };
-                self.executed_count += 1;
+                self.executed_count = self.executed_count.saturating_add(1);
                 self.action_log.push(outcome.clone());
                 outcome
             }
@@ -414,7 +414,7 @@ impl EvidenceConformanceChecker {
                         reason: e.to_string(),
                     },
                 };
-                self.rejected_count += 1;
+                self.rejected_count = self.rejected_count.saturating_add(1);
                 self.action_log.push(outcome.clone());
                 outcome
             }

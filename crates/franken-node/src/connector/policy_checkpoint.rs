@@ -264,7 +264,7 @@ impl PolicyCheckpoint {
             self.timestamp,
             &self.signer,
         );
-        computed == self.checkpoint_hash
+        crate::security::constant_time::ct_eq(&computed, &self.checkpoint_hash)
     }
 
     /// Short hash prefix for logging (first 16 hex chars).

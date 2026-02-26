@@ -1053,7 +1053,11 @@ fn sorted_dependencies(mut dependencies: Vec<DependencyTrustStatus>) -> Vec<Depe
 }
 
 fn timestamp_from_secs(timestamp_secs: u64) -> String {
-    chrono::DateTime::from_timestamp(timestamp_secs as i64, 0)
+    let secs = match i64::try_from(timestamp_secs) {
+        Ok(s) => s,
+        Err(_) => return "1970-01-01T00:00:00Z".to_string(),
+    };
+    chrono::DateTime::from_timestamp(secs, 0)
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }

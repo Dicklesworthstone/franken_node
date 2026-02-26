@@ -269,7 +269,10 @@ pub fn match_motifs(
         return Vec::new();
     }
 
-    let latest = trajectory.observations.last().unwrap();
+    let latest = trajectory
+        .observations
+        .last()
+        .expect("guarded: early return on is_empty() above");
     let mut matches = Vec::new();
 
     for motif in motifs {

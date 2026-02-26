@@ -220,12 +220,12 @@ impl DeviceProfileRegistry {
         for profile in sorted_profiles {
             // INV-DPR-FRESHNESS: check staleness
             let age = now.saturating_sub(profile.registered_at);
-            if age > policy.freshness_max_age_secs {
+            if age >= policy.freshness_max_age_secs {
                 rejected.push(DeviceMatch {
                     device_id: profile.device_id.clone(),
                     matched: false,
                     reason: format!(
-                        "stale: age {}s > max {}s",
+                        "stale: age {}s >= max {}s",
                         age, policy.freshness_max_age_secs
                     ),
                     score: 0,

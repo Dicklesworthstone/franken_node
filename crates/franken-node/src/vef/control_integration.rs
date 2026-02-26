@@ -516,7 +516,7 @@ impl ControlTransitionGate {
 
             // Check evidence age against policy.
             let age = self.now_millis.saturating_sub(ev.created_at_millis);
-            if age > max_age {
+            if age >= max_age {
                 self.emit_event(
                     event_codes::CTL_004_DENIED_EXPIRED_EVIDENCE,
                     &request.request_id,

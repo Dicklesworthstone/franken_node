@@ -145,7 +145,7 @@ fn compare_marker_hash_at(
     let index = sequence as usize;
     let local_hash = &local.markers[index].marker_hash;
     let remote_hash = &remote.markers[index].marker_hash;
-    let matched = local_hash == remote_hash;
+    let matched = crate::security::constant_time::ct_eq(local_hash, remote_hash);
 
     comparisons.push(DivergenceComparison {
         sequence,

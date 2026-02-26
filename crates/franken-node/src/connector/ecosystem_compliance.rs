@@ -255,7 +255,7 @@ impl ComplianceEvidenceStore {
             .ok_or_else(|| ComplianceError::NotFound(content_hash.to_owned()))?;
 
         let recomputed = Self::compute_content_hash(&evidence.content);
-        let valid = recomputed == evidence.content_hash;
+        let valid = crate::security::constant_time::ct_eq(&recomputed, &evidence.content_hash);
 
         let event_code = if valid {
             ENE_007_COMPLIANCE_TAMPER_CHECK_PASS

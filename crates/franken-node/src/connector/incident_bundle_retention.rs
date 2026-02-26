@@ -450,7 +450,7 @@ impl IncidentBundleStore {
         }
 
         // Check capacity
-        if self.total_bytes + bundle.size_bytes > self.max_bytes {
+        if self.total_bytes.saturating_add(bundle.size_bytes) > self.max_bytes {
             return Err(IncidentBundleError::StorageFull {
                 current_bytes: self.total_bytes,
                 max_bytes: self.max_bytes,
@@ -470,7 +470,7 @@ impl IncidentBundleStore {
             event_code: event_codes::IBR_001.into(),
         });
 
-        self.total_bytes += bundle.size_bytes;
+        self.total_bytes = self.total_bytes.saturating_add(bundle.size_bytes);
         self.bundles.insert(bundle.bundle_id.clone(), bundle);
         Ok(())
     }

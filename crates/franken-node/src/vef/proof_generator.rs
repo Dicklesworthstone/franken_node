@@ -306,7 +306,8 @@ impl ProofBackend for TestProofBackend {
         }
         let expected_data = self.compute_proof_bytes(entries);
         let expected_hash = Self::hash_bytes(&expected_data);
-        Ok(proof.proof_data == expected_data && proof.proof_data_hash == expected_hash)
+        Ok(crate::security::constant_time::ct_eq_bytes(&proof.proof_data, &expected_data)
+            && crate::security::constant_time::ct_eq(&proof.proof_data_hash, &expected_hash))
     }
 }
 

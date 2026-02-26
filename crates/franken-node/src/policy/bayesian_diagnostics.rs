@@ -118,7 +118,7 @@ impl BetaState {
         } else {
             self.beta += 1.0;
         }
-        self.observation_count += 1;
+        self.observation_count = self.observation_count.saturating_add(1);
     }
 
     /// Mean of the beta distribution = alpha / (alpha + beta).

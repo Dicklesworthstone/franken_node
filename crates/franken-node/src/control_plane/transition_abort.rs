@@ -137,9 +137,11 @@ impl TransitionAbortEvent {
     /// Verify that all participants are at the pre-transition epoch.
     /// INV-ABORT-NO-PARTIAL
     pub fn verify_no_partial_state(&self) -> bool {
-        self.participant_states
-            .iter()
-            .all(|p| p.current_epoch == self.pre_epoch)
+        !self.participant_states.is_empty()
+            && self
+                .participant_states
+                .iter()
+                .all(|p| p.current_epoch == self.pre_epoch)
     }
 
     /// Export as JSON string.
@@ -884,5 +886,25 @@ mod tests {
         assert!(state.had_acked);
         assert_eq!(state.current_epoch, 5);
         assert_eq!(state.in_flight_items, 0);
+    }
+
+    #[test]
+    fn verify_no_partial_state_empty_participants_returns_false() {
+        let event = TransitionAbortEvent::new(
+            "b-empty",
+            TransitionAbortReason::Cancellation {
+                source: "test".into(),
+            },
+            5,
+            6,
+            vec![], // empty participants
+            1000,
+            2000,
+            "t-empty",
+        );
+        assert!(
+            !event.verify_no_partial_state(),
+            "empty participant list must not pass verification (vacuous truth guard)"
+        );
     }
 }

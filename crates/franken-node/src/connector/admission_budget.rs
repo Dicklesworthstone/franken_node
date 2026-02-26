@@ -243,7 +243,7 @@ impl AdmissionBudgetTracker {
     /// Record a failed auth attempt for a peer.
     pub fn record_failed_auth(&mut self, peer_id: &str) -> Result<(), AdmissionError> {
         let usage = self.peers.entry(peer_id.to_string()).or_default();
-        usage.failed_auth_count += 1;
+        usage.failed_auth_count = usage.failed_auth_count.saturating_add(1);
         if usage.failed_auth_count > self.budget.max_failed_auth {
             return Err(AdmissionError::AuthExceeded {
                 peer_id: peer_id.to_string(),
@@ -257,12 +257,12 @@ impl AdmissionBudgetTracker {
     /// Record an inflight decode starting.
     pub fn record_decode_start(&mut self, peer_id: &str) -> Result<(), AdmissionError> {
         let usage = self.peers.entry(peer_id.to_string()).or_default();
-        usage.inflight_decode_count += 1;
+        usage.inflight_decode_count = usage.inflight_decode_count.saturating_add(1);
         if usage.inflight_decode_count > self.budget.max_inflight_decode {
-            usage.inflight_decode_count -= 1;
+            usage.inflight_decode_count = usage.inflight_decode_count.saturating_sub(1);
             return Err(AdmissionError::InflightExceeded {
                 peer_id: peer_id.to_string(),
-                count: usage.inflight_decode_count + 1,
+                count: usage.inflight_decode_count.saturating_add(1),
                 limit: self.budget.max_inflight_decode,
             });
         }
@@ -296,7 +296,7 @@ impl AdmissionBudgetTracker {
         let mut records = Vec::new();
 
         // Dimension 1: bytes
-        let bytes_after = usage.bytes_used + request.bytes_requested;
+        let bytes_after = usage.bytes_used.saturating_add(request.bytes_requested);
         let bytes_ok = bytes_after <= self.budget.max_bytes;
         records.push(BudgetCheckRecord {
             peer_id: request.peer_id.clone(),
@@ -312,7 +312,7 @@ impl AdmissionBudgetTracker {
         }
 
         // Dimension 2: symbols
-        let symbols_after = usage.symbols_used + request.symbols_requested;
+        let symbols_after = usage.symbols_used.saturating_add(request.symbols_requested);
         let symbols_ok = symbols_after <= self.budget.max_symbols;
         records.push(BudgetCheckRecord {
             peer_id: request.peer_id.clone(),
@@ -358,7 +358,9 @@ impl AdmissionBudgetTracker {
         }
 
         // Dimension 5: decode_cpu
-        let cpu_after = usage.decode_cpu_ms + request.decode_cpu_estimate_ms;
+        let cpu_after = usage
+            .decode_cpu_ms
+            .saturating_add(request.decode_cpu_estimate_ms);
         let cpu_ok = cpu_after <= self.budget.max_decode_cpu_ms;
         records.push(BudgetCheckRecord {
             peer_id: request.peer_id.clone(),
@@ -415,9 +417,11 @@ impl AdmissionBudgetTracker {
         let (verdict, records) = self.check_admission(request, trace_id, timestamp);
         if verdict.admitted {
             let usage = self.peers.entry(request.peer_id.clone()).or_default();
-            usage.bytes_used += request.bytes_requested;
-            usage.symbols_used += request.symbols_requested;
-            usage.decode_cpu_ms += request.decode_cpu_estimate_ms;
+            usage.bytes_used = usage.bytes_used.saturating_add(request.bytes_requested);
+            usage.symbols_used = usage.symbols_used.saturating_add(request.symbols_requested);
+            usage.decode_cpu_ms = usage
+                .decode_cpu_ms
+                .saturating_add(request.decode_cpu_estimate_ms);
         }
         (verdict, records)
     }

@@ -620,7 +620,7 @@ pub fn verify_trust_state(
 pub fn replay_capsule(capsule_data: &str, expected_output_hash: &str) -> ReplayResult {
     // Compute deterministic hash of capsule data as actual output
     let actual_hash = deterministic_hash(capsule_data);
-    let matches = actual_hash == expected_output_hash;
+    let matches = crate::security::constant_time::ct_eq(&actual_hash, expected_output_hash);
 
     ReplayResult {
         verdict: if matches {
@@ -784,7 +784,8 @@ pub fn generate_reference_bundle() -> EvidenceBundle {
 pub fn generate_reference_verification_result() -> VerificationResult {
     let claim = generate_reference_claim();
     let evidence = generate_reference_evidence();
-    verify_claim(&claim, &evidence, "verifier://test@example.com").unwrap()
+    verify_claim(&claim, &evidence, "verifier://test@example.com")
+        .expect("reference claim must verify successfully")
 }
 
 // ---------------------------------------------------------------------------

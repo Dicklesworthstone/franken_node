@@ -215,7 +215,7 @@ impl VerifierBenchmarkReleases {
         );
         self.releases
             .get_mut(release_id)
-            .unwrap()
+            .expect("validated: release existence checked via contains_key() above")
             .artifacts
             .push(artifact);
         Ok(())
@@ -242,7 +242,10 @@ impl VerifierBenchmarkReleases {
             serde_json::json!({"score": quality, "meets": true}),
         );
 
-        let rel = self.releases.get_mut(release_id).unwrap();
+        let rel = self
+            .releases
+            .get_mut(release_id)
+            .expect("validated: release checked via immutable get() above");
         rel.status = ReleaseStatus::Published;
         self.log(
             event_codes::VBR_STATUS_CHANGED,
@@ -282,7 +285,10 @@ impl VerifierBenchmarkReleases {
             context: context.to_string(),
             timestamp: Utc::now().to_rfc3339(),
         });
-        self.releases.get_mut(release_id).unwrap().download_count += 1;
+        self.releases
+            .get_mut(release_id)
+            .expect("validated: release existence checked via contains_key above")
+            .download_count += 1;
         self.log(
             event_codes::VBR_DOWNLOAD_RECORDED,
             trace_id,

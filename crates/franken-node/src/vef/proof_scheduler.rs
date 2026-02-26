@@ -420,7 +420,7 @@ impl VefProofScheduler {
             ) {
                 continue;
             }
-            if now_millis > job.deadline_millis {
+            if now_millis >= job.deadline_millis {
                 job.status = ProofJobStatus::DeadlineExceeded;
                 exceeded.push(job.job_id.clone());
                 self.events.push(SchedulerEvent {

@@ -430,7 +430,10 @@ pub fn replay_capsule(
     let actual_hash = deterministic_hash(&replay_input);
 
     // Step 5: Compare
-    let verdict = if actual_hash == capsule.manifest.expected_output_hash {
+    let verdict = if crate::security::constant_time::ct_eq(
+        &actual_hash,
+        &capsule.manifest.expected_output_hash,
+    ) {
         CapsuleVerdict::Pass
     } else {
         CapsuleVerdict::Fail
@@ -597,10 +600,11 @@ pub fn build_reference_manifest() -> CapsuleManifest {
 /// Build a reference verification session for testing (with one step, sealed).
 pub fn build_reference_session() -> VerificationSession {
     let capsule = build_reference_capsule();
-    let result = replay_capsule(&capsule, "verifier://test@example.com").unwrap();
+    let result = replay_capsule(&capsule, "verifier://test@example.com")
+        .expect("reference capsule must replay successfully");
     let mut session = create_session("session-ref-001", "verifier://test@example.com");
-    record_session_step(&mut session, &result).unwrap();
-    seal_session(&mut session).unwrap();
+    record_session_step(&mut session, &result).expect("recording reference step must succeed");
+    seal_session(&mut session).expect("sealing reference session must succeed");
     session
 }
 

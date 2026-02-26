@@ -828,8 +828,10 @@ impl StakingLedger {
         // INV-STAKE-NO-DOUBLE-SLASH: check evidence hash not already used
         let evidence_hash = evidence.evidence_hash.clone();
         for existing in &self.state.slash_events {
-            if existing.evidence.evidence_hash == evidence_hash
-                && existing.publisher_id == record.publisher_id
+            if crate::security::constant_time::ct_eq(
+                &existing.evidence.evidence_hash,
+                &evidence_hash,
+            ) && existing.publisher_id == record.publisher_id
             {
                 return Err(StakingError::AlreadySlashed {
                     stake_id,

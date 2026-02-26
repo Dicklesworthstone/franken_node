@@ -369,7 +369,10 @@ impl SignedExtensionRegistry {
             Some(false) => {}
         }
 
-        let ext = self.extensions.get_mut(extension_id).unwrap();
+        let ext = self
+            .extensions
+            .get_mut(extension_id)
+            .expect("validated: extension existence checked via get() above");
         ext.versions.push(version.clone());
         ext.updated_at = Utc::now().to_rfc3339();
 
@@ -469,7 +472,10 @@ impl SignedExtensionRegistry {
             Some(false) => {}
         }
 
-        let ext = self.extensions.get_mut(extension_id).unwrap();
+        let ext = self
+            .extensions
+            .get_mut(extension_id)
+            .expect("validated: extension existence checked via get() in revocation flow");
         ext.status = ExtensionStatus::Revoked;
         ext.updated_at = Utc::now().to_rfc3339();
         let revoked_at = ext.updated_at.clone();

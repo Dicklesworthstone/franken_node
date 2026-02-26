@@ -303,11 +303,11 @@ impl CancelInjectionMatrix {
 
     /// Add a test case result.
     pub fn record_case(&mut self, entry: CancelMatrixEntry) {
-        self.total_cases += 1;
+        self.total_cases = self.total_cases.saturating_add(1);
         if entry.outcome.is_pass() {
-            self.pass_count += 1;
+            self.pass_count = self.pass_count.saturating_add(1);
         } else {
-            self.fail_count += 1;
+            self.fail_count = self.fail_count.saturating_add(1);
         }
 
         let wf = entry.workflow.clone();

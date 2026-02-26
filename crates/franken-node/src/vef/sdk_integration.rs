@@ -454,7 +454,7 @@ impl VefCapsuleEmbed {
         trace_id: &str,
     ) -> Result<bool, VsiError> {
         let expected = compute_binding_hash(&embedding.proof_ref, capsule_payload)?;
-        let valid = expected == embedding.binding_hash;
+        let valid = crate::security::constant_time::ct_eq(&expected, &embedding.binding_hash);
 
         self.events.push(VsiEvent {
             event_code: event_codes::VSI_005_EMBED_VALIDATED.to_string(),

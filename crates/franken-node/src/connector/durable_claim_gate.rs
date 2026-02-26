@@ -321,7 +321,7 @@ impl DurableClaimGate {
             }
 
             let issued_in_future = current_epoch < proof.issued_at_epoch;
-            let stale_by_ttl = current_epoch > proof.expires_at_epoch;
+            let stale_by_ttl = current_epoch >= proof.expires_at_epoch;
             let stale_by_window = current_epoch.saturating_sub(proof.issued_at_epoch)
                 > self.config.freshness_window_epochs;
             if issued_in_future || stale_by_ttl || stale_by_window {

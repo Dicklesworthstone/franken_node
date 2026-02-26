@@ -72,6 +72,11 @@ use supply_chain::trust_card::{
     demo_registry as demo_trust_registry, render_comparison_human, render_trust_card_human,
     to_canonical_json as trust_card_to_json,
 };
+use tools::benchmark_suite::{
+    render_human_summary as benchmark_suite_render_human_summary,
+    run_default_suite as benchmark_suite_run_default_suite,
+    to_canonical_json as benchmark_suite_to_json,
+};
 use tools::counterfactual_replay::{
     CounterfactualReplayEngine, PolicyConfig, summarize_output,
     to_canonical_json as counterfactual_to_json,
@@ -213,6 +218,14 @@ fn parse_profile_override(raw: Option<&str>) -> Result<Option<Profile>> {
             .map_err(|err| anyhow::anyhow!(err.to_string()))
     })
     .transpose()
+}
+
+fn handle_bench_run(args: &cli::BenchRunArgs) -> Result<()> {
+    let report = benchmark_suite_run_default_suite(args.scenario.as_deref())
+        .map_err(|err| anyhow::anyhow!("benchmark suite run failed: {err}"))?;
+    println!("{}", benchmark_suite_to_json(&report));
+    eprintln!("{}", benchmark_suite_render_human_summary(&report));
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -2894,8 +2907,7 @@ async fn main() -> Result<()> {
 
         Command::Bench(sub) => match sub {
             BenchCommand::Run(args) => {
-                eprintln!("franken-node bench run: scenario={:?}", args.scenario);
-                eprintln!("[not yet implemented]");
+                handle_bench_run(&args)?;
             }
         },
 

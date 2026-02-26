@@ -456,7 +456,10 @@ impl ControlLaneScheduler {
                     task_class: task_class.to_string(),
                 })?;
 
-        let counters = self.counters.get_mut(lane.as_str()).unwrap();
+        let counters = self
+            .counters
+            .get_mut(lane.as_str())
+            .expect("invariant: counters initialized for all ControlLane variants in new()");
         counters.tasks_run += 1;
         counters.consecutive_empty_ticks = 0;
 
@@ -487,7 +490,10 @@ impl ControlLaneScheduler {
         for lane in ControlLane::all() {
             let lane_key = lane.as_str().to_string();
             let tasks_run = tasks_by_lane.get(&lane_key).copied().unwrap_or(0);
-            let counters = self.counters.get_mut(&lane_key).unwrap();
+            let counters = self
+                .counters
+                .get_mut(&lane_key)
+                .expect("invariant: counters initialized for all ControlLane variants in new()");
 
             if tasks_run == 0 && counters.tasks_queued > 0 {
                 counters.consecutive_empty_ticks += 1;

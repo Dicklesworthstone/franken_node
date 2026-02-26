@@ -222,12 +222,25 @@ pub fn receipt_hash_sha256(receipt: &ExecutionReceipt) -> Result<String, Executi
     Ok(format!("sha256:{digest:x}"))
 }
 
+/// Constant-time string comparison (inline to avoid cross-crate path issues in test harnesses).
+fn ct_eq_inline(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc: u8 = 0;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
+
 pub fn verify_hash(
     receipt: &ExecutionReceipt,
     expected_hash: &str,
 ) -> Result<(), ExecutionReceiptError> {
     let computed = receipt_hash_sha256(receipt)?;
-    if computed == expected_hash {
+    if ct_eq_inline(&computed, expected_hash) {
         return Ok(());
     }
     Err(ExecutionReceiptError::new(

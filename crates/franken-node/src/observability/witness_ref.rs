@@ -353,7 +353,7 @@ impl WitnessValidator {
 
         // Check presence for high-impact entries
         if is_high_impact(entry) && witnesses.is_empty() {
-            self.rejected_count += 1;
+            self.rejected_count = self.rejected_count.saturating_add(1);
             return Err(WitnessValidationError::MissingWitnesses {
                 entry_id,
                 decision_kind: entry.decision_kind.label().to_string(),
@@ -362,7 +362,7 @@ impl WitnessValidator {
 
         // Check for duplicates
         if witnesses.has_duplicates() {
-            self.rejected_count += 1;
+            self.rejected_count = self.rejected_count.saturating_add(1);
             // Find the first duplicate
             let mut seen = std::collections::BTreeSet::new();
             for w in witnesses.refs() {
@@ -384,7 +384,7 @@ impl WitnessValidator {
                     _ => false,
                 };
                 if needs_rejection {
-                    self.rejected_count += 1;
+                    self.rejected_count = self.rejected_count.saturating_add(1);
                     return Err(WitnessValidationError::UnresolvableLocator {
                         entry_id,
                         witness_id: w.witness_id.as_str().to_string(),
@@ -393,7 +393,7 @@ impl WitnessValidator {
             }
         }
 
-        self.validated_count += 1;
+        self.validated_count = self.validated_count.saturating_add(1);
         Ok(())
     }
 
@@ -405,7 +405,7 @@ impl WitnessValidator {
         actual_content_hash: &[u8; 32],
     ) -> Result<(), WitnessValidationError> {
         if witness.integrity_hash != *actual_content_hash {
-            self.rejected_count += 1;
+            self.rejected_count = self.rejected_count.saturating_add(1);
             return Err(WitnessValidationError::IntegrityHashMismatch {
                 entry_id: entry_id.to_string(),
                 witness_id: witness.witness_id.as_str().to_string(),

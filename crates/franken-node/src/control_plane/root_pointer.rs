@@ -470,7 +470,11 @@ fn publish_root_internal(
     let start = Instant::now();
     let root_path = root_pointer_path(dir);
     let temp_path = dir.join(format!(".{}.tmp.{}", ROOT_POINTER_FILE, Uuid::now_v7()));
-    let old_root = read_root(dir).ok();
+    let old_root = match read_root(dir) {
+        Ok(r) => Some(r),
+        Err(RootPointerError::MissingRoot { .. }) => None,
+        Err(e) => return Err(e),
+    };
 
     let epoch_regression = old_root
         .as_ref()

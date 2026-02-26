@@ -358,9 +358,12 @@ impl DivergenceDetector {
 
         // Check 1 & 2: epochs match
         if local.epoch == remote.epoch {
-            if local.state_hash == remote.state_hash {
+            if crate::security::constant_time::ct_eq(&local.state_hash, &remote.state_hash) {
                 // Same state but different parent chain → rollback detected.
-                if local.parent_state_hash != remote.parent_state_hash {
+                if !crate::security::constant_time::ct_eq(
+                    &local.parent_state_hash,
+                    &remote.parent_state_hash,
+                ) {
                     self.halted = true;
                     let proof = RollbackProof {
                         local_state: local.clone(),

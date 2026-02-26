@@ -642,7 +642,9 @@ impl VerifierEconomyRegistry {
     /// In production this would use Ed25519 verification; here we use a
     /// simplified check that the key matches and signature is non-empty.
     pub fn verify_signature(&self, sig: &AttestationSignature, expected_key: &str) -> bool {
-        sig.algorithm == "ed25519" && sig.public_key == expected_key && !sig.value.is_empty()
+        sig.algorithm == "ed25519"
+            && crate::security::constant_time::ct_eq(&sig.public_key, expected_key)
+            && !sig.value.is_empty()
     }
 
     // -- Reputation scoring ---------------------------------------------------

@@ -229,7 +229,10 @@ impl EvictionSagaManager {
                 "saga {saga_id} is in terminal phase {phase} and cannot be cancelled"
             )),
             SagaPhase::Compensating => Err(format!("saga {saga_id} is already compensating")),
-            _ => Ok(()),
+            SagaPhase::Created
+            | SagaPhase::Uploading
+            | SagaPhase::Verifying
+            | SagaPhase::Retiring => Ok(()),
         }
     }
 

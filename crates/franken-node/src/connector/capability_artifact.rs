@@ -292,7 +292,8 @@ impl CapabilityEnvelope {
     ///
     /// # INV-CART-DIGEST-BOUND
     pub fn verify_digest(&self, identity: &ArtifactIdentity) -> bool {
-        !self.digest.is_empty() && self.digest == self.compute_digest(identity)
+        !self.digest.is_empty()
+            && crate::security::constant_time::ct_eq(&self.digest, &self.compute_digest(identity))
     }
 }
 

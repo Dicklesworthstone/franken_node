@@ -625,7 +625,9 @@ impl ReproBundleExporter {
     pub fn export(&mut self, ctx: &ExportContext) -> &ReproBundle {
         let bundle = generate_repro_bundle(ctx);
         self.bundles.push(bundle);
-        self.bundles.last().unwrap()
+        self.bundles
+            .last()
+            .expect("just pushed: bundles cannot be empty")
     }
 
     /// Get all exported bundles.

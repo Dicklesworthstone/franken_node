@@ -218,7 +218,10 @@ pub fn verify_receipt(
 
     let expected_chain_hash =
         compute_chain_hash(signed.receipt.previous_receipt_hash.as_deref(), &payload);
-    Ok(expected_chain_hash == signed.chain_hash)
+    Ok(crate::security::constant_time::ct_eq(
+        &expected_chain_hash,
+        &signed.chain_hash,
+    ))
 }
 
 /// Append and sign a receipt while preserving chain linkage.
