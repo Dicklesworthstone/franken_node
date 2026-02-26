@@ -135,7 +135,7 @@ pub struct PerformanceMetric {
 impl PerformanceMetric {
     /// Hardening overhead ratio at p99.
     pub fn overhead_ratio(&self) -> f64 {
-        if self.baseline.p99_ms == 0.0 {
+        if self.baseline.p99_ms.abs() < f64::EPSILON {
             return 0.0;
         }
         self.hardened.p99_ms / self.baseline.p99_ms
@@ -143,7 +143,7 @@ impl PerformanceMetric {
 
     /// Cold-start overhead ratio.
     pub fn cold_start_ratio(&self) -> f64 {
-        if self.warm_start_ms == 0.0 {
+        if self.warm_start_ms.abs() < f64::EPSILON {
             return 0.0;
         }
         self.cold_start_ms / self.warm_start_ms

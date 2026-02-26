@@ -366,7 +366,7 @@ impl StakeWeighter {
     ) -> f64 {
         let new_weight = self.compute_weight(new_node);
         let est_weight = self.compute_weight(established_node);
-        if est_weight == 0.0 {
+        if est_weight.abs() < f64::EPSILON {
             return 0.0;
         }
         new_weight / est_weight
