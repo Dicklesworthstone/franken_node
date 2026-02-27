@@ -499,7 +499,7 @@ impl CapabilityEnforcer {
             _ => {
                 self.metrics.blocked_total = self.metrics.blocked_total.saturating_add(1);
                 let bc = self.blocked_counts.entry(capability).or_insert(0);
-            *bc = bc.saturating_add(1);
+                *bc = bc.saturating_add(1);
 
                 self.log_event(
                     IBD_001_CAPABILITY_BLOCKED,

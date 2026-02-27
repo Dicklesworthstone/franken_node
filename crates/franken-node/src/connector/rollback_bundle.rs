@@ -1002,7 +1002,13 @@ mod tests {
         let (_store, mut bundle) = make_store_and_bundle();
         bundle.manifest.components[0].checksum.pop();
         let result = bundle.verify_integrity();
-        assert!(matches!(result, Err(RollbackBundleError::ChecksumMismatch { .. })));
+        // Tampering with a manifest-embedded checksum changes the manifest's
+        // integrity hash, so the integrity check fails before we reach
+        // per-component checksum verification.
+        assert!(matches!(
+            result,
+            Err(RollbackBundleError::ManifestInvalid { .. })
+        ));
     }
 
     #[test]
@@ -1029,7 +1035,7 @@ mod tests {
                 assert_eq!(expected, "1.4.2");
                 assert_eq!(actual, "2.0.0");
             }
-            _ => assert!(false, "expected VersionMismatch"),
+            _ => panic!("expected VersionMismatch"),
         }
     }
 

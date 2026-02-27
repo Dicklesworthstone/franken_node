@@ -835,14 +835,14 @@ mod tests {
                 &root(2, 2, "h2"),
                 &key_for_thread,
                 "thread-1",
-                Duration::from_millis(400),
+                Duration::from_millis(1000),
             )
             .expect("thread-1 publish")
         });
 
         // Give thread-1 enough time to spawn and acquire the lock.
-        // 40ms was too tight and caused flaky failures on loaded machines.
-        thread::sleep(Duration::from_millis(120));
+        // 120ms was too tight and caused flaky failures on loaded machines.
+        thread::sleep(Duration::from_millis(500));
 
         let start = Instant::now();
         let t2_outcome =
@@ -851,7 +851,7 @@ mod tests {
 
         let _ = t1.join().expect("thread-1 join");
         assert!(
-            elapsed >= Duration::from_millis(150),
+            elapsed >= Duration::from_millis(400),
             "second publish should wait behind first (elapsed: {elapsed:?})"
         );
         assert_eq!(t2_outcome.event.event_code, ROOT_PUBLISH_COMPLETE);

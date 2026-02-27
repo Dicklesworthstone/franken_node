@@ -496,7 +496,8 @@ impl ControlLaneScheduler {
                 .expect("invariant: counters initialized for all ControlLane variants in new()");
 
             if tasks_run == 0 && counters.tasks_queued > 0 {
-                counters.consecutive_empty_ticks = counters.consecutive_empty_ticks.saturating_add(1);
+                counters.consecutive_empty_ticks =
+                    counters.consecutive_empty_ticks.saturating_add(1);
             } else {
                 counters.consecutive_empty_ticks = 0;
             }

@@ -254,10 +254,9 @@ impl TierPresence {
     #[must_use]
     pub fn has_orphan(&self) -> bool {
         // Orphan: L2 retired but L3 absent
-        let l2_retired_l3_absent = !self.l2_present && !self.l3_present;
+        !self.l2_present && !self.l3_present
         // Orphan: L3 present but not verified in a completed saga
         // (this is checked externally against saga state)
-        l2_retired_l3_absent
     }
 
     /// Check if safe to retire L2 (L3 must be present and verified).

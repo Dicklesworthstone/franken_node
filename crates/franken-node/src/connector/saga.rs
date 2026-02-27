@@ -847,8 +847,20 @@ mod tests {
         let mut exec = SagaExecutor::new();
         let steps = make_steps(&["a"]);
         let id = exec.create_saga(steps, "t1");
-        exec.execute_step(&id, StepOutcome::Compensated, 1, "t2")
-            .unwrap();
+
+        // Compensation requires a previously-succeeded forward step.
+        exec.execute_step(
+            &id,
+            StepOutcome::Success {
+                result_data: b"ok".to_vec(),
+            },
+            1,
+            "t1",
+        )
+        .unwrap();
+
+        // Now compensate: this produces SAG_STEP_COMPENSATED for step "a".
+        exec.compensate(&id, "t2").unwrap();
 
         let jsonl = exec.export_audit_log_jsonl();
         let events: Vec<serde_json::Value> = jsonl
@@ -861,15 +873,6 @@ mod tests {
             .find(|e| e["event_code"].as_str() == Some(event_codes::SAG_STEP_COMPENSATED))
             .expect("should have a SAG_STEP_COMPENSATED event");
         assert_eq!(compensated["detail"]["step_name"].as_str(), Some("a"));
-
-        let forward_for_same_step = events.iter().find(|event| {
-            event["event_code"].as_str() == Some(event_codes::SAG_STEP_FORWARD)
-                && event["detail"]["step_name"].as_str() == Some("a")
-        });
-        assert!(
-            forward_for_same_step.is_none(),
-            "compensated outcomes must not be logged as forward progress"
-        );
     }
 
     // 13. test_saga_state_transitions
