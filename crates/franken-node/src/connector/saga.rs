@@ -268,6 +268,19 @@ impl SagaExecutor {
             ));
         }
 
+        // Invariant: once any forward step fails, no additional forward steps
+        // may execute. A compensation run is required first.
+        let has_failed_forward_step = saga
+            .records
+            .iter()
+            .any(|r| r.action == "forward" && matches!(r.outcome, StepOutcome::Failed { .. }));
+        if has_failed_forward_step {
+            saga.state = SagaState::Failed;
+            return Err(format!(
+                "saga {saga_id} contains failed forward steps and must be compensated before additional execution"
+            ));
+        }
+
         let step_index = saga.completed_steps;
         if step_index >= saga.steps.len() {
             return Err(format!(
@@ -296,8 +309,12 @@ impl SagaExecutor {
         };
 
         saga.records.push(record);
-        saga.completed_steps = saga.completed_steps.saturating_add(1);
-        saga.state = SagaState::Running;
+        if matches!(outcome, StepOutcome::Failed { .. }) {
+            saga.state = SagaState::Failed;
+        } else {
+            saga.completed_steps = saga.completed_steps.saturating_add(1);
+            saga.state = SagaState::Running;
+        }
 
         self.log(
             event_code,
@@ -642,6 +659,62 @@ mod tests {
         assert_eq!(trace.compensated_steps.len(), 2);
         assert_eq!(trace.compensated_steps[0].step_index, 1);
         assert_eq!(trace.compensated_steps[1].step_index, 0);
+    }
+
+    #[test]
+    fn test_failed_step_sets_failed_state_and_does_not_increment_completed_steps() {
+        let mut exec = SagaExecutor::new();
+        let steps = make_steps(&["a", "b", "c"]);
+        let id = exec.create_saga(steps, "t");
+
+        exec.execute_step(&id, success_outcome(), 1, "t").unwrap();
+        exec.execute_step(
+            &id,
+            StepOutcome::Failed {
+                reason: "boom".to_string(),
+            },
+            1,
+            "t",
+        )
+        .unwrap();
+
+        let saga = exec.get_saga(&id).unwrap();
+        assert_eq!(saga.state, SagaState::Failed);
+        assert_eq!(
+            saga.completed_steps, 1,
+            "failed forward steps must not count as completed"
+        );
+    }
+
+    #[test]
+    fn test_cannot_execute_additional_forward_steps_after_failure() {
+        let mut exec = SagaExecutor::new();
+        let steps = make_steps(&["a", "b", "c"]);
+        let id = exec.create_saga(steps, "t");
+
+        exec.execute_step(&id, success_outcome(), 1, "t").unwrap();
+        exec.execute_step(
+            &id,
+            StepOutcome::Failed {
+                reason: "boom".to_string(),
+            },
+            1,
+            "t",
+        )
+        .unwrap();
+
+        let err = exec
+            .execute_step(&id, success_outcome(), 1, "t")
+            .expect_err("forward execution must stop after first failure");
+        assert!(
+            err.contains("cannot execute forward steps"),
+            "unexpected error text: {err}"
+        );
+
+        // Failed saga can still be compensated.
+        let trace = exec.compensate(&id, "t").unwrap();
+        assert_eq!(trace.compensated_steps.len(), 1);
+        assert_eq!(trace.compensated_steps[0].step_index, 0);
     }
 
     // 6. test_no_intermediate_state (INV-SAGA-TERMINAL)
