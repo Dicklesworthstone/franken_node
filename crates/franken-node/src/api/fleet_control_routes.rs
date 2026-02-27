@@ -256,8 +256,8 @@ pub fn execute_coordination(
         command_id,
         command_type: request.command_type.clone(),
         participating_nodes: request.target_nodes.clone(),
-        ack_count: request.target_nodes.len() as u32,
-        total_nodes: request.target_nodes.len() as u32,
+        ack_count: u32::try_from(request.target_nodes.len()).unwrap_or(u32::MAX),
+        total_nodes: u32::try_from(request.target_nodes.len()).unwrap_or(u32::MAX),
         status: CoordinationStatus::Acknowledged,
         issued_at: chrono::Utc::now().to_rfc3339(),
     };

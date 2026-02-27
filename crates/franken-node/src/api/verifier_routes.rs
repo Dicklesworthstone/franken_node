@@ -159,14 +159,20 @@ pub fn trigger_conformance(
         },
     ];
 
-    let passed = findings
-        .iter()
-        .filter(|f| f.status == ConformanceStatus::Pass)
-        .count() as u32;
-    let failed = findings
-        .iter()
-        .filter(|f| f.status == ConformanceStatus::Fail)
-        .count() as u32;
+    let passed = u32::try_from(
+        findings
+            .iter()
+            .filter(|f| f.status == ConformanceStatus::Pass)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+    let failed = u32::try_from(
+        findings
+            .iter()
+            .filter(|f| f.status == ConformanceStatus::Fail)
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
 
     let status = if failed > 0 {
         ConformanceStatus::Fail
@@ -177,7 +183,7 @@ pub fn trigger_conformance(
     let result = ConformanceResult {
         check_id,
         status,
-        total_checks: findings.len() as u32,
+        total_checks: u32::try_from(findings.len()).unwrap_or(u32::MAX),
         passed,
         failed,
         skipped: 0,

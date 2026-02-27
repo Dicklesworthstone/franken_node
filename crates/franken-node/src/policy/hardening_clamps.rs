@@ -221,10 +221,12 @@ impl HardeningClampPolicy {
         }
 
         let window_start = now_ms.saturating_sub(self.budget.window_duration_ms);
-        self.escalation_history
+        let count = self
+            .escalation_history
             .iter()
             .filter(|r| r.timestamp_ms >= window_start)
-            .count() as u32
+            .count();
+        u32::try_from(count).unwrap_or(u32::MAX)
     }
 
     /// Find the highest level whose overhead is within budget.

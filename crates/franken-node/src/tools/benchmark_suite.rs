@@ -745,7 +745,7 @@ impl BenchmarkSuite {
             unit: scenario.unit.clone(),
             confidence_interval: ci,
             score,
-            iterations: raw_measurements.len() as u32,
+            iterations: u32::try_from(raw_measurements.len()).unwrap_or(u32::MAX),
             variance_pct: cv,
         }
     }
@@ -770,7 +770,7 @@ impl BenchmarkSuite {
             0
         } else {
             let total: u32 = results.iter().map(|r| r.score).sum();
-            total / results.len() as u32
+            total / u32::try_from(results.len()).unwrap_or(u32::MAX)
         };
 
         self.emit_event(
