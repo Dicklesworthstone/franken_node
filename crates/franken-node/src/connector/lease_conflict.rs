@@ -161,7 +161,7 @@ pub struct ForkLogEntry {
 pub fn detect_conflicts(leases: &[ActiveLease], resource: &str, now: u64) -> Vec<LeaseConflict> {
     let relevant: Vec<&ActiveLease> = leases
         .iter()
-        .filter(|l| l.resource == resource && l.granted_at <= now && l.expires_at >= now)
+        .filter(|l| l.resource == resource && l.granted_at <= now && l.expires_at > now)
         .collect();
 
     let mut conflicts = Vec::new();

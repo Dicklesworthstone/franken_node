@@ -293,7 +293,7 @@ impl ControlChannel {
         let window = self.replay_window_mut(msg.direction);
         window.insert(msg.sequence_number);
         // Trim window to configured size
-        if window.len() as u64 > window_size {
+        if window.len() as u64 >= window_size {
             let min_seq = msg.sequence_number.saturating_sub(window_size);
             window.retain(|&s| s > min_seq);
         }
