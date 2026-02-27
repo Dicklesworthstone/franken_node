@@ -1,4 +1,4 @@
-# AGENTS.md — dcg (Destructive Command Guard)
+# AGENTS.md — franken_node
 
 > Guidelines for AI coding agents working in this Rust codebase.
 
@@ -15,6 +15,20 @@ If I tell you to do something, even if it goes against what follows below, YOU M
 **YOU ARE NEVER ALLOWED TO DELETE A FILE WITHOUT EXPRESS PERMISSION.** Even a new file that you yourself created, such as a test code file. You have a horrible track record of deleting critically important files or otherwise throwing away tons of expensive work. As a result, you have permanently lost any and all rights to determine that a file or folder should be deleted.
 
 **YOU MUST ALWAYS ASK AND RECEIVE CLEAR, WRITTEN PERMISSION BEFORE EVER DELETING A FILE OR FOLDER OF ANY KIND.**
+
+---
+
+## Repository Reality Check (Authoritative)
+
+This repository is **franken_node** (trust-native runtime platform), not the standalone `dcg` codebase.
+
+- **Workspace layout:** Root `Cargo.toml` is a workspace manifest.
+- **Primary crate path:** `crates/franken-node/`
+- **Main Rust sources:** `crates/franken-node/src/`
+- **Primary binary entrypoint:** `crates/franken-node/src/main.rs`
+- **Primary library exports:** `crates/franken-node/src/lib.rs`
+
+If any later section mentions legacy `dcg` paths like `src/main.rs` at repo root, treat this section and the on-disk tree as authoritative for implementation work in this repository.
 
 ---
 
@@ -55,7 +69,7 @@ We only use **Cargo** in this project, NEVER any other package manager.
 
 - **Edition:** Rust 2024 (nightly required — see `rust-toolchain.toml`)
 - **Dependency versions:** Explicit versions for stability
-- **Configuration:** Cargo.toml only (single crate, not a workspace)
+- **Configuration:** Workspace at root `Cargo.toml`, with primary crate under `crates/franken-node/`
 - **Unsafe code:** Forbidden (`#![forbid(unsafe_code)]`)
 
 ### Key Dependencies
@@ -223,9 +237,9 @@ If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to f
 
 ---
 
-## dcg (Destructive Command Guard) — This Project
+## Legacy dcg Reference (Historical / Non-Authoritative Here)
 
-**This is the project you're working on.** dcg is a high-performance Claude Code hook that blocks destructive commands before they execute. It protects against dangerous git commands, filesystem operations, database queries, container commands, and more through a modular pack system.
+The following section documents the `dcg` protocol and implementation model for historical reference. In this repository, do **not** treat these `dcg`-specific root-level `src/*` paths as authoritative; use the workspace reality section above and the actual `crates/franken-node/` tree for code changes.
 
 ### What It Does
 
