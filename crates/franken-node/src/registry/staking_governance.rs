@@ -536,10 +536,11 @@ impl SlashingEngine {
                     code: ERR_STAKE_INVALID_TRANSITION,
                 })?;
 
-        let slash_amount =
-            (stake_balance as u128 * tier_policy.slash_fraction_bps as u128 / 10000) as u64;
-        let penalty_hash =
-            compute_penalty_hash(evidence_hash, tier_policy.slash_fraction_bps, stake_balance);
+        // Normalize to the effective policy value so amount and hash describe
+        // the same penalty decision across nodes/config representations.
+        let effective_bps = tier_policy.slash_fraction_bps.min(10_000);
+        let slash_amount = (stake_balance as u128 * effective_bps as u128 / 10000) as u64;
+        let penalty_hash = compute_penalty_hash(evidence_hash, effective_bps, stake_balance);
 
         Ok((slash_amount, penalty_hash))
     }
@@ -1952,6 +1953,31 @@ mod tests {
 
         let h3 = compute_penalty_hash("ev-hash", 5000, 600);
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_compute_penalty_caps_bps_and_hashes_effective_value() {
+        let mut policy = StakePolicy::default_policy();
+        let critical = policy
+            .tiers
+            .get_mut("critical")
+            .expect("default policy must contain critical tier");
+        critical.slash_fraction_bps = 15_000;
+
+        let engine = SlashingEngine::new(policy);
+        let evidence_hash = "ev-hash";
+        let stake_balance = 1_000u64;
+
+        let (slash_amount, penalty_hash) = engine
+            .compute_penalty(&RiskTier::Critical, stake_balance, evidence_hash)
+            .expect("penalty calculation must succeed");
+
+        assert_eq!(slash_amount, stake_balance, "bps > 100% must cap at 100%");
+        assert_eq!(
+            penalty_hash,
+            compute_penalty_hash(evidence_hash, 10_000, stake_balance),
+            "penalty hash must reflect effective capped basis points"
+        );
     }
 
     #[test]

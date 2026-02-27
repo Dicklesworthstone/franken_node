@@ -389,6 +389,8 @@ pub struct RuntimeOracle {
 impl RuntimeOracle {
     /// Create a new oracle with the given trace ID and quorum threshold (percent).
     pub fn new(trace_id: &str, quorum_threshold_percent: u8) -> Self {
+        // INV-NVO-QUORUM: quorum percentage must remain in [1, 100].
+        let quorum_threshold_percent = quorum_threshold_percent.clamp(1, 100);
         let mut oracle = Self {
             runtimes: BTreeMap::new(),
             checks: BTreeMap::new(),
@@ -838,6 +840,31 @@ mod tests {
         let oracle = RuntimeOracle::new("trace-001", 66);
         assert_eq!(oracle.event_log.len(), 1);
         assert_eq!(oracle.event_log[0].event_code, event_codes::FN_NV_001);
+    }
+
+    #[test]
+    fn oracle_creation_clamps_quorum_threshold_bounds() {
+        let low = RuntimeOracle::new("trace-q-low", 0);
+        assert_eq!(low.quorum_threshold_percent, 1);
+
+        let high = RuntimeOracle::new("trace-q-high", 255);
+        assert_eq!(high.quorum_threshold_percent, 100);
+    }
+
+    #[test]
+    fn over_100_input_is_clamped_to_unanimous_quorum() {
+        let mut oracle = RuntimeOracle::new("trace-q-unanimous", 255);
+        oracle.register_runtime(sample_runtime("a")).unwrap();
+        oracle.register_runtime(sample_runtime("b")).unwrap();
+        oracle.register_runtime(sample_runtime("c")).unwrap();
+
+        oracle.vote("check-1", "a", vec![1]).unwrap();
+        oracle.vote("check-1", "b", vec![1]).unwrap();
+        oracle.vote("check-1", "c", vec![1]).unwrap();
+
+        let result = oracle.tally_votes("check-1").unwrap();
+        assert!(result.quorum_reached);
+        assert_eq!(result.quorum_threshold, 3);
     }
 
     // 2) Register runtime success
