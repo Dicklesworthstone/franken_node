@@ -15,6 +15,19 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (lhs, rhs) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= *lhs ^ *rhs;
+    }
+    diff == 0
+}
+
 /// Stable schema version for chain serialization and hash material.
 pub const RECEIPT_CHAIN_SCHEMA_VERSION: &str = "vef-receipt-chain-v1";
 
@@ -283,7 +296,7 @@ impl ReceiptChain {
 
             let recomputed_receipt_hash = receipt_hash_sha256(&entry.receipt)
                 .map_err(|err| ChainError::internal(format!("receipt re-hash failed: {err}")))?;
-            if entry.receipt_hash != recomputed_receipt_hash {
+            if !constant_time_eq(&entry.receipt_hash, &recomputed_receipt_hash) {
                 return Err(ChainError::tamper(format!(
                     "receipt hash mismatch at entry {}",
                     entry.index
@@ -304,7 +317,7 @@ impl ReceiptChain {
 
             let expected_chain_hash =
                 compute_chain_hash(entry.index, expected_prev, &entry.receipt_hash)?;
-            if entry.chain_hash != expected_chain_hash {
+            if !constant_time_eq(&entry.chain_hash, &expected_chain_hash) {
                 return Err(ChainError::tamper(format!(
                     "chain hash mismatch at entry {}",
                     entry.index
@@ -600,6 +613,16 @@ mod tests {
         }
     }
 
+    fn tamper_same_length_hash(input: &str) -> String {
+        let mut chars: Vec<char> = input.chars().collect();
+        let idx = chars
+            .iter()
+            .position(|ch| *ch != '0')
+            .unwrap_or(chars.len().saturating_sub(1));
+        chars[idx] = if chars[idx] == '0' { '1' } else { '0' };
+        chars.into_iter().collect()
+    }
+
     #[test]
     fn append_creates_genesis_link_at_index_zero() {
         let mut chain = ReceiptChain::new(ReceiptChainConfig::default());
@@ -773,6 +796,57 @@ mod tests {
 
         let mut tampered_entries = chain.entries().to_vec();
         tampered_entries[1].receipt.actor_identity = "attacker".to_string();
+
+        let err =
+            ReceiptChain::verify_entries_and_checkpoints(&tampered_entries, chain.checkpoints())
+                .unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_TAMPER);
+    }
+
+    #[test]
+    fn detect_tamper_when_receipt_hash_is_same_length_modified() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 0,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 0..3_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::PolicyTransition, seq),
+                    1_700_000_550_000 + seq,
+                    "trace-tamper-receipt-hash",
+                )
+                .unwrap();
+        }
+
+        let mut tampered_entries = chain.entries().to_vec();
+        tampered_entries[1].receipt_hash =
+            tamper_same_length_hash(&tampered_entries[1].receipt_hash);
+
+        let err =
+            ReceiptChain::verify_entries_and_checkpoints(&tampered_entries, chain.checkpoints())
+                .unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_TAMPER);
+    }
+
+    #[test]
+    fn detect_tamper_when_chain_hash_is_same_length_modified() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 0,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 0..3_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::PolicyTransition, seq),
+                    1_700_000_575_000 + seq,
+                    "trace-tamper-chain-hash",
+                )
+                .unwrap();
+        }
+
+        let mut tampered_entries = chain.entries().to_vec();
+        tampered_entries[2].chain_hash = tamper_same_length_hash(&tampered_entries[2].chain_hash);
 
         let err =
             ReceiptChain::verify_entries_and_checkpoints(&tampered_entries, chain.checkpoints())

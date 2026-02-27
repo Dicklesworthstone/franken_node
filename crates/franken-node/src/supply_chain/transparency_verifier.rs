@@ -190,7 +190,7 @@ pub fn verify_inclusion(
     };
 
     // Check leaf hash matches artifact hash
-    if proof.leaf_hash != artifact_hash {
+    if !ct_eq(&proof.leaf_hash, artifact_hash) {
         return ProofReceipt {
             connector_id: connector_id.into(),
             artifact_id: artifact_id.into(),
@@ -353,6 +353,16 @@ mod tests {
         }
     }
 
+    fn tamper_same_length_hash(input: &str) -> String {
+        let mut chars: Vec<char> = input.chars().collect();
+        let idx = chars
+            .iter()
+            .position(|ch| *ch != '0')
+            .unwrap_or(chars.len().saturating_sub(1));
+        chars[idx] = if chars[idx] == '0' { '1' } else { '0' };
+        chars.into_iter().collect()
+    }
+
     // === Merkle basics ===
 
     #[test]
@@ -466,6 +476,27 @@ mod tests {
             "conn-1",
             "art-1",
             "t5",
+            "ts",
+        );
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::LeafMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn leaf_mismatch_same_length_rejected() {
+        let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
+        let policy = test_policy(&root);
+        let tampered_hash = tamper_same_length_hash(&proofs[0].leaf_hash);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &tampered_hash,
+            "conn-1",
+            "art-1",
+            "t5b",
             "ts",
         );
         assert!(!receipt.verified);

@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::control_plane::marker_stream::MarkerStream;
+use crate::security::constant_time::ct_eq;
 
 /// Canonical hash string type used by proof APIs.
 pub type Hash = String;
@@ -337,7 +338,7 @@ pub fn verify_inclusion(
     }
 
     let expected_leaf = marker_leaf_hash(marker_hash);
-    if expected_leaf != proof.leaf_hash {
+    if !ct_eq(&expected_leaf, &proof.leaf_hash) {
         return Err(ProofError::LeafMismatch {
             expected: expected_leaf,
             actual: proof.leaf_hash.clone(),
@@ -355,7 +356,7 @@ pub fn verify_inclusion(
         index /= 2;
     }
 
-    if current != root.root_hash {
+    if !ct_eq(&current, &root.root_hash) {
         return Err(ProofError::RootMismatch {
             expected: root.root_hash.clone(),
             actual: current,
@@ -417,21 +418,21 @@ pub fn verify_prefix(
         });
     }
 
-    if proof.prefix_root_hash != root_a.root_hash {
+    if !ct_eq(&proof.prefix_root_hash, &root_a.root_hash) {
         return Err(ProofError::RootMismatch {
             expected: root_a.root_hash.clone(),
             actual: proof.prefix_root_hash.clone(),
         });
     }
 
-    if proof.super_root_hash != root_b.root_hash {
+    if !ct_eq(&proof.super_root_hash, &root_b.root_hash) {
         return Err(ProofError::RootMismatch {
             expected: root_b.root_hash.clone(),
             actual: proof.super_root_hash.clone(),
         });
     }
 
-    if proof.prefix_root_from_super != root_a.root_hash {
+    if !ct_eq(&proof.prefix_root_from_super, &root_a.root_hash) {
         return Err(ProofError::RootMismatch {
             expected: root_a.root_hash.clone(),
             actual: proof.prefix_root_from_super.clone(),
@@ -542,6 +543,13 @@ mod tests {
         checkpoint
     }
 
+    fn tamper_same_length(hash: &str) -> String {
+        assert!(!hash.is_empty(), "hash cannot be empty");
+        let mut bytes = hash.as_bytes().to_vec();
+        bytes[0] = if bytes[0] == b'0' { b'1' } else { b'0' };
+        String::from_utf8(bytes).expect("hex hash is valid utf-8")
+    }
+
     #[test]
     fn checkpoint_disabled_blocks_build_and_proofs() {
         let stream = build_stream(3);
@@ -577,6 +585,22 @@ mod tests {
 
         let err = verify_inclusion(&proof, root, &"wrong-hash".to_string()).expect_err("reject");
         assert_eq!(err.code(), "MMR_LEAF_MISMATCH");
+    }
+
+    #[test]
+    fn inclusion_proof_rejects_same_length_tampered_root_hash() {
+        let stream = build_stream(8);
+        let checkpoint = build_checkpoint(&stream);
+        let root = checkpoint.root().expect("root");
+        let proof = mmr_inclusion_proof(&stream, &checkpoint, 6).expect("proof");
+        let marker = stream.get(6).expect("marker");
+
+        let mut tampered_root = root.clone();
+        tampered_root.root_hash = tamper_same_length(&tampered_root.root_hash);
+
+        let err =
+            verify_inclusion(&proof, &tampered_root, &marker.marker_hash).expect_err("tampered");
+        assert_eq!(err.code(), "MMR_ROOT_MISMATCH");
     }
 
     #[test]
@@ -623,6 +647,25 @@ mod tests {
 
         let err = mmr_prefix_proof(&checkpoint_large, &checkpoint_small).expect_err("invalid");
         assert_eq!(err.code(), "MMR_PREFIX_SIZE_INVALID");
+    }
+
+    #[test]
+    fn prefix_proof_rejects_same_length_tampered_prefix_root() {
+        let stream_a = build_stream(4);
+        let stream_b = build_stream(7);
+        let checkpoint_a = build_checkpoint(&stream_a);
+        let checkpoint_b = build_checkpoint(&stream_b);
+
+        let mut proof = mmr_prefix_proof(&checkpoint_a, &checkpoint_b).expect("prefix proof");
+        proof.prefix_root_hash = tamper_same_length(&proof.prefix_root_hash);
+
+        let err = verify_prefix(
+            &proof,
+            checkpoint_a.root().expect("root_a"),
+            checkpoint_b.root().expect("root_b"),
+        )
+        .expect_err("tampered");
+        assert_eq!(err.code(), "MMR_ROOT_MISMATCH");
     }
 
     #[test]

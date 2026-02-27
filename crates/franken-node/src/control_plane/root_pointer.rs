@@ -24,7 +24,16 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    crate::security::constant_time::ct_eq(a, b)
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    if a_bytes.len() != b_bytes.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (lhs, rhs) in a_bytes.iter().zip(b_bytes.iter()) {
+        diff |= *lhs ^ *rhs;
+    }
+    diff == 0
 }
 
 /// RAII guard that removes a temp file on drop (unless defused after rename).
@@ -395,7 +404,7 @@ pub fn bootstrap_root(
     }
 
     let root_hash = hash_hex(&root_bytes);
-    if auth.root_hash != root_hash {
+    if !constant_time_eq(&auth.root_hash, &root_hash) {
         return Err(BootstrapError::RootAuthFailed {
             reason: format!(
                 "root hash mismatch: expected={}, actual={}",
@@ -738,6 +747,16 @@ mod tests {
         }
     }
 
+    fn tamper_same_length(input: &str) -> String {
+        let mut chars: Vec<char> = input.chars().collect();
+        let idx = chars
+            .iter()
+            .position(|ch| *ch != '0')
+            .unwrap_or(chars.len().saturating_sub(1));
+        chars[idx] = if chars[idx] == '0' { '1' } else { '0' };
+        chars.into_iter().collect()
+    }
+
     #[test]
     fn publish_and_read_roundtrip() {
         let dir = TempDir::new().expect("tempdir");
@@ -929,6 +948,30 @@ mod tests {
 
         let cfg = RootAuthConfig::strict(k, ControlEpoch(3));
         let err = bootstrap_root(dir.path(), &cfg).expect_err("tampered auth should fail");
+        assert!(matches!(err, BootstrapError::RootAuthFailed { .. }));
+        assert_eq!(err.code(), "ROOT_BOOTSTRAP_AUTH_FAILED");
+    }
+
+    #[test]
+    fn bootstrap_rejects_same_length_tampered_root_hash() {
+        let dir = TempDir::new().expect("tempdir");
+        let k = key();
+        let root = root(3, 30, "hash-3");
+        publish_root(dir.path(), &root, &k, "trace-bootstrap-root-hash").expect("publish");
+
+        let auth_path = root_auth_path(dir.path());
+        let mut auth: RootAuthRecord = serde_json::from_slice(&fs::read(&auth_path).expect("read"))
+            .expect("parse auth record");
+        assert!(!auth.root_hash.is_empty(), "root hash should not be empty");
+        auth.root_hash = tamper_same_length(&auth.root_hash);
+        fs::write(
+            &auth_path,
+            serde_json::to_vec_pretty(&auth).expect("serialize tampered auth"),
+        )
+        .expect("write tampered auth");
+
+        let cfg = RootAuthConfig::strict(k, ControlEpoch(3));
+        let err = bootstrap_root(dir.path(), &cfg).expect_err("tampered root hash should fail");
         assert!(matches!(err, BootstrapError::RootAuthFailed { .. }));
         assert_eq!(err.code(), "ROOT_BOOTSTRAP_AUTH_FAILED");
     }
