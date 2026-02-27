@@ -68,6 +68,15 @@ pub enum ConnectivityMode {
     LocalOnly,
 }
 
+impl fmt::Display for ConnectivityMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Connected => write!(f, "connected"),
+            Self::LocalOnly => write!(f, "local_only"),
+        }
+    }
+}
+
 /// Scope of a capability token.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RemoteScope {
@@ -204,6 +213,11 @@ pub enum RemoteCapError {
     ReplayDetected {
         token_id: String,
     },
+    ConnectivityModeDenied {
+        mode: ConnectivityMode,
+        operation: RemoteOperation,
+        endpoint: String,
+    },
 }
 
 impl RemoteCapError {
@@ -218,6 +232,7 @@ impl RemoteCapError {
             Self::ScopeDenied { .. } => "REMOTECAP_SCOPE_DENIED",
             Self::Revoked { .. } => "REMOTECAP_REVOKED",
             Self::ReplayDetected { .. } => "REMOTECAP_REPLAY",
+            Self::ConnectivityModeDenied { .. } => "REMOTECAP_CONNECTIVITY_MODE_DENIED",
         }
     }
 
@@ -266,6 +281,15 @@ impl fmt::Display for RemoteCapError {
             Self::ReplayDetected { token_id } => {
                 write!(f, "{}: token replay detected ({token_id})", self.code())
             }
+            Self::ConnectivityModeDenied {
+                mode,
+                operation,
+                endpoint,
+            } => write!(
+                f,
+                "{}: mode={mode} operation={operation} endpoint={endpoint}",
+                self.code()
+            ),
         }
     }
 }
@@ -490,6 +514,27 @@ impl CapabilityGate {
         trace_id: &str,
         consume_single_use: bool,
     ) -> Result<(), RemoteCapError> {
+        if self.connectivity_mode == ConnectivityMode::LocalOnly {
+            let err = RemoteCapError::ConnectivityModeDenied {
+                mode: self.connectivity_mode,
+                operation,
+                endpoint: endpoint.to_string(),
+            };
+            self.audit_log.push(build_audit_event(
+                "REMOTECAP_DENIED",
+                "RC_CHECK_DENIED",
+                cap.map(|token| token.token_id.clone()),
+                cap.map(|token| token.issuer_identity.clone()),
+                Some(operation),
+                Some(endpoint.to_string()),
+                trace_id.to_string(),
+                now_epoch_secs,
+                false,
+                Some(err.code().to_string()),
+            ));
+            return Err(err);
+        }
+
         let Some(cap) = cap else {
             let err = RemoteCapError::Missing;
             self.audit_log.push(build_audit_event(
@@ -1035,6 +1080,41 @@ mod tests {
         let event = gate.audit_log().last().expect("event");
         assert_eq!(event.event_code, "REMOTECAP_LOCAL_MODE_ACTIVE");
         assert!(event.allowed);
+    }
+
+    #[test]
+    fn local_mode_denies_network_even_with_valid_cap() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-15a",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::with_mode("secret-a", ConnectivityMode::LocalOnly);
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_031,
+                "trace-15b",
+            )
+            .expect_err("network authorization must be denied in local-only mode");
+        assert_eq!(err.code(), "REMOTECAP_CONNECTIVITY_MODE_DENIED");
+
+        let event = gate.audit_log().last().expect("denial event");
+        assert!(!event.allowed);
+        assert_eq!(
+            event.denial_code.as_deref(),
+            Some("REMOTECAP_CONNECTIVITY_MODE_DENIED")
+        );
     }
 
     #[test]

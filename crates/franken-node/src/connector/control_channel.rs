@@ -268,7 +268,8 @@ impl ControlChannel {
             None => true,
         };
         if !sequence_valid {
-            let expected_min = self.last_seq(msg.direction).unwrap_or(0) + 1;
+            // Saturate to avoid overflow if the previous sequence reached u64::MAX.
+            let expected_min = self.last_seq(msg.direction).unwrap_or(0).saturating_add(1);
             let audit = ChannelAuditEntry {
                 message_id: msg.message_id.clone(),
                 direction: msg.direction.label().into(),
@@ -518,6 +519,27 @@ mod tests {
         // First message can have any sequence
         ch.process_message(&msg("m1", Direction::Send, 100, "tok"), "ts")
             .unwrap();
+    }
+
+    #[test]
+    fn sequence_regress_after_max_sequence_does_not_overflow() {
+        let mut ch = ControlChannel::new(config()).unwrap();
+        ch.process_message(&msg("m1", Direction::Send, u64::MAX, "tok"), "ts")
+            .unwrap();
+
+        let err = ch
+            .process_message(&msg("m2", Direction::Send, u64::MAX - 1, "tok"), "ts")
+            .unwrap_err();
+
+        match err {
+            ChannelError::SequenceRegress {
+                expected_min, got, ..
+            } => {
+                assert_eq!(expected_min, u64::MAX);
+                assert_eq!(got, u64::MAX - 1);
+            }
+            other => panic!("expected sequence regress, got {other:?}"),
+        }
     }
 
     #[test]

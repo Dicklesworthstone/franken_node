@@ -296,14 +296,29 @@ pub fn fork_log_entry(
         });
     }
 
-    // Deterministic entry_id from conflict + trace
+    // Deterministic entry_id from canonicalized conflict identity + action context.
+    // Canonicalizing lease IDs prevents ordering artifacts from changing IDs.
+    let (lease_lo, lease_hi) = if conflict.lease_a <= conflict.lease_b {
+        (conflict.lease_a.as_str(), conflict.lease_b.as_str())
+    } else {
+        (conflict.lease_b.as_str(), conflict.lease_a.as_str())
+    };
+
     let mut hasher = sha2::Sha256::new();
     sha2::Digest::update(&mut hasher, b"lease_conflict_resolution_v1:");
-    sha2::Digest::update(&mut hasher, conflict.lease_a.as_bytes());
+    sha2::Digest::update(&mut hasher, lease_lo.as_bytes());
     sha2::Digest::update(&mut hasher, b"|");
-    sha2::Digest::update(&mut hasher, conflict.lease_b.as_bytes());
+    sha2::Digest::update(&mut hasher, lease_hi.as_bytes());
+    sha2::Digest::update(&mut hasher, b"|");
+    sha2::Digest::update(&mut hasher, conflict.resource.as_bytes());
+    sha2::Digest::update(&mut hasher, b"|");
+    sha2::Digest::update(&mut hasher, conflict.overlap_start.to_le_bytes());
+    sha2::Digest::update(&mut hasher, b"|");
+    sha2::Digest::update(&mut hasher, conflict.overlap_end.to_le_bytes());
     sha2::Digest::update(&mut hasher, b"|");
     sha2::Digest::update(&mut hasher, trace_id.as_bytes());
+    sha2::Digest::update(&mut hasher, b"|");
+    sha2::Digest::update(&mut hasher, action_id.as_bytes());
     let hash_hex = format!("{:x}", sha2::Digest::finalize(hasher));
     let entry_id = format!("fork-{}", &hash_hex[..16]);
 
@@ -350,16 +365,16 @@ pub fn process_conflicts(
     for conflict in &conflicts {
         match resolve_conflict(conflict, policy, leases) {
             Ok(res) => {
-                if let Ok(entry) =
-                    fork_log_entry(conflict, Some(&res), trace_id, action_id, timestamp)
-                {
-                    logs.push(entry);
+                match fork_log_entry(conflict, Some(&res), trace_id, action_id, timestamp) {
+                    Ok(entry) => logs.push(entry),
+                    Err(e) => errors.push(e),
                 }
                 resolutions.push(res);
             }
             Err(e) => {
-                if let Ok(entry) = fork_log_entry(conflict, None, trace_id, action_id, timestamp) {
-                    logs.push(entry);
+                match fork_log_entry(conflict, None, trace_id, action_id, timestamp) {
+                    Ok(entry) => logs.push(entry),
+                    Err(log_err) => errors.push(log_err),
                 }
                 errors.push(e);
             }
@@ -599,6 +614,20 @@ mod tests {
     }
 
     #[test]
+    fn process_conflicts_propagates_fork_log_context_errors() {
+        let leases = vec![
+            lease("l1", "r", "Operation", 100, 60, "Standard"),
+            lease("l2", "r", "Operation", 110, 60, "Standard"),
+        ];
+        let (resolutions, logs, errors) =
+            process_conflicts(&leases, "r", 120, &policy(), "", "act", "ts");
+        assert_eq!(resolutions.len(), 1);
+        assert_eq!(logs.len(), 0);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code(), "OLC_FORK_LOG_INCOMPLETE");
+    }
+
+    #[test]
     fn three_way_overlap() {
         let leases = vec![
             lease("l1", "r", "Operation", 100, 60, "Standard"),
@@ -631,6 +660,44 @@ mod tests {
         };
         let e1 = fork_log_entry(&conflict, None, "tr", "act", "ts").unwrap();
         let e2 = fork_log_entry(&conflict, None, "tr", "act", "ts").unwrap();
+        assert_eq!(e1.entry_id, e2.entry_id);
+    }
+
+    #[test]
+    fn entry_id_varies_across_action_context() {
+        let conflict = LeaseConflict {
+            lease_a: "l1".into(),
+            lease_b: "l2".into(),
+            resource: "r".into(),
+            overlap_start: 100,
+            overlap_end: 160,
+            tier: ConflictTier::Standard,
+        };
+        let e1 = fork_log_entry(&conflict, None, "tr", "act-a", "ts").unwrap();
+        let e2 = fork_log_entry(&conflict, None, "tr", "act-b", "ts").unwrap();
+        assert_ne!(e1.entry_id, e2.entry_id);
+    }
+
+    #[test]
+    fn entry_id_stable_when_lease_ids_swapped() {
+        let conflict_ab = LeaseConflict {
+            lease_a: "l1".into(),
+            lease_b: "l2".into(),
+            resource: "r".into(),
+            overlap_start: 100,
+            overlap_end: 160,
+            tier: ConflictTier::Standard,
+        };
+        let conflict_ba = LeaseConflict {
+            lease_a: "l2".into(),
+            lease_b: "l1".into(),
+            resource: "r".into(),
+            overlap_start: 100,
+            overlap_end: 160,
+            tier: ConflictTier::Standard,
+        };
+        let e1 = fork_log_entry(&conflict_ab, None, "tr", "act", "ts").unwrap();
+        let e2 = fork_log_entry(&conflict_ba, None, "tr", "act", "ts").unwrap();
         assert_eq!(e1.entry_id, e2.entry_id);
     }
 

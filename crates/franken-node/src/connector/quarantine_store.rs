@@ -176,7 +176,7 @@ impl QuarantineStore {
 
         // Evict by oldest first until we have room
         while (self.entries.len() >= self.config.max_objects
-            || self.total_bytes + needed_bytes > self.config.max_bytes)
+            || self.total_bytes.saturating_add(needed_bytes) > self.config.max_bytes)
             && !self.entries.is_empty()
         {
             // Find oldest entry (deterministic: break ties by object_id)
@@ -217,28 +217,31 @@ impl QuarantineStore {
         source_peer: &str,
         now: u64,
     ) -> Result<Vec<EvictionRecord>, QuarantineError> {
+        // Step 1: evict TTL-expired entries
+        let mut evictions = self.evict_expired(now);
+
+        // Duplicate check must happen after TTL cleanup so expired entries do
+        // not block re-ingest of the same object ID.
         if self.entries.contains_key(object_id) {
             return Err(QuarantineError::Duplicate {
                 object_id: object_id.to_string(),
             });
         }
 
-        // Step 1: evict TTL-expired entries
-        let mut evictions = self.evict_expired(now);
+        // If the incoming object can never fit, reject without evicting healthy
+        // entries for quota pressure.
+        if size_bytes > self.config.max_bytes {
+            return Err(QuarantineError::QuotaExceeded {
+                current_bytes: self.total_bytes,
+                max_bytes: self.config.max_bytes,
+            });
+        }
 
         // Step 2: if still over quota, evict oldest
         if self.entries.len() >= self.config.max_objects
             || self.total_bytes.saturating_add(size_bytes) > self.config.max_bytes
         {
             evictions.extend(self.evict_for_quota(size_bytes, now));
-        }
-
-        // Step 3: check if we can fit after eviction
-        if size_bytes > self.config.max_bytes {
-            return Err(QuarantineError::QuotaExceeded {
-                current_bytes: self.total_bytes,
-                max_bytes: self.config.max_bytes,
-            });
         }
 
         self.entries.insert(
@@ -519,5 +522,49 @@ mod tests {
         assert_eq!(store.stats(1001).total_bytes, 250);
         store.promote("obj1").unwrap();
         assert_eq!(store.stats(1001).total_bytes, 150);
+    }
+
+    #[test]
+    fn oversized_ingest_does_not_evict_existing_entries() {
+        let mut store = QuarantineStore::new(config()).unwrap();
+        for i in 0..5 {
+            store
+                .ingest(&format!("obj{i}"), 10, "peer1", 1000 + i as u64)
+                .unwrap();
+        }
+
+        let err = store.ingest("oversized", 600, "peer2", 1006).unwrap_err();
+        assert_eq!(err.code(), "QDS_QUOTA_EXCEEDED");
+        assert_eq!(store.stats(1006).object_count, 5);
+        assert!(store.contains("obj0"));
+    }
+
+    #[test]
+    fn quota_eviction_handles_large_totals_without_overflow() {
+        let cfg = QuarantineConfig {
+            max_objects: 1,
+            max_bytes: u64::MAX,
+            ttl_seconds: 100,
+        };
+        let mut store = QuarantineStore::new(cfg).unwrap();
+        store.ingest("obj1", u64::MAX - 1, "peer1", 1000).unwrap();
+
+        let evictions = store.ingest("obj2", 10, "peer1", 1001).unwrap();
+        assert_eq!(evictions.len(), 1);
+        assert!(store.contains("obj2"));
+        assert!(!store.contains("obj1"));
+    }
+
+    #[test]
+    fn reingest_same_object_after_ttl_expiry_succeeds() {
+        let mut store = QuarantineStore::new(config()).unwrap();
+        store.ingest("obj1", 100, "peer1", 1000).unwrap();
+
+        let evictions = store.ingest("obj1", 120, "peer2", 1200).unwrap();
+        assert_eq!(evictions.len(), 1);
+        assert_eq!(evictions[0].object_id, "obj1");
+        assert_eq!(evictions[0].reason, "ttl_expired");
+        assert!(store.contains("obj1"));
+        assert_eq!(store.stats(1200).total_bytes, 120);
     }
 }
