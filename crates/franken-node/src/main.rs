@@ -32,6 +32,7 @@ pub mod verifier_economy;
 use anyhow::{Context, Result};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
@@ -68,10 +69,14 @@ use security::decision_receipt::{
     export_receipts_to_path, write_receipts_markdown,
 };
 use security::remote_cap::{CapabilityProvider, RemoteOperation, RemoteScope};
+use supply_chain::extension_registry::{
+    ExtensionSignature, ExtensionStatus, ProvenanceAttestation, RegistrationRequest,
+    SignedExtension, SignedExtensionRegistry, VersionEntry,
+};
 use supply_chain::trust_card::{
-    RevocationStatus, RiskLevel, TrustCard, TrustCardListFilter, TrustCardRegistry,
-    demo_registry as demo_trust_registry, render_comparison_human, render_trust_card_human,
-    to_canonical_json as trust_card_to_json,
+    ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardListFilter,
+    TrustCardMutation, TrustCardRegistry, demo_registry as demo_trust_registry,
+    render_comparison_human, render_trust_card_human, to_canonical_json as trust_card_to_json,
 };
 use tools::benchmark_suite::{
     render_human_summary as benchmark_suite_render_human_summary,
@@ -1905,6 +1910,86 @@ mod trust_command_tests {
 }
 
 #[cfg(test)]
+mod registry_command_tests {
+    use super::*;
+
+    #[test]
+    fn parse_min_assurance_accepts_range() {
+        assert_eq!(parse_min_assurance(None).expect("none"), None);
+        assert_eq!(parse_min_assurance(Some(1)).expect("one"), Some(1));
+        assert_eq!(parse_min_assurance(Some(5)).expect("five"), Some(5));
+    }
+
+    #[test]
+    fn parse_min_assurance_rejects_out_of_range() {
+        let err = parse_min_assurance(Some(0)).expect_err("must reject");
+        assert!(err.to_string().contains("between 1 and 5"));
+        let err = parse_min_assurance(Some(6)).expect_err("must reject");
+        assert!(err.to_string().contains("between 1 and 5"));
+    }
+
+    #[test]
+    fn assurance_level_is_higher_for_active_than_revoked() {
+        let registry = registry_cli_registry().expect("registry");
+        let entries = registry.list(None);
+        let active = entries
+            .iter()
+            .find(|extension| extension.status == ExtensionStatus::Active)
+            .expect("active extension");
+        let revoked = entries
+            .iter()
+            .find(|extension| extension.status == ExtensionStatus::Revoked)
+            .expect("revoked extension");
+
+        assert!(extension_assurance_level(active) > extension_assurance_level(revoked));
+    }
+
+    #[test]
+    fn search_registry_entries_filters_by_query_and_assurance() {
+        let registry = registry_cli_registry().expect("registry");
+        let telemetry_results = search_registry_entries(&registry, "telemetry", Some(3));
+        assert!(!telemetry_results.is_empty());
+        assert!(
+            telemetry_results
+                .iter()
+                .all(|(_, extension)| extension_matches_query(extension, "telemetry"))
+        );
+        assert!(
+            telemetry_results
+                .iter()
+                .all(|(assurance, _)| *assurance >= 3)
+        );
+
+        let high_assurance = search_registry_entries(&registry, "", Some(5));
+        assert!(!high_assurance.is_empty());
+        assert!(high_assurance.iter().all(|(assurance, _)| *assurance == 5));
+    }
+
+    #[test]
+    fn render_registry_search_results_handles_empty_rows() {
+        let rendered = render_registry_search_results(&[], "nomatch", Some(4));
+        assert!(rendered.contains("no extensions matched"));
+        assert!(rendered.contains("query=`nomatch`"));
+    }
+
+    #[test]
+    fn build_registry_publish_request_derives_stable_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let package = temp.path().join("My Extension!.tar.gz");
+        std::fs::write(&package, "artifact").expect("write package");
+        let hash = "a".repeat(64);
+
+        let request = build_registry_publish_request(&package, &hash);
+        assert!(!request.name.is_empty());
+        assert!(request.name.chars().all(|ch| {
+            ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_'
+        }));
+        assert_eq!(request.initial_version.content_hash, hash);
+        assert_eq!(request.signature.signature_hex.len(), 128);
+    }
+}
+
+#[cfg(test)]
 mod fleet_command_tests {
     use super::*;
     use crate::api::fleet_quarantine::{ConvergencePhase, ConvergenceState, DecisionReceipt};
@@ -2136,6 +2221,339 @@ fn trust_card_cli_registry() -> Result<TrustCardRegistry> {
     demo_trust_registry(now_unix_secs()).map_err(Into::into)
 }
 
+fn build_registry_seed_request(
+    name: &str,
+    description: &str,
+    publisher_id: &str,
+    version: &str,
+    tags: &[&str],
+) -> RegistrationRequest {
+    let attestation_hash = hex::encode(sha2::Sha256::digest(
+        format!("{name}:{publisher_id}:{version}").as_bytes(),
+    ));
+    let signature_hex = format!("{attestation_hash}{attestation_hash}");
+    RegistrationRequest {
+        name: name.to_string(),
+        description: description.to_string(),
+        publisher_id: publisher_id.to_string(),
+        signature: ExtensionSignature {
+            key_id: format!("{publisher_id}-key"),
+            algorithm: "ed25519".to_string(),
+            signature_hex,
+            signed_at: chrono::Utc::now().to_rfc3339(),
+        },
+        provenance: ProvenanceAttestation {
+            publisher_id: publisher_id.to_string(),
+            build_system: "github-actions".to_string(),
+            source_repository: format!("https://github.com/{publisher_id}/{name}"),
+            vcs_commit: attestation_hash[..12].to_string(),
+            attestation_hash,
+        },
+        initial_version: VersionEntry {
+            version: version.to_string(),
+            parent_version: None,
+            content_hash: hex::encode(sha2::Sha256::digest(
+                format!("{name}:{version}:content").as_bytes(),
+            )),
+            registered_at: chrono::Utc::now().to_rfc3339(),
+            compatible_with: vec!["franken-node".to_string()],
+        },
+        tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+    }
+}
+
+fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
+    let mut registry = SignedExtensionRegistry::default();
+
+    let baseline = [
+        build_registry_seed_request(
+            "auth-guard",
+            "Access policy enforcement extension",
+            "acme-sec",
+            "1.4.0",
+            &["auth", "security", "policy"],
+        ),
+        build_registry_seed_request(
+            "telemetry-bridge",
+            "Telemetry fan-out and export bridge",
+            "beta-observability",
+            "2.1.3",
+            &["telemetry", "metrics", "export"],
+        ),
+        build_registry_seed_request(
+            "sandbox-runner",
+            "Sandboxed task execution runtime",
+            "gamma-runtime",
+            "0.9.2",
+            &["runtime", "sandbox", "worker"],
+        ),
+    ];
+
+    let mut ids = Vec::new();
+    for request in baseline {
+        let result = registry.register(request, "trace-cli-registry-seed");
+        if !result.success {
+            anyhow::bail!("failed seeding extension registry: {}", result.detail);
+        }
+        let id = result
+            .extension_id
+            .ok_or_else(|| anyhow::anyhow!("seeded registry entry missing extension id"))?;
+        ids.push(id);
+    }
+
+    if let Some(id) = ids.get(1) {
+        let _ = registry.deprecate(id, "trace-cli-registry-seed-deprecate");
+    }
+    if let Some(id) = ids.get(2) {
+        let _ = registry.revoke(
+            id,
+            supply_chain::extension_registry::RevocationReason::SecurityVulnerability,
+            "registry-seed",
+            "trace-cli-registry-seed-revoke",
+        );
+    }
+
+    Ok(registry)
+}
+
+fn normalize_registry_name(raw: &str) -> String {
+    let mut normalized = raw
+        .trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    normalized = normalized.trim_matches('-').to_string();
+    if normalized.is_empty() {
+        "extension-artifact".to_string()
+    } else {
+        normalized
+    }
+}
+
+fn build_registry_publish_request(package_path: &Path, content_hash: &str) -> RegistrationRequest {
+    let inferred_name = package_path
+        .file_stem()
+        .and_then(std::ffi::OsStr::to_str)
+        .unwrap_or("extension-artifact");
+    let name = normalize_registry_name(inferred_name);
+    let publisher_id = normalize_registry_name(
+        &std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_else(|_| "local-operator".to_string()),
+    );
+
+    RegistrationRequest {
+        name: name.clone(),
+        description: format!("CLI-published artifact from {}", package_path.display()),
+        publisher_id: publisher_id.clone(),
+        signature: ExtensionSignature {
+            key_id: format!("{publisher_id}-cli-key"),
+            algorithm: "ed25519".to_string(),
+            signature_hex: format!("{content_hash}{content_hash}"),
+            signed_at: chrono::Utc::now().to_rfc3339(),
+        },
+        provenance: ProvenanceAttestation {
+            publisher_id,
+            build_system: "franken-node-cli".to_string(),
+            source_repository: "local://workspace".to_string(),
+            vcs_commit: content_hash[..12].to_string(),
+            attestation_hash: content_hash.to_string(),
+        },
+        initial_version: VersionEntry {
+            version: "1.0.0".to_string(),
+            parent_version: None,
+            content_hash: content_hash.to_string(),
+            registered_at: chrono::Utc::now().to_rfc3339(),
+            compatible_with: vec!["franken-node".to_string()],
+        },
+        tags: vec!["cli-publish".to_string(), "local".to_string()],
+    }
+}
+
+fn parse_min_assurance(raw: Option<u8>) -> Result<Option<u8>> {
+    let Some(value) = raw else {
+        return Ok(None);
+    };
+    if (1..=5).contains(&value) {
+        Ok(Some(value))
+    } else {
+        anyhow::bail!("invalid --min-assurance `{value}`; expected a value between 1 and 5");
+    }
+}
+
+fn extension_assurance_level(extension: &SignedExtension) -> u8 {
+    let mut score = 1_u8;
+
+    if extension.status == ExtensionStatus::Active {
+        score = score.saturating_add(1);
+    }
+    if extension
+        .signature
+        .algorithm
+        .eq_ignore_ascii_case("ed25519")
+        && extension.signature.signature_hex.len() >= 64
+    {
+        score = score.saturating_add(1);
+    }
+    if !extension.provenance.attestation_hash.is_empty()
+        && !extension.provenance.source_repository.is_empty()
+    {
+        score = score.saturating_add(1);
+    }
+    if !extension.versions.is_empty() {
+        score = score.saturating_add(1);
+    }
+    if extension.status == ExtensionStatus::Revoked {
+        score = score.saturating_sub(2);
+    }
+
+    score.clamp(1, 5)
+}
+
+fn extension_matches_query(extension: &SignedExtension, query: &str) -> bool {
+    let needle = query.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+
+    extension
+        .extension_id
+        .to_ascii_lowercase()
+        .contains(&needle)
+        || extension.name.to_ascii_lowercase().contains(&needle)
+        || extension
+            .publisher_id
+            .to_ascii_lowercase()
+            .contains(&needle)
+        || extension.description.to_ascii_lowercase().contains(&needle)
+        || extension
+            .tags
+            .iter()
+            .any(|tag| tag.to_ascii_lowercase().contains(&needle))
+}
+
+fn search_registry_entries<'a>(
+    registry: &'a SignedExtensionRegistry,
+    query: &str,
+    min_assurance: Option<u8>,
+) -> Vec<(u8, &'a SignedExtension)> {
+    let mut results = registry
+        .list(None)
+        .into_iter()
+        .filter(|extension| extension_matches_query(extension, query))
+        .map(|extension| (extension_assurance_level(extension), extension))
+        .filter(|(assurance, _)| min_assurance.is_none_or(|minimum| *assurance >= minimum))
+        .collect::<Vec<_>>();
+
+    results.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| left.1.name.cmp(&right.1.name))
+            .then_with(|| left.1.extension_id.cmp(&right.1.extension_id))
+    });
+    results
+}
+
+fn render_registry_search_results(
+    rows: &[(u8, &SignedExtension)],
+    query: &str,
+    min_assurance: Option<u8>,
+) -> String {
+    if rows.is_empty() {
+        return format!(
+            "registry search: no extensions matched query=`{query}` min_assurance={}",
+            min_assurance.map_or_else(|| "none".to_string(), |value| value.to_string())
+        );
+    }
+
+    let mut lines = Vec::with_capacity(rows.len() + 3);
+    lines.push(format!(
+        "registry search: query=`{query}` min_assurance={}",
+        min_assurance.map_or_else(|| "none".to_string(), |value| value.to_string())
+    ));
+    lines.push("extension_id | name | publisher | status | assurance".to_string());
+    lines.push("------------ | ---- | --------- | ------ | ---------".to_string());
+    for (assurance, extension) in rows {
+        lines.push(format!(
+            "{} | {} | {} | {} | {}",
+            extension.extension_id,
+            extension.name,
+            extension.publisher_id,
+            extension.status.label(),
+            assurance
+        ));
+    }
+    lines.join("\n")
+}
+
+fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
+    if !args.package_path.exists() {
+        anyhow::bail!(
+            "registry publish target does not exist: {}",
+            args.package_path.display()
+        );
+    }
+    if !args.package_path.is_file() {
+        anyhow::bail!(
+            "registry publish target must be a file: {}",
+            args.package_path.display()
+        );
+    }
+
+    let package_bytes = std::fs::read(&args.package_path)
+        .with_context(|| format!("failed reading package {}", args.package_path.display()))?;
+    let content_hash = hex::encode(sha2::Sha256::digest(&package_bytes));
+    let request = build_registry_publish_request(&args.package_path, &content_hash);
+
+    let mut registry = registry_cli_registry()?;
+    let result = registry.register(request, "trace-cli-registry-publish");
+    if !result.success {
+        anyhow::bail!("registry publish failed: {}", result.detail);
+    }
+    let extension_id = result
+        .extension_id
+        .ok_or_else(|| anyhow::anyhow!("registry publish returned no extension id"))?;
+    let published = registry
+        .query(&extension_id)
+        .ok_or_else(|| anyhow::anyhow!("registry publish stored entry is missing"))?;
+
+    println!(
+        "registry publish: extension_id={} name={} status={} content_sha256={}",
+        published.extension_id,
+        published.name,
+        published.status.label(),
+        content_hash
+    );
+    println!(
+        "registry state: entries={} revocations={} audit_records={} content_hash={}",
+        registry.list(None).len(),
+        registry.revocations().len(),
+        registry.audit_log().len(),
+        registry.content_hash()
+    );
+
+    Ok(())
+}
+
+fn handle_registry_search(args: &cli::RegistrySearchArgs) -> Result<()> {
+    let min_assurance = parse_min_assurance(args.min_assurance)?;
+    let registry = registry_cli_registry()?;
+    let rows = search_registry_entries(&registry, &args.query, min_assurance);
+    println!(
+        "{}",
+        render_registry_search_results(&rows, &args.query, min_assurance)
+    );
+    Ok(())
+}
+
 fn parse_risk_level_filter(raw: Option<&str>) -> Result<Option<RiskLevel>> {
     let Some(raw_value) = raw else {
         return Ok(None);
@@ -2211,6 +2629,117 @@ fn render_trust_card_list(cards: &[TrustCard]) -> String {
         ));
     }
     lines.join("\n")
+}
+
+fn revoke_trust_card(
+    registry: &mut TrustCardRegistry,
+    extension_id: &str,
+    now_secs: u64,
+) -> Result<TrustCard> {
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    registry
+        .update(
+            extension_id,
+            TrustCardMutation {
+                certification_level: None,
+                revocation_status: Some(RevocationStatus::Revoked {
+                    reason: "manual revoke via franken-node trust revoke".to_string(),
+                    revoked_at: now_rfc3339.clone(),
+                }),
+                active_quarantine: Some(true),
+                reputation_score_basis_points: None,
+                reputation_trend: Some(ReputationTrend::Declining),
+                user_facing_risk_assessment: Some(RiskAssessment {
+                    level: RiskLevel::Critical,
+                    summary: "Revoked by operator action via trust revoke.".to_string(),
+                }),
+                last_verified_timestamp: Some(now_rfc3339),
+            },
+            now_secs,
+            "trace-cli-trust-revoke",
+        )
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
+}
+
+fn quarantine_trust_cards(
+    registry: &mut TrustCardRegistry,
+    artifact: &str,
+    now_secs: u64,
+) -> Result<Vec<TrustCard>> {
+    let now_rfc3339 = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let mut targets = Vec::new();
+
+    let direct_match = registry
+        .read(artifact, now_secs, "trace-cli-trust-quarantine-lookup")
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+
+    if let Some(card) = direct_match {
+        targets.push(card.extension.extension_id);
+    } else if artifact.starts_with("sha256:") {
+        targets = registry
+            .list(
+                &TrustCardListFilter::empty(),
+                "trace-cli-trust-quarantine-list",
+                now_secs,
+            )
+            .into_iter()
+            .map(|card| card.extension.extension_id)
+            .collect();
+    } else {
+        anyhow::bail!(
+            "artifact `{artifact}` did not match a trust card extension id; use extension id or sha256:* reference"
+        );
+    }
+
+    if targets.is_empty() {
+        anyhow::bail!("no trust cards available for quarantine");
+    }
+
+    let mut updates = Vec::new();
+    for extension_id in targets {
+        let updated = registry
+            .update(
+                &extension_id,
+                TrustCardMutation {
+                    certification_level: None,
+                    revocation_status: None,
+                    active_quarantine: Some(true),
+                    reputation_score_basis_points: None,
+                    reputation_trend: None,
+                    user_facing_risk_assessment: None,
+                    last_verified_timestamp: Some(now_rfc3339.clone()),
+                },
+                now_secs,
+                "trace-cli-trust-quarantine",
+            )
+            .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+        updates.push(updated);
+    }
+
+    updates.sort_by(|left, right| {
+        left.extension
+            .extension_id
+            .cmp(&right.extension.extension_id)
+    });
+    Ok(updates)
+}
+
+fn render_trust_sync_summary(cards: &[TrustCard], force: bool) -> String {
+    let revoked = cards
+        .iter()
+        .filter(|card| matches!(card.revocation_status, RevocationStatus::Revoked { .. }))
+        .count();
+    let quarantined = cards.iter().filter(|card| card.active_quarantine).count();
+    let critical = cards
+        .iter()
+        .filter(|card| card.user_facing_risk_assessment.level == RiskLevel::Critical)
+        .count();
+    format!(
+        "trust sync completed: force={force} cards={} revoked={} quarantined={} critical_risk={critical}",
+        cards.len(),
+        revoked,
+        quarantined
+    )
 }
 
 fn fleet_cli_identity() -> AuthIdentity {
@@ -3037,7 +3566,10 @@ async fn main() -> Result<()> {
                 println!("{}", render_trust_card_list(&filtered));
             }
             TrustCommand::Revoke(args) => {
-                eprintln!("franken-node trust revoke: extension={}", args.extension_id);
+                let now_secs = now_unix_secs();
+                let mut registry = trust_card_cli_registry()?;
+                let card = revoke_trust_card(&mut registry, &args.extension_id, now_secs)?;
+                println!("{}", render_trust_card_human(&card));
                 maybe_export_demo_receipts(
                     "revocation",
                     "trust-control-plane",
@@ -3045,10 +3577,17 @@ async fn main() -> Result<()> {
                     args.receipt_out.as_deref(),
                     args.receipt_summary_out.as_deref(),
                 )?;
-                eprintln!("[not yet implemented]");
             }
             TrustCommand::Quarantine(args) => {
-                eprintln!("franken-node trust quarantine: artifact={}", args.artifact);
+                let now_secs = now_unix_secs();
+                let mut registry = trust_card_cli_registry()?;
+                let updates = quarantine_trust_cards(&mut registry, &args.artifact, now_secs)?;
+                println!(
+                    "quarantine applied: artifact={} affected_cards={}",
+                    args.artifact,
+                    updates.len()
+                );
+                println!("{}", render_trust_card_list(&updates));
                 maybe_export_demo_receipts(
                     "quarantine",
                     "trust-control-plane",
@@ -3056,11 +3595,16 @@ async fn main() -> Result<()> {
                     args.receipt_out.as_deref(),
                     args.receipt_summary_out.as_deref(),
                 )?;
-                eprintln!("[not yet implemented]");
             }
             TrustCommand::Sync(args) => {
-                eprintln!("franken-node trust sync: force={}", args.force);
-                eprintln!("[not yet implemented]");
+                let mut registry = trust_card_cli_registry()?;
+                let now_secs = now_unix_secs();
+                let cards = registry.list(
+                    &TrustCardListFilter::empty(),
+                    "trace-cli-trust-sync",
+                    now_secs,
+                );
+                println!("{}", render_trust_sync_summary(&cards, args.force));
             }
         },
 
@@ -3215,18 +3759,10 @@ async fn main() -> Result<()> {
 
         Command::Registry(sub) => match sub {
             RegistryCommand::Publish(args) => {
-                eprintln!(
-                    "franken-node registry publish: package={}",
-                    args.package_path.display()
-                );
-                eprintln!("[not yet implemented]");
+                handle_registry_publish(&args)?;
             }
             RegistryCommand::Search(args) => {
-                eprintln!(
-                    "franken-node registry search: query={} min_assurance={:?}",
-                    args.query, args.min_assurance
-                );
-                eprintln!("[not yet implemented]");
+                handle_registry_search(&args)?;
             }
         },
 
