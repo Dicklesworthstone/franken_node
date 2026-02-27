@@ -197,6 +197,21 @@ pub fn verify_threshold(
             continue;
         }
 
+        // Verify signature first to prevent invalid signatures from poisoning the seen set
+        let key = config.signer_keys.iter().find(|k| k.key_id == sig.key_id);
+        if let Some(key) = key {
+            if !verify_signature(key, &artifact.content_hash, sig) {
+                if first_failure.is_none() {
+                    first_failure = Some(FailureReason::InvalidSignature {
+                        signer_id: sig.signer_id.clone(),
+                    });
+                }
+                continue;
+            }
+        } else {
+            continue;
+        }
+
         // A signer key can only contribute once toward quorum.
         if !seen_key_ids.insert(sig.key_id.as_str()) {
             if first_failure.is_none() {
@@ -217,17 +232,7 @@ pub fn verify_threshold(
             continue;
         }
 
-        // Verify signature
-        let key = config.signer_keys.iter().find(|k| k.key_id == sig.key_id);
-        if let Some(key) = key {
-            if verify_signature(key, &artifact.content_hash, sig) {
-                valid_count += 1;
-            } else if first_failure.is_none() {
-                first_failure = Some(FailureReason::InvalidSignature {
-                    signer_id: sig.signer_id.clone(),
-                });
-            }
-        }
+        valid_count += 1;
     }
 
     let verified = valid_count >= config.threshold;

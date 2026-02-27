@@ -389,7 +389,7 @@ impl VerifierEconomyRegistry {
         if self
             .verifiers
             .values()
-            .any(|v| v.public_key == reg.public_key)
+            .any(|v| crate::security::constant_time::ct_eq(&v.public_key, &reg.public_key))
         {
             return Err(VepError {
                 code: ERR_VEP_DUPLICATE_SUBMISSION.to_string(),

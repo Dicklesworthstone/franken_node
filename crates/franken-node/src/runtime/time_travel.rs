@@ -259,7 +259,7 @@ impl WorkflowSnapshot {
     /// Verify the snapshot integrity against its stored digest.
     pub fn verify_integrity(&self) -> bool {
         let computed = Self::compute_integrity_digest(&self.frames);
-        computed == self.integrity_digest
+        crate::security::constant_time::ct_eq(&computed, &self.integrity_digest)
     }
 
     /// Serialize this snapshot to JSON bytes.
@@ -591,7 +591,7 @@ impl ReplaySession {
         let frame = &self.snapshot.frames[self.cursor as usize];
         let expected_digest = frame.decision.digest();
         let actual_digest = replayed.digest();
-        if expected_digest != actual_digest {
+        if !crate::security::constant_time::ct_eq(&expected_digest, &actual_digest) {
             let explanation = DivergenceExplanation {
                 frame_index: frame.frame_index,
                 clock_tick: frame.clock_tick,
@@ -870,6 +870,15 @@ mod tests {
     fn snapshot_integrity_fails_on_tamper() {
         let mut snap = simple_capture(42, &[b"a"]);
         snap.integrity_digest = "tampered".to_string();
+        assert!(!snap.verify_integrity());
+    }
+
+    #[test]
+    fn snapshot_integrity_fails_on_same_length_tamper() {
+        let mut snap = simple_capture(42, &[b"a"]);
+        let mut chars: Vec<char> = snap.integrity_digest.chars().collect();
+        chars[0] = if chars[0] == '0' { '1' } else { '0' };
+        snap.integrity_digest = chars.into_iter().collect();
         assert!(!snap.verify_integrity());
     }
 

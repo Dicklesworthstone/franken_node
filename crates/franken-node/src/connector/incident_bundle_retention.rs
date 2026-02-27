@@ -441,7 +441,7 @@ impl IncidentBundleStore {
 
         // INV-IBR-INTEGRITY: verify hash
         let expected = compute_integrity_hash(&bundle);
-        if bundle.integrity_hash != expected {
+        if !crate::security::constant_time::ct_eq(&bundle.integrity_hash, &expected) {
             return Err(IncidentBundleError::IntegrityFailure {
                 bundle_id: bundle.bundle_id.clone(),
                 expected,
@@ -532,7 +532,7 @@ impl IncidentBundleStore {
 
         // INV-IBR-INTEGRITY: verify hash before export
         let computed = compute_integrity_hash(bundle);
-        if bundle.integrity_hash != computed {
+        if !crate::security::constant_time::ct_eq(&bundle.integrity_hash, &computed) {
             return Err(IncidentBundleError::IntegrityFailure {
                 bundle_id: bundle_id.into(),
                 expected: bundle.integrity_hash.clone(),
@@ -930,6 +930,23 @@ mod tests {
             1000,
         );
         bundle.integrity_hash = "bad_hash".into();
+        let err = store.store(bundle, 1000).unwrap_err();
+        assert_eq!(err.code(), "IBR_INTEGRITY_FAILURE");
+    }
+
+    #[test]
+    fn test_store_rejects_same_length_bad_integrity() {
+        let mut store = default_store();
+        let mut bundle = sample_bundle(
+            "ibr-001",
+            "INC-001",
+            Severity::Critical,
+            RetentionTier::Hot,
+            1000,
+        );
+        let mut chars: Vec<char> = bundle.integrity_hash.chars().collect();
+        chars[0] = if chars[0] == '0' { '1' } else { '0' };
+        bundle.integrity_hash = chars.into_iter().collect();
         let err = store.store(bundle, 1000).unwrap_err();
         assert_eq!(err.code(), "IBR_INTEGRITY_FAILURE");
     }

@@ -288,7 +288,7 @@ impl IncidentLab {
             });
         }
         let computed = Self::compute_trace_hash(trace);
-        if computed != trace.integrity_hash {
+        if !crate::security::constant_time::ct_eq(&computed, &trace.integrity_hash) {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_CORRUPT.to_string(),
                 message: format!(
@@ -446,7 +446,8 @@ impl IncidentLab {
     pub fn verify_deterministic_replay(&self, trace: &IncidentTrace) -> Result<bool, LabError> {
         let replay_a = self.replay_trace(trace)?;
         let replay_b = self.replay_trace(trace)?;
-        if replay_a.replay_digest != replay_b.replay_digest {
+        if !crate::security::constant_time::ct_eq(&replay_a.replay_digest, &replay_b.replay_digest)
+        {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_REPLAY_DIVERGENCE.to_string(),
                 message: format!(
@@ -559,6 +560,17 @@ mod tests {
         let lab = lab();
         let mut trace = make_test_trace("t-corrupt", 3);
         trace.integrity_hash = "badhash".to_string();
+        let err = lab.validate_trace(&trace).unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_ILAB_TRACE_CORRUPT);
+    }
+
+    #[test]
+    fn test_corrupt_trace_same_length_hash_rejected() {
+        let lab = lab();
+        let mut trace = make_test_trace("t-corrupt-same-len", 3);
+        let mut chars: Vec<char> = trace.integrity_hash.chars().collect();
+        chars[0] = if chars[0] == '0' { '1' } else { '0' };
+        trace.integrity_hash = chars.into_iter().collect();
         let err = lab.validate_trace(&trace).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_ILAB_TRACE_CORRUPT);
     }

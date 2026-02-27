@@ -546,7 +546,7 @@ impl AttestationLedger {
             outcome,
             status: AttestationStatus::Active,
             generated_at_ms: now_ms,
-            expires_at_ms: now_ms + policy.validity_ms,
+            expires_at_ms: now_ms.saturating_add(policy.validity_ms),
             trace_id: trace_id.clone(),
         };
 
@@ -1204,7 +1204,7 @@ mod tests {
             ZkVerificationResult::Rejected { error_code, .. } => {
                 assert_eq!(error_code, error_codes::ERR_ZKA_POLICY_MISMATCH);
             }
-            _ => assert!(false, "Expected Rejected"),
+            _ => panic!("Expected Rejected"),
         }
     }
 
@@ -1227,7 +1227,7 @@ mod tests {
             ZkVerificationResult::Rejected { error_code, .. } => {
                 assert_eq!(error_code, error_codes::ERR_ZKA_EXPIRED);
             }
-            _ => assert!(false, "Expected Rejected"),
+            _ => panic!("Expected Rejected"),
         }
     }
 
@@ -1249,7 +1249,7 @@ mod tests {
             ZkVerificationResult::Rejected { error_code, .. } => {
                 assert_eq!(error_code, error_codes::ERR_ZKA_REVOKED);
             }
-            _ => assert!(false, "Expected Rejected"),
+            _ => panic!("Expected Rejected"),
         }
     }
 
@@ -1271,7 +1271,7 @@ mod tests {
             ZkVerificationResult::Rejected { error_code, .. } => {
                 assert_eq!(error_code, error_codes::ERR_ZKA_INVALID_PROOF);
             }
-            _ => assert!(false, "Expected Rejected"),
+            _ => panic!("Expected Rejected"),
         }
     }
 
@@ -1292,7 +1292,7 @@ mod tests {
             ZkVerificationResult::Rejected { error_code, .. } => {
                 assert_eq!(error_code, error_codes::ERR_ZKA_PREDICATE_UNSATISFIED);
             }
-            _ => assert!(false, "Expected Rejected"),
+            _ => panic!("Expected Rejected"),
         }
     }
 
