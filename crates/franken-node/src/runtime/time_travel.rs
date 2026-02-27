@@ -277,9 +277,26 @@ impl WorkflowSnapshot {
             serde_json::from_slice(data).map_err(|e| TimeTravelError::SnapshotCorrupt {
                 detail: format!("deserialization failed: {e}"),
             })?;
+        if snap.schema_version != SCHEMA_VERSION {
+            return Err(TimeTravelError::SnapshotCorrupt {
+                detail: format!(
+                    "schema_version mismatch: declared {}, expected {}",
+                    snap.schema_version, SCHEMA_VERSION
+                ),
+            });
+        }
         if !snap.verify_integrity() {
             return Err(TimeTravelError::SnapshotCorrupt {
                 detail: "integrity digest mismatch".to_string(),
+            });
+        }
+        if snap.frame_count != snap.frames.len() as u64 {
+            return Err(TimeTravelError::SnapshotCorrupt {
+                detail: format!(
+                    "frame_count mismatch: declared {}, actual {}",
+                    snap.frame_count,
+                    snap.frames.len()
+                ),
             });
         }
         Ok(snap)
@@ -499,9 +516,31 @@ impl ReplaySession {
     ///
     /// INV-TTR-DETERMINISTIC: the replay seed must match the capture seed.
     pub fn start(snapshot: WorkflowSnapshot, seed: u64) -> Result<Self, TimeTravelError> {
+        if snapshot.schema_version != SCHEMA_VERSION {
+            return Err(TimeTravelError::SnapshotCorrupt {
+                detail: format!(
+                    "schema_version mismatch: declared {}, expected {}",
+                    snapshot.schema_version, SCHEMA_VERSION
+                ),
+            });
+        }
+        if !snapshot.verify_integrity() {
+            return Err(TimeTravelError::SnapshotCorrupt {
+                detail: "integrity digest mismatch".to_string(),
+            });
+        }
         if snapshot.frames.is_empty() {
             return Err(TimeTravelError::EmptyTrace {
                 code: error_codes::ERR_TTR_EMPTY_TRACE.to_string(),
+            });
+        }
+        if snapshot.frame_count != snapshot.frames.len() as u64 {
+            return Err(TimeTravelError::SnapshotCorrupt {
+                detail: format!(
+                    "frame_count mismatch: declared {}, actual {}",
+                    snapshot.frame_count,
+                    snapshot.frames.len()
+                ),
             });
         }
         if snapshot.seed != seed {
@@ -538,7 +577,7 @@ impl ReplaySession {
     ///
     /// INV-TTR-STEP-NAVIGATION: fails if already at the last frame.
     pub fn step_forward(&mut self) -> Result<&CaptureFrame, TimeTravelError> {
-        let next = self.cursor + 1;
+        let next = self.cursor.saturating_add(1);
         if next >= self.snapshot.frame_count {
             return Err(TimeTravelError::StepOutOfBounds {
                 requested: next,
@@ -918,6 +957,54 @@ mod tests {
         let snap = simple_capture(42, &[b"a"]);
         let err = ReplaySession::start(snap, 99).unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_TTR_SEED_MISMATCH);
+    }
+
+    #[test]
+    fn snapshot_from_json_rejects_frame_count_mismatch() {
+        let snap = simple_capture(42, &[b"a", b"b"]);
+        let bytes = snap.to_json_bytes().unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        json["frame_count"] = serde_json::json!(999_u64);
+        let tampered = serde_json::to_vec(&json).unwrap();
+
+        let err = WorkflowSnapshot::from_json_bytes(&tampered).unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_TTR_SNAPSHOT_CORRUPT);
+    }
+
+    #[test]
+    fn snapshot_from_json_rejects_schema_mismatch() {
+        let snap = simple_capture(42, &[b"a"]);
+        let bytes = snap.to_json_bytes().unwrap();
+        let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        json["schema_version"] = serde_json::json!("ttr-v9.9");
+        let tampered = serde_json::to_vec(&json).unwrap();
+
+        let err = WorkflowSnapshot::from_json_bytes(&tampered).unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_TTR_SNAPSHOT_CORRUPT);
+    }
+
+    #[test]
+    fn replay_rejects_frame_count_mismatch() {
+        let mut snap = simple_capture(42, &[b"a", b"b"]);
+        snap.frame_count = snap.frame_count.saturating_add(1);
+        let err = ReplaySession::start(snap, 42).unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_TTR_SNAPSHOT_CORRUPT);
+    }
+
+    #[test]
+    fn replay_rejects_schema_mismatch_snapshot() {
+        let mut snap = simple_capture(42, &[b"a"]);
+        snap.schema_version = "ttr-v0".to_string();
+        let err = ReplaySession::start(snap, 42).unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_TTR_SNAPSHOT_CORRUPT);
+    }
+
+    #[test]
+    fn replay_rejects_integrity_mismatch_snapshot() {
+        let mut snap = simple_capture(42, &[b"a"]);
+        snap.integrity_digest = "deadbeef".to_string();
+        let err = ReplaySession::start(snap, 42).unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_TTR_SNAPSHOT_CORRUPT);
     }
 
     #[test]

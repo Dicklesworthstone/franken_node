@@ -4,6 +4,8 @@
 //! threshold is exceeded, triggers automatic rollback to a known-good
 //! pinned version. Rollback targets must pass trust policy.
 
+use std::collections::BTreeMap;
+
 /// Configuration for crash-loop detection thresholds.
 #[derive(Debug, Clone)]
 pub struct CrashLoopConfig {
@@ -85,6 +87,10 @@ pub enum CrashLoopError {
         connector_id: String,
         version: String,
     },
+    PinConnectorMismatch {
+        expected_connector: String,
+        pin_connector: String,
+    },
     CooldownActive {
         connector_id: String,
         remaining_secs: u64,
@@ -97,6 +103,7 @@ impl CrashLoopError {
             Self::ThresholdExceeded { .. } => "CLD_THRESHOLD_EXCEEDED",
             Self::NoKnownGood { .. } => "CLD_NO_KNOWN_GOOD",
             Self::PinUntrusted { .. } => "CLD_PIN_UNTRUSTED",
+            Self::PinConnectorMismatch { .. } => "CLD_PIN_CONNECTOR_MISMATCH",
             Self::CooldownActive { .. } => "CLD_COOLDOWN_ACTIVE",
         }
     }
@@ -127,6 +134,15 @@ impl std::fmt::Display for CrashLoopError {
                     "CLD_PIN_UNTRUSTED: pin {version} for {connector_id} is untrusted"
                 )
             }
+            Self::PinConnectorMismatch {
+                expected_connector,
+                pin_connector,
+            } => {
+                write!(
+                    f,
+                    "CLD_PIN_CONNECTOR_MISMATCH: expected {expected_connector}, got pin for {pin_connector}"
+                )
+            }
             Self::CooldownActive {
                 connector_id,
                 remaining_secs,
@@ -143,10 +159,10 @@ impl std::fmt::Display for CrashLoopError {
 /// Crash-loop detector maintaining sliding window state.
 pub struct CrashLoopDetector {
     config: CrashLoopConfig,
-    /// Crash timestamps as epoch seconds for window calculation.
-    crash_times: Vec<u64>,
-    /// Epoch second when last rollback occurred (0 = never).
-    last_rollback_epoch: u64,
+    /// Crash timestamps keyed by connector ID.
+    crash_times_by_connector: BTreeMap<String, Vec<u64>>,
+    /// Epoch second when last rollback occurred, keyed by connector ID.
+    last_rollback_epoch_by_connector: BTreeMap<String, u64>,
     pub incidents: Vec<CrashLoopIncident>,
 }
 
@@ -154,46 +170,93 @@ impl CrashLoopDetector {
     pub fn new(config: CrashLoopConfig) -> Self {
         Self {
             config,
-            crash_times: Vec::new(),
-            last_rollback_epoch: 0,
+            crash_times_by_connector: BTreeMap::new(),
+            last_rollback_epoch_by_connector: BTreeMap::new(),
             incidents: Vec::new(),
         }
     }
 
     /// Record a crash event. Returns the current crash count within the window.
-    pub fn record_crash(&mut self, _event: &CrashEvent, epoch_secs: u64) -> u32 {
-        self.crash_times.push(epoch_secs);
+    pub fn record_crash(&mut self, event: &CrashEvent, epoch_secs: u64) -> u32 {
+        let connector_id = event.connector_id.clone();
+        let times = self
+            .crash_times_by_connector
+            .entry(connector_id.clone())
+            .or_default();
+        times.push(epoch_secs);
         // Prune timestamps outside the sliding window to bound memory.
         let cutoff = epoch_secs.saturating_sub(self.config.window_secs);
-        self.crash_times.retain(|&t| t >= cutoff);
-        self.crashes_in_window(epoch_secs)
+        times.retain(|&t| t >= cutoff);
+        self.crashes_in_window_for(&connector_id, epoch_secs)
     }
 
-    /// Count crashes within the sliding window ending at `now`.
+    /// Count crashes across all connectors within the sliding window ending at `now`.
     pub fn crashes_in_window(&self, now: u64) -> u32 {
-        let cutoff = now.saturating_sub(self.config.window_secs);
-        u32::try_from(self.crash_times.iter().filter(|&&t| t >= cutoff).count()).unwrap_or(u32::MAX)
+        self.crash_times_by_connector.keys().fold(0_u32, |acc, id| {
+            acc.saturating_add(self.crashes_in_window_for(id, now))
+        })
     }
 
-    /// Check if the crash-loop threshold is exceeded at time `now`.
+    /// Count crashes for a single connector within the sliding window ending at `now`.
+    pub fn crashes_in_window_for(&self, connector_id: &str, now: u64) -> u32 {
+        let cutoff = now.saturating_sub(self.config.window_secs);
+        let count = self
+            .crash_times_by_connector
+            .get(connector_id)
+            .map_or(0_usize, |times| {
+                times.iter().filter(|&&t| t >= cutoff).count()
+            });
+        u32::try_from(count).unwrap_or(u32::MAX)
+    }
+
+    /// Check if the crash-loop threshold is exceeded across all connectors at time `now`.
     pub fn is_looping(&self, now: u64) -> bool {
         self.crashes_in_window(now) >= self.config.max_crashes
     }
 
-    /// Check if cooldown is still active at time `now`.
-    pub fn in_cooldown(&self, now: u64) -> bool {
-        if self.last_rollback_epoch == 0 {
-            return false;
-        }
-        now <= self.last_rollback_epoch + self.config.cooldown_secs
+    /// Check if the crash-loop threshold is exceeded for a connector at time `now`.
+    pub fn is_looping_for(&self, connector_id: &str, now: u64) -> bool {
+        self.crashes_in_window_for(connector_id, now) >= self.config.max_crashes
     }
 
-    /// Remaining cooldown seconds (0 if not in cooldown).
+    /// Check if any connector is still in cooldown at time `now`.
+    pub fn in_cooldown(&self, now: u64) -> bool {
+        self.last_rollback_epoch_by_connector
+            .keys()
+            .any(|id| self.in_cooldown_for(id, now))
+    }
+
+    /// Check if cooldown is still active for a connector at time `now`.
+    pub fn in_cooldown_for(&self, connector_id: &str, now: u64) -> bool {
+        let Some(last_rollback_epoch) = self.last_rollback_epoch_by_connector.get(connector_id)
+        else {
+            return false;
+        };
+        let cooldown_end = last_rollback_epoch.saturating_add(self.config.cooldown_secs);
+        now <= cooldown_end
+    }
+
+    /// Remaining cooldown seconds across all connectors (0 if none in cooldown).
     pub fn cooldown_remaining(&self, now: u64) -> u64 {
-        if !self.in_cooldown(now) {
+        self.last_rollback_epoch_by_connector
+            .keys()
+            .map(|id| self.cooldown_remaining_for(id, now))
+            .max()
+            .unwrap_or(0)
+    }
+
+    /// Remaining cooldown seconds for a connector (0 if not in cooldown).
+    pub fn cooldown_remaining_for(&self, connector_id: &str, now: u64) -> u64 {
+        if !self.in_cooldown_for(connector_id, now) {
             return 0;
         }
-        (self.last_rollback_epoch + self.config.cooldown_secs).saturating_sub(now)
+        self.last_rollback_epoch_by_connector
+            .get(connector_id)
+            .map_or(0, |last_rollback_epoch| {
+                last_rollback_epoch
+                    .saturating_add(self.config.cooldown_secs)
+                    .saturating_sub(now)
+            })
     }
 
     /// Evaluate whether rollback should be triggered and produce a decision.
@@ -211,7 +274,12 @@ impl CrashLoopDetector {
         trace_id: &str,
         timestamp: &str,
     ) -> Result<RollbackDecision, CrashLoopError> {
-        let crash_count = self.crashes_in_window(now);
+        let crash_count = self.crashes_in_window_for(connector_id, now);
+        let connector_events: Vec<CrashEvent> = crash_events
+            .iter()
+            .filter(|event| event.connector_id == connector_id)
+            .cloned()
+            .collect();
 
         // INV-CLD-THRESHOLD: Only act if threshold exceeded
         if crash_count < self.config.max_crashes {
@@ -228,7 +296,7 @@ impl CrashLoopDetector {
             };
             let incident = CrashLoopIncident {
                 connector_id: connector_id.to_string(),
-                crash_events: crash_events.to_vec(),
+                crash_events: connector_events.clone(),
                 decision: decision.clone(),
                 trace_id: trace_id.to_string(),
             };
@@ -237,8 +305,8 @@ impl CrashLoopDetector {
         }
 
         // Check cooldown
-        if self.in_cooldown(now) {
-            let remaining = self.cooldown_remaining(now);
+        if self.in_cooldown_for(connector_id, now) {
+            let remaining = self.cooldown_remaining_for(connector_id, now);
             let decision = RollbackDecision {
                 connector_id: connector_id.to_string(),
                 triggered: true,
@@ -252,7 +320,7 @@ impl CrashLoopDetector {
             };
             let incident = CrashLoopIncident {
                 connector_id: connector_id.to_string(),
-                crash_events: crash_events.to_vec(),
+                crash_events: connector_events.clone(),
                 decision: decision.clone(),
                 trace_id: trace_id.to_string(),
             };
@@ -280,7 +348,7 @@ impl CrashLoopDetector {
                 };
                 let incident = CrashLoopIncident {
                     connector_id: connector_id.to_string(),
-                    crash_events: crash_events.to_vec(),
+                    crash_events: connector_events.clone(),
                     decision: decision.clone(),
                     trace_id: trace_id.to_string(),
                 };
@@ -290,6 +358,34 @@ impl CrashLoopDetector {
                 });
             }
         };
+
+        if pin.connector_id != connector_id {
+            let decision = RollbackDecision {
+                connector_id: connector_id.to_string(),
+                triggered: true,
+                crash_count,
+                window_secs: self.config.window_secs,
+                rollback_target: Some(pin.clone()),
+                rollback_allowed: false,
+                reason: format!(
+                    "known-good pin targets connector '{}', expected '{}'",
+                    pin.connector_id, connector_id
+                ),
+                trace_id: trace_id.to_string(),
+                timestamp: timestamp.to_string(),
+            };
+            let incident = CrashLoopIncident {
+                connector_id: connector_id.to_string(),
+                crash_events: connector_events.clone(),
+                decision: decision.clone(),
+                trace_id: trace_id.to_string(),
+            };
+            self.incidents.push(incident);
+            return Err(CrashLoopError::PinConnectorMismatch {
+                expected_connector: connector_id.to_string(),
+                pin_connector: pin.connector_id.clone(),
+            });
+        }
 
         // INV-CLD-TRUST-POLICY: rollback target must be trusted
         if !pin.trusted {
@@ -306,7 +402,7 @@ impl CrashLoopDetector {
             };
             let incident = CrashLoopIncident {
                 connector_id: connector_id.to_string(),
-                crash_events: crash_events.to_vec(),
+                crash_events: connector_events.clone(),
                 decision: decision.clone(),
                 trace_id: trace_id.to_string(),
             };
@@ -318,10 +414,10 @@ impl CrashLoopDetector {
         }
 
         // All checks pass — automatic rollback
-        self.last_rollback_epoch = now;
-        // Clear crash window and incident history after rollback
-        self.crash_times.clear();
-        self.incidents.clear();
+        self.last_rollback_epoch_by_connector
+            .insert(connector_id.to_string(), now);
+        // Clear only this connector's crash window after rollback.
+        self.crash_times_by_connector.remove(connector_id);
 
         let decision = RollbackDecision {
             connector_id: connector_id.to_string(),
@@ -336,7 +432,7 @@ impl CrashLoopDetector {
         };
         let incident = CrashLoopIncident {
             connector_id: connector_id.to_string(),
-            crash_events: crash_events.to_vec(),
+            crash_events: connector_events,
             decision: decision.clone(),
             trace_id: trace_id.to_string(),
         };
@@ -380,6 +476,15 @@ mod tests {
             version: "0.9.0".into(),
             pin_hash: "bad000".into(),
             trusted: false,
+        }
+    }
+
+    fn trusted_pin_for(id: &str) -> KnownGoodPin {
+        KnownGoodPin {
+            connector_id: id.into(),
+            version: "1.0.0".into(),
+            pin_hash: "abc123".into(),
+            trusted: true,
         }
     }
 
@@ -518,6 +623,36 @@ mod tests {
     }
 
     #[test]
+    fn incident_audit_trail_retains_history_across_rollbacks() {
+        let mut det = CrashLoopDetector::new(config());
+
+        for i in 0..3 {
+            let ev = crash("conn-1", "t", "oom-1");
+            det.record_crash(&ev, 100 + i);
+        }
+        let events1: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom-1")).collect();
+        let first = det
+            .evaluate("conn-1", &events1, Some(&trusted_pin()), 102, "tr1", "ts1")
+            .expect("first rollback should succeed");
+        assert!(first.rollback_allowed);
+        assert_eq!(det.incidents.len(), 1);
+
+        for i in 0..3 {
+            let ev = crash("conn-1", "t", "oom-2");
+            det.record_crash(&ev, 200 + i);
+        }
+        let events2: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom-2")).collect();
+        let second = det
+            .evaluate("conn-1", &events2, Some(&trusted_pin()), 202, "tr2", "ts2")
+            .expect("second rollback should succeed");
+        assert!(second.rollback_allowed);
+
+        assert_eq!(det.incidents.len(), 2);
+        assert_eq!(det.incidents[0].trace_id, "tr1");
+        assert_eq!(det.incidents[1].trace_id, "tr2");
+    }
+
+    #[test]
     fn rollback_clears_crash_window() {
         let mut det = CrashLoopDetector::new(config());
         for i in 0..3 {
@@ -528,7 +663,7 @@ mod tests {
         det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1")
             .unwrap();
         // After rollback, crash window should be cleared
-        assert_eq!(det.crashes_in_window(103), 0);
+        assert_eq!(det.crashes_in_window_for("conn-1", 103), 0);
     }
 
     #[test]
@@ -575,6 +710,14 @@ mod tests {
             }
             .code(),
             "CLD_PIN_UNTRUSTED"
+        );
+        assert_eq!(
+            CrashLoopError::PinConnectorMismatch {
+                expected_connector: "x".into(),
+                pin_connector: "y".into()
+            }
+            .code(),
+            "CLD_PIN_CONNECTOR_MISMATCH"
         );
         assert_eq!(
             CrashLoopError::CooldownActive {
@@ -627,10 +770,129 @@ mod tests {
         // Cooldown is 30 secs: epoch 102 + 30 = 132.
         // At exactly 132, cooldown must still be active (fail-closed).
         assert!(
-            det.in_cooldown(132),
+            det.in_cooldown_for("conn-1", 132),
             "cooldown must still be active at exact boundary"
         );
         // One second later, cooldown expires.
-        assert!(!det.in_cooldown(133));
+        assert!(!det.in_cooldown_for("conn-1", 133));
+    }
+
+    #[test]
+    fn cooldown_math_saturates_near_u64_max() {
+        let mut det = CrashLoopDetector::new(CrashLoopConfig {
+            max_crashes: 1,
+            window_secs: 1,
+            cooldown_secs: 10,
+        });
+        det.last_rollback_epoch_by_connector
+            .insert("conn-1".to_string(), u64::MAX - 5);
+
+        // With saturating arithmetic, deadline clamps at u64::MAX.
+        assert!(det.in_cooldown_for("conn-1", u64::MAX));
+        assert_eq!(det.cooldown_remaining_for("conn-1", u64::MAX), 0);
+        assert_eq!(det.cooldown_remaining_for("conn-1", u64::MAX - 2), 2);
+    }
+
+    #[test]
+    fn crashes_are_isolated_per_connector() {
+        let mut det = CrashLoopDetector::new(config());
+
+        for i in 0..3 {
+            let ev = crash("conn-a", "t", "oom-a");
+            det.record_crash(&ev, 100 + i);
+        }
+
+        let ev_b = crash("conn-b", "t", "oom-b");
+        det.record_crash(&ev_b, 102);
+
+        let outcome_b = det
+            .evaluate(
+                "conn-b",
+                std::slice::from_ref(&ev_b),
+                Some(&trusted_pin()),
+                102,
+                "tr-b",
+                "ts-b",
+            )
+            .unwrap();
+        assert!(!outcome_b.triggered);
+        assert_eq!(outcome_b.crash_count, 1);
+    }
+
+    #[test]
+    fn pin_connector_mismatch_rejected() {
+        let mut det = CrashLoopDetector::new(config());
+        for i in 0..3 {
+            let ev = crash("conn-a", "t", "oom-a");
+            det.record_crash(&ev, 100 + i);
+        }
+
+        let events: Vec<_> = (0..3).map(|_| crash("conn-a", "t", "oom-a")).collect();
+        let err = det
+            .evaluate(
+                "conn-a",
+                &events,
+                Some(&trusted_pin_for("conn-b")),
+                102,
+                "tr-a",
+                "ts-a",
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), "CLD_PIN_CONNECTOR_MISMATCH");
+    }
+
+    #[test]
+    fn incidents_only_include_target_connector_events() {
+        let mut det = CrashLoopDetector::new(config());
+        for i in 0..3 {
+            let ev = crash("conn-a", "t", "oom-a");
+            det.record_crash(&ev, 100 + i);
+        }
+
+        let mixed_events = vec![
+            crash("conn-a", "t1", "oom-a"),
+            crash("conn-b", "t2", "oom-b"),
+        ];
+        let _ = det
+            .evaluate(
+                "conn-a",
+                &mixed_events,
+                Some(&trusted_pin_for("conn-a")),
+                102,
+                "tr-a",
+                "ts-a",
+            )
+            .unwrap();
+        assert_eq!(det.incidents.len(), 1);
+        assert_eq!(det.incidents[0].crash_events.len(), 1);
+        assert_eq!(det.incidents[0].crash_events[0].connector_id, "conn-a");
+    }
+
+    #[test]
+    fn rollback_clears_only_target_connector_window() {
+        let mut det = CrashLoopDetector::new(config());
+
+        for i in 0..3 {
+            let ev = crash("conn-a", "t", "oom-a");
+            det.record_crash(&ev, 100 + i);
+        }
+        for i in 0..2 {
+            let ev = crash("conn-b", "t", "oom-b");
+            det.record_crash(&ev, 100 + i);
+        }
+
+        let events_a: Vec<_> = (0..3).map(|_| crash("conn-a", "t", "oom-a")).collect();
+        det.evaluate(
+            "conn-a",
+            &events_a,
+            Some(&trusted_pin()),
+            102,
+            "tr-a",
+            "ts-a",
+        )
+        .unwrap();
+
+        assert_eq!(det.crashes_in_window_for("conn-a", 102), 0);
+        assert_eq!(det.crashes_in_window_for("conn-b", 102), 2);
     }
 }
