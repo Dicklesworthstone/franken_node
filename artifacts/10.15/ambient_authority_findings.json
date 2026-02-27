@@ -1,5 +1,5 @@
 {
-  "generated_on": "2026-02-26",
+  "generated_on": "2026-02-27",
   "findings": [
     {
       "module_path": "crates/franken-node/src/connector/durable_claim_gate.rs",
@@ -13,7 +13,7 @@
     {
       "module_path": "crates/franken-node/src/connector/eviction_saga.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 289,
+      "line": 288,
       "callsite": "SystemTime::now()",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-005",
@@ -67,7 +67,7 @@
     {
       "module_path": "crates/franken-node/src/connector/state_model.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 224,
+      "line": 226,
       "callsite": "let duration = SystemTime::now()",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-004",
@@ -76,7 +76,7 @@
     {
       "module_path": "crates/franken-node/src/connector/state_model.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 225,
+      "line": 227,
       "callsite": ".duration_since(SystemTime::UNIX_EPOCH)",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-004",
@@ -298,7 +298,7 @@
     {
       "module_path": "crates/franken-node/src/connector/eviction_saga.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 289,
+      "line": 288,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-005 applied"
     },
@@ -557,14 +557,14 @@
     {
       "module_path": "crates/franken-node/src/connector/state_model.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 224,
+      "line": 226,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-004 applied"
     },
     {
       "module_path": "crates/franken-node/src/connector/state_model.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 225,
+      "line": 227,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-004 applied"
     },
