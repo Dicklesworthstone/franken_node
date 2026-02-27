@@ -130,11 +130,10 @@ impl ResourceSnapshot {
     pub fn delta(&self, after: &ResourceSnapshot) -> ResourceDelta {
         // Use i128 intermediate to avoid wrapping when u64 values exceed i64::MAX.
         ResourceDelta {
-            file_handles: (after.file_handles as i128 - self.file_handles as i128) as i64,
-            locks_held: (after.locks_held as i128 - self.locks_held as i128) as i64,
-            memory_allocations: (after.memory_allocations as i128 - self.memory_allocations as i128)
-                as i64,
-            temp_files: (after.temp_files as i128 - self.temp_files as i128) as i64,
+            file_handles: after.file_handles as i128 - self.file_handles as i128,
+            locks_held: after.locks_held as i128 - self.locks_held as i128,
+            memory_allocations: after.memory_allocations as i128 - self.memory_allocations as i128,
+            temp_files: after.temp_files as i128 - self.temp_files as i128,
         }
     }
 }
@@ -142,10 +141,10 @@ impl ResourceSnapshot {
 /// Resource delta for leak detection.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ResourceDelta {
-    pub file_handles: i64,
-    pub locks_held: i64,
-    pub memory_allocations: i64,
-    pub temp_files: i64,
+    pub file_handles: i128,
+    pub locks_held: i128,
+    pub memory_allocations: i128,
+    pub temp_files: i128,
 }
 
 impl ResourceDelta {
@@ -1148,6 +1147,16 @@ mod tests {
         let after = ResourceSnapshot::empty(1100);
         let delta = before.delta(&after);
         assert!(!delta.has_leaks());
+    }
+
+    #[test]
+    fn resource_delta_detects_massive_leaks() {
+        let before = ResourceSnapshot::empty(1000);
+        let mut after = ResourceSnapshot::empty(1100);
+        after.file_handles = u64::MAX;
+        let delta = before.delta(&after);
+        assert!(delta.has_leaks());
+        assert_eq!(delta.file_handles, u64::MAX as i128);
     }
 
     #[test]
