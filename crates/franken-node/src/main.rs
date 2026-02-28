@@ -94,11 +94,48 @@ use tools::replay_bundle::{
 
 const PROFILE_EXAMPLES_TEMPLATE: &str =
     include_str!("../../../config/franken_node.profile_examples.toml");
-const VERIFY_CLI_CONTRACT_VERSION: &str = "2.0.0";
-const VERIFY_CLI_CONTRACT_MAJOR: u16 = 2;
+const VERIFY_CLI_CONTRACT_VERSION: &str = "3.0.0";
+const VERIFY_CLI_CONTRACT_MAJOR: u16 = 3;
+const VERIFY_MODULE_IDS: &[&str] = &[
+    "api",
+    "claims",
+    "cli",
+    "config",
+    "conformance",
+    "connector",
+    "control_plane",
+    "encoding",
+    "extensions",
+    "federation",
+    "migration",
+    "observability",
+    "ops",
+    "perf",
+    "policy",
+    "registry",
+    "remote",
+    "repair",
+    "replay",
+    "runtime",
+    "sdk",
+    "security",
+    "storage",
+    "supply_chain",
+    "testing",
+    "tools",
+    "verifier_economy",
+];
+const VERIFY_MIGRATION_IDS: &[&str] = &[
+    "audit",
+    "rewrite",
+    "validate",
+    "bpet_migration_gate",
+    "dgis_migration_gate",
+];
+const VERIFY_CORPUS_SEARCH_ROOTS: &[&str] = &["fixtures", "vectors"];
 
 #[derive(Debug, Serialize)]
-struct VerifyContractStubOutput {
+struct VerifyContractOutput {
     command: String,
     contract_version: String,
     schema_version: String,
