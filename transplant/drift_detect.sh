@@ -25,6 +25,32 @@ SOURCE_ROOT="/data/projects/pi_agent_rust"
 JSON_OUTPUT=false
 QUIET=false
 
+emit_error() {
+  local message="$1"
+  local error_code="${2:-DRIFT_DETECT_ERROR}"
+  local timestamp
+  timestamp=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+  if $JSON_OUTPUT; then
+    cat <<ENDJSON
+{
+  "verdict": "ERROR",
+  "timestamp": "$timestamp",
+  "error": {
+    "code": "$error_code",
+    "message": "$message"
+  },
+  "source_root": "$SOURCE_ROOT",
+  "snapshot_dir": "$(basename "$SNAPSHOT_DIR")"
+}
+ENDJSON
+  else
+    echo "ERROR: $message" >&2
+  fi
+
+  exit 2
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --json) JSON_OUTPUT=true; shift ;;
@@ -37,17 +63,24 @@ while [ $# -gt 0 ]; do
       echo "  --source  Override upstream source path (default: /data/projects/pi_agent_rust)"
       exit 0
       ;;
-    *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    *) emit_error "Unknown argument: $1" "DRIFT_INVALID_ARGUMENT" ;;
   esac
 done
 
 # Validate prerequisites
-for path in "$LOCKFILE" "$SNAPSHOT_DIR" "$SOURCE_ROOT"; do
-  if [ ! -e "$path" ]; then
-    echo "ERROR: Not found: $path" >&2
-    exit 2
-  fi
-done
+if [ ! -f "$LOCKFILE" ]; then
+  emit_error "Lockfile not found: $LOCKFILE" "DRIFT_LOCKFILE_MISSING"
+fi
+
+if [ ! -d "$SOURCE_ROOT" ]; then
+  emit_error "Source root not found or not a directory: $SOURCE_ROOT" "DRIFT_SOURCE_MISSING"
+fi
+
+SNAPSHOT_PRESENT=true
+if [ ! -d "$SNAPSHOT_DIR" ]; then
+  SNAPSHOT_PRESENT=false
+  $QUIET || echo "WARNING: Snapshot directory missing; treating all lockfile entries as missing_local: $SNAPSHOT_DIR" >&2
+fi
 
 # Parse lockfile entries
 declare -A LOCKFILE_HASHES
@@ -67,19 +100,23 @@ MISSING_SOURCE=()
 for relpath in "${LOCKFILE_PATHS[@]}"; do
   local_file="${SNAPSHOT_DIR}/${relpath}"
   source_file="${SOURCE_ROOT}/${relpath}"
-  expected_hash="${LOCKFILE_HASHES[$relpath]}"
+  source_missing=false
+
+  # Check upstream source
+  if [ ! -f "$source_file" ]; then
+    MISSING_SOURCE+=("$relpath")
+    source_missing=true
+    $QUIET || echo "MISSING_SOURCE: $relpath" >&2
+  fi
 
   # Check local snapshot
-  if [ ! -f "$local_file" ]; then
+  if ! $SNAPSHOT_PRESENT || [ ! -f "$local_file" ]; then
     MISSING_LOCAL+=("$relpath")
     $QUIET || echo "MISSING_LOCAL: $relpath" >&2
     continue
   fi
 
-  # Check upstream source
-  if [ ! -f "$source_file" ]; then
-    MISSING_SOURCE+=("$relpath")
-    $QUIET || echo "MISSING_SOURCE: $relpath" >&2
+  if $source_missing; then
     continue
   fi
 
@@ -95,13 +132,15 @@ done
 
 # Scan for extra local files
 EXTRA_LOCAL=()
-while IFS= read -r relpath; do
-  [ -z "$relpath" ] && continue
-  if [ -z "${LOCKFILE_HASHES[$relpath]+x}" ]; then
-    EXTRA_LOCAL+=("$relpath")
-    $QUIET || echo "EXTRA_LOCAL: $relpath" >&2
-  fi
-done < <(cd "$SNAPSHOT_DIR" && fd --type file . | sed 's|^\./||' | sort)
+if $SNAPSHOT_PRESENT; then
+  while IFS= read -r relpath; do
+    [ -z "$relpath" ] && continue
+    if [ -z "${LOCKFILE_HASHES[$relpath]+x}" ]; then
+      EXTRA_LOCAL+=("$relpath")
+      $QUIET || echo "EXTRA_LOCAL: $relpath" >&2
+    fi
+  done < <(cd "$SNAPSHOT_DIR" && fd --type file . | sed 's|^\./||' | sort)
+fi
 
 # Determine verdict
 TOTAL_FINDINGS=$(( ${#CONTENT_DRIFT[@]} + ${#MISSING_LOCAL[@]} + ${#MISSING_SOURCE[@]} + ${#EXTRA_LOCAL[@]} ))
@@ -132,6 +171,7 @@ if $JSON_OUTPUT; then
   "lockfile_entries": $TOTAL_ENTRIES,
   "source_root": "$SOURCE_ROOT",
   "snapshot_dir": "$(basename "$SNAPSHOT_DIR")",
+  "snapshot_present": $SNAPSHOT_PRESENT,
   "findings": {
     "total": $TOTAL_FINDINGS,
     "content_drift": ${#CONTENT_DRIFT[@]},
@@ -153,6 +193,9 @@ else
   echo "Lockfile entries: $TOTAL_ENTRIES"
   echo "Source:           $SOURCE_ROOT"
   echo "Snapshot:         $(basename "$SNAPSHOT_DIR")/"
+  if ! $SNAPSHOT_PRESENT; then
+    echo "Snapshot status:  missing (bootstrap mode)"
+  fi
   echo "Timestamp:        $TIMESTAMP"
   echo ""
   echo "Findings:"

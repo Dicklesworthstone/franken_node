@@ -43,6 +43,69 @@ done
 
 TIMESTAMP=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+emit_resync_error() {
+  local message="$1"
+  local error_code="${2:-RESYNC_ERROR}"
+
+  if $JSON_OUTPUT; then
+    cat <<ENDJSON
+{
+  "verdict": "ERROR",
+  "timestamp": "$TIMESTAMP",
+  "error": {
+    "code": "$error_code",
+    "message": "$message"
+  },
+  "source_root": "$SOURCE_ROOT",
+  "snapshot_dir": "$SNAPSHOT_DIR"
+}
+ENDJSON
+  else
+    echo "ERROR: $message" >&2
+  fi
+
+  exit 2
+}
+
+parse_json_verdict() {
+  printf '%s' "$1" | python3 -c '
+import json
+import sys
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    print("ERROR")
+    raise SystemExit(0)
+
+verdict = payload.get("verdict")
+print(verdict if isinstance(verdict, str) else "ERROR")
+'
+}
+
+extract_drift_list() {
+  local report="$1"
+  local key="$2"
+  printf '%s' "$report" | python3 -c '
+import json
+import sys
+
+key = sys.argv[1]
+
+try:
+    payload = json.load(sys.stdin)
+except Exception:
+    raise SystemExit(0)
+
+details = payload.get("details") or {}
+items = details.get(key) or []
+if isinstance(items, list):
+    for item in items:
+        if isinstance(item, str):
+            print(item)
+' "$key"
+}
+
 echo "=== Transplant Re-sync Workflow ===" >&2
 echo "Timestamp: $TIMESTAMP" >&2
 echo "Source:    $SOURCE_ROOT" >&2
@@ -52,8 +115,15 @@ echo "" >&2
 
 # Step 1: Run drift detection
 echo "[1/5] Running drift detection..." >&2
-DRIFT_REPORT=$("$SCRIPT_DIR/drift_detect.sh" --json --source "$SOURCE_ROOT" 2>/dev/null || true)
-DRIFT_VERDICT=$(echo "$DRIFT_REPORT" | python3 -c "import sys,json; print(json.load(sys.stdin)['verdict'])")
+set +e
+DRIFT_REPORT=$("$SCRIPT_DIR/drift_detect.sh" --json --quiet --source "$SOURCE_ROOT" 2>/dev/null)
+DRIFT_RC=$?
+set -e
+DRIFT_VERDICT=$(parse_json_verdict "$DRIFT_REPORT")
+
+if [ "$DRIFT_RC" -eq 2 ] || [ "$DRIFT_VERDICT" = "ERROR" ] || [ "$DRIFT_VERDICT" = "UNKNOWN" ]; then
+  emit_resync_error "drift detection failed (expected JSON verdict from drift_detect.sh)" "RESYNC_DRIFT_PROBE_FAILED"
+fi
 
 if [ "$DRIFT_VERDICT" = "NO_DRIFT" ]; then
   echo "No drift detected. Snapshot is in sync with upstream." >&2
@@ -66,9 +136,9 @@ fi
 echo "Drift detected. Analyzing changes..." >&2
 
 # Step 2: Parse drift details
-CONTENT_DRIFT=$(echo "$DRIFT_REPORT" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f) for f in d['details']['content_drift']]")
-MISSING_LOCAL=$(echo "$DRIFT_REPORT" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f) for f in d['details']['missing_local']]")
-EXTRA_LOCAL=$(echo "$DRIFT_REPORT" | python3 -c "import sys,json; d=json.load(sys.stdin); [print(f) for f in d['details']['extra_local']]")
+CONTENT_DRIFT=$(extract_drift_list "$DRIFT_REPORT" "content_drift")
+MISSING_LOCAL=$(extract_drift_list "$DRIFT_REPORT" "missing_local")
+EXTRA_LOCAL=$(extract_drift_list "$DRIFT_REPORT" "extra_local")
 
 ACTIONS=()
 
@@ -132,8 +202,15 @@ echo "[3/5] Regenerating lockfile..." >&2
 
 # Step 5: Verify new lockfile
 echo "[4/5] Verifying new lockfile..." >&2
-VERIFY_RESULT=$("$SCRIPT_DIR/verify_lockfile.sh" --json 2>/dev/null || true)
-VERIFY_VERDICT=$(echo "$VERIFY_RESULT" | python3 -c "import sys,json; print(json.load(sys.stdin)['verdict'])")
+set +e
+VERIFY_RESULT=$("$SCRIPT_DIR/verify_lockfile.sh" --json 2>/dev/null)
+VERIFY_RC=$?
+set -e
+VERIFY_VERDICT=$(parse_json_verdict "$VERIFY_RESULT")
+
+if [ "$VERIFY_RC" -eq 2 ] || [ "$VERIFY_VERDICT" = "ERROR" ] || [ "$VERIFY_VERDICT" = "UNKNOWN" ]; then
+  emit_resync_error "lockfile verification failed (expected JSON verdict from verify_lockfile.sh)" "RESYNC_VERIFY_PROBE_FAILED"
+fi
 
 echo "[5/5] Generating evidence report..." >&2
 
