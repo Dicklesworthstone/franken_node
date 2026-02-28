@@ -573,7 +573,8 @@ impl LaneRouter {
             });
         }
 
-        let permit = self.acquire_bulkhead(operation_id, lane, now_ms, lane_in_flight_before)?;
+        let permit =
+            self.acquire_bulkhead(operation_id, lane, now_ms, lane_in_flight_before, true)?;
         let lane_in_flight_after = {
             let lane_state = self.lane_state_mut(lane)?;
             lane_state.metrics.in_flight = lane_state.metrics.in_flight.saturating_add(1);
@@ -772,6 +773,7 @@ impl LaneRouter {
         lane: ProductLane,
         now_ms: u64,
         lane_in_flight: usize,
+        count_lane_rejection: bool,
     ) -> Result<crate::runtime::bulkhead::BulkheadPermit, LaneRouterError> {
         match self.bulkhead.try_acquire(operation_id, now_ms) {
             Ok(permit) => Ok(permit),
@@ -780,8 +782,10 @@ impl LaneRouter {
                 current_in_flight,
                 retry_after_ms,
             }) => {
-                let lane_state = self.lane_state_mut(lane)?;
-                lane_state.metrics.rejected = lane_state.metrics.rejected.saturating_add(1);
+                if count_lane_rejection {
+                    let lane_state = self.lane_state_mut(lane)?;
+                    lane_state.metrics.rejected = lane_state.metrics.rejected.saturating_add(1);
+                }
                 self.events.push(LaneEvent {
                     event_code: event_codes::BULKHEAD_OVERLOAD.to_string(),
                     operation_id: operation_id.to_string(),
@@ -858,6 +862,7 @@ impl LaneRouter {
                     lane,
                     now_ms,
                     lane_in_flight_before,
+                    false,
                 ) {
                     Ok(permit) => permit,
                     Err(LaneRouterError::BulkheadOverload { .. }) => {
@@ -1271,6 +1276,62 @@ mod tests {
 
         let second = router.assign_operation(&timed, "timed-2", None, 4);
         assert!(second.is_ok());
+    }
+
+    #[test]
+    fn queued_promotion_bulkhead_overload_does_not_count_as_lane_rejection() {
+        let mut cfg = runtime_config();
+        cfg.remote_max_in_flight = 3;
+        cfg.lanes.insert(
+            "timed".to_string(),
+            RuntimeLaneConfig {
+                max_concurrent: 1,
+                priority_weight: 10,
+                queue_limit: 8,
+                enqueue_timeout_ms: 25,
+                overflow_policy: LaneOverflowPolicy::EnqueueWithTimeout,
+            },
+        );
+
+        let mut router = LaneRouter::from_runtime_config(&cfg).expect("router");
+        let timed = cx_with_scope("lane.timed");
+        let cancel = cx_with_scope("lane.cancel");
+        let realtime = cx_with_scope("lane.realtime");
+
+        let _ = router
+            .assign_operation(&timed, "timed-active", None, 1)
+            .expect("timed active");
+        let queued = router
+            .assign_operation(&timed, "timed-queued", None, 2)
+            .expect("timed queued");
+        assert!(queued.queued);
+
+        let _ = router
+            .assign_operation(&cancel, "cancel-active", None, 3)
+            .expect("cancel active");
+        let _ = router
+            .assign_operation(&realtime, "realtime-active", None, 4)
+            .expect("realtime active");
+
+        let mut tightened_cfg = cfg.clone();
+        tightened_cfg.remote_max_in_flight = 1;
+        router
+            .reload_config(
+                LaneRouterConfig::from_runtime_config(&tightened_cfg).expect("cfg"),
+                5,
+            )
+            .expect("reload");
+
+        router
+            .complete_operation("timed-active", 6, false)
+            .expect("complete timed active");
+
+        let timed_state = router.lanes.get(&ProductLane::Timed).expect("timed state");
+        assert_eq!(timed_state.metrics.queued, 1);
+        assert_eq!(
+            timed_state.metrics.rejected, 0,
+            "queued operation should remain pending, not rejected, when promotion hits temporary bulkhead overload"
+        );
     }
 
     #[test]
