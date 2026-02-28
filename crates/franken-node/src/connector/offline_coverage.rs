@@ -193,7 +193,11 @@ impl OfflineCoverageTracker {
         }
 
         let total = state.artifacts.len();
-        let available = state.artifacts.values().filter(|entry| entry.available).count();
+        let available = state
+            .artifacts
+            .values()
+            .filter(|entry| entry.available)
+            .count();
         let repair_debt = total - available;
         let coverage_ratio = available as f64 / total as f64;
         let availability_ratio = coverage_ratio; // in this model, coverage = availability
