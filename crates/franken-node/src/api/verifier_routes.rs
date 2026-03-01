@@ -6,6 +6,7 @@
 //! - `GET  /v1/verifier/audit-log` — query audit log entries
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use super::error::ApiError;
 use super::middleware::{
@@ -14,6 +15,13 @@ use super::middleware::{
 };
 use super::trust_card_routes::ApiResponse;
 use super::utf8_prefix;
+
+fn hash_evidence_content(content: &serde_json::Value) -> Result<(String, u64), serde_json::Error> {
+    let canonical = serde_json::to_vec(content)?;
+    let content_hash = format!("sha256:{}", hex::encode(Sha256::digest(&canonical)));
+    let size_bytes = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
+    Ok((content_hash, size_bytes))
+}
 
 // ── Response Types ─────────────────────────────────────────────────────────
 
@@ -201,21 +209,26 @@ pub fn trigger_conformance(
 /// Handle `GET /v1/verifier/evidence/{check_id}`.
 pub fn get_evidence(
     _identity: &AuthIdentity,
-    _trace: &TraceContext,
+    trace: &TraceContext,
     check_id: &str,
 ) -> Result<ApiResponse<EvidenceArtifact>, ApiError> {
-    // In a real implementation this would look up stored evidence.
-    // For the skeleton, return a synthetic artifact.
+    let content = serde_json::json!({
+        "skeleton": true,
+        "check_id": check_id,
+    });
+    let (content_hash, size_bytes) =
+        hash_evidence_content(&content).map_err(|err| ApiError::Internal {
+            detail: format!("failed to serialize verifier evidence payload: {err}"),
+            trace_id: trace.trace_id.clone(),
+        })?;
+
     let artifact = EvidenceArtifact {
         check_id: check_id.to_string(),
         artifact_type: "conformance_evidence".to_string(),
-        content_hash: "sha256:placeholder".to_string(),
-        size_bytes: 0,
+        content_hash,
+        size_bytes,
         created_at: chrono::Utc::now().to_rfc3339(),
-        content: serde_json::json!({
-            "skeleton": true,
-            "check_id": check_id,
-        }),
+        content,
     };
 
     Ok(ApiResponse {
@@ -299,6 +312,8 @@ mod tests {
         assert!(result.ok);
         assert_eq!(result.data.check_id, "chk-test-001");
         assert_eq!(result.data.artifact_type, "conformance_evidence");
+        assert!(result.data.content_hash.starts_with("sha256:"));
+        assert!(result.data.size_bytes > 0);
     }
 
     #[test]
@@ -373,6 +388,17 @@ mod tests {
         assert!(result.ok);
         assert!(!result.data.check_id.is_empty());
         assert!(!result.data.content.is_null());
+        assert!(result.data.size_bytes > 0);
+    }
+
+    #[test]
+    fn evidence_hash_is_deterministic_for_same_payload() {
+        let identity = test_identity();
+        let trace = test_trace();
+        let first = get_evidence(&identity, &trace, "chk-repeat").expect("first");
+        let second = get_evidence(&identity, &trace, "chk-repeat").expect("second");
+        assert_eq!(first.data.content_hash, second.data.content_hash);
+        assert_eq!(first.data.size_bytes, second.data.size_bytes);
     }
 
     #[test]

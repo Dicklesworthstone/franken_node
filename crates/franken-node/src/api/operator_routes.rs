@@ -7,6 +7,8 @@
 //! - `GET /v1/operator/rollout` — rollout state query
 
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 use super::error::ApiError;
 use super::middleware::{
@@ -14,6 +16,12 @@ use super::middleware::{
     TraceContext,
 };
 use super::trust_card_routes::ApiResponse;
+
+static PROCESS_START: OnceLock<Instant> = OnceLock::new();
+
+fn process_uptime_seconds() -> u64 {
+    PROCESS_START.get_or_init(Instant::now).elapsed().as_secs()
+}
 
 // ── Response Types ─────────────────────────────────────────────────────────
 
@@ -141,7 +149,7 @@ pub fn get_status(
     let status = NodeStatus {
         node_id: "franken-node-primary".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
-        uptime_seconds: 0, // placeholder — real implementation reads process uptime
+        uptime_seconds: process_uptime_seconds(),
         policy_profile: "balanced".to_string(),
         active_extensions: 0,
         quarantined_extensions: 0,
@@ -275,6 +283,16 @@ mod tests {
         let result = get_status(&identity, &trace).expect("status");
         assert!(result.ok);
         assert!(!result.data.node_id.is_empty());
+    }
+
+    #[test]
+    fn status_uptime_is_monotonic() {
+        let identity = test_identity();
+        let trace = test_trace();
+        let first = get_status(&identity, &trace).expect("first");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let second = get_status(&identity, &trace).expect("second");
+        assert!(second.data.uptime_seconds >= first.data.uptime_seconds);
     }
 
     #[test]
