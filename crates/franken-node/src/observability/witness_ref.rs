@@ -14,6 +14,7 @@
 use std::fmt;
 
 use super::evidence_ledger::{DecisionKind, EvidenceEntry};
+use crate::security::constant_time::ct_eq_bytes;
 
 /// Stable event codes for structured logging.
 pub mod event_codes {
@@ -404,7 +405,7 @@ impl WitnessValidator {
         witness: &WitnessRef,
         actual_content_hash: &[u8; 32],
     ) -> Result<(), WitnessValidationError> {
-        if witness.integrity_hash != *actual_content_hash {
+        if !ct_eq_bytes(&witness.integrity_hash, actual_content_hash) {
             self.rejected_count = self.rejected_count.saturating_add(1);
             return Err(WitnessValidationError::IntegrityHashMismatch {
                 entry_id: entry_id.to_string(),

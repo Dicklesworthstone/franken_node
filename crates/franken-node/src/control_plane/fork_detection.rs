@@ -405,7 +405,7 @@ impl DivergenceDetector {
 
         // Check 4: parent hash chain validation
         // The newer state's parent_state_hash should match the older state's state_hash
-        if newer.parent_state_hash != older.state_hash {
+        if !crate::security::constant_time::ct_eq(&newer.parent_state_hash, &older.state_hash) {
             // ROLLBACK_DETECTED
             // INV-RFD-HALT-ON-DIVERGENCE
             self.halted = true;

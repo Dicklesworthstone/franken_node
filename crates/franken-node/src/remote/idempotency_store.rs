@@ -19,6 +19,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::security::constant_time::ct_eq;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -262,7 +264,7 @@ impl IdempotencyDedupeStore {
         let action = if let Some(entry) = self.entries.get(&key_hex) {
             if entry.is_expired(now_secs) {
                 Action::Expired
-            } else if entry.payload_hash != payload_hash {
+            } else if !ct_eq(&entry.payload_hash, &payload_hash) {
                 Action::Conflict {
                     expected_hash: entry.payload_hash.clone(),
                 }
@@ -435,7 +437,7 @@ impl IdempotencyDedupeStore {
         for k in &expired_keys {
             self.entries.remove(k);
         }
-        self.total_expired += count as u64;
+        self.total_expired = self.total_expired.saturating_add(count as u64);
 
         self.log(
             event_codes::ID_SWEEP_COMPLETE,
@@ -461,7 +463,7 @@ impl IdempotencyDedupeStore {
                 count += 1;
             }
         }
-        self.total_recovered += count as u64;
+        self.total_recovered = self.total_recovered.saturating_add(count as u64);
 
         self.log(
             event_codes::ID_STORE_RECOVERY,

@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+use crate::security::constant_time::ct_eq;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -89,7 +91,7 @@ impl IncidentTrace {
     /// Validate that the stored hash matches the computed hash.
     pub fn validate_integrity(&self) -> Result<(), LabError> {
         let computed = self.compute_hash();
-        if computed != self.trace_hash {
+        if !ct_eq(&computed, &self.trace_hash) {
             return Err(LabError::TraceCorrupt {
                 incident_id: self.incident_id.clone(),
                 expected: self.trace_hash.clone(),

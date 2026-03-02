@@ -410,7 +410,7 @@ impl PolicyCheckpointChain {
         }
 
         // INV-PCK-PARENT-CHAIN
-        if checkpoint.parent_hash != self.head_hash {
+        if !crate::security::constant_time::ct_eq(&checkpoint.parent_hash, &self.head_hash) {
             self.events.push(CheckpointChainEvent {
                 event_code: event_codes::PCK_003_CHECKPOINT_REJECTED.to_string(),
                 event_name: event_names::CHECKPOINT_REJECTED.to_string(),

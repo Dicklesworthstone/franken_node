@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use crate::security::constant_time::ct_eq;
+
 /// Snapshot trigger policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotPolicy {
@@ -130,7 +132,7 @@ impl SnapshotTracker {
     /// Record a state mutation of the given byte size.
     pub fn record_mutation(&mut self, bytes: u64) {
         self.ops_since_snapshot = self.ops_since_snapshot.saturating_add(1);
-        self.bytes_since_snapshot += bytes;
+        self.bytes_since_snapshot = self.bytes_since_snapshot.saturating_add(bytes);
     }
 
     /// Check if a snapshot should be triggered based on current policy.
@@ -177,7 +179,7 @@ impl SnapshotTracker {
         snapshot: &SnapshotRecord,
         chain_head_hash: &str,
     ) -> Result<(), SnapshotError> {
-        if snapshot.root_hash != chain_head_hash {
+        if !ct_eq(&snapshot.root_hash, chain_head_hash) {
             return Err(SnapshotError::SnapshotHashMismatch {
                 expected: chain_head_hash.to_string(),
                 actual: snapshot.root_hash.clone(),

@@ -11,6 +11,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::security::constant_time::ct_eq;
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub const CSR_PIPELINE_STARTED: &str = "CSR_PIPELINE_STARTED";
@@ -615,7 +617,7 @@ impl ReportingPipeline {
         // Verify hash if content is provided.
         if let Some(content) = &input.content {
             let computed = sha256_hex(content.as_bytes());
-            if computed != input.sha256_hash {
+            if !ct_eq(&computed, &input.sha256_hash) {
                 return Err(CategoryShiftError::HashMismatch(
                     input.artifact_path.clone(),
                 ));

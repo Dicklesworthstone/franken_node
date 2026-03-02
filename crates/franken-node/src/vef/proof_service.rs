@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
+use crate::security::constant_time::ct_eq;
+
 pub const PROOF_SERVICE_SCHEMA_VERSION: &str = "vef-proof-service-v1";
 
 pub mod event_codes {
@@ -355,14 +357,14 @@ impl ProofOutputEnvelope {
         }
 
         let expected_commitment = input.commitment_hash()?;
-        if self.input_commitment_hash != expected_commitment {
+        if !ct_eq(&self.input_commitment_hash, &expected_commitment) {
             return Err(ProofServiceError::verify_error(format!(
                 "input commitment mismatch expected={} got={}",
                 expected_commitment, self.input_commitment_hash
             )));
         }
 
-        if self.trace_id != input.trace_id {
+        if !ct_eq(&self.trace_id, &input.trace_id) {
             return Err(ProofServiceError::verify_error(format!(
                 "trace_id mismatch expected={} got={}",
                 input.trace_id, self.trace_id

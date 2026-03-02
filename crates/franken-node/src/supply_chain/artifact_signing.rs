@@ -11,6 +11,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
+use crate::security::constant_time::ct_eq;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -369,7 +371,7 @@ pub fn verify_release(
             }
             Some(content) => {
                 let actual_hash = sha256_hex(content);
-                if actual_hash != entry.sha256 {
+                if !ct_eq(&actual_hash, &entry.sha256) {
                     results.push(ArtifactVerificationResult {
                         artifact_name: name.clone(),
                         passed: false,

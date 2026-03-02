@@ -3487,7 +3487,7 @@ fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
         matches.insert(relative_path);
     }
 
-    let search_token = args
+    let search_term = args
         .corpus_path
         .file_name()
         .and_then(std::ffi::OsStr::to_str)
@@ -3500,7 +3500,7 @@ fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
         if !search_root.is_dir() {
             continue;
         }
-        if let Err(err) = collect_corpus_matches(&search_root, search_token, &mut matches) {
+        if let Err(err) = collect_corpus_matches(&search_root, search_term, &mut matches) {
             let payload = build_verify_output(
                 "verify corpus",
                 args.compat_version,

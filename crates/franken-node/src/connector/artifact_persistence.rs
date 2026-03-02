@@ -5,6 +5,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::security::constant_time::ct_eq;
 use crate::control_plane::control_epoch::{
     ControlEpoch, EpochArtifactEvent, EpochRejection, ValidityWindowPolicy, check_artifact_epoch,
 };
@@ -306,7 +307,7 @@ impl ArtifactStore {
                     reason: format!("artifact not found: {artifact_id}"),
                 })?;
 
-        if artifact.payload_hash != payload_hash {
+        if !ct_eq(&artifact.payload_hash, payload_hash) {
             return Err(PersistenceError::ReplayMismatch {
                 artifact_id: artifact_id.to_string(),
                 expected_hash: artifact.payload_hash.clone(),

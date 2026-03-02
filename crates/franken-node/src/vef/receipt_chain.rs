@@ -13,6 +13,8 @@ use super::connector::vef_execution_receipt::{ExecutionReceipt, receipt_hash_sha
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
+
+use crate::security::constant_time::ct_eq;
 use std::sync::{Arc, Mutex};
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -363,7 +365,7 @@ impl ReceiptChain {
                 )));
             }
             let chain_head = entries[checkpoint.end_index as usize].chain_hash.as_str();
-            if checkpoint.chain_head_hash != chain_head {
+            if !ct_eq(&checkpoint.chain_head_hash, chain_head) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} chain head mismatch",
                     checkpoint.checkpoint_id
@@ -376,7 +378,7 @@ impl ReceiptChain {
                 chain_head,
                 entries,
             )?;
-            if checkpoint.commitment_hash != expected_commitment {
+            if !ct_eq(&checkpoint.commitment_hash, &expected_commitment) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} commitment hash mismatch",
                     checkpoint.checkpoint_id

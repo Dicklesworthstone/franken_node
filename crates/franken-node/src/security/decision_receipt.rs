@@ -244,7 +244,12 @@ pub fn verify_hash_chain(receipts: &[SignedReceipt]) -> Result<(), ReceiptError>
         } else {
             Some(receipts[idx - 1].chain_hash.clone())
         };
-        if signed.receipt.previous_receipt_hash != expected_previous {
+        let prev_match = match (&signed.receipt.previous_receipt_hash, &expected_previous) {
+            (Some(a), Some(b)) => crate::security::constant_time::ct_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        };
+        if !prev_match {
             return Err(ReceiptError::HashChainMismatch {
                 expected: expected_previous.unwrap_or_else(|| "<none>".to_string()),
                 actual: signed
@@ -258,7 +263,7 @@ pub fn verify_hash_chain(receipts: &[SignedReceipt]) -> Result<(), ReceiptError>
         let payload = canonical_json(&signed.receipt)?;
         let expected_chain =
             compute_chain_hash(signed.receipt.previous_receipt_hash.as_deref(), &payload);
-        if signed.chain_hash != expected_chain {
+        if !crate::security::constant_time::ct_eq(&signed.chain_hash, &expected_chain) {
             return Err(ReceiptError::HashChainMismatch {
                 expected: expected_chain,
                 actual: signed.chain_hash.clone(),

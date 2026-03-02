@@ -16,6 +16,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::security::constant_time::ct_eq;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -372,7 +374,7 @@ impl RetrievabilityGate {
         }
 
         // Check hash match
-        if self.config.require_hash_match && state.content_hash != expected_hash {
+        if self.config.require_hash_match && !ct_eq(&state.content_hash, expected_hash) {
             let reason = ProofFailureReason::HashMismatch {
                 expected: expected_hash.to_string(),
                 actual: state.content_hash.clone(),
