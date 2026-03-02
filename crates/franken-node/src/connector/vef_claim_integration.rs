@@ -383,7 +383,7 @@ impl VefClaimIntegration {
 
     /// Check proof freshness against max age.
     pub fn check_proof_freshness(&self, proof_age_secs: u64) -> Result<(), VefClaimError> {
-        if proof_age_secs > self.config.max_proof_age_secs {
+        if proof_age_secs >= self.config.max_proof_age_secs {
             return Err(VefClaimError::ProofStale {
                 age_secs: proof_age_secs,
                 max_secs: self.config.max_proof_age_secs,

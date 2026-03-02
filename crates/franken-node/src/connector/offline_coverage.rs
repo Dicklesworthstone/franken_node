@@ -198,8 +198,12 @@ impl OfflineCoverageTracker {
             .values()
             .filter(|entry| entry.available)
             .count();
-        let repair_debt = total - available;
-        let coverage_ratio = available as f64 / total as f64;
+        let repair_debt = total.saturating_sub(available);
+        let coverage_ratio = if total == 0 {
+            0.0
+        } else {
+            available as f64 / total as f64
+        };
         let availability_ratio = coverage_ratio; // in this model, coverage = availability
 
         Ok(CoverageMetrics {

@@ -186,7 +186,7 @@ pub fn check_frame(
     let mut violations = Vec::new();
 
     // Check 1: size (INV-BPG-SIZE-BOUNDED)
-    if frame.raw_bytes_len > config.max_frame_bytes {
+    if frame.raw_bytes_len >= config.max_frame_bytes {
         violations.push(GuardrailViolation::SizeExceeded {
             actual: frame.raw_bytes_len,
             limit: config.max_frame_bytes,
@@ -194,7 +194,7 @@ pub fn check_frame(
     }
 
     // Check 2: nesting depth (INV-BPG-DEPTH-BOUNDED)
-    if frame.nesting_depth > config.max_nesting_depth {
+    if frame.nesting_depth >= config.max_nesting_depth {
         violations.push(GuardrailViolation::DepthExceeded {
             actual: frame.nesting_depth,
             limit: config.max_nesting_depth,
@@ -202,7 +202,7 @@ pub fn check_frame(
     }
 
     // Check 3: CPU budget (INV-BPG-CPU-BOUNDED)
-    if frame.decode_cpu_ms > config.max_decode_cpu_ms {
+    if frame.decode_cpu_ms >= config.max_decode_cpu_ms {
         violations.push(GuardrailViolation::CpuExceeded {
             actual: frame.decode_cpu_ms,
             limit: config.max_decode_cpu_ms,
@@ -464,8 +464,13 @@ mod tests {
 
     #[test]
     fn boundary_exact_limits() {
-        // Exactly at limit should pass
+        // Exactly at limit is fail-closed (rejected)
         let f = frame("f1", 1000, 10, 50);
+        let (v, _) = check_frame(&f, &config(), "ts").unwrap();
+        assert!(!v.allowed);
+
+        // One below limit passes
+        let f = frame("f2", 999, 9, 49);
         let (v, _) = check_frame(&f, &config(), "ts").unwrap();
         assert!(v.allowed);
     }

@@ -188,8 +188,8 @@ impl CheckpointGuard {
                 .max_duration_between_checkpoints_ms
                 .saturating_mul(self.config.strict_abort_multiplier);
 
-            let violate_by_iterations = iterations_since_checkpoint > strict_iterations;
-            let violate_by_duration = elapsed_since_checkpoint_ms > strict_duration_ms;
+            let violate_by_iterations = iterations_since_checkpoint >= strict_iterations;
+            let violate_by_duration = elapsed_since_checkpoint_ms >= strict_duration_ms;
 
             if violate_by_iterations || violate_by_duration {
                 self.events.push(CheckpointGuardEvent {
@@ -272,11 +272,12 @@ mod tests {
         let mut guard =
             CheckpointGuard::new("orch-strict", "trace-strict", strict_config(3, 5_000));
 
-        for iteration in 1..=6 {
+        for iteration in 1..=5 {
             assert!(guard.on_iteration(iteration).is_ok());
         }
 
-        let violation = guard.on_iteration(7).expect_err("strict violation");
+        // iteration 6 == strict_iterations (3*2) → fail-closed at boundary
+        let violation = guard.on_iteration(6).expect_err("strict violation");
         assert_eq!(violation.code(), "CHECKPOINT_CONTRACT_VIOLATION");
         assert!(
             guard

@@ -346,7 +346,7 @@ impl RetrievabilityGate {
         };
 
         // Check latency
-        if state.fetch_latency_ms > self.config.max_latency_ms {
+        if state.fetch_latency_ms >= self.config.max_latency_ms {
             let reason = ProofFailureReason::LatencyExceeded {
                 limit_ms: self.config.max_latency_ms,
                 actual_ms: state.fetch_latency_ms,
@@ -749,7 +749,7 @@ mod tests {
     }
 
     #[test]
-    fn test_latency_at_limit_passes() {
+    fn test_latency_at_limit_is_rejected() {
         let mut gate = make_gate();
         gate.register_target(
             &aid("a1"),
@@ -757,7 +757,31 @@ mod tests {
             TargetTierState {
                 content_hash: "abc".to_string(),
                 reachable: true,
-                fetch_latency_ms: 5000, // exactly at limit
+                fetch_latency_ms: 5000, // exactly at limit → fail-closed
+            },
+        );
+        let err = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "abc",
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ERR_LATENCY_EXCEEDED);
+    }
+
+    #[test]
+    fn test_latency_below_limit_passes() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "abc".to_string(),
+                reachable: true,
+                fetch_latency_ms: 4999, // one below limit → passes
             },
         );
         let proof = gate
@@ -769,7 +793,7 @@ mod tests {
                 "abc",
             )
             .unwrap();
-        assert_eq!(proof.latency_ms, 5000);
+        assert_eq!(proof.latency_ms, 4999);
     }
 
     // -- Target unreachable --

@@ -379,7 +379,7 @@ impl RevocationIntegrationEngine {
 
         match context.safety_tier {
             ExtensionSafetyTier::Low => {
-                if context.revocation_data_age_secs > max_allowed {
+                if context.revocation_data_age_secs >= max_allowed {
                     let decision = RevocationCheckDecision {
                         extension_id: context.extension_id.clone(),
                         operation: context.operation,

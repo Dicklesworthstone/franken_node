@@ -156,7 +156,7 @@ impl ContainmentEvent {
 
     /// Whether convergence time exceeds the SLO threshold.
     pub fn exceeds_slo(&self) -> bool {
-        self.initiation_to_convergence_ms > self.category.slo_ms()
+        self.initiation_to_convergence_ms >= self.category.slo_ms()
     }
 }
 

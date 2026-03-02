@@ -79,19 +79,19 @@ impl ProofLagSlo {
     /// Returns true if any metric in `metrics` breaches this SLO.
     #[must_use]
     pub fn breached_by(&self, metrics: &ProofLagMetrics) -> bool {
-        metrics.proof_lag_secs > self.max_proof_lag_secs
-            || metrics.backlog_depth > self.max_backlog_depth
-            || metrics.error_rate > self.max_error_rate
+        metrics.proof_lag_secs >= self.max_proof_lag_secs
+            || metrics.backlog_depth >= self.max_backlog_depth
+            || metrics.error_rate >= self.max_error_rate
     }
 
     /// Returns the name of the first metric that breaches this SLO, if any.
     #[must_use]
     pub fn first_breached_metric(&self, metrics: &ProofLagMetrics) -> Option<&'static str> {
-        if metrics.proof_lag_secs > self.max_proof_lag_secs {
+        if metrics.proof_lag_secs >= self.max_proof_lag_secs {
             Some("proof_lag_secs")
-        } else if metrics.backlog_depth > self.max_backlog_depth {
+        } else if metrics.backlog_depth >= self.max_backlog_depth {
             Some("backlog_depth")
-        } else if metrics.error_rate > self.max_error_rate {
+        } else if metrics.error_rate >= self.max_error_rate {
             Some("error_rate")
         } else {
             None
@@ -605,19 +605,19 @@ impl VefDegradedModeEngine {
             }
         };
 
-        if metrics.proof_lag_secs > slo.max_proof_lag_secs {
+        if metrics.proof_lag_secs >= slo.max_proof_lag_secs {
             (
                 "proof_lag_secs",
                 metrics.proof_lag_secs as f64,
                 slo.max_proof_lag_secs as f64,
             )
-        } else if metrics.backlog_depth > slo.max_backlog_depth {
+        } else if metrics.backlog_depth >= slo.max_backlog_depth {
             (
                 "backlog_depth",
                 metrics.backlog_depth as f64,
                 slo.max_backlog_depth as f64,
             )
-        } else if metrics.error_rate > slo.max_error_rate {
+        } else if metrics.error_rate >= slo.max_error_rate {
             ("error_rate", metrics.error_rate, slo.max_error_rate)
         } else {
             ("unknown", 0.0, 0.0)
