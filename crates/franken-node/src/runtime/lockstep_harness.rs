@@ -221,16 +221,22 @@ impl LockstepHarness {
 
         // Append deterministic strace output to detect behavioral divergences
         combined_output.extend_from_slice(b"\n--- SYSTEM CALL BOUNDARIES ---\n");
-        if Path::new(&strace_output_file).exists() {
-            let strace_content = std::fs::read(&strace_output_file)
-                .map_err(|e| anyhow::anyhow!("Failed to read strace output: {}", e))?;
-            // Filter out non-deterministic pointers/PIDs from strace output using simple heuristics
-            // so we don't get false positive divergences for different runtimes doing the same thing.
-            let deterministic_strace = Self::sanitize_strace_output(&strace_content);
-            combined_output.extend_from_slice(&deterministic_strace);
-        }
+        let strace_content = Self::read_strace_output(Path::new(&strace_output_file), runtime)?;
+        // Filter out non-deterministic pointers/PIDs from strace output using simple heuristics
+        // so we don't get false positive divergences for different runtimes doing the same thing.
+        let deterministic_strace = Self::sanitize_strace_output(&strace_content);
+        combined_output.extend_from_slice(&deterministic_strace);
 
         Ok(combined_output)
+    }
+
+    fn read_strace_output(path: &Path, runtime: &str) -> Result<Vec<u8>> {
+        std::fs::read(path).with_context(|| {
+            format!(
+                "strace output missing or unreadable for runtime {runtime}: {}",
+                path.display()
+            )
+        })
     }
 
     /// Strips out PIDs, memory addresses, and timestamps from strace logs
@@ -442,6 +448,29 @@ mod tests {
         drop(cleanup);
 
         assert!(!Path::new(&path).exists());
+    }
+
+    #[test]
+    fn read_strace_output_reads_existing_file() {
+        let path = format!("/tmp/lockstep_strace_read_{}.log", uuid::Uuid::now_v7());
+        std::fs::write(&path, b"open(\"/tmp/test\", O_RDONLY) = 3\n").expect("write strace");
+        let _cleanup = TempFileCleanup { path: path.clone() };
+
+        let contents =
+            LockstepHarness::read_strace_output(Path::new(&path), "node").expect("read strace");
+        assert!(contents.starts_with(b"open("));
+    }
+
+    #[test]
+    fn read_strace_output_errors_when_file_missing() {
+        let path = format!("/tmp/lockstep_missing_strace_{}.log", uuid::Uuid::now_v7());
+        assert!(!Path::new(&path).exists());
+
+        let err = LockstepHarness::read_strace_output(Path::new(&path), "node")
+            .expect_err("missing strace file must fail");
+        let message = format!("{err:#}");
+        assert!(message.contains("strace output missing or unreadable for runtime node"));
+        assert!(message.contains(&path));
     }
 
     // ── sanitize_strace_output ───────────────────────────────────────
