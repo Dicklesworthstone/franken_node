@@ -1,5 +1,5 @@
 {
-  "generated_on": "2026-02-27",
+  "generated_on": "2026-03-02",
   "findings": [
     {
       "module_path": "crates/franken-node/src/connector/durable_claim_gate.rs",
@@ -22,7 +22,7 @@
     {
       "module_path": "crates/franken-node/src/connector/policy_checkpoint.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 641,
+      "line": 646,
       "callsite": "SystemTime::now()",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-006",
@@ -31,7 +31,7 @@
     {
       "module_path": "crates/franken-node/src/connector/region_ownership.rs",
       "ambient_api": "std::time::Instant",
-      "line": 374,
+      "line": 381,
       "callsite": "let start = Instant::now();",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-007",
@@ -40,7 +40,7 @@
     {
       "module_path": "crates/franken-node/src/connector/rollout_state.rs",
       "ambient_api": "std::fs",
-      "line": 332,
+      "line": 333,
       "callsite": "std::fs::write(&tmp_path, &json).map_err(|e| PersistError::IoError {",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-002",
@@ -49,7 +49,7 @@
     {
       "module_path": "crates/franken-node/src/connector/rollout_state.rs",
       "ambient_api": "std::fs",
-      "line": 335,
+      "line": 336,
       "callsite": "std::fs::rename(&tmp_path, path).map_err(|e| PersistError::IoError {",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-002",
@@ -58,7 +58,7 @@
     {
       "module_path": "crates/franken-node/src/connector/rollout_state.rs",
       "ambient_api": "std::fs",
-      "line": 344,
+      "line": 345,
       "callsite": "let content = std::fs::read_to_string(path).map_err(|e| PersistError::IoError {",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-002",
@@ -459,7 +459,7 @@
     {
       "module_path": "crates/franken-node/src/connector/policy_checkpoint.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 641,
+      "line": 646,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-006 applied"
     },
@@ -487,7 +487,7 @@
     {
       "module_path": "crates/franken-node/src/connector/region_ownership.rs",
       "ambient_api": "std::time::Instant",
-      "line": 374,
+      "line": 381,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-007 applied"
     },
@@ -515,21 +515,21 @@
     {
       "module_path": "crates/franken-node/src/connector/rollout_state.rs",
       "ambient_api": "std::fs",
-      "line": 332,
+      "line": 333,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-002 applied"
     },
     {
       "module_path": "crates/franken-node/src/connector/rollout_state.rs",
       "ambient_api": "std::fs",
-      "line": 335,
+      "line": 336,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-002 applied"
     },
     {
       "module_path": "crates/franken-node/src/connector/rollout_state.rs",
       "ambient_api": "std::fs",
-      "line": 344,
+      "line": 345,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-002 applied"
     },
