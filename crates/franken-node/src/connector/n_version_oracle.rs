@@ -272,7 +272,7 @@ pub fn run_harness(
             };
             let ref_digest = digest_bytes(ref_output);
 
-            if fe_digest != ref_digest {
+            if !ct_eq(&fe_digest, &ref_digest) {
                 div_counter += 1;
                 let risk_tier = classify_divergence(
                     &sample.boundary_name,

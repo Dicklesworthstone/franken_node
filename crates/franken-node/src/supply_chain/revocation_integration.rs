@@ -230,11 +230,12 @@ impl RevocationIntegrationEngine {
         }
     }
 
-    pub fn init_zone(&mut self, zone_id: &str) {
+    pub fn init_zone(&mut self, zone_id: &str) -> Result<(), RevocationIntegrationError> {
         self.registry
             .init_zone(zone_id)
-            .expect("zone_id must not be empty");
+            .map_err(map_registry_error)?;
         self.last_seen_heads.entry(zone_id.to_string()).or_insert(0);
+        Ok(())
     }
 
     pub fn process_propagation(
@@ -558,7 +559,7 @@ mod tests {
     fn engine() -> RevocationIntegrationEngine {
         let mut engine =
             RevocationIntegrationEngine::new(RevocationIntegrationPolicy::default_policy());
-        engine.init_zone("prod");
+        engine.init_zone("prod").unwrap();
         engine
     }
 
@@ -774,8 +775,8 @@ mod tests {
     #[test]
     fn init_zone_twice_is_safe() {
         let mut engine = engine();
-        engine.init_zone("prod"); // double init
-        engine.init_zone("staging");
+        engine.init_zone("prod").unwrap(); // double init
+        engine.init_zone("staging").unwrap();
         // Should not panic
     }
 

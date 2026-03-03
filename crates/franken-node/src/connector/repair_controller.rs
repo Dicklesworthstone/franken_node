@@ -157,9 +157,9 @@ pub fn run_cycle(
 
     // First pass: fairness minimum for each tenant
     for tenant_id in &active_tenants {
-        let items = by_tenant
-            .get(tenant_id)
-            .expect("tenant_id came from by_tenant keys");
+        let items = by_tenant.get(tenant_id).ok_or(RepairError::InvalidConfig {
+            reason: format!("missing tenant {tenant_id} in by_tenant map"),
+        })?;
         let mut tenant_alloc = RepairAllocation {
             tenant_id: tenant_id.clone(),
             items_allocated: Vec::new(),
@@ -174,7 +174,7 @@ pub fn run_cycle(
             let can_use = item
                 .size_units
                 .min(fairness_remaining)
-                .min(config.max_units_per_cycle - total_used);
+                .min(config.max_units_per_cycle.saturating_sub(total_used));
             if can_use > 0 {
                 tenant_alloc.items_allocated.push(item.item_id.clone());
                 tenant_alloc.units_used += can_use;
@@ -191,12 +191,12 @@ pub fn run_cycle(
         // Collect all unallocated items, sorted by priority desc then item_id
         let mut remaining_items: Vec<&RepairItem> = Vec::new();
         for tenant_id in &active_tenants {
-            let items = by_tenant
-                .get(tenant_id)
-                .expect("tenant_id came from by_tenant keys");
-            let alloc = allocations
-                .get(tenant_id)
-                .expect("allocation inserted for every active tenant in first pass");
+            let items = by_tenant.get(tenant_id).ok_or(RepairError::InvalidConfig {
+                reason: format!("missing tenant {tenant_id} in by_tenant map"),
+            })?;
+            let alloc = allocations.get(tenant_id).ok_or(RepairError::InvalidConfig {
+                reason: format!("missing allocation for tenant {tenant_id}"),
+            })?;
             for item in items {
                 if !alloc.items_allocated.contains(&item.item_id) {
                     remaining_items.push(item);
@@ -213,7 +213,9 @@ pub fn run_cycle(
             if can_use > 0 {
                 let alloc = allocations
                     .get_mut(&item.tenant_id)
-                    .expect("allocation inserted for every active tenant in first pass");
+                    .ok_or(RepairError::InvalidConfig {
+                        reason: format!("missing allocation for tenant {}", item.tenant_id),
+                    })?;
                 alloc.items_allocated.push(item.item_id.clone());
                 alloc.units_used += can_use;
                 total_used += can_use;

@@ -335,6 +335,9 @@ impl PerformanceHardeningMetrics {
             }
 
             let n = metrics.len() as f64;
+            if n == 0.0 {
+                continue;
+            }
             let avg_overhead = overhead_sum / n;
             let avg_cold = cold_sum / n;
             let budget = cat.budget_ms();

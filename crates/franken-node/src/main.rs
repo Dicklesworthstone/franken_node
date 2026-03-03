@@ -2340,15 +2340,21 @@ fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
     }
 
     if let Some(id) = ids.get(1) {
-        let _ = registry.deprecate(id, "trace-cli-registry-seed-deprecate");
+        let result = registry.deprecate(id, "trace-cli-registry-seed-deprecate");
+        if !result.success {
+            anyhow::bail!("registry seed deprecate failed: {}", result.detail);
+        }
     }
     if let Some(id) = ids.get(2) {
-        let _ = registry.revoke(
+        let result = registry.revoke(
             id,
             supply_chain::extension_registry::RevocationReason::SecurityVulnerability,
             "registry-seed",
             "trace-cli-registry-seed-revoke",
         );
+        if !result.success {
+            anyhow::bail!("registry seed revoke failed: {}", result.detail);
+        }
     }
 
     Ok(registry)

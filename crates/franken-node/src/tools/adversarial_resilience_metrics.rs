@@ -254,6 +254,9 @@ impl AdversarialResilienceMetrics {
 
         for (ct, ms) in &by_campaign {
             let n = ms.len() as f64;
+            if n == 0.0 {
+                continue;
+            }
             let avg_det = ms.iter().map(|m| m.detection_rate()).sum::<f64>() / n;
             let avg_blk = ms.iter().map(|m| m.block_rate()).sum::<f64>() / n;
             let avg_res = ms.iter().map(|m| m.resilience_score()).sum::<f64>() / n;

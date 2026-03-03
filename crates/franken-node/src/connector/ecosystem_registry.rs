@@ -454,7 +454,7 @@ impl EcosystemRegistry {
     pub fn verify_audit_integrity(&self) -> Result<(), RegistryError> {
         let mut expected_prev = String::new();
         for entry in &self.audit_trail {
-            if entry.prev_hash != expected_prev {
+            if !ct_eq(&entry.prev_hash, &expected_prev) {
                 return Err(RegistryError::AuthFailure(format!(
                     "audit chain broken at seq {}: expected prev_hash {}, got {}",
                     entry.sequence, expected_prev, entry.prev_hash

@@ -517,9 +517,8 @@ impl EpochTransitionBarrier {
                 active_barrier_id: self
                     .active_barrier
                     .as_ref()
-                    .expect("active_barrier set: is_barrier_active() returned true")
-                    .barrier_id
-                    .clone(),
+                    .map(|b| b.barrier_id.clone())
+                    .unwrap_or_default(),
             });
         }
 
@@ -573,10 +572,9 @@ impl EpochTransitionBarrier {
         };
 
         self.active_barrier = Some(instance);
-        Ok(self
-            .active_barrier
+        self.active_barrier
             .as_ref()
-            .expect("active_barrier set: just assigned above"))
+            .ok_or(BarrierError::NoParticipants)
     }
 
     /// Record a drain ACK from a participant.

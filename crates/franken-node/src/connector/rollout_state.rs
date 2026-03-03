@@ -119,6 +119,7 @@ impl RolloutState {
     /// bd-1cs7: Clear the cancellation phase (e.g., after finalization).
     pub fn clear_cancel_phase(&mut self) {
         self.cancel_phase = None;
+        self.bump_version();
     }
 
     /// bd-1cs7: Check if cancellation is active.

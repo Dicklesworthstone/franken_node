@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::security::constant_time::ct_eq;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -29,6 +30,7 @@ pub const ERR_QUARANTINE_NOT_FOUND: &str = "ERR_QUARANTINE_NOT_FOUND";
 pub const ERR_QUARANTINE_ALREADY_ACTIVE: &str = "ERR_QUARANTINE_ALREADY_ACTIVE";
 pub const ERR_RECALL_WITHOUT_QUARANTINE: &str = "ERR_RECALL_WITHOUT_QUARANTINE";
 pub const ERR_LIFT_REQUIRES_CLEARANCE: &str = "ERR_LIFT_REQUIRES_CLEARANCE";
+pub const ERR_QUARANTINE_INVALID_TRANSITION: &str = "ERR_QUARANTINE_INVALID_TRANSITION";
 pub const ERR_AUDIT_CHAIN_BROKEN: &str = "ERR_AUDIT_CHAIN_BROKEN";
 
 // ── Quarantine mode ─────────────────────────────────────────────────────────
@@ -499,13 +501,22 @@ impl QuarantineRegistry {
         Ok(())
     }
 
-    /// Start draining active sessions.
+    /// Start draining active sessions. Requires state = Enforced.
     pub fn start_drain(&mut self, order_id: &str, timestamp: &str) -> Result<(), QuarantineError> {
         let (ext_id, severity, trace_id) = {
             let record = self.records.get(order_id).ok_or_else(|| QuarantineError {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: format!("Quarantine order not found: {order_id}"),
             })?;
+            if record.state != QuarantineState::Enforced {
+                return Err(QuarantineError {
+                    code: ERR_QUARANTINE_INVALID_TRANSITION.to_owned(),
+                    message: format!(
+                        "Cannot start drain: order {order_id} is in state {:?}, expected Enforced",
+                        record.state
+                    ),
+                });
+            }
             (
                 self.extension_id_from_scope(&record.order.scope),
                 record.order.severity,
@@ -535,7 +546,7 @@ impl QuarantineRegistry {
         Ok(())
     }
 
-    /// Complete drain, mark as isolated.
+    /// Complete drain, mark as isolated. Requires state = Draining.
     pub fn complete_drain(
         &mut self,
         order_id: &str,
@@ -546,6 +557,15 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: format!("Quarantine order not found: {order_id}"),
             })?;
+            if record.state != QuarantineState::Draining {
+                return Err(QuarantineError {
+                    code: ERR_QUARANTINE_INVALID_TRANSITION.to_owned(),
+                    message: format!(
+                        "Cannot complete drain: order {order_id} is in state {:?}, expected Draining",
+                        record.state
+                    ),
+                });
+            }
             (
                 self.extension_id_from_scope(&record.order.scope),
                 record.order.severity,
@@ -757,6 +777,15 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: format!("Quarantine order not found: {order_id}"),
             })?;
+            if record.state != QuarantineState::Isolated {
+                return Err(QuarantineError {
+                    code: ERR_QUARANTINE_INVALID_TRANSITION.to_owned(),
+                    message: format!(
+                        "Cannot lift quarantine: order {} is in state {:?}, expected Isolated",
+                        order_id, record.state
+                    ),
+                });
+            }
             (
                 self.extension_id_from_scope(&record.order.scope),
                 record.order.severity,
@@ -838,7 +867,7 @@ impl QuarantineRegistry {
                 &self.audit_trail[i - 1].entry_hash
             };
 
-            if entry.prev_hash != *expected_prev {
+            if !ct_eq(&entry.prev_hash, expected_prev) {
                 return Err(QuarantineError {
                     code: ERR_AUDIT_CHAIN_BROKEN.to_owned(),
                     message: format!("Audit chain broken at index {i}: prev_hash mismatch"),
@@ -847,7 +876,7 @@ impl QuarantineRegistry {
 
             // Verify entry hash.
             let computed = compute_entry_hash(entry);
-            if entry.entry_hash != computed {
+            if !ct_eq(&entry.entry_hash, &computed) {
                 return Err(QuarantineError {
                     code: ERR_AUDIT_CHAIN_BROKEN.to_owned(),
                     message: format!("Audit chain broken at index {i}: entry_hash mismatch"),
@@ -1093,6 +1122,13 @@ mod tests {
         let order = make_order("q-001", QuarantineSeverity::Medium, QuarantineMode::Soft);
         reg.initiate_quarantine(order).unwrap();
         assert!(reg.is_quarantined("ext-test"));
+
+        // Advance through the required state machine: Enforced → Draining → Isolated
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .unwrap();
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
+            .unwrap();
 
         reg.lift_quarantine(make_clearance("q-001")).unwrap();
         assert!(!reg.is_quarantined("ext-test"));

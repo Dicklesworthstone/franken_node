@@ -459,7 +459,9 @@ impl ControlLaneScheduler {
         let counters = self
             .counters
             .get_mut(lane.as_str())
-            .expect("invariant: counters initialized for all ControlLane variants in new()");
+            .ok_or(ControlLanePolicyError::IncompleteMap {
+                detail: format!("counters missing for lane {}", lane.as_str()),
+            })?;
         counters.tasks_run = counters.tasks_run.saturating_add(1);
         counters.consecutive_empty_ticks = 0;
 
@@ -490,10 +492,12 @@ impl ControlLaneScheduler {
         for lane in ControlLane::all() {
             let lane_key = lane.as_str().to_string();
             let tasks_run = tasks_by_lane.get(&lane_key).copied().unwrap_or(0);
-            let counters = self
-                .counters
-                .get_mut(&lane_key)
-                .expect("invariant: counters initialized for all ControlLane variants in new()");
+            let Some(counters) = self.counters.get_mut(&lane_key) else {
+                alerts.push(ControlLanePolicyError::IncompleteMap {
+                    detail: format!("counters missing for lane {lane_key}"),
+                });
+                continue;
+            };
 
             if tasks_run == 0 && counters.tasks_queued > 0 {
                 counters.consecutive_empty_ticks =

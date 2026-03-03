@@ -654,7 +654,7 @@ impl CertificationRegistry {
     pub fn verify_audit_integrity(&self) -> Result<(), CertificationError> {
         let mut expected_prev = String::new();
         for entry in &self.audit_trail {
-            if entry.prev_hash != expected_prev {
+            if !ct_eq(&entry.prev_hash, &expected_prev) {
                 return Err(CertificationError::AuditIntegrityViolation);
             }
             let computed = compute_entry_hash(entry);

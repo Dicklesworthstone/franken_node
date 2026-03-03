@@ -713,8 +713,13 @@ impl ExfiltrationSentinel {
 
         for boundary in self.boundaries.values() {
             // Check if this edge crosses this boundary
-            let crosses =
-                edge.source.contains(&boundary.from_zone) && edge.sink.contains(&boundary.to_zone);
+            let source_in_zone = edge.source == boundary.from_zone
+                || edge.source.starts_with(&format!("{}-", boundary.from_zone))
+                || edge.source.starts_with(&format!("{}/", boundary.from_zone));
+            let sink_in_zone = edge.sink == boundary.to_zone
+                || edge.sink.starts_with(&format!("{}-", boundary.to_zone))
+                || edge.sink.starts_with(&format!("{}/", boundary.to_zone));
+            let crosses = source_in_zone && sink_in_zone;
 
             if !crosses {
                 continue;
@@ -918,7 +923,13 @@ impl ExfiltrationSentinel {
         // Heuristic: detect rapid sequential flows from the same source to external sinks.
         let mut source_external_counts: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for edge in graph.edges.values() {
-            if edge.sink.contains("external") || edge.sink.contains("public") {
+            let sink_is_external = edge.sink == "external"
+                || edge.sink.starts_with("external-")
+                || edge.sink.starts_with("external/");
+            let sink_is_public = edge.sink == "public"
+                || edge.sink.starts_with("public-")
+                || edge.sink.starts_with("public/");
+            if sink_is_external || sink_is_public {
                 source_external_counts
                     .entry(edge.source.clone())
                     .or_default()
@@ -1056,8 +1067,13 @@ pub mod invariants {
         boundaries: &BTreeMap<String, TaintBoundary>,
     ) -> FlowVerdict {
         for boundary in boundaries.values() {
-            let crosses =
-                edge.source.contains(&boundary.from_zone) && edge.sink.contains(&boundary.to_zone);
+            let source_in_zone = edge.source == boundary.from_zone
+                || edge.source.starts_with(&format!("{}-", boundary.from_zone))
+                || edge.source.starts_with(&format!("{}/", boundary.from_zone));
+            let sink_in_zone = edge.sink == boundary.to_zone
+                || edge.sink.starts_with(&format!("{}-", boundary.to_zone))
+                || edge.sink.starts_with(&format!("{}/", boundary.to_zone));
+            let crosses = source_in_zone && sink_in_zone;
             if crosses && boundary.is_violated_by(&edge.taint_set) {
                 return FlowVerdict::Quarantine;
             }
@@ -1079,8 +1095,13 @@ pub mod invariants {
     ) -> bool {
         for edge in graph.edges.values() {
             for boundary in boundaries.values() {
-                let crosses = edge.source.contains(&boundary.from_zone)
-                    && edge.sink.contains(&boundary.to_zone);
+                let source_in_zone = edge.source == boundary.from_zone
+                    || edge.source.starts_with(&format!("{}-", boundary.from_zone))
+                    || edge.source.starts_with(&format!("{}/", boundary.from_zone));
+                let sink_in_zone = edge.sink == boundary.to_zone
+                    || edge.sink.starts_with(&format!("{}-", boundary.to_zone))
+                    || edge.sink.starts_with(&format!("{}/", boundary.to_zone));
+                let crosses = source_in_zone && sink_in_zone;
                 if crosses && boundary.is_violated_by(&edge.taint_set) && !edge.quarantined {
                     return false;
                 }

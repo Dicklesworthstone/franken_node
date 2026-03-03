@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::Write;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 // ── Event codes ─────────────────────────────────────────────────────
 
@@ -34,6 +34,7 @@ pub mod event_codes {
     pub const LEDGER_EVICTION: &str = "EVD-LEDGER-002";
     pub const LEDGER_SPILL: &str = "EVD-LEDGER-003";
     pub const LEDGER_CAPACITY_WARN: &str = "EVD-LEDGER-004";
+    pub const LEDGER_LOCK_POISON_RECOVERED: &str = "EVD-LEDGER-005";
 }
 
 // ── EntryId ─────────────────────────────────────────────────────────
@@ -282,7 +283,7 @@ impl EvidenceLedger {
     /// Evict the oldest entry from the ring buffer.
     fn evict_oldest(&mut self) {
         if let Some((evicted_id, evicted_entry, evicted_size)) = self.entries.pop_front() {
-            self.current_bytes -= evicted_size;
+            self.current_bytes = self.current_bytes.saturating_sub(evicted_size);
             self.total_evicted = self.total_evicted.saturating_add(1);
             eprintln!(
                 "{}: evicted entry={}, decision={}, epoch={}, freed_bytes={}",
@@ -338,31 +339,33 @@ impl SharedEvidenceLedger {
     }
 
     pub fn append(&self, entry: EvidenceEntry) -> Result<EntryId, LedgerError> {
-        self.inner
-            .lock()
-            .expect("evidence ledger lock poisoned")
-            .append(entry)
+        let mut ledger = self.lock_recover();
+        ledger.append(entry)
     }
 
     pub fn len(&self) -> usize {
-        self.inner
-            .lock()
-            .expect("evidence ledger lock poisoned")
-            .len()
+        self.lock_recover().len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.inner
-            .lock()
-            .expect("evidence ledger lock poisoned")
-            .is_empty()
+        self.lock_recover().is_empty()
     }
 
     pub fn snapshot(&self) -> LedgerSnapshot {
-        self.inner
-            .lock()
-            .expect("evidence ledger lock poisoned")
-            .snapshot()
+        self.lock_recover().snapshot()
+    }
+
+    fn lock_recover(&self) -> MutexGuard<'_, EvidenceLedger> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                eprintln!(
+                    "{}: recovering from poisoned evidence ledger lock",
+                    event_codes::LEDGER_LOCK_POISON_RECOVERED
+                );
+                poisoned.into_inner()
+            }
+        }
     }
 }
 
@@ -822,6 +825,25 @@ mod tests {
         shared.append(make_entry("DEC-002", 2)).unwrap();
         let snap = shared.snapshot();
         assert_eq!(snap.entries.len(), 2);
+    }
+
+    #[test]
+    fn shared_ledger_recovers_from_poisoned_lock() {
+        let shared = SharedEvidenceLedger::new(LedgerCapacity::new(100, 100_000));
+        let poison_target = shared.clone();
+        let join = std::thread::spawn(move || {
+            let _guard = poison_target
+                .inner
+                .lock()
+                .expect("lock acquired for poison test");
+            panic!("intentional poison");
+        });
+        assert!(join.join().is_err(), "poisoning thread should panic");
+
+        assert!(shared.is_empty());
+        shared.append(make_entry("DEC-001", 1)).unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared.snapshot().entries.len(), 1);
     }
 
     // ── Steady-state load ──

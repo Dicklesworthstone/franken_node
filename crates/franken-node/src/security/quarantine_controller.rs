@@ -241,6 +241,7 @@ impl QuarantineController {
     fn hmac_sha256(&self, data: &str) -> String {
         let mut mac =
             Hmac::<Sha256>::new_from_slice(&self.signing_key).expect("HMAC accepts any key len");
+        mac.update(b"quarantine_controller_hmac_v1:");
         mac.update(data.as_bytes());
         let result = mac.finalize().into_bytes();
         hex::encode(result)

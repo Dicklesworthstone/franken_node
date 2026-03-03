@@ -12,7 +12,18 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use crate::security::constant_time::ct_eq;
+/// Constant-time string comparison (inline to avoid cross-crate path issues in test harnesses).
+fn ct_eq_inline(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
 
 pub const PROOF_SERVICE_SCHEMA_VERSION: &str = "vef-proof-service-v1";
 
@@ -201,7 +212,7 @@ impl ProofInputEnvelope {
             )));
         }
 
-        let expected_count = (window.end_index - window.start_index + 1) as usize;
+        let expected_count = window.end_index.saturating_sub(window.start_index).saturating_add(1) as usize;
         if window_entries.len() != expected_count {
             return Err(ProofServiceError::input_error(format!(
                 "window {} expected {} entries, found {}",
@@ -264,7 +275,7 @@ impl ProofInputEnvelope {
                 self.receipt_start_index, self.receipt_end_index
             )));
         }
-        let expected_count = (self.receipt_end_index - self.receipt_start_index + 1) as usize;
+        let expected_count = self.receipt_end_index.saturating_sub(self.receipt_start_index).saturating_add(1) as usize;
         if self.receipt_hashes.len() != expected_count {
             return Err(ProofServiceError::input_error(format!(
                 "receipt hash count mismatch expected={} got={}",
@@ -357,14 +368,14 @@ impl ProofOutputEnvelope {
         }
 
         let expected_commitment = input.commitment_hash()?;
-        if !ct_eq(&self.input_commitment_hash, &expected_commitment) {
+        if !ct_eq_inline(&self.input_commitment_hash, &expected_commitment) {
             return Err(ProofServiceError::verify_error(format!(
                 "input commitment mismatch expected={} got={}",
                 expected_commitment, self.input_commitment_hash
             )));
         }
 
-        if !ct_eq(&self.trace_id, &input.trace_id) {
+        if !ct_eq_inline(&self.trace_id, &input.trace_id) {
             return Err(ProofServiceError::verify_error(format!(
                 "trace_id mismatch expected={} got={}",
                 input.trace_id, self.trace_id

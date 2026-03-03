@@ -382,13 +382,13 @@ impl ScoreboardPipeline {
         snapshot_id: &str,
         contracts: &[CompiledContract],
     ) -> ScoreboardUpdateResult {
-        // INV-SCOREBOARD-FRESH-LINKS: reject stale evidence
+        // INV-SCOREBOARD-FRESH-LINKS: reject stale evidence (fail-closed: >= rejects at boundary)
         for contract in contracts {
             if self
                 .config
                 .now_epoch_ms
                 .saturating_sub(contract.compiled_at_epoch_ms)
-                > self.config.max_evidence_age_ms
+                >= self.config.max_evidence_age_ms
             {
                 return ScoreboardUpdateResult::Rejected {
                     reason: ScoreboardRejectionReason::StaleEvidence,
@@ -449,13 +449,13 @@ impl ScoreboardPipeline {
         snapshot_id: &str,
         contracts: &[CompiledContract],
     ) -> Option<ScoreboardSnapshot> {
-        // Check freshness first
+        // Check freshness first (fail-closed: >= rejects at boundary)
         for contract in contracts {
             if self
                 .config
                 .now_epoch_ms
                 .saturating_sub(contract.compiled_at_epoch_ms)
-                > self.config.max_evidence_age_ms
+                >= self.config.max_evidence_age_ms
             {
                 return None;
             }

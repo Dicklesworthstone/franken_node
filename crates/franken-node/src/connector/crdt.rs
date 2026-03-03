@@ -192,7 +192,7 @@ impl GCounter {
 
     pub fn increment(&mut self, replica_id: &str, amount: u64) {
         let count = self.counts.entry(replica_id.to_string()).or_insert(0);
-        *count += amount;
+        *count = count.saturating_add(amount);
     }
 
     pub fn value(&self) -> u64 {

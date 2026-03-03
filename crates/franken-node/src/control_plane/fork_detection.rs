@@ -563,7 +563,7 @@ impl RollbackDetector {
                 });
             }
             // The new state's parent_state_hash must match the last state's state_hash
-            if sv.parent_state_hash != last.state_hash {
+            if !crate::security::constant_time::ct_eq(&sv.parent_state_hash, &last.state_hash) {
                 let proof = RollbackProof {
                     local_state: last.clone(),
                     remote_state: sv.clone(),
@@ -639,7 +639,7 @@ impl MarkerProofVerifier {
                     claimed_epoch,
                 })?;
 
-        if marker.marker_hash != marker_id {
+        if !crate::security::constant_time::ct_eq(&marker.marker_hash, marker_id) {
             return Err(ForkDetectionError::RfdMarkerNotFound {
                 marker_id: marker_id.to_string(),
                 claimed_epoch,

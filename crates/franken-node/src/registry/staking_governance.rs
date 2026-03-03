@@ -864,7 +864,10 @@ impl StakingLedger {
             .state
             .stakes
             .get_mut(&stake_id.0)
-            .expect("stake existence verified above");
+            .ok_or(StakingError::StakeNotFound {
+                stake_id,
+                code: ERR_STAKE_NOT_FOUND,
+            })?;
         stake_record.state = StakeState::Slashed;
         stake_record.slashed_at = Some(timestamp);
         stake_record.amount = post_balance;
@@ -990,7 +993,10 @@ impl StakingLedger {
         self.state
             .stakes
             .get_mut(&stake_id.0)
-            .expect("stake existence verified above")
+            .ok_or(StakingError::StakeNotFound {
+                stake_id,
+                code: ERR_STAKE_NOT_FOUND,
+            })?
             .state = StakeState::UnderAppeal;
 
         let appeal = AppealRecord {
@@ -1095,7 +1101,10 @@ impl StakingLedger {
             self.state
                 .stakes
                 .get_mut(&stake_id.0)
-                .expect("stake existence verified above")
+                .ok_or(StakingError::StakeNotFound {
+                    stake_id,
+                    code: ERR_STAKE_NOT_FOUND,
+                })?
                 .state = StakeState::Slashed;
         } else {
             // Appeal granted: restore to active and return slashed amount
@@ -1103,7 +1112,10 @@ impl StakingLedger {
                 .state
                 .stakes
                 .get_mut(&stake_id.0)
-                .expect("stake existence verified above");
+                .ok_or(StakingError::StakeNotFound {
+                    stake_id,
+                    code: ERR_STAKE_NOT_FOUND,
+                })?;
             stake_record.state = StakeState::Active;
 
             // Find the slash event and restore

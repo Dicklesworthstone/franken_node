@@ -381,22 +381,20 @@ impl DurabilityViolationDetector {
             return Ok(());
         }
 
+        let last_halt = || {
+            self.active_halts
+                .last()
+                .cloned()
+                .unwrap_or_else(|| BundleId::new("unknown".to_string()))
+        };
         match &self.halt_policy {
             HaltPolicy::HaltAll => Err(DurabilityHaltedError {
-                bundle_id: self
-                    .active_halts
-                    .last()
-                    .expect("active_halts checked non-empty above")
-                    .clone(),
+                bundle_id: last_halt(),
                 scope: scope.to_string(),
             }),
             HaltPolicy::HaltScope(halt_scope) if halt_scope == scope => {
                 Err(DurabilityHaltedError {
-                    bundle_id: self
-                        .active_halts
-                        .last()
-                        .expect("active_halts checked non-empty above")
-                        .clone(),
+                    bundle_id: last_halt(),
                     scope: scope.to_string(),
                 })
             }

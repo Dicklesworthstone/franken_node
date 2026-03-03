@@ -151,7 +151,7 @@ pub fn evaluate_candidates(
                     "probability {:.2} < threshold {:.2}",
                     candidate.predicted_probability, config.probability_threshold
                 ),
-                budget_remaining: config.max_bytes - budget_used,
+                budget_remaining: config.max_bytes.saturating_sub(budget_used),
             });
             continue;
         }
@@ -162,13 +162,13 @@ pub fn evaluate_candidates(
                 artifact_id: candidate.artifact_id.clone(),
                 staged: false,
                 reason: "max_artifacts_per_cycle reached".into(),
-                budget_remaining: config.max_bytes - budget_used,
+                budget_remaining: config.max_bytes.saturating_sub(budget_used),
             });
             continue;
         }
 
         // INV-PSE-BUDGET: check budget
-        if budget_used + candidate.size_bytes > config.max_bytes {
+        if budget_used.saturating_add(candidate.size_bytes) > config.max_bytes {
             decisions.push(PrestageDecision {
                 artifact_id: candidate.artifact_id.clone(),
                 staged: false,
@@ -176,13 +176,13 @@ pub fn evaluate_candidates(
                     "budget exceeded: {} + {} > {}",
                     budget_used, candidate.size_bytes, config.max_bytes
                 ),
-                budget_remaining: config.max_bytes - budget_used,
+                budget_remaining: config.max_bytes.saturating_sub(budget_used),
             });
             continue;
         }
 
         // Stage this artifact
-        budget_used += candidate.size_bytes;
+        budget_used = budget_used.saturating_add(candidate.size_bytes);
         staged_count += 1;
         decisions.push(PrestageDecision {
             artifact_id: candidate.artifact_id.clone(),
@@ -191,7 +191,7 @@ pub fn evaluate_candidates(
                 "probability {:.2} >= threshold",
                 candidate.predicted_probability
             ),
-            budget_remaining: config.max_bytes - budget_used,
+            budget_remaining: config.max_bytes.saturating_sub(budget_used),
         });
     }
 

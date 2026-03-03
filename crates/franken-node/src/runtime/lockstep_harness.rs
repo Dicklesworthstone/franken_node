@@ -195,7 +195,7 @@ impl LockstepHarness {
             if let Some(status) = child.try_wait()? {
                 break status;
             }
-            if start.elapsed() > timeout {
+            if Self::has_timed_out(start.elapsed(), timeout) {
                 let _ = child.kill();
                 let _ = child.wait(); // Reclaim resources
                 // Join reader threads to avoid leaking them after kill.
@@ -228,6 +228,10 @@ impl LockstepHarness {
         combined_output.extend_from_slice(&deterministic_strace);
 
         Ok(combined_output)
+    }
+
+    fn has_timed_out(elapsed: Duration, timeout: Duration) -> bool {
+        elapsed >= timeout
     }
 
     fn read_strace_output(path: &Path, runtime: &str) -> Result<Vec<u8>> {
@@ -379,6 +383,23 @@ mod tests {
             "franken-engine".into(),
         ]);
         assert_eq!(h.runtimes.len(), 5);
+    }
+
+    #[test]
+    fn timeout_boundary_is_fail_closed() {
+        let timeout = Duration::from_millis(30);
+        assert!(!LockstepHarness::has_timed_out(
+            Duration::from_millis(29),
+            timeout
+        ));
+        assert!(LockstepHarness::has_timed_out(
+            Duration::from_millis(30),
+            timeout
+        ));
+        assert!(LockstepHarness::has_timed_out(
+            Duration::from_millis(31),
+            timeout
+        ));
     }
 
     #[test]

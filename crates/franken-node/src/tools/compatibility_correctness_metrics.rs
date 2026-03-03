@@ -360,9 +360,9 @@ impl CompatibilityCorrectnessMetrics {
             let mut detect_sum: f64 = 0.0;
 
             for m in metrics {
-                total_tests += m.total_tests;
-                total_passed += m.passed_tests;
-                total_regressions += m.regressions;
+                total_tests = total_tests.saturating_add(m.total_tests);
+                total_passed = total_passed.saturating_add(m.passed_tests);
+                total_regressions = total_regressions.saturating_add(m.regressions);
                 detect_sum += m.mean_detect_ms;
             }
 
@@ -378,8 +378,8 @@ impl CompatibilityCorrectnessMetrics {
                 flagged.push(key.clone());
             }
 
-            total_tests_all += total_tests;
-            total_passed_all += total_passed;
+            total_tests_all = total_tests_all.saturating_add(total_tests);
+            total_passed_all = total_passed_all.saturating_add(total_passed);
 
             segments.push(SegmentStats {
                 segment: key.clone(),

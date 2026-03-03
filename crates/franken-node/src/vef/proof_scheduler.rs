@@ -272,7 +272,7 @@ impl VefProofScheduler {
                 window_id: format!("win-{}-{}", entries[start].index, entries[end].index),
                 start_index: entries[start].index,
                 end_index: entries[end].index,
-                entry_count: (end - start + 1) as u64,
+                entry_count: (end - start).saturating_add(1) as u64,
                 aligned_checkpoint_id,
                 tier,
                 created_at_millis: now_millis,
@@ -385,8 +385,8 @@ impl VefProofScheduler {
                 .ok_or_else(|| SchedulerError::internal(format!("missing job {}", job.job_id)))?;
             entry.status = ProofJobStatus::Dispatched;
             entry.dispatched_at_millis = Some(now_millis);
-            compute_used += entry.estimated_compute_millis;
-            memory_used += entry.estimated_memory_mib;
+            compute_used = compute_used.saturating_add(entry.estimated_compute_millis);
+            memory_used = memory_used.saturating_add(entry.estimated_memory_mib);
             self.events.push(SchedulerEvent {
                 event_code: event_codes::VEF_SCHED_002_JOB_DISPATCHED.to_string(),
                 trace_id: entry.trace_id.clone(),
@@ -453,13 +453,13 @@ impl VefProofScheduler {
                             .map(|current| current.min(job.created_at_millis))
                             .unwrap_or(job.created_at_millis),
                     );
-                    compute_budget_used_millis += job.estimated_compute_millis;
-                    memory_budget_used_mib += job.estimated_memory_mib;
+                    compute_budget_used_millis = compute_budget_used_millis.saturating_add(job.estimated_compute_millis);
+                    memory_budget_used_mib = memory_budget_used_mib.saturating_add(job.estimated_memory_mib);
                 }
                 ProofJobStatus::Dispatched => {
                     dispatched_jobs += 1;
-                    compute_budget_used_millis += job.estimated_compute_millis;
-                    memory_budget_used_mib += job.estimated_memory_mib;
+                    compute_budget_used_millis = compute_budget_used_millis.saturating_add(job.estimated_compute_millis);
+                    memory_budget_used_mib = memory_budget_used_mib.saturating_add(job.estimated_memory_mib);
                 }
                 ProofJobStatus::Completed => completed_jobs += 1,
                 ProofJobStatus::DeadlineExceeded => deadline_exceeded_jobs += 1,

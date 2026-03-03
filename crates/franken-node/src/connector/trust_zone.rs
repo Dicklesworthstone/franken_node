@@ -336,7 +336,7 @@ impl ZoneSegmentationEngine {
             }
             IsolationLevel::Permissive => {
                 // Permissive: reads allowed, writes require bridge.
-                if (req.action.contains("write") || req.action.contains("delete"))
+                if (req.action == "write" || req.action == "delete")
                     && !source.allowed_cross_zone_targets.contains(&req.target_zone)
                 {
                     return Err(SegmentationError::IsolationViolation {
@@ -363,8 +363,10 @@ impl ZoneSegmentationEngine {
             });
         }
         // Convention: dual-owner proof contains both zone IDs separated by ":".
-        if !req.authorization_proof.contains(&req.source_zone)
-            || !req.authorization_proof.contains(&req.target_zone)
+        // Use segment-exact matching to prevent substring false positives.
+        let proof_segments: Vec<&str> = req.authorization_proof.split(':').collect();
+        if !proof_segments.iter().any(|s| *s == req.source_zone)
+            || !proof_segments.iter().any(|s| *s == req.target_zone)
         {
             return Err(SegmentationError::BridgeAuthIncomplete {
                 detail: format!(

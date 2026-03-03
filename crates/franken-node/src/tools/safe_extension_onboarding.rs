@@ -289,6 +289,9 @@ impl SafeExtensionOnboarding {
         for phase in OnboardingPhase::all() {
             if let Some(steps) = phase_groups.get(phase) {
                 let n = steps.len();
+                if n == 0 {
+                    continue;
+                }
                 let avg_dur = steps.iter().map(|(d, _, _, _)| d).sum::<f64>() / n as f64;
                 let auto_rate = steps.iter().filter(|(_, a, _, _)| *a).count() as f64 / n as f64;
                 let pass_rate = steps.iter().filter(|(_, _, p, _)| *p).count() as f64 / n as f64;

@@ -331,7 +331,7 @@ impl Region {
         Ok(())
     }
 
-    /// Mark a task as completed.
+    /// Mark a task as completed. Only valid from Running or Draining state.
     pub fn complete_task(&mut self, task_id: &str) -> Result<(), RegionError> {
         let task = self
             .tasks
@@ -341,7 +341,14 @@ impl Region {
                 region_id: self.id,
                 task_id: task_id.to_string(),
             })?;
-        task.state = TaskState::Completed;
+        match task.state {
+            TaskState::Running | TaskState::Draining => {
+                task.state = TaskState::Completed;
+            }
+            TaskState::Completed | TaskState::ForceTerminated => {
+                // Already in a terminal state — no-op to preserve idempotency.
+            }
+        }
         Ok(())
     }
 
@@ -537,22 +544,22 @@ pub fn build_lifecycle_hierarchy(
 pub fn generate_quiescence_trace(
     regions: &[&Region],
     close_results: &[&CloseResult],
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, serde_json::Error> {
     let mut trace: Vec<serde_json::Value> = Vec::new();
 
     // Open events
     for region in regions {
-        trace.push(serde_json::to_value(region.open_event()).expect("RegionEvent is serializable"));
+        trace.push(serde_json::to_value(region.open_event())?);
     }
 
     // Close events
     for result in close_results {
         for event in &result.events {
-            trace.push(serde_json::to_value(event).expect("RegionEvent is serializable"));
+            trace.push(serde_json::to_value(event)?);
         }
     }
 
-    trace
+    Ok(trace)
 }
 
 #[cfg(test)]
@@ -689,7 +696,7 @@ mod tests {
         root.register_task("task-1").unwrap();
         let result = root.close().unwrap();
 
-        let trace = generate_quiescence_trace(&[&root], &[&result]);
+        let trace = generate_quiescence_trace(&[&root], &[&result]).unwrap();
         assert!(!trace.is_empty());
     }
 

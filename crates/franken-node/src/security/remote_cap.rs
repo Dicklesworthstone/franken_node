@@ -751,6 +751,7 @@ fn scope_fingerprint(scope: &RemoteScope) -> String {
 fn keyed_digest(secret: &str, payload: &str) -> String {
     let mut mac =
         Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+    mac.update(b"remote_cap_keyed_digest_v1:");
     mac.update(payload.as_bytes());
     hex::encode(mac.finalize().into_bytes())
 }

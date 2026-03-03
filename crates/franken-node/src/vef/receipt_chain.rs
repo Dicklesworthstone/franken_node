@@ -14,7 +14,18 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-use crate::security::constant_time::ct_eq;
+/// Constant-time string comparison (inline to avoid cross-crate path issues in test harnesses).
+fn ct_eq_inline(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut acc = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        acc |= x ^ y;
+    }
+    acc == 0
+}
 use std::sync::{Arc, Mutex};
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
@@ -365,7 +376,7 @@ impl ReceiptChain {
                 )));
             }
             let chain_head = entries[checkpoint.end_index as usize].chain_hash.as_str();
-            if !ct_eq(&checkpoint.chain_head_hash, chain_head) {
+            if !ct_eq_inline(&checkpoint.chain_head_hash, chain_head) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} chain head mismatch",
                     checkpoint.checkpoint_id
@@ -378,7 +389,7 @@ impl ReceiptChain {
                 chain_head,
                 entries,
             )?;
-            if !ct_eq(&checkpoint.commitment_hash, &expected_commitment) {
+            if !ct_eq_inline(&checkpoint.commitment_hash, &expected_commitment) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} commitment hash mismatch",
                     checkpoint.checkpoint_id
@@ -455,7 +466,7 @@ impl ReceiptChain {
             checkpoint_id: self.checkpoints.len() as u64,
             start_index,
             end_index,
-            entry_count: end_index - start_index + 1,
+            entry_count: end_index.saturating_sub(start_index).saturating_add(1),
             chain_head_hash,
             commitment_hash,
             created_at_millis: now_millis,

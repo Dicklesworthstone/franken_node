@@ -465,6 +465,9 @@ impl MarkerStream {
             }
         }
         // lo - 1 is the rightmost index where timestamp <= ts
+        if lo == 0 {
+            return None;
+        }
         Some(self.markers[lo - 1].sequence)
     }
 
@@ -517,7 +520,7 @@ impl MarkerStream {
                 marker.timestamp,
                 &marker.trace_id,
             );
-            if marker.marker_hash != recomputed {
+            if !crate::security::constant_time::ct_eq(&marker.marker_hash, &recomputed) {
                 return Err(MarkerStreamError::IntegrityFailure {
                     sequence: expected_seq,
                     detail: format!(
@@ -559,7 +562,7 @@ impl MarkerStream {
             &last.trace_id,
         );
 
-        if last.marker_hash != recomputed {
+        if !crate::security::constant_time::ct_eq(&last.marker_hash, &recomputed) {
             self.markers.pop()
         } else {
             None
