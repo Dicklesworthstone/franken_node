@@ -274,7 +274,7 @@ impl PolicyChangeEngine {
             serde_json::to_string(&rollback_diff)
                 .map_err(|e| PolicyChangeError::new(
                     "ROLLBACK_SERIALIZATION_FAILED",
-                    &format!("failed to serialize rollback diff: {e}"),
+                    format!("failed to serialize rollback diff: {e}"),
                 ))?,
         );
 

@@ -166,25 +166,24 @@ pub fn evaluate_freshness(
     check: &FreshnessCheck,
     override_receipt: Option<&OverrideReceipt>,
 ) -> Result<FreshnessDecision, FreshnessError> {
-    let max_age = policy.max_age_for_tier(check.tier);
-
-    // INV-RF-STANDARD-PASS: no freshness requirement
-    if check.tier == SafetyTier::Standard {
-        return Ok(FreshnessDecision {
-            action_id: check.action_id.clone(),
-            tier: check.tier,
-            allowed: true,
-            revocation_age_secs: check.revocation_age_secs,
-            max_age_secs: None,
-            override_receipt: None,
-            reason: "standard tier: no freshness requirement".into(),
-            trace_id: check.trace_id.clone(),
-            timestamp: check.timestamp.clone(),
-        });
-    }
-
-    let max_age_secs =
-        max_age.expect("invariant: only Standard returns None, and Standard returns early above");
+    let max_age_secs = match check.tier {
+        // INV-RF-STANDARD-PASS: no freshness requirement
+        SafetyTier::Standard => {
+            return Ok(FreshnessDecision {
+                action_id: check.action_id.clone(),
+                tier: check.tier,
+                allowed: true,
+                revocation_age_secs: check.revocation_age_secs,
+                max_age_secs: None,
+                override_receipt: None,
+                reason: "standard tier: no freshness requirement".into(),
+                trace_id: check.trace_id.clone(),
+                timestamp: check.timestamp.clone(),
+            });
+        }
+        SafetyTier::Risky => policy.risky_max_age_secs,
+        SafetyTier::Dangerous => policy.dangerous_max_age_secs,
+    };
 
     // Fresh enough: allow (fail-closed: exact boundary = stale)
     if check.revocation_age_secs < max_age_secs {
@@ -333,8 +332,8 @@ mod tests {
     #[test]
     fn at_boundary_denied() {
         // Fail-closed: age exactly at max_age is stale
-        let err =
-            evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3600), None).unwrap_err();
+        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3600), None)
+            .unwrap_err();
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 

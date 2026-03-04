@@ -347,7 +347,7 @@ impl MigrationKitEcosystem {
         Ok(self
             .kits
             .get(kit_id)
-            .expect("validated: kit existence checked via contains_key() above"))
+            .ok_or_else(|| "Kit not found".to_string())?)
     }
 
     /// Start a migration step.
@@ -367,6 +367,13 @@ impl MigrationKitEcosystem {
             .iter_mut()
             .find(|s| s.step_id == step_id)
             .ok_or_else(|| "Step not found".to_string())?;
+
+        if step.status != StepStatus::Pending {
+            return Err(format!(
+                "Cannot start step {step_id}: current status is {:?}, expected Pending",
+                step.status
+            ));
+        }
 
         step.status = StepStatus::InProgress;
 
@@ -398,6 +405,13 @@ impl MigrationKitEcosystem {
             .find(|s| s.step_id == step_id)
             .ok_or_else(|| "Step not found".to_string())?;
 
+        if step.status != StepStatus::InProgress {
+            return Err(format!(
+                "Cannot complete step {step_id}: current status is {:?}, expected InProgress",
+                step.status
+            ));
+        }
+
         step.status = StepStatus::Completed;
 
         self.log(
@@ -411,7 +425,7 @@ impl MigrationKitEcosystem {
         let all_done = self
             .kits
             .get(kit_id)
-            .expect("validated: kit checked via get_mut().ok_or_else() above")
+            .ok_or_else(|| "Kit not found".to_string())?
             .steps
             .iter()
             .all(|s| s.status == StepStatus::Completed);
@@ -444,6 +458,13 @@ impl MigrationKitEcosystem {
             .iter_mut()
             .find(|s| s.step_id == step_id)
             .ok_or_else(|| "Step not found".to_string())?;
+
+        if !matches!(step.status, StepStatus::InProgress | StepStatus::Failed) {
+            return Err(format!(
+                "Cannot rollback step {step_id}: current status is {:?}, expected InProgress or Failed",
+                step.status
+            ));
+        }
 
         if step.rollback_procedure.is_empty() {
             self.log(
@@ -794,6 +815,75 @@ mod tests {
                 &make_trace(),
             )
             .unwrap();
+        // Must start the step first so it's InProgress (rollback requires InProgress or Failed)
+        eco.start_step(&kit_id, "s1", &make_trace()).unwrap();
+        let result = eco.rollback_step(&kit_id, "s1", &make_trace());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn start_step_rejects_non_pending() {
+        let mut eco = MigrationKitEcosystem::default();
+        let kit_id = eco
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                sample_steps(),
+                &make_trace(),
+            )
+            .unwrap();
+        eco.start_step(&kit_id, "s1", &make_trace()).unwrap();
+        // Cannot start again — already InProgress
+        let result = eco.start_step(&kit_id, "s1", &make_trace());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn complete_step_rejects_non_in_progress() {
+        let mut eco = MigrationKitEcosystem::default();
+        let kit_id = eco
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                sample_steps(),
+                &make_trace(),
+            )
+            .unwrap();
+        // Cannot complete a Pending step
+        let result = eco.complete_step(&kit_id, "s1", &make_trace());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rollback_step_rejects_pending() {
+        let mut eco = MigrationKitEcosystem::default();
+        let kit_id = eco
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                sample_steps(),
+                &make_trace(),
+            )
+            .unwrap();
+        // Cannot rollback a Pending step
+        let result = eco.rollback_step(&kit_id, "s1", &make_trace());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rollback_step_rejects_completed() {
+        let mut eco = MigrationKitEcosystem::default();
+        let kit_id = eco
+            .load_kit(
+                Archetype::Express,
+                sample_compat(Archetype::Express),
+                sample_steps(),
+                &make_trace(),
+            )
+            .unwrap();
+        eco.start_step(&kit_id, "s1", &make_trace()).unwrap();
+        eco.complete_step(&kit_id, "s1", &make_trace()).unwrap();
+        // Cannot rollback a Completed step
         let result = eco.rollback_step(&kit_id, "s1", &make_trace());
         assert!(result.is_err());
     }

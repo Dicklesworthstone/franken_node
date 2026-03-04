@@ -162,18 +162,30 @@ impl AuthenticatedSession {
     }
 
     /// Transition to Active state with the given timestamp.
+    /// Only valid from Establishing state.
     pub fn activate(&mut self, timestamp: u64) {
+        if self.state != SessionState::Establishing {
+            return; // Guard: only Establishing → Active
+        }
         self.state = SessionState::Active;
         self.established_at = timestamp;
     }
 
     /// Transition to Terminating state.
+    /// Only valid from Active state.
     pub fn begin_termination(&mut self) {
+        if self.state != SessionState::Active {
+            return; // Guard: only Active → Terminating
+        }
         self.state = SessionState::Terminating;
     }
 
     /// Transition to Terminated state.
+    /// Only valid from Active or Terminating state.
     pub fn terminate(&mut self) {
+        if !matches!(self.state, SessionState::Active | SessionState::Terminating) {
+            return; // Guard: only Active/Terminating → Terminated
+        }
         self.state = SessionState::Terminated;
     }
 

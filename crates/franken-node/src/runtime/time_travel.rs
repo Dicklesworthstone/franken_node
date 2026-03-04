@@ -461,7 +461,11 @@ impl CaptureSession {
         };
         self.frames.push(frame);
         self.events.push(event_codes::TTR_002.to_string());
-        Ok(self.frames.last().expect("frames non-empty after push"))
+        self.frames
+            .last()
+            .ok_or_else(|| TimeTravelError::SnapshotCorrupt {
+                detail: "capture invariant violated: frame missing after append".to_string(),
+            })
     }
 
     /// Return the number of captured frames.

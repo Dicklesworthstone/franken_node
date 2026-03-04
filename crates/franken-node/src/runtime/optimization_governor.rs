@@ -625,10 +625,9 @@ impl OptimizationGovernor {
         }
 
         // 5. Approved -- apply the knob change
-        self.knob_states
-            .get_mut(&proposal.knob)
-            .expect("knob existence checked above")
-            .value = proposal.new_value;
+        if let Some(state) = self.knob_states.get_mut(&proposal.knob) {
+            state.value = proposal.new_value;
+        }
 
         self.applied.insert(
             proposal.proposal_id.clone(),

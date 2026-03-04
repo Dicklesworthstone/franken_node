@@ -92,6 +92,9 @@ pub enum LeaseError {
         expected: String,
         actual: String,
     },
+    NotFound {
+        lease_id: String,
+    },
 }
 
 impl LeaseError {
@@ -101,6 +104,7 @@ impl LeaseError {
             Self::StaleUse { .. } => "LS_STALE_USE",
             Self::AlreadyRevoked { .. } => "LS_ALREADY_REVOKED",
             Self::PurposeMismatch { .. } => "LS_PURPOSE_MISMATCH",
+            Self::NotFound { .. } => "LS_NOT_FOUND",
         }
     }
 }
@@ -121,6 +125,7 @@ impl std::fmt::Display for LeaseError {
                     "LS_PURPOSE_MISMATCH: {lease_id} expected {expected}, got {actual}"
                 )
             }
+            Self::NotFound { lease_id } => write!(f, "LS_NOT_FOUND: {lease_id}"),
         }
     }
 }
@@ -231,7 +236,7 @@ impl LeaseService {
         let lease = self
             .leases
             .get_mut(lease_id)
-            .expect("lease existence verified above");
+            .ok_or_else(|| LeaseError::NotFound { lease_id: lease_id.to_string() })?;
         lease.renewed_at = now;
 
         self.decisions.push(LeaseDecision {

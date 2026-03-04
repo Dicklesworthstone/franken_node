@@ -191,7 +191,7 @@ impl RecoveryStatus {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DegradedModeState {
     Normal,
     Degraded,
@@ -304,6 +304,8 @@ pub struct ActionDecision {
 pub enum DegradedModePolicyError {
     #[error("trigger condition is not configured for this policy: {0}")]
     TriggerNotConfigured(String),
+    #[error("cannot activate: already in {0:?} state")]
+    AlreadyDegraded(DegradedModeState),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -337,7 +339,7 @@ impl DegradedModePolicyEngine {
 
     #[must_use]
     pub fn state(&self) -> DegradedModeState {
-        self.state.clone()
+        self.state
     }
 
     #[must_use]
@@ -353,6 +355,9 @@ impl DegradedModePolicyEngine {
         trace_id: impl Into<String>,
     ) -> Result<(), DegradedModePolicyError> {
         let trigger_label = trigger.label();
+        if self.state != DegradedModeState::Normal {
+            return Err(DegradedModePolicyError::AlreadyDegraded(self.state));
+        }
         if !self.trigger_is_configured(&trigger) {
             return Err(DegradedModePolicyError::TriggerNotConfigured(trigger_label));
         }

@@ -388,7 +388,7 @@ impl RegionTree {
         let parent = self
             .nodes
             .get_mut(parent_id.as_str())
-            .expect("node existence verified above");
+            .ok_or_else(|| RegionTreeError::ParentNotFound { parent_id: parent_id.as_str().to_string() })?;
         parent.children.push(id.clone());
         let child_count = parent.children.len();
 
@@ -533,7 +533,7 @@ impl RegionTree {
             let node = self
                 .nodes
                 .get_mut(region_id.as_str())
-                .expect("node existence verified above");
+                .ok_or_else(|| RegionTreeError::RegionNotFound { region_id: region_id.as_str().to_string() })?;
             node.state = RegionState::Draining;
             drain_budget_ms = node.drain_budget_ms;
             task_count = node.tasks.len();
@@ -562,7 +562,7 @@ impl RegionTree {
             let node = self
                 .nodes
                 .get(region_id.as_str())
-                .expect("node existence verified above");
+                .ok_or_else(|| RegionTreeError::RegionNotFound { region_id: region_id.as_str().to_string() })?;
             remaining = node.tasks.len();
         }
 
@@ -585,7 +585,7 @@ impl RegionTree {
             let node = self
                 .nodes
                 .get_mut(region_id.as_str())
-                .expect("node existence verified above");
+                .ok_or_else(|| RegionTreeError::RegionNotFound { region_id: region_id.as_str().to_string() })?;
             node.tasks.clear();
         }
 
@@ -611,7 +611,7 @@ impl RegionTree {
             let node = self
                 .nodes
                 .get_mut(region_id.as_str())
-                .expect("node existence verified above");
+                .ok_or_else(|| RegionTreeError::RegionNotFound { region_id: region_id.as_str().to_string() })?;
             node.state = RegionState::Closed;
         }
 

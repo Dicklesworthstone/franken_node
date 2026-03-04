@@ -270,7 +270,7 @@ impl OperatorAuthorization {
                 mac.update(authorization_hash.as_bytes());
                 hex::encode(mac.finalize().into_bytes())
             }
-            Err(_) => String::new(),
+            Err(_) => "INVALID_SIGNING_KEY".to_string(),
         };
 
         Self {
@@ -543,6 +543,11 @@ impl ControlPlaneDivergenceGate {
         timestamp: u64,
         trace_id: &str,
     ) {
+        // Guard: only transition from Normal to avoid overwriting
+        // quarantine/alert/recovery state
+        if !matches!(self.state, GateState::Normal) {
+            return;
+        }
         self.state = GateState::Diverged;
         self.active_divergence = Some(ActiveDivergence {
             detection_result: result.label().to_string(),

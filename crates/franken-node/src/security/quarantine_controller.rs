@@ -227,7 +227,7 @@ impl QuarantineController {
 
         let canonical =
             serde_json::to_string(event).map_err(|e| format!("serialization error: {e}"))?;
-        let signature = self.hmac_sha256(&canonical);
+        let signature = self.hmac_sha256(&canonical)?;
 
         Ok(SignedEvidenceEntry {
             event: event.clone(),
@@ -238,13 +238,16 @@ impl QuarantineController {
     }
 
     /// Compute HMAC-SHA256 over data using the controller's signing key.
-    fn hmac_sha256(&self, data: &str) -> String {
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(&self.signing_key).expect("HMAC accepts any key len");
+    fn hmac_sha256(&self, data: &str) -> Result<String, String> {
+        if self.signing_key.is_empty() {
+            return Err(format!("{ERR_QC_INVALID_KEY}: signing key must not be empty"));
+        }
+        let mut mac = Hmac::<Sha256>::new_from_slice(&self.signing_key)
+            .map_err(|_| format!("{ERR_QC_INVALID_KEY}: HMAC key initialization failed"))?;
         mac.update(b"quarantine_controller_hmac_v1:");
         mac.update(data.as_bytes());
         let result = mac.finalize().into_bytes();
-        hex::encode(result)
+        Ok(hex::encode(result))
     }
 
     /// Produce a JSON-serializable state snapshot of the controller.
@@ -265,7 +268,10 @@ impl QuarantineController {
             Ok(s) => s,
             Err(_) => return false,
         };
-        let expected = self.hmac_sha256(&canonical);
+        let expected = match self.hmac_sha256(&canonical) {
+            Ok(sig) => sig,
+            Err(_) => return false,
+        };
         crate::security::constant_time::ct_eq(&expected, &entry.signature)
     }
 }
@@ -357,6 +363,17 @@ mod tests {
         let (snap2, _) = c2.replay_batch(&events, "r2").unwrap();
 
         assert_eq!(snap1["dep-1"].to_bits(), snap2["dep-1"].to_bits());
+    }
+
+    #[test]
+    fn submit_evidence_rejects_empty_signing_key() {
+        let mut c = QuarantineController::new(PolicyThreshold::default(), b"");
+        c.register_entity("dep-1".into(), EntityType::Dependency, 0, "t")
+            .unwrap();
+
+        let err = c.submit_evidence(evidence("dep-1", 0.8, 1)).unwrap_err();
+        assert!(err.contains(ERR_QC_INVALID_KEY));
+        assert_eq!(c.evidence_count(), 0);
     }
 
     #[test]
@@ -468,7 +485,9 @@ mod tests {
         let c = make_controller();
         let payload = "{\"probe\":true}";
 
-        let hmac_digest = c.hmac_sha256(payload);
+        let hmac_digest = c
+            .hmac_sha256(payload)
+            .expect("default controller key should produce HMAC");
 
         let mut hasher = Sha256::new();
         hasher.update(&c.signing_key);

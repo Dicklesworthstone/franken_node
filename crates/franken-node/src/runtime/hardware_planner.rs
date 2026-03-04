@@ -25,7 +25,7 @@
 //! - INV-HWP-AUDIT-COMPLETE: all decisions recorded with stable event codes
 
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::fmt;
 
 /// Schema version for hardware planner records.
@@ -589,28 +589,23 @@ impl HardwarePlanner {
         timestamp_ms: u64,
         trace_id: &str,
     ) -> Result<&HardwareProfile, HardwarePlannerError> {
-        if self.profiles.contains_key(&profile.profile_id) {
-            return Err(HardwarePlannerError::DuplicateProfile {
-                profile_id: profile.profile_id.clone(),
-            });
-        }
-
         let pid = profile.profile_id.clone();
-        self.audit_log.push(PlannerAuditEvent {
-            event_code: event_codes::HWP_001.to_string(),
-            workload_id: String::new(),
-            profile_id: Some(pid.clone()),
-            timestamp_ms,
-            trace_id: trace_id.to_string(),
-            detail: format!("hardware profile registered: {}", pid),
-            schema_version: SCHEMA_VERSION.to_string(),
-        });
+        match self.profiles.entry(pid.clone()) {
+            Entry::Occupied(_) => Err(HardwarePlannerError::DuplicateProfile { profile_id: pid }),
+            Entry::Vacant(entry) => {
+                self.audit_log.push(PlannerAuditEvent {
+                    event_code: event_codes::HWP_001.to_string(),
+                    workload_id: String::new(),
+                    profile_id: Some(pid.clone()),
+                    timestamp_ms,
+                    trace_id: trace_id.to_string(),
+                    detail: format!("hardware profile registered: {}", pid),
+                    schema_version: SCHEMA_VERSION.to_string(),
+                });
 
-        self.profiles.insert(pid.clone(), profile);
-        Ok(self
-            .profiles
-            .get(&pid)
-            .expect("profile present after insert"))
+                Ok(entry.insert(profile))
+            }
+        }
     }
 
     /// Register a placement policy.
@@ -621,28 +616,23 @@ impl HardwarePlanner {
         timestamp_ms: u64,
         trace_id: &str,
     ) -> Result<&PlacementPolicy, HardwarePlannerError> {
-        if self.policies.contains_key(&policy.policy_id) {
-            return Err(HardwarePlannerError::DuplicatePolicy {
-                policy_id: policy.policy_id.clone(),
-            });
-        }
-
         let pid = policy.policy_id.clone();
-        self.audit_log.push(PlannerAuditEvent {
-            event_code: event_codes::HWP_002.to_string(),
-            workload_id: String::new(),
-            profile_id: None,
-            timestamp_ms,
-            trace_id: trace_id.to_string(),
-            detail: format!("placement policy registered: {}", pid),
-            schema_version: SCHEMA_VERSION.to_string(),
-        });
+        match self.policies.entry(pid.clone()) {
+            Entry::Occupied(_) => Err(HardwarePlannerError::DuplicatePolicy { policy_id: pid }),
+            Entry::Vacant(entry) => {
+                self.audit_log.push(PlannerAuditEvent {
+                    event_code: event_codes::HWP_002.to_string(),
+                    workload_id: String::new(),
+                    profile_id: None,
+                    timestamp_ms,
+                    trace_id: trace_id.to_string(),
+                    detail: format!("placement policy registered: {}", pid),
+                    schema_version: SCHEMA_VERSION.to_string(),
+                });
 
-        self.policies.insert(pid.clone(), policy);
-        Ok(self
-            .policies
-            .get(&pid)
-            .expect("policy present after insert"))
+                Ok(entry.insert(policy))
+            }
+        }
     }
 
     /// Request placement for a workload.

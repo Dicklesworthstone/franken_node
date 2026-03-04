@@ -730,17 +730,15 @@ impl CompatGateEvaluator {
         scope_a: &str,
         scope_b: &str,
     ) -> Result<(), CompatGateError> {
-        let config_a = self.scopes.get(scope_a);
-        let config_b = self.scopes.get(scope_b);
-
-        // If either scope doesn't exist, non-interference holds vacuously
-        if config_a.is_none() || config_b.is_none() {
+        let Some(config_a) = self.scopes.get(scope_a) else {
             return Ok(());
-        }
+        };
+        let Some(config_b) = self.scopes.get(scope_b) else {
+            return Ok(());
+        };
 
-        let mode_b = config_b
-            .expect("guarded: is_none() returns Ok(()) above")
-            .mode;
+        // If either scope doesn't exist, non-interference holds vacuously.
+        let mode_b = config_b.mode;
 
         // For each shim, the decision in scope_b must be determined solely by
         // scope_b's mode, not scope_a's state. Since our gate evaluation is
@@ -750,18 +748,16 @@ impl CompatGateEvaluator {
         for entry in self.registry.all() {
             let action_b = divergence_action(entry.band, mode_b);
             // Check that no policy predicate from scope_a applies to scope_b
-            if let Some(cfg_a) = config_a {
-                for pred in &cfg_a.policy_predicates {
-                    if pred.applies_to_scope("scope", scope_b) {
-                        return Err(CompatGateError::NonInterferenceViolation {
-                            scope_a: scope_a.to_string(),
-                            scope_b: scope_b.to_string(),
-                            detail: format!(
-                                "predicate {} from scope {} applies to scope {}",
-                                pred.predicate_id, scope_a, scope_b
-                            ),
-                        });
-                    }
+            for pred in &config_a.policy_predicates {
+                if pred.applies_to_scope("scope", scope_b) {
+                    return Err(CompatGateError::NonInterferenceViolation {
+                        scope_a: scope_a.to_string(),
+                        scope_b: scope_b.to_string(),
+                        detail: format!(
+                            "predicate {} from scope {} applies to scope {}",
+                            pred.predicate_id, scope_a, scope_b
+                        ),
+                    });
                 }
             }
             // Action is solely a function of (band, mode_b) — no cross-scope leak

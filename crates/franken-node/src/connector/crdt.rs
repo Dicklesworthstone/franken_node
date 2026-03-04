@@ -90,8 +90,16 @@ impl LwwMap {
                 return;
             }
             if existing.timestamp == timestamp {
-                let current_str = serde_json::to_string(&existing.value).unwrap_or_default();
-                let new_str = serde_json::to_string(&value).unwrap_or_default();
+                // Deterministic tie-break via lexicographic JSON comparison.
+                // If either serialization fails, keep existing (deterministic choice).
+                let current_str = match serde_json::to_string(&existing.value) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
+                let new_str = match serde_json::to_string(&value) {
+                    Ok(s) => s,
+                    Err(_) => return,
+                };
                 if current_str >= new_str {
                     return;
                 }

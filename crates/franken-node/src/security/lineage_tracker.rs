@@ -854,7 +854,8 @@ impl ExfiltrationSentinel {
                         detected += 1;
                     }
                     Err(_) => {
-                        // Edge may already be quarantined from a previous pass.
+                        // Fail closed: evaluation failure counts as a detection
+                        detected += 1;
                     }
                 }
             }

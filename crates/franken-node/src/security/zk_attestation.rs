@@ -885,6 +885,15 @@ impl AttestationLedger {
     /// attestations by status and outcome.
     #[must_use]
     pub fn generate_compliance_report(&self, policy_id: &str) -> BTreeMap<String, usize> {
+        fn increment_counter(report: &mut BTreeMap<String, usize>, key: &str) {
+            if let Some(count) = report.get_mut(key) {
+                *count += 1;
+            } else {
+                // Fail-safe fallback: preserve accounting even if key initialization drifts.
+                report.insert(key.to_string(), 1);
+            }
+        }
+
         let mut report = BTreeMap::new();
         report.insert("total".to_string(), 0);
         report.insert("active".to_string(), 0);
@@ -898,34 +907,16 @@ impl AttestationLedger {
             if att.policy_id != policy_id {
                 continue;
             }
-            *report.get_mut("total").expect("key initialized above") += 1;
+            increment_counter(&mut report, "total");
             match att.status {
-                AttestationStatus::Active => {
-                    *report.get_mut("active").expect("key initialized above") += 1
-                }
-                AttestationStatus::Expired => {
-                    *report.get_mut("expired").expect("key initialized above") += 1
-                }
-                AttestationStatus::Revoked => {
-                    *report.get_mut("revoked").expect("key initialized above") += 1
-                }
+                AttestationStatus::Active => increment_counter(&mut report, "active"),
+                AttestationStatus::Expired => increment_counter(&mut report, "expired"),
+                AttestationStatus::Revoked => increment_counter(&mut report, "revoked"),
             }
             match att.outcome {
-                PredicateOutcome::Pass => {
-                    *report
-                        .get_mut("outcome_pass")
-                        .expect("key initialized above") += 1
-                }
-                PredicateOutcome::Fail => {
-                    *report
-                        .get_mut("outcome_fail")
-                        .expect("key initialized above") += 1
-                }
-                PredicateOutcome::Error => {
-                    *report
-                        .get_mut("outcome_error")
-                        .expect("key initialized above") += 1
-                }
+                PredicateOutcome::Pass => increment_counter(&mut report, "outcome_pass"),
+                PredicateOutcome::Fail => increment_counter(&mut report, "outcome_fail"),
+                PredicateOutcome::Error => increment_counter(&mut report, "outcome_error"),
             }
         }
         report
