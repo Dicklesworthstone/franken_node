@@ -781,11 +781,10 @@ pub fn generate_reference_bundle() -> EvidenceBundle {
 }
 
 /// Generate a reference verification result for testing.
-pub fn generate_reference_verification_result() -> VerificationResult {
+pub fn generate_reference_verification_result() -> Result<VerificationResult, VerifierSdkError> {
     let claim = generate_reference_claim();
     let evidence = generate_reference_evidence();
     verify_claim(&claim, &evidence, "verifier://test@example.com")
-        .expect("reference claim must verify successfully")
 }
 
 // ---------------------------------------------------------------------------
@@ -827,7 +826,7 @@ mod tests {
 
     #[test]
     fn test_generate_reference_verification_result() {
-        let result = generate_reference_verification_result();
+        let result = generate_reference_verification_result().unwrap();
         assert_eq!(result.verdict, Verdict::Pass);
         assert!(!result.verifier_signature.is_empty());
         assert!(!result.artifact_binding_hash.is_empty());
@@ -1101,7 +1100,7 @@ mod tests {
     fn test_transparency_log_append() {
         // INV-VER-TRANSPARENCY-APPEND
         let mut log = Vec::new();
-        let result = generate_reference_verification_result();
+        let result = generate_reference_verification_result().unwrap();
         let entry = append_transparency_log(&mut log, &result);
         assert_eq!(log.len(), 1);
         assert!(!entry.result_hash.is_empty());
@@ -1111,7 +1110,7 @@ mod tests {
     #[test]
     fn test_transparency_log_chain() {
         let mut log = Vec::new();
-        let r1 = generate_reference_verification_result();
+        let r1 = generate_reference_verification_result().unwrap();
         let e1 = append_transparency_log(&mut log, &r1);
         let e2 = append_transparency_log(&mut log, &r1);
         assert_eq!(log.len(), 2);
@@ -1122,7 +1121,7 @@ mod tests {
     #[test]
     fn test_transparency_log_first_entry_zeros() {
         let mut log = Vec::new();
-        let result = generate_reference_verification_result();
+        let result = generate_reference_verification_result().unwrap();
         let entry = append_transparency_log(&mut log, &result);
         assert!(entry.merkle_proof[0] == "0".repeat(64));
     }
@@ -1193,7 +1192,7 @@ mod tests {
 
     #[test]
     fn test_verification_result_serde_roundtrip() {
-        let result = generate_reference_verification_result();
+        let result = generate_reference_verification_result().unwrap();
         let json = serde_json::to_string(&result).unwrap();
         let parsed: VerificationResult = serde_json::from_str(&json).unwrap();
         assert_eq!(result, parsed);

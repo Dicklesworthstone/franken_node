@@ -233,6 +233,7 @@ pub fn sign_epoch_artifact(
             reason: e.to_string(),
         }
     })?;
+    mac.update(b"epoch_scoped_sign_v1:");
     mac.update(artifact);
     let bytes = mac.finalize().into_bytes();
     let mut out = [0u8; SIGNATURE_LEN];
@@ -258,6 +259,7 @@ pub fn verify_epoch_signature(
             reason: e.to_string(),
         }
     })?;
+    mac.update(b"epoch_scoped_sign_v1:");
     mac.update(artifact);
     mac.verify_slice(&signature.bytes)
         .map_err(|_| AuthError::SignatureRejected {

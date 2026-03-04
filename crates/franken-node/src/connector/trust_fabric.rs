@@ -602,7 +602,9 @@ impl TrustFabricFleet {
         if digests.is_empty() {
             return true;
         }
-        digests.windows(2).all(|w| w[0] == w[1])
+        digests
+            .windows(2)
+            .all(|w| crate::security::constant_time::ct_eq_bytes(&w[0], &w[1]))
     }
 
     /// Run one gossip round: each node exchanges with a random peer.

@@ -424,7 +424,7 @@ impl ControlLanePolicy {
 
     /// Check that budgets sum to 100% (INV-CLP-BUDGET-SUM).
     pub fn verify_budget_sum(&self) -> bool {
-        let total: u8 = self.budgets.values().map(|b| b.min_pct).sum();
+        let total: u16 = self.budgets.values().map(|b| b.min_pct as u16).sum();
         total == 100
     }
 

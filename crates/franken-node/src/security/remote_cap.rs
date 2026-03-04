@@ -14,16 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    if a_bytes.len() != b_bytes.len() {
-        return false;
-    }
-    let mut result = 0;
-    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
+    crate::security::constant_time::ct_eq(a, b)
 }
 
 /// Network-bound operations that require an explicit `RemoteCap`.
@@ -218,6 +209,9 @@ pub enum RemoteCapError {
         operation: RemoteOperation,
         endpoint: String,
     },
+    CryptoEngineUnavailable {
+        detail: String,
+    },
 }
 
 impl RemoteCapError {
@@ -233,6 +227,7 @@ impl RemoteCapError {
             Self::Revoked { .. } => "REMOTECAP_REVOKED",
             Self::ReplayDetected { .. } => "REMOTECAP_REPLAY",
             Self::ConnectivityModeDenied { .. } => "REMOTECAP_CONNECTIVITY_MODE_DENIED",
+            Self::CryptoEngineUnavailable { .. } => "REMOTECAP_CRYPTO_UNAVAILABLE",
         }
     }
 
@@ -290,6 +285,9 @@ impl fmt::Display for RemoteCapError {
                 "{}: mode={mode} operation={operation} endpoint={endpoint}",
                 self.code()
             ),
+            Self::CryptoEngineUnavailable { detail } => {
+                write!(f, "{}: {detail}", self.code())
+            }
         }
     }
 }
@@ -362,7 +360,7 @@ impl CapabilityProvider {
             &normalized_scope,
             single_use,
         );
-        let signature = keyed_digest(&self.signing_secret, &unsigned_payload);
+        let signature = keyed_digest(&self.signing_secret, &unsigned_payload)?;
 
         let cap = RemoteCap {
             token_id: token_id.clone(),
@@ -579,7 +577,7 @@ impl CapabilityGate {
             &cap.scope,
             cap.single_use,
         );
-        let expected_signature = keyed_digest(&self.verification_secret, &payload);
+        let expected_signature = keyed_digest(&self.verification_secret, &payload)?;
         if !constant_time_eq(&cap.signature, &expected_signature) {
             let err = RemoteCapError::InvalidSignature;
             self.audit_log.push(build_audit_event(
@@ -748,12 +746,15 @@ fn scope_fingerprint(scope: &RemoteScope) -> String {
     )
 }
 
-fn keyed_digest(secret: &str, payload: &str) -> String {
-    let mut mac =
-        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any key length");
+fn keyed_digest(secret: &str, payload: &str) -> Result<String, RemoteCapError> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes()).map_err(|source| {
+        RemoteCapError::CryptoEngineUnavailable {
+            detail: format!("HMAC key initialization failed: {source}"),
+        }
+    })?;
     mac.update(b"remote_cap_keyed_digest_v1:");
     mac.update(payload.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 fn sha256_hex(input: &[u8]) -> String {
@@ -1175,7 +1176,7 @@ mod tests {
     #[test]
     fn signature_uses_hmac_instead_of_plain_concat_hash() {
         let payload = "v1|token=t|issuer=i|issued=1|expires=2|ops=x|endpoints=y|single_use=false";
-        let hmac_digest = keyed_digest("secret-a", payload);
+        let hmac_digest = keyed_digest("secret-a", payload).expect("hmac digest");
 
         let mut legacy_hasher = Sha256::new();
         legacy_hasher.update("secret-a".as_bytes());

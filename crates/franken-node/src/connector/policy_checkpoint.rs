@@ -488,7 +488,12 @@ impl PolicyCheckpointChain {
             // INV-PCK-PARENT-CHAIN: parent_hash must match predecessor
             let expected_parent = prev_hash;
             let actual_parent = cp.parent_hash.as_deref();
-            if expected_parent != actual_parent {
+            let parent_match = match (expected_parent, actual_parent) {
+                (Some(a), Some(b)) => crate::security::constant_time::ct_eq(a, b),
+                (None, None) => true,
+                _ => false,
+            };
+            if !parent_match {
                 return Err((
                     i,
                     CheckpointChainError::HashChainBreak {

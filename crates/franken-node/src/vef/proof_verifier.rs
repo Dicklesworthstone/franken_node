@@ -315,7 +315,7 @@ impl ProofVerifier {
         let mut degrade_level: u8 = 0;
 
         // Check 1: Proof expiration
-        let expiry_satisfied = now_millis <= proof.expires_at_millis;
+        let expiry_satisfied = now_millis < proof.expires_at_millis;
         if !expiry_satisfied {
             deny_reasons.push(format!(
                 "{}: proof expired at {} but now is {}",
@@ -341,7 +341,7 @@ impl ProofVerifier {
         let age_limit = predicate
             .max_proof_age_millis
             .min(self.config.max_proof_age_millis);
-        let freshness_satisfied = age_millis <= age_limit;
+        let freshness_satisfied = age_millis < age_limit;
         if !freshness_satisfied {
             deny_reasons.push(format!(
                 "{}: proof age {}ms exceeds limit {}ms",
@@ -834,6 +834,19 @@ mod tests {
         let mut gate = gate_with_predicate();
         let mut proof = valid_proof();
         proof.expires_at_millis = NOW - 1;
+        let req = make_request(proof);
+        let report = gate.verify(&req).unwrap();
+        assert!(matches!(report.decision, TrustDecision::Deny(_)));
+    }
+
+    // ── 2b. Proof expired at exact boundary (fail-closed) ──────────────────
+
+    #[test]
+    fn proof_expired_at_exact_boundary_is_denied() {
+        let mut gate = gate_with_predicate();
+        let mut proof = valid_proof();
+        // At exact boundary: now == expires_at → fail-closed → Deny
+        proof.expires_at_millis = NOW;
         let req = make_request(proof);
         let report = gate.verify(&req).unwrap();
         assert!(matches!(report.decision, TrustDecision::Deny(_)));

@@ -1,8 +1,8 @@
 /// Constant-time string comparison for signature verification.
 ///
-/// Uses XOR-and-accumulate to avoid timing side-channels.  The comparison
-/// always examines every byte of both inputs (after length check) so an
-/// attacker cannot infer how many prefix bytes matched.
+/// Uses XOR-and-accumulate to avoid timing side-channels. The comparison
+/// always examines up to `max(a.len(), b.len())` bytes, so the runtime does
+/// not short-circuit on the first mismatch or unequal-length early return.
 ///
 /// INV-CT-01: Comparison runtime depends only on string length, not content.
 #[must_use]
@@ -12,14 +12,19 @@ pub fn ct_eq(a: &str, b: &str) -> bool {
 
 /// Constant-time byte slice comparison.
 ///
-/// INV-CT-02: Comparison runtime depends only on slice length, not content.
+/// INV-CT-02: Comparison runtime depends only on input lengths, not content.
 #[must_use]
 pub fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+    let max_len = a.len().max(b.len());
+    let mut mismatch = a.len() ^ b.len();
+
+    for i in 0..max_len {
+        let lhs = a.get(i).copied().unwrap_or_default();
+        let rhs = b.get(i).copied().unwrap_or_default();
+        mismatch |= usize::from(lhs ^ rhs);
     }
-    use subtle::ConstantTimeEq;
-    a.ct_eq(b).into()
+
+    mismatch == 0
 }
 
 #[cfg(test)]

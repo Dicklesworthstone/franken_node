@@ -24,16 +24,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    if a_bytes.len() != b_bytes.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (lhs, rhs) in a_bytes.iter().zip(b_bytes.iter()) {
-        diff |= *lhs ^ *rhs;
-    }
-    diff == 0
+    crate::security::constant_time::ct_eq(a, b)
 }
 
 /// RAII guard that removes a temp file on drop (unless defused after rename).
@@ -271,6 +262,11 @@ pub enum RootPointerError {
     CrashInjected(PublishStep),
     #[error("publish mutex poisoned")]
     LockPoisoned,
+    #[error("invalid signing key during {context}: {reason}")]
+    SigningKeyInvalid {
+        context: &'static str,
+        reason: String,
+    },
 }
 
 impl RootPointerError {
@@ -292,6 +288,7 @@ impl RootPointerError {
             Self::EpochRegression { .. } => "EPOCH_REGRESSION_BLOCKED",
             Self::CrashInjected(_) => "ROOT_CRASH_INJECTED",
             Self::LockPoisoned => "ROOT_LOCK_POISONED",
+            Self::SigningKeyInvalid { .. } => "ROOT_SIGNING_KEY_INVALID",
         }
     }
 }
@@ -395,7 +392,7 @@ pub fn bootstrap_root(
     }
 
     let max_allowed_epoch = auth_config.max_allowed_epoch();
-    if root.epoch > max_allowed_epoch {
+    if root.epoch < auth_config.current_epoch || root.epoch > max_allowed_epoch {
         return Err(BootstrapError::RootEpochInvalid {
             current_epoch: auth_config.current_epoch,
             root_epoch: root.epoch,
@@ -421,7 +418,11 @@ pub fn bootstrap_root(
         });
     }
 
-    let expected_mac = sign_payload(&root_hash, &auth_config.trust_anchor);
+    let expected_mac = sign_payload(&root_hash, &auth_config.trust_anchor).map_err(|source| {
+        BootstrapError::RootAuthFailed {
+            reason: format!("detached root MAC verification setup failed: {source}"),
+        }
+    })?;
     if !constant_time_eq(&auth.mac, &expected_mac) {
         return Err(BootstrapError::RootAuthFailed {
             reason: "detached root MAC verification failed".to_string(),
@@ -471,7 +472,12 @@ pub fn verify_publish_event(
     signing_key: &[u8],
 ) -> Result<bool, RootPointerError> {
     let canonical = canonical_event_payload(event)?;
-    let expected = sign_payload(&canonical, signing_key);
+    let expected = sign_payload(&canonical, signing_key).map_err(|source| {
+        RootPointerError::SigningKeyInvalid {
+            context: "verify_publish_event",
+            reason: source.to_string(),
+        }
+    })?;
     Ok(constant_time_eq(&expected, &event.signature))
 }
 
@@ -516,7 +522,12 @@ fn publish_root_internal(
         root_hash: manifest_hash.clone(),
         epoch: root.epoch,
         issued_at: Utc::now().to_rfc3339(),
-        mac: sign_payload(&manifest_hash, signing_key),
+        mac: sign_payload(&manifest_hash, signing_key).map_err(|source| {
+            RootPointerError::SigningKeyInvalid {
+                context: "publish_root_auth",
+                reason: source.to_string(),
+            }
+        })?,
     };
     let auth_payload =
         serde_json::to_vec_pretty(&auth_record).map_err(RootPointerError::Serialize)?;
@@ -630,7 +641,12 @@ fn publish_root_internal(
     };
     let signature_payload =
         serde_json::to_string(&event_unsigned).map_err(RootPointerError::EventSerialize)?;
-    let signature = sign_payload(&signature_payload, signing_key);
+    let signature = sign_payload(&signature_payload, signing_key).map_err(|source| {
+        RootPointerError::SigningKeyInvalid {
+            context: "publish_root_event",
+            reason: source.to_string(),
+        }
+    })?;
 
     let _elapsed = start.elapsed();
     let event = RootPublishEvent {
@@ -677,11 +693,11 @@ fn hash_hex(payload: &[u8]) -> String {
     hex::encode(hasher.finalize())
 }
 
-fn sign_payload(payload: &str, signing_key: &[u8]) -> String {
-    let mut mac = Hmac::<Sha256>::new_from_slice(signing_key).expect("HMAC accepts any key length");
+fn sign_payload(payload: &str, signing_key: &[u8]) -> Result<String, hmac::digest::InvalidLength> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(signing_key)?;
     mac.update(b"root_pointer_sign_v1:");
     mac.update(payload.as_bytes());
-    hex::encode(mac.finalize().into_bytes())
+    Ok(hex::encode(mac.finalize().into_bytes()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -991,6 +1007,25 @@ mod tests {
         };
 
         let err = bootstrap_root(dir.path(), &cfg).expect_err("future epoch must fail");
+        assert!(matches!(err, BootstrapError::RootEpochInvalid { .. }));
+        assert_eq!(err.code(), "ROOT_BOOTSTRAP_EPOCH_INVALID");
+    }
+
+    #[test]
+    fn bootstrap_rejects_stale_epoch_root() {
+        let dir = TempDir::new().expect("tempdir");
+        let k = key();
+        let root = root(5, 90, "hash-5");
+        publish_root(dir.path(), &root, &k, "trace-bootstrap-stale-epoch").expect("publish");
+
+        let cfg = RootAuthConfig {
+            trust_anchor: k,
+            expected_format_version: ROOT_POINTER_FORMAT_VERSION.to_string(),
+            current_epoch: ControlEpoch(7),
+            max_future_epochs: 1,
+        };
+
+        let err = bootstrap_root(dir.path(), &cfg).expect_err("stale epoch must fail");
         assert!(matches!(err, BootstrapError::RootEpochInvalid { .. }));
         assert_eq!(err.code(), "ROOT_BOOTSTRAP_EPOCH_INVALID");
     }

@@ -308,8 +308,8 @@ impl RevocationFreshnessGate {
         let max_staleness = tier.max_staleness_epochs();
         let staleness = current_epoch.saturating_sub(proof.epoch);
 
-        // Fresh enough: pass
-        if staleness <= max_staleness {
+        // Fresh enough: pass (fail-closed: exact boundary = stale)
+        if staleness < max_staleness {
             return Ok(GateDecision {
                 action_id: action_id.to_string(),
                 tier,
@@ -516,12 +516,12 @@ mod tests {
     }
 
     #[test]
-    fn critical_at_boundary_passes() {
+    fn critical_at_boundary_denied() {
         let mut g = gate();
         let p = proof(SafetyTier::Critical, 99, "n1");
         let d = g.check(&p, 100, true, false, "key_rotate", "tr-1").unwrap();
-        assert!(d.allowed);
-        assert_eq!(d.event_code, event_codes::RFG_001);
+        assert!(!d.allowed, "fail-closed: exact boundary staleness must deny");
+        assert_eq!(d.event_code, event_codes::RFG_002);
     }
 
     #[test]

@@ -854,6 +854,7 @@ pub fn verify_card_signature(card: &TrustCard, registry_key: &[u8]) -> Result<()
 
     let mut mac =
         HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;
+    mac.update(b"trust_card_registry_sig_v1:");
     mac.update(card.card_hash.as_bytes());
     let expected_signature = hex::encode(mac.finalize().into_bytes());
     if !constant_time_eq(&card.registry_signature, &expected_signature) {
@@ -1037,6 +1038,7 @@ fn sign_card_in_place(card: &mut TrustCard, registry_key: &[u8]) -> Result<(), T
     card.card_hash = compute_card_hash(card)?;
     let mut mac =
         HmacSha256::new_from_slice(registry_key).map_err(|_| TrustCardError::InvalidRegistryKey)?;
+    mac.update(b"trust_card_registry_sig_v1:");
     mac.update(card.card_hash.as_bytes());
     card.registry_signature = hex::encode(mac.finalize().into_bytes());
     Ok(())

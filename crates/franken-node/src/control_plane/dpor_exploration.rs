@@ -575,7 +575,7 @@ impl DporExplorer {
     }
 
     /// Register the default 10.14 protocol models.
-    pub fn register_default_models(&mut self) {
+    pub fn register_default_models(&mut self) -> Result<(), DporError> {
         // Epoch barrier coordination
         let mut m1 = ProtocolModel::new(
             ProtocolModelId::EpochBarrierCoordination,
@@ -609,8 +609,7 @@ impl DporExplorer {
             "commit_requires_all_drains",
             "Commit only after all participants drain",
         ));
-        self.register_model(m1)
-            .expect("invariant: default EpochBarrier model passes validation");
+        self.register_model(m1)?;
 
         // Remote capability operations
         let mut m2 = ProtocolModel::new(
@@ -642,8 +641,7 @@ impl DporExplorer {
             "release_after_execute",
             "Capability released only after execution completes",
         ));
-        self.register_model(m2)
-            .expect("invariant: default RemoteCapabilityOps model passes validation");
+        self.register_model(m2)?;
 
         // Marker stream mutations
         let mut m3 = ProtocolModel::new(
@@ -662,8 +660,8 @@ impl DporExplorer {
             "hash_chain_valid",
             "Hash chain is valid after all operations",
         ));
-        self.register_model(m3)
-            .expect("invariant: default MarkerStreamMutations model passes validation");
+        self.register_model(m3)?;
+        Ok(())
     }
 
     /// Get exploration results.
@@ -703,7 +701,7 @@ mod tests {
 
     fn make_explorer() -> DporExplorer {
         let mut e = DporExplorer::default();
-        e.register_default_models();
+        e.register_default_models().unwrap();
         e
     }
 

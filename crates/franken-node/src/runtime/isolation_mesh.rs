@@ -505,10 +505,11 @@ impl IsolationMesh {
         self.workloads
             .insert(workload_id.to_string(), placement.clone());
 
-        let rs = self
-            .rail_states
-            .get_mut(rail_id)
-            .expect("rail state must exist");
+        let rs = self.rail_states.get_mut(rail_id).ok_or_else(|| {
+            MeshError::UnknownRail {
+                rail_id: rail_id.to_string(),
+            }
+        })?;
         rs.active_count = rs.active_count.saturating_add(1);
         rs.total_placed = rs.total_placed.saturating_add(1);
 
@@ -616,19 +617,23 @@ impl IsolationMesh {
         }
 
         // Increment new rail
-        let new_state = self
-            .rail_states
-            .get_mut(target_rail_id)
-            .expect("target rail state must exist");
+        let new_state =
+            self.rail_states
+                .get_mut(target_rail_id)
+                .ok_or_else(|| MeshError::UnknownRail {
+                    rail_id: target_rail_id.to_string(),
+                })?;
         new_state.active_count = new_state.active_count.saturating_add(1);
         new_state.total_elevated_in = new_state.total_elevated_in.saturating_add(1);
 
         // Update workload placement -- INV-MESH-POLICY-CONTINUITY: policy preserved
         let updated_placement = {
-            let placement = self
-                .workloads
-                .get_mut(workload_id)
-                .expect("workload must exist");
+            let placement =
+                self.workloads
+                    .get_mut(workload_id)
+                    .ok_or_else(|| MeshError::UnknownWorkload {
+                        workload_id: workload_id.to_string(),
+                    })?;
             placement.elevation_history.push(ElevationRecord {
                 from_rail_id: old_rail_id,
                 from_level: current_level,

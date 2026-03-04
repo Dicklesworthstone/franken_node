@@ -11,16 +11,7 @@ use sha2::{Digest, Sha256};
 use std::fmt;
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
-    let a_bytes = a.as_bytes();
-    let b_bytes = b.as_bytes();
-    if a_bytes.len() != b_bytes.len() {
-        return false;
-    }
-    let mut result = 0;
-    for (x, y) in a_bytes.iter().zip(b_bytes.iter()) {
-        result |= x ^ y;
-    }
-    result == 0
+    crate::security::constant_time::ct_eq(a, b)
 }
 
 use super::fork_detection::{
@@ -273,11 +264,14 @@ impl OperatorAuthorization {
         let authorization_hash = format!("{:x}", hasher.finalize());
 
         use hmac::{Hmac, Mac};
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(signing_key).expect("HMAC accepts any key length");
-        mac.update(b"divergence_gate_sign_v1:");
-        mac.update(authorization_hash.as_bytes());
-        let signature = hex::encode(mac.finalize().into_bytes());
+        let signature = match Hmac::<Sha256>::new_from_slice(signing_key) {
+            Ok(mut mac) => {
+                mac.update(b"divergence_gate_sign_v1:");
+                mac.update(authorization_hash.as_bytes());
+                hex::encode(mac.finalize().into_bytes())
+            }
+            Err(_) => String::new(),
+        };
 
         Self {
             operator_id,
@@ -304,8 +298,10 @@ impl OperatorAuthorization {
         }
 
         use hmac::{Hmac, Mac};
-        let mut mac =
-            Hmac::<Sha256>::new_from_slice(verification_key).expect("HMAC accepts any key length");
+        let mut mac = match Hmac::<Sha256>::new_from_slice(verification_key) {
+            Ok(mac) => mac,
+            Err(_) => return false,
+        };
         mac.update(b"divergence_gate_sign_v1:");
         mac.update(self.authorization_hash.as_bytes());
         let expected_sig = hex::encode(mac.finalize().into_bytes());

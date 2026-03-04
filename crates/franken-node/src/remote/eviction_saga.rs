@@ -406,7 +406,7 @@ impl EvictionSagaManager {
         let saga = self
             .sagas
             .get_mut(saga_id)
-            .expect("saga existence verified above");
+            .ok_or_else(|| format!("saga disappeared during cancel: {saga_id}"))?;
         // Re-check after mutable borrow as a defensive invariant.
         Self::ensure_cancel_allowed(saga.phase, saga_id)?;
         saga.record_transition(SagaPhase::Compensating, &format!("compensation: {action}"));
@@ -485,7 +485,7 @@ impl EvictionSagaManager {
                 let saga = self
                     .sagas
                     .get_mut(saga_id)
-                    .expect("saga existence verified above");
+                    .ok_or_else(|| format!("saga disappeared during recovery: {saga_id}"))?;
                 saga.l3_present = false;
                 saga.record_transition(SagaPhase::Compensated, "crash_recovery: abort_upload");
             }
@@ -493,7 +493,7 @@ impl EvictionSagaManager {
                 let saga = self
                     .sagas
                     .get_mut(saga_id)
-                    .expect("saga existence verified above");
+                    .ok_or_else(|| format!("saga disappeared during recovery: {saga_id}"))?;
                 saga.l3_present = false;
                 saga.l3_verified = false;
                 saga.record_transition(SagaPhase::Compensated, "crash_recovery: cleanup_l3");
@@ -502,7 +502,7 @@ impl EvictionSagaManager {
                 let saga = self
                     .sagas
                     .get_mut(saga_id)
-                    .expect("saga existence verified above");
+                    .ok_or_else(|| format!("saga disappeared during recovery: {saga_id}"))?;
                 saga.l2_present = false;
                 saga.record_transition(SagaPhase::Complete, "crash_recovery: complete_retirement");
             }

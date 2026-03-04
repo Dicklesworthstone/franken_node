@@ -598,14 +598,13 @@ pub fn build_reference_manifest() -> CapsuleManifest {
 }
 
 /// Build a reference verification session for testing (with one step, sealed).
-pub fn build_reference_session() -> VerificationSession {
+pub fn build_reference_session() -> Result<VerificationSession, VsdkError> {
     let capsule = build_reference_capsule();
-    let result = replay_capsule(&capsule, "verifier://test@example.com")
-        .expect("reference capsule must replay successfully");
+    let result = replay_capsule(&capsule, "verifier://test@example.com")?;
     let mut session = create_session("session-ref-001", "verifier://test@example.com");
-    record_session_step(&mut session, &result).expect("recording reference step must succeed");
-    seal_session(&mut session).expect("sealing reference session must succeed");
-    session
+    record_session_step(&mut session, &result)?;
+    seal_session(&mut session)?;
+    Ok(session)
 }
 
 // ---------------------------------------------------------------------------
@@ -1009,7 +1008,7 @@ mod tests {
 
     #[test]
     fn test_session_serde_roundtrip() {
-        let session = build_reference_session();
+        let session = build_reference_session().unwrap();
         let json = serde_json::to_string(&session).unwrap();
         let parsed: VerificationSession = serde_json::from_str(&json).unwrap();
         assert_eq!(session, parsed);
@@ -1171,7 +1170,7 @@ mod tests {
 
     #[test]
     fn test_build_reference_session() {
-        let session = build_reference_session();
+        let session = build_reference_session().unwrap();
         assert!(session.sealed);
         assert_eq!(session.final_verdict, Some(CapsuleVerdict::Pass));
         assert_eq!(session.steps.len(), 1);

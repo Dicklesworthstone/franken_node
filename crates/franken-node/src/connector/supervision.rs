@@ -430,7 +430,7 @@ impl Supervisor {
         // Prune restart timestamps outside the sliding window.
         let now_ms = self.computed_now_ms();
         self.restart_timestamps
-            .retain(|&ts| now_ms.saturating_sub(ts) < self.time_window_ms);
+            .retain(|&ts| now_ms.saturating_sub(ts) <= self.time_window_ms);
 
         // INV-SUP-BUDGET-BOUND: check budget.
         let restart_count = u32::try_from(self.restart_timestamps.len()).unwrap_or(u32::MAX);

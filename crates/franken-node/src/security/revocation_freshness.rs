@@ -186,8 +186,8 @@ pub fn evaluate_freshness(
     let max_age_secs =
         max_age.expect("invariant: only Standard returns None, and Standard returns early above");
 
-    // Fresh enough: allow
-    if check.revocation_age_secs <= max_age_secs {
+    // Fresh enough: allow (fail-closed: exact boundary = stale)
+    if check.revocation_age_secs < max_age_secs {
         return Ok(FreshnessDecision {
             action_id: check.action_id.clone(),
             tier: check.tier,
@@ -331,11 +331,11 @@ mod tests {
     }
 
     #[test]
-    fn at_boundary_passes() {
-        // Age exactly at max_age should pass (<= check)
-        let d =
-            evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3600), None).unwrap();
-        assert!(d.allowed);
+    fn at_boundary_denied() {
+        // Fail-closed: age exactly at max_age is stale
+        let err =
+            evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3600), None).unwrap_err();
+        assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 
     #[test]
