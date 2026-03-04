@@ -1,0 +1,34 @@
+{
+  "bead_id": "bd-24h7",
+  "agent": "OrangeDog",
+  "timestamp_utc": "2026-03-04T01:19:45Z",
+  "successful_run": {
+    "build_id": 29737366419669420,
+    "command": "env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/tmp/rch_target_orangedog_bd24h7_final RUSTFLAGS=-Dwarnings cargo check -p frankenengine-engine --test runtime_decision_theory_enrichment_integration --message-format short",
+    "exit_code": 0,
+    "approx_duration_seconds": 242,
+    "observation": "Silent execute phase persisted before successful completion"
+  },
+  "timeout_runs": [
+    {
+      "build_id": 29737366419669408,
+      "command": "env CARGO_TARGET_DIR=/tmp/rch_target_pearl_parser cargo check -p frankenengine-engine --all-targets",
+      "exit_code": 137
+    },
+    {
+      "build_id": 29737366419669409,
+      "command": "cargo check -p frankenengine-engine",
+      "exit_code": 137
+    },
+    {
+      "build_id": 29737366419669410,
+      "command": "env CARGO_TARGET_DIR=/tmp/rch_target_foggyvalley_bd24h7_a cargo check -p frankenengine-engine --tests --message-format short",
+      "exit_code": 137
+    }
+  ],
+  "strategy_update": {
+    "silent_execute_policy": "Allow multi-minute silent windows before cancellation",
+    "preferred_validation_mode": "Narrow test/lib shards with isolated target dirs",
+    "warning_lane": "RUSTFLAGS=-Dwarnings"
+  }
+}
