@@ -210,6 +210,14 @@ impl TraceSlot {
     }
 }
 
+fn digest_prefix_u64(digest: &[u8]) -> u64 {
+    let mut prefix = [0u8; 8];
+    if let Some(first_eight) = digest.get(..8) {
+        prefix.copy_from_slice(first_eight);
+    }
+    u64::from_le_bytes(prefix)
+}
+
 impl GateEngine {
     /// Create a new gate engine with a signing key.
     pub fn new(signing_key: Vec<u8>) -> Self {
@@ -260,14 +268,7 @@ impl GateEngine {
         h.update(b"|");
         h.update(payload.as_bytes());
         let digest = h.finalize();
-        format!(
-            "{:016x}",
-            u64::from_le_bytes(
-                digest[..8]
-                    .try_into()
-                    .expect("SHA-256 digest is 32 bytes, first 8 always valid")
-            )
-        )
+        format!("{:016x}", digest_prefix_u64(&digest))
     }
 
     fn emit_audit(&mut self, event_code: &str, scope_id: &str, detail: &str, trace_id: &str) {

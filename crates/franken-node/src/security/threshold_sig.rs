@@ -120,6 +120,14 @@ impl fmt::Display for FailureReason {
 
 // ── Signature verification ──────────────────────────────────────────
 
+fn digest_prefix_u64(digest: &[u8]) -> u64 {
+    let mut prefix = [0u8; 8];
+    if let Some(first_eight) = digest.get(..8) {
+        prefix.copy_from_slice(first_eight);
+    }
+    u64::from_le_bytes(prefix)
+}
+
 /// Simulate signature verification. In production this would use Ed25519
 /// or similar. Here we verify: H(key || content_hash) == signature.
 fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature) -> bool {
@@ -129,10 +137,7 @@ fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature)
     h.update(b":");
     h.update(content_hash.as_bytes());
     let digest = h.finalize();
-    let expected = format!(
-        "{:016x}",
-        u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
-    );
+    let expected = format!("{:016x}", digest_prefix_u64(&digest));
     crate::security::constant_time::ct_eq(&sig.signature_hex, &expected)
 }
 
@@ -147,10 +152,7 @@ pub fn sign(key: &SignerKey, content_hash: &str) -> PartialSignature {
     PartialSignature {
         signer_id: key.key_id.clone(),
         key_id: key.key_id.clone(),
-        signature_hex: format!(
-            "{:016x}",
-            u64::from_le_bytes(digest[..8].try_into().expect("SHA-256 digest is 32 bytes"))
-        ),
+        signature_hex: format!("{:016x}", digest_prefix_u64(&digest)),
     }
 }
 

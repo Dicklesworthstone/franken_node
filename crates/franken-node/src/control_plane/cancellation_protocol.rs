@@ -53,6 +53,7 @@ pub mod error_codes {
     pub const ERR_CANCEL_DRAIN_TIMEOUT: &str = "ERR_CANCEL_DRAIN_TIMEOUT";
     pub const ERR_CANCEL_LEAK: &str = "ERR_CANCEL_LEAK";
     pub const ERR_CANCEL_NOT_FOUND: &str = "ERR_CANCEL_NOT_FOUND";
+    pub const ERR_CANCEL_INVARIANT: &str = "ERR_CANCEL_INVARIANT";
 }
 
 // ---- Cancellation phase ----
@@ -145,6 +146,8 @@ pub enum CancelProtocolError {
     },
     /// Workflow not found in the registry.
     WorkflowNotFound { workflow_id: String },
+    /// Internal protocol invariant failed unexpectedly.
+    InvariantViolation { detail: String },
 }
 
 impl CancelProtocolError {
@@ -155,6 +158,7 @@ impl CancelProtocolError {
             Self::DrainTimeout { .. } => error_codes::ERR_CANCEL_DRAIN_TIMEOUT,
             Self::ResourceLeak { .. } => error_codes::ERR_CANCEL_LEAK,
             Self::WorkflowNotFound { .. } => error_codes::ERR_CANCEL_NOT_FOUND,
+            Self::InvariantViolation { .. } => error_codes::ERR_CANCEL_INVARIANT,
         }
     }
 }
@@ -207,6 +211,9 @@ impl fmt::Display for CancelProtocolError {
             }
             Self::WorkflowNotFound { workflow_id } => {
                 write!(f, "{}: workflow {} not found", self.code(), workflow_id)
+            }
+            Self::InvariantViolation { detail } => {
+                write!(f, "{}: invariant violation: {}", self.code(), detail)
             }
         }
     }
@@ -459,7 +466,11 @@ impl CancellationProtocol {
         ));
 
         self.records.push(record);
-        Ok(self.records.last().expect("records non-empty: just pushed"))
+        self.records
+            .last()
+            .ok_or_else(|| CancelProtocolError::InvariantViolation {
+                detail: "records unexpectedly empty immediately after push".to_string(),
+            })
     }
 
     /// Phase 2a: DRAIN start — begin draining in-flight operations.
