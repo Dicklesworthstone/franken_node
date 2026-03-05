@@ -204,7 +204,7 @@ impl GCounter {
     }
 
     pub fn value(&self) -> u64 {
-        self.counts.values().sum()
+        self.counts.values().fold(0u64, |a, b| a.saturating_add(*b))
     }
 
     pub fn merge(&self, other: &GCounter) -> Result<GCounter, CrdtError> {

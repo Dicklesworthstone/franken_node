@@ -769,7 +769,7 @@ impl BenchmarkSuite {
         let aggregate = if results.is_empty() {
             0
         } else {
-            let total: u32 = results.iter().map(|r| r.score).sum();
+            let total: u32 = results.iter().map(|r| r.score).fold(0u32, |a, b| a.saturating_add(b));
             total / u32::try_from(results.len()).unwrap_or(u32::MAX)
         };
 
