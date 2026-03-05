@@ -31,6 +31,12 @@ pub const SCHEMA_VERSION: &str = "ids-v1.0";
 
 /// Default time-to-live: 7 days in seconds.
 pub const DEFAULT_TTL_SECS: u64 = 604_800;
+/// Default maximum number of audit records retained in-memory.
+pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
+
+fn default_audit_log_capacity() -> usize {
+    DEFAULT_MAX_AUDIT_RECORDS
+}
 
 // ── Event codes ──────────────────────────────────────────────────────────
 
@@ -179,6 +185,8 @@ pub struct IdempotencyDedupeStore {
     entries: BTreeMap<String, DedupeEntry>,
     ttl_secs: u64,
     audit_log: Vec<IdsAuditRecord>,
+    #[serde(default = "default_audit_log_capacity")]
+    max_audit_records: usize,
     total_new: u64,
     total_duplicate: u64,
     total_conflict: u64,
@@ -190,10 +198,19 @@ impl IdempotencyDedupeStore {
     /// Create a new store with the given default TTL.
     #[must_use]
     pub fn new(ttl_secs: u64) -> Self {
+        Self::with_audit_log_capacity(ttl_secs, DEFAULT_MAX_AUDIT_RECORDS)
+    }
+
+    /// Create a new store with explicit audit log capacity.
+    ///
+    /// Capacity is clamped to at least 1 so every transition remains auditable.
+    #[must_use]
+    pub fn with_audit_log_capacity(ttl_secs: u64, max_audit_records: usize) -> Self {
         Self {
             entries: BTreeMap::new(),
             ttl_secs,
             audit_log: Vec::new(),
+            max_audit_records: max_audit_records.max(1),
             total_new: 0,
             total_duplicate: 0,
             total_conflict: 0,
@@ -226,6 +243,10 @@ impl IdempotencyDedupeStore {
             trace_id: trace_id.to_string(),
             detail,
         });
+        if self.audit_log.len() > self.max_audit_records {
+            let overflow = self.audit_log.len() - self.max_audit_records;
+            self.audit_log.drain(0..overflow);
+        }
     }
 
     // ── primary operations ───────────────────────────────────────────
@@ -534,6 +555,12 @@ impl IdempotencyDedupeStore {
         self.audit_log.len()
     }
 
+    /// Configured maximum retained audit records.
+    #[must_use]
+    pub fn audit_log_capacity(&self) -> usize {
+        self.max_audit_records
+    }
+
     /// Access the raw audit log slice.
     #[must_use]
     pub fn audit_log(&self) -> &[IdsAuditRecord] {
@@ -804,6 +831,55 @@ mod tests {
     }
 
     #[test]
+    fn test_audit_log_capacity_enforces_oldest_first_eviction() {
+        let mut store = IdempotencyDedupeStore::with_audit_log_capacity(3600, 2);
+        let key = test_key(51);
+        let payload = b"cap-audit";
+
+        assert_eq!(
+            store.check_or_insert(key, payload, 1000, "tcap"),
+            DedupeResult::New
+        );
+        store
+            .complete(key, b"cap-result".to_vec(), 1001, "tcap")
+            .unwrap();
+        let _ = store.check_or_insert(key, payload, 1002, "tcap");
+
+        assert_eq!(store.audit_log_len(), 2);
+        let codes: Vec<&str> = store
+            .audit_log()
+            .iter()
+            .map(|record| record.event_code.as_str())
+            .collect();
+        assert_eq!(
+            codes,
+            vec![
+                event_codes::ID_INFLIGHT_RESOLVED,
+                event_codes::ID_ENTRY_DUPLICATE
+            ]
+        );
+    }
+
+    #[test]
+    fn test_audit_log_capacity_clamps_to_one() {
+        let mut store = IdempotencyDedupeStore::with_audit_log_capacity(3600, 0);
+        let key = test_key(52);
+        let payload = b"cap-clamp";
+
+        assert_eq!(store.audit_log_capacity(), 1);
+        let _ = store.check_or_insert(key, payload, 1000, "tcap1");
+        store
+            .complete(key, b"cap-result-1".to_vec(), 1001, "tcap1")
+            .unwrap();
+
+        assert_eq!(store.audit_log_len(), 1);
+        assert_eq!(
+            store.audit_log()[0].event_code,
+            event_codes::ID_INFLIGHT_RESOLVED
+        );
+    }
+
+    #[test]
     fn test_stats() {
         let mut store = IdempotencyDedupeStore::new(3600);
         let key = test_key(60);
@@ -828,6 +904,7 @@ mod tests {
         let store = IdempotencyDedupeStore::default();
         assert_eq!(store.ttl_secs, DEFAULT_TTL_SECS);
         assert_eq!(DEFAULT_TTL_SECS, 604_800); // 7 days
+        assert_eq!(store.audit_log_capacity(), DEFAULT_MAX_AUDIT_RECORDS);
     }
 
     #[test]

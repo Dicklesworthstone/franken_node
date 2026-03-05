@@ -12,6 +12,16 @@ use sha2::{Digest, Sha256};
 // ── Constants ────────────────────────────────────────────────────────────────
 
 pub const SCHEMA_VERSION: &str = "es-v1.0";
+pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
+pub const DEFAULT_MAX_TRANSITIONS_PER_SAGA: usize = 512;
+
+fn default_audit_log_capacity() -> usize {
+    DEFAULT_MAX_AUDIT_RECORDS
+}
+
+fn default_transition_capacity() -> usize {
+    DEFAULT_MAX_TRANSITIONS_PER_SAGA
+}
 
 // ── Event codes ──────────────────────────────────────────────────────────────
 
@@ -150,7 +160,8 @@ impl SagaInstance {
         }
     }
 
-    fn record_transition(&mut self, to_phase: SagaPhase, outcome: &str) {
+    fn record_transition(&mut self, to_phase: SagaPhase, outcome: &str, max_transitions: usize) {
+        let max_transitions = max_transitions.max(1);
         let from = self.phase;
         self.transitions.push(PhaseTransition {
             saga_id: self.saga_id.clone(),
@@ -160,6 +171,10 @@ impl SagaInstance {
             timestamp_ms: 0, // Caller provides real timestamp
             outcome: outcome.to_string(),
         });
+        if self.transitions.len() > max_transitions {
+            let overflow = self.transitions.len() - max_transitions;
+            self.transitions.drain(0..overflow);
+        }
         self.phase = to_phase;
     }
 
@@ -179,14 +194,24 @@ impl SagaInstance {
 pub struct EvictionSagaManager {
     sagas: BTreeMap<String, SagaInstance>,
     audit_log: Vec<EsAuditRecord>,
+    #[serde(default = "default_audit_log_capacity")]
+    max_audit_records: usize,
+    #[serde(default = "default_transition_capacity")]
+    max_transitions_per_saga: usize,
     next_saga_id: u64,
 }
 
 impl EvictionSagaManager {
     pub fn new() -> Self {
+        Self::with_capacities(DEFAULT_MAX_AUDIT_RECORDS, DEFAULT_MAX_TRANSITIONS_PER_SAGA)
+    }
+
+    pub fn with_capacities(max_audit_records: usize, max_transitions_per_saga: usize) -> Self {
         Self {
             sagas: BTreeMap::new(),
             audit_log: Vec::new(),
+            max_audit_records: max_audit_records.max(1),
+            max_transitions_per_saga: max_transitions_per_saga.max(1),
             next_saga_id: 1,
         }
     }
@@ -207,6 +232,10 @@ impl EvictionSagaManager {
             trace_id: trace_id.to_string(),
             detail,
         });
+        if self.audit_log.len() > self.max_audit_records {
+            let overflow = self.audit_log.len() - self.max_audit_records;
+            self.audit_log.drain(0..overflow);
+        }
     }
 
     fn ensure_remote_cap_active(
@@ -294,6 +323,7 @@ impl EvictionSagaManager {
 
     /// Advance saga to Uploading phase.
     pub fn begin_upload(&mut self, saga_id: &str, trace_id: &str) -> Result<(), String> {
+        let max_transitions_per_saga = self.max_transitions_per_saga;
         let saga = self
             .sagas
             .get_mut(saga_id)
@@ -304,7 +334,11 @@ impl EvictionSagaManager {
         }
         Self::ensure_remote_cap_active(saga, saga_id, "begin_upload")?;
 
-        saga.record_transition(SagaPhase::Uploading, "upload_started");
+        saga.record_transition(
+            SagaPhase::Uploading,
+            "upload_started",
+            max_transitions_per_saga,
+        );
         self.log(
             event_codes::ES_PHASE_UPLOAD,
             trace_id,
@@ -315,6 +349,7 @@ impl EvictionSagaManager {
 
     /// Complete upload and advance to Verifying.
     pub fn complete_upload(&mut self, saga_id: &str, trace_id: &str) -> Result<(), String> {
+        let max_transitions_per_saga = self.max_transitions_per_saga;
         let saga = self
             .sagas
             .get_mut(saga_id)
@@ -326,7 +361,11 @@ impl EvictionSagaManager {
         Self::ensure_remote_cap_active(saga, saga_id, "complete_upload")?;
 
         saga.l3_present = true;
-        saga.record_transition(SagaPhase::Verifying, "upload_complete");
+        saga.record_transition(
+            SagaPhase::Verifying,
+            "upload_complete",
+            max_transitions_per_saga,
+        );
         self.log(
             event_codes::ES_PHASE_VERIFY,
             trace_id,
@@ -337,6 +376,7 @@ impl EvictionSagaManager {
 
     /// Complete verification and advance to Retiring.
     pub fn complete_verify(&mut self, saga_id: &str, trace_id: &str) -> Result<(), String> {
+        let max_transitions_per_saga = self.max_transitions_per_saga;
         let saga = self
             .sagas
             .get_mut(saga_id)
@@ -348,7 +388,11 @@ impl EvictionSagaManager {
         Self::ensure_remote_cap_active(saga, saga_id, "complete_verify")?;
 
         saga.l3_verified = true;
-        saga.record_transition(SagaPhase::Retiring, "verification_passed");
+        saga.record_transition(
+            SagaPhase::Retiring,
+            "verification_passed",
+            max_transitions_per_saga,
+        );
         self.log(
             event_codes::ES_PHASE_RETIRE,
             trace_id,
@@ -359,6 +403,7 @@ impl EvictionSagaManager {
 
     /// Complete retirement (L2 removed).
     pub fn complete_retire(&mut self, saga_id: &str, trace_id: &str) -> Result<(), String> {
+        let max_transitions_per_saga = self.max_transitions_per_saga;
         let saga = self
             .sagas
             .get_mut(saga_id)
@@ -370,7 +415,11 @@ impl EvictionSagaManager {
         Self::ensure_remote_cap_active(saga, saga_id, "complete_retire")?;
 
         saga.l2_present = false;
-        saga.record_transition(SagaPhase::Complete, "retirement_complete");
+        saga.record_transition(
+            SagaPhase::Complete,
+            "retirement_complete",
+            max_transitions_per_saga,
+        );
         self.log(
             event_codes::ES_SAGA_COMPLETE,
             trace_id,
@@ -385,6 +434,7 @@ impl EvictionSagaManager {
         saga_id: &str,
         trace_id: &str,
     ) -> Result<CompensationAction, String> {
+        let max_transitions_per_saga = self.max_transitions_per_saga;
         // Extract values from saga with immutable borrow first
         let (action, phase_str) = {
             let saga = self
@@ -409,7 +459,11 @@ impl EvictionSagaManager {
             .ok_or_else(|| format!("saga disappeared during cancel: {saga_id}"))?;
         // Re-check after mutable borrow as a defensive invariant.
         Self::ensure_cancel_allowed(saga.phase, saga_id)?;
-        saga.record_transition(SagaPhase::Compensating, &format!("compensation: {action}"));
+        saga.record_transition(
+            SagaPhase::Compensating,
+            &format!("compensation: {action}"),
+            max_transitions_per_saga,
+        );
 
         // Apply compensation
         match &action {
@@ -429,7 +483,11 @@ impl EvictionSagaManager {
             CompensationAction::None => {}
         }
 
-        saga.record_transition(SagaPhase::Compensated, "compensation_complete");
+        saga.record_transition(
+            SagaPhase::Compensated,
+            "compensation_complete",
+            max_transitions_per_saga,
+        );
         // Drop mutable borrow before logging
         let action_str = format!("{action}");
         self.log(
@@ -451,6 +509,7 @@ impl EvictionSagaManager {
         saga_id: &str,
         trace_id: &str,
     ) -> Result<CompensationAction, String> {
+        let max_transitions_per_saga = self.max_transitions_per_saga;
         let action = {
             let saga = self
                 .sagas
@@ -487,7 +546,11 @@ impl EvictionSagaManager {
                     .get_mut(saga_id)
                     .ok_or_else(|| format!("saga disappeared during recovery: {saga_id}"))?;
                 saga.l3_present = false;
-                saga.record_transition(SagaPhase::Compensated, "crash_recovery: abort_upload");
+                saga.record_transition(
+                    SagaPhase::Compensated,
+                    "crash_recovery: abort_upload",
+                    max_transitions_per_saga,
+                );
             }
             CompensationAction::CleanupL3 => {
                 let saga = self
@@ -496,7 +559,11 @@ impl EvictionSagaManager {
                     .ok_or_else(|| format!("saga disappeared during recovery: {saga_id}"))?;
                 saga.l3_present = false;
                 saga.l3_verified = false;
-                saga.record_transition(SagaPhase::Compensated, "crash_recovery: cleanup_l3");
+                saga.record_transition(
+                    SagaPhase::Compensated,
+                    "crash_recovery: cleanup_l3",
+                    max_transitions_per_saga,
+                );
             }
             CompensationAction::CompleteRetirement => {
                 let saga = self
@@ -504,7 +571,11 @@ impl EvictionSagaManager {
                     .get_mut(saga_id)
                     .ok_or_else(|| format!("saga disappeared during recovery: {saga_id}"))?;
                 saga.l2_present = false;
-                saga.record_transition(SagaPhase::Complete, "crash_recovery: complete_retirement");
+                saga.record_transition(
+                    SagaPhase::Complete,
+                    "crash_recovery: complete_retirement",
+                    max_transitions_per_saga,
+                );
             }
             CompensationAction::None => {}
         }
@@ -596,6 +667,14 @@ impl EvictionSagaManager {
     pub fn saga_count(&self) -> usize {
         self.sagas.len()
     }
+
+    pub fn audit_log_capacity(&self) -> usize {
+        self.max_audit_records
+    }
+
+    pub fn transition_capacity(&self) -> usize {
+        self.max_transitions_per_saga
+    }
 }
 
 impl Default for EvictionSagaManager {
@@ -614,6 +693,49 @@ mod tests {
     fn test_new_manager() {
         let mgr = EvictionSagaManager::new();
         assert_eq!(mgr.saga_count(), 0);
+        assert_eq!(mgr.audit_log_capacity(), DEFAULT_MAX_AUDIT_RECORDS);
+        assert_eq!(mgr.transition_capacity(), DEFAULT_MAX_TRANSITIONS_PER_SAGA);
+    }
+
+    #[test]
+    fn test_capacity_clamps_to_one() {
+        let mgr = EvictionSagaManager::with_capacities(0, 0);
+        assert_eq!(mgr.audit_log_capacity(), 1);
+        assert_eq!(mgr.transition_capacity(), 1);
+    }
+
+    #[test]
+    fn test_audit_log_capacity_enforces_oldest_first_eviction() {
+        let mut mgr = EvictionSagaManager::with_capacities(2, 8);
+        let id = mgr.start_saga("artifact-a", true, "ta1").unwrap();
+        mgr.begin_upload(&id, "ta2").unwrap();
+        mgr.complete_upload(&id, "ta3").unwrap();
+
+        assert_eq!(mgr.audit_log.len(), 2);
+        let codes: Vec<&str> = mgr
+            .audit_log
+            .iter()
+            .map(|record| record.event_code.as_str())
+            .collect();
+        assert_eq!(
+            codes,
+            vec![event_codes::ES_PHASE_UPLOAD, event_codes::ES_PHASE_VERIFY]
+        );
+    }
+
+    #[test]
+    fn test_transition_capacity_enforces_oldest_first_eviction() {
+        let mut mgr = EvictionSagaManager::with_capacities(8, 2);
+        let id = mgr.start_saga("artifact-b", true, "tt1").unwrap();
+        mgr.begin_upload(&id, "tt2").unwrap();
+        mgr.complete_upload(&id, "tt3").unwrap();
+        mgr.complete_verify(&id, "tt4").unwrap();
+
+        let saga = mgr.get_saga(&id).unwrap();
+        assert_eq!(saga.transitions.len(), 2);
+        assert_eq!(saga.phase, SagaPhase::Retiring);
+        assert_eq!(saga.transitions[0].to_phase, SagaPhase::Verifying);
+        assert_eq!(saga.transitions[1].to_phase, SagaPhase::Retiring);
     }
 
     #[test]
@@ -882,8 +1004,9 @@ mod tests {
         // Simulate crash mid-compensation: manually transition to Compensating
         // (as if cancel_saga crashed after first record_transition but before completing)
         {
+            let cap = mgr.transition_capacity();
             let saga = mgr.sagas.get_mut(&id).unwrap();
-            saga.record_transition(SagaPhase::Compensating, "compensation: CleanupL3");
+            saga.record_transition(SagaPhase::Compensating, "compensation: CleanupL3", cap);
         }
         assert_eq!(mgr.get_saga(&id).unwrap().phase, SagaPhase::Compensating);
 
@@ -903,8 +1026,9 @@ mod tests {
         mgr.begin_upload(&id, "t2").unwrap();
 
         {
+            let cap = mgr.transition_capacity();
             let saga = mgr.sagas.get_mut(&id).unwrap();
-            saga.record_transition(SagaPhase::Compensating, "compensation: AbortUpload");
+            saga.record_transition(SagaPhase::Compensating, "compensation: AbortUpload", cap);
         }
 
         let action = mgr.recover_saga(&id, "t3").unwrap();
@@ -925,8 +1049,13 @@ mod tests {
         mgr.complete_verify(&id, "t4").unwrap();
 
         {
+            let cap = mgr.transition_capacity();
             let saga = mgr.sagas.get_mut(&id).unwrap();
-            saga.record_transition(SagaPhase::Compensating, "compensation: CompleteRetirement");
+            saga.record_transition(
+                SagaPhase::Compensating,
+                "compensation: CompleteRetirement",
+                cap,
+            );
         }
 
         let action = mgr.recover_saga(&id, "t5").unwrap();
@@ -991,8 +1120,9 @@ mod tests {
 
         // Simulate crash mid-compensation
         {
+            let cap = mgr.transition_capacity();
             let saga = mgr.sagas.get_mut(&id).unwrap();
-            saga.record_transition(SagaPhase::Compensating, "compensation: CleanupL3");
+            saga.record_transition(SagaPhase::Compensating, "compensation: CleanupL3", cap);
         }
 
         let result = mgr.leak_check("t4");

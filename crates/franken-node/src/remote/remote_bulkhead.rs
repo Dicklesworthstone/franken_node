@@ -19,6 +19,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 
+const MAX_BULKHEAD_EVENTS: usize = 1024;
+const MAX_LATENCY_SAMPLES: usize = 1024;
+
 /// Stable event codes for bulkhead telemetry.
 pub mod event_codes {
     pub const RB_PERMIT_ACQUIRED: &str = "RB_PERMIT_ACQUIRED";
@@ -299,14 +302,40 @@ impl RemoteBulkhead {
         &self.latency_samples
     }
 
+    fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+        if cap == 0 {
+            return;
+        }
+        if items.len() >= cap {
+            let overflow = items.len() + 1 - cap;
+            items.drain(0..overflow);
+        }
+        items.push(item);
+    }
+
     fn log_event(&mut self, event_code: &str, now_ms: u64, detail: impl Into<String>) {
-        self.events.push(BulkheadEvent {
-            event_code: event_code.to_string(),
-            now_ms,
-            in_flight: self.in_flight,
-            max_in_flight: self.max_in_flight,
-            detail: detail.into(),
-        });
+        Self::push_bounded(
+            &mut self.events,
+            BulkheadEvent {
+                event_code: event_code.to_string(),
+                now_ms,
+                in_flight: self.in_flight,
+                max_in_flight: self.max_in_flight,
+                detail: detail.into(),
+            },
+            MAX_BULKHEAD_EVENTS,
+        );
+    }
+
+    fn push_latency_sample(&mut self, latency_ms: u64) {
+        Self::push_bounded(
+            &mut self.latency_samples,
+            ForegroundLatencySample {
+                in_flight: self.in_flight,
+                latency_ms,
+            },
+            MAX_LATENCY_SAMPLES,
+        );
     }
 
     fn issue_permit(&mut self, now_ms: u64) -> BulkheadPermit {
@@ -556,10 +585,7 @@ impl RemoteBulkhead {
 
     /// Record foreground latency observation.
     pub fn record_foreground_latency(&mut self, latency_ms: u64) {
-        self.latency_samples.push(ForegroundLatencySample {
-            in_flight: self.in_flight,
-            latency_ms,
-        });
+        self.push_latency_sample(latency_ms);
         self.log_event(
             event_codes::RB_LATENCY_REPORT,
             0,
@@ -756,5 +782,58 @@ mod tests {
         assert!(codes.contains(&event_codes::RB_PERMIT_ACQUIRED));
         assert!(codes.contains(&event_codes::RB_REQUEST_QUEUED));
         assert!(codes.contains(&event_codes::RB_PERMIT_RELEASED));
+    }
+
+    #[test]
+    fn event_log_is_bounded_with_oldest_first_eviction() {
+        let mut b = bulkhead_reject(1);
+        let total = MAX_BULKHEAD_EVENTS + 7;
+        for idx in 0..total {
+            let latency = u64::try_from(idx).expect("usize->u64 conversion should not overflow");
+            b.record_foreground_latency(latency);
+        }
+
+        assert_eq!(b.events().len(), MAX_BULKHEAD_EVENTS);
+        let dropped = total - MAX_BULKHEAD_EVENTS;
+        let expected_first = format!("latency_ms={dropped}");
+        let expected_last = format!("latency_ms={}", total - 1);
+        let first = b.events().first().expect("event log should not be empty");
+        let last = b.events().last().expect("event log should not be empty");
+        assert_eq!(first.detail, expected_first);
+        assert_eq!(last.detail, expected_last);
+        assert!(
+            b.events()
+                .iter()
+                .all(|event| event.event_code == event_codes::RB_LATENCY_REPORT)
+        );
+    }
+
+    #[test]
+    fn latency_samples_are_bounded_with_oldest_first_eviction() {
+        let mut b = bulkhead_reject(1);
+        let total = MAX_LATENCY_SAMPLES + 11;
+        for idx in 0..total {
+            let latency = u64::try_from(idx).expect("usize->u64 conversion should not overflow");
+            b.record_foreground_latency(latency);
+        }
+
+        assert_eq!(b.latency_samples().len(), MAX_LATENCY_SAMPLES);
+        let dropped = total - MAX_LATENCY_SAMPLES;
+        let first = b
+            .latency_samples()
+            .first()
+            .expect("latency samples should not be empty");
+        let last = b
+            .latency_samples()
+            .last()
+            .expect("latency samples should not be empty");
+        assert_eq!(
+            first.latency_ms,
+            u64::try_from(dropped).expect("usize->u64 conversion should not overflow")
+        );
+        assert_eq!(
+            last.latency_ms,
+            u64::try_from(total - 1).expect("usize->u64 conversion should not overflow")
+        );
     }
 }
