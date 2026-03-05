@@ -717,7 +717,7 @@ mod tests {
         let windows = scheduler
             .select_windows(&entries, &checkpoints, 1_701_100_008_000, "trace-complete")
             .unwrap();
-        let queued = scheduler
+        scheduler
             .enqueue_windows(&windows, 1_701_100_008_010)
             .unwrap();
         let dispatched = scheduler.dispatch_jobs(1_701_100_008_020).unwrap();

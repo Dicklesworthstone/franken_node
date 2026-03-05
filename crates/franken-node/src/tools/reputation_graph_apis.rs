@@ -241,9 +241,13 @@ impl ReputationGraphApis {
             self.edges.iter().filter(|e| e.target == node_id).collect();
         let edge_count = incoming.len();
 
-        let weighted_sum: f64 = incoming.iter().map(|e| e.weight).sum();
+        let weighted_sum: f64 = incoming
+            .iter()
+            .map(|e| if e.weight.is_finite() { e.weight } else { 0.0 })
+            .sum();
         let composite = if edge_count > 0 {
-            (base + weighted_sum / edge_count as f64) / 2.0
+            let raw = (base + weighted_sum / edge_count as f64) / 2.0;
+            if raw.is_finite() { raw } else { base }
         } else {
             base
         };

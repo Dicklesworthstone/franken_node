@@ -523,6 +523,11 @@ impl ParticipationWeightEngine {
             return 1.0; // Fallback: if no established participants, use 1.0
         }
 
+        // Filter out non-finite values before sorting to prevent NaN poisoning.
+        established_weights.retain(|w| w.is_finite());
+        if established_weights.is_empty() {
+            return 1.0;
+        }
         established_weights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let mid = established_weights.len() / 2;
         if established_weights.len().is_multiple_of(2) {

@@ -2,7 +2,6 @@ use crate::storage::frankensqlite_adapter::{FrankensqliteAdapter, PersistenceCla
 use anyhow::Result;
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::thread;
 
@@ -25,10 +24,8 @@ impl TelemetryBridge {
         let socket_path = self.socket_path.clone();
         let adapter_clone = Arc::clone(&self.adapter);
 
-        // Ensure the old socket is removed before binding
-        if Path::new(&socket_path).exists() {
-            std::fs::remove_file(&socket_path)?;
-        }
+        // Best-effort cleanup of stale socket (avoid TOCTOU by not checking exists() first).
+        let _ = std::fs::remove_file(&socket_path);
 
         let listener = UnixListener::bind(&socket_path)?;
 
