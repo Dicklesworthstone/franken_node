@@ -6,6 +6,15 @@
 
 use std::collections::BTreeMap;
 
+/// Maximum entries in the canonical revocation log before oldest are evicted.
+const MAX_LOG_ENTRIES: usize = 4096;
+
+/// Maximum audit trail entries before oldest are evicted.
+const MAX_AUDIT_ENTRIES: usize = 4096;
+
+/// Maximum revoked artifacts per zone before oldest are evicted.
+const MAX_REVOKED_PER_ZONE: usize = 4096;
+
 /// A revocation head checkpoint for a specific zone.
 #[derive(Debug, Clone)]
 pub struct RevocationHead {
@@ -140,6 +149,10 @@ impl RevocationRegistry {
 
         // INV-REV-MONOTONIC + INV-REV-STALE-REJECT
         if head.sequence <= current {
+            if self.audits.len() >= MAX_AUDIT_ENTRIES {
+                let overflow = self.audits.len() + 1 - MAX_AUDIT_ENTRIES;
+                self.audits.drain(0..overflow);
+            }
             self.audits.push(RevocationAudit {
                 zone_id: head.zone_id.clone(),
                 action: "rejected_stale".into(),
@@ -156,11 +169,17 @@ impl RevocationRegistry {
 
         // Advance the head
         self.heads.insert(head.zone_id.clone(), head.sequence);
-        self.revoked
-            .entry(head.zone_id.clone())
-            .or_default()
-            .push(head.revoked_artifact.clone());
+        let zone_revoked = self.revoked.entry(head.zone_id.clone()).or_default();
+        if zone_revoked.len() >= MAX_REVOKED_PER_ZONE {
+            let overflow = zone_revoked.len() + 1 - MAX_REVOKED_PER_ZONE;
+            zone_revoked.drain(0..overflow);
+        }
+        zone_revoked.push(head.revoked_artifact.clone());
 
+        if self.audits.len() >= MAX_AUDIT_ENTRIES {
+            let overflow = self.audits.len() + 1 - MAX_AUDIT_ENTRIES;
+            self.audits.drain(0..overflow);
+        }
         self.audits.push(RevocationAudit {
             zone_id: head.zone_id.clone(),
             action: "advanced".into(),
@@ -170,6 +189,10 @@ impl RevocationRegistry {
         });
 
         // Append to canonical log for recovery
+        if self.log.len() >= MAX_LOG_ENTRIES {
+            let overflow = self.log.len() + 1 - MAX_LOG_ENTRIES;
+            self.log.drain(0..overflow);
+        }
         self.log.push(head.clone());
 
         Ok(head.sequence)

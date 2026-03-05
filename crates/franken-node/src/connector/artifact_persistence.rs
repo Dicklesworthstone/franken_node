@@ -5,10 +5,10 @@
 
 use std::collections::BTreeMap;
 
-use crate::security::constant_time::ct_eq;
 use crate::control_plane::control_epoch::{
     ControlEpoch, EpochArtifactEvent, EpochRejection, ValidityWindowPolicy, check_artifact_epoch,
 };
+use crate::security::constant_time::ct_eq;
 
 /// Required artifact types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]

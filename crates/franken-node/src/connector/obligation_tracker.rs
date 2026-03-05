@@ -28,6 +28,15 @@ pub const DEFAULT_LEAK_TIMEOUT_SECS: u64 = 30;
 /// Default per-flow budget for concurrent reservations. INV-OBL-BUDGET-BOUND
 pub const DEFAULT_FLOW_BUDGET: usize = 256;
 
+/// Maximum audit log entries before oldest are evicted.
+const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+
+/// Maximum obligations before oldest are evicted from the map.
+const MAX_OBLIGATIONS: usize = 8192;
+
+/// Maximum scan results before oldest are evicted.
+const MAX_SCAN_RESULTS: usize = 1024;
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub mod event_codes {
@@ -260,6 +269,14 @@ impl ObligationTracker {
         t
     }
 
+    fn push_audit(&mut self, record: ObligationAuditRecord) {
+        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            let overflow = self.audit_log.len() + 1 - MAX_AUDIT_LOG_ENTRIES;
+            self.audit_log.drain(0..overflow);
+        }
+        self.audit_log.push(record);
+    }
+
     /// Count of currently reserved obligations for a specific flow.
     fn reserved_count_for_flow(&self, flow: &ObligationFlow) -> usize {
         self.obligations
@@ -291,9 +308,15 @@ impl ObligationTracker {
             trace_id: trace_id.to_string(),
         };
 
+        if self.obligations.len() >= MAX_OBLIGATIONS
+            && !self.obligations.contains_key(&id.0)
+            && let Some(oldest_key) = self.obligations.keys().next().cloned()
+        {
+            self.obligations.remove(&oldest_key);
+        }
         self.obligations.insert(id.0.clone(), obligation);
 
-        self.audit_log.push(ObligationAuditRecord {
+        self.push_audit(ObligationAuditRecord {
             event_code: event_codes::OBL_RESERVED.to_string(),
             obligation_id: id.0.clone(),
             flow: flow.as_str().to_string(),
@@ -349,7 +372,7 @@ impl ObligationTracker {
 
         let flow_str = obligation.flow.as_str().to_string();
 
-        self.audit_log.push(ObligationAuditRecord {
+        self.push_audit(ObligationAuditRecord {
             event_code: event_codes::OBL_COMMITTED.to_string(),
             obligation_id: id.0.clone(),
             flow: flow_str,
@@ -396,7 +419,7 @@ impl ObligationTracker {
 
         let flow_str = obligation.flow.as_str().to_string();
 
-        self.audit_log.push(ObligationAuditRecord {
+        self.push_audit(ObligationAuditRecord {
             event_code: event_codes::OBL_ROLLED_BACK.to_string(),
             obligation_id: id.0.clone(),
             flow: flow_str,
@@ -436,7 +459,7 @@ impl ObligationTracker {
 
                 let flow_str = obligation.flow.as_str().to_string();
 
-                self.audit_log.push(ObligationAuditRecord {
+                self.push_audit(ObligationAuditRecord {
                     event_code: event_codes::OBL_LEAK_DETECTED.to_string(),
                     obligation_id: key.clone(),
                     flow: flow_str,
@@ -454,7 +477,7 @@ impl ObligationTracker {
         let scanned = self.obligations.len();
         let leaked = leaked_ids.len();
 
-        self.audit_log.push(ObligationAuditRecord {
+        self.push_audit(ObligationAuditRecord {
             event_code: event_codes::OBL_SCAN_COMPLETED.to_string(),
             obligation_id: String::new(),
             flow: String::new(),
@@ -472,6 +495,10 @@ impl ObligationTracker {
             schema_version: SCHEMA_VERSION.to_string(),
         };
 
+        if self.scan_results.len() >= MAX_SCAN_RESULTS {
+            let overflow = self.scan_results.len() + 1 - MAX_SCAN_RESULTS;
+            self.scan_results.drain(0..overflow);
+        }
         self.scan_results.push(result.clone());
         result
     }

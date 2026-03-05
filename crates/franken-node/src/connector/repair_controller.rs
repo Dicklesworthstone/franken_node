@@ -194,9 +194,11 @@ pub fn run_cycle(
             let items = by_tenant.get(tenant_id).ok_or(RepairError::InvalidConfig {
                 reason: format!("missing tenant {tenant_id} in by_tenant map"),
             })?;
-            let alloc = allocations.get(tenant_id).ok_or(RepairError::InvalidConfig {
-                reason: format!("missing allocation for tenant {tenant_id}"),
-            })?;
+            let alloc = allocations
+                .get(tenant_id)
+                .ok_or(RepairError::InvalidConfig {
+                    reason: format!("missing allocation for tenant {tenant_id}"),
+                })?;
             for item in items {
                 if !alloc.items_allocated.contains(&item.item_id) {
                     remaining_items.push(item);
@@ -211,11 +213,12 @@ pub fn run_cycle(
             }
             let can_use = item.size_units.min(config.max_units_per_cycle - total_used);
             if can_use > 0 {
-                let alloc = allocations
-                    .get_mut(&item.tenant_id)
-                    .ok_or(RepairError::InvalidConfig {
-                        reason: format!("missing allocation for tenant {}", item.tenant_id),
-                    })?;
+                let alloc =
+                    allocations
+                        .get_mut(&item.tenant_id)
+                        .ok_or(RepairError::InvalidConfig {
+                            reason: format!("missing allocation for tenant {}", item.tenant_id),
+                        })?;
                 alloc.items_allocated.push(item.item_id.clone());
                 alloc.units_used += can_use;
                 total_used += can_use;

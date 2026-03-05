@@ -277,7 +277,10 @@ impl fmt::Display for ScenarioBuilderError {
             }
             Self::EmptyName => write!(f, "{ERR_SB_EMPTY_NAME}: scenario name must not be empty"),
             Self::JsonParse { message } => {
-                write!(f, "ERR_SB_JSON_PARSE: failed to parse scenario JSON: {message}")
+                write!(
+                    f,
+                    "ERR_SB_JSON_PARSE: failed to parse scenario JSON: {message}"
+                )
             }
         }
     }

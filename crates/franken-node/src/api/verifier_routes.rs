@@ -18,9 +18,12 @@ use super::utf8_prefix;
 
 fn hash_evidence_content(content: &serde_json::Value) -> Result<(String, u64), serde_json::Error> {
     let canonical = serde_json::to_vec(content)?;
-    let content_hash = format!("sha256:{}", hex::encode(Sha256::digest(
-        [b"verifier_evidence_content_v1:" as &[u8], &canonical[..]].concat(),
-    )));
+    let content_hash = format!(
+        "sha256:{}",
+        hex::encode(Sha256::digest(
+            [b"verifier_evidence_content_v1:" as &[u8], &canonical[..]].concat(),
+        ))
+    );
     let size_bytes = u64::try_from(canonical.len()).unwrap_or(u64::MAX);
     Ok((content_hash, size_bytes))
 }

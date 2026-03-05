@@ -42,6 +42,15 @@ use crate::security::constant_time::ct_eq;
 /// Schema version for time-travel replay records.
 pub const SCHEMA_VERSION: &str = "ttr-v1.0";
 
+/// Maximum audit log entries before oldest are evicted.
+const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+
+/// Maximum registered traces in a single ReplayEngine.
+const MAX_REGISTERED_TRACES: usize = 1024;
+
+/// Maximum steps in a single TraceBuilder.
+const MAX_TRACE_STEPS: usize = 8192;
+
 // ---------------------------------------------------------------------------
 // Invariant constants (internal TTR invariants)
 // ---------------------------------------------------------------------------
@@ -539,6 +548,10 @@ impl TraceBuilder {
         timestamp_ns: u64,
     ) -> u64 {
         let seq = self.next_seq;
+        if self.steps.len() >= MAX_TRACE_STEPS {
+            let overflow = self.steps.len() + 1 - MAX_TRACE_STEPS;
+            self.steps.drain(0..overflow);
+        }
         self.steps.push(TraceStep::new(
             seq,
             input,
@@ -546,6 +559,10 @@ impl TraceBuilder {
             side_effects,
             timestamp_ns,
         ));
+        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            let overflow = self.audit_log.len() + 1 - MAX_AUDIT_LOG_ENTRIES;
+            self.audit_log.drain(0..overflow);
+        }
         self.audit_log.push(AuditEntry::new(
             event_codes::TTR_002,
             &self.trace_id,
@@ -746,6 +763,11 @@ impl ReplayEngine {
                 trace_id: trace.trace_id.clone(),
             });
         }
+        if self.traces.len() >= MAX_REGISTERED_TRACES
+            && let Some(oldest_key) = self.traces.keys().next().cloned()
+        {
+            self.traces.remove(&oldest_key);
+        }
         self.traces.insert(trace.trace_id.clone(), trace);
         Ok(())
     }
@@ -785,6 +807,9 @@ impl ReplayEngine {
             })?;
 
         // Emit TTR-004: Replay started
+        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            self.audit_log.drain(0..1);
+        }
         self.audit_log.push(AuditEntry::new(
             event_codes::TTR_004,
             trace_id,
@@ -825,6 +850,9 @@ impl ReplayEngine {
 
             if output_match && effects_match {
                 // TTR-005: step identical
+                if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+                    self.audit_log.drain(0..1);
+                }
                 self.audit_log.push(AuditEntry::new(
                     event_codes::TTR_005,
                     trace_id,
@@ -842,6 +870,9 @@ impl ReplayEngine {
                     step.seq, kind, output_match, effects_match
                 );
                 // TTR-006: step diverged
+                if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+                    self.audit_log.drain(0..1);
+                }
                 self.audit_log.push(AuditEntry::new(
                     event_codes::TTR_006,
                     trace_id,
@@ -867,6 +898,9 @@ impl ReplayEngine {
         };
 
         // TTR-007: Replay completed
+        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            self.audit_log.drain(0..1);
+        }
         self.audit_log.push(AuditEntry::new(
             event_codes::TTR_007,
             trace_id,

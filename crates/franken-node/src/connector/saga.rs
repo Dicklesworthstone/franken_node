@@ -14,6 +14,12 @@ use sha2::{Digest, Sha256};
 
 pub const SCHEMA_VERSION: &str = "saga-v1.0";
 
+/// Maximum audit log entries before oldest are evicted.
+const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+
+/// Maximum concurrent sagas before oldest are evicted.
+const MAX_SAGAS: usize = 2048;
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub mod event_codes {
@@ -194,8 +200,12 @@ impl SagaExecutor {
         }
     }
 
-    /// Internal: append an audit record.
+    /// Internal: append an audit record with capacity eviction.
     fn log(&mut self, event_code: &str, trace_id: &str, saga_id: &str, detail: serde_json::Value) {
+        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            let overflow = self.audit_log.len() + 1 - MAX_AUDIT_LOG_ENTRIES;
+            self.audit_log.drain(0..overflow);
+        }
         self.audit_log.push(SagaAuditRecord {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
@@ -221,6 +231,12 @@ impl SagaExecutor {
             records: Vec::new(),
         };
 
+        if self.sagas.len() >= MAX_SAGAS
+            && !self.sagas.contains_key(&saga_id)
+            && let Some(oldest_key) = self.sagas.keys().next().cloned()
+        {
+            self.sagas.remove(&oldest_key);
+        }
         self.sagas.insert(saga_id.clone(), saga);
 
         self.log(

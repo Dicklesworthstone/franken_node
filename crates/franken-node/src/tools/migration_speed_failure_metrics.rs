@@ -142,7 +142,10 @@ pub struct MigrationRecord {
 
 impl MigrationRecord {
     pub fn total_from_phases(&self) -> u64 {
-        self.phase_durations.iter().map(|p| p.duration_ms).fold(0u64, |a, b| a.saturating_add(b))
+        self.phase_durations
+            .iter()
+            .map(|p| p.duration_ms)
+            .fold(0u64, |a, b| a.saturating_add(b))
     }
 }
 

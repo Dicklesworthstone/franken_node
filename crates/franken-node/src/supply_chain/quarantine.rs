@@ -8,6 +8,15 @@
 use std::collections::BTreeMap;
 
 use crate::security::constant_time::ct_eq;
+
+/// Maximum audit trail entries before oldest are evicted.
+const MAX_AUDIT_TRAIL: usize = 4096;
+
+/// Maximum quarantine records before oldest are evicted.
+const MAX_RECORDS: usize = 4096;
+
+/// Maximum propagation status entries before oldest are evicted.
+const MAX_PROPAGATION_STATUS: usize = 4096;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -381,6 +390,12 @@ impl QuarantineRegistry {
             state_history,
         };
 
+        if self.records.len() >= MAX_RECORDS
+            && !self.records.contains_key(&order_id)
+            && let Some(oldest_key) = self.records.keys().next().cloned()
+        {
+            self.records.remove(&oldest_key);
+        }
         self.records.insert(order_id.clone(), record.clone());
         self.active_quarantines
             .insert(ext_id.clone(), order_id.clone());
@@ -431,6 +446,12 @@ impl QuarantineRegistry {
             )
         };
 
+        if self.propagation_status.len() >= MAX_PROPAGATION_STATUS
+            && !self.propagation_status.contains_key(node_id)
+            && let Some(oldest_key) = self.propagation_status.keys().next().cloned()
+        {
+            self.propagation_status.remove(&oldest_key);
+        }
         self.propagation_status
             .insert(node_id.to_owned(), timestamp.to_owned());
 
@@ -487,7 +508,10 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: "Quarantine order disappeared during operation".to_string(),
             })?;
-        if matches!(record.state, QuarantineState::Initiated | QuarantineState::Propagated) {
+        if matches!(
+            record.state,
+            QuarantineState::Initiated | QuarantineState::Propagated
+        ) {
             record.state = QuarantineState::Enforced;
             record
                 .state_history
@@ -1008,6 +1032,10 @@ impl QuarantineRegistry {
         };
 
         entry.entry_hash = compute_entry_hash(&entry);
+        if self.audit_trail.len() >= MAX_AUDIT_TRAIL {
+            let overflow = self.audit_trail.len() + 1 - MAX_AUDIT_TRAIL;
+            self.audit_trail.drain(0..overflow);
+        }
         self.audit_trail.push(entry);
     }
 }
@@ -1169,8 +1197,7 @@ mod tests {
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
             .unwrap();
         reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
-            .unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
 
         reg.lift_quarantine(make_clearance("q-001")).unwrap();
         assert!(!reg.is_quarantined("ext-test"));
@@ -1200,8 +1227,7 @@ mod tests {
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
             .unwrap();
         reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
-            .unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
 
         // Trigger recall (requires Isolated state).
         reg.trigger_recall(make_recall("q-001")).unwrap();
@@ -1270,8 +1296,7 @@ mod tests {
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
             .unwrap();
         reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
-            .unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
         reg.trigger_recall(make_recall("q-001")).unwrap();
 
         // 1 of 3 nodes confirmed.

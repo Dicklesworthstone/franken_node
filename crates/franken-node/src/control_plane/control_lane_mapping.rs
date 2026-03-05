@@ -456,12 +456,12 @@ impl ControlLaneScheduler {
                     task_class: task_class.to_string(),
                 })?;
 
-        let counters = self
-            .counters
-            .get_mut(lane.as_str())
-            .ok_or(ControlLanePolicyError::IncompleteMap {
-                detail: format!("counters missing for lane {}", lane.as_str()),
-            })?;
+        let counters =
+            self.counters
+                .get_mut(lane.as_str())
+                .ok_or(ControlLanePolicyError::IncompleteMap {
+                    detail: format!("counters missing for lane {}", lane.as_str()),
+                })?;
         counters.tasks_run = counters.tasks_run.saturating_add(1);
         counters.consecutive_empty_ticks = 0;
 

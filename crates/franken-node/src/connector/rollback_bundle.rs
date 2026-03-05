@@ -1035,9 +1035,11 @@ mod tests {
         assert_eq!(bundle.manifest.target_version, "1.4.1");
         assert_eq!(bundle.components.len(), 3);
         assert!(!bundle.integrity_hash.is_empty());
-        assert!(store
-            .events()
-            .contains(&event_codes::RRB_001_BUNDLE_CREATED.to_string()));
+        assert!(
+            store
+                .events()
+                .contains(&event_codes::RRB_001_BUNDLE_CREATED.to_string())
+        );
     }
 
     #[test]
@@ -1591,14 +1593,18 @@ mod tests {
     fn test_manifest_health_checks_populated() {
         let (_store, bundle) = make_store_and_bundle();
         assert_eq!(bundle.manifest.health_checks.len(), 4);
-        assert!(bundle
-            .manifest
-            .health_checks
-            .contains(&"binary_version".to_string()));
-        assert!(bundle
-            .manifest
-            .health_checks
-            .contains(&"smoke_test".to_string()));
+        assert!(
+            bundle
+                .manifest
+                .health_checks
+                .contains(&"binary_version".to_string())
+        );
+        assert!(
+            bundle
+                .manifest
+                .health_checks
+                .contains(&"smoke_test".to_string())
+        );
     }
 
     #[test]

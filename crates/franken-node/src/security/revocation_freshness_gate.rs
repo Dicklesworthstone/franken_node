@@ -524,7 +524,13 @@ mod tests {
             .check(&p, 100, true, false, "key_rotate", "tr-1")
             .unwrap_err();
         assert!(
-            matches!(err, FreshnessError::Stale { tier: SafetyTier::Critical, .. }),
+            matches!(
+                err,
+                FreshnessError::Stale {
+                    tier: SafetyTier::Critical,
+                    ..
+                }
+            ),
             "fail-closed: exact boundary staleness must return Stale error"
         );
     }

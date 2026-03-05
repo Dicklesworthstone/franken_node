@@ -234,7 +234,12 @@ impl SafeExtensionOnboarding {
         if session_steps.is_empty() {
             return None;
         }
-        Some(session_steps.iter().map(|s| s.duration_seconds).fold(0u64, |a, b| a.saturating_add(b)))
+        Some(
+            session_steps
+                .iter()
+                .map(|s| s.duration_seconds)
+                .fold(0u64, |a, b| a.saturating_add(b)),
+        )
     }
 
     /// Generate onboarding health report.

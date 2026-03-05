@@ -166,7 +166,8 @@ fn derive_evidence_requirements(
     if projected.drift_score >= thresholds.max_drift_score_for_direct_admit {
         requirements.push("bpet.longitudinal_drift_trace".to_string());
     }
-    if projected.regime_shift_probability >= thresholds.max_regime_shift_probability_for_direct_admit
+    if projected.regime_shift_probability
+        >= thresholds.max_regime_shift_probability_for_direct_admit
     {
         requirements.push("bpet.regime_shift_counterfactuals".to_string());
         requirements.push("ops.signoff.two_person_rule".to_string());

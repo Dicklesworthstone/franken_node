@@ -240,7 +240,9 @@ impl QuarantineController {
     /// Compute HMAC-SHA256 over data using the controller's signing key.
     fn hmac_sha256(&self, data: &str) -> Result<String, String> {
         if self.signing_key.is_empty() {
-            return Err(format!("{ERR_QC_INVALID_KEY}: signing key must not be empty"));
+            return Err(format!(
+                "{ERR_QC_INVALID_KEY}: signing key must not be empty"
+            ));
         }
         let mut mac = Hmac::<Sha256>::new_from_slice(&self.signing_key)
             .map_err(|_| format!("{ERR_QC_INVALID_KEY}: HMAC key initialization failed"))?;

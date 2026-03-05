@@ -390,10 +390,12 @@ impl MarkerStream {
         };
 
         self.markers.push(marker);
-        self.markers.last().ok_or_else(|| MarkerStreamError::IntegrityFailure {
-            sequence: next_seq,
-            detail: "marker append invariant violated: stream empty after push".to_string(),
-        })
+        self.markers
+            .last()
+            .ok_or_else(|| MarkerStreamError::IntegrityFailure {
+                sequence: next_seq,
+                detail: "marker append invariant violated: stream empty after push".to_string(),
+            })
     }
 
     /// Get the most recent marker.

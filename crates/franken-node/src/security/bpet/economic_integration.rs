@@ -191,12 +191,23 @@ impl InterventionRoi {
         }
 
         // Clamp non-finite inputs to 0.0 to prevent NaN propagation.
-        let risk_reduction = if risk_reduction.is_finite() { risk_reduction } else { 0.0 };
-        let current_expected_loss =
-            if current_expected_loss.is_finite() { current_expected_loss } else { 0.0 };
+        let risk_reduction = if risk_reduction.is_finite() {
+            risk_reduction
+        } else {
+            0.0
+        };
+        let current_expected_loss = if current_expected_loss.is_finite() {
+            current_expected_loss
+        } else {
+            0.0
+        };
 
         let loss_avoided = risk_reduction * current_expected_loss;
-        let roi = if loss_avoided.is_finite() { loss_avoided / cost } else { 0.0 };
+        let roi = if loss_avoided.is_finite() {
+            loss_avoided / cost
+        } else {
+            0.0
+        };
         let payback = if loss_avoided > 0.0 && loss_avoided.is_finite() {
             cost / (loss_avoided / 365.0)
         } else {

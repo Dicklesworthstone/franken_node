@@ -13,6 +13,7 @@
 //! Invariants:
 //! - INV-FLEET-ZONE-SCOPE   — every operation is scoped to a zone/tenant
 //! - INV-FLEET-RECEIPT      — all operations produce signed decision receipts
+//! - INV-FLEET-BOUNDED      — all collections are bounded with capacity eviction
 //! - INV-FLEET-CONVERGENCE  — convergence state tracked with progress + ETA
 //! - INV-FLEET-SAFE-START   — API starts in read-only mode, requires activation
 //! - INV-FLEET-ROLLBACK     — release deterministically rolls back quarantine state
@@ -20,6 +21,15 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+
+/// Maximum fleet control events before oldest are evicted.
+const MAX_FLEET_EVENTS: usize = 4096;
+
+/// Maximum incident handles before oldest are evicted.
+const MAX_INCIDENTS: usize = 2048;
+
+/// Maximum zone status entries before oldest are evicted.
+const MAX_ZONE_STATUS: usize = 2048;
 
 use super::error::ApiError;
 use super::middleware::{
@@ -481,9 +491,21 @@ impl FleetControlManager {
             status: IncidentStatus::Active,
             action_type: "quarantine".to_string(),
         };
+        if self.incidents.len() >= MAX_INCIDENTS
+            && !self.incidents.contains_key(&incident_id)
+            && let Some(oldest_key) = self.incidents.keys().next().cloned()
+        {
+            self.incidents.remove(&oldest_key);
+        }
         self.incidents.insert(incident_id.clone(), incident);
 
-        // Update zone status
+        // Update zone status (bounded by MAX_ZONE_STATUS)
+        if self.zone_status.len() >= MAX_ZONE_STATUS
+            && !self.zone_status.contains_key(&scope.zone_id)
+            && let Some(oldest_key) = self.zone_status.keys().next().cloned()
+        {
+            self.zone_status.remove(&oldest_key);
+        }
         let zone = self
             .zone_status
             .entry(scope.zone_id.clone())
@@ -513,6 +535,10 @@ impl FleetControlManager {
         // Emit event
         let event =
             FleetControlEvent::quarantine_initiated(&trace.trace_id, &scope.zone_id, extension_id);
+        if self.events.len() >= MAX_FLEET_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
+            self.events.drain(0..overflow);
+        }
         self.events.push(event);
 
         Ok(FleetActionResult {
@@ -547,7 +573,13 @@ impl FleetControlManager {
         let op_id = self.next_operation_id();
         let now = chrono::Utc::now().to_rfc3339();
 
-        // Update zone status
+        // Update zone status (bounded by MAX_ZONE_STATUS)
+        if self.zone_status.len() >= MAX_ZONE_STATUS
+            && !self.zone_status.contains_key(&scope.zone_id)
+            && let Some(oldest_key) = self.zone_status.keys().next().cloned()
+        {
+            self.zone_status.remove(&oldest_key);
+        }
         let zone = self
             .zone_status
             .entry(scope.zone_id.clone())
@@ -575,11 +607,21 @@ impl FleetControlManager {
                 status: IncidentStatus::Active,
                 action_type: "revoke".to_string(),
             };
+            if self.incidents.len() >= MAX_INCIDENTS
+                && !self.incidents.contains_key(&incident_id)
+                && let Some(oldest_key) = self.incidents.keys().next().cloned()
+            {
+                self.incidents.remove(&oldest_key);
+            }
             self.incidents.insert(incident_id, incident);
         }
 
         let event =
             FleetControlEvent::revocation_issued(&trace.trace_id, &scope.zone_id, extension_id);
+        if self.events.len() >= MAX_FLEET_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
+            self.events.drain(0..overflow);
+        }
         self.events.push(event);
 
         Ok(FleetActionResult {
@@ -636,6 +678,10 @@ impl FleetControlManager {
         let receipt = self.build_receipt(&op_id, &identity.principal, &zone_id, &now);
 
         let event = FleetControlEvent::fleet_released(&trace.trace_id, &zone_id, incident_id);
+        if self.events.len() >= MAX_FLEET_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
+            self.events.drain(0..overflow);
+        }
         self.events.push(event);
 
         Ok(FleetActionResult {
@@ -702,6 +748,10 @@ impl FleetControlManager {
         };
 
         let event = FleetControlEvent::reconcile_completed(&trace.trace_id, zone_count);
+        if self.events.len() >= MAX_FLEET_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
+            self.events.drain(0..overflow);
+        }
         self.events.push(event);
 
         Ok(FleetActionResult {

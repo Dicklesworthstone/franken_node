@@ -225,8 +225,7 @@ impl AcknowledgementReceipt {
     }
 
     pub fn content_hash(&self) -> String {
-        let canonical =
-            serde_json::to_string(self).unwrap_or_else(|e| format!("__serde_err:{e}"));
+        let canonical = serde_json::to_string(self).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let digest =
             Sha256::digest([b"update_copilot_hash_v1:" as &[u8], canonical.as_bytes()].concat());
         hex::encode(digest)

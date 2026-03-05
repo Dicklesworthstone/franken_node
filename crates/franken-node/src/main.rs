@@ -2267,7 +2267,11 @@ fn build_registry_seed_request(
     tags: &[&str],
 ) -> RegistrationRequest {
     let attestation_hash = hex::encode(sha2::Sha256::digest(
-        [b"registry_seed_attestation_v1:" as &[u8], format!("{name}:{publisher_id}:{version}").as_bytes()].concat(),
+        [
+            b"registry_seed_attestation_v1:" as &[u8],
+            format!("{name}:{publisher_id}:{version}").as_bytes(),
+        ]
+        .concat(),
     ));
     let signature_hex = format!("{attestation_hash}{attestation_hash}");
     RegistrationRequest {
@@ -2291,7 +2295,11 @@ fn build_registry_seed_request(
             version: version.to_string(),
             parent_version: None,
             content_hash: hex::encode(sha2::Sha256::digest(
-                [b"registry_seed_content_v1:" as &[u8], format!("{name}:{version}:content").as_bytes()].concat(),
+                [
+                    b"registry_seed_content_v1:" as &[u8],
+                    format!("{name}:{version}:content").as_bytes(),
+                ]
+                .concat(),
             )),
             registered_at: chrono::Utc::now().to_rfc3339(),
             compatible_with: vec!["franken-node".to_string()],

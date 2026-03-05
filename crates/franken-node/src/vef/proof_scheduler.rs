@@ -11,6 +11,15 @@ use std::fmt;
 
 pub const SCHEDULER_SCHEMA_VERSION: &str = "vef-proof-scheduler-v1";
 
+/// Maximum scheduler events before oldest are evicted.
+const MAX_SCHEDULER_EVENTS: usize = 4096;
+
+/// Maximum tracked windows before oldest are evicted.
+const MAX_WINDOWS_SEEN: usize = 4096;
+
+/// Maximum tracked jobs before oldest are evicted.
+const MAX_JOBS: usize = 2048;
+
 pub mod event_codes {
     pub const VEF_SCHED_001_WINDOW_SELECTED: &str = "VEF-SCHED-001";
     pub const VEF_SCHED_002_JOB_DISPATCHED: &str = "VEF-SCHED-002";
@@ -217,6 +226,14 @@ impl VefProofScheduler {
         }
     }
 
+    fn push_event(&mut self, event: SchedulerEvent) {
+        if self.events.len() >= MAX_SCHEDULER_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_SCHEDULER_EVENTS;
+            self.events.drain(0..overflow);
+        }
+        self.events.push(event);
+    }
+
     pub fn jobs(&self) -> &BTreeMap<String, ProofJob> {
         &self.jobs
     }
@@ -245,7 +262,8 @@ impl VefProofScheduler {
         let mut windows = Vec::new();
         let mut start = 0usize;
         while start < entries.len() {
-            let max_end = (start + self.policy.max_receipts_per_window.saturating_sub(1)).min(entries.len().saturating_sub(1));
+            let max_end = (start + self.policy.max_receipts_per_window.saturating_sub(1))
+                .min(entries.len().saturating_sub(1));
             let global_start = entries[start].index;
             let global_max_end = entries[max_end].index;
 
@@ -278,7 +296,7 @@ impl VefProofScheduler {
                 created_at_millis: now_millis,
                 trace_id: trace_id.to_string(),
             };
-            self.events.push(SchedulerEvent {
+            self.push_event(SchedulerEvent {
                 event_code: event_codes::VEF_SCHED_001_WINDOW_SELECTED.to_string(),
                 trace_id: trace_id.to_string(),
                 detail: format!(
@@ -341,7 +359,18 @@ impl VefProofScheduler {
                 completed_at_millis: None,
                 trace_id: window.trace_id.clone(),
             };
+            if self.jobs.len() >= MAX_JOBS
+                && !self.jobs.contains_key(&job_id)
+                && let Some(oldest_key) = self.jobs.keys().next().cloned()
+            {
+                self.jobs.remove(&oldest_key);
+            }
             self.jobs.insert(job_id.clone(), job);
+            if self.windows_seen.len() >= MAX_WINDOWS_SEEN
+                && let Some(oldest) = self.windows_seen.iter().next().cloned()
+            {
+                self.windows_seen.remove(&oldest);
+            }
             self.windows_seen.insert(window.window_id.clone());
             queued.push(job_id);
         }
@@ -387,12 +416,14 @@ impl VefProofScheduler {
             entry.dispatched_at_millis = Some(now_millis);
             compute_used = compute_used.saturating_add(entry.estimated_compute_millis);
             memory_used = memory_used.saturating_add(entry.estimated_memory_mib);
-            self.events.push(SchedulerEvent {
-                event_code: event_codes::VEF_SCHED_002_JOB_DISPATCHED.to_string(),
-                trace_id: entry.trace_id.clone(),
-                detail: format!("job={} window={}", entry.job_id, entry.window_id),
-            });
+            let evt_trace = entry.trace_id.clone();
+            let evt_detail = format!("job={} window={}", entry.job_id, entry.window_id);
             dispatched.push(entry.clone());
+            self.push_event(SchedulerEvent {
+                event_code: event_codes::VEF_SCHED_002_JOB_DISPATCHED.to_string(),
+                trace_id: evt_trace,
+                detail: evt_detail,
+            });
         }
 
         Ok(dispatched)
@@ -411,9 +442,10 @@ impl VefProofScheduler {
         }
         job.status = ProofJobStatus::Completed;
         job.completed_at_millis = Some(now_millis);
-        self.events.push(SchedulerEvent {
+        let evt_trace = job.trace_id.clone();
+        self.push_event(SchedulerEvent {
             event_code: event_codes::VEF_SCHED_003_JOB_COMPLETED.to_string(),
-            trace_id: job.trace_id.clone(),
+            trace_id: evt_trace,
             detail: format!("job={job_id} completed"),
         });
         Ok(())
@@ -421,6 +453,7 @@ impl VefProofScheduler {
 
     pub fn enforce_deadlines(&mut self, now_millis: u64) -> Vec<String> {
         let mut exceeded = Vec::new();
+        let mut deferred_events = Vec::new();
         for job in self.jobs.values_mut() {
             if matches!(
                 job.status,
@@ -431,12 +464,15 @@ impl VefProofScheduler {
             if now_millis >= job.deadline_millis {
                 job.status = ProofJobStatus::DeadlineExceeded;
                 exceeded.push(job.job_id.clone());
-                self.events.push(SchedulerEvent {
+                deferred_events.push(SchedulerEvent {
                     event_code: event_codes::VEF_SCHED_ERR_001_DEADLINE.to_string(),
                     trace_id: job.trace_id.clone(),
                     detail: format!("job={} exceeded deadline", job.job_id),
                 });
             }
+        }
+        for event in deferred_events {
+            self.push_event(event);
         }
         exceeded
     }
@@ -459,13 +495,17 @@ impl VefProofScheduler {
                             .map(|current| current.min(job.created_at_millis))
                             .unwrap_or(job.created_at_millis),
                     );
-                    compute_budget_used_millis = compute_budget_used_millis.saturating_add(job.estimated_compute_millis);
-                    memory_budget_used_mib = memory_budget_used_mib.saturating_add(job.estimated_memory_mib);
+                    compute_budget_used_millis =
+                        compute_budget_used_millis.saturating_add(job.estimated_compute_millis);
+                    memory_budget_used_mib =
+                        memory_budget_used_mib.saturating_add(job.estimated_memory_mib);
                 }
                 ProofJobStatus::Dispatched => {
                     dispatched_jobs += 1;
-                    compute_budget_used_millis = compute_budget_used_millis.saturating_add(job.estimated_compute_millis);
-                    memory_budget_used_mib = memory_budget_used_mib.saturating_add(job.estimated_memory_mib);
+                    compute_budget_used_millis =
+                        compute_budget_used_millis.saturating_add(job.estimated_compute_millis);
+                    memory_budget_used_mib =
+                        memory_budget_used_mib.saturating_add(job.estimated_memory_mib);
                 }
                 ProofJobStatus::Completed => completed_jobs += 1,
                 ProofJobStatus::DeadlineExceeded => deadline_exceeded_jobs += 1,
@@ -485,7 +525,7 @@ impl VefProofScheduler {
             memory_budget_used_mib,
             windows_observed: self.windows_seen.len(),
         };
-        self.events.push(SchedulerEvent {
+        self.push_event(SchedulerEvent {
             event_code: event_codes::VEF_SCHED_004_BACKLOG_HEALTH.to_string(),
             trace_id: trace_id.to_string(),
             detail: format!(
@@ -722,9 +762,7 @@ mod tests {
             .unwrap();
         let dispatched = scheduler.dispatch_jobs(1_701_100_008_020).unwrap();
         let job_id = &dispatched[0].job_id;
-        scheduler
-            .mark_completed(job_id, 1_701_100_008_030)
-            .unwrap();
+        scheduler.mark_completed(job_id, 1_701_100_008_030).unwrap();
         assert_eq!(
             scheduler.jobs().get(job_id).unwrap().status,
             ProofJobStatus::Completed

@@ -539,9 +539,8 @@ impl SlashingEngine {
         // Normalize to the effective policy value so amount and hash describe
         // the same penalty decision across nodes/config representations.
         let effective_bps = tier_policy.slash_fraction_bps.min(10_000);
-        let slash_amount =
-            u64::try_from(stake_balance as u128 * effective_bps as u128 / 10000)
-                .unwrap_or(u64::MAX);
+        let slash_amount = u64::try_from(stake_balance as u128 * effective_bps as u128 / 10000)
+            .unwrap_or(u64::MAX);
         let penalty_hash = compute_penalty_hash(evidence_hash, effective_bps, stake_balance);
 
         Ok((slash_amount, penalty_hash))
@@ -862,14 +861,14 @@ impl StakingLedger {
         let post_balance = pre_balance.saturating_sub(slash_amount);
 
         // Update stake record
-        let stake_record = self
-            .state
-            .stakes
-            .get_mut(&stake_id.0)
-            .ok_or(StakingError::StakeNotFound {
-                stake_id,
-                code: ERR_STAKE_NOT_FOUND,
-            })?;
+        let stake_record =
+            self.state
+                .stakes
+                .get_mut(&stake_id.0)
+                .ok_or(StakingError::StakeNotFound {
+                    stake_id,
+                    code: ERR_STAKE_NOT_FOUND,
+                })?;
         stake_record.state = StakeState::Slashed;
         stake_record.slashed_at = Some(timestamp);
         stake_record.amount = post_balance;
@@ -1110,14 +1109,14 @@ impl StakingLedger {
                 .state = StakeState::Slashed;
         } else {
             // Appeal granted: restore to active and return slashed amount
-            let stake_record = self
-                .state
-                .stakes
-                .get_mut(&stake_id.0)
-                .ok_or(StakingError::StakeNotFound {
-                    stake_id,
-                    code: ERR_STAKE_NOT_FOUND,
-                })?;
+            let stake_record =
+                self.state
+                    .stakes
+                    .get_mut(&stake_id.0)
+                    .ok_or(StakingError::StakeNotFound {
+                        stake_id,
+                        code: ERR_STAKE_NOT_FOUND,
+                    })?;
             stake_record.state = StakeState::Active;
 
             // Find the slash event and restore

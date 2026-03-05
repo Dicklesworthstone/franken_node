@@ -5,6 +5,8 @@
 
 use std::collections::BTreeSet;
 
+const MAX_AUDIT_LOG_ENTRIES: usize = 1024;
+
 /// Direction of a control channel message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Direction {
@@ -199,6 +201,16 @@ impl ControlChannel {
         }
     }
 
+    /// Append an audit entry with deterministic oldest-first eviction once
+    /// the bounded capacity is reached.
+    fn push_audit_entry(&mut self, entry: ChannelAuditEntry) {
+        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            let overflow = self.audit_log.len() + 1 - MAX_AUDIT_LOG_ENTRIES;
+            self.audit_log.drain(0..overflow);
+        }
+        self.audit_log.push(entry);
+    }
+
     /// Process a message through the authenticated control channel.
     ///
     /// INV-ACC-AUTHENTICATED: auth check first.
@@ -234,7 +246,7 @@ impl ControlChannel {
                 verdict: "REJECT_AUTH".into(),
                 timestamp: timestamp.into(),
             };
-            self.audit_log.push(audit.clone());
+            self.push_audit_entry(audit.clone());
             return Err(ChannelError::AuthFailed {
                 message_id: msg.message_id.clone(),
             });
@@ -255,7 +267,7 @@ impl ControlChannel {
                 verdict: "REJECT_REPLAY".into(),
                 timestamp: timestamp.into(),
             };
-            self.audit_log.push(audit);
+            self.push_audit_entry(audit);
             return Err(ChannelError::ReplayDetected {
                 message_id: msg.message_id.clone(),
                 sequence: msg.sequence_number,
@@ -280,7 +292,7 @@ impl ControlChannel {
                 verdict: "REJECT_SEQUENCE".into(),
                 timestamp: timestamp.into(),
             };
-            self.audit_log.push(audit);
+            self.push_audit_entry(audit);
             return Err(ChannelError::SequenceRegress {
                 message_id: msg.message_id.clone(),
                 expected_min,
@@ -316,7 +328,7 @@ impl ControlChannel {
             verdict: "ACCEPT".into(),
             timestamp: timestamp.into(),
         };
-        self.audit_log.push(audit.clone());
+        self.push_audit_entry(audit.clone());
 
         Ok((result, audit))
     }
@@ -554,5 +566,30 @@ mod tests {
         let (r1b, _) = ch1.process_message(&m2, "ts").unwrap();
         let (r2b, _) = ch2.process_message(&m2, "ts").unwrap();
         assert_eq!(r1b.verdict, r2b.verdict);
+    }
+
+    #[test]
+    fn audit_log_capacity_is_bounded_with_oldest_first_eviction() {
+        let mut ch = ControlChannel::new(config()).unwrap();
+        let start = 10_000_u64;
+        let total = MAX_AUDIT_LOG_ENTRIES + 64;
+
+        for idx in 0..total {
+            let seq = start + idx as u64;
+            let id = format!("m{seq}");
+            ch.process_message(&msg(&id, Direction::Send, seq, "tok"), "ts")
+                .unwrap();
+        }
+
+        let log = ch.audit_log();
+        assert_eq!(log.len(), MAX_AUDIT_LOG_ENTRIES);
+        assert_eq!(
+            log.first().map(|entry| entry.sequence_number),
+            Some(start + 64)
+        );
+        assert_eq!(
+            log.last().map(|entry| entry.sequence_number),
+            Some(start + total as u64 - 1)
+        );
     }
 }

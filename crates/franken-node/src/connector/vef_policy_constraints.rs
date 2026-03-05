@@ -644,7 +644,10 @@ pub fn proof_generator_accepts(envelope: &CompiledConstraintEnvelope) -> bool {
             && !predicate.source_rule_id.is_empty()
             && !predicate.expression.is_empty()
             && predicate.trace_link.starts_with("policy:")
-            && predicate.trace_link.split('/').any(|seg| seg.starts_with("rule:"))
+            && predicate
+                .trace_link
+                .split('/')
+                .any(|seg| seg.starts_with("rule:"))
     })
 }
 

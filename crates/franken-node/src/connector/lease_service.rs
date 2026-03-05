@@ -236,7 +236,9 @@ impl LeaseService {
         let lease = self
             .leases
             .get_mut(lease_id)
-            .ok_or_else(|| LeaseError::NotFound { lease_id: lease_id.to_string() })?;
+            .ok_or_else(|| LeaseError::NotFound {
+                lease_id: lease_id.to_string(),
+            })?;
         lease.renewed_at = now;
 
         self.decisions.push(LeaseDecision {

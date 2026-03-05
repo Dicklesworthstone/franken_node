@@ -41,6 +41,12 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
+/// Maximum entries before the chain refuses new appends.
+const MAX_CHAIN_ENTRIES: usize = 16384;
+
+/// Maximum checkpoints before oldest are evicted.
+const MAX_CHECKPOINTS: usize = 1024;
+
 /// Stable schema version for chain serialization and hash material.
 pub const RECEIPT_CHAIN_SCHEMA_VERSION: &str = "vef-receipt-chain-v1";
 
@@ -220,6 +226,11 @@ impl ReceiptChain {
         appended_at_millis: u64,
         trace_id: impl Into<String>,
     ) -> Result<AppendOutcome, ChainError> {
+        if self.entries.len() >= MAX_CHAIN_ENTRIES {
+            return Err(ChainError::internal(format!(
+                "chain capacity exhausted ({MAX_CHAIN_ENTRIES} entries)"
+            )));
+        }
         let trace_id = trace_id.into();
         let receipt_hash = receipt_hash_sha256(&receipt)
             .map_err(|err| ChainError::internal(format!("receipt hash failed: {err}")))?;
@@ -472,6 +483,10 @@ impl ReceiptChain {
             created_at_millis: now_millis,
             trace_id,
         };
+        if self.checkpoints.len() >= MAX_CHECKPOINTS {
+            let overflow = self.checkpoints.len() + 1 - MAX_CHECKPOINTS;
+            self.checkpoints.drain(0..overflow);
+        }
         self.checkpoints.push(checkpoint.clone());
         self.last_checkpoint_entry = self.entries.len();
         Ok(checkpoint)

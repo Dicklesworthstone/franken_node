@@ -19,6 +19,21 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::security::constant_time::ct_eq;
 
+/// Maximum events before oldest are evicted.
+const MAX_EVENTS: usize = 4096;
+
+/// Maximum verifiers before oldest are evicted.
+const MAX_VERIFIERS: usize = 4096;
+
+/// Maximum attestations before oldest are evicted.
+const MAX_ATTESTATIONS: usize = 8192;
+
+/// Maximum disputes before oldest are evicted.
+const MAX_DISPUTES: usize = 2048;
+
+/// Maximum replay capsules before oldest are evicted.
+const MAX_REPLAY_CAPSULES: usize = 2048;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -367,6 +382,10 @@ impl VerifierEconomyRegistry {
     }
 
     fn emit(&mut self, code: &str, detail: &str) {
+        if self.events.len() >= MAX_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_EVENTS;
+            self.events.drain(0..overflow);
+        }
         self.events.push(VerifierEconomyEvent {
             code: code.to_string(),
             detail: detail.to_string(),
@@ -413,6 +432,12 @@ impl VerifierEconomyRegistry {
             active: true,
         };
 
+        if self.verifiers.len() >= MAX_VERIFIERS
+            && !self.verifiers.contains_key(&verifier_id)
+            && let Some(oldest_key) = self.verifiers.keys().next().cloned()
+        {
+            self.verifiers.remove(&oldest_key);
+        }
         self.verifiers.insert(verifier_id.clone(), verifier.clone());
         self.emit(VEP_005, &format!("Verifier registered: {}", verifier_id));
 
@@ -542,6 +567,12 @@ impl VerifierEconomyRegistry {
             state: AttestationState::Submitted,
         };
 
+        if self.attestations.len() >= MAX_ATTESTATIONS
+            && !self.attestations.contains_key(&attestation_id)
+            && let Some(oldest_key) = self.attestations.keys().next().cloned()
+        {
+            self.attestations.remove(&oldest_key);
+        }
         self.attestations
             .insert(attestation_id.clone(), attestation.clone());
         self.emit(
@@ -733,6 +764,12 @@ impl VerifierEconomyRegistry {
             resolved_at: None,
         };
 
+        if self.disputes.len() >= MAX_DISPUTES
+            && !self.disputes.contains_key(&dispute_id)
+            && let Some(oldest_key) = self.disputes.keys().next().cloned()
+        {
+            self.disputes.remove(&oldest_key);
+        }
         self.disputes.insert(dispute_id.clone(), dispute.clone());
         self.emit(
             VEP_003,
@@ -776,6 +813,12 @@ impl VerifierEconomyRegistry {
 
     pub fn register_replay_capsule(&mut self, capsule: ReplayCapsule) -> VepResult<()> {
         let capsule_id = capsule.capsule_id.clone();
+        if self.replay_capsules.len() >= MAX_REPLAY_CAPSULES
+            && !self.replay_capsules.contains_key(&capsule_id)
+            && let Some(oldest_key) = self.replay_capsules.keys().next().cloned()
+        {
+            self.replay_capsules.remove(&oldest_key);
+        }
         self.replay_capsules.insert(capsule_id.clone(), capsule);
         Ok(())
     }

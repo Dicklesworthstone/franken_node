@@ -270,13 +270,12 @@ impl PolicyChangeEngine {
                 new_value: d.old_value.clone(),
             })
             .collect();
-        let rollback_command = Some(
-            serde_json::to_string(&rollback_diff)
-                .map_err(|e| PolicyChangeError::new(
-                    "ROLLBACK_SERIALIZATION_FAILED",
-                    format!("failed to serialize rollback diff: {e}"),
-                ))?,
-        );
+        let rollback_command = Some(serde_json::to_string(&rollback_diff).map_err(|e| {
+            PolicyChangeError::new(
+                "ROLLBACK_SERIALIZATION_FAILED",
+                format!("failed to serialize rollback diff: {e}"),
+            )
+        })?);
 
         let proposal_id = proposal.proposal_id.clone();
         let proposed_by = proposal.proposed_by.clone();

@@ -212,7 +212,10 @@ impl ProofInputEnvelope {
             )));
         }
 
-        let expected_count = window.end_index.saturating_sub(window.start_index).saturating_add(1) as usize;
+        let expected_count = window
+            .end_index
+            .saturating_sub(window.start_index)
+            .saturating_add(1) as usize;
         if window_entries.len() != expected_count {
             return Err(ProofServiceError::input_error(format!(
                 "window {} expected {} entries, found {}",
@@ -275,7 +278,10 @@ impl ProofInputEnvelope {
                 self.receipt_start_index, self.receipt_end_index
             )));
         }
-        let expected_count = self.receipt_end_index.saturating_sub(self.receipt_start_index).saturating_add(1) as usize;
+        let expected_count = self
+            .receipt_end_index
+            .saturating_sub(self.receipt_start_index)
+            .saturating_add(1) as usize;
         if self.receipt_hashes.len() != expected_count {
             return Err(ProofServiceError::input_error(format!(
                 "receipt hash count mismatch expected={} got={}",

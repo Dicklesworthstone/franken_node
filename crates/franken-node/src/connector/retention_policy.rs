@@ -221,7 +221,9 @@ impl RetentionStore {
         let msg = self
             .messages
             .remove(message_id)
-            .ok_or_else(|| RetentionError::NotFound { message_id: message_id.to_string() })?;
+            .ok_or_else(|| RetentionError::NotFound {
+                message_id: message_id.to_string(),
+            })?;
         self.total_bytes = self.total_bytes.saturating_sub(msg.size_bytes);
 
         self.decisions.push(RetentionDecision {
