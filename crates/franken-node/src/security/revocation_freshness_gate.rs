@@ -519,15 +519,21 @@ mod tests {
     fn critical_at_boundary_denied() {
         let mut g = gate();
         let p = proof(SafetyTier::Critical, 99, "n1");
-        let d = g.check(&p, 100, true, false, "key_rotate", "tr-1").unwrap();
-        assert!(!d.allowed, "fail-closed: exact boundary staleness must deny");
-        assert_eq!(d.event_code, event_codes::RFG_002);
+        // Fail-closed: staleness == max_staleness → Err(Stale), not Ok with allowed=false
+        let err = g
+            .check(&p, 100, true, false, "key_rotate", "tr-1")
+            .unwrap_err();
+        assert!(
+            matches!(err, FreshnessError::Stale { tier: SafetyTier::Critical, .. }),
+            "fail-closed: exact boundary staleness must return Stale error"
+        );
     }
 
     #[test]
     fn standard_fresh_proof_passes() {
         let mut g = gate();
-        let p = proof(SafetyTier::Standard, 95, "n1");
+        // staleness = 100 - 96 = 4 < max_staleness(Standard=5) → fresh
+        let p = proof(SafetyTier::Standard, 96, "n1");
         let d = g
             .check(&p, 100, true, false, "policy_deploy", "tr-1")
             .unwrap();

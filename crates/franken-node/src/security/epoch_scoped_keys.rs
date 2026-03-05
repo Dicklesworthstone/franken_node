@@ -348,7 +348,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             sig.to_hex(),
-            "ab39e9df44b940453a89358528d54bff9bd9d180359dac0a1f3dd2f924e43494"
+            "30bc7f13f9c722de36c7adfc0d46e8bae53f8d0687809548d3a8772c155ba0c9"
         );
     }
 

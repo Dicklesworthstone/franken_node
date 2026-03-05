@@ -720,13 +720,13 @@ mod tests {
         let queued = scheduler
             .enqueue_windows(&windows, 1_701_100_008_010)
             .unwrap();
-        let job_id = queued[0].clone();
-        scheduler.dispatch_jobs(1_701_100_008_020).unwrap();
+        let dispatched = scheduler.dispatch_jobs(1_701_100_008_020).unwrap();
+        let job_id = &dispatched[0].job_id;
         scheduler
-            .mark_completed(&job_id, 1_701_100_008_030)
+            .mark_completed(job_id, 1_701_100_008_030)
             .unwrap();
         assert_eq!(
-            scheduler.jobs().get(&job_id).unwrap().status,
+            scheduler.jobs().get(job_id).unwrap().status,
             ProofJobStatus::Completed
         );
     }
