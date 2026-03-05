@@ -793,7 +793,7 @@ impl EffectsFirewall {
                     timestamp,
                 );
             }
-            _ => {}
+            FirewallVerdict::Allow | FirewallVerdict::Deny => {}
         }
 
         // Emit FW_003: verdict issued.

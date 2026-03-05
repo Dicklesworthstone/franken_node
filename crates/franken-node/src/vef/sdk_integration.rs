@@ -566,7 +566,7 @@ impl ExternalVerificationEndpoint {
         };
         self.store.insert(submission.submission_id.clone(), record);
 
-        self.next_seq = self.next_seq.wrapping_add(1);
+        self.next_seq = self.next_seq.saturating_add(1);
 
         self.events.push(VsiEvent {
             event_code: event_codes::VSI_002_EVIDENCE_SUBMITTED.to_string(),

@@ -487,7 +487,7 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: "Quarantine order disappeared during operation".to_string(),
             })?;
-        if record.state != QuarantineState::Enforced {
+        if matches!(record.state, QuarantineState::Initiated | QuarantineState::Propagated) {
             record.state = QuarantineState::Enforced;
             record
                 .state_history
@@ -670,6 +670,15 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: "Quarantine order disappeared during operation".to_string(),
             })?;
+        if !matches!(record.state, QuarantineState::Isolated) {
+            return Err(QuarantineError {
+                code: ERR_RECALL_WITHOUT_QUARANTINE.to_owned(),
+                message: format!(
+                    "Cannot trigger recall from state {:?}, requires Isolated",
+                    record.state
+                ),
+            });
+        }
         record.state = QuarantineState::RecallTriggered;
         record
             .state_history
@@ -716,6 +725,15 @@ impl QuarantineRegistry {
                 code: ERR_QUARANTINE_NOT_FOUND.to_owned(),
                 message: "Quarantine order disappeared during operation".to_string(),
             })?;
+        if record.state != QuarantineState::RecallTriggered {
+            return Err(QuarantineError {
+                code: ERR_RECALL_WITHOUT_QUARANTINE.to_owned(),
+                message: format!(
+                    "Cannot record recall receipt in state {:?}, requires RecallTriggered",
+                    record.state
+                ),
+            });
+        }
         record.recall_receipts.push(receipt);
 
         self.append_audit(
@@ -1179,8 +1197,13 @@ mod tests {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
         reg.initiate_quarantine(order).unwrap();
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .unwrap();
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
+            .unwrap();
 
-        // Trigger recall.
+        // Trigger recall (requires Isolated state).
         reg.trigger_recall(make_recall("q-001")).unwrap();
         assert_eq!(
             reg.get_record("q-001").unwrap().state,
@@ -1244,6 +1267,11 @@ mod tests {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
         reg.initiate_quarantine(order).unwrap();
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .unwrap();
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
+            .unwrap();
         reg.trigger_recall(make_recall("q-001")).unwrap();
 
         // 1 of 3 nodes confirmed.
