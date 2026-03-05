@@ -9,6 +9,12 @@
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Maximum reconciliation events before oldest are evicted.
+const MAX_EVENTS: usize = 4096;
+
+/// Maximum trust records per TrustState before inserts are rejected.
+const MAX_TRUST_RECORDS: usize = 8192;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -176,7 +182,14 @@ impl TrustState {
     }
 
     /// Insert a record into the state and recompute root digest.
+    /// Evicts the oldest record (by key) when at capacity.
     pub fn insert(&mut self, record: TrustRecord) {
+        if self.records.len() >= MAX_TRUST_RECORDS
+            && !self.records.contains_key(&record.id)
+            && let Some(oldest_key) = self.records.keys().next().cloned()
+        {
+            self.records.remove(&oldest_key);
+        }
         self.records.insert(record.id.clone(), record);
         self.recompute_root_digest();
     }
@@ -291,6 +304,14 @@ impl AntiEntropyReconciler {
         })
     }
 
+    fn push_event(&mut self, event: ReconciliationEvent) {
+        if self.events.len() >= MAX_EVENTS {
+            let overflow = self.events.len() + 1 - MAX_EVENTS;
+            self.events.drain(0..overflow);
+        }
+        self.events.push(event);
+    }
+
     /// Compute the delta between local and remote states.
     /// INV-AE-DELTA: only processes O(delta) records.
     pub fn compute_delta(&self, local: &TrustState, remote: &TrustState) -> Vec<TrustRecord> {
@@ -316,7 +337,10 @@ impl AntiEntropyReconciler {
             let (Some(local_rec), Some(remote_rec)) = (local.get(id), remote.get(id)) else {
                 continue;
             };
-            if !crate::security::constant_time::ct_eq_bytes(&local_rec.digest(), &remote_rec.digest()) {
+            if !crate::security::constant_time::ct_eq_bytes(
+                &local_rec.digest(),
+                &remote_rec.digest(),
+            ) {
                 return Some(id.clone());
             }
         }
@@ -338,7 +362,7 @@ impl AntiEntropyReconciler {
         let trace_id = format!("ae-{}", self.reconciliation_count);
         let start = std::time::Instant::now();
 
-        self.events.push(ReconciliationEvent {
+        self.push_event(ReconciliationEvent {
             code: EVT_CYCLE_STARTED.to_string(),
             detail: format!("local={},remote={}", local.len(), remote.len()),
             trace_id: trace_id.clone(),
@@ -347,7 +371,7 @@ impl AntiEntropyReconciler {
 
         // Check for fork.
         if let Some(forked_id) = self.detect_fork(local, remote) {
-            self.events.push(ReconciliationEvent {
+            self.push_event(ReconciliationEvent {
                 code: EVT_FORK_DETECTED.to_string(),
                 detail: format!("divergent record: {forked_id}"),
                 trace_id: trace_id.clone(),
@@ -360,7 +384,7 @@ impl AntiEntropyReconciler {
         let delta = self.compute_delta(local, remote);
         let delta_size = delta.len();
 
-        self.events.push(ReconciliationEvent {
+        self.push_event(ReconciliationEvent {
             code: EVT_DELTA_COMPUTED.to_string(),
             detail: format!("delta_size={delta_size}"),
             trace_id: trace_id.clone(),
@@ -385,7 +409,7 @@ impl AntiEntropyReconciler {
             if self.config.cancellation_enabled
                 && cancelled.load(std::sync::atomic::Ordering::Relaxed)
             {
-                self.events.push(ReconciliationEvent {
+                self.push_event(ReconciliationEvent {
                     code: EVT_CANCELLED.to_string(),
                     detail: format!("cancelled after validating {} records", accepted.len()),
                     trace_id: trace_id.clone(),
@@ -396,7 +420,7 @@ impl AntiEntropyReconciler {
 
             // Check if already present (idempotent replay).
             if local.contains(&record.id) {
-                self.events.push(ReconciliationEvent {
+                self.push_event(ReconciliationEvent {
                     code: EVT_REPLAY_IDEMPOTENT.to_string(),
                     detail: format!("record {} already present", record.id),
                     trace_id: trace_id.clone(),
@@ -407,7 +431,7 @@ impl AntiEntropyReconciler {
 
             // INV-AE-EPOCH: reject future-epoch records.
             if record.epoch > local.current_epoch() + self.config.epoch_tolerance {
-                self.events.push(ReconciliationEvent {
+                self.push_event(ReconciliationEvent {
                     code: EVT_RECORD_REJECTED.to_string(),
                     detail: format!(
                         "epoch violation: record {} epoch={} > local={}",
@@ -424,7 +448,7 @@ impl AntiEntropyReconciler {
 
             // INV-AE-PROOF: verify MMR inclusion proof.
             if self.config.proof_required && !verify_mmr_proof(record) {
-                self.events.push(ReconciliationEvent {
+                self.push_event(ReconciliationEvent {
                     code: EVT_RECORD_REJECTED.to_string(),
                     detail: format!("proof invalid: record {}", record.id),
                     trace_id: trace_id.clone(),
@@ -435,7 +459,7 @@ impl AntiEntropyReconciler {
             }
 
             accepted.push(record.clone());
-            self.events.push(ReconciliationEvent {
+            self.push_event(ReconciliationEvent {
                 code: EVT_RECORD_ACCEPTED.to_string(),
                 detail: format!("record {} epoch={}", record.id, record.epoch),
                 trace_id: trace_id.clone(),
@@ -450,7 +474,7 @@ impl AntiEntropyReconciler {
 
         let elapsed = start.elapsed();
 
-        self.events.push(ReconciliationEvent {
+        self.push_event(ReconciliationEvent {
             code: EVT_CYCLE_COMPLETED.to_string(),
             detail: format!(
                 "accepted={},rejected={},elapsed_ms={}",

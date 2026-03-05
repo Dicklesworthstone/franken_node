@@ -22,6 +22,8 @@ pub const SCHEMA_VERSION: &str = "ls-v1.0";
 
 /// Default starvation window in milliseconds.
 pub const DEFAULT_STARVATION_WINDOW_MS: u64 = 5_000;
+/// Default maximum number of audit log records retained in-memory.
+pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 
 // ---- Event codes ----
 
@@ -452,12 +454,21 @@ pub struct LaneScheduler {
     counters: BTreeMap<String, LaneCounters>,
     active_tasks: BTreeMap<String, TaskAssignment>,
     audit_log: Vec<LaneAuditRecord>,
+    max_audit_log_entries: usize,
     task_counter: u64,
 }
 
 impl LaneScheduler {
     /// Create a new lane scheduler with the given policy.
     pub fn new(policy: LaneMappingPolicy) -> Result<Self, LaneSchedulerError> {
+        Self::with_audit_log_capacity(policy, DEFAULT_MAX_AUDIT_LOG_ENTRIES)
+    }
+
+    /// Create a new lane scheduler with explicit audit log capacity.
+    pub fn with_audit_log_capacity(
+        policy: LaneMappingPolicy,
+        max_audit_log_entries: usize,
+    ) -> Result<Self, LaneSchedulerError> {
         if let Err(detail) = policy.validate() {
             return Err(LaneSchedulerError::InvalidPolicy { detail });
         }
@@ -475,8 +486,17 @@ impl LaneScheduler {
             counters,
             active_tasks: BTreeMap::new(),
             audit_log: Vec::new(),
+            max_audit_log_entries: max_audit_log_entries.max(1),
             task_counter: 0,
         })
+    }
+
+    fn push_audit_record(&mut self, record: LaneAuditRecord) {
+        self.audit_log.push(record);
+        if self.audit_log.len() > self.max_audit_log_entries {
+            let overflow = self.audit_log.len() - self.max_audit_log_entries;
+            self.audit_log.drain(0..overflow);
+        }
     }
 
     /// Assign a task to a lane based on its class.
@@ -532,7 +552,7 @@ impl LaneScheduler {
         self.active_tasks
             .insert(task_id.clone(), assignment.clone());
 
-        self.audit_log.push(LaneAuditRecord {
+        self.push_audit_record(LaneAuditRecord {
             event_code: event_codes::LANE_ASSIGN.to_string(),
             task_id,
             task_class: task_class.to_string(),
@@ -570,7 +590,7 @@ impl LaneScheduler {
         counters.completed_total = counters.completed_total.saturating_add(1);
         counters.last_completion_ms = Some(timestamp_ms);
 
-        self.audit_log.push(LaneAuditRecord {
+        self.push_audit_record(LaneAuditRecord {
             event_code: event_codes::LANE_TASK_COMPLETED.to_string(),
             task_id: task_id.to_string(),
             task_class: assignment.task_class.to_string(),
@@ -621,7 +641,7 @@ impl LaneScheduler {
                 c.starvation_events = c.starvation_events.saturating_add(1);
             }
 
-            self.audit_log.push(LaneAuditRecord {
+            self.push_audit_record(LaneAuditRecord {
                 event_code: event_codes::LANE_STARVED.to_string(),
                 task_id: String::new(),
                 task_class: String::new(),
@@ -685,6 +705,11 @@ impl LaneScheduler {
     /// Get the audit log.
     pub fn audit_log(&self) -> &[LaneAuditRecord] {
         &self.audit_log
+    }
+
+    /// Get configured audit log capacity.
+    pub fn audit_log_capacity(&self) -> usize {
+        self.max_audit_log_entries
     }
 
     /// Export audit log as JSONL.
@@ -839,6 +864,24 @@ mod tests {
         let s = make_scheduler();
         assert_eq!(s.total_active(), 0);
         assert_eq!(s.total_completed(), 0);
+        assert_eq!(s.audit_log_capacity(), DEFAULT_MAX_AUDIT_LOG_ENTRIES);
+    }
+
+    #[test]
+    fn scheduler_audit_capacity_clamps_to_one() {
+        let mut s = LaneScheduler::with_audit_log_capacity(default_policy(), 0).unwrap();
+        assert_eq!(s.audit_log_capacity(), 1);
+
+        let a = s
+            .assign_task(&task_classes::epoch_transition(), 1000, "t1")
+            .unwrap();
+        s.complete_task(&a.task_id, 1001, "t2").unwrap();
+
+        assert_eq!(s.audit_log().len(), 1);
+        assert_eq!(
+            s.audit_log()[0].event_code,
+            event_codes::LANE_TASK_COMPLETED
+        );
     }
 
     #[test]
@@ -1105,6 +1148,32 @@ mod tests {
             serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(parsed["event_code"], event_codes::LANE_ASSIGN);
         assert_eq!(parsed["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn audit_log_capacity_enforces_oldest_first_eviction() {
+        let mut p = LaneMappingPolicy::new();
+        p.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1));
+        p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+        let mut s = LaneScheduler::with_audit_log_capacity(p, 2).unwrap();
+
+        let a = s
+            .assign_task(&task_classes::log_rotation(), 1000, "ta1")
+            .unwrap();
+        s.complete_task(&a.task_id, 1001, "ta2").unwrap();
+        s.assign_task(&task_classes::log_rotation(), 1002, "ta3")
+            .unwrap();
+
+        assert_eq!(s.audit_log().len(), 2);
+        let codes: Vec<&str> = s
+            .audit_log()
+            .iter()
+            .map(|r| r.event_code.as_str())
+            .collect();
+        assert_eq!(
+            codes,
+            vec![event_codes::LANE_TASK_COMPLETED, event_codes::LANE_ASSIGN]
+        );
     }
 
     // ---- Error display ----

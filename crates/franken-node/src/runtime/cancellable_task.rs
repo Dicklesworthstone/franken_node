@@ -498,11 +498,11 @@ impl CancellationRuntime {
         });
 
         self.tasks.insert(task_id.to_string(), entry);
-        self.tasks.get(task_id).ok_or_else(|| {
-            CancellableTaskError::TaskNotFound {
+        self.tasks
+            .get(task_id)
+            .ok_or_else(|| CancellableTaskError::TaskNotFound {
                 task_id: task_id.to_string(),
-            }
-        })
+            })
     }
 
     /// Register a child task under a parent.
@@ -522,10 +522,12 @@ impl CancellationRuntime {
                 task_id: child_id.to_string(),
             });
         }
-        let parent = self
-            .tasks
-            .get_mut(parent_id)
-            .ok_or_else(|| CancellableTaskError::TaskNotFound { task_id: parent_id.to_string() })?;
+        let parent =
+            self.tasks
+                .get_mut(parent_id)
+                .ok_or_else(|| CancellableTaskError::TaskNotFound {
+                    task_id: parent_id.to_string(),
+                })?;
         if parent
             .child_task_ids
             .iter()
@@ -560,11 +562,12 @@ impl CancellationRuntime {
 
         // Idempotent: absorb duplicate cancel on CancelRequested
         if phase == TaskPhase::CancelRequested {
-            return self.tasks.get(task_id).ok_or_else(|| {
-                CancellableTaskError::TaskNotFound {
+            return self
+                .tasks
+                .get(task_id)
+                .ok_or_else(|| CancellableTaskError::TaskNotFound {
                     task_id: task_id.to_string(),
-                }
-            });
+                });
         }
 
         if phase == TaskPhase::Finalized {
@@ -581,10 +584,12 @@ impl CancellationRuntime {
             });
         }
 
-        let entry = self
-            .tasks
-            .get_mut(task_id)
-            .ok_or_else(|| CancellableTaskError::TaskNotFound { task_id: task_id.to_string() })?;
+        let entry =
+            self.tasks
+                .get_mut(task_id)
+                .ok_or_else(|| CancellableTaskError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                })?;
         let from = phase;
         entry.phase = TaskPhase::CancelRequested;
         entry.cancel_requested_ms = Some(timestamp_ms);
@@ -621,11 +626,11 @@ impl CancellationRuntime {
             }
         }
 
-        self.tasks.get(task_id).ok_or_else(|| {
-            CancellableTaskError::TaskNotFound {
+        self.tasks
+            .get(task_id)
+            .ok_or_else(|| CancellableTaskError::TaskNotFound {
                 task_id: task_id.to_string(),
-            }
-        })
+            })
     }
 
     /// Start the drain phase on a cancelled task.
@@ -653,10 +658,12 @@ impl CancellationRuntime {
         }
 
         let from = entry.phase;
-        let entry = self
-            .tasks
-            .get_mut(task_id)
-            .ok_or_else(|| CancellableTaskError::TaskNotFound { task_id: task_id.to_string() })?;
+        let entry =
+            self.tasks
+                .get_mut(task_id)
+                .ok_or_else(|| CancellableTaskError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                })?;
         entry.phase = TaskPhase::Draining;
         entry.drain_started_ms = Some(timestamp_ms);
 
@@ -671,11 +678,11 @@ impl CancellationRuntime {
             schema_version: SCHEMA_VERSION.to_string(),
         });
 
-        self.tasks.get(task_id).ok_or_else(|| {
-            CancellableTaskError::TaskNotFound {
+        self.tasks
+            .get(task_id)
+            .ok_or_else(|| CancellableTaskError::TaskNotFound {
                 task_id: task_id.to_string(),
-            }
-        })
+            })
     }
 
     /// Complete the drain phase.
@@ -721,10 +728,12 @@ impl CancellationRuntime {
             event_codes::FN_CX_004
         };
 
-        let entry = self
-            .tasks
-            .get_mut(task_id)
-            .ok_or_else(|| CancellableTaskError::TaskNotFound { task_id: task_id.to_string() })?;
+        let entry =
+            self.tasks
+                .get_mut(task_id)
+                .ok_or_else(|| CancellableTaskError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                })?;
         entry.phase = TaskPhase::DrainComplete;
         entry.drain_completed_ms = Some(timestamp_ms);
         entry.drain_result = Some(effective_result);
@@ -751,11 +760,11 @@ impl CancellationRuntime {
             });
         }
 
-        self.tasks.get(task_id).ok_or_else(|| {
-            CancellableTaskError::TaskNotFound {
+        self.tasks
+            .get(task_id)
+            .ok_or_else(|| CancellableTaskError::TaskNotFound {
                 task_id: task_id.to_string(),
-            }
-        })
+            })
     }
 
     /// Finalize a task after drain, producing a FinalizeRecord.
@@ -797,10 +806,12 @@ impl CancellationRuntime {
         let drain_result = entry.drain_result.clone().unwrap_or(DrainResult::Completed);
 
         // Transition to Finalizing
-        let entry = self
-            .tasks
-            .get_mut(task_id)
-            .ok_or_else(|| CancellableTaskError::TaskNotFound { task_id: task_id.to_string() })?;
+        let entry =
+            self.tasks
+                .get_mut(task_id)
+                .ok_or_else(|| CancellableTaskError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                })?;
         entry.phase = TaskPhase::Finalizing;
         entry.finalize_started_ms = Some(timestamp_ms);
 
@@ -836,10 +847,12 @@ impl CancellationRuntime {
             });
 
             // Still finalize (with error record) so the lane can be released
-            let entry = self
-                .tasks
-                .get_mut(task_id)
-                .ok_or_else(|| CancellableTaskError::TaskNotFound { task_id: task_id.to_string() })?;
+            let entry =
+                self.tasks
+                    .get_mut(task_id)
+                    .ok_or_else(|| CancellableTaskError::TaskNotFound {
+                        task_id: task_id.to_string(),
+                    })?;
             entry.phase = TaskPhase::Finalized;
             entry.finalize_completed_ms = Some(timestamp_ms);
 
@@ -863,10 +876,12 @@ impl CancellationRuntime {
             schema_version: SCHEMA_VERSION.to_string(),
         };
 
-        let entry = self
-            .tasks
-            .get_mut(task_id)
-            .ok_or_else(|| CancellableTaskError::TaskNotFound { task_id: task_id.to_string() })?;
+        let entry =
+            self.tasks
+                .get_mut(task_id)
+                .ok_or_else(|| CancellableTaskError::TaskNotFound {
+                    task_id: task_id.to_string(),
+                })?;
         entry.phase = TaskPhase::Finalized;
         entry.finalize_completed_ms = Some(timestamp_ms);
         entry.finalize_record = Some(record.clone());

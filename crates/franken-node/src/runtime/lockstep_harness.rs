@@ -167,22 +167,12 @@ impl LockstepHarness {
             })?;
 
         // Drain stdout and stderr in background threads to prevent pipe buffer deadlock
-        let mut stdout_handle = child
-            .stdout
-            .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "runtime {runtime} stdout pipe unavailable despite Stdio::piped()"
-                )
-            })?;
-        let mut stderr_handle = child
-            .stderr
-            .take()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "runtime {runtime} stderr pipe unavailable despite Stdio::piped()"
-                )
-            })?;
+        let mut stdout_handle = child.stdout.take().ok_or_else(|| {
+            anyhow::anyhow!("runtime {runtime} stdout pipe unavailable despite Stdio::piped()")
+        })?;
+        let mut stderr_handle = child.stderr.take().ok_or_else(|| {
+            anyhow::anyhow!("runtime {runtime} stderr pipe unavailable despite Stdio::piped()")
+        })?;
 
         let stdout_thread = thread::spawn(move || {
             let mut buf = Vec::new();
@@ -221,8 +211,12 @@ impl LockstepHarness {
             thread::sleep(Duration::from_millis(50));
         };
 
-        let stdout_bytes = stdout_thread.join().unwrap_or_else(|_| b"__thread_panic:stdout".to_vec());
-        let stderr_bytes = stderr_thread.join().unwrap_or_else(|_| b"__thread_panic:stderr".to_vec());
+        let stdout_bytes = stdout_thread
+            .join()
+            .unwrap_or_else(|_| b"__thread_panic:stdout".to_vec());
+        let stderr_bytes = stderr_thread
+            .join()
+            .unwrap_or_else(|_| b"__thread_panic:stderr".to_vec());
 
         let mut combined_output = Vec::new();
         combined_output.extend_from_slice(&stdout_bytes);

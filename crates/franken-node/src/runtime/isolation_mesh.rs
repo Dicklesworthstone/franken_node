@@ -505,11 +505,12 @@ impl IsolationMesh {
         self.workloads
             .insert(workload_id.to_string(), placement.clone());
 
-        let rs = self.rail_states.get_mut(rail_id).ok_or_else(|| {
-            MeshError::UnknownRail {
+        let rs = self
+            .rail_states
+            .get_mut(rail_id)
+            .ok_or_else(|| MeshError::UnknownRail {
                 rail_id: rail_id.to_string(),
-            }
-        })?;
+            })?;
         rs.active_count = rs.active_count.saturating_add(1);
         rs.total_placed = rs.total_placed.saturating_add(1);
 
