@@ -362,7 +362,8 @@ pub fn compute_content_hash(artifact: &MigrationArtifact) -> String {
         },
         "verifier_metadata": artifact.verifier_metadata,
     });
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+    let bytes =
+        serde_json::to_vec(&canonical).unwrap_or_else(|e| format!("__serde_err:{e}").into_bytes());
     hex::encode(Sha256::digest(
         [b"migration_artifact_hash_v1:" as &[u8], bytes.as_slice()].concat(),
     ))

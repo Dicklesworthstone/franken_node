@@ -584,7 +584,8 @@ impl EvictionSagaManager {
 
     /// Content hash.
     pub fn content_hash(&self) -> String {
-        let content = serde_json::to_string(&self.sagas).unwrap_or_default();
+        let content =
+            serde_json::to_string(&self.sagas).unwrap_or_else(|e| format!("__serde_err:{e}"));
         format!(
             "{:x}",
             Sha256::digest([b"eviction_saga_content_v1:" as &[u8], content.as_bytes()].concat())

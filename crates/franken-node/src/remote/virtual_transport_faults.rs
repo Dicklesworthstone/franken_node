@@ -445,7 +445,8 @@ impl VirtualTransportFaultHarness {
             .filter(|f| matches!(f.fault, FaultClass::Corrupt { .. }))
             .count();
 
-        let hash_input = serde_json::to_string(&schedule.faults).unwrap_or_default();
+        let hash_input = serde_json::to_string(&schedule.faults)
+            .unwrap_or_else(|e| format!("__serde_err:{e}"));
         let content_hash = format!(
             "{:x}",
             Sha256::digest(

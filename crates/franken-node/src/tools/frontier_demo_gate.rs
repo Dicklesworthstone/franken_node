@@ -216,7 +216,8 @@ impl ReproducibilityManifest {
             "environment_metadata": &self.environment_metadata,
             "timing_per_gate": &self.timing_per_gate,
         });
-        let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+        let bytes = serde_json::to_vec(&canonical)
+            .unwrap_or_else(|e| format!("__serde_err:{e}").into_bytes());
         hex::encode(Sha256::digest(
             [b"frontier_demo_hash_v1:" as &[u8], &bytes[..]].concat(),
         ))
@@ -248,7 +249,8 @@ pub struct ExternalVerifierBootstrap {
 impl ExternalVerifierBootstrap {
     /// Create a bootstrap from a manifest and results.
     pub fn new(manifest: ReproducibilityManifest, gate_results: Vec<DemoGateResult>) -> Self {
-        let hash_input = serde_json::to_string(&gate_results).unwrap_or_default();
+        let hash_input = serde_json::to_string(&gate_results)
+            .unwrap_or_else(|e| format!("__serde_err:{e}"));
         let expected_hash = hex::encode(Sha256::digest(
             [b"frontier_demo_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
         ));
@@ -269,7 +271,8 @@ impl ExternalVerifierBootstrap {
 
     /// Verify that the provided results match the expected hash.
     pub fn verify_results(&self, results: &[DemoGateResult]) -> bool {
-        let hash_input = serde_json::to_string(results).unwrap_or_default();
+        let hash_input =
+            serde_json::to_string(results).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let computed = hex::encode(Sha256::digest(
             [b"frontier_demo_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
         ));
@@ -366,7 +369,8 @@ impl DemoGateRunner {
             let label = result.program.label().to_string();
 
             // Compute input fingerprint from corpus
-            let corpus_json = serde_json::to_string(&corpus).unwrap_or_default();
+            let corpus_json = serde_json::to_string(&corpus)
+                .unwrap_or_else(|e| format!("__serde_err:{e}"));
             let input_fp = hex::encode(Sha256::digest(
                 [b"frontier_demo_hash_v1:" as &[u8], corpus_json.as_bytes()].concat(),
             ));
@@ -461,7 +465,8 @@ impl FrontierDemoGate for DefaultDemoGate {
     }
 
     fn execute(&self) -> DemoGateResult {
-        let corpus_json = serde_json::to_string(&self.corpus).unwrap_or_default();
+        let corpus_json = serde_json::to_string(&self.corpus)
+            .unwrap_or_else(|e| format!("__serde_err:{e}"));
         let output_fp = hex::encode(Sha256::digest(
             [b"frontier_demo_hash_v1:" as &[u8], corpus_json.as_bytes()].concat(),
         ));

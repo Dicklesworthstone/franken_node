@@ -185,7 +185,8 @@ pub struct AccessAuditEntry {
 
 impl AccessAuditEntry {
     pub fn compute_hash(decision: &AccessDecision) -> String {
-        let canonical = serde_json::to_string(decision).unwrap_or_default();
+        let canonical =
+            serde_json::to_string(decision).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let digest =
             Sha256::digest([b"atc_reciprocity_hash_v1:" as &[u8], canonical.as_bytes()].concat());
         hex::encode(digest)
@@ -418,7 +419,8 @@ impl ReciprocityEngine {
         }
 
         let content_hash = {
-            let canonical = serde_json::to_string(&entries).unwrap_or_default();
+            let canonical =
+                serde_json::to_string(&entries).unwrap_or_else(|e| format!("__serde_err:{e}"));
             let digest = Sha256::digest(
                 [b"atc_reciprocity_hash_v1:" as &[u8], canonical.as_bytes()].concat(),
             );

@@ -605,7 +605,8 @@ impl TransportFaultGate {
         let failed_tests = total_tests - passed_tests;
 
         // Content hash of all results for reproducibility.
-        let results_json = serde_json::to_string(&results).unwrap_or_default();
+        let results_json =
+            serde_json::to_string(&results).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let content_hash = format!(
             "{:x}",
             Sha256::digest(
