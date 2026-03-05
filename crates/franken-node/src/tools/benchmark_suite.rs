@@ -282,7 +282,7 @@ impl BenchmarkReport {
     pub fn compute_provenance_hash(&self) -> String {
         let mut report_for_hash = self.clone();
         report_for_hash.provenance_hash = String::new();
-        let json = serde_json::to_string(&report_for_hash).unwrap_or_default();
+        let json = serde_json::to_string(&report_for_hash).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = sha2::Sha256::new();
         sha2::Digest::update(&mut hasher, b"benchmark_suite_json_v1:" as &[u8]);
         sha2::Digest::update(&mut hasher, json.as_bytes());

@@ -137,12 +137,12 @@ impl SignedPolicyBundle {
     pub fn signable_payload(&self) -> String {
         let mut bundle_for_sign = self.clone();
         bundle_for_sign.signature = String::new();
-        serde_json::to_string(&bundle_for_sign).unwrap_or_default()
+        serde_json::to_string(&bundle_for_sign).unwrap_or_else(|e| format!("__serde_err:{e}"))
     }
 
     /// Compute the SHA-256-like hash of this bundle for chain linking.
     pub fn bundle_hash(&self) -> String {
-        let json = serde_json::to_string(self).unwrap_or_default();
+        let json = serde_json::to_string(self).unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = Sha256::new();
         hasher.update(b"profile_tuning_json_v1:" as &[u8]);
         hasher.update(json.as_bytes());

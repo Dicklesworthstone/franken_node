@@ -674,7 +674,9 @@ pub fn append_transparency_log(
     log: &mut Vec<TransparencyLogEntry>,
     result: &VerificationResult,
 ) -> TransparencyLogEntry {
-    let result_hash = deterministic_hash(&serde_json::to_string(result).unwrap_or_default());
+    let result_hash = deterministic_hash(
+        &serde_json::to_string(result).unwrap_or_else(|e| format!("__serde_err:{e}")),
+    );
     let prev_hash = log
         .last()
         .map(|e| e.result_hash.clone())
