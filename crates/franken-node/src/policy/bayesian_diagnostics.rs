@@ -234,7 +234,7 @@ impl BayesianDiagnostics {
         // Normalize posterior probabilities so they sum to 1.0
         // (INV-BAYES-NORMALIZED)
         let total: f64 = raw_scores.iter().map(|(_, p, _, _, _)| *p).sum();
-        if total > 0.0 {
+        if total.is_finite() && total > 0.0 {
             for entry in &mut raw_scores {
                 entry.1 /= total;
             }

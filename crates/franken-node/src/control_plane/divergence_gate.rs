@@ -850,8 +850,15 @@ impl ControlPlaneDivergenceGate {
             });
         }
 
-        // Transition to Recovering, then Normal
+        // Transition to Recovering (observable intermediate state)
         self.state = GateState::Recovering;
+        self.emit_audit(
+            timestamp,
+            event_codes::DG_004_RECOVERY_COMPLETED,
+            "entering recovery: operator_reset pending",
+            trace_id,
+            authorization.resync_checkpoint_epoch,
+        );
         self.detector.operator_reset();
         self.state = GateState::Normal;
         let epoch = self.active_divergence.as_ref().map_or(0, |a| a.fork_epoch);

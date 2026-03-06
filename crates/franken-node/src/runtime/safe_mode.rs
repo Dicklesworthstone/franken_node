@@ -10,6 +10,7 @@
 //! - **SMO-002**: Capability restricted due to safe-mode policy.
 //! - **SMO-003**: Flag conflict or redundancy detected.
 //! - **SMO-004**: Degraded state entered (automatic trigger).
+//! - **SMO-005**: Safe-mode deactivated after verified recovery.
 //!
 //! # Invariants
 //!
@@ -43,6 +44,9 @@ pub const SMO_003_FLAG_CONFLICT: &str = "SMO-003";
 
 /// SMO-004: Degraded state entered (automatic trigger).
 pub const SMO_004_DEGRADED_STATE_ENTERED: &str = "SMO-004";
+
+/// SMO-005: Safe-mode deactivated after verified recovery.
+pub const SMO_005_SAFE_MODE_DEACTIVATED: &str = "SMO-005";
 
 // ---------------------------------------------------------------------------
 // Invariant tags
@@ -680,9 +684,9 @@ impl SafeModeController {
             details: "Safe mode exited".to_string(),
         });
 
-        // Emit SMO-001 for the exit transition.
+        // Emit a distinct deactivation event so automation can separate entry and exit.
         self.emit_event(SafeModeEvent {
-            code: SMO_001_SAFE_MODE_ACTIVATED.to_string(),
+            code: SMO_005_SAFE_MODE_DEACTIVATED.to_string(),
             message: "Safe mode deactivated".to_string(),
             severity: EventSeverity::Info,
         });
@@ -1523,6 +1527,30 @@ mod tests {
     }
 
     #[test]
+    fn test_controller_exit_emits_smo005() {
+        let mut ctrl = SafeModeController::with_default_config();
+        ctrl.enter_safe_mode(
+            SafeModeEntryReason::ExplicitFlag,
+            "2026-02-20T10:00:00Z",
+            "sha256:test",
+            Vec::new(),
+        );
+        let verification = ExitVerification {
+            trust_state_consistent: true,
+            no_unresolved_incidents: true,
+            evidence_ledger_intact: true,
+            operator_confirmed: true,
+        };
+
+        ctrl.exit_safe_mode(&verification, "operator-1", "2026-02-20T11:00:00Z")
+            .unwrap();
+
+        let exit_event = ctrl.events().last().expect("exit event");
+        assert_eq!(exit_event.code, SMO_005_SAFE_MODE_DEACTIVATED);
+        assert_eq!(exit_event.message, "Safe mode deactivated");
+    }
+
+    #[test]
     fn test_controller_exit_denied_audit_logged() {
         let mut ctrl = SafeModeController::with_default_config();
         ctrl.enter_safe_mode(
@@ -1885,6 +1913,7 @@ mod tests {
         assert_eq!(SMO_002_CAPABILITY_RESTRICTED, "SMO-002");
         assert_eq!(SMO_003_FLAG_CONFLICT, "SMO-003");
         assert_eq!(SMO_004_DEGRADED_STATE_ENTERED, "SMO-004");
+        assert_eq!(SMO_005_SAFE_MODE_DEACTIVATED, "SMO-005");
     }
 
     // -- Invariant constant tests -------------------------------------------

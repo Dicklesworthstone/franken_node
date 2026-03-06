@@ -492,7 +492,7 @@ impl BocpdDetector {
             growth_probs.truncate(self.config.max_run_length + 1);
         }
         let total: f64 = growth_probs.iter().sum();
-        if total > 0.0 {
+        if total.is_finite() && total > 0.0 {
             for p in &mut growth_probs {
                 *p /= total;
             }

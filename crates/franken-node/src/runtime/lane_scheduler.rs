@@ -728,7 +728,7 @@ impl LaneScheduler {
 
     /// Total completed tasks across all lanes.
     pub fn total_completed(&self) -> u64 {
-        self.counters.values().map(|c| c.completed_total).sum()
+        self.counters.values().fold(0u64, |acc, c| acc.saturating_add(c.completed_total))
     }
 }
 

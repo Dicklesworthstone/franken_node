@@ -29,6 +29,7 @@ pub const EVT_BUDGET_ADJUSTED: &str = "VOI-006";
 // ---------------------------------------------------------------------------
 
 pub const ERR_VOI_INVALID_CONFIG: &str = "ERR_VOI_INVALID_CONFIG";
+pub const ERR_VOI_INVALID_DIAG: &str = "ERR_VOI_INVALID_DIAG";
 pub const ERR_VOI_DUPLICATE_DIAG: &str = "ERR_VOI_DUPLICATE_DIAG";
 pub const ERR_VOI_UNKNOWN_DIAG: &str = "ERR_VOI_UNKNOWN_DIAG";
 pub const ERR_VOI_BUDGET_EXCEEDED: &str = "ERR_VOI_BUDGET_EXCEEDED";
@@ -150,6 +151,7 @@ impl VoiConfig {
 #[derive(Debug, Clone, PartialEq)]
 pub enum VoiError {
     InvalidConfig(String),
+    InvalidDiagnostic(String),
     DuplicateDiagnostic(String),
     UnknownDiagnostic(String),
     BudgetExceeded(String),
@@ -160,6 +162,7 @@ impl std::fmt::Display for VoiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidConfig(msg) => write!(f, "{ERR_VOI_INVALID_CONFIG}: {msg}"),
+            Self::InvalidDiagnostic(msg) => write!(f, "{ERR_VOI_INVALID_DIAG}: {msg}"),
             Self::DuplicateDiagnostic(name) => {
                 write!(f, "{ERR_VOI_DUPLICATE_DIAG}: {name}")
             }
@@ -298,6 +301,7 @@ impl VoiScheduler {
 
     /// Register a diagnostic.
     pub fn register_diagnostic(&mut self, diag: DiagnosticDef) -> Result<(), VoiError> {
+        validate_diagnostic(&diag)?;
         if self.diagnostics.contains_key(&diag.name) {
             return Err(VoiError::DuplicateDiagnostic(diag.name.clone()));
         }
@@ -333,13 +337,17 @@ impl VoiScheduler {
         for state in self.states.values_mut() {
             state.uncertainty_level = 1.0;
         }
-        push_bounded(&mut self.events, VoiEvent {
-            code: EVT_BUDGET_ADJUSTED.to_string(),
-            detail: format!(
-                "regime_shift: budget boosted {}x until ts={}",
-                self.config.regime_multiplier, self.regime_boost_until
-            ),
-        }, MAX_EVENTS);
+        push_bounded(
+            &mut self.events,
+            VoiEvent {
+                code: EVT_BUDGET_ADJUSTED.to_string(),
+                detail: format!(
+                    "regime_shift: budget boosted {}x until ts={}",
+                    self.config.regime_multiplier, self.regime_boost_until
+                ),
+            },
+            MAX_EVENTS,
+        );
     }
 
     /// Compute effective budget at the given timestamp.
@@ -418,20 +426,28 @@ impl VoiScheduler {
         let storm_active = self.consecutive_storm_windows >= self.config.storm_windows;
         if storm_active && !self.conservative_mode {
             self.conservative_mode = true;
-            push_bounded(&mut self.events, VoiEvent {
-                code: EVT_STORM_DETECTED.to_string(),
-                detail: format!(
-                    "demand={total_demand:.1} > {}x budget for {} windows",
-                    self.config.storm_threshold, self.consecutive_storm_windows
-                ),
-            }, MAX_EVENTS);
+            push_bounded(
+                &mut self.events,
+                VoiEvent {
+                    code: EVT_STORM_DETECTED.to_string(),
+                    detail: format!(
+                        "demand={total_demand:.1} > {}x budget for {} windows",
+                        self.config.storm_threshold, self.consecutive_storm_windows
+                    ),
+                },
+                MAX_EVENTS,
+            );
         }
         if !storm_active && self.conservative_mode {
             self.conservative_mode = false;
-            push_bounded(&mut self.events, VoiEvent {
-                code: EVT_BUDGET_ADJUSTED.to_string(),
-                detail: "storm subsided, restoring normal mode".to_string(),
-            }, MAX_EVENTS);
+            push_bounded(
+                &mut self.events,
+                VoiEvent {
+                    code: EVT_BUDGET_ADJUSTED.to_string(),
+                    detail: "storm subsided, restoring normal mode".to_string(),
+                },
+                MAX_EVENTS,
+            );
         }
 
         // Score all diagnostics.
@@ -492,10 +508,14 @@ impl VoiScheduler {
                     preempted: false,
                     deferred: false,
                 });
-                push_bounded(&mut self.events, VoiEvent {
-                    code: EVT_DIAGNOSTIC_SELECTED.to_string(),
-                    detail: format!("{}(voi={:.3},cost={:.1})", c.name, c.voi, c.cost),
-                }, MAX_EVENTS);
+                push_bounded(
+                    &mut self.events,
+                    VoiEvent {
+                        code: EVT_DIAGNOSTIC_SELECTED.to_string(),
+                        detail: format!("{}(voi={:.3},cost={:.1})", c.name, c.voi, c.cost),
+                    },
+                    MAX_EVENTS,
+                );
                 // Update last_run_ts.
                 if let Some(state) = self.states.get_mut(&c.name) {
                     state.last_run_ts = now_ts;
@@ -512,13 +532,17 @@ impl VoiScheduler {
                     preempted: false,
                     deferred: true,
                 });
-                push_bounded(&mut self.events, VoiEvent {
-                    code: EVT_DIAGNOSTIC_DEFERRED.to_string(),
-                    detail: format!(
-                        "{}(cost={:.1},remaining={:.1})",
-                        c.name, c.cost, budget_remaining
-                    ),
-                }, MAX_EVENTS);
+                push_bounded(
+                    &mut self.events,
+                    VoiEvent {
+                        code: EVT_DIAGNOSTIC_DEFERRED.to_string(),
+                        detail: format!(
+                            "{}(cost={:.1},remaining={:.1})",
+                            c.name, c.cost, budget_remaining
+                        ),
+                    },
+                    MAX_EVENTS,
+                );
             }
         }
 
@@ -527,31 +551,39 @@ impl VoiScheduler {
             for (name, diag) in &self.diagnostics {
                 if diag.priority_class != PriorityClass::Critical {
                     preempted_names.push(name.clone());
-                    push_bounded(&mut self.events, VoiEvent {
-                        code: EVT_PREEMPTION.to_string(),
-                        detail: format!(
-                            "{name} preempted (conservative mode, class={})",
-                            diag.priority_class
-                        ),
-                    }, MAX_EVENTS);
+                    push_bounded(
+                        &mut self.events,
+                        VoiEvent {
+                            code: EVT_PREEMPTION.to_string(),
+                            detail: format!(
+                                "{name} preempted (conservative mode, class={})",
+                                diag.priority_class
+                            ),
+                        },
+                        MAX_EVENTS,
+                    );
                 }
             }
         }
 
         let budget_consumed = budget - budget_remaining;
 
-        push_bounded(&mut self.events, VoiEvent {
-            code: EVT_SCHEDULE_CYCLE.to_string(),
-            detail: format!(
-                "selected={},deferred={},preempted={},budget={:.1}/{:.1},conservative={}",
-                selected.len(),
-                deferred.len(),
-                preempted_names.len(),
-                budget_consumed,
-                budget,
-                self.conservative_mode,
-            ),
-        }, MAX_EVENTS);
+        push_bounded(
+            &mut self.events,
+            VoiEvent {
+                code: EVT_SCHEDULE_CYCLE.to_string(),
+                detail: format!(
+                    "selected={},deferred={},preempted={},budget={:.1}/{:.1},conservative={}",
+                    selected.len(),
+                    deferred.len(),
+                    preempted_names.len(),
+                    budget_consumed,
+                    budget,
+                    self.conservative_mode,
+                ),
+            },
+            MAX_EVENTS,
+        );
 
         Ok(ScheduleCycleResult {
             timestamp: now_ts,
@@ -596,6 +628,16 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
+}
+
+fn validate_diagnostic(diag: &DiagnosticDef) -> Result<(), VoiError> {
+    if !diag.cost.is_finite() || diag.cost <= 0.0 {
+        return Err(VoiError::InvalidDiagnostic(format!(
+            "diagnostic '{}' cost must be finite and > 0, got {}",
+            diag.name, diag.cost
+        )));
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -802,6 +844,36 @@ mod tests {
         let d = simple_diagnostic("dup", 10.0, PriorityClass::Standard);
         assert!(sched.register_diagnostic(d.clone()).is_ok());
         assert!(sched.register_diagnostic(d).is_err());
+    }
+
+    #[test]
+    fn test_rejects_negative_cost_diagnostic() {
+        let mut sched = VoiScheduler::new(VoiConfig::default()).unwrap();
+        let err = sched
+            .register_diagnostic(simple_diagnostic(
+                "negative_cost",
+                -5.0,
+                PriorityClass::Standard,
+            ))
+            .expect_err("negative cost must fail");
+        assert!(
+            matches!(err, VoiError::InvalidDiagnostic(message) if message.contains("cost must be finite and > 0"))
+        );
+    }
+
+    #[test]
+    fn test_rejects_non_finite_cost_diagnostic() {
+        let mut sched = VoiScheduler::new(VoiConfig::default()).unwrap();
+        let err = sched
+            .register_diagnostic(simple_diagnostic(
+                "nan_cost",
+                f64::NAN,
+                PriorityClass::Standard,
+            ))
+            .expect_err("non-finite cost must fail");
+        assert!(
+            matches!(err, VoiError::InvalidDiagnostic(message) if message.contains("cost must be finite and > 0"))
+        );
     }
 
     #[test]
@@ -1102,6 +1174,9 @@ mod tests {
     fn test_error_display() {
         let err = VoiError::InvalidConfig("test".into());
         assert!(format!("{err}").contains(ERR_VOI_INVALID_CONFIG));
+
+        let err = VoiError::InvalidDiagnostic("bad".into());
+        assert!(format!("{err}").contains(ERR_VOI_INVALID_DIAG));
 
         let err = VoiError::DuplicateDiagnostic("dup".into());
         assert!(format!("{err}").contains(ERR_VOI_DUPLICATE_DIAG));

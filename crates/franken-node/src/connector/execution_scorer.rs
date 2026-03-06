@@ -226,7 +226,7 @@ fn validate_probabilities(
     }
 
     let sum: f64 = probabilities.iter().sum();
-    if (sum - 1.0).abs() > PROBABILITY_SUM_EPSILON {
+    if !sum.is_finite() || (sum - 1.0).abs() > PROBABILITY_SUM_EPSILON {
         return Err(LossScoringError::InvalidProbabilities {
             reason: format!(
                 "probability sum must equal 1.0 within epsilon {PROBABILITY_SUM_EPSILON}, got {sum}"
@@ -350,7 +350,7 @@ fn perturb_probabilities(base: &[f64], index: usize, delta: f64) -> Option<Vec<f
     }
 
     let sum: f64 = adjusted.iter().sum();
-    if sum <= 0.0 {
+    if !sum.is_finite() || sum <= 0.0 {
         return None;
     }
     let normalization_factor = 1.0 / sum;

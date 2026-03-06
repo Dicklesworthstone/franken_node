@@ -261,6 +261,9 @@ impl TrustAggregator {
         }
 
         let sum: f64 = trimmed.iter().sum();
+        if !sum.is_finite() {
+            return Err(SybilDefenseError::aggregation_failed("non-finite sum in trimmed mean"));
+        }
         let mean = sum / trimmed.len() as f64;
 
         Ok(AggregationResult {
@@ -410,13 +413,18 @@ impl StakeWeighter {
 
         let pairs = self.apply_weights(signals, nodes);
         let total_weight: f64 = pairs.iter().map(|(_, w)| w).sum();
-        if total_weight.abs() < f64::EPSILON {
+        if !total_weight.is_finite() || total_weight.abs() < f64::EPSILON {
             return Err(SybilDefenseError::aggregation_failed(
-                "total weight is zero",
+                "total weight is zero or non-finite",
             ));
         }
 
         let weighted_sum: f64 = pairs.iter().map(|(wv, _)| wv).sum();
+        if !weighted_sum.is_finite() {
+            return Err(SybilDefenseError::aggregation_failed(
+                "non-finite weighted sum",
+            ));
+        }
         Ok(weighted_sum / total_weight)
     }
 }

@@ -219,7 +219,7 @@ impl ControlLanePolicy {
         }
 
         // Check budget sum
-        let total: u32 = self.budgets.values().map(|b| b.min_percent).sum();
+        let total: u32 = self.budgets.values().fold(0u32, |acc, b| acc.saturating_add(b.min_percent));
         if total > 100 {
             return Err(ControlLanePolicyError::BudgetOverflow {
                 total_percent: total,

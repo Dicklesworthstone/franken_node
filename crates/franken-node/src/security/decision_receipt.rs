@@ -93,6 +93,8 @@ pub enum ReceiptError {
         timestamp: String,
         source: chrono::ParseError,
     },
+    #[error("receipt confidence must be finite and within [0.0, 1.0], got {value}")]
+    InvalidConfidence { value: f64 },
     #[error("high-impact action '{action_name}' requires a signed receipt")]
     MissingHighImpactReceipt { action_name: String },
     #[error("hash-chain mismatch: expected {expected}, got {actual}")]
@@ -119,6 +121,7 @@ impl Receipt {
         confidence: f64,
         rollback_command: &str,
     ) -> Result<Self, ReceiptError> {
+        validate_confidence(confidence)?;
         Ok(Self {
             receipt_id: Uuid::now_v7().to_string(),
             action_name: action_name.to_string(),
@@ -189,6 +192,7 @@ pub fn sign_receipt(
     receipt: &Receipt,
     signing_key: &Ed25519PrivateKey,
 ) -> Result<SignedReceipt, ReceiptError> {
+    validate_confidence(receipt.confidence)?;
     let payload = canonical_json(receipt)?;
     let signature = signing_key.sign(payload.as_bytes());
     let signature_b64 = BASE64_STANDARD.encode(signature.to_bytes());
@@ -206,6 +210,7 @@ pub fn verify_receipt(
     signed: &SignedReceipt,
     public_key: &Ed25519PublicKey,
 ) -> Result<bool, ReceiptError> {
+    validate_confidence(signed.receipt.confidence)?;
     let payload = canonical_json(&signed.receipt)?;
     let sig_bytes = BASE64_STANDARD
         .decode(&signed.signature)
@@ -423,6 +428,13 @@ fn parse_timestamp(timestamp: &str) -> Result<DateTime<Utc>, ReceiptError> {
         })
 }
 
+fn validate_confidence(confidence: f64) -> Result<(), ReceiptError> {
+    if !confidence.is_finite() || !(0.0..=1.0).contains(&confidence) {
+        return Err(ReceiptError::InvalidConfidence { value: confidence });
+    }
+    Ok(())
+}
+
 fn hash_canonical_json(value: &impl Serialize) -> Result<String, ReceiptError> {
     let canonical = canonical_json(value)?;
     Ok(sha256_hex(canonical.as_bytes()))
@@ -507,6 +519,24 @@ mod tests {
     }
 
     #[test]
+    fn receipt_new_rejects_out_of_range_confidence() {
+        let err = Receipt::new(
+            "quarantine",
+            "control-plane@prod",
+            &json!({"z": 1, "a": 2}),
+            &json!({"result": "ok"}),
+            Decision::Approved,
+            "policy gate evaluated",
+            vec!["ledger-001".to_string()],
+            vec!["rule-A".to_string(), "rule-B".to_string()],
+            1.5,
+            "franken-node trust release --incident INC-001",
+        )
+        .expect_err("out-of-range confidence must fail");
+        assert!(matches!(err, ReceiptError::InvalidConfidence { value } if value == 1.5));
+    }
+
+    #[test]
     fn sign_and_verify_roundtrip() {
         let key = demo_signing_key();
         let public_key = key.verifying_key();
@@ -514,6 +544,19 @@ mod tests {
         let signed = sign_receipt(&receipt, &key).expect("sign");
         let verified = verify_receipt(&signed, &public_key).expect("verify");
         assert!(verified);
+    }
+
+    #[test]
+    fn verify_receipt_rejects_non_finite_confidence() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.receipt.confidence = f64::NAN;
+
+        let err = verify_receipt(&signed, &public_key)
+            .expect_err("non-finite confidence must fail verification");
+        assert!(matches!(err, ReceiptError::InvalidConfidence { value } if value.is_nan()));
     }
 
     #[test]
