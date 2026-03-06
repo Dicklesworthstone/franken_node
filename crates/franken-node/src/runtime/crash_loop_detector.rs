@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 
+const DEFAULT_MAX_INCIDENTS: usize = 4096;
+
 /// Configuration for crash-loop detection thresholds.
 #[derive(Debug, Clone)]
 pub struct CrashLoopConfig {
@@ -159,6 +161,7 @@ impl std::fmt::Display for CrashLoopError {
 /// Crash-loop detector maintaining sliding window state.
 pub struct CrashLoopDetector {
     config: CrashLoopConfig,
+    max_incidents: usize,
     /// Crash timestamps keyed by connector ID.
     crash_times_by_connector: BTreeMap<String, Vec<u64>>,
     /// Epoch second when last rollback occurred, keyed by connector ID.
@@ -168,11 +171,24 @@ pub struct CrashLoopDetector {
 
 impl CrashLoopDetector {
     pub fn new(config: CrashLoopConfig) -> Self {
+        Self::with_incident_capacity(config, DEFAULT_MAX_INCIDENTS)
+    }
+
+    pub fn with_incident_capacity(config: CrashLoopConfig, max_incidents: usize) -> Self {
         Self {
             config,
+            max_incidents: max_incidents.max(1),
             crash_times_by_connector: BTreeMap::new(),
             last_rollback_epoch_by_connector: BTreeMap::new(),
             incidents: Vec::new(),
+        }
+    }
+
+    fn push_incident(&mut self, incident: CrashLoopIncident) {
+        self.incidents.push(incident);
+        if self.incidents.len() > self.max_incidents {
+            let overflow = self.incidents.len() - self.max_incidents;
+            self.incidents.drain(0..overflow);
         }
     }
 
@@ -300,7 +316,7 @@ impl CrashLoopDetector {
                 decision: decision.clone(),
                 trace_id: trace_id.to_string(),
             };
-            self.incidents.push(incident);
+            self.push_incident(incident);
             return Ok(decision);
         }
 
@@ -324,7 +340,7 @@ impl CrashLoopDetector {
                 decision: decision.clone(),
                 trace_id: trace_id.to_string(),
             };
-            self.incidents.push(incident);
+            self.push_incident(incident);
             return Err(CrashLoopError::CooldownActive {
                 connector_id: connector_id.to_string(),
                 remaining_secs: remaining,
@@ -352,7 +368,7 @@ impl CrashLoopDetector {
                     decision: decision.clone(),
                     trace_id: trace_id.to_string(),
                 };
-                self.incidents.push(incident);
+                self.push_incident(incident);
                 return Err(CrashLoopError::NoKnownGood {
                     connector_id: connector_id.to_string(),
                 });
@@ -380,7 +396,7 @@ impl CrashLoopDetector {
                 decision: decision.clone(),
                 trace_id: trace_id.to_string(),
             };
-            self.incidents.push(incident);
+            self.push_incident(incident);
             return Err(CrashLoopError::PinConnectorMismatch {
                 expected_connector: connector_id.to_string(),
                 pin_connector: pin.connector_id.clone(),
@@ -406,7 +422,7 @@ impl CrashLoopDetector {
                 decision: decision.clone(),
                 trace_id: trace_id.to_string(),
             };
-            self.incidents.push(incident);
+            self.push_incident(incident);
             return Err(CrashLoopError::PinUntrusted {
                 connector_id: connector_id.to_string(),
                 version: pin.version.clone(),
@@ -436,7 +452,7 @@ impl CrashLoopDetector {
             decision: decision.clone(),
             trace_id: trace_id.to_string(),
         };
-        self.incidents.push(incident);
+        self.push_incident(incident);
         Ok(decision)
     }
 }
@@ -894,5 +910,56 @@ mod tests {
 
         assert_eq!(det.crashes_in_window_for("conn-a", 102), 0);
         assert_eq!(det.crashes_in_window_for("conn-b", 102), 2);
+    }
+
+    #[test]
+    fn incident_capacity_clamps_to_one() {
+        let mut det = CrashLoopDetector::with_incident_capacity(config(), 0);
+
+        for idx in 0..2 {
+            for offset in 0..3 {
+                let ev = crash("conn-1", "t", "oom");
+                det.record_crash(&ev, 100 + (idx * 100) + offset);
+            }
+            let events: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom")).collect();
+            det.evaluate(
+                "conn-1",
+                &events,
+                Some(&trusted_pin()),
+                102 + (idx * 100),
+                &format!("tr{idx}"),
+                "ts",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(det.incidents.len(), 1);
+        assert_eq!(det.incidents[0].trace_id, "tr1");
+    }
+
+    #[test]
+    fn incident_history_evicts_oldest_first() {
+        let mut det = CrashLoopDetector::with_incident_capacity(config(), 2);
+
+        for idx in 0..3 {
+            for offset in 0..3 {
+                let ev = crash("conn-1", "t", "oom");
+                det.record_crash(&ev, 100 + (idx * 100) + offset);
+            }
+            let events: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom")).collect();
+            det.evaluate(
+                "conn-1",
+                &events,
+                Some(&trusted_pin()),
+                102 + (idx * 100),
+                &format!("tr{idx}"),
+                "ts",
+            )
+            .unwrap();
+        }
+
+        assert_eq!(det.incidents.len(), 2);
+        assert_eq!(det.incidents[0].trace_id, "tr1");
+        assert_eq!(det.incidents[1].trace_id, "tr2");
     }
 }
