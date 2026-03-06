@@ -78,9 +78,9 @@ impl ReplayTarget {
         self.current_version.saturating_sub(self.snapshot_version)
     }
 
-    /// Check if replay distance exceeds the configured max.
+    /// Check if replay distance exceeds the configured max (fail-closed at boundary).
     pub fn is_within_bounds(&self) -> bool {
-        self.replay_distance() <= self.max_replay_ops
+        self.replay_distance() < self.max_replay_ops
     }
 }
 
@@ -455,6 +455,14 @@ mod tests {
     }
 
     #[test]
+    fn replay_target_boundary_fail_closed() {
+        // distance == max → fail-closed: NOT within bounds
+        let rt = ReplayTarget::new(100, 100000, 5, 105);
+        assert_eq!(rt.replay_distance(), 100);
+        assert!(!rt.is_within_bounds());
+    }
+
+    #[test]
     fn check_replay_bound_ok() {
         let mut t = default_tracker();
         t.take_snapshot(10, "h".into(), "t".into()).unwrap();
@@ -467,6 +475,14 @@ mod tests {
         t.take_snapshot(10, "h".into(), "t".into()).unwrap();
         let err = t.check_replay_bound(200, 100).unwrap_err();
         assert!(matches!(err, SnapshotError::ReplayBoundExceeded { .. }));
+    }
+
+    #[test]
+    fn check_replay_bound_boundary_fail_closed() {
+        // distance == max → fail-closed: reject at boundary
+        let mut t = default_tracker();
+        t.take_snapshot(10, "h".into(), "t".into()).unwrap();
+        assert!(t.check_replay_bound(110, 100).is_err());
     }
 
     // === Policy update audit ===
