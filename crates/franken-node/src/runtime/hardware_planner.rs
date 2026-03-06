@@ -127,6 +127,7 @@ pub mod error_codes {
     pub const ERR_HWP_DISPATCH_NOT_PLACED: &str = "ERR_HWP_DISPATCH_NOT_PLACED";
     pub const ERR_HWP_INVALID_RISK_LEVEL: &str = "ERR_HWP_INVALID_RISK_LEVEL";
     pub const ERR_HWP_FALLBACK_EXHAUSTED: &str = "ERR_HWP_FALLBACK_EXHAUSTED";
+    pub const ERR_HWP_UNKNOWN_POLICY: &str = "ERR_HWP_UNKNOWN_POLICY";
 
     // Semantic aliases for policy-evidenced planner error conditions.
     /// Constraint evaluation found a violation (capability or risk).
@@ -407,6 +408,8 @@ pub enum HardwarePlannerError {
     InvalidRiskLevel { profile_id: String, risk_level: u32 },
     /// All fallback paths exhausted.
     FallbackExhausted { workload_id: String },
+    /// Referenced placement policy does not exist.
+    UnknownPolicy { policy_id: String },
 }
 
 impl HardwarePlannerError {
@@ -423,6 +426,7 @@ impl HardwarePlannerError {
             Self::DispatchNotPlaced { .. } => error_codes::ERR_HWP_DISPATCH_NOT_PLACED,
             Self::InvalidRiskLevel { .. } => error_codes::ERR_HWP_INVALID_RISK_LEVEL,
             Self::FallbackExhausted { .. } => error_codes::ERR_HWP_FALLBACK_EXHAUSTED,
+            Self::UnknownPolicy { .. } => error_codes::ERR_HWP_UNKNOWN_POLICY,
         }
     }
 }
@@ -521,6 +525,9 @@ impl fmt::Display for HardwarePlannerError {
                     workload_id
                 )
             }
+            Self::UnknownPolicy { policy_id } => {
+                write!(f, "{}: unknown policy {}", self.code(), policy_id)
+            }
         }
     }
 }
@@ -608,10 +615,9 @@ impl HardwarePlanner {
             schema_version: SCHEMA_VERSION.to_string(),
         });
 
-        Ok(self
-            .profiles
+        self.profiles
             .get(&pid)
-            .expect("registered hardware profile must be retrievable"))
+            .ok_or(HardwarePlannerError::UnknownProfile { profile_id: pid })
     }
 
     /// Register a placement policy.
@@ -638,10 +644,11 @@ impl HardwarePlanner {
             schema_version: SCHEMA_VERSION.to_string(),
         });
 
-        Ok(self
-            .policies
-            .get(&pid)
-            .expect("registered placement policy must be retrievable"))
+        self.policies.get(&pid).ok_or(
+            HardwarePlannerError::UnknownPolicy {
+                policy_id: pid,
+            },
+        )
     }
 
     /// Request placement for a workload.
@@ -671,11 +678,12 @@ impl HardwarePlanner {
             schema_version: SCHEMA_VERSION.to_string(),
         });
 
-        let policy = self.policies.get(&request.policy_id).cloned();
-        let effective_max_risk = policy
-            .as_ref()
-            .map(|p| p.max_risk_tolerance.min(request.max_risk))
-            .unwrap_or(request.max_risk);
+        let policy = self.policies.get(&request.policy_id).cloned().ok_or_else(|| {
+            HardwarePlannerError::UnknownPolicy {
+                policy_id: request.policy_id.clone(),
+            }
+        })?;
+        let effective_max_risk = policy.max_risk_tolerance.min(request.max_risk);
 
         let mut evidence = PolicyEvidence::new(&request.policy_id);
 
@@ -684,10 +692,7 @@ impl HardwarePlanner {
         evidence.candidates_considered = profile_ids.clone();
 
         // Phase 1: capability + metadata filter
-        let required_metadata_keys = policy
-            .as_ref()
-            .map(|p| p.required_metadata_keys.clone())
-            .unwrap_or_default();
+        let required_metadata_keys = policy.required_metadata_keys.clone();
 
         let mut capable: Vec<String> = Vec::new();
         for pid in &profile_ids {
@@ -845,7 +850,7 @@ impl HardwarePlanner {
         }
 
         // Phase 4: select best candidate per policy
-        let selected = self.select_best(&with_capacity, policy.as_ref());
+        let selected = self.select_best(&with_capacity, Some(&policy));
         evidence.selected_target = Some(selected.clone());
         evidence.reasoning_chain.push(format!(
             "selected {} from {} candidates",
@@ -896,8 +901,7 @@ impl HardwarePlanner {
         match self.request_placement(request, timestamp_ms) {
             Ok(decision) => Ok(decision),
             Err(HardwarePlannerError::RiskExceeded { .. })
-            | Err(HardwarePlannerError::CapacityExhausted { .. })
-            | Err(HardwarePlannerError::FallbackExhausted { .. }) => {
+            | Err(HardwarePlannerError::CapacityExhausted { .. }) => {
                 // HWP-008: fallback attempted
                 self.emit_audit(PlannerAuditEvent {
                     event_code: event_codes::HWP_008.to_string(),
@@ -944,7 +948,7 @@ impl HardwarePlanner {
                         }
                         Ok(decision)
                     }
-                    Err(e) => {
+                    Err(_) => {
                         // HWP-010
                         self.emit_audit(PlannerAuditEvent {
                             event_code: event_codes::HWP_010.to_string(),
@@ -955,7 +959,21 @@ impl HardwarePlanner {
                             detail: "fallback path exhausted after risk relaxation".to_string(),
                             schema_version: SCHEMA_VERSION.to_string(),
                         });
-                        Err(e)
+
+                        if let Some(last) = self.decisions.last_mut()
+                            && last.workload_id == request.workload_id
+                        {
+                            last.outcome = PlacementOutcome::RejectedFallbackExhausted;
+                            last.evidence.fallback_attempted = true;
+                            last.evidence.fallback_reason = Some(format!(
+                                "risk relaxed from {} to {}",
+                                request.max_risk, relaxed.max_risk
+                            ));
+                        }
+
+                        Err(HardwarePlannerError::FallbackExhausted {
+                            workload_id: request.workload_id.clone(),
+                        })
                     }
                 }
             }
@@ -1469,6 +1487,19 @@ mod tests {
         assert_eq!(err.code(), error_codes::ERR_HWP_EMPTY_CAPABILITIES);
     }
 
+    #[test]
+    fn placement_rejected_unknown_policy() {
+        let mut planner = make_planner();
+        planner
+            .register_profile(gpu_profile("hw-1", 10, 4), 1000, "t1")
+            .unwrap();
+
+        let req = workload("wl-1", &["gpu", "compute"], 50, "missing-policy");
+        let err = planner.request_placement(&req, 2000).unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_HWP_UNKNOWN_POLICY);
+        assert!(planner.decisions().is_empty());
+    }
+
     // ---- Policy prefers lowest risk ----
 
     #[test]
@@ -1765,6 +1796,9 @@ mod tests {
             HardwarePlannerError::FallbackExhausted {
                 workload_id: "wl-1".into(),
             },
+            HardwarePlannerError::UnknownPolicy {
+                policy_id: "pol-x".into(),
+            },
         ];
         for e in &errors {
             let s = e.to_string();
@@ -1858,5 +1892,30 @@ mod tests {
         assert_eq!(decision.outcome, PlacementOutcome::PlacedViaFallback);
         assert_eq!(decision.target_profile_id, Some("hw-1".to_string()));
         assert!(decision.evidence.fallback_attempted);
+    }
+
+    #[test]
+    fn fallback_failure_returns_fallback_exhausted_and_marks_decision() {
+        let mut planner = make_planner();
+        planner
+            .register_profile(gpu_profile("hw-1", 40, 1), 1000, "t1")
+            .unwrap();
+        planner
+            .register_policy(default_policy(), 1001, "t1")
+            .unwrap();
+
+        let req = workload("wl-1", &["gpu", "compute"], 10, "default");
+        let err = planner
+            .request_placement_with_fallback(&req, 5, 3000)
+            .unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_HWP_FALLBACK_EXHAUSTED);
+
+        let last = planner.decisions().last().expect("fallback decision");
+        assert_eq!(last.outcome, PlacementOutcome::RejectedFallbackExhausted);
+        assert!(last.evidence.fallback_attempted);
+        assert_eq!(
+            last.evidence.fallback_reason.as_deref(),
+            Some("risk relaxed from 10 to 15")
+        );
     }
 }

@@ -142,6 +142,28 @@ impl ComplianceEvidenceStore {
         push_bounded(&mut self.events, event, MAX_EVENTS);
     }
 
+    fn validate_evidence_integrity(
+        requested_hash: &str,
+        evidence: &ComplianceEvidence,
+    ) -> Result<(), String> {
+        if !crate::security::constant_time::ct_eq(requested_hash, &evidence.content_hash) {
+            return Err(format!(
+                "requested hash {} does not match stored hash {}",
+                requested_hash, evidence.content_hash
+            ));
+        }
+
+        let recomputed = Self::compute_content_hash(&evidence.content);
+        if !crate::security::constant_time::ct_eq(&recomputed, &evidence.content_hash) {
+            return Err(format!(
+                "tamper detected: expected {}, got {}",
+                evidence.content_hash, recomputed
+            ));
+        }
+
+        Ok(())
+    }
+
     /// Compute the content-addressed hash for a piece of content.
     #[must_use]
     pub fn compute_content_hash(content: &str) -> String {
@@ -214,16 +236,11 @@ impl ComplianceEvidenceStore {
             .cloned()
             .ok_or_else(|| ComplianceError::NotFound(content_hash.to_owned()))?;
 
-        // Tamper-evidence check: recompute hash and verify.
-        let recomputed = Self::compute_content_hash(&evidence.content);
-        if !crate::security::constant_time::ct_eq(&recomputed, &evidence.content_hash) {
+        if let Err(detail) = Self::validate_evidence_integrity(content_hash, &evidence) {
             self.emit_event(ComplianceEvent {
                 event_code: ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL.to_owned(),
                 content_hash: content_hash.to_owned(),
-                detail: format!(
-                    "tamper detected: expected {}, got {}",
-                    evidence.content_hash, recomputed
-                ),
+                detail,
                 timestamp: timestamp.to_owned(),
                 trace_id: trace_id.to_owned(),
             });
@@ -261,22 +278,24 @@ impl ComplianceEvidenceStore {
             .get(content_hash)
             .ok_or_else(|| ComplianceError::NotFound(content_hash.to_owned()))?;
 
-        let recomputed = Self::compute_content_hash(&evidence.content);
-        let valid = crate::security::constant_time::ct_eq(&recomputed, &evidence.content_hash);
-
-        let event_code = if valid {
-            ENE_007_COMPLIANCE_TAMPER_CHECK_PASS
-        } else {
-            ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL
-        };
+        let (valid, event_code, detail) =
+            match Self::validate_evidence_integrity(content_hash, evidence) {
+                Ok(()) => (
+                    true,
+                    ENE_007_COMPLIANCE_TAMPER_CHECK_PASS,
+                    "tamper verification: pass".to_owned(),
+                ),
+                Err(detail) => (
+                    false,
+                    ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL,
+                    format!("tamper verification: fail ({detail})"),
+                ),
+            };
 
         self.emit_event(ComplianceEvent {
             event_code: event_code.to_owned(),
             content_hash: content_hash.to_owned(),
-            detail: format!(
-                "tamper verification: {}",
-                if valid { "pass" } else { "fail" }
-            ),
+            detail,
             timestamp: timestamp.to_owned(),
             trace_id: trace_id.to_owned(),
         });
@@ -501,6 +520,41 @@ mod tests {
     }
 
     #[test]
+    fn test_retrieve_tampered_index_hash_mismatch_detected() {
+        let mut store = ComplianceEvidenceStore::new();
+        let original_hash = store
+            .store_evidence(
+                "pub-1",
+                EvidenceSource::MigrationSingularity,
+                "Index Alias Test",
+                "payload-original",
+                None,
+                &[],
+                &ts(1),
+                "t",
+            )
+            .unwrap();
+        let alias_hash = ComplianceEvidenceStore::compute_content_hash("payload-alias");
+        let evidence = store
+            .artifacts
+            .remove(&original_hash)
+            .expect("stored evidence");
+        store.artifacts.insert(alias_hash.clone(), evidence);
+
+        let result = store.retrieve_evidence(&alias_hash, &ts(2), "t");
+        assert!(matches!(
+            result,
+            Err(ComplianceError::TamperDetected(ref hash)) if hash == &alias_hash
+        ));
+        let events = store.take_events();
+        assert_eq!(
+            events.last().unwrap().event_code,
+            ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL
+        );
+        assert!(events.last().unwrap().detail.contains("requested hash"));
+    }
+
+    #[test]
     fn test_retrieve_tampered_hash_length_mismatch_detected() {
         let mut store = ComplianceEvidenceStore::new();
         let hash = store
@@ -562,6 +616,40 @@ mod tests {
 
         let valid = store.verify_tamper_evidence(&hash, &ts(2), "t").unwrap();
         assert!(!valid);
+    }
+
+    #[test]
+    fn test_tamper_evidence_verification_fail_on_index_hash_mismatch() {
+        let mut store = ComplianceEvidenceStore::new();
+        let original_hash = store
+            .store_evidence(
+                "pub-1",
+                EvidenceSource::TrustFabric,
+                "Index Alias Test",
+                "content",
+                None,
+                &[],
+                &ts(1),
+                "t",
+            )
+            .unwrap();
+        let alias_hash = ComplianceEvidenceStore::compute_content_hash("content-alias");
+        let evidence = store
+            .artifacts
+            .remove(&original_hash)
+            .expect("stored evidence");
+        store.artifacts.insert(alias_hash.clone(), evidence);
+
+        let valid = store
+            .verify_tamper_evidence(&alias_hash, &ts(2), "t")
+            .unwrap();
+        assert!(!valid);
+        let events = store.take_events();
+        assert_eq!(
+            events.last().unwrap().event_code,
+            ENE_008_COMPLIANCE_TAMPER_CHECK_FAIL
+        );
+        assert!(events.last().unwrap().detail.contains("requested hash"));
     }
 
     #[test]
@@ -701,11 +789,9 @@ mod tests {
             )
             .unwrap();
         let events = store.take_events();
-        assert!(
-            events
-                .iter()
-                .any(|e| e.event_code == ENE_005_COMPLIANCE_EVIDENCE_STORED)
-        );
+        assert!(events
+            .iter()
+            .any(|e| e.event_code == ENE_005_COMPLIANCE_EVIDENCE_STORED));
     }
 
     #[test]
@@ -726,16 +812,12 @@ mod tests {
         store.take_events(); // drain store events
         store.retrieve_evidence(&hash, &ts(2), "t").unwrap();
         let events = store.take_events();
-        assert!(
-            events
-                .iter()
-                .any(|e| e.event_code == ENE_007_COMPLIANCE_TAMPER_CHECK_PASS)
-        );
-        assert!(
-            events
-                .iter()
-                .any(|e| e.event_code == ENE_006_COMPLIANCE_EVIDENCE_RETRIEVED)
-        );
+        assert!(events
+            .iter()
+            .any(|e| e.event_code == ENE_007_COMPLIANCE_TAMPER_CHECK_PASS));
+        assert!(events
+            .iter()
+            .any(|e| e.event_code == ENE_006_COMPLIANCE_EVIDENCE_RETRIEVED));
     }
 
     #[test]

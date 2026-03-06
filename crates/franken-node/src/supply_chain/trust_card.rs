@@ -616,7 +616,7 @@ impl TrustCardRegistry {
                     let cached = self
                         .cache_by_extension
                         .get(&extension_id)
-                        .expect("fresh cache state requires cached card");
+                        .ok_or_else(|| TrustCardError::NotFound(extension_id.clone()))?;
                     verify_card_signature(&cached.card, &self.registry_key)?;
                     report.cache_hits = report.cache_hits.saturating_add(1);
                     self.emit(
@@ -724,6 +724,8 @@ impl TrustCardRegistry {
             let right = self
                 .latest_card(right_extension_id)
                 .ok_or_else(|| TrustCardError::NotFound(right_extension_id.to_string()))?;
+            verify_card_signature(left, &self.registry_key)?;
+            verify_card_signature(right, &self.registry_key)?;
             comparison_from_cards(
                 left,
                 right,
@@ -768,6 +770,8 @@ impl TrustCardRegistry {
                     extension_id: extension_id.to_string(),
                     version: right_version,
                 })?;
+            verify_card_signature(left, &self.registry_key)?;
+            verify_card_signature(right, &self.registry_key)?;
             comparison_from_cards(
                 left,
                 right,
@@ -1344,6 +1348,48 @@ mod tests {
             diff.right_extension_id,
             "npm:@beta/telemetry-bridge@2".to_string()
         );
+    }
+
+    #[test]
+    fn compare_rejects_tampered_latest_card() {
+        let mut registry = demo_registry(1_000).expect("demo");
+        let latest = registry
+            .cards_by_extension
+            .get_mut("npm:@beta/telemetry-bridge")
+            .expect("history")
+            .last_mut()
+            .expect("latest");
+        latest.reputation_score_basis_points = latest.reputation_score_basis_points.saturating_add(1);
+
+        let err = registry
+            .compare(
+                "npm:@acme/auth-guard",
+                "npm:@beta/telemetry-bridge",
+                1_100,
+                "trace",
+            )
+            .expect_err("tampered latest card must be rejected");
+        assert!(matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge"));
+    }
+
+    #[test]
+    fn compare_versions_rejects_tampered_history_card() {
+        let mut registry = demo_registry(1_000).expect("demo");
+        let original = registry
+            .cards_by_extension
+            .get("npm:@beta/telemetry-bridge")
+            .expect("history")[0]
+            .clone();
+        registry
+            .cards_by_extension
+            .get_mut("npm:@beta/telemetry-bridge")
+            .expect("history")[0]
+            .previous_version_hash = Some(original.card_hash);
+
+        let err = registry
+            .compare_versions("npm:@beta/telemetry-bridge", 1, 2, 1_100, "trace")
+            .expect_err("tampered historical card must be rejected");
+        assert!(matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge"));
     }
 
     #[test]

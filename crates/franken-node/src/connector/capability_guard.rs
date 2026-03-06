@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
+const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
 const MAX_EVENTS: usize = 4096;
 
 // ---------------------------------------------------------------------------
@@ -549,11 +550,15 @@ impl CapabilityGuard {
             audit_trail: Vec::new(),
             events: Vec::new(),
         };
-        push_bounded(&mut guard.events, CapabilityGuardEvent {
-            event_code: event_codes::CAP_006.to_string(),
-            subsystem: String::new(),
-            detail: "capability guard initialized".to_string(),
-        }, MAX_EVENTS);
+        push_bounded(
+            &mut guard.events,
+            CapabilityGuardEvent {
+                event_code: event_codes::CAP_006.to_string(),
+                subsystem: String::new(),
+                detail: "capability guard initialized".to_string(),
+            },
+            MAX_EVENTS,
+        );
         guard
     }
 
@@ -617,7 +622,7 @@ impl CapabilityGuard {
                     event_code: event_codes::CAP_002.to_string(),
                     detail: format!("no profile registered for subsystem {subsystem}"),
                 };
-                self.audit_trail.push(entry);
+                self.emit_audit(entry);
                 self.emit_event(CapabilityGuardEvent {
                     event_code: event_codes::CAP_002.to_string(),
                     subsystem: subsystem.to_string(),
@@ -638,7 +643,7 @@ impl CapabilityGuard {
                 event_code: event_codes::CAP_001.to_string(),
                 detail: format!("capability {capability} granted to {subsystem}"),
             };
-            self.audit_trail.push(entry);
+            self.emit_audit(entry);
             self.emit_event(CapabilityGuardEvent {
                 event_code: event_codes::CAP_001.to_string(),
                 subsystem: subsystem.to_string(),
@@ -660,7 +665,7 @@ impl CapabilityGuard {
                 event_code: event_codes::CAP_002.to_string(),
                 detail: format!("capability {capability} not declared in profile for {subsystem}"),
             };
-            self.audit_trail.push(entry);
+            self.emit_audit(entry);
             self.emit_event(CapabilityGuardEvent {
                 event_code: event_codes::CAP_002.to_string(),
                 subsystem: subsystem.to_string(),
@@ -759,6 +764,10 @@ impl CapabilityGuard {
 
     fn emit_event(&mut self, event: CapabilityGuardEvent) {
         push_bounded(&mut self.events, event, MAX_EVENTS);
+    }
+
+    fn emit_audit(&mut self, entry: CapabilityAuditEntry) {
+        push_bounded(&mut self.audit_trail, entry, MAX_AUDIT_TRAIL_ENTRIES);
     }
 }
 
@@ -1248,6 +1257,27 @@ mod tests {
     }
 
     #[test]
+    fn test_guard_audit_trail_capacity_enforces_oldest_first_eviction() {
+        let mut guard = CapabilityGuard::new();
+        let mut profile = CapabilityProfile::new("sub", "1.0.0", RiskLevel::Low);
+        profile.add_capability("cap:fs:read", "read");
+        guard.register_profile(profile);
+
+        for i in 0..(MAX_AUDIT_TRAIL_ENTRIES + 2) {
+            guard
+                .check_capability("sub", "cap:fs:read", &format!("ts-{i}"))
+                .unwrap();
+        }
+
+        assert_eq!(guard.audit_trail().len(), MAX_AUDIT_TRAIL_ENTRIES);
+        assert_eq!(guard.audit_trail().first().unwrap().timestamp, "ts-2");
+        assert_eq!(
+            guard.audit_trail().last().unwrap().timestamp,
+            format!("ts-{}", MAX_AUDIT_TRAIL_ENTRIES + 1)
+        );
+    }
+
+    #[test]
     fn test_guard_detect_audit_gaps() {
         let mut guard = CapabilityGuard::new();
         let p1 = CapabilityProfile::new("sub_a", "1.0.0", RiskLevel::Low);
@@ -1262,12 +1292,10 @@ mod tests {
     #[test]
     fn test_guard_events_include_init() {
         let guard = CapabilityGuard::new();
-        assert!(
-            guard
-                .events()
-                .iter()
-                .any(|e| e.event_code == event_codes::CAP_006)
-        );
+        assert!(guard
+            .events()
+            .iter()
+            .any(|e| e.event_code == event_codes::CAP_006));
     }
 
     // ── Default profiles ─────────────────────────────────────────────

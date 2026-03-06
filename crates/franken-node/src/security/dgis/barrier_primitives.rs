@@ -502,6 +502,13 @@ impl BarrierEngine {
         barrier: Barrier,
         trace_id: &str,
     ) -> Result<BarrierAuditReceipt, BarrierError> {
+        if self.barriers.contains_key(&barrier.barrier_id) {
+            return Err(BarrierError::CompositionConflict(format!(
+                "barrier id {} already exists",
+                barrier.barrier_id
+            )));
+        }
+
         // Check composition validity before applying
         self.check_composition_validity(&barrier)?;
 
@@ -1610,5 +1617,34 @@ mod tests {
 
         let result = engine.check_fork_pin("unbarriered-node", "any-digest", &trace);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn duplicate_barrier_id_is_rejected_before_node_routing_is_corrupted() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+
+        let barrier = make_sandbox_barrier("node-a", SandboxTier::Strict);
+        let duplicate_id = barrier.barrier_id.clone();
+        engine.apply_barrier(barrier, &trace).unwrap();
+
+        let mut duplicate = make_fork_pin_barrier("node-b", "sha256:112233");
+        duplicate.barrier_id = duplicate_id;
+
+        let err = engine.apply_barrier(duplicate, &trace).unwrap_err();
+        match err {
+            BarrierError::CompositionConflict(message) => {
+                assert!(message.contains("barrier id"));
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+
+        assert_eq!(engine.get_node_barriers("node-a").len(), 1);
+        assert!(engine.get_node_barriers("node-b").is_empty());
+        assert!(
+            engine
+                .check_sandbox_escalation("node-a", "network_http", SandboxTier::Moderate, &trace)
+                .is_err()
+        );
     }
 }
