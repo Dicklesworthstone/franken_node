@@ -9,6 +9,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+const MAX_AUDIT_TRAIL: usize = 4096;
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub const COPILOT_RECOMMENDATION_REQUESTED: &str = "COPILOT_RECOMMENDATION_REQUESTED";
@@ -39,7 +41,12 @@ impl ExpectedLossVector {
     /// Validate all values are non-negative.
     #[must_use]
     pub fn is_valid(&self) -> bool {
-        self.availability_loss >= 0.0
+        self.availability_loss.is_finite()
+            && self.integrity_loss.is_finite()
+            && self.confidentiality_loss.is_finite()
+            && self.financial_loss.is_finite()
+            && self.reputation_loss.is_finite()
+            && self.availability_loss >= 0.0
             && self.integrity_loss >= 0.0
             && self.confidentiality_loss >= 0.0
             && self.financial_loss >= 0.0
@@ -67,6 +74,7 @@ impl ExpectedLossVector {
             ("reputation", self.reputation_loss),
         ];
         dims.iter()
+            .filter(|(_, value)| value.is_finite())
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(name, _)| *name)
             .unwrap_or("unknown")
@@ -91,6 +99,16 @@ impl ConfidenceInterval {
     #[must_use]
     pub fn is_non_degenerate(&self) -> bool {
         self.upper_bound > self.lower_bound
+    }
+
+    /// Validate numeric integrity and ordering constraints.
+    #[must_use]
+    pub fn is_valid(&self) -> bool {
+        self.lower_bound.is_finite()
+            && self.upper_bound.is_finite()
+            && self.confidence_level.is_finite()
+            && self.is_non_degenerate()
+            && (0.0..=1.0).contains(&self.confidence_level)
     }
 }
 
@@ -311,6 +329,13 @@ impl Default for ActionRecommendationEngine {
 }
 
 impl ActionRecommendationEngine {
+    fn candidate_is_valid(candidate: &ActionCandidate, state: &SystemState) -> bool {
+        candidate.expected_loss_if_act.is_valid()
+            && candidate.expected_loss_if_wait.is_valid()
+            && candidate.uncertainty_band.is_valid()
+            && compute_voi(candidate, state).is_finite()
+    }
+
     /// Create with custom top_k.
     #[must_use]
     pub fn new(top_k: usize) -> Self {
@@ -334,6 +359,7 @@ impl ActionRecommendationEngine {
         // Score all candidates by VOI.
         let mut scored: Vec<(f64, &ActionCandidate)> = candidates
             .iter()
+            .filter(|candidate| Self::candidate_is_valid(candidate, state))
             .map(|c| (compute_voi(c, state), c))
             .collect();
 
@@ -352,11 +378,12 @@ impl ActionRecommendationEngine {
 
                 let adjusted_uncertainty = if degraded_confidence {
                     // Widen uncertainty band by 50% under degraded mode.
-                    Some(ConfidenceInterval {
+                    let adjusted = ConfidenceInterval {
                         lower_bound: candidate.uncertainty_band.lower_bound * 0.75,
                         upper_bound: candidate.uncertainty_band.upper_bound * 1.5,
                         confidence_level: candidate.uncertainty_band.confidence_level * 0.8,
-                    })
+                    };
+                    adjusted.is_valid().then_some(adjusted)
                 } else {
                     None
                 };
@@ -422,6 +449,10 @@ impl ActionRecommendationEngine {
             event_code: COPILOT_RECOMMENDATION_SERVED.to_owned(),
         };
         self.audit_trail.push(audit);
+        if self.audit_trail.len() > MAX_AUDIT_TRAIL {
+            let overflow = self.audit_trail.len() - MAX_AUDIT_TRAIL;
+            self.audit_trail.drain(0..overflow);
+        }
         self.total_served = self.total_served.saturating_add(1);
 
         response
@@ -728,6 +759,15 @@ mod tests {
             reputation_loss: 0.0,
         };
         assert!(!invalid.is_valid());
+
+        let non_finite = ExpectedLossVector {
+            availability_loss: f64::INFINITY,
+            integrity_loss: 2.0,
+            confidentiality_loss: 0.0,
+            financial_loss: 0.0,
+            reputation_loss: 0.0,
+        };
+        assert!(!non_finite.is_valid());
     }
 
     #[test]
@@ -757,6 +797,14 @@ mod tests {
             confidence_level: 0.95,
         };
         assert!(!degenerate.is_non_degenerate());
+        assert!(!degenerate.is_valid());
+
+        let invalid = ConfidenceInterval {
+            lower_bound: 1.0,
+            upper_bound: f64::INFINITY,
+            confidence_level: 0.95,
+        };
+        assert!(!invalid.is_valid());
     }
 
     #[test]
@@ -839,5 +887,75 @@ mod tests {
 
         assert_eq!(engine.total_served(), 2);
         assert_eq!(engine.audit_trail().len(), 2);
+    }
+
+    #[test]
+    fn test_invalid_candidate_is_filtered_from_ranking() {
+        let mut engine = ActionRecommendationEngine::new(5);
+        let state = make_state(false);
+
+        let mut invalid = make_candidate("invalid", 10.0, 50.0);
+        invalid.expected_loss_if_wait.financial_loss = f64::INFINITY;
+
+        let valid = make_candidate("valid", 10.0, 50.0);
+        let response = engine.recommend(
+            &[invalid, valid],
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
+
+        assert_eq!(response.recommendations.len(), 1);
+        assert_eq!(response.recommendations[0].action_id, "valid");
+    }
+
+    #[test]
+    fn test_invalid_uncertainty_band_is_filtered_from_ranking() {
+        let mut engine = ActionRecommendationEngine::new(5);
+        let state = make_state(false);
+
+        let mut invalid = make_candidate("invalid", 10.0, 50.0);
+        invalid.uncertainty_band.upper_bound = f64::INFINITY;
+
+        let response = engine.recommend(
+            &[invalid],
+            &state,
+            "op",
+            "rec-001",
+            "t-001",
+            "2026-01-15T00:00:00Z",
+        );
+
+        assert!(response.recommendations.is_empty());
+    }
+
+    #[test]
+    fn test_audit_trail_is_capped_oldest_first() {
+        let mut engine = ActionRecommendationEngine::new(1);
+        let state = make_state(false);
+        let candidates = vec![make_candidate("a1", 10.0, 50.0)];
+
+        for i in 0..(MAX_AUDIT_TRAIL + 5) {
+            engine.recommend(
+                &candidates,
+                &state,
+                "op",
+                &format!("rec-{i}"),
+                &format!("t-{i}"),
+                "2026-01-15T00:00:00Z",
+            );
+        }
+
+        assert_eq!(engine.audit_trail().len(), MAX_AUDIT_TRAIL);
+        assert_eq!(
+            engine.audit_trail().first().unwrap().recommendation_id,
+            "rec-5"
+        );
+        assert_eq!(
+            engine.audit_trail().last().unwrap().recommendation_id,
+            format!("rec-{}", MAX_AUDIT_TRAIL + 4)
+        );
     }
 }

@@ -227,6 +227,15 @@ impl Default for TrustAggregator {
 }
 
 impl TrustAggregator {
+    fn validate_finite_values(values: &[f64]) -> Result<(), SybilDefenseError> {
+        if values.iter().any(|value| !value.is_finite()) {
+            return Err(SybilDefenseError::aggregation_failed(
+                "non-finite value in aggregation input",
+            ));
+        }
+        Ok(())
+    }
+
     /// Create a new aggregator with the given trim ratio.
     pub fn new(trim_ratio: f64) -> Self {
         Self { trim_ratio }
@@ -242,6 +251,7 @@ impl TrustAggregator {
                 "no values to aggregate",
             ));
         }
+        Self::validate_finite_values(values)?;
 
         let mut sorted = values.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
@@ -262,7 +272,9 @@ impl TrustAggregator {
 
         let sum: f64 = trimmed.iter().sum();
         if !sum.is_finite() {
-            return Err(SybilDefenseError::aggregation_failed("non-finite sum in trimmed mean"));
+            return Err(SybilDefenseError::aggregation_failed(
+                "non-finite sum in trimmed mean",
+            ));
         }
         let mean = sum / trimmed.len() as f64;
 
@@ -284,16 +296,24 @@ impl TrustAggregator {
                 "no values to aggregate",
             ));
         }
+        Self::validate_finite_values(values)?;
 
         let mut sorted = values.to_vec();
         sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
 
         let n = sorted.len();
         let median = if n.is_multiple_of(2) {
-            (sorted[(n / 2).saturating_sub(1)] + sorted[n / 2]) / 2.0
+            let lower = sorted[(n / 2).saturating_sub(1)];
+            let upper = sorted[n / 2];
+            lower / 2.0 + upper / 2.0
         } else {
             sorted[n / 2]
         };
+        if !median.is_finite() {
+            return Err(SybilDefenseError::aggregation_failed(
+                "non-finite median in aggregation output",
+            ));
+        }
 
         Ok(AggregationResult {
             value: median,
@@ -944,6 +964,33 @@ mod tests {
         let agg = TrustAggregator::default();
         let result = agg.median(&[]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_trimmed_mean_rejects_non_finite_input() {
+        let agg = TrustAggregator::default();
+        let err = agg
+            .trimmed_mean(&[0.5, f64::INFINITY, 0.7])
+            .expect_err("non-finite inputs must fail closed");
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+    }
+
+    #[test]
+    fn test_median_rejects_non_finite_input() {
+        let agg = TrustAggregator::default();
+        let err = agg
+            .median(&[0.5, f64::NAN, 0.7])
+            .expect_err("non-finite median inputs must fail closed");
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+    }
+
+    #[test]
+    fn test_median_even_count_avoids_overflow() {
+        let agg = TrustAggregator::default();
+        let result = agg
+            .median(&[f64::MAX, f64::MAX])
+            .expect("finite extreme inputs should stay finite");
+        assert_eq!(result.value, f64::MAX);
     }
 
     #[test]

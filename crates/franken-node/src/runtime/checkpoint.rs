@@ -222,6 +222,20 @@ impl InMemoryCheckpointBackend {
             record.progress_state_json = injected_state_json.to_string();
         }
     }
+
+    #[cfg(test)]
+    fn tamper_previous_checkpoint_hash(
+        &mut self,
+        orchestration_id: &str,
+        index: usize,
+        injected_previous_hash: Option<&str>,
+    ) {
+        if let Some(stream) = self.records.get_mut(orchestration_id)
+            && let Some(record) = stream.get_mut(index)
+        {
+            record.previous_checkpoint_hash = injected_previous_hash.map(ToString::to_string);
+        }
+    }
 }
 
 impl CheckpointBackend for InMemoryCheckpointBackend {
@@ -361,11 +375,57 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
         state: &T,
     ) -> Result<CheckpointId, CheckpointError> {
         let existing = self.read_latest_valid(trace_id, orchestration_id)?;
-        let previous_checkpoint_hash = existing.latest.map(|meta| meta.checkpoint_id);
-
         let progress_state_json = serde_json::to_string(state)
             .map_err(|err| CheckpointError::Serialization(err.to_string()))?;
         let progress_state_hash = hash_hex(progress_state_json.as_bytes());
+        if let Some(latest) = existing.latest.as_ref()
+            && latest.iteration_count == iteration_count
+            && latest.epoch == epoch
+            && ct_eq(&latest.progress_state_hash, &progress_state_hash)
+        {
+            let checkpoint_id = latest.checkpoint_id.clone();
+            let previous_checkpoint_hash = latest.previous_checkpoint_hash.clone();
+
+            self.decision_stream.push(CheckpointEvent {
+                event_code: FN_CK_005_IDEMPOTENT_REUSE.to_string(),
+                event_name: CHECKPOINT_IDEMPOTENT_REUSE.to_string(),
+                orchestration_id: orchestration_id.to_string(),
+                iteration_count,
+                checkpoint_hash: Some(checkpoint_id.clone()),
+                previous_checkpoint_hash: previous_checkpoint_hash.clone(),
+                progress_state_hash: Some(progress_state_hash.clone()),
+                epoch,
+                trace_id: trace_id.to_string(),
+                contract_status: "idempotent".to_string(),
+                wall_clock_time: now_unix_secs(),
+            });
+            if self.decision_stream.len() > MAX_EVENTS {
+                let overflow = self.decision_stream.len() - MAX_EVENTS;
+                self.decision_stream.drain(0..overflow);
+            }
+
+            self.decision_stream.push(CheckpointEvent {
+                event_code: FN_CK_008_DECISION_STREAM_APPEND.to_string(),
+                event_name: CHECKPOINT_DECISION_STREAM_APPEND.to_string(),
+                orchestration_id: orchestration_id.to_string(),
+                iteration_count,
+                checkpoint_hash: Some(checkpoint_id.clone()),
+                previous_checkpoint_hash,
+                progress_state_hash: Some(progress_state_hash),
+                epoch,
+                trace_id: trace_id.to_string(),
+                contract_status: "appended".to_string(),
+                wall_clock_time: now_unix_secs(),
+            });
+            if self.decision_stream.len() > MAX_EVENTS {
+                let overflow = self.decision_stream.len() - MAX_EVENTS;
+                self.decision_stream.drain(0..overflow);
+            }
+
+            return Ok(checkpoint_id);
+        }
+
+        let previous_checkpoint_hash = existing.latest.map(|meta| meta.checkpoint_id);
         let checkpoint_id = derive_checkpoint_id(
             orchestration_id,
             iteration_count,
@@ -544,19 +604,21 @@ fn derive_checkpoint_id(
     iteration_count: u64,
     epoch: u64,
     progress_state_hash: &str,
-    _previous_checkpoint_hash: Option<&str>,
+    previous_checkpoint_hash: Option<&str>,
 ) -> CheckpointId {
     let mut hasher = Sha256::new();
-    hasher.update(b"checkpoint_content_v1:");
+    hasher.update(b"checkpoint_content_v2:");
     hasher.update(orchestration_id.as_bytes());
     hasher.update([0x00]);
     hasher.update(iteration_count.to_le_bytes());
     hasher.update(epoch.to_le_bytes());
     hasher.update([0x00]);
     hasher.update(progress_state_hash.as_bytes());
-    // NOTE: previous_checkpoint_hash is intentionally excluded from the ID
-    // derivation so that saving the same state twice (idempotent save)
-    // produces the same checkpoint_id regardless of chain position.
+    hasher.update([0x00]);
+    match previous_checkpoint_hash {
+        Some(previous_hash) => hasher.update(previous_hash.as_bytes()),
+        None => hasher.update(b"root"),
+    }
     format!("{:x}", hasher.finalize())
 }
 
@@ -668,6 +730,66 @@ mod tests {
             read.events
                 .iter()
                 .any(|event| event.event_code == FN_CK_003_HASH_CHAIN_FAILURE)
+        );
+    }
+
+    #[test]
+    fn descendant_reparent_after_midstream_tamper_is_rejected() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+
+        let first = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-3b",
+                "orch-3b",
+                10,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "10".to_string())]),
+            )
+            .expect("checkpoint 10");
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-3b",
+                "orch-3b",
+                20,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "20".to_string())]),
+            )
+            .expect("checkpoint 20");
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-3b",
+                "orch-3b",
+                30,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "30".to_string())]),
+            )
+            .expect("checkpoint 30");
+
+        writer
+            .backend_mut()
+            .tamper_progress_state("orch-3b", 1, "{\"cursor\":\"999\"}");
+        writer
+            .backend_mut()
+            .tamper_previous_checkpoint_hash("orch-3b", 2, Some(&first));
+
+        let read = writer
+            .read_latest_valid("trace-ck-3b", "orch-3b")
+            .expect("read latest valid");
+
+        assert_eq!(read.latest.expect("latest").iteration_count, 10);
+        assert_eq!(
+            read.events
+                .iter()
+                .filter(|event| event.event_code == FN_CK_003_HASH_CHAIN_FAILURE)
+                .count(),
+            2
         );
     }
 
