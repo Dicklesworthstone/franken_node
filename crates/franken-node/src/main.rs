@@ -77,8 +77,8 @@ use supply_chain::extension_registry::{
 use supply_chain::trust_card::{
     ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardListFilter,
     TrustCardMutation, TrustCardRegistry, TrustCardSyncReport,
-    demo_registry as demo_trust_registry,
-    render_comparison_human, render_trust_card_human, to_canonical_json as trust_card_to_json,
+    demo_registry as demo_trust_registry, render_comparison_human, render_trust_card_human,
+    to_canonical_json as trust_card_to_json,
 };
 use tools::benchmark_suite::{
     render_human_summary as benchmark_suite_render_human_summary,

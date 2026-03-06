@@ -587,11 +587,7 @@ impl TrustCardRegistry {
             },
         );
 
-        let extension_ids = self
-            .cards_by_extension
-            .keys()
-            .cloned()
-            .collect::<Vec<_>>();
+        let extension_ids = self.cards_by_extension.keys().cloned().collect::<Vec<_>>();
         let mut report = TrustCardSyncReport {
             total_cards: extension_ids.len(),
             cache_hits: 0,

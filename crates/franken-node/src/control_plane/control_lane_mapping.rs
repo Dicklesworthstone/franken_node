@@ -667,7 +667,9 @@ mod tests {
         ControlLaneScheduler::new(default_control_lane_policy()).unwrap()
     }
 
-    fn make_scheduler_with_audit_log_capacity(max_audit_log_entries: usize) -> ControlLaneScheduler {
+    fn make_scheduler_with_audit_log_capacity(
+        max_audit_log_entries: usize,
+    ) -> ControlLaneScheduler {
         ControlLaneScheduler::with_audit_log_capacity(
             default_control_lane_policy(),
             max_audit_log_entries,
@@ -990,7 +992,10 @@ mod tests {
         let _ = s.advance_tick(&BTreeMap::new(), 1001, "t1");
 
         assert_eq!(s.audit_log().len(), 1);
-        assert_eq!(s.audit_log()[0].event_code, event_codes::CLM_STARVATION_ALERT);
+        assert_eq!(
+            s.audit_log()[0].event_code,
+            event_codes::CLM_STARVATION_ALERT
+        );
         assert_eq!(s.audit_log()[0].lane, ControlLane::Cancel.to_string());
     }
 
@@ -1009,9 +1014,15 @@ mod tests {
 
         assert_eq!(s.audit_log_capacity(), 2);
         assert_eq!(s.audit_log().len(), 2);
-        assert_eq!(s.audit_log()[0].event_code, event_codes::CLM_STARVATION_ALERT);
+        assert_eq!(
+            s.audit_log()[0].event_code,
+            event_codes::CLM_STARVATION_ALERT
+        );
         assert_eq!(s.audit_log()[0].lane, ControlLane::Cancel.to_string());
-        assert_eq!(s.audit_log()[1].event_code, event_codes::CLM_STARVATION_ALERT);
+        assert_eq!(
+            s.audit_log()[1].event_code,
+            event_codes::CLM_STARVATION_ALERT
+        );
         assert_eq!(s.audit_log()[1].lane, ControlLane::Timed.to_string());
     }
 
