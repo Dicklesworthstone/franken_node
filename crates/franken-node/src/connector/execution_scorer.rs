@@ -475,23 +475,24 @@ impl std::fmt::Display for ScorerError {
 ///
 /// INV-EPS-REJECT-INVALID: weights must be non-negative and sum > 0.
 pub fn validate_weights(weights: &ScoringWeights) -> Result<(), ScorerError> {
+    if !weights.latency_weight.is_finite()
+        || !weights.risk_weight.is_finite()
+        || !weights.capability_weight.is_finite()
+    {
+        return Err(ScorerError::InvalidWeights {
+            reason: "weights must be finite".into(),
+        });
+    }
     if weights.latency_weight < 0.0 || weights.risk_weight < 0.0 || weights.capability_weight < 0.0
     {
         return Err(ScorerError::InvalidWeights {
             reason: "negative weight".into(),
         });
     }
-    if weights.sum() <= 0.0 {
+    let weight_sum = weights.sum();
+    if !weight_sum.is_finite() || weight_sum <= 0.0 {
         return Err(ScorerError::InvalidWeights {
             reason: "weights sum to zero".into(),
-        });
-    }
-    if weights.latency_weight.is_nan()
-        || weights.risk_weight.is_nan()
-        || weights.capability_weight.is_nan()
-    {
-        return Err(ScorerError::InvalidWeights {
-            reason: "NaN weight".into(),
         });
     }
     Ok(())
@@ -505,10 +506,10 @@ fn validate_candidate(c: &CandidateInput) -> Result<(), ScorerError> {
             reason: "empty device_id".into(),
         });
     }
-    if c.estimated_latency_ms < 0.0 {
+    if !c.estimated_latency_ms.is_finite() || c.estimated_latency_ms < 0.0 {
         return Err(ScorerError::InvalidInput {
             device_id: c.device_id.clone(),
-            reason: "negative latency".into(),
+            reason: "latency must be finite and >= 0".into(),
         });
     }
     if !(0.0..=1.0).contains(&c.risk_score) {
@@ -567,7 +568,17 @@ pub fn score_candidates(
             let capability_component = cw * c.capability_match_ratio;
             let total = latency_component + risk_component + capability_component;
 
-            ScoredCandidate {
+            if !latency_component.is_finite()
+                || !risk_component.is_finite()
+                || !capability_component.is_finite()
+                || !total.is_finite()
+            {
+                return Err(ScorerError::ScoreOverflow {
+                    device_id: c.device_id.clone(),
+                });
+            }
+
+            Ok(ScoredCandidate {
                 device_id: c.device_id.clone(),
                 total_score: total,
                 factors: FactorBreakdown {
@@ -576,9 +587,9 @@ pub fn score_candidates(
                     capability_component,
                 },
                 rank: 0, // set after sorting
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     // INV-EPS-DETERMINISTIC + INV-EPS-TIEBREAK:
     // Sort descending by score; tie-break by ascending device_id.
@@ -722,6 +733,17 @@ mod tests {
     }
 
     #[test]
+    fn invalid_weights_non_finite() {
+        let w = ScoringWeights {
+            latency_weight: f64::INFINITY,
+            risk_weight: 0.5,
+            capability_weight: 0.5,
+        };
+        let err = score_candidates(&[cand("d1", 100.0, 0.5, 0.5)], &w, "tr", "ts").unwrap_err();
+        assert_eq!(err.code(), "EPS_INVALID_WEIGHTS");
+    }
+
+    #[test]
     fn invalid_risk_out_of_range() {
         let candidates = vec![cand("d1", 100.0, 1.5, 0.5)];
         let err = score_candidates(&candidates, &weights(), "tr", "ts").unwrap_err();
@@ -745,6 +767,13 @@ mod tests {
     #[test]
     fn negative_latency_rejected() {
         let candidates = vec![cand("d1", -10.0, 0.5, 0.5)];
+        let err = score_candidates(&candidates, &weights(), "tr", "ts").unwrap_err();
+        assert_eq!(err.code(), "EPS_INVALID_INPUT");
+    }
+
+    #[test]
+    fn non_finite_latency_rejected() {
+        let candidates = vec![cand("d1", f64::NAN, 0.5, 0.5)];
         let err = score_candidates(&candidates, &weights(), "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "EPS_INVALID_INPUT");
     }
@@ -906,12 +935,10 @@ mod tests {
         let records = sensitivity_analysis(&actions, &matrix, &probs, 0.3).unwrap();
         assert!(!records.is_empty());
         assert!(records.iter().any(|record| record.action == "block"));
-        assert!(
-            records
-                .iter()
-                .all(|record| record.parameter_name == "false_alarm"
-                    || record.parameter_name == "active_attack")
-        );
+        assert!(records
+            .iter()
+            .all(|record| record.parameter_name == "false_alarm"
+                || record.parameter_name == "active_attack"));
     }
 
     #[test]

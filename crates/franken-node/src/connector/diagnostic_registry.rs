@@ -117,25 +117,46 @@ impl Default for VoiConfig {
 
 impl VoiConfig {
     pub fn validate(&self) -> Result<(), VoiError> {
-        if self.budget_units <= 0.0 {
-            return Err(VoiError::InvalidConfig("budget_units must be > 0".into()));
+        if !self.budget_units.is_finite() || self.budget_units <= 0.0 {
+            return Err(VoiError::InvalidConfig(
+                "budget_units must be finite and > 0".into(),
+            ));
         }
         if self.window_secs == 0 {
             return Err(VoiError::InvalidConfig("window_secs must be > 0".into()));
         }
-        if self.storm_threshold <= 1.0 {
+        if !self.storm_threshold.is_finite() || self.storm_threshold <= 1.0 {
             return Err(VoiError::InvalidConfig(
-                "storm_threshold must be > 1".into(),
+                "storm_threshold must be finite and > 1".into(),
             ));
         }
         if self.storm_windows == 0 {
             return Err(VoiError::InvalidConfig("storm_windows must be > 0".into()));
         }
+        if !self.regime_multiplier.is_finite() || self.regime_multiplier < 1.0 {
+            return Err(VoiError::InvalidConfig(
+                "regime_multiplier must be finite and >= 1".into(),
+            ));
+        }
+        if !self.weight_staleness.is_finite()
+            || !self.weight_uncertainty.is_finite()
+            || !self.weight_downstream.is_finite()
+            || !self.weight_historical.is_finite()
+        {
+            return Err(VoiError::InvalidConfig("weights must all be finite".into()));
+        }
+        if self.weight_staleness < 0.0
+            || self.weight_uncertainty < 0.0
+            || self.weight_downstream < 0.0
+            || self.weight_historical < 0.0
+        {
+            return Err(VoiError::InvalidConfig("weights must all be >= 0".into()));
+        }
         let w = self.weight_staleness
             + self.weight_uncertainty
             + self.weight_downstream
             + self.weight_historical;
-        if (w - 1.0).abs() > 0.01 {
+        if !w.is_finite() || (w - 1.0).abs() > 0.01 {
             return Err(VoiError::InvalidConfig(format!(
                 "weights must sum to 1.0, got {w:.3}"
             )));
@@ -803,6 +824,15 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_non_finite_budget() {
+        let cfg = VoiConfig {
+            budget_units: f64::NAN,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn test_invalid_window() {
         let cfg = VoiConfig {
             window_secs: 0,
@@ -821,12 +851,51 @@ mod tests {
     }
 
     #[test]
+    fn test_invalid_non_finite_storm_threshold() {
+        let cfg = VoiConfig {
+            storm_threshold: f64::INFINITY,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_regime_multiplier() {
+        let cfg = VoiConfig {
+            regime_multiplier: 0.5,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
     fn test_invalid_weights() {
         let cfg = VoiConfig {
             weight_staleness: 0.5,
             ..Default::default()
         };
         // Weights now sum to 1.2 (0.5+0.3+0.2+0.2).
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_non_finite_weights() {
+        let cfg = VoiConfig {
+            weight_staleness: f64::NAN,
+            ..Default::default()
+        };
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn test_invalid_negative_weight_component() {
+        let cfg = VoiConfig {
+            weight_staleness: -0.1,
+            weight_uncertainty: 0.7,
+            weight_downstream: 0.2,
+            weight_historical: 0.2,
+            ..Default::default()
+        };
         assert!(cfg.validate().is_err());
     }
 
@@ -1245,30 +1314,22 @@ mod tests {
     #[test]
     fn test_default_diagnostics_has_critical() {
         let diags = default_diagnostics();
-        assert!(
-            diags
-                .iter()
-                .any(|d| d.priority_class == PriorityClass::Critical)
-        );
+        assert!(diags
+            .iter()
+            .any(|d| d.priority_class == PriorityClass::Critical));
     }
 
     #[test]
     fn test_default_diagnostics_has_all_classes() {
         let diags = default_diagnostics();
-        assert!(
-            diags
-                .iter()
-                .any(|d| d.priority_class == PriorityClass::Critical)
-        );
-        assert!(
-            diags
-                .iter()
-                .any(|d| d.priority_class == PriorityClass::Standard)
-        );
-        assert!(
-            diags
-                .iter()
-                .any(|d| d.priority_class == PriorityClass::Background)
-        );
+        assert!(diags
+            .iter()
+            .any(|d| d.priority_class == PriorityClass::Critical));
+        assert!(diags
+            .iter()
+            .any(|d| d.priority_class == PriorityClass::Standard));
+        assert!(diags
+            .iter()
+            .any(|d| d.priority_class == PriorityClass::Background));
     }
 }

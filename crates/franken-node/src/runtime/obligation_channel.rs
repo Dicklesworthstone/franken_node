@@ -287,7 +287,7 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
 
         let obligation = ChannelObligation {
             obligation_id: obligation_id.clone(),
-            deadline: now_ms + self.default_deadline_ms,
+            deadline: now_ms.saturating_add(self.default_deadline_ms),
             trace_id: trace_id.to_string(),
             status: ObligationStatus::Created,
             created_at_ms: now_ms,
@@ -1358,6 +1358,15 @@ mod tests {
         let id = ch.send("msg".to_string(), 1000, "trace-1");
         let obl = ch.get_obligation(&id).unwrap();
         assert_eq!(obl.deadline, 1500);
+    }
+
+    // 34b. Deadline computation saturates instead of wrapping
+    #[test]
+    fn test_channel_deadline_saturates_on_overflow() {
+        let mut ch: ObligationChannel<String> = ObligationChannel::with_deadline("ch-overflow", 50);
+        let id = ch.send("msg".to_string(), u64::MAX - 10, "trace-overflow");
+        let obl = ch.get_obligation(&id).unwrap();
+        assert_eq!(obl.deadline, u64::MAX);
     }
 
     // 34. Ledger query_by_status

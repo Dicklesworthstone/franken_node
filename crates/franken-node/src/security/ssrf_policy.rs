@@ -193,6 +193,16 @@ fn parse_ipv4_lax(ip: &str) -> Option<[u8; 4]> {
     }
 }
 
+/// Reserved hostname aliases that resolve to loopback without touching the public DNS.
+fn blocked_hostname_label(host: &str) -> Option<&'static str> {
+    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    if normalized == "localhost" || normalized.ends_with(".localhost") {
+        Some("localhost")
+    } else {
+        None
+    }
+}
+
 impl SsrfPolicyTemplate {
     /// Create the default template with all standard blocked CIDRs.
     pub fn default_template(connector_id: String) -> Self {
@@ -204,10 +214,13 @@ impl SsrfPolicyTemplate {
         }
     }
 
-    /// Check if an IP string falls within any blocked CIDR.
+    /// Check whether an endpoint string should be treated as internal/private.
     pub fn is_private_ip(ip: &str) -> bool {
         // Handle IPv6 loopback
         if ip == "::1" || ip == "[::1]" {
+            return true;
+        }
+        if blocked_hostname_label(ip).is_some() {
             return true;
         }
         let octets = match parse_ipv4(ip) {
@@ -263,6 +276,33 @@ impl SsrfPolicyTemplate {
                 cidr: "::1/128".to_string(),
             });
         }
+        if let Some(label) = blocked_hostname_label(host) {
+            if self.find_allowlist(host, port).is_some() {
+                self.emit_audit(
+                    host,
+                    port,
+                    Action::Allow,
+                    Some(label),
+                    true,
+                    trace_id,
+                    timestamp,
+                );
+                return Ok(Action::Allow);
+            }
+            self.emit_audit(
+                host,
+                port,
+                Action::Deny,
+                Some(label),
+                false,
+                trace_id,
+                timestamp,
+            );
+            return Err(SsrfError::SsrfDenied {
+                host: host.to_string(),
+                cidr: label.to_string(),
+            });
+        }
 
         // Parse IPv4
         let octets = match parse_ipv4(host) {
@@ -298,7 +338,8 @@ impl SsrfPolicyTemplate {
                         host: host.to_string(),
                     });
                 }
-                // Not an IP literal — allow through (DNS names handled by network guard)
+                // Not an IP literal and not a reserved loopback alias —
+                // allow through (DNS names handled by the egress guard policy)
                 self.emit_audit(host, port, Action::Allow, None, false, trace_id, timestamp);
                 return Ok(Action::Allow);
             }
@@ -600,6 +641,13 @@ mod tests {
     }
 
     #[test]
+    fn private_ip_localhost_hostname_aliases() {
+        assert!(SsrfPolicyTemplate::is_private_ip("localhost"));
+        assert!(SsrfPolicyTemplate::is_private_ip("LOCALHOST."));
+        assert!(SsrfPolicyTemplate::is_private_ip("api.localhost"));
+    }
+
+    #[test]
     fn public_ip_not_private() {
         assert!(!SsrfPolicyTemplate::is_private_ip("8.8.8.8"));
         assert!(!SsrfPolicyTemplate::is_private_ip("1.1.1.1"));
@@ -665,6 +713,27 @@ mod tests {
     }
 
     #[test]
+    fn check_ssrf_blocks_localhost_hostname_alias() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf("LOCALHOST.", 80, Protocol::Http, "t5a", "ts");
+        assert!(result.is_err());
+        match result.unwrap_err() {
+            SsrfError::SsrfDenied { host, cidr } => {
+                assert_eq!(host, "LOCALHOST.");
+                assert_eq!(cidr, "localhost");
+            }
+            other => panic!("expected SsrfDenied, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn check_ssrf_blocks_localhost_subdomain_alias() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf("api.localhost", 443, Protocol::Http, "t5b", "ts");
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn check_ssrf_emits_audit() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
         let _ = t.check_ssrf("127.0.0.1", 80, Protocol::Http, "t6", "ts");
@@ -672,6 +741,15 @@ mod tests {
         assert_eq!(t.audit_log.len(), 2);
         assert_eq!(t.audit_log[0].action, Action::Deny);
         assert_eq!(t.audit_log[1].action, Action::Allow);
+    }
+
+    #[test]
+    fn allowlist_permits_localhost_hostname_alias() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        t.add_allowlist("localhost", Some(8080), "local proxy", "t7a", "ts")
+            .unwrap();
+        let result = t.check_ssrf("localhost", 8080, Protocol::Http, "t7b", "ts");
+        assert!(result.is_ok());
     }
 
     // === Allowlist ===
