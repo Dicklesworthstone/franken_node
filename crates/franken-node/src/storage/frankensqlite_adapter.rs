@@ -49,6 +49,9 @@ const MAX_EVENTS: usize = 4096;
 /// Maximum number of audit log entries before oldest-first eviction.
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+/// Maximum number of schema version records retained.
+const MAX_SCHEMA_VERSIONS: usize = 1024;
+
 pub const INV_FSA_TIER1_DURABLE: &str = "INV-FSA-TIER1-DURABLE";
 pub const INV_FSA_REPLAY_DETERMINISTIC: &str = "INV-FSA-REPLAY-DETERMINISTIC";
 pub const INV_FSA_CONCURRENT_SAFE: &str = "INV-FSA-CONCURRENT-SAFE";
@@ -417,6 +420,10 @@ impl FrankensqliteAdapter {
             applied_at: "2026-02-20T00:00:00Z".into(),
             description: description.to_string(),
         });
+        if self.schema_versions.len() > MAX_SCHEMA_VERSIONS {
+            let overflow = self.schema_versions.len() - MAX_SCHEMA_VERSIONS;
+            self.schema_versions.drain(0..overflow);
+        }
         Ok(())
     }
 

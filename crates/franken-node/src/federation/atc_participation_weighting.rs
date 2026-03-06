@@ -434,7 +434,12 @@ impl ParticipationWeightEngine {
         match &participant.stake {
             None => 0.0,
             Some(stake) => {
-                let base = (stake.amount.ln_1p() / 10.0).clamp(0.0, 1.0);
+                let amount = if stake.amount.is_finite() && stake.amount >= 0.0 {
+                    stake.amount
+                } else {
+                    0.0
+                };
+                let base = (amount.ln_1p() / 10.0).clamp(0.0, 1.0);
                 let lock_bonus = if stake.locked {
                     (stake.lock_duration_seconds as f64 / (86400.0 * 365.0)).min(0.5)
                 } else {
@@ -449,7 +454,11 @@ impl ParticipationWeightEngine {
         match &participant.reputation {
             None => 0.0,
             Some(rep) => {
-                let score_component = rep.score;
+                let score_component = if rep.score.is_finite() {
+                    rep.score.clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
                 let tenure_component = (rep.tenure_seconds as f64
                     / self.config.established_tenure_seconds as f64)
                     .min(1.0);

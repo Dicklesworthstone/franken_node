@@ -246,11 +246,12 @@ impl ReputationGraphApis {
             .iter()
             .map(|e| if e.weight.is_finite() { e.weight } else { 0.0 })
             .sum();
+        let safe_base = if base.is_finite() { base } else { 0.0 };
         let composite = if edge_count > 0 {
-            let raw = (base + weighted_sum / edge_count as f64) / 2.0;
-            if raw.is_finite() { raw } else { base }
+            let raw = (safe_base + weighted_sum / edge_count as f64) / 2.0;
+            if raw.is_finite() { raw } else { safe_base }
         } else {
-            base
+            safe_base
         };
 
         let meets = composite >= MIN_TRUST_SCORE;
