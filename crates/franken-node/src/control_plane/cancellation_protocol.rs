@@ -28,6 +28,9 @@ pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 30_000;
 /// Minimum drain timeout in milliseconds.
 pub const MIN_DRAIN_TIMEOUT_MS: u64 = 1_000;
 
+/// Default max number of retained audit log entries.
+pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -386,14 +389,23 @@ impl CancellationRecord {
 pub struct CancellationProtocol {
     records: Vec<CancellationRecord>,
     audit_log: Vec<CancelAuditEvent>,
+    max_audit_log_entries: usize,
     default_drain_config: DrainConfig,
 }
 
 impl CancellationProtocol {
     pub fn new(default_drain_config: DrainConfig) -> Self {
+        Self::with_audit_log_capacity(default_drain_config, DEFAULT_MAX_AUDIT_LOG_ENTRIES)
+    }
+
+    pub fn with_audit_log_capacity(
+        default_drain_config: DrainConfig,
+        max_audit_log_entries: usize,
+    ) -> Self {
         Self {
             records: Vec::new(),
             audit_log: Vec::new(),
+            max_audit_log_entries: max_audit_log_entries.max(1),
             default_drain_config,
         }
     }
@@ -435,7 +447,7 @@ impl CancellationProtocol {
             self.records[idx].request_timestamp_ms = Some(timestamp_ms);
             self.records[idx].in_flight_count = in_flight_count;
 
-            self.audit_log.push(CancelAuditEvent::new(
+            self.record_audit_event(CancelAuditEvent::new(
                 event_codes::CAN_001,
                 workflow_id,
                 CancelPhase::Idle,
@@ -455,7 +467,7 @@ impl CancellationProtocol {
         record.request_timestamp_ms = Some(timestamp_ms);
         record.in_flight_count = in_flight_count;
 
-        self.audit_log.push(CancelAuditEvent::new(
+        self.record_audit_event(CancelAuditEvent::new(
             event_codes::CAN_001,
             workflow_id,
             CancelPhase::Idle,
@@ -494,7 +506,7 @@ impl CancellationProtocol {
         self.records[idx].current_phase = CancelPhase::Draining;
         self.records[idx].drain_start_ms = Some(timestamp_ms);
 
-        self.audit_log.push(CancelAuditEvent::new(
+        self.record_audit_event(CancelAuditEvent::new(
             event_codes::CAN_002,
             workflow_id,
             from,
@@ -536,7 +548,7 @@ impl CancellationProtocol {
             self.records[idx].drain_timed_out = true;
             self.records[idx].drain_complete_ms = Some(timestamp_ms);
 
-            self.audit_log.push(CancelAuditEvent::new(
+            self.record_audit_event(CancelAuditEvent::new(
                 event_codes::CAN_004,
                 workflow_id,
                 CancelPhase::Draining,
@@ -556,7 +568,7 @@ impl CancellationProtocol {
         } else {
             self.records[idx].drain_complete_ms = Some(timestamp_ms);
 
-            self.audit_log.push(CancelAuditEvent::new(
+            self.record_audit_event(CancelAuditEvent::new(
                 event_codes::CAN_003,
                 workflow_id,
                 CancelPhase::Draining,
@@ -606,7 +618,7 @@ impl CancellationProtocol {
             let leaks = resources.leaked_resources();
             self.records[idx].resource_leaks = leaks.clone();
 
-            self.audit_log.push(CancelAuditEvent::new(
+            self.record_audit_event(CancelAuditEvent::new(
                 event_codes::CAN_006,
                 workflow_id,
                 CancelPhase::Finalizing,
@@ -628,7 +640,7 @@ impl CancellationProtocol {
         self.records[idx].current_phase = CancelPhase::Finalized;
         self.records[idx].finalize_ms = Some(timestamp_ms);
 
-        self.audit_log.push(CancelAuditEvent::new(
+        self.record_audit_event(CancelAuditEvent::new(
             event_codes::CAN_005,
             workflow_id,
             CancelPhase::Finalizing,
@@ -657,6 +669,11 @@ impl CancellationProtocol {
     /// Get the audit log.
     pub fn audit_log(&self) -> &[CancelAuditEvent] {
         &self.audit_log
+    }
+
+    /// Get the configured audit log capacity.
+    pub fn audit_log_capacity(&self) -> usize {
+        self.max_audit_log_entries
     }
 
     /// Export audit log as JSONL.
@@ -698,6 +715,14 @@ impl CancellationProtocol {
             .ok_or(CancelProtocolError::WorkflowNotFound {
                 workflow_id: workflow_id.to_string(),
             })
+    }
+
+    fn record_audit_event(&mut self, event: CancelAuditEvent) {
+        if self.audit_log.len() >= self.max_audit_log_entries {
+            let overflow = self.audit_log.len() + 1 - self.max_audit_log_entries;
+            self.audit_log.drain(0..overflow);
+        }
+        self.audit_log.push(event);
     }
 }
 
@@ -1071,6 +1096,32 @@ mod tests {
             serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(parsed["event_code"], event_codes::CAN_001);
         assert_eq!(parsed["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn audit_log_capacity_clamps_to_one() {
+        let mut proto = CancellationProtocol::with_audit_log_capacity(DrainConfig::default(), 0);
+        assert_eq!(proto.audit_log_capacity(), 1);
+
+        proto.request_cancel("wf-1", 0, 1000, "t1").unwrap();
+        proto.start_drain("wf-1", 1100, "t1").unwrap();
+
+        assert_eq!(proto.audit_log().len(), 1);
+        assert_eq!(proto.audit_log()[0].event_code, event_codes::CAN_002);
+    }
+
+    #[test]
+    fn audit_log_capacity_enforces_oldest_first_eviction() {
+        let mut proto = CancellationProtocol::with_audit_log_capacity(DrainConfig::default(), 2);
+
+        proto.request_cancel("wf-1", 0, 1000, "t1").unwrap();
+        proto.start_drain("wf-1", 1100, "t1").unwrap();
+        proto.complete_drain("wf-1", 1200, "t1").unwrap();
+
+        assert_eq!(proto.audit_log_capacity(), 2);
+        assert_eq!(proto.audit_log().len(), 2);
+        assert_eq!(proto.audit_log()[0].event_code, event_codes::CAN_002);
+        assert_eq!(proto.audit_log()[1].event_code, event_codes::CAN_003);
     }
 
     // ---- Error display ----

@@ -358,7 +358,9 @@ pub fn replay_bundle(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundl
 }
 
 pub fn write_bundle_to_path(bundle: &ReplayBundle, path: &Path) -> Result<(), ReplayBundleError> {
-    if let Some(parent) = path.parent() {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
         std::fs::create_dir_all(parent)?;
     }
     let canonical_json = to_canonical_json(bundle)?;
@@ -630,6 +632,12 @@ fn canonicalize_value(value: &Value, path: &str) -> Result<Value, ReplayBundleEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn cwd_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn fixture_events() -> Vec<RawEvent> {
         vec![
@@ -758,6 +766,25 @@ mod tests {
         let path = dir.path().join("bundle.json");
         write_bundle_to_path(&bundle, &path).expect("write");
         let loaded = read_bundle_from_path(&path).expect("read");
+        assert_eq!(bundle, loaded);
+    }
+
+    #[test]
+    fn write_bundle_supports_relative_file_in_current_directory() {
+        let _lock = cwd_test_lock().lock().expect("cwd test lock");
+        let bundle = generate_replay_bundle("INC-IO-REL-001", &fixture_events()).expect("bundle");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let previous_cwd = std::env::current_dir().expect("current dir");
+        std::env::set_current_dir(dir.path()).expect("set cwd");
+
+        let relative_path = Path::new("bundle.json");
+        let write_result = write_bundle_to_path(&bundle, relative_path);
+        let restore_result = std::env::set_current_dir(&previous_cwd);
+
+        write_result.expect("write relative bundle");
+        restore_result.expect("restore cwd");
+
+        let loaded = read_bundle_from_path(&dir.path().join("bundle.json")).expect("read");
         assert_eq!(bundle, loaded);
     }
 

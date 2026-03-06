@@ -20,6 +20,12 @@ use std::fmt;
 
 /// Schema version for abort event records.
 pub const SCHEMA_VERSION: &str = "ta-v1.0";
+/// Maximum in-memory abort events retained before oldest entries are evicted.
+pub const MAX_ABORT_EVENTS: usize = 4_096;
+/// Maximum in-memory force-transition events retained before oldest entries are evicted.
+pub const MAX_FORCE_EVENTS: usize = 4_096;
+/// Maximum in-memory audit records retained before oldest entries are evicted.
+pub const MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 
 // ---- Event codes ----
 
@@ -334,6 +340,18 @@ impl TransitionAbortManager {
         }
     }
 
+    fn push_abort_event(&mut self, event: TransitionAbortEvent) {
+        push_bounded(&mut self.abort_events, event, MAX_ABORT_EVENTS);
+    }
+
+    fn push_force_event(&mut self, event: ForceTransitionEvent) {
+        push_bounded(&mut self.force_events, event, MAX_FORCE_EVENTS);
+    }
+
+    fn push_audit_record(&mut self, record: AbortAuditRecord) {
+        push_bounded(&mut self.audit_log, record, MAX_AUDIT_LOG_ENTRIES);
+    }
+
     /// Validate a force transition policy against known participants.
     /// INV-ABORT-FORCE-BOUNDED, INV-ABORT-FORCE-SCOPED
     pub fn validate_force_policy(
@@ -403,7 +421,7 @@ impl TransitionAbortManager {
             trace_id,
         );
 
-        self.audit_log.push(AbortAuditRecord {
+        self.push_audit_record(AbortAuditRecord {
             event_code: event_codes::TRANSITION_ABORTED.to_string(),
             barrier_id: barrier_id.to_string(),
             pre_epoch,
@@ -415,7 +433,7 @@ impl TransitionAbortManager {
             schema_version: SCHEMA_VERSION.to_string(),
         });
 
-        self.abort_events.push(event.clone());
+        self.push_abort_event(event.clone());
         event
     }
 
@@ -445,7 +463,7 @@ impl TransitionAbortManager {
             schema_version: SCHEMA_VERSION.to_string(),
         };
 
-        self.audit_log.push(AbortAuditRecord {
+        self.push_audit_record(AbortAuditRecord {
             event_code: event_codes::FORCE_TRANSITION_APPLIED.to_string(),
             barrier_id: barrier_id.to_string(),
             pre_epoch,
@@ -460,7 +478,7 @@ impl TransitionAbortManager {
             schema_version: SCHEMA_VERSION.to_string(),
         });
 
-        self.force_events.push(event.clone());
+        self.push_force_event(event.clone());
         event
     }
 
@@ -502,6 +520,14 @@ impl TransitionAbortManager {
 impl Default for TransitionAbortManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn push_bounded<T>(entries: &mut Vec<T>, entry: T, max_entries: usize) {
+    entries.push(entry);
+    if entries.len() > max_entries {
+        let overflow = entries.len() - max_entries;
+        entries.drain(0..overflow);
     }
 }
 
@@ -860,6 +886,59 @@ mod tests {
         }
         assert_eq!(mgr.abort_count(), 5);
         assert_eq!(mgr.abort_events().len(), 5);
+    }
+
+    #[test]
+    fn abort_events_are_bounded_with_oldest_first_eviction() {
+        let mut mgr = TransitionAbortManager::new();
+        for i in 0..(MAX_ABORT_EVENTS + 2) {
+            mgr.record_abort(
+                &format!("abort-{i}"),
+                TransitionAbortReason::Timeout { elapsed_ms: 1000 },
+                i as u64,
+                i as u64 + 1,
+                vec![],
+                1000,
+                2000 + i as u64,
+                &format!("trace-{i}"),
+            );
+        }
+
+        assert_eq!(mgr.abort_count(), MAX_ABORT_EVENTS);
+        assert_eq!(mgr.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
+        assert_eq!(mgr.abort_events()[0].barrier_id, "abort-2");
+        assert_eq!(
+            mgr.abort_events().last().unwrap().barrier_id,
+            format!("abort-{}", MAX_ABORT_EVENTS + 1)
+        );
+        assert_eq!(mgr.audit_log()[0].barrier_id, "abort-2");
+    }
+
+    #[test]
+    fn force_events_are_bounded_with_oldest_first_eviction() {
+        let mut mgr = TransitionAbortManager::new();
+        let policy = ForceTransitionPolicy::new(BTreeSet::new(), 0, "admin", "reason");
+
+        for i in 0..(MAX_FORCE_EVENTS + 2) {
+            mgr.record_force_transition(
+                &format!("force-{i}"),
+                &policy,
+                &[],
+                i as u64,
+                i as u64 + 1,
+                1000 + i as u64,
+                &format!("trace-{i}"),
+            );
+        }
+
+        assert_eq!(mgr.force_count(), MAX_FORCE_EVENTS);
+        assert_eq!(mgr.audit_log().len(), MAX_AUDIT_LOG_ENTRIES);
+        assert_eq!(mgr.force_events()[0].barrier_id, "force-2");
+        assert_eq!(
+            mgr.force_events().last().unwrap().barrier_id,
+            format!("force-{}", MAX_FORCE_EVENTS + 1)
+        );
+        assert_eq!(mgr.audit_log()[0].barrier_id, "force-2");
     }
 
     // ---- Force event schema version ----

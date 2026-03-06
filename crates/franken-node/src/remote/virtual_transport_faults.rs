@@ -12,6 +12,16 @@ use sha2::{Digest, Sha256};
 // ── Constants ────────────────────────────────────────────────────────────────
 
 pub const SCHEMA_VERSION: &str = "vtf-v1.0";
+pub const DEFAULT_MAX_FAULT_LOG_ENTRIES: usize = 4_096;
+pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
+
+fn default_max_fault_log_entries() -> usize {
+    DEFAULT_MAX_FAULT_LOG_ENTRIES
+}
+
+fn default_max_audit_log_entries() -> usize {
+    DEFAULT_MAX_AUDIT_LOG_ENTRIES
+}
 
 // ── Event codes ──────────────────────────────────────────────────────────────
 
@@ -258,19 +268,37 @@ pub struct VtfAuditRecord {
 pub struct VirtualTransportFaultHarness {
     seed: u64,
     fault_log: Vec<FaultEvent>,
+    #[serde(skip, default = "default_max_fault_log_entries")]
+    max_fault_log_entries: usize,
     reorder_buffer: VecDeque<(u64, Vec<u8>)>,
     next_fault_id: u64,
     audit_log: Vec<VtfAuditRecord>,
+    #[serde(skip, default = "default_max_audit_log_entries")]
+    max_audit_log_entries: usize,
 }
 
 impl VirtualTransportFaultHarness {
     pub fn new(seed: u64) -> Self {
+        Self::with_log_capacities(
+            seed,
+            DEFAULT_MAX_FAULT_LOG_ENTRIES,
+            DEFAULT_MAX_AUDIT_LOG_ENTRIES,
+        )
+    }
+
+    pub fn with_log_capacities(
+        seed: u64,
+        max_fault_log_entries: usize,
+        max_audit_log_entries: usize,
+    ) -> Self {
         Self {
             seed,
             fault_log: Vec::new(),
+            max_fault_log_entries: max_fault_log_entries.max(1),
             reorder_buffer: VecDeque::new(),
             next_fault_id: 1,
             audit_log: Vec::new(),
+            max_audit_log_entries: max_audit_log_entries.max(1),
         }
     }
 
@@ -285,6 +313,10 @@ impl VirtualTransportFaultHarness {
     }
 
     fn log_audit(&mut self, event_code: &str, trace_id: &str, detail: serde_json::Value) {
+        if self.audit_log.len() >= self.max_audit_log_entries {
+            let overflow = self.audit_log.len() + 1 - self.max_audit_log_entries;
+            self.audit_log.drain(0..overflow);
+        }
         self.audit_log.push(VtfAuditRecord {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
@@ -300,6 +332,10 @@ impl VirtualTransportFaultHarness {
     ) -> u64 {
         let id = self.next_fault_id;
         self.next_fault_id = self.next_fault_id.saturating_add(1);
+        if self.fault_log.len() >= self.max_fault_log_entries {
+            let overflow = self.fault_log.len() + 1 - self.max_fault_log_entries;
+            self.fault_log.drain(0..overflow);
+        }
         self.fault_log.push(FaultEvent {
             fault_id: id,
             fault_class: fault_class.to_string(),
@@ -507,6 +543,22 @@ impl VirtualTransportFaultHarness {
     pub fn fault_count(&self) -> usize {
         self.fault_log.len()
     }
+
+    pub fn fault_log(&self) -> &[FaultEvent] {
+        &self.fault_log
+    }
+
+    pub fn audit_log(&self) -> &[VtfAuditRecord] {
+        &self.audit_log
+    }
+
+    pub fn fault_log_capacity(&self) -> usize {
+        self.max_fault_log_entries
+    }
+
+    pub fn audit_log_capacity(&self) -> usize {
+        self.max_audit_log_entries
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -685,6 +737,13 @@ mod tests {
     }
 
     #[test]
+    fn test_log_capacities_clamp_to_one() {
+        let harness = VirtualTransportFaultHarness::with_log_capacities(1, 0, 0);
+        assert_eq!(harness.fault_log_capacity(), 1);
+        assert_eq!(harness.audit_log_capacity(), 1);
+    }
+
+    #[test]
     fn test_fault_log_export_jsonl() {
         let mut harness = VirtualTransportFaultHarness::new(1);
         harness.apply_drop(1, b"a", "t1");
@@ -700,6 +759,38 @@ mod tests {
         let harness = VirtualTransportFaultHarness::init(42, "t1");
         let jsonl = harness.export_audit_log_jsonl();
         assert!(!jsonl.is_empty());
+    }
+
+    #[test]
+    fn test_fault_log_capacity_enforces_oldest_first_eviction() {
+        let mut harness = VirtualTransportFaultHarness::with_log_capacities(1, 2, 4);
+        harness.apply_drop(1, b"a", "t1");
+        harness.apply_drop(2, b"b", "t1");
+        harness.apply_drop(3, b"c", "t1");
+
+        assert_eq!(harness.fault_log().len(), 2);
+        assert_eq!(harness.fault_log()[0].fault_id, 2);
+        assert_eq!(harness.fault_log()[1].fault_id, 3);
+        assert_eq!(harness.fault_log()[0].message_id, 2);
+        assert_eq!(harness.fault_log()[1].message_id, 3);
+    }
+
+    #[test]
+    fn test_audit_log_capacity_enforces_oldest_first_eviction() {
+        let mut harness = VirtualTransportFaultHarness::with_log_capacities(1, 4, 2);
+        harness.apply_drop(1, b"a", "t1");
+        harness.apply_reorder(2, b"b", 1, "t1");
+        harness.apply_corrupt(3, b"c", &[0], "t1");
+
+        assert_eq!(harness.audit_log().len(), 2);
+        assert_eq!(
+            harness.audit_log()[0].event_code,
+            event_codes::FAULT_REORDER_APPLIED
+        );
+        assert_eq!(
+            harness.audit_log()[1].event_code,
+            event_codes::FAULT_CORRUPT_APPLIED
+        );
     }
 
     #[test]

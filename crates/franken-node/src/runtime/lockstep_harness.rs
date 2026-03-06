@@ -1,8 +1,12 @@
-use crate::runtime::nversion_oracle::{BoundaryScope, RuntimeEntry, RuntimeOracle};
+use crate::runtime::nversion_oracle::{
+    BoundaryScope, CheckOutcome, DivergenceReport, OracleVerdict, RiskTier, RuntimeEntry,
+    RuntimeOracle, SemanticDivergence,
+};
 use anyhow::{Context, Result};
-use std::collections::BTreeMap;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -24,7 +28,39 @@ pub struct LockstepHarness {
 
 impl LockstepHarness {
     pub fn new(runtimes: Vec<String>) -> Self {
-        Self { runtimes }
+        Self {
+            runtimes: Self::normalize_runtimes(runtimes),
+        }
+    }
+
+    fn normalize_runtimes(runtimes: Vec<String>) -> Vec<String> {
+        let mut normalized = Vec::new();
+        let mut seen = BTreeSet::new();
+        for runtime in runtimes {
+            let trimmed = runtime.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            let runtime = trimmed.to_string();
+            if seen.insert(runtime.clone()) {
+                normalized.push(runtime);
+            }
+        }
+        normalized
+    }
+
+    fn validate_runtimes(&self) -> Result<()> {
+        if self.runtimes.len() >= 2 {
+            return Ok(());
+        }
+
+        let configured = if self.runtimes.is_empty() {
+            "none".to_string()
+        } else {
+            self.runtimes.join(", ")
+        };
+        anyhow::bail!("verify lockstep requires at least two distinct runtimes; got {configured}");
     }
 
     fn is_franken_runtime(runtime: &str) -> bool {
@@ -47,7 +83,8 @@ impl LockstepHarness {
 
     /// Spawns the specified runtimes concurrently, intercepts their outputs,
     /// and feeds the results to the Oracle.
-    pub fn verify_lockstep(&self, app_path: &Path) -> Result<()> {
+    pub fn verify_lockstep(&self, app_path: &Path, emit_fixtures: bool) -> Result<()> {
+        self.validate_runtimes()?;
         let mut oracle = RuntimeOracle::new("lockstep-harness-trace", 100);
 
         for rt in &self.runtimes {
@@ -103,7 +140,7 @@ impl LockstepHarness {
             )
             .map_err(|e| anyhow::anyhow!("Oracle cross check error: {}", e))?;
 
-        if let Some(crate::runtime::nversion_oracle::CheckOutcome::Diverge {
+        if let Some(CheckOutcome::Diverge {
             outputs: div_outputs,
         }) = check.outcome
         {
@@ -111,17 +148,167 @@ impl LockstepHarness {
                 &format!("div-{}", check_id),
                 &check_id,
                 BoundaryScope::IO,
-                crate::runtime::nversion_oracle::RiskTier::High,
+                RiskTier::High,
                 &div_outputs,
             );
         }
 
         // Generate and print the report
         let report = oracle.generate_report(0);
+        if emit_fixtures && !report.divergences.is_empty() {
+            for path in Self::emit_divergence_fixtures(app_path, &report)? {
+                eprintln!("lockstep divergence fixture written: {}", path.display());
+            }
+        }
         let canonical_json = serde_json::to_string_pretty(&report)?;
         println!("{}", canonical_json);
 
-        Ok(())
+        Self::ensure_report_passes(&report)
+    }
+
+    fn ensure_report_passes(report: &DivergenceReport) -> Result<()> {
+        match &report.verdict {
+            OracleVerdict::Pass => Ok(()),
+            OracleVerdict::BlockRelease {
+                blocking_divergence_ids,
+            } => anyhow::bail!(
+                "lockstep verification diverged; verdict=block_release blocking_divergences={}",
+                blocking_divergence_ids.join(",")
+            ),
+            OracleVerdict::RequiresReceipt {
+                pending_divergence_ids,
+            } => anyhow::bail!(
+                "lockstep verification diverged; verdict=requires_receipt pending_divergences={}",
+                pending_divergence_ids.join(",")
+            ),
+        }
+    }
+
+    fn emit_divergence_fixtures(
+        app_path: &Path,
+        report: &DivergenceReport,
+    ) -> Result<Vec<PathBuf>> {
+        let output_dir = Self::fixture_output_dir(app_path);
+        std::fs::create_dir_all(&output_dir).with_context(|| {
+            format!(
+                "failed creating lockstep fixture output dir {}",
+                output_dir.display()
+            )
+        })?;
+
+        let mut written = Vec::new();
+        for divergence in &report.divergences {
+            let path = output_dir.join(format!(
+                "{}_min.json",
+                Self::sanitize_fixture_token(&divergence.divergence_id)
+            ));
+            let fixture = Self::divergence_fixture_value(app_path, report, divergence);
+            let payload = serde_json::to_string_pretty(&fixture)
+                .context("failed serializing generated lockstep divergence fixture")?;
+            std::fs::write(&path, format!("{payload}\n")).with_context(|| {
+                format!(
+                    "failed writing lockstep divergence fixture {}",
+                    path.display()
+                )
+            })?;
+            written.push(path);
+        }
+
+        Ok(written)
+    }
+
+    fn fixture_output_dir(app_path: &Path) -> PathBuf {
+        let base = if app_path.is_dir() {
+            app_path.to_path_buf()
+        } else {
+            app_path
+                .parent()
+                .map_or_else(|| PathBuf::from("."), Path::to_path_buf)
+        };
+        base.join("fixtures").join("lockstep")
+    }
+
+    fn divergence_fixture_value(
+        app_path: &Path,
+        report: &DivergenceReport,
+        divergence: &SemanticDivergence,
+    ) -> serde_json::Value {
+        let runtime_outputs = divergence
+            .runtime_outputs
+            .iter()
+            .map(|(runtime, output)| {
+                (
+                    runtime.clone(),
+                    serde_json::json!({
+                        "encoding": "base64",
+                        "value": BASE64_STANDARD.encode(output),
+                    }),
+                )
+            })
+            .collect::<serde_json::Map<String, serde_json::Value>>();
+
+        serde_json::json!({
+            "id": format!(
+                "fixture:lockstep:oracle:{}",
+                Self::sanitize_fixture_token(&divergence.divergence_id)
+            ),
+            "api_family": "lockstep",
+            "api_name": "oracle",
+            "band": Self::fixture_band(divergence.risk_tier),
+            "description": format!(
+                "Auto-generated divergence fixture for {}",
+                app_path.to_string_lossy().replace('\\', "/")
+            ),
+            "input": {
+                "args": [app_path.to_string_lossy().replace('\\', "/")],
+                "env": {
+                    "boundary_scope": divergence.boundary_scope.label(),
+                    "runtimes": report.runtimes.keys().cloned().collect::<Vec<_>>(),
+                    "trace_id": report.trace_id.as_str(),
+                },
+                "files": {},
+            },
+            "expected_output": {
+                "oracle_verdict": report.verdict.label(),
+                "risk_tier": divergence.risk_tier.label(),
+                "runtime_outputs": runtime_outputs,
+            },
+            "oracle_source": "lockstep-oracle",
+            "tags": [
+                "generated",
+                "divergence",
+                divergence.boundary_scope.label(),
+                divergence.risk_tier.label(),
+            ],
+        })
+    }
+
+    fn fixture_band(risk_tier: RiskTier) -> &'static str {
+        if risk_tier.blocks_release() {
+            "high-value"
+        } else {
+            "edge"
+        }
+    }
+
+    fn sanitize_fixture_token(raw: &str) -> String {
+        let mut token = String::new();
+        for ch in raw.chars() {
+            if ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_' {
+                token.push(ch);
+            } else if ch.is_ascii_uppercase() {
+                token.push(ch.to_ascii_lowercase());
+            } else {
+                token.push('-');
+            }
+        }
+
+        let trimmed = token.trim_matches('-');
+        if trimmed.is_empty() {
+            "lockstep-divergence".to_string()
+        } else {
+            trimmed.to_string()
+        }
     }
 
     fn execute_runtime(runtime: &str, app_path: &Path) -> Result<Vec<u8>> {
@@ -362,6 +549,7 @@ impl LockstepHarness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::nversion_oracle::{CrossRuntimeCheck, OracleEvent};
 
     // ── Construction ──────────────────────────────────────────────────
 
@@ -377,6 +565,19 @@ mod tests {
     fn new_harness_empty_runtimes() {
         let h = LockstepHarness::new(vec![]);
         assert!(h.runtimes.is_empty());
+    }
+
+    #[test]
+    fn new_harness_trims_and_deduplicates_runtimes() {
+        let h = LockstepHarness::new(vec![
+            " node ".into(),
+            "".into(),
+            "bun".into(),
+            "node".into(),
+            " franken-node ".into(),
+            "bun".into(),
+        ]);
+        assert_eq!(h.runtimes, vec!["node", "bun", "franken-node"]);
     }
 
     #[test]
@@ -437,6 +638,14 @@ mod tests {
             LockstepHarness::resolve_runtime_binary("custom-runtime"),
             "custom-runtime"
         );
+    }
+
+    #[test]
+    fn validate_runtimes_requires_two_distinct_entries() {
+        let err = LockstepHarness::new(vec!["node".into(), " node ".into()])
+            .validate_runtimes()
+            .expect_err("single distinct runtime must fail");
+        assert!(format!("{err:#}").contains("at least two distinct runtimes"));
     }
 
     // ── TempFileCleanup ──────────────────────────────────────────────
@@ -731,6 +940,107 @@ mod tests {
         assert_eq!(
             divergence.risk_tier,
             crate::runtime::nversion_oracle::RiskTier::High
+        );
+    }
+
+    fn sample_divergence_report(verdict: OracleVerdict) -> DivergenceReport {
+        let mut runtimes = BTreeMap::new();
+        runtimes.insert(
+            "node".to_string(),
+            RuntimeEntry {
+                runtime_id: "node".to_string(),
+                runtime_name: "node".to_string(),
+                version: "20.0.0".to_string(),
+                is_reference: true,
+            },
+        );
+        runtimes.insert(
+            "franken-node".to_string(),
+            RuntimeEntry {
+                runtime_id: "franken-node".to_string(),
+                runtime_name: "franken-node".to_string(),
+                version: "0.1.0".to_string(),
+                is_reference: false,
+            },
+        );
+
+        let mut outputs = BTreeMap::new();
+        outputs.insert("node".to_string(), b"node-output".to_vec());
+        outputs.insert("franken-node".to_string(), b"franken-output".to_vec());
+
+        DivergenceReport {
+            schema_version: "nvo-v1.0".to_string(),
+            trace_id: "trace-lockstep".to_string(),
+            runtimes,
+            checks: vec![CrossRuntimeCheck {
+                check_id: "check-1".to_string(),
+                boundary_scope: BoundaryScope::IO,
+                input: b"{}".to_vec(),
+                trace_id: "trace-lockstep".to_string(),
+                outcome: Some(CheckOutcome::Diverge {
+                    outputs: outputs.clone(),
+                }),
+            }],
+            divergences: vec![SemanticDivergence {
+                divergence_id: "div-1".to_string(),
+                check_id: "check-1".to_string(),
+                boundary_scope: BoundaryScope::IO,
+                risk_tier: RiskTier::High,
+                runtime_outputs: outputs,
+                resolved: false,
+                resolution_note: None,
+                trace_id: "trace-lockstep".to_string(),
+            }],
+            voting_results: Vec::new(),
+            receipts: Vec::new(),
+            verdict,
+            event_log: vec![OracleEvent {
+                event_code: "FN-NV-012".to_string(),
+                trace_id: "trace-lockstep".to_string(),
+                message: "Oracle report generated".to_string(),
+                details: BTreeMap::new(),
+            }],
+        }
+    }
+
+    #[test]
+    fn ensure_report_passes_rejects_non_pass_verdicts() {
+        let report = sample_divergence_report(OracleVerdict::BlockRelease {
+            blocking_divergence_ids: vec!["div-1".to_string()],
+        });
+
+        let err = LockstepHarness::ensure_report_passes(&report)
+            .expect_err("blocking divergence must fail verification");
+        let message = format!("{err:#}");
+        assert!(message.contains("verdict=block_release"));
+        assert!(message.contains("div-1"));
+    }
+
+    #[test]
+    fn emit_divergence_fixtures_writes_schema_shaped_fixture() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let app_path = temp.path().join("demo-app").join("index.js");
+        let report = sample_divergence_report(OracleVerdict::BlockRelease {
+            blocking_divergence_ids: vec!["div-1".to_string()],
+        });
+
+        let written = LockstepHarness::emit_divergence_fixtures(&app_path, &report)
+            .expect("fixture emission should succeed");
+        assert_eq!(written.len(), 1);
+        assert!(written[0].ends_with("fixtures/lockstep/div-1_min.json"));
+
+        let fixture: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&written[0]).expect("read fixture"))
+                .expect("valid fixture json");
+        assert_eq!(fixture["id"], "fixture:lockstep:oracle:div-1");
+        assert_eq!(fixture["band"], "high-value");
+        assert_eq!(
+            fixture["expected_output"]["oracle_verdict"],
+            serde_json::Value::String("block_release".to_string())
+        );
+        assert_eq!(
+            fixture["expected_output"]["runtime_outputs"]["node"]["encoding"],
+            serde_json::Value::String("base64".to_string())
         );
     }
 

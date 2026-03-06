@@ -76,7 +76,8 @@ use supply_chain::extension_registry::{
 };
 use supply_chain::trust_card::{
     ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard, TrustCardListFilter,
-    TrustCardMutation, TrustCardRegistry, demo_registry as demo_trust_registry,
+    TrustCardMutation, TrustCardRegistry, TrustCardSyncReport,
+    demo_registry as demo_trust_registry,
     render_comparison_human, render_trust_card_human, to_canonical_json as trust_card_to_json,
 };
 use tools::benchmark_suite::{
@@ -2778,7 +2779,11 @@ fn quarantine_trust_cards(
     Ok(updates)
 }
 
-fn render_trust_sync_summary(cards: &[TrustCard], force: bool) -> String {
+fn render_trust_sync_summary(
+    cards: &[TrustCard],
+    sync_report: &TrustCardSyncReport,
+    force: bool,
+) -> String {
     let revoked = cards
         .iter()
         .filter(|card| matches!(card.revocation_status, RevocationStatus::Revoked { .. }))
@@ -2789,8 +2794,13 @@ fn render_trust_sync_summary(cards: &[TrustCard], force: bool) -> String {
         .filter(|card| card.user_facing_risk_assessment.level == RiskLevel::Critical)
         .count();
     format!(
-        "trust sync completed: force={force} cards={} revoked={} quarantined={} critical_risk={critical}",
+        "trust sync completed: force={force} cards={} refreshed={} cache_hits={} cache_misses={} stale_refreshes={} forced_refreshes={} revoked={} quarantined={} critical_risk={critical}",
         cards.len(),
+        sync_report.cache_misses + sync_report.stale_refreshes + sync_report.forced_refreshes,
+        sync_report.cache_hits,
+        sync_report.cache_misses,
+        sync_report.stale_refreshes,
+        sync_report.forced_refreshes,
         revoked,
         quarantined
     )
@@ -3857,7 +3867,7 @@ async fn main() -> Result<()> {
                     "Running lockstep verification on {}",
                     args.project_path.display()
                 );
-                if let Err(e) = harness.verify_lockstep(&args.project_path) {
+                if let Err(e) = harness.verify_lockstep(&args.project_path, args.emit_fixtures) {
                     eprintln!("Lockstep harness failed: {}", e);
                     std::process::exit(1);
                 }
@@ -3927,12 +3937,18 @@ async fn main() -> Result<()> {
             TrustCommand::Sync(args) => {
                 let mut registry = trust_card_cli_registry()?;
                 let now_secs = now_unix_secs();
+                let sync_report = registry
+                    .sync_cache(now_secs, "trace-cli-trust-sync", args.force)
+                    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
                 let cards = registry.list(
                     &TrustCardListFilter::empty(),
                     "trace-cli-trust-sync",
                     now_secs,
                 );
-                println!("{}", render_trust_sync_summary(&cards, args.force));
+                println!(
+                    "{}",
+                    render_trust_sync_summary(&cards, &sync_report, args.force)
+                );
             }
         },
 

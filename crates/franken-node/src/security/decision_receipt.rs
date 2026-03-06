@@ -349,6 +349,7 @@ pub fn export_receipts_to_path(
     filter: &ReceiptQuery,
     path: &Path,
 ) -> Result<(), ReceiptError> {
+    ensure_parent_dir(path)?;
     if path.extension().and_then(std::ffi::OsStr::to_str) == Some("cbor") {
         let bytes = export_receipts_cbor(receipts, filter)?;
         std::fs::write(path, bytes).map_err(|source| ReceiptError::WriteFailed {
@@ -392,6 +393,7 @@ pub fn write_receipts_markdown(
     receipts: &[SignedReceipt],
     path: &Path,
 ) -> Result<(), ReceiptError> {
+    ensure_parent_dir(path)?;
     let markdown = render_receipts_markdown(receipts);
     std::fs::write(path, markdown).map_err(|source| ReceiptError::WriteFailed {
         path: path.display().to_string(),
@@ -463,6 +465,18 @@ fn compute_chain_hash(previous_hash: Option<&str>, payload: &str) -> String {
     hasher.update(b":");
     hasher.update(payload.as_bytes());
     hex::encode(hasher.finalize())
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<(), ReceiptError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent).map_err(|source| ReceiptError::WriteFailed {
+            path: path.display().to_string(),
+            source,
+        })?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -606,5 +620,34 @@ mod tests {
         let markdown = render_receipts_markdown(&[signed]);
         assert!(markdown.contains("Signed Decision Receipts"));
         assert!(markdown.contains("| Receipt ID | Action | Actor | Decision | Timestamp |"));
+    }
+
+    #[test]
+    fn export_receipts_to_path_creates_missing_parent_directories() {
+        let key = demo_signing_key();
+        let signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output_path = dir.path().join("nested/receipts.json");
+
+        export_receipts_to_path(&[signed], &ReceiptQuery::default(), &output_path).expect("export");
+
+        let exported = std::fs::read_to_string(&output_path).expect("read");
+        assert!(exported.contains("quarantine"));
+    }
+
+    #[test]
+    fn write_receipts_markdown_creates_missing_parent_directories() {
+        let key = demo_signing_key();
+        let signed =
+            sign_receipt(&make_receipt("revocation", Decision::Denied), &key).expect("sign");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let output_path = dir.path().join("nested/receipts.md");
+
+        write_receipts_markdown(&[signed], &output_path).expect("write markdown");
+
+        let markdown = std::fs::read_to_string(&output_path).expect("read");
+        assert!(markdown.contains("Signed Decision Receipts"));
+        assert!(markdown.contains("revocation"));
     }
 }

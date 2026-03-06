@@ -743,14 +743,16 @@ fn push_capped_script_finding(
         return;
     }
 
-    let (severity, message, recommendation) = match kind {
+    let (category, severity, message, recommendation) = match kind {
         ScriptFindingKind::Risky => (
+            MigrationCategory::Scripts,
             MigrationSeverity::High,
             "risky install/build script pattern detected in package.json".to_string(),
             "Replace dynamic install hooks with deterministic build steps before migration."
                 .to_string(),
         ),
         ScriptFindingKind::MissingNodeEngine => (
+            MigrationCategory::Runtime,
             MigrationSeverity::Low,
             "package.json is missing engines.node version pin".to_string(),
             "Add engines.node to reduce runtime drift during migration verification.".to_string(),
@@ -759,7 +761,7 @@ fn push_capped_script_finding(
 
     findings.push(MigrationAuditFinding {
         id: String::new(),
-        category: MigrationCategory::Scripts,
+        category,
         severity,
         message,
         path: Some(relative_path.to_string()),
@@ -1243,6 +1245,33 @@ mod tests {
                 .any(|entry| entry.action == MigrationRewriteAction::ManualScriptReview)
         );
         assert!(report.manual_review_items >= 1);
+    }
+
+    #[test]
+    fn run_audit_classifies_missing_node_engine_under_runtime() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let project = temp.path();
+
+        std::fs::write(project.join("index.js"), "console.log('hello');").expect("write js");
+        std::fs::write(
+            project.join("package.json"),
+            r#"{"name":"demo","version":"1.0.0","scripts":{"test":"node test.js"}}"#,
+        )
+        .expect("write package");
+        std::fs::write(project.join("package-lock.json"), "{}\n").expect("write lockfile");
+
+        let report = run_audit(project).expect("audit should succeed");
+        let finding = report
+            .findings
+            .iter()
+            .find(|finding| {
+                finding.path.as_deref() == Some("package.json")
+                    && finding.message.contains("missing engines.node")
+            })
+            .expect("missing engines finding");
+
+        assert_eq!(finding.category, MigrationCategory::Runtime);
+        assert_eq!(finding.severity, MigrationSeverity::Low);
     }
 
     #[test]

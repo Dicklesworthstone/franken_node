@@ -20,6 +20,7 @@ pub const TRUST_CARD_SERVED: &str = "TRUST_CARD_SERVED";
 pub const TRUST_CARD_CACHE_HIT: &str = "TRUST_CARD_CACHE_HIT";
 pub const TRUST_CARD_CACHE_MISS: &str = "TRUST_CARD_CACHE_MISS";
 pub const TRUST_CARD_STALE_REFRESH: &str = "TRUST_CARD_STALE_REFRESH";
+pub const TRUST_CARD_FORCE_REFRESH: &str = "TRUST_CARD_FORCE_REFRESH";
 pub const TRUST_CARD_DIFF_COMPUTED: &str = "TRUST_CARD_DIFF_COMPUTED";
 
 const DEFAULT_CACHE_TTL_SECS: u64 = 60;
@@ -244,6 +245,15 @@ pub struct TelemetryEvent {
 struct CachedCard {
     card: TrustCard,
     cached_at_secs: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrustCardSyncReport {
+    pub total_cards: usize,
+    pub cache_hits: usize,
+    pub cache_misses: usize,
+    pub stale_refreshes: usize,
+    pub forced_refreshes: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -559,6 +569,114 @@ impl TrustCardRegistry {
         )
     }
 
+    pub fn sync_cache(
+        &mut self,
+        now_secs: u64,
+        trace_id: &str,
+        force: bool,
+    ) -> Result<TrustCardSyncReport, TrustCardError> {
+        self.emit(
+            TRUST_CARD_QUERIED,
+            None,
+            trace_id,
+            now_secs,
+            if force {
+                "force sync trust card cache"
+            } else {
+                "sync trust card cache"
+            },
+        );
+
+        let extension_ids = self
+            .cards_by_extension
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut report = TrustCardSyncReport {
+            total_cards: extension_ids.len(),
+            cache_hits: 0,
+            cache_misses: 0,
+            stale_refreshes: 0,
+            forced_refreshes: 0,
+        };
+
+        for extension_id in extension_ids {
+            let latest = self
+                .latest_card(&extension_id)
+                .ok_or_else(|| TrustCardError::NotFound(extension_id.clone()))?
+                .clone();
+            let cache_state = match self.cache_by_extension.get(&extension_id) {
+                Some(cached)
+                    if now_secs.saturating_sub(cached.cached_at_secs) <= self.cache_ttl_secs =>
+                {
+                    CacheSyncState::Fresh
+                }
+                Some(_) => CacheSyncState::Stale,
+                None => CacheSyncState::Missing,
+            };
+
+            match cache_state {
+                CacheSyncState::Fresh if !force => {
+                    let cached = self
+                        .cache_by_extension
+                        .get(&extension_id)
+                        .expect("fresh cache state requires cached card");
+                    verify_card_signature(&cached.card, &self.registry_key)?;
+                    report.cache_hits = report.cache_hits.saturating_add(1);
+                    self.emit(
+                        TRUST_CARD_CACHE_HIT,
+                        Some(extension_id),
+                        trace_id,
+                        now_secs,
+                        "sync skipped fresh cache entry",
+                    );
+                    continue;
+                }
+                CacheSyncState::Missing => {
+                    report.cache_misses = report.cache_misses.saturating_add(1);
+                    self.emit(
+                        TRUST_CARD_CACHE_MISS,
+                        Some(extension_id.clone()),
+                        trace_id,
+                        now_secs,
+                        "sync populated missing cache entry",
+                    );
+                }
+                CacheSyncState::Stale => {
+                    report.stale_refreshes = report.stale_refreshes.saturating_add(1);
+                    self.emit(
+                        TRUST_CARD_STALE_REFRESH,
+                        Some(extension_id.clone()),
+                        trace_id,
+                        now_secs,
+                        "sync refreshed stale cache from source",
+                    );
+                }
+                CacheSyncState::Fresh => {
+                    report.forced_refreshes = report.forced_refreshes.saturating_add(1);
+                    self.emit(
+                        TRUST_CARD_FORCE_REFRESH,
+                        Some(extension_id.clone()),
+                        trace_id,
+                        now_secs,
+                        "force sync refreshed fresh cache from source",
+                    );
+                }
+            }
+
+            verify_card_signature(&latest, &self.registry_key)?;
+            self.cache_by_extension.insert(
+                extension_id,
+                CachedCard {
+                    card: latest,
+                    cached_at_secs: now_secs,
+                },
+            );
+        }
+
+        Ok(report)
+    }
+
     pub fn search(&mut self, query: &str, now_secs: u64, trace_id: &str) -> Vec<TrustCard> {
         self.emit(
             TRUST_CARD_QUERIED,
@@ -710,6 +828,13 @@ impl TrustCardRegistry {
             detail: detail.to_string(),
         });
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CacheSyncState {
+    Fresh,
+    Stale,
+    Missing,
 }
 
 fn comparison_from_cards(
@@ -1281,6 +1406,76 @@ mod tests {
             .map(|evt| evt.event_code.as_str())
             .collect();
         assert!(codes.contains(&TRUST_CARD_CACHE_HIT));
+    }
+
+    #[test]
+    fn sync_cache_counts_missing_entries_without_force() {
+        let mut registry = demo_registry(1_000).expect("demo");
+        let total_cards = registry.cards_by_extension.len();
+        let missing_extension = registry
+            .cards_by_extension
+            .keys()
+            .next()
+            .cloned()
+            .expect("demo registry should not be empty");
+        registry.cache_by_extension.remove(&missing_extension);
+
+        let report = registry
+            .sync_cache(1_010, "trace-sync", false)
+            .expect("sync cache");
+
+        assert_eq!(report.total_cards, total_cards);
+        assert_eq!(report.cache_misses, 1);
+        assert_eq!(report.cache_hits, total_cards.saturating_sub(1));
+        assert_eq!(report.stale_refreshes, 0);
+        assert_eq!(report.forced_refreshes, 0);
+        assert!(registry.cache_by_extension.contains_key(&missing_extension));
+    }
+
+    #[test]
+    fn sync_cache_refreshes_stale_entries_without_force() {
+        let mut registry = TrustCardRegistry::new(1, DEFAULT_REGISTRY_KEY);
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+
+        let report = registry
+            .sync_cache(1_002, "trace-sync", false)
+            .expect("sync cache");
+
+        assert_eq!(
+            report,
+            TrustCardSyncReport {
+                total_cards: 1,
+                cache_hits: 0,
+                cache_misses: 0,
+                stale_refreshes: 1,
+                forced_refreshes: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn sync_cache_force_refreshes_fresh_entries() {
+        let mut registry = demo_registry(1_000).expect("demo");
+        let total_cards = registry.cards_by_extension.len();
+
+        let report = registry
+            .sync_cache(1_010, "trace-sync", true)
+            .expect("force sync cache");
+
+        assert_eq!(report.total_cards, total_cards);
+        assert_eq!(report.cache_hits, 0);
+        assert_eq!(report.cache_misses, 0);
+        assert_eq!(report.stale_refreshes, 0);
+        assert_eq!(report.forced_refreshes, total_cards);
+
+        let codes: Vec<&str> = registry
+            .telemetry()
+            .iter()
+            .map(|evt| evt.event_code.as_str())
+            .collect();
+        assert!(codes.contains(&TRUST_CARD_FORCE_REFRESH));
     }
 
     #[test]

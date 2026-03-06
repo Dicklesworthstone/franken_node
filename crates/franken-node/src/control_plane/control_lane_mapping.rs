@@ -26,6 +26,9 @@ pub const SCHEMA_VERSION: &str = "clm-v1.0";
 /// Default starvation threshold in ticks.
 pub const DEFAULT_STARVATION_THRESHOLD_TICKS: u32 = 3;
 
+/// Default max number of retained audit log entries.
+pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -420,12 +423,21 @@ pub struct ControlLaneScheduler {
     policy: ControlLanePolicy,
     counters: BTreeMap<String, LaneTickCounters>,
     audit_log: Vec<ControlLaneAuditRecord>,
+    max_audit_log_entries: usize,
     current_tick: u64,
 }
 
 impl ControlLaneScheduler {
     /// Create a new scheduler with the given policy.
     pub fn new(policy: ControlLanePolicy) -> Result<Self, ControlLanePolicyError> {
+        Self::with_audit_log_capacity(policy, DEFAULT_MAX_AUDIT_LOG_ENTRIES)
+    }
+
+    /// Create a new scheduler with the given audit log capacity.
+    pub fn with_audit_log_capacity(
+        policy: ControlLanePolicy,
+        max_audit_log_entries: usize,
+    ) -> Result<Self, ControlLanePolicyError> {
         policy.validate()?;
 
         let mut counters = BTreeMap::new();
@@ -437,6 +449,7 @@ impl ControlLaneScheduler {
             policy,
             counters,
             audit_log: Vec::new(),
+            max_audit_log_entries: max_audit_log_entries.max(1),
             current_tick: 0,
         })
     }
@@ -465,7 +478,7 @@ impl ControlLaneScheduler {
         counters.tasks_run = counters.tasks_run.saturating_add(1);
         counters.consecutive_empty_ticks = 0;
 
-        self.audit_log.push(ControlLaneAuditRecord {
+        self.record_audit(ControlLaneAuditRecord {
             event_code: event_codes::CLM_TASK_ASSIGNED.to_string(),
             task_class: task_class.to_string(),
             lane: lane.to_string(),
@@ -515,7 +528,7 @@ impl ControlLaneScheduler {
                     lane: *lane,
                     consecutive_ticks: counters.consecutive_empty_ticks,
                 });
-                self.audit_log.push(ControlLaneAuditRecord {
+                self.record_audit(ControlLaneAuditRecord {
                     event_code: event_codes::CLM_STARVATION_ALERT.to_string(),
                     task_class: String::new(),
                     lane: lane.to_string(),
@@ -591,6 +604,11 @@ impl ControlLaneScheduler {
         &self.audit_log
     }
 
+    /// Get the configured audit log capacity.
+    pub fn audit_log_capacity(&self) -> usize {
+        self.max_audit_log_entries
+    }
+
     /// Export audit log as JSONL.
     pub fn export_audit_log_jsonl(&self) -> String {
         self.audit_log
@@ -610,6 +628,14 @@ impl ControlLaneScheduler {
         if let Some(c) = self.counters.get_mut(lane.as_str()) {
             c.tasks_queued = count;
         }
+    }
+
+    fn record_audit(&mut self, record: ControlLaneAuditRecord) {
+        if self.audit_log.len() >= self.max_audit_log_entries {
+            let overflow = self.audit_log.len() + 1 - self.max_audit_log_entries;
+            self.audit_log.drain(0..overflow);
+        }
+        self.audit_log.push(record);
     }
 }
 
@@ -639,6 +665,14 @@ mod tests {
 
     fn make_scheduler() -> ControlLaneScheduler {
         ControlLaneScheduler::new(default_control_lane_policy()).unwrap()
+    }
+
+    fn make_scheduler_with_audit_log_capacity(max_audit_log_entries: usize) -> ControlLaneScheduler {
+        ControlLaneScheduler::with_audit_log_capacity(
+            default_control_lane_policy(),
+            max_audit_log_entries,
+        )
+        .unwrap()
     }
 
     // ---- ControlLane ----
@@ -943,6 +977,42 @@ mod tests {
         let parsed: serde_json::Value =
             serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert_eq!(parsed["schema_version"], SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn audit_log_capacity_clamps_to_one() {
+        let mut s = make_scheduler_with_audit_log_capacity(0);
+        assert_eq!(s.audit_log_capacity(), 1);
+
+        s.assign_task(&task_classes::cancellation_handler(), 1000, "t1")
+            .unwrap();
+        s.set_queued(ControlLane::Cancel, 1);
+        let _ = s.advance_tick(&BTreeMap::new(), 1001, "t1");
+
+        assert_eq!(s.audit_log().len(), 1);
+        assert_eq!(s.audit_log()[0].event_code, event_codes::CLM_STARVATION_ALERT);
+        assert_eq!(s.audit_log()[0].lane, ControlLane::Cancel.to_string());
+    }
+
+    #[test]
+    fn audit_log_capacity_enforces_oldest_first_eviction() {
+        let mut s = make_scheduler_with_audit_log_capacity(2);
+
+        s.assign_task(&task_classes::cancellation_handler(), 1000, "t1")
+            .unwrap();
+        s.set_queued(ControlLane::Cancel, 1);
+        let _ = s.advance_tick(&BTreeMap::new(), 1001, "t1");
+        s.set_queued(ControlLane::Cancel, 0);
+        s.set_queued(ControlLane::Timed, 1);
+        let _ = s.advance_tick(&BTreeMap::new(), 1002, "t1");
+        let _ = s.advance_tick(&BTreeMap::new(), 1003, "t1");
+
+        assert_eq!(s.audit_log_capacity(), 2);
+        assert_eq!(s.audit_log().len(), 2);
+        assert_eq!(s.audit_log()[0].event_code, event_codes::CLM_STARVATION_ALERT);
+        assert_eq!(s.audit_log()[0].lane, ControlLane::Cancel.to_string());
+        assert_eq!(s.audit_log()[1].event_code, event_codes::CLM_STARVATION_ALERT);
+        assert_eq!(s.audit_log()[1].lane, ControlLane::Timed.to_string());
     }
 
     // ---- Error display ----
