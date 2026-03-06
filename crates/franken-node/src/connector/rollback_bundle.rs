@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_EVENTS: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -528,8 +529,7 @@ impl BundleStore {
         self.bundles
             .insert(target_version.to_string(), bundle.clone());
 
-        self.events
-            .push(event_codes::RRB_001_BUNDLE_CREATED.to_string());
+        self.emit_event(event_codes::RRB_001_BUNDLE_CREATED.to_string());
 
         self.emit_audit(RollbackAuditEntry {
             timestamp: timestamp.to_string(),
@@ -560,8 +560,7 @@ impl BundleStore {
 
         // Step 1: Verify bundle integrity
         if let Err(e) = bundle.verify_integrity() {
-            self.events
-                .push(event_codes::RRB_004_ROLLBACK_FAILED.to_string());
+            self.emit_event(event_codes::RRB_004_ROLLBACK_FAILED.to_string());
             self.emit_audit(RollbackAuditEntry {
                 timestamp: timestamp.to_string(),
                 event_code: event_codes::RRB_004_ROLLBACK_FAILED.to_string(),
@@ -584,8 +583,7 @@ impl BundleStore {
 
         // Step 2: Check version compatibility
         if let Err(e) = bundle.check_compatibility(current_version) {
-            self.events
-                .push(event_codes::RRB_004_ROLLBACK_FAILED.to_string());
+            self.emit_event(event_codes::RRB_004_ROLLBACK_FAILED.to_string());
             return RollbackResult {
                 success: false,
                 mode,
@@ -600,8 +598,7 @@ impl BundleStore {
         // Step 3: Capture pre-rollback snapshot
         let pre_snapshot = self.current_state.clone();
 
-        self.events
-            .push(event_codes::RRB_002_ROLLBACK_INITIATED.to_string());
+        self.emit_event(event_codes::RRB_002_ROLLBACK_INITIATED.to_string());
 
         // Step 4: Apply components in order (or simulate for dry-run)
         for component in bundle.ordered_components() {
@@ -687,8 +684,7 @@ impl BundleStore {
             .collect();
 
         if all_health_pass {
-            self.events
-                .push(event_codes::RRB_003_ROLLBACK_COMPLETED.to_string());
+            self.emit_event(event_codes::RRB_003_ROLLBACK_COMPLETED.to_string());
             self.emit_audit(RollbackAuditEntry {
                 timestamp: timestamp.to_string(),
                 event_code: event_codes::RRB_003_ROLLBACK_COMPLETED.to_string(),
@@ -707,8 +703,7 @@ impl BundleStore {
             if mode == RollbackMode::Apply {
                 self.current_state = pre_snapshot.clone();
             }
-            self.events
-                .push(event_codes::RRB_004_ROLLBACK_FAILED.to_string());
+            self.emit_event(event_codes::RRB_004_ROLLBACK_FAILED.to_string());
             self.emit_audit(RollbackAuditEntry {
                 timestamp: timestamp.to_string(),
                 event_code: event_codes::RRB_004_ROLLBACK_FAILED.to_string(),
@@ -760,6 +755,10 @@ impl BundleStore {
 
     fn emit_audit(&mut self, entry: RollbackAuditEntry) {
         push_bounded(&mut self.audit_log, entry, MAX_AUDIT_LOG_ENTRIES);
+    }
+
+    fn emit_event(&mut self, event: String) {
+        push_bounded(&mut self.events, event, MAX_EVENTS);
     }
 }
 

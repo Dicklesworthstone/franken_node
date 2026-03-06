@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
+const MAX_INTERACTIONS: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -742,6 +744,10 @@ impl UpdateCopilot {
 
     fn log_interaction(&mut self, interaction: CopilotInteraction) {
         self.interactions.push(interaction);
+        if self.interactions.len() > MAX_INTERACTIONS {
+            let overflow = self.interactions.len() - MAX_INTERACTIONS;
+            self.interactions.drain(0..overflow);
+        }
     }
 }
 

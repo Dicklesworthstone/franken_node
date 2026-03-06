@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 
 use crate::security::constant_time::ct_eq;
 
+const MAX_HISTORY_ENTRIES: usize = 4096;
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub const CSR_PIPELINE_STARTED: &str = "CSR_PIPELINE_STARTED";
@@ -427,6 +429,10 @@ impl ReportingPipeline {
         );
 
         self.history.push(report.clone());
+        if self.history.len() > MAX_HISTORY_ENTRIES {
+            let overflow = self.history.len() - MAX_HISTORY_ENTRIES;
+            self.history.drain(0..overflow);
+        }
         Ok(report)
     }
 

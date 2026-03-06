@@ -12,6 +12,9 @@ use sha2::{Digest, Sha256};
 
 // ── Event codes (RPL-series) ─────────────────────────────────────────────────
 
+const MAX_EVIDENCE_ENTRIES: usize = 4096;
+const MAX_REPLAY_LOG_ENTRIES: usize = 4096;
+
 pub const RPL_001_REPLAY_INITIATED: &str = "RPL-001";
 pub const RPL_002_REPRODUCED: &str = "RPL-002";
 pub const RPL_003_DIVERGED: &str = "RPL-003";
@@ -221,7 +224,7 @@ impl EvidenceReplayGate {
 
     /// Capture evidence for a control-plane decision.
     pub fn capture_evidence(&mut self, evidence: CapturedEvidence) {
-        self.evidence_store.push(evidence);
+        push_bounded(&mut self.evidence_store, evidence, MAX_EVIDENCE_ENTRIES);
     }
 
     /// Replay a single captured evidence entry using the canonical validator.
@@ -237,14 +240,14 @@ impl EvidenceReplayGate {
         self.total_replays = self.total_replays.saturating_add(1);
 
         // Log replay initiation.
-        self.replay_log.push(ReplayLogEntry {
+        push_bounded(&mut self.replay_log, ReplayLogEntry {
             event_code: RPL_001_REPLAY_INITIATED.to_owned(),
             decision_id: evidence.decision_id.clone(),
             verdict: None,
             diff_size_bytes: None,
             trace_id: evidence.trace_id.clone(),
             timestamp: timestamp.to_owned(),
-        });
+        }, MAX_REPLAY_LOG_ENTRIES);
 
         // Verify input hash integrity.
         let computed_hash = evidence.compute_input_hash();
@@ -264,14 +267,14 @@ impl EvidenceReplayGate {
                 event_code: RPL_004_ERROR.to_owned(),
             };
 
-            self.replay_log.push(ReplayLogEntry {
+            push_bounded(&mut self.replay_log, ReplayLogEntry {
                 event_code: RPL_004_ERROR.to_owned(),
                 decision_id: evidence.decision_id.clone(),
                 verdict: Some("error".to_owned()),
                 diff_size_bytes: None,
                 trace_id: evidence.trace_id.clone(),
                 timestamp: timestamp.to_owned(),
-            });
+            }, MAX_REPLAY_LOG_ENTRIES);
 
             return result;
         }
@@ -280,14 +283,14 @@ impl EvidenceReplayGate {
         let verdict = if replayed_action == evidence.chosen_action {
             self.total_reproduced = self.total_reproduced.saturating_add(1);
 
-            self.replay_log.push(ReplayLogEntry {
+            push_bounded(&mut self.replay_log, ReplayLogEntry {
                 event_code: RPL_002_REPRODUCED.to_owned(),
                 decision_id: evidence.decision_id.clone(),
                 verdict: Some("reproduced".to_owned()),
                 diff_size_bytes: None,
                 trace_id: evidence.trace_id.clone(),
                 timestamp: timestamp.to_owned(),
-            });
+            }, MAX_REPLAY_LOG_ENTRIES);
 
             ReplayVerdict::Reproduced
         } else {
@@ -303,14 +306,14 @@ impl EvidenceReplayGate {
             );
             let diff_size = diff.len();
 
-            self.replay_log.push(ReplayLogEntry {
+            push_bounded(&mut self.replay_log, ReplayLogEntry {
                 event_code: RPL_003_DIVERGED.to_owned(),
                 decision_id: evidence.decision_id.clone(),
                 verdict: Some("diverged".to_owned()),
                 diff_size_bytes: Some(diff_size),
                 trace_id: evidence.trace_id.clone(),
                 timestamp: timestamp.to_owned(),
-            });
+            }, MAX_REPLAY_LOG_ENTRIES);
 
             ReplayVerdict::Diverged {
                 original_action: evidence.chosen_action.clone(),
@@ -368,14 +371,14 @@ impl EvidenceReplayGate {
         };
 
         // Log gate decision.
-        self.replay_log.push(ReplayLogEntry {
+        push_bounded(&mut self.replay_log, ReplayLogEntry {
             event_code: RPL_005_GATE_DECISION.to_owned(),
             decision_id: format!("gate-{timestamp}"),
             verdict: Some(format!("{decision:?}")),
             diff_size_bytes: None,
             trace_id: String::new(),
             timestamp: timestamp.to_owned(),
-        });
+        }, MAX_REPLAY_LOG_ENTRIES);
 
         GateResult {
             decision,
@@ -422,6 +425,13 @@ impl EvidenceReplayGate {
     pub fn total_errors(&self) -> u64 {
         self.total_errors
     }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        items.drain(..items.len() - cap + 1);
+    }
+    items.push(item);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

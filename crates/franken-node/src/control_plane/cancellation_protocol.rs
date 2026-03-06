@@ -31,6 +31,9 @@ pub const MIN_DRAIN_TIMEOUT_MS: u64 = 1_000;
 /// Default max number of retained audit log entries.
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 
+/// Default max number of retained cancellation records.
+pub const DEFAULT_MAX_RECORDS: usize = 4_096;
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -478,6 +481,10 @@ impl CancellationProtocol {
         ));
 
         self.records.push(record);
+        if self.records.len() > DEFAULT_MAX_RECORDS {
+            let overflow = self.records.len() - DEFAULT_MAX_RECORDS;
+            self.records.drain(0..overflow);
+        }
         self.records
             .last()
             .ok_or_else(|| CancelProtocolError::InvariantViolation {

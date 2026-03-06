@@ -39,6 +39,8 @@
 
 use serde::{Deserialize, Serialize};
 
+const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
+
 // Re-export the core governor and its types from the runtime module.
 pub use crate::runtime::optimization_governor::{
     DecisionRecord, GovernorDecision, GovernorSnapshot, KnobState, OptimizationGovernor,
@@ -109,38 +111,38 @@ impl GovernorGate {
         let pid = proposal.proposal_id.clone();
 
         // GOVERNOR_CANDIDATE_PROPOSED
-        self.audit_trail.push(GateAuditEntry {
+        push_bounded(&mut self.audit_trail, GateAuditEntry {
             event_code: event_codes::GOVERNOR_CANDIDATE_PROPOSED.to_string(),
             proposal_id: pid.clone(),
             detail: format!(
                 "knob={} old={} new={}",
                 proposal.knob, proposal.old_value, proposal.new_value
             ),
-        });
+        }, MAX_AUDIT_TRAIL_ENTRIES);
 
         // GOVERNOR_SHADOW_EVAL_START
-        self.audit_trail.push(GateAuditEntry {
+        push_bounded(&mut self.audit_trail, GateAuditEntry {
             event_code: event_codes::GOVERNOR_SHADOW_EVAL_START.to_string(),
             proposal_id: pid.clone(),
             detail: "shadow evaluation starting".to_string(),
-        });
+        }, MAX_AUDIT_TRAIL_ENTRIES);
 
         let decision = self.inner.submit(proposal);
 
         match &decision {
             GovernorDecision::Approved => {
                 // GOVERNOR_SAFETY_CHECK_PASS
-                self.audit_trail.push(GateAuditEntry {
+                push_bounded(&mut self.audit_trail, GateAuditEntry {
                     event_code: event_codes::GOVERNOR_SAFETY_CHECK_PASS.to_string(),
                     proposal_id: pid.clone(),
                     detail: "all safety checks passed".to_string(),
-                });
+                }, MAX_AUDIT_TRAIL_ENTRIES);
                 // GOVERNOR_POLICY_APPLIED
-                self.audit_trail.push(GateAuditEntry {
+                push_bounded(&mut self.audit_trail, GateAuditEntry {
                     event_code: event_codes::GOVERNOR_POLICY_APPLIED.to_string(),
                     proposal_id: pid,
                     detail: "policy applied to runtime knob".to_string(),
-                });
+                }, MAX_AUDIT_TRAIL_ENTRIES);
             }
             GovernorDecision::Rejected(reason) => {
                 let err = match reason {
@@ -155,18 +157,18 @@ impl GovernorGate {
                         error_codes::ERR_GOVERNOR_SHADOW_EVAL_FAILED
                     }
                 };
-                self.audit_trail.push(GateAuditEntry {
+                push_bounded(&mut self.audit_trail, GateAuditEntry {
                     event_code: err.to_string(),
                     proposal_id: pid,
                     detail: format!("{reason:?}"),
-                });
+                }, MAX_AUDIT_TRAIL_ENTRIES);
             }
             GovernorDecision::Reverted(msg) => {
-                self.audit_trail.push(GateAuditEntry {
+                push_bounded(&mut self.audit_trail, GateAuditEntry {
                     event_code: event_codes::GOVERNOR_POLICY_REVERTED.to_string(),
                     proposal_id: pid,
                     detail: msg.clone(),
-                });
+                }, MAX_AUDIT_TRAIL_ENTRIES);
             }
             GovernorDecision::ShadowOnly => {}
         }
@@ -182,11 +184,11 @@ impl GovernorGate {
         let reverted = self.inner.live_check(live_metrics);
         for pid in &reverted {
             // GOVERNOR_POLICY_REVERTED
-            self.audit_trail.push(GateAuditEntry {
+            push_bounded(&mut self.audit_trail, GateAuditEntry {
                 event_code: event_codes::GOVERNOR_POLICY_REVERTED.to_string(),
                 proposal_id: pid.clone(),
                 detail: "auto-reverted: live metrics breached safety envelope".to_string(),
-            });
+            }, MAX_AUDIT_TRAIL_ENTRIES);
         }
         reverted
     }
@@ -196,11 +198,11 @@ impl GovernorGate {
     /// INV-GOVERNOR-ENGINE-BOUNDARY: the governor cannot adjust
     /// engine-core internals.  This method always returns an error.
     pub fn reject_engine_internal_adjustment(&mut self, internal_name: &str) -> Result<(), String> {
-        self.audit_trail.push(GateAuditEntry {
+        push_bounded(&mut self.audit_trail, GateAuditEntry {
             event_code: error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION.to_string(),
             proposal_id: String::new(),
             detail: format!("rejected engine-core internal: {internal_name}"),
-        });
+        }, MAX_AUDIT_TRAIL_ENTRIES);
         Err(format!(
             "{}: cannot adjust engine-core internal '{}'",
             error_codes::ERR_GOVERNOR_ENGINE_BOUNDARY_VIOLATION,
@@ -343,11 +345,11 @@ impl GovernorGate {
             });
         }
 
-        self.audit_trail_mut().push(GateAuditEntry {
+        push_bounded(self.audit_trail_mut(), GateAuditEntry {
             event_code: GOV_008_KNOB_ENUMERATION.to_string(),
             proposal_id: String::new(),
             detail: format!("{} knobs enumerated", knobs.len()),
-        });
+        }, MAX_AUDIT_TRAIL_ENTRIES);
 
         KnobEnumeration {
             knobs,
@@ -389,7 +391,7 @@ impl GovernorGate {
 
         let applied_count = inner.applied_count();
 
-        self.audit_trail_mut().push(GateAuditEntry {
+        push_bounded(self.audit_trail_mut(), GateAuditEntry {
             event_code: GOV_009_DISPATCH_HOOK.to_string(),
             proposal_id: String::new(),
             detail: format!(
@@ -397,7 +399,7 @@ impl GovernorGate {
                 env_vars.len(),
                 applied_count
             ),
-        });
+        }, MAX_AUDIT_TRAIL_ENTRIES);
 
         DispatchHookPayload {
             env_vars,
@@ -418,11 +420,11 @@ impl GovernorGate {
 
         if matches!(decision, GovernorDecision::Approved) {
             let payload = self.build_dispatch_payload();
-            self.audit_trail_mut().push(GateAuditEntry {
+            push_bounded(self.audit_trail_mut(), GateAuditEntry {
                 event_code: GOV_010_KNOB_DISPATCHED.to_string(),
                 proposal_id: String::new(),
                 detail: format!("knob {} dispatched to engine", knob),
-            });
+            }, MAX_AUDIT_TRAIL_ENTRIES);
             (decision, Some(payload))
         } else {
             (decision, None)
@@ -441,6 +443,13 @@ pub struct GovernorDispatchSnapshot {
     pub enumeration: KnobEnumeration,
     pub dispatch_payload: DispatchHookPayload,
     pub applied_count: usize,
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        items.drain(..items.len() - cap + 1);
+    }
+    items.push(item);
 }
 
 // ===========================================================================

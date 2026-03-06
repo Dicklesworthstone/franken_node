@@ -34,6 +34,9 @@ pub const DEFAULT_BARRIER_TIMEOUT_MS: u64 = 30_000;
 /// Default per-participant drain timeout in milliseconds.
 pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 10_000;
 
+/// Max number of retained barrier audit history entries.
+const MAX_BARRIER_HISTORY: usize = 4096;
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -691,6 +694,10 @@ impl EpochTransitionBarrier {
             abort_reason: None,
             schema_version: SCHEMA_VERSION.to_string(),
         });
+        if self.history.len() > MAX_BARRIER_HISTORY {
+            let overflow = self.history.len() - MAX_BARRIER_HISTORY;
+            self.history.drain(0..overflow);
+        }
 
         Ok(target_epoch)
     }
@@ -770,6 +777,10 @@ impl EpochTransitionBarrier {
             abort_reason: Some(reason_str),
             schema_version: SCHEMA_VERSION.to_string(),
         });
+        if self.history.len() > MAX_BARRIER_HISTORY {
+            let overflow = self.history.len() - MAX_BARRIER_HISTORY;
+            self.history.drain(0..overflow);
+        }
 
         // INV-BARRIER-ABORT-SAFE: return current epoch (not advanced)
         Ok(current_epoch)

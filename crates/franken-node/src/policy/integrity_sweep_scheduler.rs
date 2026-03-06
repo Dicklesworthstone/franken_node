@@ -14,6 +14,8 @@
 
 use std::time::Duration;
 
+const MAX_DECISIONS: usize = 4096;
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -366,6 +368,10 @@ impl IntegritySweepScheduler {
         let _event = EVD_SWEEP_001;
 
         self.decisions.push(decision);
+        if self.decisions.len() > MAX_DECISIONS {
+            let overflow = self.decisions.len() - MAX_DECISIONS;
+            self.decisions.drain(0..overflow);
+        }
 
         self
     }

@@ -25,6 +25,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
+const MAX_DECISIONS: usize = 4096;
+const MAX_REPLAY_RESULTS: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -301,6 +303,10 @@ impl TrustComplexityGate {
         }
 
         self.decisions.push(decision);
+        if self.decisions.len() > MAX_DECISIONS {
+            let overflow = self.decisions.len() - MAX_DECISIONS;
+            self.decisions.drain(0..overflow);
+        }
         Ok(())
     }
 
@@ -350,6 +356,10 @@ impl TrustComplexityGate {
         };
 
         self.replay_results.push(result.clone());
+        if self.replay_results.len() > MAX_REPLAY_RESULTS {
+            let overflow = self.replay_results.len() - MAX_REPLAY_RESULTS;
+            self.replay_results.drain(0..overflow);
+        }
         result
     }
 

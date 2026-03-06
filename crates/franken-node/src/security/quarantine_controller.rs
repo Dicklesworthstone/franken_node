@@ -23,6 +23,9 @@
 //! - **INV-QC-SEQUENCE-MONOTONIC**: Evidence log sequence numbers are
 //!   strictly monotonically increasing.
 
+const MAX_EVIDENCE_LOG_ENTRIES: usize = 4096;
+const MAX_ACTION_LOG_ENTRIES: usize = 4096;
+
 use crate::security::adversary_graph::{
     ADV_005_ACTION_TRIGGERED, ADV_008_SIGNED_EVIDENCE, AdversaryGraph, EntityId, EntityType,
     EvidenceEvent, PolicyThreshold, QuarantineAction, SignedEvidenceEntry,
@@ -166,6 +169,10 @@ impl QuarantineController {
         // Sign the evidence entry
         let signed = self.sign_evidence(&event)?;
         self.evidence_log.push(signed);
+        if self.evidence_log.len() > MAX_EVIDENCE_LOG_ENTRIES {
+            let overflow = self.evidence_log.len() - MAX_EVIDENCE_LOG_ENTRIES;
+            self.evidence_log.drain(0..overflow);
+        }
 
         // Ingest into graph
         let (action, posterior) = self.graph.ingest_evidence(&event)?;
@@ -181,6 +188,10 @@ impl QuarantineController {
                 event_code: ADV_005_ACTION_TRIGGERED.to_string(),
             };
             self.action_log.push(record);
+            if self.action_log.len() > MAX_ACTION_LOG_ENTRIES {
+                let overflow = self.action_log.len() - MAX_ACTION_LOG_ENTRIES;
+                self.action_log.drain(0..overflow);
+            }
         }
 
         Ok((action, posterior))

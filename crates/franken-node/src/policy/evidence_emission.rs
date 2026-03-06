@@ -14,6 +14,8 @@ use std::fmt;
 
 use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry, EvidenceLedger};
 
+const MAX_ACTION_LOG_ENTRIES: usize = 4096;
+
 /// Stable event codes for structured logging.
 pub mod event_codes {
     pub const POLICY_ACTION_SUCCESS: &str = "EVD-POLICY-001";
@@ -286,6 +288,14 @@ impl EvidenceConformanceChecker {
         &self.action_log
     }
 
+    fn push_action(&mut self, outcome: PolicyActionOutcome) {
+        self.action_log.push(outcome);
+        if self.action_log.len() > MAX_ACTION_LOG_ENTRIES {
+            let overflow = self.action_log.len() - MAX_ACTION_LOG_ENTRIES;
+            self.action_log.drain(0..overflow);
+        }
+    }
+
     /// Validate evidence for an action and append to the ledger if valid.
     ///
     /// Returns `Executed` if evidence is valid and ledger append succeeds.
@@ -315,7 +325,7 @@ impl EvidenceConformanceChecker {
                     action_id
                 );
                 self.rejected_count = self.rejected_count.saturating_add(1);
-                self.action_log.push(outcome.clone());
+                self.push_action(outcome.clone());
                 return outcome;
             }
         };
@@ -329,7 +339,7 @@ impl EvidenceConformanceChecker {
                 },
             };
             self.rejected_count = self.rejected_count.saturating_add(1);
-            self.action_log.push(outcome.clone());
+            self.push_action(outcome.clone());
             return outcome;
         }
 
@@ -341,7 +351,7 @@ impl EvidenceConformanceChecker {
                 },
             };
             self.rejected_count = self.rejected_count.saturating_add(1);
-            self.action_log.push(outcome.clone());
+            self.push_action(outcome.clone());
             return outcome;
         }
 
@@ -364,7 +374,7 @@ impl EvidenceConformanceChecker {
                 entry.decision_kind.label()
             );
             self.rejected_count = self.rejected_count.saturating_add(1);
-            self.action_log.push(outcome.clone());
+            self.push_action(outcome.clone());
             return outcome;
         }
 
@@ -384,7 +394,7 @@ impl EvidenceConformanceChecker {
                 entry.decision_id
             );
             self.rejected_count = self.rejected_count.saturating_add(1);
-            self.action_log.push(outcome.clone());
+            self.push_action(outcome.clone());
             return outcome;
         }
 
@@ -404,7 +414,7 @@ impl EvidenceConformanceChecker {
                     evidence_decision_id: entry.decision_id.clone(),
                 };
                 self.executed_count = self.executed_count.saturating_add(1);
-                self.action_log.push(outcome.clone());
+                self.push_action(outcome.clone());
                 outcome
             }
             Err(e) => {
@@ -415,7 +425,7 @@ impl EvidenceConformanceChecker {
                     },
                 };
                 self.rejected_count = self.rejected_count.saturating_add(1);
-                self.action_log.push(outcome.clone());
+                self.push_action(outcome.clone());
                 outcome
             }
         }
