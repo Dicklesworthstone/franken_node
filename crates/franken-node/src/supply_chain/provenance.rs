@@ -591,11 +591,11 @@ fn validate_links(
         if stale_by_age || stale_by_expiry {
             let within_cached_window = matches!(policy.mode, VerificationMode::CachedTrustWindow)
                 && age
-                    <= policy
+                    < policy
                         .max_attestation_age_secs
                         .saturating_add(policy.cached_trust_window_secs)
                 && now_epoch
-                    <= link
+                    < link
                         .expires_at_epoch
                         .saturating_add(policy.cached_trust_window_secs);
 
