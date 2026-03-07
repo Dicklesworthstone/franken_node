@@ -748,7 +748,12 @@ pub fn sha256_hex(data: &[u8]) -> String {
 }
 
 /// Evaluate threshold status.
+///
+/// Fail-closed: NaN/Inf in either argument → `NotMet` (most conservative).
 fn evaluate_threshold_status(actual: f64, target: f64) -> ThresholdStatus {
+    if !actual.is_finite() || !target.is_finite() {
+        return ThresholdStatus::NotMet;
+    }
     if actual > target * 1.1 {
         ThresholdStatus::Exceeded
     } else if actual >= target {
@@ -1314,6 +1319,34 @@ mod tests {
         assert_eq!(evaluate_threshold_status(96.0, 95.0), ThresholdStatus::Met);
         assert_eq!(
             evaluate_threshold_status(90.0, 95.0),
+            ThresholdStatus::NotMet
+        );
+    }
+
+    #[test]
+    fn evaluate_threshold_nan_actual_is_fail_closed() {
+        assert_eq!(
+            evaluate_threshold_status(f64::NAN, 95.0),
+            ThresholdStatus::NotMet
+        );
+    }
+
+    #[test]
+    fn evaluate_threshold_nan_target_is_fail_closed() {
+        assert_eq!(
+            evaluate_threshold_status(100.0, f64::NAN),
+            ThresholdStatus::NotMet
+        );
+    }
+
+    #[test]
+    fn evaluate_threshold_inf_is_fail_closed() {
+        assert_eq!(
+            evaluate_threshold_status(f64::INFINITY, 95.0),
+            ThresholdStatus::NotMet
+        );
+        assert_eq!(
+            evaluate_threshold_status(100.0, f64::INFINITY),
             ThresholdStatus::NotMet
         );
     }

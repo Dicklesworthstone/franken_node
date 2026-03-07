@@ -242,11 +242,13 @@ impl OfflineCoverageTracker {
 
             // For repair_debt, breach = actual > threshold (debt too high)
             // For coverage/availability, breach = actual < threshold (ratio too low)
-            let breached = if target.metric_name == "repair_debt" {
-                actual > target.threshold
-            } else {
-                actual < target.threshold
-            };
+            // Fail-closed: NaN/Inf threshold → always breach (conservative)
+            let breached = !target.threshold.is_finite()
+                || if target.metric_name == "repair_debt" {
+                    actual > target.threshold
+                } else {
+                    actual < target.threshold
+                };
 
             if breached {
                 alerts.push(SloBreachAlert {
@@ -522,6 +524,26 @@ mod tests {
         t.record_event(ev("a2", false, 101, "prod")).unwrap();
         let m = t.compute_metrics("prod").unwrap();
         assert!((m.coverage_ratio - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn nan_slo_threshold_triggers_breach() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+        let alerts = t
+            .check_slos(&[slo("coverage", f64::NAN)], "prod", 200, "trace-nan")
+            .unwrap();
+        assert_eq!(alerts.len(), 1, "NaN threshold must trigger SLO breach (fail-closed)");
+    }
+
+    #[test]
+    fn inf_slo_threshold_triggers_breach() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+        let alerts = t
+            .check_slos(&[slo("coverage", f64::INFINITY)], "prod", 200, "trace-inf")
+            .unwrap();
+        assert_eq!(alerts.len(), 1, "Inf threshold must trigger SLO breach (fail-closed)");
     }
 
     #[test]
