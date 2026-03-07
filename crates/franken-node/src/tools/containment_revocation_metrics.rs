@@ -235,7 +235,11 @@ impl ContainmentRevocationMetrics {
         event: ContainmentEvent,
         trace_id: &str,
     ) -> Result<String, String> {
-        if event.initiation_to_ack_ms < 0.0 || event.initiation_to_convergence_ms < 0.0 {
+        if !event.initiation_to_ack_ms.is_finite()
+            || !event.initiation_to_convergence_ms.is_finite()
+            || event.initiation_to_ack_ms < 0.0
+            || event.initiation_to_convergence_ms < 0.0
+        {
             self.log(
                 event_codes::CRM_ERR_INVALID_EVENT,
                 trace_id,
@@ -671,5 +675,37 @@ mod tests {
     fn percentile_empty() {
         let p = compute_percentiles(&[]);
         assert_eq!(p.p50_ms, 0.0);
+    }
+
+    #[test]
+    fn nan_convergence_latency_rejected() {
+        let mut engine = ContainmentRevocationMetrics::default();
+        let mut ev = sample_event("e1", EventCategory::Revocation);
+        ev.initiation_to_convergence_ms = f64::NAN;
+        assert!(engine.record_event(ev, &trace()).is_err());
+    }
+
+    #[test]
+    fn nan_ack_latency_rejected() {
+        let mut engine = ContainmentRevocationMetrics::default();
+        let mut ev = sample_event("e1", EventCategory::Revocation);
+        ev.initiation_to_ack_ms = f64::NAN;
+        assert!(engine.record_event(ev, &trace()).is_err());
+    }
+
+    #[test]
+    fn inf_convergence_latency_rejected() {
+        let mut engine = ContainmentRevocationMetrics::default();
+        let mut ev = sample_event("e1", EventCategory::Revocation);
+        ev.initiation_to_convergence_ms = f64::INFINITY;
+        assert!(engine.record_event(ev, &trace()).is_err());
+    }
+
+    #[test]
+    fn neg_inf_ack_latency_rejected() {
+        let mut engine = ContainmentRevocationMetrics::default();
+        let mut ev = sample_event("e1", EventCategory::Revocation);
+        ev.initiation_to_ack_ms = f64::NEG_INFINITY;
+        assert!(engine.record_event(ev, &trace()).is_err());
     }
 }
