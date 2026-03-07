@@ -251,7 +251,9 @@ impl TrustAggregator {
         } else {
             0.2
         };
-        Self { trim_ratio: safe_ratio }
+        Self {
+            trim_ratio: safe_ratio,
+        }
     }
 
     /// Compute the trimmed mean of a set of values.
@@ -267,7 +269,7 @@ impl TrustAggregator {
         Self::validate_finite_values(values)?;
 
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| a.total_cmp(b));
 
         let n = sorted.len();
         let trim_count = (n as f64 * self.trim_ratio).floor() as usize;
@@ -312,7 +314,7 @@ impl TrustAggregator {
         Self::validate_finite_values(values)?;
 
         let mut sorted = values.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| a.total_cmp(b));
 
         let n = sorted.len();
         let median = if n.is_multiple_of(2) {
@@ -369,8 +371,16 @@ impl Default for StakeWeighter {
 impl StakeWeighter {
     /// Create a new stake weighter with custom parameters.
     pub fn new(established_threshold: u64, base_weight: f64, max_weight: f64) -> Self {
-        let safe_base = if base_weight.is_finite() { base_weight } else { 0.01 };
-        let safe_max = if max_weight.is_finite() { max_weight } else { 1.0 };
+        let safe_base = if base_weight.is_finite() {
+            base_weight
+        } else {
+            0.01
+        };
+        let safe_max = if max_weight.is_finite() {
+            max_weight
+        } else {
+            1.0
+        };
         Self {
             established_threshold,
             base_weight: safe_base,
@@ -614,15 +624,19 @@ impl SybilDetector {
 
         // Log detection event
         if !sybil_ids.is_empty() {
-            push_bounded(&mut self.events, SybilDefenseEvent {
-                event_code: SPS_003_SYBIL_DETECTED.to_string(),
-                target_id: signals
-                    .first()
-                    .map(|s| s.target_id.clone())
-                    .unwrap_or_default(),
-                detail: format!("Detected {} suspected Sybil identities", sybil_ids.len()),
-                timestamp_ms,
-            }, MAX_EVENTS);
+            push_bounded(
+                &mut self.events,
+                SybilDefenseEvent {
+                    event_code: SPS_003_SYBIL_DETECTED.to_string(),
+                    target_id: signals
+                        .first()
+                        .map(|s| s.target_id.clone())
+                        .unwrap_or_default(),
+                    detail: format!("Detected {} suspected Sybil identities", sybil_ids.len()),
+                    timestamp_ms,
+                },
+                MAX_EVENTS,
+            );
         }
 
         sybil_ids
@@ -762,29 +776,37 @@ impl SybilDefensePipeline {
         let result = self.aggregator.trimmed_mean(&weighted_values)?;
 
         // Log events
-        push_bounded(&mut self.events, SybilDefenseEvent {
-            event_code: SPS_001_ROBUST_AGGREGATION.to_string(),
-            target_id: signals
-                .first()
-                .map(|s| s.target_id.clone())
-                .unwrap_or_default(),
-            detail: format!(
-                "Aggregated {} signals (trimmed {}), result: {:.6}",
-                result.signal_count, result.trimmed_count, result.value
-            ),
-            timestamp_ms,
-        }, MAX_EVENTS);
-
-        if !sybil_ids.is_empty() {
-            push_bounded(&mut self.events, SybilDefenseEvent {
-                event_code: SPS_003_SYBIL_DETECTED.to_string(),
+        push_bounded(
+            &mut self.events,
+            SybilDefenseEvent {
+                event_code: SPS_001_ROBUST_AGGREGATION.to_string(),
                 target_id: signals
                     .first()
                     .map(|s| s.target_id.clone())
                     .unwrap_or_default(),
-                detail: format!("{} Sybil identities attenuated", sybil_ids.len()),
+                detail: format!(
+                    "Aggregated {} signals (trimmed {}), result: {:.6}",
+                    result.signal_count, result.trimmed_count, result.value
+                ),
                 timestamp_ms,
-            }, MAX_EVENTS);
+            },
+            MAX_EVENTS,
+        );
+
+        if !sybil_ids.is_empty() {
+            push_bounded(
+                &mut self.events,
+                SybilDefenseEvent {
+                    event_code: SPS_003_SYBIL_DETECTED.to_string(),
+                    target_id: signals
+                        .first()
+                        .map(|s| s.target_id.clone())
+                        .unwrap_or_default(),
+                    detail: format!("{} Sybil identities attenuated", sybil_ids.len()),
+                    timestamp_ms,
+                },
+                MAX_EVENTS,
+            );
         }
 
         Ok(result)

@@ -492,9 +492,12 @@ impl ParticipationWeightEngine {
                 } else {
                     0.0
                 };
-                let tenure_component = (rep.tenure_seconds as f64
-                    / self.config.established_tenure_seconds as f64)
-                    .min(1.0);
+                let tenure_component = if self.config.established_tenure_seconds == 0 {
+                    0.0
+                } else {
+                    (rep.tenure_seconds as f64 / self.config.established_tenure_seconds as f64)
+                        .min(1.0)
+                };
                 let interaction_ratio =
                     if rep.contributions_accepted + rep.contributions_rejected > 0 {
                         rep.contributions_accepted as f64
@@ -576,7 +579,7 @@ impl ParticipationWeightEngine {
         if established_weights.is_empty() {
             return 1.0;
         }
-        established_weights.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        established_weights.sort_by(|a, b| a.total_cmp(b));
         let mid = established_weights.len() / 2;
         if established_weights.len().is_multiple_of(2) {
             (established_weights[mid - 1] + established_weights[mid]) / 2.0
