@@ -286,6 +286,18 @@ impl CompatibilityCorrectnessMetrics {
             return Err("passed_tests cannot exceed total_tests".to_string());
         }
 
+        if !metric.mean_detect_ms.is_finite() || metric.mean_detect_ms < 0.0 {
+            self.log(
+                event_codes::CCM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({
+                    "metric_id": &metric.metric_id,
+                    "reason": "mean_detect_ms must be a non-negative finite value",
+                }),
+            );
+            return Err("mean_detect_ms must be a non-negative finite value".to_string());
+        }
+
         metric.timestamp = Utc::now().to_rfc3339();
         let metric_id = metric.metric_id.clone();
 
