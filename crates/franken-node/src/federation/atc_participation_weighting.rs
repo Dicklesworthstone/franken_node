@@ -303,8 +303,37 @@ impl Default for ParticipationWeightEngine {
 
 impl ParticipationWeightEngine {
     pub fn new(config: WeightingConfig) -> Self {
+        let defaults = WeightingConfig::default();
+        let safe_config = WeightingConfig {
+            attestation_weight: if config.attestation_weight.is_finite() {
+                config.attestation_weight
+            } else {
+                defaults.attestation_weight
+            },
+            stake_weight: if config.stake_weight.is_finite() {
+                config.stake_weight
+            } else {
+                defaults.stake_weight
+            },
+            reputation_weight: if config.reputation_weight.is_finite() {
+                config.reputation_weight
+            } else {
+                defaults.reputation_weight
+            },
+            new_participant_cap_fraction: if config.new_participant_cap_fraction.is_finite() {
+                config.new_participant_cap_fraction
+            } else {
+                defaults.new_participant_cap_fraction
+            },
+            sybil_attenuation_factor: if config.sybil_attenuation_factor.is_finite() {
+                config.sybil_attenuation_factor
+            } else {
+                defaults.sybil_attenuation_factor
+            },
+            ..config
+        };
         Self {
-            config,
+            config: safe_config,
             audit_log: Vec::new(),
         }
     }
@@ -976,5 +1005,25 @@ mod tests {
         assert_eq!(record.participant_count, 7);
         assert_eq!(record.participants_rejected, 1); // zero-attestation
         assert!(record.sybil_clusters_detected > 0);
+    }
+
+    #[test]
+    fn nan_config_weights_produce_finite_output() {
+        let bad_config = WeightingConfig {
+            attestation_weight: f64::NAN,
+            stake_weight: f64::INFINITY,
+            reputation_weight: f64::NEG_INFINITY,
+            sybil_attenuation_factor: f64::NAN,
+            new_participant_cap_fraction: f64::INFINITY,
+            ..WeightingConfig::default()
+        };
+        let mut engine = ParticipationWeightEngine::new(bad_config);
+        let participants = vec![make_established_participant("nan-test")];
+        let record = engine.compute_weights(&participants, "nan-batch", "2026-02-20T00:00:00Z");
+        assert!(record.total_weight.is_finite());
+        for w in &record.weights {
+            assert!(w.final_weight.is_finite(), "final_weight should be finite");
+            assert!(w.raw_weight.is_finite(), "raw_weight should be finite");
+        }
     }
 }
