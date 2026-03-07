@@ -625,7 +625,11 @@ impl UpdateCopilot {
         let history_depth = 0.7; // Placeholder; would check real history
         factors.insert("history_depth".to_string(), history_depth);
 
-        let avg_quality: f64 = factors.values().sum::<f64>() / factors.len() as f64;
+        let avg_quality: f64 = if factors.is_empty() {
+            0.5
+        } else {
+            factors.values().sum::<f64>() / factors.len() as f64
+        };
         let uncertainty = 1.0 - avg_quality;
 
         ConfidenceOutput {

@@ -697,6 +697,9 @@ impl VerifierEconomyRegistry {
             + 0.25 * dims.coverage
             + 0.30 * dims.accuracy
             + 0.10 * dims.longevity;
+        if !raw.is_finite() {
+            return 0;
+        }
         let score = (raw * 100.0).round() as i64;
         score.clamp(0, 100) as u32
     }
@@ -1788,5 +1791,27 @@ mod tests {
         );
         assert_eq!(ERR_VEP_INCOMPLETE_PAYLOAD, "ERR-VEP-INCOMPLETE-PAYLOAD");
         assert_eq!(ERR_VEP_ANTI_GAMING, "ERR-VEP-ANTI-GAMING");
+    }
+
+    #[test]
+    fn test_compute_reputation_nan_returns_zero() {
+        let dims = ReputationDimensions {
+            consistency: f64::NAN,
+            coverage: 0.8,
+            accuracy: 0.9,
+            longevity: 0.5,
+        };
+        assert_eq!(VerifierEconomyRegistry::compute_reputation(&dims), 0);
+    }
+
+    #[test]
+    fn test_compute_reputation_inf_returns_zero() {
+        let dims = ReputationDimensions {
+            consistency: f64::INFINITY,
+            coverage: 0.8,
+            accuracy: 0.9,
+            longevity: 0.5,
+        };
+        assert_eq!(VerifierEconomyRegistry::compute_reputation(&dims), 0);
     }
 }

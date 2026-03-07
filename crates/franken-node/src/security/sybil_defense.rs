@@ -246,7 +246,12 @@ impl TrustAggregator {
 
     /// Create a new aggregator with the given trim ratio.
     pub fn new(trim_ratio: f64) -> Self {
-        Self { trim_ratio }
+        let safe_ratio = if trim_ratio.is_finite() {
+            trim_ratio
+        } else {
+            0.2
+        };
+        Self { trim_ratio: safe_ratio }
     }
 
     /// Compute the trimmed mean of a set of values.
@@ -364,10 +369,12 @@ impl Default for StakeWeighter {
 impl StakeWeighter {
     /// Create a new stake weighter with custom parameters.
     pub fn new(established_threshold: u64, base_weight: f64, max_weight: f64) -> Self {
+        let safe_base = if base_weight.is_finite() { base_weight } else { 0.01 };
+        let safe_max = if max_weight.is_finite() { max_weight } else { 1.0 };
         Self {
             established_threshold,
-            base_weight,
-            max_weight,
+            base_weight: safe_base,
+            max_weight: safe_max,
         }
     }
 
@@ -491,10 +498,15 @@ impl Default for SybilDetector {
 impl SybilDetector {
     /// Create a new detector with custom parameters.
     pub fn new(burst_threshold: usize, burst_window_ms: u64, similarity_threshold: f64) -> Self {
+        let safe_sim = if similarity_threshold.is_finite() {
+            similarity_threshold
+        } else {
+            0.95
+        };
         Self {
             burst_threshold,
             burst_window_ms,
-            similarity_threshold,
+            similarity_threshold: safe_sim,
             events: Vec::new(),
         }
     }
@@ -1734,5 +1746,30 @@ mod tests {
         let agg = TrustAggregator::default();
         let result = agg.median(&[0.42]).unwrap();
         assert!((result.value - 0.42).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregator_nan_trim_ratio_falls_back_to_default() {
+        let agg = TrustAggregator::new(f64::NAN);
+        assert!((agg.trim_ratio - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregator_inf_trim_ratio_falls_back_to_default() {
+        let agg = TrustAggregator::new(f64::INFINITY);
+        assert!((agg.trim_ratio - 0.2).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn stake_weighter_nan_weights_fall_back_to_defaults() {
+        let w = StakeWeighter::new(100, f64::NAN, f64::NAN);
+        assert!((w.base_weight - 0.01).abs() < f64::EPSILON);
+        assert!((w.max_weight - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sybil_detector_nan_threshold_falls_back_to_default() {
+        let d = SybilDetector::new(5, 60_000, f64::NAN);
+        assert!((d.similarity_threshold - 0.95).abs() < f64::EPSILON);
     }
 }

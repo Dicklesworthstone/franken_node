@@ -69,10 +69,15 @@ pub struct ProofLagSlo {
 impl ProofLagSlo {
     #[must_use]
     pub fn new(max_proof_lag_secs: u64, max_backlog_depth: u64, max_error_rate: f64) -> Self {
+        let safe_rate = if max_error_rate.is_finite() {
+            max_error_rate
+        } else {
+            0.0 // fail-closed: any error rate breaches the SLO
+        };
         Self {
             max_proof_lag_secs,
             max_backlog_depth,
-            max_error_rate,
+            max_error_rate: safe_rate,
         }
     }
 
@@ -1251,5 +1256,26 @@ mod tests {
 
         // Normal -> Restricted (1 transition) + Restricted -> Normal (1 transition)
         assert_eq!(transitions.len(), 2, "expected 2 transition events");
+    }
+
+    #[test]
+    fn proof_lag_slo_nan_error_rate_is_fail_closed() {
+        let slo = ProofLagSlo::new(300, 100, f64::NAN);
+        // NaN max_error_rate should become 0.0 (fail-closed)
+        assert!((slo.max_error_rate - 0.0).abs() < f64::EPSILON);
+        // Any positive error rate should breach the SLO
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 0,
+            backlog_depth: 0,
+            error_rate: 0.01,
+            heartbeat_age_secs: 0,
+        };
+        assert!(slo.breached_by(&metrics));
+    }
+
+    #[test]
+    fn proof_lag_slo_inf_error_rate_is_fail_closed() {
+        let slo = ProofLagSlo::new(300, 100, f64::INFINITY);
+        assert!((slo.max_error_rate - 0.0).abs() < f64::EPSILON);
     }
 }

@@ -4,6 +4,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+extended-surfaces = []
+test-support = []
+
 [dependencies]
 anyhow.workspace = true
 thiserror.workspace = true

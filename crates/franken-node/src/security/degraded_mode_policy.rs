@@ -193,7 +193,9 @@ impl RecoveryStatus {
 
     #[must_use]
     pub fn with_error_rate(mut self, rate: f64) -> Self {
-        self.observed_error_rate = Some(rate);
+        if rate.is_finite() {
+            self.observed_error_rate = Some(rate);
+        }
         self
     }
 
@@ -857,5 +859,23 @@ mod tests {
         assert!(!blocked.permitted);
         let allowed = engine.evaluate_action("health.check", "alice", 2_122, "trace");
         assert!(allowed.permitted);
+    }
+
+    #[test]
+    fn with_error_rate_nan_is_ignored() {
+        let status = RecoveryStatus::default().with_error_rate(f64::NAN);
+        assert!(status.observed_error_rate.is_none());
+    }
+
+    #[test]
+    fn with_error_rate_inf_is_ignored() {
+        let status = RecoveryStatus::default().with_error_rate(f64::INFINITY);
+        assert!(status.observed_error_rate.is_none());
+    }
+
+    #[test]
+    fn with_error_rate_finite_is_accepted() {
+        let status = RecoveryStatus::default().with_error_rate(0.03);
+        assert_eq!(status.observed_error_rate, Some(0.03));
     }
 }
