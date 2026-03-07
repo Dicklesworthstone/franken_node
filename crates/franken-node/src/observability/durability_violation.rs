@@ -15,6 +15,17 @@ use std::fmt;
 
 use serde_json::json;
 
+const MAX_ACTIVE_HALTS: usize = 4096;
+const MAX_BUNDLES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Stable event codes for structured logging.
 pub mod event_codes {
     pub const VIOLATION_BUNDLE_GENERATED: &str = "EVD-VIOLATION-001";
@@ -364,12 +375,12 @@ impl DurabilityViolationDetector {
         // Apply halt policy
         match &self.halt_policy {
             HaltPolicy::HaltAll | HaltPolicy::HaltScope(_) => {
-                self.active_halts.push(bundle_id);
+                push_bounded(&mut self.active_halts, bundle_id, MAX_ACTIVE_HALTS);
             }
             HaltPolicy::WarnOnly => {}
         }
 
-        self.bundles.push(bundle);
+        push_bounded(&mut self.bundles, bundle, MAX_BUNDLES);
         let idx = self.bundles.len().saturating_sub(1);
         &self.bundles[idx]
     }

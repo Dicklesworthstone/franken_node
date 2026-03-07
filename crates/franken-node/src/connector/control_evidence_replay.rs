@@ -17,6 +17,7 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
+const MAX_VERDICTS: usize = 4096;
 
 use crate::connector::control_evidence::{ControlEvidenceEntry, DecisionKind, DecisionType};
 use crate::observability::evidence_ledger::{DecisionKind as LedgerDecisionKind, EvidenceEntry};
@@ -357,11 +358,13 @@ impl ControlReplayGate {
             &entry.trace_id,
         );
 
-        self.verdicts.push((
-            entry.decision_id.clone(),
-            entry.decision_type,
+        let decision_id = entry.decision_id.clone();
+        let decision_type = entry.decision_type;
+        push_bounded(&mut self.verdicts, (
+            decision_id,
+            decision_type,
             verdict.clone(),
-        ));
+        ), MAX_VERDICTS);
         verdict
     }
 
@@ -476,18 +479,14 @@ impl ControlReplayGate {
         detail: String,
         trace_id: &str,
     ) {
-        self.events.push(ReplayGateEvent {
+        push_bounded(&mut self.events, ReplayGateEvent {
             code: code.to_string(),
             decision_id: decision_id.to_string(),
             decision_type: decision_type.label().to_string(),
             verdict: verdict.to_string(),
             detail,
             trace_id: trace_id.to_string(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 
@@ -495,6 +494,15 @@ impl Default for ControlReplayGate {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // ===========================================================================

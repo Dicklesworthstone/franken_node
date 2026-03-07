@@ -15,6 +15,14 @@ const MAX_AUDIT_ENTRIES: usize = 4096;
 /// Maximum revoked artifacts per zone before oldest are evicted.
 const MAX_REVOKED_PER_ZONE: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// A revocation head checkpoint for a specific zone.
 #[derive(Debug, Clone)]
 pub struct RevocationHead {
@@ -149,17 +157,13 @@ impl RevocationRegistry {
 
         // INV-REV-MONOTONIC + INV-REV-STALE-REJECT
         if head.sequence <= current {
-            if self.audits.len() >= MAX_AUDIT_ENTRIES {
-                let overflow = self.audits.len() + 1 - MAX_AUDIT_ENTRIES;
-                self.audits.drain(0..overflow);
-            }
-            self.audits.push(RevocationAudit {
+            push_bounded(&mut self.audits, RevocationAudit {
                 zone_id: head.zone_id.clone(),
                 action: "rejected_stale".into(),
                 sequence: head.sequence,
                 trace_id: head.trace_id.clone(),
                 timestamp: head.timestamp.clone(),
-            });
+            }, MAX_AUDIT_ENTRIES);
             return Err(RevocationError::StaleHead {
                 zone_id: head.zone_id,
                 offered: head.sequence,
@@ -170,30 +174,18 @@ impl RevocationRegistry {
         // Advance the head
         self.heads.insert(head.zone_id.clone(), head.sequence);
         let zone_revoked = self.revoked.entry(head.zone_id.clone()).or_default();
-        if zone_revoked.len() >= MAX_REVOKED_PER_ZONE {
-            let overflow = zone_revoked.len() + 1 - MAX_REVOKED_PER_ZONE;
-            zone_revoked.drain(0..overflow);
-        }
-        zone_revoked.push(head.revoked_artifact.clone());
+        push_bounded(zone_revoked, head.revoked_artifact.clone(), MAX_REVOKED_PER_ZONE);
 
-        if self.audits.len() >= MAX_AUDIT_ENTRIES {
-            let overflow = self.audits.len() + 1 - MAX_AUDIT_ENTRIES;
-            self.audits.drain(0..overflow);
-        }
-        self.audits.push(RevocationAudit {
+        push_bounded(&mut self.audits, RevocationAudit {
             zone_id: head.zone_id.clone(),
             action: "advanced".into(),
             sequence: head.sequence,
             trace_id: head.trace_id.clone(),
             timestamp: head.timestamp.clone(),
-        });
+        }, MAX_AUDIT_ENTRIES);
 
         // Append to canonical log for recovery
-        if self.log.len() >= MAX_LOG_ENTRIES {
-            let overflow = self.log.len() + 1 - MAX_LOG_ENTRIES;
-            self.log.drain(0..overflow);
-        }
-        self.log.push(head.clone());
+        push_bounded(&mut self.log, head.clone(), MAX_LOG_ENTRIES);
 
         Ok(head.sequence)
     }

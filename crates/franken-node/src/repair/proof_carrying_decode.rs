@@ -27,6 +27,15 @@ pub const REPAIR_PROOF_VERIFIED: &str = "REPAIR_PROOF_VERIFIED";
 pub const REPAIR_PROOF_MISSING: &str = "REPAIR_PROOF_MISSING";
 pub const REPAIR_PROOF_INVALID: &str = "REPAIR_PROOF_INVALID";
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
+const MAX_REGISTERED_ALGORITHMS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -254,7 +263,7 @@ impl ProofCarryingDecoder {
 
     pub fn register_algorithm(&mut self, algorithm_id: AlgorithmId) {
         if !self.registered_algorithms.contains(&algorithm_id) {
-            self.registered_algorithms.push(algorithm_id);
+            push_bounded(&mut self.registered_algorithms, algorithm_id, MAX_REGISTERED_ALGORITHMS);
         }
     }
 
@@ -267,11 +276,8 @@ impl ProofCarryingDecoder {
     }
 
     fn push_audit_event(&mut self, event: ProofAuditEvent) {
-        self.audit_log.push(event);
-        if self.audit_log.len() > self.max_audit_log_entries {
-            let overflow = self.audit_log.len() - self.max_audit_log_entries;
-            self.audit_log.drain(0..overflow);
-        }
+        let cap = self.max_audit_log_entries;
+        push_bounded(&mut self.audit_log, event, cap);
     }
 
     /// Decode/reconstruct an object from fragments.

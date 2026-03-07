@@ -13,11 +13,24 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 pub const SCHEMA_VERSION: &str = "vt-v1.0";
 pub const BEAD_ID: &str = "bd-2ko";
 pub const SECTION: &str = "10.11";
+pub const DEFAULT_MAX_EVENT_LOG_ENTRIES: usize = 4_096;
+
+fn default_max_event_log_capacity() -> usize {
+    DEFAULT_MAX_EVENT_LOG_ENTRIES
+}
 
 // ── Event codes ──────────────────────────────────────────────────────────────
 
@@ -333,11 +346,18 @@ pub struct VirtualTransportLayer {
     current_tick: u64,
     /// Accumulated event log.
     event_log: Vec<TransportEvent>,
+    #[serde(default = "default_max_event_log_capacity")]
+    max_event_log_entries: usize,
 }
 
 impl VirtualTransportLayer {
     /// Create a new virtual transport layer with the given seed.
     pub fn new(rng_seed: u64) -> Self {
+        Self::with_event_log_capacity(rng_seed, DEFAULT_MAX_EVENT_LOG_ENTRIES)
+    }
+
+    /// Create a new transport layer with explicit event-log capacity.
+    pub fn with_event_log_capacity(rng_seed: u64, max_event_log_entries: usize) -> Self {
         Self {
             links: BTreeMap::new(),
             rng_seed,
@@ -349,6 +369,7 @@ impl VirtualTransportLayer {
             next_message_id: 1,
             current_tick: 0,
             event_log: Vec::new(),
+            max_event_log_entries: max_event_log_entries.max(1),
         }
     }
 
@@ -365,6 +386,11 @@ impl VirtualTransportLayer {
     /// Access the full event log.
     pub fn event_log(&self) -> &[TransportEvent] {
         &self.event_log
+    }
+
+    /// Return the configured event-log capacity.
+    pub fn event_log_capacity(&self) -> usize {
+        self.max_event_log_entries
     }
 
     /// Return a snapshot of transport statistics.
@@ -403,7 +429,7 @@ impl VirtualTransportLayer {
         }
         let state = LinkState::new(source.to_string(), target.to_string(), config);
         self.links.insert(link_id.clone(), state);
-        self.event_log.push(TransportEvent::MessageSent {
+        self.push_event(TransportEvent::MessageSent {
             event_code: event_codes::VT_007.to_string(),
             message_id: 0,
             link_id: link_id.clone(),
@@ -419,7 +445,7 @@ impl VirtualTransportLayer {
                 .ok_or_else(|| VirtualTransportError::LinkNotFound {
                     link_id: link_id.to_string(),
                 })?;
-        self.event_log.push(TransportEvent::MessageSent {
+        self.push_event(TransportEvent::MessageSent {
             event_code: event_codes::VT_008.to_string(),
             message_id: 0,
             link_id: link_id.to_string(),
@@ -436,7 +462,7 @@ impl VirtualTransportLayer {
                     link_id: link_id.to_string(),
                 })?;
         link.config.partition = true;
-        self.event_log.push(TransportEvent::PartitionActivated {
+        self.push_event(TransportEvent::PartitionActivated {
             event_code: event_codes::VT_005.to_string(),
             link_id: link_id.to_string(),
         });
@@ -452,7 +478,7 @@ impl VirtualTransportLayer {
                     link_id: link_id.to_string(),
                 })?;
         link.config.partition = false;
-        self.event_log.push(TransportEvent::PartitionHealed {
+        self.push_event(TransportEvent::PartitionHealed {
             event_code: event_codes::VT_006.to_string(),
             link_id: link_id.to_string(),
         });
@@ -513,7 +539,7 @@ impl VirtualTransportLayer {
         let roll = self.rng.next_f64();
         if roll < drop_prob {
             self.dropped_messages = self.dropped_messages.saturating_add(1);
-            self.event_log.push(TransportEvent::MessageDropped {
+            self.push_event(TransportEvent::MessageDropped {
                 event_code: event_codes::VT_002.to_string(),
                 message_id: msg_id,
                 link_id: link_id.clone(),
@@ -528,7 +554,7 @@ impl VirtualTransportLayer {
         if corrupt_bits > 0 && !msg_payload.is_empty() {
             let bits_flipped = self.apply_corruption(&mut msg_payload, corrupt_bits);
             self.corrupted_messages = self.corrupted_messages.saturating_add(1);
-            self.event_log.push(TransportEvent::MessageCorrupted {
+            self.push_event(TransportEvent::MessageCorrupted {
                 event_code: event_codes::VT_004.to_string(),
                 message_id: msg_id,
                 link_id: link_id.clone(),
@@ -566,7 +592,7 @@ impl VirtualTransportLayer {
 
             link.buffer.insert(insert_pos, msg);
             self.reordered_messages = self.reordered_messages.saturating_add(1);
-            self.event_log.push(TransportEvent::MessageReordered {
+            self.push_event(TransportEvent::MessageReordered {
                 event_code: event_codes::VT_003.to_string(),
                 message_id: msg_id,
                 link_id: link_id.clone(),
@@ -575,7 +601,7 @@ impl VirtualTransportLayer {
         } else {
             // Normal FIFO enqueue.
             link.buffer.push(msg);
-            self.event_log.push(TransportEvent::MessageSent {
+            self.push_event(TransportEvent::MessageSent {
                 event_code: event_codes::VT_001.to_string(),
                 message_id: msg_id,
                 link_id: link_id.clone(),
@@ -695,6 +721,11 @@ impl VirtualTransportLayer {
             payload[byte_idx] ^= 1 << bit_idx;
         }
         actual_flips
+    }
+
+    fn push_event(&mut self, event: TransportEvent) {
+        let cap = self.max_event_log_entries;
+        push_bounded(&mut self.event_log, event, cap);
     }
 }
 
@@ -1018,7 +1049,25 @@ mod tests {
         assert_eq!(partition_events.len(), 2);
     }
 
-    // -- Test 17: event codes are distinct
+    // -- Test 17: event log capacity evicts oldest entries first
+    #[test]
+    fn test_event_log_capacity_enforces_oldest_first_eviction() {
+        let mut vt = VirtualTransportLayer::with_event_log_capacity(42, 3);
+        vt.create_link("a", "b", LinkFaultConfig::no_faults())
+            .unwrap();
+        vt.send_message("a", "b", b"test".to_vec()).unwrap();
+        vt.activate_partition("a->b").unwrap();
+        vt.heal_partition("a->b").unwrap();
+
+        let log = vt.event_log();
+        assert_eq!(vt.event_log_capacity(), 3);
+        assert_eq!(log.len(), 3);
+        assert_eq!(log[0].event_code(), event_codes::VT_001);
+        assert_eq!(log[1].event_code(), event_codes::VT_005);
+        assert_eq!(log[2].event_code(), event_codes::VT_006);
+    }
+
+    // -- Test 18: event codes are distinct
     #[test]
     fn test_event_codes_distinct() {
         let codes = [
@@ -1038,7 +1087,7 @@ mod tests {
         assert_eq!(seen.len(), 8);
     }
 
-    // -- Test 18: error codes are distinct
+    // -- Test 19: error codes are distinct
     #[test]
     fn test_error_codes_distinct() {
         let codes = [
@@ -1054,7 +1103,7 @@ mod tests {
         assert_eq!(seen.len(), 4);
     }
 
-    // -- Test 19: invariants are distinct
+    // -- Test 20: invariants are distinct
     #[test]
     fn test_invariants_distinct() {
         let invs = [
@@ -1070,7 +1119,7 @@ mod tests {
         assert_eq!(seen.len(), 4);
     }
 
-    // -- Test 20: reset clears state but preserves seed
+    // -- Test 21: reset clears state but preserves seed
     #[test]
     fn test_reset() {
         let mut vt = VirtualTransportLayer::new(42);
@@ -1086,7 +1135,7 @@ mod tests {
         assert_eq!(vt.rng_seed, 42);
     }
 
-    // -- Test 21: update link config
+    // -- Test 22: update link config
     #[test]
     fn test_update_link_config() {
         let mut vt = VirtualTransportLayer::new(42);
@@ -1103,7 +1152,7 @@ mod tests {
         assert!((link.config.drop_probability - 0.5).abs() < f64::EPSILON);
     }
 
-    // -- Test 22: deliver_all returns all messages
+    // -- Test 23: deliver_all returns all messages
     #[test]
     fn test_deliver_all() {
         let mut vt = VirtualTransportLayer::new(42);
@@ -1119,7 +1168,7 @@ mod tests {
         assert_eq!(vt.buffered_count("a->b").unwrap(), 0);
     }
 
-    // -- Test 23: message Display implementation
+    // -- Test 24: message Display implementation
     #[test]
     fn test_message_display() {
         let msg = Message {
@@ -1137,7 +1186,7 @@ mod tests {
         assert!(display.contains("tick=5"));
     }
 
-    // -- Test 24: link_state link_id format
+    // -- Test 25: link_state link_id format
     #[test]
     fn test_link_state_link_id() {
         let ls = LinkState::new(
@@ -1149,7 +1198,7 @@ mod tests {
         assert!(ls.active);
     }
 
-    // -- Test 25: default transport layer
+    // -- Test 26: default transport layer
     #[test]
     fn test_default() {
         let vt = VirtualTransportLayer::default();

@@ -21,6 +21,7 @@
 //! - INV-DSG-SAFETY: safety properties checked at every explored state
 
 const MAX_EVENTS: usize = 4096;
+const MAX_REGISTERED_SCENARIOS: usize = 4096;
 
 use crate::control_plane::dpor_exploration::{
     CounterexampleStep, DporExplorer, ExplorationBudget, ExplorationResult, Operation,
@@ -630,7 +631,7 @@ impl DporScheduleGate {
             self.explorer
                 .register_model(model)
                 .map_err(|e| DporScheduleGateError::RegistrationFailed(e.to_string()))?;
-            self.registered_scenarios.push(name.to_string());
+            push_bounded(&mut self.registered_scenarios, name.to_string(), MAX_REGISTERED_SCENARIOS);
             self.emit(GateEvent::new(
                 event_codes::DSG_002,
                 &format!("registered scenario: {}", name),
@@ -655,7 +656,7 @@ impl DporScheduleGate {
         self.explorer
             .register_model(model)
             .map_err(|e| DporScheduleGateError::RegistrationFailed(e.to_string()))?;
-        self.registered_scenarios.push(name.to_string());
+        push_bounded(&mut self.registered_scenarios, name.to_string(), MAX_REGISTERED_SCENARIOS);
         self.emit(GateEvent::new(
             event_codes::DSG_002,
             &format!("registered scenario: {}", name),
@@ -848,12 +849,17 @@ impl DporScheduleGate {
     }
 
     fn emit(&mut self, event: GateEvent) {
-        self.events.push(event);
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        push_bounded(&mut self.events, event, MAX_EVENTS);
     }
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // ===========================================================================

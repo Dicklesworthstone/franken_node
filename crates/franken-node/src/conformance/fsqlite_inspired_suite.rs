@@ -281,6 +281,14 @@ const MAX_CONFORMANCE_RESULTS: usize = 4096;
 /// Maximum audit log entries before oldest-first eviction.
 const MAX_CONFORMANCE_AUDIT_LOG: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// The conformance suite runner.
 pub struct ConformanceSuiteRunner {
     fixtures: Vec<ConformanceFixture>,
@@ -301,27 +309,15 @@ impl ConformanceSuiteRunner {
     }
 
     fn push_fixture(&mut self, fixture: ConformanceFixture) {
-        self.fixtures.push(fixture);
-        if self.fixtures.len() > MAX_CONFORMANCE_FIXTURES {
-            let overflow = self.fixtures.len() - MAX_CONFORMANCE_FIXTURES;
-            self.fixtures.drain(0..overflow);
-        }
+        push_bounded(&mut self.fixtures, fixture, MAX_CONFORMANCE_FIXTURES);
     }
 
     fn push_result(&mut self, record: ConformanceTestRecord) {
-        self.results.push(record);
-        if self.results.len() > MAX_CONFORMANCE_RESULTS {
-            let overflow = self.results.len() - MAX_CONFORMANCE_RESULTS;
-            self.results.drain(0..overflow);
-        }
+        push_bounded(&mut self.results, record, MAX_CONFORMANCE_RESULTS);
     }
 
     fn push_audit(&mut self, record: ConformanceAuditRecord) {
-        self.audit_log.push(record);
-        if self.audit_log.len() > MAX_CONFORMANCE_AUDIT_LOG {
-            let overflow = self.audit_log.len() - MAX_CONFORMANCE_AUDIT_LOG;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_log, record, MAX_CONFORMANCE_AUDIT_LOG);
     }
 
     /// Register a fixture. Returns error if ID already registered.

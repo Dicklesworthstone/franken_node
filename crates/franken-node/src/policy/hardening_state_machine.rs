@@ -211,6 +211,16 @@ impl fmt::Display for HardeningError {
     }
 }
 
+const MAX_TRANSITION_LOG_ENTRIES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Monotonic hardening mode state machine.
 ///
 /// INV-HARDEN-MONOTONIC: level can only increase via `escalate`.
@@ -270,7 +280,7 @@ impl HardeningStateMachine {
         };
 
         self.current_level = target;
-        self.transition_log.push(record.clone());
+        push_bounded(&mut self.transition_log, record.clone(), MAX_TRANSITION_LOG_ENTRIES);
 
         Ok(record)
     }
@@ -308,7 +318,7 @@ impl HardeningStateMachine {
         };
 
         self.current_level = target;
-        self.transition_log.push(record.clone());
+        push_bounded(&mut self.transition_log, record.clone(), MAX_TRANSITION_LOG_ENTRIES);
 
         Ok(record)
     }

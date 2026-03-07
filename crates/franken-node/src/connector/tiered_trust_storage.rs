@@ -19,6 +19,14 @@ use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -622,16 +630,12 @@ impl TieredTrustStorage {
     // -- Event log -----------------------------------------------------------
 
     fn emit(&mut self, code: &str, tier: Tier, artifact_id: Option<&ArtifactId>, detail: String) {
-        self.events.push(StorageEvent {
+        push_bounded(&mut self.events, StorageEvent {
             code: code.to_string(),
             tier: tier.as_str().to_string(),
             artifact_id: artifact_id.map(|id| id.0.clone()),
             detail,
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 
     /// All events emitted since creation.

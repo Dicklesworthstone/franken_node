@@ -313,7 +313,7 @@ impl CancelInjectionMatrix {
 
         let wf = entry.workflow.clone();
         if !self.workflows_tested.contains(&wf) {
-            self.workflows_tested.push(wf);
+            push_bounded(&mut self.workflows_tested, wf, MAX_WORKFLOWS_TESTED);
         }
 
         self.entries.push(entry);
@@ -502,6 +502,8 @@ pub struct WorkflowRegistration {
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 /// Maximum cancel matrix entries before oldest-first eviction.
 const MAX_MATRIX_ENTRIES: usize = 4096;
+/// Maximum workflows tested entries before oldest-first eviction.
+const MAX_WORKFLOWS_TESTED: usize = 4096;
 
 /// The cancellation injection framework.
 ///
@@ -873,6 +875,14 @@ impl CancellationInjectionFramework {
 impl Default for CancellationInjectionFramework {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

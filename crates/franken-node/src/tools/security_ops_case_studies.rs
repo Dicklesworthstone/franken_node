@@ -51,6 +51,14 @@ pub const MIN_INDUSTRY_SUBMISSIONS: usize = 1;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Pre/post security and operational metrics used for case-study quantification.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct KeyMetrics {
@@ -396,17 +404,13 @@ impl SecurityOpsCaseStudyRegistry {
     }
 
     fn log(&mut self, event_code: &str, entity_id: &str, detail: &str, trace_id: &str) {
-        self.audit_log.push(CaseStudyAuditRecord {
+        push_bounded(&mut self.audit_log, CaseStudyAuditRecord {
             event_code: event_code.to_string(),
             entity_id: entity_id.to_string(),
             detail: detail.to_string(),
             trace_id: trace_id.to_string(),
             timestamp: Utc::now().to_rfc3339(),
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

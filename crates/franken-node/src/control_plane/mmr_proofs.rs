@@ -14,6 +14,9 @@ use sha2::{Digest, Sha256};
 use crate::control_plane::marker_stream::MarkerStream;
 use crate::security::constant_time::ct_eq;
 
+/// Maximum leaf hashes before oldest-first eviction.
+const MAX_LEAF_HASHES: usize = 4096;
+
 /// Canonical hash string type used by proof APIs.
 pub type Hash = String;
 
@@ -189,7 +192,7 @@ impl MmrCheckpoint {
             return Err(ProofError::MmrDisabled);
         }
 
-        self.leaf_hashes.push(marker_leaf_hash(marker_hash));
+        push_bounded(&mut self.leaf_hashes, marker_leaf_hash(marker_hash), MAX_LEAF_HASHES);
         let root_hash =
             merkle_root_from_leaf_hashes(&self.leaf_hashes).ok_or(ProofError::EmptyCheckpoint)?;
         let root = MmrRoot {
@@ -241,7 +244,7 @@ impl MmrCheckpoint {
             let marker = stream.get(idx).ok_or(ProofError::InvalidProof {
                 reason: format!("marker missing at sequence {idx}"),
             })?;
-            self.leaf_hashes.push(marker_leaf_hash(&marker.marker_hash));
+            push_bounded(&mut self.leaf_hashes, marker_leaf_hash(&marker.marker_hash), MAX_LEAF_HASHES);
         }
 
         let root_hash =
@@ -515,6 +518,14 @@ fn sha256_hex(input: &[u8]) -> Hash {
     hex::encode(hasher.finalize())
 }
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -689,9 +700,12 @@ mod tests {
 
     #[test]
     fn proof_size_is_log_n() {
-        let stream = build_stream(10_000);
+        // Use a count within the bounded marker capacity (4096)
+        let count = 4_000_u64;
+        let stream = build_stream(count);
         let checkpoint = build_checkpoint(&stream);
-        let proof = mmr_inclusion_proof(&stream, &checkpoint, 9_999).expect("proof");
+        let proof =
+            mmr_inclusion_proof(&stream, &checkpoint, count - 1).expect("proof");
         assert!(
             proof.audit_path.len() <= 14,
             "expected <= 14, got {}",

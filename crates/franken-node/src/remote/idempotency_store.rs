@@ -26,6 +26,14 @@ use sha2::{Digest, Sha256};
 
 use super::idempotency::IdempotencyKey;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Schema version tag for serialised store snapshots.
 pub const SCHEMA_VERSION: &str = "ids-v1.0";
 
@@ -238,15 +246,12 @@ impl IdempotencyDedupeStore {
     // ── internal logging ─────────────────────────────────────────────
 
     fn log(&mut self, event_code: &str, trace_id: &str, detail: serde_json::Value) {
-        self.audit_log.push(IdsAuditRecord {
+        let cap = self.max_audit_records;
+        push_bounded(&mut self.audit_log, IdsAuditRecord {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
             detail,
-        });
-        if self.audit_log.len() > self.max_audit_records {
-            let overflow = self.audit_log.len() - self.max_audit_records;
-            self.audit_log.drain(0..overflow);
-        }
+        }, cap);
     }
 
     // ── primary operations ───────────────────────────────────────────

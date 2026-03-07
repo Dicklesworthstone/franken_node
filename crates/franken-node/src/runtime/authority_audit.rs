@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
+const MAX_VIOLATIONS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -613,7 +614,7 @@ impl AuthorityAuditGuard {
                 .to_string(),
                 trace_id: context.trace_id.clone(),
             });
-            self.violations.push(violation.clone());
+            push_bounded(&mut self.violations, violation.clone(), MAX_VIOLATIONS);
             if self.strict_mode {
                 Err(violation)
             } else {

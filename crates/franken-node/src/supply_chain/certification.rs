@@ -13,6 +13,16 @@ use sha2::{Digest, Sha256};
 use super::reputation::ReputationTier;
 use crate::security::constant_time::ct_eq;
 
+const MAX_AUDIT_TRAIL: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub const CERTIFICATION_EVALUATED: &str = "CERTIFICATION_EVALUATED";
@@ -703,7 +713,7 @@ impl CertificationRegistry {
             event,
         };
         entry.entry_hash = compute_entry_hash(&entry);
-        self.audit_trail.push(entry);
+        push_bounded(&mut self.audit_trail, entry, MAX_AUDIT_TRAIL);
     }
 }
 

@@ -16,6 +16,15 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
+const MAX_RESULTS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -416,7 +425,7 @@ impl OverheadGate {
             GateDecision::Fail { violations }
         };
 
-        self.results.push(result);
+        push_bounded(&mut self.results, result, MAX_RESULTS);
         decision
     }
 
@@ -491,17 +500,13 @@ impl OverheadGate {
         overhead_pct: Option<f64>,
         trace_id: &str,
     ) {
-        self.events.push(OverheadEvent {
+        push_bounded(&mut self.events, OverheadEvent {
             code: code.to_string(),
             hot_path: hot_path.label().to_string(),
             detail,
             overhead_pct,
             trace_id: trace_id.to_string(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 

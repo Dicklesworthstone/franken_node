@@ -34,6 +34,14 @@ use std::collections::BTreeMap;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -473,18 +481,19 @@ impl ReciprocityEngine {
 
     fn log_decision(&mut self, decision: &AccessDecision, event_code: &str, timestamp: &str) {
         let content_hash = AccessAuditEntry::compute_hash(decision);
-        self.audit_log.push(AccessAuditEntry {
-            entry_id: format!("audit-{}", self.audit_log.len() + 1),
-            event_code: event_code.to_string(),
-            participant_id: decision.participant_id.clone(),
-            timestamp: timestamp.to_string(),
-            decision: decision.clone(),
-            content_hash,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        let entry_id = format!("audit-{}", self.audit_log.len() + 1);
+        push_bounded(
+            &mut self.audit_log,
+            AccessAuditEntry {
+                entry_id,
+                event_code: event_code.to_string(),
+                participant_id: decision.participant_id.clone(),
+                timestamp: timestamp.to_string(),
+                decision: decision.clone(),
+                content_hash,
+            },
+            MAX_AUDIT_LOG_ENTRIES,
+        );
     }
 }
 

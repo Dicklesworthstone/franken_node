@@ -5,6 +5,9 @@
 
 use std::collections::BTreeMap;
 
+/// Maximum number of lease decisions before oldest-first eviction.
+const MAX_DECISIONS: usize = 4096;
+
 /// Purpose for which a lease is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LeasePurpose {
@@ -176,14 +179,14 @@ impl LeaseService {
         };
 
         self.leases.insert(lease_id.clone(), lease.clone());
-        self.decisions.push(LeaseDecision {
+        push_bounded(&mut self.decisions, LeaseDecision {
             lease_id: lease_id.clone(),
             action: "grant".into(),
             allowed: true,
             reason: format!("granted {purpose} lease to {holder}"),
             trace_id: trace_id.to_string(),
             timestamp: timestamp.to_string(),
-        });
+        }, MAX_DECISIONS);
 
         lease
     }
@@ -206,28 +209,28 @@ impl LeaseService {
             })?;
 
         if lease.revoked {
-            self.decisions.push(LeaseDecision {
+            push_bounded(&mut self.decisions, LeaseDecision {
                 lease_id: lease_id.to_string(),
                 action: "renew".into(),
                 allowed: false,
                 reason: "lease revoked".into(),
                 trace_id: trace_id.to_string(),
                 timestamp: timestamp.to_string(),
-            });
+            }, MAX_DECISIONS);
             return Err(LeaseError::AlreadyRevoked {
                 lease_id: lease_id.to_string(),
             });
         }
 
         if lease.is_expired(now) {
-            self.decisions.push(LeaseDecision {
+            push_bounded(&mut self.decisions, LeaseDecision {
                 lease_id: lease_id.to_string(),
                 action: "renew".into(),
                 allowed: false,
                 reason: "lease expired".into(),
                 trace_id: trace_id.to_string(),
                 timestamp: timestamp.to_string(),
-            });
+            }, MAX_DECISIONS);
             return Err(LeaseError::Expired {
                 lease_id: lease_id.to_string(),
             });
@@ -241,14 +244,14 @@ impl LeaseService {
             })?;
         lease.renewed_at = now;
 
-        self.decisions.push(LeaseDecision {
+        push_bounded(&mut self.decisions, LeaseDecision {
             lease_id: lease_id.to_string(),
             action: "renew".into(),
             allowed: true,
             reason: "renewed".into(),
             trace_id: trace_id.to_string(),
             timestamp: timestamp.to_string(),
-        });
+        }, MAX_DECISIONS);
 
         Ok(lease.clone())
     }
@@ -281,7 +284,7 @@ impl LeaseService {
                 trace_id: trace_id.to_string(),
                 timestamp: timestamp.to_string(),
             };
-            self.decisions.push(d.clone());
+            push_bounded(&mut self.decisions, d.clone(), MAX_DECISIONS);
             return Err(LeaseError::StaleUse {
                 lease_id: lease_id.to_string(),
             });
@@ -296,7 +299,7 @@ impl LeaseService {
                 trace_id: trace_id.to_string(),
                 timestamp: timestamp.to_string(),
             };
-            self.decisions.push(d.clone());
+            push_bounded(&mut self.decisions, d.clone(), MAX_DECISIONS);
             return Err(LeaseError::StaleUse {
                 lease_id: lease_id.to_string(),
             });
@@ -315,7 +318,7 @@ impl LeaseService {
                 trace_id: trace_id.to_string(),
                 timestamp: timestamp.to_string(),
             };
-            self.decisions.push(d.clone());
+            push_bounded(&mut self.decisions, d.clone(), MAX_DECISIONS);
             return Err(LeaseError::PurposeMismatch {
                 lease_id: lease_id.to_string(),
                 expected: required_purpose.to_string(),
@@ -331,7 +334,7 @@ impl LeaseService {
             trace_id: trace_id.to_string(),
             timestamp: timestamp.to_string(),
         };
-        self.decisions.push(d.clone());
+        push_bounded(&mut self.decisions, d.clone(), MAX_DECISIONS);
         Ok(d)
     }
 
@@ -356,14 +359,14 @@ impl LeaseService {
         }
 
         lease.revoked = true;
-        self.decisions.push(LeaseDecision {
+        push_bounded(&mut self.decisions, LeaseDecision {
             lease_id: lease_id.to_string(),
             action: "revoke".into(),
             allowed: true,
             reason: "revoked".into(),
             trace_id: trace_id.to_string(),
             timestamp: timestamp.to_string(),
-        });
+        }, MAX_DECISIONS);
 
         Ok(())
     }
@@ -377,6 +380,15 @@ impl LeaseService {
     pub fn active_count(&self, now: u64) -> usize {
         self.leases.values().filter(|l| l.is_active(now)).count()
     }
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 #[cfg(test)]

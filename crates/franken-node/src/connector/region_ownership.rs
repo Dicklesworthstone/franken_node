@@ -27,6 +27,17 @@ use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+const MAX_CHILD_REGION_IDS: usize = 4096;
+const MAX_TASKS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Stable event codes for region ownership.
 pub mod event_codes {
     pub const REGION_OPENED: &str = "RGN-001";
@@ -314,7 +325,8 @@ impl Region {
             closed: false,
             quiescence_budget_ms,
         };
-        self.child_region_ids.push(child.id);
+        let child_id = child.id;
+        push_bounded(&mut self.child_region_ids, child_id, MAX_CHILD_REGION_IDS);
         child
     }
 
@@ -323,11 +335,11 @@ impl Region {
         if self.closed {
             return Err(RegionError::AlreadyClosed { region_id: self.id });
         }
-        self.tasks.push(RegionTask {
+        push_bounded(&mut self.tasks, RegionTask {
             task_id: task_id.to_string(),
             state: TaskState::Running,
             registered_at_ms: 0,
-        });
+        }, MAX_TASKS);
         Ok(())
     }
 

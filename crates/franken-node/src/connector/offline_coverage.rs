@@ -174,11 +174,7 @@ impl OfflineCoverageTracker {
             }
         }
         scope.event_count = scope.event_count.saturating_add(1);
-        self.all_events.push(event);
-        if self.all_events.len() > MAX_EVENTS {
-            let overflow = self.all_events.len() - MAX_EVENTS;
-            self.all_events.drain(0..overflow);
-        }
+        push_bounded(&mut self.all_events, event, MAX_EVENTS);
         Ok(())
     }
 
@@ -298,6 +294,15 @@ impl OfflineCoverageTracker {
     pub fn scope_count(&self) -> usize {
         self.scopes.len()
     }
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 #[cfg(test)]

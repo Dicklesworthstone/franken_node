@@ -56,6 +56,15 @@ pub const SCHEMA_VERSION: &str = "seo-v1.0";
 pub const MAX_FRICTION_SCORE: f64 = 3.0;
 pub const TARGET_TTFE_SECONDS: u64 = 300;
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_STEPS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 /// Onboarding phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -222,7 +231,7 @@ impl SafeExtensionOnboarding {
             );
         }
 
-        self.steps.push(step);
+        push_bounded(&mut self.steps, step, MAX_STEPS);
     }
 
     /// Compute time-to-first-extension for a session (sum of all step durations).
@@ -397,17 +406,13 @@ impl SafeExtensionOnboarding {
     }
 
     fn log(&mut self, event_code: &str, entity_id: &str, detail: &str) {
-        self.audit_log.push(SeoAuditRecord {
+        push_bounded(&mut self.audit_log, SeoAuditRecord {
             event_code: event_code.to_string(),
             entity_id: entity_id.to_string(),
             detail: detail.to_string(),
             trace_id: Uuid::now_v7().to_string(),
             timestamp: Utc::now().to_rfc3339(),
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

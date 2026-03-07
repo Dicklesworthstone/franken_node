@@ -54,6 +54,7 @@ pub const ADV_007_REPLAY_COMPLETED: &str = "ADV-007";
 /// ADV-008: Signed evidence entry appended to log.
 pub const ADV_008_SIGNED_EVIDENCE: &str = "ADV-008";
 pub const DEFAULT_MAX_LOG_ENTRIES: usize = 4_096;
+const MAX_EDGES: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Invariant tags
@@ -139,6 +140,9 @@ impl AdversaryNode {
     ///
     /// Returns the old and new posteriors for threshold checking.
     pub fn ingest_evidence(&mut self, adverse_weight: f64, timestamp: u64) -> (f64, f64) {
+        if !adverse_weight.is_finite() {
+            return (self.risk_posterior, self.risk_posterior);
+        }
         let clamped = adverse_weight.clamp(0.0, 1.0);
         let old_posterior = self.risk_posterior;
         self.alpha += clamped;
@@ -379,12 +383,12 @@ impl AdversaryGraph {
                 "{ERR_ADV_DANGLING_EDGE}: target node {to} not found"
             ));
         }
-        self.edges.push(TrustEdge {
+        push_bounded(&mut self.edges, TrustEdge {
             from: from.clone(),
             to: to.clone(),
             relationship: relationship.clone(),
             created_at: timestamp,
-        });
+        }, MAX_EDGES);
         self.push_log_entry(AdversaryLogEntry {
             trace_id: trace_id.to_string(),
             event_code: ADV_002_EDGE_ADDED.to_string(),
@@ -487,6 +491,14 @@ impl AdversaryGraph {
             "nodes": self.nodes.values().collect::<Vec<_>>(),
             "edges": &self.edges,
         })
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 
@@ -771,5 +783,24 @@ mod tests {
         };
         let err = g.ingest_evidence(&ev).unwrap_err();
         assert!(err.contains(ERR_ADV_NODE_NOT_FOUND));
+    }
+
+    #[test]
+    fn bayesian_node_nan_evidence_is_ignored() {
+        let mut node = AdversaryNode::new("test".into(), EntityType::Publisher, 0);
+        let old_posterior = node.risk_posterior;
+        let (old, new) = node.ingest_evidence(f64::NAN, 1);
+        assert_eq!(old, old_posterior);
+        assert_eq!(new, old_posterior);
+        assert_eq!(node.evidence_count, 0);
+    }
+
+    #[test]
+    fn bayesian_node_inf_evidence_is_ignored() {
+        let mut node = AdversaryNode::new("test".into(), EntityType::Publisher, 0);
+        let old_posterior = node.risk_posterior;
+        let (old, new) = node.ingest_evidence(f64::INFINITY, 2);
+        assert_eq!(old, old_posterior);
+        assert_eq!(new, old_posterior);
     }
 }

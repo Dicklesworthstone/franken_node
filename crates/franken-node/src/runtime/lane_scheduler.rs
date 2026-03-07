@@ -25,6 +25,14 @@ pub const DEFAULT_STARVATION_WINDOW_MS: u64 = 5_000;
 /// Default maximum number of audit log records retained in-memory.
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -492,11 +500,8 @@ impl LaneScheduler {
     }
 
     fn push_audit_record(&mut self, record: LaneAuditRecord) {
-        self.audit_log.push(record);
-        if self.audit_log.len() > self.max_audit_log_entries {
-            let overflow = self.audit_log.len() - self.max_audit_log_entries;
-            self.audit_log.drain(0..overflow);
-        }
+        let cap = self.max_audit_log_entries;
+        push_bounded(&mut self.audit_log, record, cap);
     }
 
     /// Assign a task to a lane based on its class.

@@ -29,6 +29,14 @@ pub const DEFAULT_STARVATION_THRESHOLD_TICKS: u32 = 3;
 /// Default max number of retained audit log entries.
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -639,11 +647,8 @@ impl ControlLaneScheduler {
     }
 
     fn record_audit(&mut self, record: ControlLaneAuditRecord) {
-        if self.audit_log.len() >= self.max_audit_log_entries {
-            let overflow = self.audit_log.len() + 1 - self.max_audit_log_entries;
-            self.audit_log.drain(0..overflow);
-        }
-        self.audit_log.push(record);
+        let cap = self.max_audit_log_entries;
+        push_bounded(&mut self.audit_log, record, cap);
     }
 }
 

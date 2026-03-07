@@ -43,6 +43,14 @@ use std::collections::BTreeMap;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -765,11 +773,7 @@ impl CapabilityEnforcer {
             prev_hash,
         };
 
-        self.audit_log.push(entry);
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_log, entry, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

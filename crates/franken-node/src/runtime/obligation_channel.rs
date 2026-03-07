@@ -23,6 +23,16 @@ use serde::{Deserialize, Serialize};
 pub const SCHEMA_VERSION: &str = "och-v1.0";
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_QUEUE_ENTRIES: usize = 4096;
+const MAX_OBLIGATION_IDS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 /// Default deadline in milliseconds for channel obligations.
 pub const DEFAULT_DEADLINE_MS: u64 = 30_000;
@@ -314,7 +324,7 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
             detail: "obligation sent to receiver".to_string(),
         });
 
-        self.queue.push((obligation, message));
+        push_bounded(&mut self.queue, (obligation, message), MAX_QUEUE_ENTRIES);
         obligation_id
     }
 
@@ -690,7 +700,7 @@ impl TwoPhaseFlow {
     pub fn add_obligation(&mut self, obligation: ChannelObligation) {
         let id = obligation.obligation_id.clone();
         self.ledger.record(obligation);
-        self.obligation_ids.push(id);
+        push_bounded(&mut self.obligation_ids, id, MAX_OBLIGATION_IDS);
     }
 
     /// Execute the prepare phase. INV-OCH-TWO-PHASE

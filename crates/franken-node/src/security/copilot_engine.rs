@@ -11,6 +11,14 @@ use serde::{Deserialize, Serialize};
 
 const MAX_AUDIT_TRAIL: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub const COPILOT_RECOMMENDATION_REQUESTED: &str = "COPILOT_RECOMMENDATION_REQUESTED";
@@ -448,11 +456,7 @@ impl ActionRecommendationEngine {
             served_at: timestamp.to_owned(),
             event_code: COPILOT_RECOMMENDATION_SERVED.to_owned(),
         };
-        self.audit_trail.push(audit);
-        if self.audit_trail.len() > MAX_AUDIT_TRAIL {
-            let overflow = self.audit_trail.len() - MAX_AUDIT_TRAIL;
-            self.audit_trail.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_trail, audit, MAX_AUDIT_TRAIL);
         self.total_served = self.total_served.saturating_add(1);
 
         response

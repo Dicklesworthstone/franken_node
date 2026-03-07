@@ -34,6 +34,14 @@ pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 /// Default max number of retained cancellation records.
 pub const DEFAULT_MAX_RECORDS: usize = 4_096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -480,11 +488,7 @@ impl CancellationProtocol {
             &format!("cancel requested, {} in-flight", in_flight_count),
         ));
 
-        self.records.push(record);
-        if self.records.len() > DEFAULT_MAX_RECORDS {
-            let overflow = self.records.len() - DEFAULT_MAX_RECORDS;
-            self.records.drain(0..overflow);
-        }
+        push_bounded(&mut self.records, record, DEFAULT_MAX_RECORDS);
         self.records
             .last()
             .ok_or_else(|| CancelProtocolError::InvariantViolation {
@@ -725,11 +729,8 @@ impl CancellationProtocol {
     }
 
     fn record_audit_event(&mut self, event: CancelAuditEvent) {
-        if self.audit_log.len() >= self.max_audit_log_entries {
-            let overflow = self.audit_log.len() + 1 - self.max_audit_log_entries;
-            self.audit_log.drain(0..overflow);
-        }
-        self.audit_log.push(event);
+        let cap = self.max_audit_log_entries;
+        push_bounded(&mut self.audit_log, event, cap);
     }
 }
 

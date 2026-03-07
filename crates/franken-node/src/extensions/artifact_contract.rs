@@ -9,6 +9,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+const MAX_TRUSTED_SIGNERS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Report schema version for capability artifact vectors.
 pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
 
@@ -138,7 +148,7 @@ impl AdmissionConfig {
     }
 
     pub fn with_signer(mut self, signer_id: impl Into<String>) -> Self {
-        self.trusted_signers.push(signer_id.into());
+        push_bounded(&mut self.trusted_signers, signer_id.into(), MAX_TRUSTED_SIGNERS);
         self
     }
 }

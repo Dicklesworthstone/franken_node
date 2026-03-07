@@ -20,6 +20,14 @@ const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 /// Maximum concurrent sagas before oldest are evicted.
 const MAX_SAGAS: usize = 2048;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub mod event_codes {
@@ -202,16 +210,12 @@ impl SagaExecutor {
 
     /// Internal: append an audit record with capacity eviction.
     fn log(&mut self, event_code: &str, trace_id: &str, saga_id: &str, detail: serde_json::Value) {
-        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() + 1 - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
-        self.audit_log.push(SagaAuditRecord {
+        push_bounded(&mut self.audit_log, SagaAuditRecord {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
             saga_id: saga_id.to_string(),
             detail,
-        });
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 
     /// Create a new saga with a list of step definitions.

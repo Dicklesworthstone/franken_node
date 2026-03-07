@@ -196,6 +196,14 @@ use sha2::{Digest, Sha256};
 
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Compute HMAC-SHA256-like signature using the given key.
 /// Uses a deterministic keyed hash for portability (no external crypto dep).
 pub fn hmac_sign(payload: &str, key: &str) -> String {
@@ -517,14 +525,10 @@ impl ProfileTuningHarness {
     }
 
     fn emit(&mut self, code: &str, detail: String) {
-        self.events.push(HarnessEvent {
+        push_bounded(&mut self.events, HarnessEvent {
             code: code.to_string(),
             detail,
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 
     fn percent_change(current: f64, previous: f64) -> f64 {

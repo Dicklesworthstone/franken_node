@@ -75,6 +75,16 @@ pub const INV_SB_IMMUTABLE: &str = "INV-SB-IMMUTABLE";
 pub const MIN_NODES: usize = 2;
 /// Maximum number of virtual nodes in a scenario.
 pub const MAX_NODES: usize = 10;
+const MAX_ASSERTIONS: usize = 4096;
+const MAX_LINKS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // NodeRole
@@ -465,12 +475,12 @@ impl ScenarioBuilder {
         if self.links.iter().any(|l| l.id == id) {
             return Err(ScenarioBuilderError::DuplicateLink { link_id: id });
         }
-        self.links.push(VirtualLink {
+        push_bounded(&mut self.links, VirtualLink {
             id,
             source_node: source_node.into(),
             target_node: target_node.into(),
             bidirectional,
-        });
+        }, MAX_LINKS);
         Ok(self)
     }
 
@@ -486,7 +496,7 @@ impl ScenarioBuilder {
 
     /// Add an assertion to be evaluated after scenario execution.
     pub fn add_assertion(mut self, assertion: ScenarioAssertion) -> Self {
-        self.assertions.push(assertion);
+        push_bounded(&mut self.assertions, assertion, MAX_ASSERTIONS);
         self
     }
 

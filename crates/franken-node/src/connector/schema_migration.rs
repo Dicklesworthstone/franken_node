@@ -6,6 +6,16 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+const MAX_HINTS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// A semantic version (major.minor.patch).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct SchemaVersion {
@@ -169,7 +179,7 @@ impl MigrationRegistry {
         if hint.from_version == hint.to_version {
             return; // self-loops are no-ops in BFS and waste exploration
         }
-        self.hints.push(hint);
+        push_bounded(&mut self.hints, hint, MAX_HINTS);
     }
 
     /// Find a migration path from source to target version.

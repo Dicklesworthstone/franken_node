@@ -5,6 +5,16 @@
 
 use std::collections::BTreeMap;
 
+const MAX_DECISIONS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Retention class for a control-plane message.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RetentionClass {
@@ -187,14 +197,14 @@ impl RetentionStore {
             size_bytes,
         };
 
-        self.decisions.push(RetentionDecision {
+        push_bounded(&mut self.decisions, RetentionDecision {
             message_id: message_id.to_string(),
             message_type: message_type.to_string(),
             retention_class: class.label().to_string(),
             action: "store".into(),
             reason: format!("classified as {}", class.label()),
             timestamp: now,
-        });
+        }, MAX_DECISIONS);
 
         self.total_bytes = self.total_bytes.saturating_add(size_bytes);
         self.messages.insert(message_id.to_string(), msg);
@@ -226,14 +236,14 @@ impl RetentionStore {
             })?;
         self.total_bytes = self.total_bytes.saturating_sub(msg.size_bytes);
 
-        self.decisions.push(RetentionDecision {
+        push_bounded(&mut self.decisions, RetentionDecision {
             message_id: message_id.to_string(),
             message_type: msg.message_type.clone(),
             retention_class: msg.retention_class.label().to_string(),
             action: "drop".into(),
             reason: "explicit drop request".into(),
             timestamp: now,
-        });
+        }, MAX_DECISIONS);
 
         Ok(())
     }
@@ -267,7 +277,7 @@ impl RetentionStore {
                     reason: "ttl_expired".into(),
                     timestamp: now,
                 };
-                self.decisions.push(decision.clone());
+                push_bounded(&mut self.decisions, decision.clone(), MAX_DECISIONS);
                 dropped.push(decision);
             }
         }

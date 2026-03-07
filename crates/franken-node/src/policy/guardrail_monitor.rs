@@ -14,6 +14,16 @@
 
 use std::fmt;
 
+const MAX_MONITORS: usize = 4096;
+
+fn push_bounded_box(items: &mut Vec<Box<dyn GuardrailMonitor>>, item: Box<dyn GuardrailMonitor>, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 use super::hardening_state_machine::HardeningLevel;
 
 /// Stable event codes for structured logging.
@@ -234,8 +244,18 @@ impl MemoryBudgetGuardrail {
     const ENVELOPE_MIN_BLOCK_THRESHOLD: f64 = 0.5;
 
     pub fn new(block_threshold: f64, warn_threshold: f64) -> Self {
-        let effective_block = block_threshold.max(Self::ENVELOPE_MIN_BLOCK_THRESHOLD);
-        let effective_warn = warn_threshold.min(effective_block);
+        let safe_block = if block_threshold.is_finite() {
+            block_threshold
+        } else {
+            Self::ENVELOPE_MIN_BLOCK_THRESHOLD
+        };
+        let safe_warn = if warn_threshold.is_finite() {
+            warn_threshold
+        } else {
+            0.0
+        };
+        let effective_block = safe_block.max(Self::ENVELOPE_MIN_BLOCK_THRESHOLD);
+        let effective_warn = safe_warn.min(effective_block);
         Self {
             budget_id: BudgetId::new("memory_budget"),
             block_threshold: effective_block,
@@ -314,9 +334,20 @@ impl MemoryTailRiskGuardrail {
     const MIN_SAMPLES: u64 = 8;
 
     pub fn new(block_threshold: f64, warn_threshold: f64, alpha: f64, min_samples: u64) -> Self {
-        let effective_block = block_threshold.clamp(Self::ENVELOPE_MIN_BLOCK_THRESHOLD, 1.0);
-        let effective_warn = warn_threshold.clamp(0.0, effective_block);
-        let effective_alpha = alpha.clamp(Self::MIN_ALPHA, Self::MAX_ALPHA);
+        let safe_block = if block_threshold.is_finite() {
+            block_threshold
+        } else {
+            Self::ENVELOPE_MIN_BLOCK_THRESHOLD
+        };
+        let safe_warn = if warn_threshold.is_finite() {
+            warn_threshold
+        } else {
+            0.0
+        };
+        let safe_alpha = if alpha.is_finite() { alpha } else { Self::MIN_ALPHA };
+        let effective_block = safe_block.clamp(Self::ENVELOPE_MIN_BLOCK_THRESHOLD, 1.0);
+        let effective_warn = safe_warn.clamp(0.0, effective_block);
+        let effective_alpha = safe_alpha.clamp(Self::MIN_ALPHA, Self::MAX_ALPHA);
         let effective_samples = min_samples.max(Self::MIN_SAMPLES);
         Self {
             budget_id: BudgetId::new("memory_tail_risk"),
@@ -436,12 +467,23 @@ impl ConformalRiskGuardrail {
     const MIN_SAMPLES: u64 = 16;
 
     pub fn new(block_error_rate: f64, warn_error_rate: f64, delta: f64, min_samples: u64) -> Self {
-        let effective_block = block_error_rate.clamp(
+        let safe_block = if block_error_rate.is_finite() {
+            block_error_rate
+        } else {
+            Self::ENVELOPE_MIN_BLOCK_ERROR_RATE
+        };
+        let safe_warn = if warn_error_rate.is_finite() {
+            warn_error_rate
+        } else {
+            0.0
+        };
+        let safe_delta = if delta.is_finite() { delta } else { Self::MIN_DELTA };
+        let effective_block = safe_block.clamp(
             Self::ENVELOPE_MIN_BLOCK_ERROR_RATE,
             Self::ENVELOPE_MAX_BLOCK_ERROR_RATE,
         );
-        let effective_warn = warn_error_rate.clamp(0.0, effective_block);
-        let effective_delta = delta.clamp(Self::MIN_DELTA, Self::MAX_DELTA);
+        let effective_warn = safe_warn.clamp(0.0, effective_block);
+        let effective_delta = safe_delta.clamp(Self::MIN_DELTA, Self::MAX_DELTA);
         let effective_samples = min_samples.max(Self::MIN_SAMPLES);
         Self {
             budget_id: BudgetId::new("conformal_risk"),
@@ -539,11 +581,21 @@ impl DurabilityLossGuardrail {
     const ENVELOPE_MIN_DURABILITY: f64 = 0.5;
 
     pub fn new(min_durability: f64, warn_margin: f64) -> Self {
-        let effective_min = min_durability.max(Self::ENVELOPE_MIN_DURABILITY);
+        let safe_min = if min_durability.is_finite() {
+            min_durability
+        } else {
+            Self::ENVELOPE_MIN_DURABILITY
+        };
+        let safe_margin = if warn_margin.is_finite() {
+            warn_margin
+        } else {
+            0.0
+        };
+        let effective_min = safe_min.max(Self::ENVELOPE_MIN_DURABILITY);
         Self {
             budget_id: BudgetId::new("durability_budget"),
             min_durability: effective_min,
-            warn_margin,
+            warn_margin: safe_margin,
             min_allowed_durability: Self::ENVELOPE_MIN_DURABILITY,
         }
     }
@@ -732,7 +784,7 @@ impl GuardrailMonitorSet {
 
     /// Register a monitor.
     pub fn register(&mut self, monitor: Box<dyn GuardrailMonitor>) {
-        self.monitors.push(monitor);
+        push_bounded_box(&mut self.monitors, monitor, MAX_MONITORS);
     }
 
     /// Number of registered monitors.
@@ -1464,5 +1516,41 @@ mod tests {
         state.proposed_hardening_level = Some(HardeningLevel::Baseline);
         let rej = set.evaluate(&state).unwrap_err();
         assert_eq!(rej.budget_id.as_str(), "hardening_regression");
+    }
+
+    // ── NaN/Inf guardrail tests ──
+
+    #[test]
+    fn memory_budget_nan_threshold_falls_back_to_envelope() {
+        let g = MemoryBudgetGuardrail::new(f64::NAN, f64::NAN);
+        assert!(g.block_threshold.is_finite());
+        assert!(g.warn_threshold.is_finite());
+        assert!(
+            g.block_threshold >= MemoryBudgetGuardrail::ENVELOPE_MIN_BLOCK_THRESHOLD
+        );
+    }
+
+    #[test]
+    fn tail_risk_nan_threshold_falls_back_to_envelope() {
+        let g = MemoryTailRiskGuardrail::new(f64::NAN, f64::INFINITY, f64::NAN, 8);
+        assert!(g.block_threshold.is_finite());
+        assert!(g.warn_threshold.is_finite());
+        assert!(g.alpha.is_finite());
+    }
+
+    #[test]
+    fn conformal_nan_threshold_falls_back_to_envelope() {
+        let g = ConformalRiskGuardrail::new(f64::NAN, f64::NEG_INFINITY, f64::NAN, 16);
+        assert!(g.block_error_rate.is_finite());
+        assert!(g.warn_error_rate.is_finite());
+        assert!(g.delta.is_finite());
+    }
+
+    #[test]
+    fn durability_nan_threshold_falls_back_to_envelope() {
+        let g = DurabilityLossGuardrail::new(f64::NAN, f64::INFINITY);
+        assert!(g.min_durability.is_finite());
+        assert!(g.warn_margin.is_finite());
+        assert!(g.min_durability >= DurabilityLossGuardrail::ENVELOPE_MIN_DURABILITY);
     }
 }

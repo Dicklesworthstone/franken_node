@@ -16,6 +16,14 @@ use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry, Evidenc
 
 const MAX_ACTION_LOG_ENTRIES: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Stable event codes for structured logging.
 pub mod event_codes {
     pub const POLICY_ACTION_SUCCESS: &str = "EVD-POLICY-001";
@@ -289,11 +297,7 @@ impl EvidenceConformanceChecker {
     }
 
     fn push_action(&mut self, outcome: PolicyActionOutcome) {
-        self.action_log.push(outcome);
-        if self.action_log.len() > MAX_ACTION_LOG_ENTRIES {
-            let overflow = self.action_log.len() - MAX_ACTION_LOG_ENTRIES;
-            self.action_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.action_log, outcome, MAX_ACTION_LOG_ENTRIES);
     }
 
     /// Validate evidence for an action and append to the ledger if valid.

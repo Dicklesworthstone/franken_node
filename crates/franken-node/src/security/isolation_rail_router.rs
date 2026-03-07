@@ -44,6 +44,14 @@ use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -484,14 +492,13 @@ impl RailRouter {
 
         self.placements
             .insert(workload.id.clone(), placement.clone());
-        self.events.push(RailEvent {
+        self.push_event(RailEvent {
             event_code: ISOLATION_RAIL_ASSIGNED.to_string(),
             workload_id: workload.id.clone(),
             detail: format!("assigned to rail {target_rail}"),
             rail: Some(target_rail),
             target_rail: None,
         });
-        self.trim_events();
 
         Ok(placement)
     }
@@ -549,14 +556,13 @@ impl RailRouter {
         }
 
         // Emit ISOLATION_ELEVATION_START
-        self.events.push(RailEvent {
+        self.push_event(RailEvent {
             event_code: ISOLATION_ELEVATION_START.to_string(),
             workload_id: workload_id.to_string(),
             detail: format!("elevating {current_rail} -> {target_rail}"),
             rail: Some(current_rail),
             target_rail: Some(target_rail),
         });
-        self.trim_events();
 
         // INV-ISOLATION-POLICY-CONTINUITY: verify all current rules are
         // preserved in the target rail policy.
@@ -569,14 +575,13 @@ impl RailRouter {
         }
 
         // Emit ISOLATION_POLICY_PRESERVED
-        self.events.push(RailEvent {
+        self.push_event(RailEvent {
             event_code: ISOLATION_POLICY_PRESERVED.to_string(),
             workload_id: workload_id.to_string(),
             detail: format!("policy continuity verified {current_rail} -> {target_rail}"),
             rail: Some(current_rail),
             target_rail: Some(target_rail),
         });
-        self.trim_events();
 
         // Mesh partition check.
         if self.config.partition_check_enabled {
@@ -595,14 +600,13 @@ impl RailRouter {
         let updated = p.clone();
 
         // Emit ISOLATION_ELEVATION_COMPLETE
-        self.events.push(RailEvent {
+        self.push_event(RailEvent {
             event_code: ISOLATION_ELEVATION_COMPLETE.to_string(),
             workload_id: workload_id.to_string(),
             detail: format!("elevated to rail {target_rail}"),
             rail: Some(target_rail),
             target_rail: None,
         });
-        self.trim_events();
 
         Ok(updated)
     }
@@ -637,14 +641,13 @@ impl RailRouter {
             (placement.clone(), budget_exceeded, detail)
         };
 
-        self.events.push(RailEvent {
+        self.push_event(RailEvent {
             event_code: ISOLATION_BUDGET_CHECK.to_string(),
             workload_id: workload_id.to_string(),
             detail,
             rail: Some(placement.rail),
             target_rail: None,
         });
-        self.trim_events();
 
         // INV-ISOLATION-BUDGET-BOUND
         if budget_exceeded {
@@ -687,11 +690,8 @@ impl RailRouter {
         self.placements.get(workload_id)
     }
 
-    fn trim_events(&mut self) {
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+    fn push_event(&mut self, event: RailEvent) {
+        push_bounded(&mut self.events, event, MAX_EVENTS);
     }
 
     /// Generate a mesh profile report (used by the check script).

@@ -11,6 +11,16 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+const MAX_TELEMETRY: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 pub const TRUST_CARD_CREATED: &str = "TRUST_CARD_CREATED";
 pub const TRUST_CARD_UPDATED: &str = "TRUST_CARD_UPDATED";
 pub const TRUST_CARD_REVOKED: &str = "TRUST_CARD_REVOKED";
@@ -820,13 +830,13 @@ impl TrustCardRegistry {
         timestamp_secs: u64,
         detail: &str,
     ) {
-        self.telemetry.push(TelemetryEvent {
+        push_bounded(&mut self.telemetry, TelemetryEvent {
             event_code: event_code.to_string(),
             extension_id,
             trace_id: trace_id.to_string(),
             timestamp_secs,
             detail: detail.to_string(),
-        });
+        }, MAX_TELEMETRY);
     }
 }
 

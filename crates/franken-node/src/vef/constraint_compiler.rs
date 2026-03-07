@@ -26,6 +26,16 @@ use crate::security::constant_time::ct_eq;
 
 /// Maximum number of compile events retained per compilation.
 const MAX_EVENTS: usize = 4096;
+const MAX_CONDITIONS: usize = 4096;
+const MAX_RULES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ── Schema version ──────────────────────────────────────────────────────────
 
@@ -635,7 +645,7 @@ impl PolicyDefinition {
 
     /// Add a rule to this policy definition.
     pub fn with_rule(mut self, rule: PolicyRule) -> Self {
-        self.rules.push(rule);
+        push_bounded(&mut self.rules, rule, MAX_RULES);
         self
     }
 }
@@ -660,11 +670,11 @@ impl PolicyRule {
 
     /// Add a condition to this rule.
     pub fn with_condition(mut self, field: &str, op: ComparisonOp, value: &str) -> Self {
-        self.conditions.push(Condition {
+        push_bounded(&mut self.conditions, Condition {
             field: field.to_string(),
             op,
             value: value.to_string(),
-        });
+        }, MAX_CONDITIONS);
         self
     }
 

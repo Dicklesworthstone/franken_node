@@ -7,6 +7,9 @@
 use sha2::Digest;
 use std::fmt;
 
+/// Maximum markers before oldest-first eviction.
+const MAX_MARKERS: usize = 4096;
+
 /// Genesis sentinel hash for sequence 0 (no predecessor).
 const GENESIS_PREV_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -142,9 +145,8 @@ fn compare_marker_hash_at(
     sequence: u64,
     comparisons: &mut Vec<DivergenceComparison>,
 ) -> bool {
-    let index = sequence as usize;
     let (Some(local_marker), Some(remote_marker)) =
-        (local.markers.get(index), remote.markers.get(index))
+        (local.get(sequence), remote.get(sequence))
     else {
         return false;
     };
@@ -323,6 +325,9 @@ impl fmt::Display for MarkerStreamError {
 #[derive(Debug)]
 pub struct MarkerStream {
     markers: Vec<Marker>,
+    /// Tracks the total number of markers ever appended, even after
+    /// oldest entries are drained by the capacity bound.
+    total_appended: u64,
 }
 
 impl MarkerStream {
@@ -330,6 +335,7 @@ impl MarkerStream {
     pub fn new() -> Self {
         Self {
             markers: Vec::new(),
+            total_appended: 0,
         }
     }
 
@@ -353,7 +359,7 @@ impl MarkerStream {
             });
         }
 
-        let next_seq = self.markers.len() as u64;
+        let next_seq = self.total_appended;
 
         // Determine prev_hash and check monotonic time
         let prev_hash = if let Some(head) = self.markers.last() {
@@ -389,7 +395,8 @@ impl MarkerStream {
             trace_id: trace_id.to_string(),
         };
 
-        self.markers.push(marker);
+        push_bounded(&mut self.markers, marker, MAX_MARKERS);
+        self.total_appended = self.total_appended.saturating_add(1);
         self.markers
             .last()
             .ok_or_else(|| MarkerStreamError::IntegrityFailure {
@@ -405,7 +412,11 @@ impl MarkerStream {
 
     /// Get marker at a specific sequence number. O(1) lookup.
     pub fn get(&self, sequence: u64) -> Option<&Marker> {
-        self.markers.get(sequence as usize)
+        let base = self.markers.first().map_or(0, |m| m.sequence);
+        if sequence < base {
+            return None;
+        }
+        self.markers.get((sequence - base) as usize)
     }
 
     /// Number of markers in the stream.
@@ -420,12 +431,13 @@ impl MarkerStream {
 
     /// Get markers in a sequence range (inclusive start, exclusive end).
     pub fn range(&self, start: u64, end: u64) -> &[Marker] {
-        let s = start as usize;
-        let e = (end as usize).min(self.markers.len());
-        if s >= e {
+        let base = self.markers.first().map_or(0, |m| m.sequence);
+        let adj_start = if start < base { 0 } else { (start - base) as usize };
+        let adj_end = if end <= base { 0 } else { ((end - base) as usize).min(self.markers.len()) };
+        if adj_start >= adj_end {
             return &[];
         }
-        &self.markers[s..e]
+        &self.markers[adj_start..adj_end]
     }
 
     /// O(1) marker lookup by sequence number (bd-129f).
@@ -435,7 +447,11 @@ impl MarkerStream {
     ///
     /// Returns `None` for out-of-range sequences without panicking.
     pub fn marker_by_sequence(&self, seq: u64) -> Option<&Marker> {
-        self.markers.get(seq as usize)
+        let base = self.markers.first().map_or(0, |m| m.sequence);
+        if seq < base {
+            return None;
+        }
+        self.markers.get((seq - base) as usize)
     }
 
     /// O(log N) timestamp-to-sequence binary search (bd-129f).
@@ -486,8 +502,9 @@ impl MarkerStream {
     /// INV-MKS-HASH-CHAIN: each marker's prev_hash matches predecessor's marker_hash.
     /// INV-MKS-MONOTONIC-TIME: timestamps are non-decreasing.
     pub fn verify_integrity(&self) -> Result<(), MarkerStreamError> {
+        let base_seq = self.markers.first().map_or(0, |m| m.sequence);
         for (i, marker) in self.markers.iter().enumerate() {
-            let expected_seq = i as u64;
+            let expected_seq = base_seq + i as u64;
 
             // Dense sequence check
             if marker.sequence != expected_seq {
@@ -500,9 +517,14 @@ impl MarkerStream {
                 });
             }
 
-            // Hash chain check
+            // Hash chain check (first retained marker's prev_hash can't be verified against drained predecessor)
             let expected_prev = if i == 0 {
-                GENESIS_PREV_HASH.to_string()
+                if base_seq == 0 {
+                    GENESIS_PREV_HASH.to_string()
+                } else {
+                    // After draining, we can't verify the first retained marker's prev_hash
+                    marker.prev_hash.clone()
+                }
             } else {
                 self.markers[i - 1].marker_hash.clone()
             };
@@ -594,6 +616,14 @@ impl MarkerStream {
 impl Default for MarkerStream {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 
@@ -1344,7 +1374,8 @@ mod tests {
     #[test]
     fn sequence_by_timestamp_large_stream() {
         let mut stream = MarkerStream::new();
-        for i in 0..10_000_u64 {
+        let count = 10_000_u64;
+        for i in 0..count {
             stream
                 .append(
                     MarkerEventType::all()[(i as usize) % MarkerEventType::all().len()],
@@ -1355,14 +1386,28 @@ mod tests {
                 .unwrap();
         }
 
-        // Exact match for first, middle, last
-        assert_eq!(stream.sequence_by_timestamp(1000), Some(0));
-        assert_eq!(stream.sequence_by_timestamp(1000 + 5000 * 10), Some(5000));
+        // With MAX_MARKERS=4096, only the last 4096 markers are retained.
+        // Retained markers: sequences 5904..=9999, timestamps 60040..=100990.
+        let first_retained = count - (MAX_MARKERS as u64);
+
+        // Timestamps before retained range return None
+        assert_eq!(stream.sequence_by_timestamp(1000), None);
+
+        // Exact match for first retained marker
+        let first_ts = 1000 + first_retained * 10;
+        assert_eq!(
+            stream.sequence_by_timestamp(first_ts),
+            Some(first_retained)
+        );
+
+        // Last marker
         assert_eq!(stream.sequence_by_timestamp(1000 + 9999 * 10), Some(9999));
 
-        // Between markers
-        assert_eq!(stream.sequence_by_timestamp(1005), Some(0)); // between 1000 and 1010
-        assert_eq!(stream.sequence_by_timestamp(50_005), Some(4900)); // between 50000 and 50010
+        // Between retained markers
+        assert_eq!(
+            stream.sequence_by_timestamp(first_ts + 5),
+            Some(first_retained)
+        );
     }
 
     #[test]

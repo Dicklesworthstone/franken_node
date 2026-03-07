@@ -13,6 +13,16 @@ use sha2::{Digest, Sha256};
 
 use crate::security::constant_time::ct_eq;
 
+const MAX_TRANSITIONS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -244,7 +254,7 @@ impl KeyRing {
 
     /// Record a key transition.
     pub fn record_transition(&mut self, record: KeyTransitionRecord) {
-        self.transitions.push(record);
+        push_bounded(&mut self.transitions, record, MAX_TRANSITIONS);
     }
 
     /// Return all stored transition records.

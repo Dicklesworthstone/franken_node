@@ -24,6 +24,16 @@ pub const SCHEMA_VERSION: &str = "lab-v1.0";
 
 /// Maximum number of events before oldest-first eviction.
 const MAX_EVENTS: usize = 4096;
+const MAX_REORDER_BUFFERS: usize = 4096;
+const MAX_VIRTUAL_LINKS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 /// Lab runtime initialized with seed and config.
 pub const EVT_LAB_INITIALIZED: &str = "FN-LB-001";
@@ -591,8 +601,8 @@ impl LabRuntime {
                 link.fault_profile.delay_ticks,
             ),
         );
-        self.virtual_links.push(link);
-        self.reorder_buffers.push(Vec::new());
+        push_bounded(&mut self.virtual_links, link, MAX_VIRTUAL_LINKS);
+        push_bounded(&mut self.reorder_buffers, Vec::new(), MAX_REORDER_BUFFERS);
         Ok(idx)
     }
 
@@ -685,22 +695,18 @@ impl LabRuntime {
         let fired = self.test_clock.advance(delta)?;
         if !fired.is_empty() {
             for (tick, cb) in &fired {
-                self.events.push(LabEvent {
+                push_bounded(&mut self.events, LabEvent {
                     tick: *tick,
                     event_code: EVT_TIMER_FIRED.to_string(),
                     payload: format!("timer_id={}, label={}", cb.id, cb.label),
-                });
+                }, MAX_EVENTS);
             }
         }
-        self.events.push(LabEvent {
+        push_bounded(&mut self.events, LabEvent {
             tick: self.test_clock.current_tick,
             event_code: EVT_TEST_CLOCK_ADVANCED.to_string(),
             payload: format!("delta={delta}, now={}", self.test_clock.current_tick),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
         Ok(fired)
     }
 
@@ -871,15 +877,11 @@ impl LabRuntime {
     // -- internal helpers --
 
     fn emit(&mut self, code: &str, payload: String) {
-        self.events.push(LabEvent {
+        push_bounded(&mut self.events, LabEvent {
             tick: self.test_clock.current_tick,
             event_code: code.to_string(),
             payload,
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 

@@ -16,6 +16,11 @@ use std::fmt;
 use serde_json::{Map, Value, json};
 use sha2::{Digest, Sha256};
 
+/// Maximum number of config entries before oldest-first eviction.
+const MAX_ENTRIES: usize = 4096;
+/// Maximum number of exported bundles before oldest-first eviction.
+const MAX_BUNDLES: usize = 4096;
+
 /// Stable event codes for structured logging.
 pub mod event_codes {
     pub const BUNDLE_EXPORTED: &str = "REPRO_BUNDLE_EXPORTED";
@@ -192,7 +197,7 @@ impl ConfigSnapshot {
     }
 
     pub fn with_entry(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.entries.push((key.into(), value.into()));
+        push_bounded(&mut self.entries, (key.into(), value.into()), MAX_ENTRIES);
         self
     }
 
@@ -624,9 +629,9 @@ impl ReproBundleExporter {
     /// Export a bundle from context (auto or manual).
     pub fn export(&mut self, ctx: &ExportContext) -> &ReproBundle {
         let bundle = generate_repro_bundle(ctx);
-        let index = self.bundles.len();
-        self.bundles.push(bundle);
-        &self.bundles[index]
+        push_bounded(&mut self.bundles, bundle, MAX_BUNDLES);
+        // After push_bounded, the last element is always the one we just pushed.
+        self.bundles.last().unwrap()
     }
 
     /// Get all exported bundles.
@@ -655,6 +660,14 @@ impl ReproBundleExporter {
             .iter()
             .filter(|b| b.timestamp_ms >= start_ms && b.timestamp_ms <= end_ms)
             .collect()
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

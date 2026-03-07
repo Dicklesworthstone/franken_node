@@ -32,6 +32,14 @@ use uuid::Uuid;
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 const MAX_REPORTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -569,11 +577,7 @@ impl MigrationKitEcosystem {
             }),
         );
 
-        self.reports.push(report.clone());
-        if self.reports.len() > MAX_REPORTS {
-            let overflow = self.reports.len() - MAX_REPORTS;
-            self.reports.drain(0..overflow);
-        }
+        push_bounded(&mut self.reports, report.clone(), MAX_REPORTS);
         Ok(report)
     }
 
@@ -598,18 +602,14 @@ impl MigrationKitEcosystem {
     }
 
     fn log(&mut self, event_code: &str, kit_id: &str, trace_id: &str, details: serde_json::Value) {
-        self.audit_log.push(MkeAuditRecord {
+        push_bounded(&mut self.audit_log, MkeAuditRecord {
             record_id: Uuid::now_v7().to_string(),
             event_code: event_code.to_string(),
             kit_id: kit_id.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             details,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

@@ -23,6 +23,14 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -594,7 +602,7 @@ impl SybilDetector {
 
         // Log detection event
         if !sybil_ids.is_empty() {
-            self.events.push(SybilDefenseEvent {
+            push_bounded(&mut self.events, SybilDefenseEvent {
                 event_code: SPS_003_SYBIL_DETECTED.to_string(),
                 target_id: signals
                     .first()
@@ -602,11 +610,7 @@ impl SybilDetector {
                     .unwrap_or_default(),
                 detail: format!("Detected {} suspected Sybil identities", sybil_ids.len()),
                 timestamp_ms,
-            });
-            if self.events.len() > MAX_EVENTS {
-                let overflow = self.events.len() - MAX_EVENTS;
-                self.events.drain(0..overflow);
-            }
+            }, MAX_EVENTS);
         }
 
         sybil_ids
@@ -746,7 +750,7 @@ impl SybilDefensePipeline {
         let result = self.aggregator.trimmed_mean(&weighted_values)?;
 
         // Log events
-        self.events.push(SybilDefenseEvent {
+        push_bounded(&mut self.events, SybilDefenseEvent {
             event_code: SPS_001_ROBUST_AGGREGATION.to_string(),
             target_id: signals
                 .first()
@@ -757,10 +761,10 @@ impl SybilDefensePipeline {
                 result.signal_count, result.trimmed_count, result.value
             ),
             timestamp_ms,
-        });
+        }, MAX_EVENTS);
 
         if !sybil_ids.is_empty() {
-            self.events.push(SybilDefenseEvent {
+            push_bounded(&mut self.events, SybilDefenseEvent {
                 event_code: SPS_003_SYBIL_DETECTED.to_string(),
                 target_id: signals
                     .first()
@@ -768,12 +772,7 @@ impl SybilDefensePipeline {
                     .unwrap_or_default(),
                 detail: format!("{} Sybil identities attenuated", sybil_ids.len()),
                 timestamp_ms,
-            });
-        }
-
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
+            }, MAX_EVENTS);
         }
 
         Ok(result)

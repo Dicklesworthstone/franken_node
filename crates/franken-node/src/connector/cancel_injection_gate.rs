@@ -190,17 +190,13 @@ impl CancelInjectionGate {
 
         self.control_workflows.insert(key.clone(), workflow);
 
-        self.audit_log.push(GateAuditRecord {
+        push_bounded(&mut self.audit_log, GateAuditRecord {
             event_code: event_codes::CIN_WORKFLOW_REGISTERED.to_string(),
             workflow: key,
             detail: "registered".to_string(),
             trace_id: trace_id.to_string(),
             schema_version: SCHEMA_VERSION.to_string(),
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 
     /// Register the default set of control-plane workflows.
@@ -492,7 +488,7 @@ impl CancelInjectionGate {
         }
         .to_string();
 
-        self.audit_log.push(GateAuditRecord {
+        push_bounded(&mut self.audit_log, GateAuditRecord {
             event_code: event_codes::CIN_GATE_VERDICT.to_string(),
             workflow: String::new(),
             detail: format!(
@@ -501,11 +497,7 @@ impl CancelInjectionGate {
             ),
             trace_id: trace_id.to_string(),
             schema_version: SCHEMA_VERSION.to_string(),
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
 
         let report = CancelInjectionGateReport {
             gate_id: "bd-3tpg".to_string(),
@@ -558,6 +550,14 @@ impl CancelInjectionGate {
 impl Default for CancelInjectionGate {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

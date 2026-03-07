@@ -15,6 +15,16 @@ use std::fmt;
 
 use super::hardening_state_machine::HardeningLevel;
 
+const MAX_ESCALATION_HISTORY: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Stable event codes for structured logging.
 pub mod event_codes {
     pub const CLAMP_ALLOWED: &str = "EVD-CLAMP-001";
@@ -206,10 +216,10 @@ impl HardeningClampPolicy {
 
     /// Record an escalation that occurred.
     pub fn record_escalation(&mut self, timestamp_ms: u64, to_level: HardeningLevel) {
-        self.escalation_history.push(EscalationRecord {
+        push_bounded(&mut self.escalation_history, EscalationRecord {
             timestamp_ms,
             to_level,
-        });
+        }, MAX_ESCALATION_HISTORY);
     }
 
     /// Count escalations within the current window.

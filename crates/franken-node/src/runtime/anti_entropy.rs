@@ -12,6 +12,14 @@ use std::collections::{BTreeMap, BTreeSet};
 /// Maximum reconciliation events before oldest are evicted.
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded_fn<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Maximum trust records per TrustState before inserts are rejected.
 const MAX_TRUST_RECORDS: usize = 8192;
 
@@ -305,11 +313,7 @@ impl AntiEntropyReconciler {
     }
 
     fn push_event(&mut self, event: ReconciliationEvent) {
-        if self.events.len() >= MAX_EVENTS {
-            let overflow = self.events.len() + 1 - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
-        self.events.push(event);
+        push_bounded_fn(&mut self.events, event, MAX_EVENTS);
     }
 
     /// Compute the delta between local and remote states.

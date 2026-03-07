@@ -171,6 +171,17 @@ pub struct ScopeMode {
     pub policy_predicate: Option<PolicyPredicate>,
 }
 
+const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
+const MAX_RECEIPTS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Gate engine
 // ---------------------------------------------------------------------------
@@ -272,13 +283,14 @@ impl GateEngine {
     }
 
     fn emit_audit(&mut self, event_code: &str, scope_id: &str, detail: &str, trace_id: &str) {
-        self.audit_trail.push(GateAuditEvent {
+        let ts = self.now_iso();
+        push_bounded(&mut self.audit_trail, GateAuditEvent {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
             scope_id: scope_id.to_string(),
-            timestamp: self.now_iso(),
+            timestamp: ts,
             detail: detail.to_string(),
-        });
+        }, MAX_AUDIT_TRAIL_ENTRIES);
     }
 
     // ---- Shim registry ----
@@ -452,7 +464,7 @@ impl GateEngine {
             self.emit_audit(PCG_003, &req.scope_id, &rationale, &trace_id);
         }
 
-        self.transition_receipts.push(receipt.clone());
+        push_bounded(&mut self.transition_receipts, receipt.clone(), MAX_RECEIPTS);
         Ok(receipt)
     }
 
@@ -491,7 +503,7 @@ impl GateEngine {
             &trace_id,
         );
 
-        self.divergence_receipts.push(receipt.clone());
+        push_bounded(&mut self.divergence_receipts, receipt.clone(), MAX_RECEIPTS);
         receipt
     }
 

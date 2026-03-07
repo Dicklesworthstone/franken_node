@@ -19,6 +19,7 @@ use crate::control_plane::transition_abort::{
 };
 
 const MAX_EVENTS: usize = 4096;
+const MAX_HISTORY_ENTRIES: usize = 4096;
 
 pub const EPOCH_PROPOSED: &str = "EPOCH_PROPOSED";
 pub const EPOCH_DRAIN_REQUESTED: &str = "EPOCH_DRAIN_REQUESTED";
@@ -401,7 +402,7 @@ impl ProductEpochCoordinator {
             quiescence_status: Some("committed".to_string()),
             trace_id: trace_id.to_string(),
         });
-        self.history.push(EpochTransitionRecord {
+        push_bounded(&mut self.history, EpochTransitionRecord {
             transition_id: pending.transition_id,
             pre_epoch: pending.pre_epoch,
             target_epoch: pending.target_epoch,
@@ -411,7 +412,7 @@ impl ProductEpochCoordinator {
             outcome: "COMMITTED".to_string(),
             abort_reason: None,
             trace_id: trace_id.to_string(),
-        });
+        }, MAX_HISTORY_ENTRIES);
         self.pending = None;
         Ok(actual_epoch)
     }
@@ -506,7 +507,7 @@ impl ProductEpochCoordinator {
             quiescence_status: Some("aborted".to_string()),
             trace_id: trace_id.to_string(),
         });
-        self.history.push(EpochTransitionRecord {
+        push_bounded(&mut self.history, EpochTransitionRecord {
             transition_id: pending.transition_id,
             pre_epoch: pending.pre_epoch,
             target_epoch: pending.target_epoch,
@@ -516,7 +517,7 @@ impl ProductEpochCoordinator {
             outcome: "ABORTED".to_string(),
             abort_reason: Some(reason.to_string()),
             trace_id: trace_id.to_string(),
-        });
+        }, MAX_HISTORY_ENTRIES);
         self.pending = None;
     }
 

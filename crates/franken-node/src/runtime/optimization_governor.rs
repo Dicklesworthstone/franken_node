@@ -41,6 +41,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
+const MAX_DECISION_LOG_ENTRIES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Schema version
 // ---------------------------------------------------------------------------
@@ -822,7 +832,7 @@ impl OptimizationGovernor {
             trace_id: trace_id.to_string(),
             evidence,
         };
-        self.decision_log.push(rec);
+        push_bounded(&mut self.decision_log, rec, MAX_DECISION_LOG_ENTRIES);
         self.next_seq = self.next_seq.saturating_add(1);
     }
 }

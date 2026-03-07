@@ -11,6 +11,9 @@ use std::collections::BTreeMap;
 
 use crate::security::constant_time::ct_eq;
 
+/// Maximum number of reference runtimes before oldest-first eviction.
+const MAX_REFERENCE_RUNTIMES: usize = 4096;
+
 // ── Schema version ─────────────────────────────────────────────────────
 
 pub const SCHEMA_VERSION: &str = "n-version-oracle-v1.0";
@@ -178,7 +181,7 @@ impl HarnessConfig {
     }
 
     pub fn with_reference(mut self, runtime: ReferenceRuntime) -> Self {
-        self.reference_runtimes.push(runtime);
+        push_bounded(&mut self.reference_runtimes, runtime, MAX_REFERENCE_RUNTIMES);
         self
     }
 }
@@ -405,6 +408,15 @@ pub fn run_harness(
             unresolved_high_risk: high_risk_unresolved.len(),
         },
     }
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // ── Unit tests ─────────────────────────────────────────────────────────

@@ -20,6 +20,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
+const MAX_SCENARIOS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -592,7 +601,7 @@ impl BenchmarkSuite {
 
     /// Add a scenario definition to the suite.
     pub fn add_scenario(&mut self, scenario: ScenarioDefinition) {
-        self.scenarios.push(scenario);
+        push_bounded(&mut self.scenarios, scenario, MAX_SCENARIOS);
     }
 
     /// Load the default set of benchmark scenarios covering all six dimensions.
@@ -814,15 +823,11 @@ impl BenchmarkSuite {
     }
 
     fn emit_event(&mut self, code: &str, scenario: Option<&str>, detail: &str) {
-        self.events.push(BenchmarkEvent {
+        push_bounded(&mut self.events, BenchmarkEvent {
             code: code.to_string(),
             scenario: scenario.map(String::from),
             detail: detail.to_string(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 

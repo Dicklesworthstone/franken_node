@@ -47,6 +47,14 @@ const MAX_CHAIN_ENTRIES: usize = 16384;
 /// Maximum checkpoints before oldest are evicted.
 const MAX_CHECKPOINTS: usize = 1024;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Stable schema version for chain serialization and hash material.
 pub const RECEIPT_CHAIN_SCHEMA_VERSION: &str = "vef-receipt-chain-v1";
 
@@ -250,7 +258,7 @@ impl ReceiptChain {
             appended_at_millis,
             trace_id: trace_id.clone(),
         };
-        self.entries.push(entry.clone());
+        push_bounded(&mut self.entries, entry.clone(), MAX_CHAIN_ENTRIES);
 
         let mut events = vec![ChainEvent {
             event_code: event_codes::VEF_CHAIN_001_APPENDED.to_string(),
@@ -483,11 +491,7 @@ impl ReceiptChain {
             created_at_millis: now_millis,
             trace_id,
         };
-        if self.checkpoints.len() >= MAX_CHECKPOINTS {
-            let overflow = self.checkpoints.len() + 1 - MAX_CHECKPOINTS;
-            self.checkpoints.drain(0..overflow);
-        }
-        self.checkpoints.push(checkpoint.clone());
+        push_bounded(&mut self.checkpoints, checkpoint.clone(), MAX_CHECKPOINTS);
         self.last_checkpoint_entry = self.entries.len();
         Ok(checkpoint)
     }

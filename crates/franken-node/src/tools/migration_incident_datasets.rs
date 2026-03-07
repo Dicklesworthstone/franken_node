@@ -29,6 +29,15 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_BUNDLES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -363,7 +372,7 @@ impl ReproducibleDatasets {
             }),
         );
 
-        self.bundles.push(bundle.clone());
+        push_bounded(&mut self.bundles, bundle.clone(), MAX_BUNDLES);
         Ok(bundle)
     }
 
@@ -439,17 +448,13 @@ impl ReproducibleDatasets {
     }
 
     fn log(&mut self, event_code: &str, trace_id: &str, details: serde_json::Value) {
-        self.audit_log.push(RdsAuditRecord {
+        push_bounded(&mut self.audit_log, RdsAuditRecord {
             record_id: Uuid::now_v7().to_string(),
             event_code: event_code.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             details,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

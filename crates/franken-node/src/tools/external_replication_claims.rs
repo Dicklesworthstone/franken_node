@@ -28,6 +28,15 @@ use std::collections::BTreeMap;
 use uuid::Uuid;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_REPLICATIONS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 pub mod event_codes {
     pub const ERC_CLAIM_CREATED: &str = "ERC-001";
@@ -215,7 +224,7 @@ impl ExternalReplicationClaims {
             trace_id,
             serde_json::json!({"claim_id": claim_id, "replicator": replicator}),
         );
-        self.replications.push(rec);
+        push_bounded(&mut self.replications, rec, MAX_REPLICATIONS);
         Ok(rid)
     }
 
@@ -374,17 +383,13 @@ impl ExternalReplicationClaims {
     }
 
     fn log(&mut self, event_code: &str, trace_id: &str, details: serde_json::Value) {
-        self.audit_log.push(ErcAuditRecord {
+        push_bounded(&mut self.audit_log, ErcAuditRecord {
             record_id: Uuid::now_v7().to_string(),
             event_code: event_code.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             details,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

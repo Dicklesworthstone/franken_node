@@ -33,6 +33,15 @@ use std::fmt;
 pub const SCHEMA_VERSION: &str = "ttr-v1.0";
 
 const MAX_EVENTS: usize = 4096;
+const MAX_FRAMES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -430,11 +439,7 @@ pub struct CaptureSession {
 
 impl CaptureSession {
     fn emit_event(&mut self, event: String) {
-        self.events.push(event);
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        push_bounded(&mut self.events, event, MAX_EVENTS);
     }
 
     /// Start a new capture session.
@@ -469,7 +474,7 @@ impl CaptureSession {
             decision,
             event_code: event_codes::TTR_002.to_string(),
         };
-        self.frames.push(frame);
+        push_bounded(&mut self.frames, frame, MAX_FRAMES);
         self.emit_event(event_codes::TTR_002.to_string());
         self.frames
             .last()
@@ -527,11 +532,7 @@ pub struct ReplaySession {
 
 impl ReplaySession {
     fn emit_event(&mut self, event: String) {
-        self.events.push(event);
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        push_bounded(&mut self.events, event, MAX_EVENTS);
     }
 
     /// Start a replay session from a snapshot.

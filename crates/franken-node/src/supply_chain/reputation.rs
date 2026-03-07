@@ -16,6 +16,16 @@ use crate::security::constant_time::ct_eq;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+const MAX_AUDIT_TRAIL: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub const REPUTATION_COMPUTED: &str = "REPUTATION_COMPUTED";
@@ -81,6 +91,9 @@ impl ReputationTier {
     /// Derive tier from a numeric score (0..=100).
     #[must_use]
     pub fn from_score(score: f64) -> Self {
+        if !score.is_finite() {
+            return Self::Untrusted;
+        }
         if score >= 80.0 {
             Self::Trusted
         } else if score >= 50.0 {
@@ -434,6 +447,10 @@ impl ReputationRegistry {
             .weight_override
             .unwrap_or_else(|| signal.kind.default_weight());
 
+        if !weight.is_finite() {
+            return Err(ReputationError::InvalidSignalWeight { weight });
+        }
+
         let old_score = pub_record.score;
         let old_tier = pub_record.tier;
 
@@ -539,6 +556,10 @@ impl ReputationRegistry {
         let old_tier = pub_record.tier;
         let baseline = config.baseline;
         let rate = config.daily_rate;
+
+        if !rate.is_finite() || !baseline.is_finite() {
+            return Err(ReputationError::InvalidDecayRate { rate });
+        }
 
         // Exponential decay toward baseline.
         let decay_factor = (1.0 - rate).powi(days_elapsed.min(i32::MAX as u32) as i32);
@@ -725,7 +746,7 @@ impl ReputationRegistry {
             event,
         };
         entry.entry_hash = compute_entry_hash(&entry);
-        self.audit_trail.push(entry);
+        push_bounded(&mut self.audit_trail, entry, MAX_AUDIT_TRAIL);
     }
 }
 
@@ -754,8 +775,12 @@ pub fn deterministic_score(signals: &[ReputationSignal], decay_config: &DecayCon
     for signal in signals {
         let weight = signal
             .weight_override
+            .filter(|weight| weight.is_finite())
             .unwrap_or_else(|| signal.kind.default_weight());
-        score = (score + weight).clamp(0.0, 100.0);
+        let candidate = score + weight;
+        if candidate.is_finite() {
+            score = candidate.clamp(0.0, 100.0);
+        }
     }
     // Note: decay is not applied in the pure function — it requires time context.
     let _ = decay_config; // Available for future deterministic replay.
@@ -1156,5 +1181,69 @@ mod tests {
         reg.freeze("pub-1", "inv-1", "test", &ts(2)).unwrap();
         let result = reg.apply_decay("pub-1", 30, &ts(3));
         assert!(matches!(result, Err(ReputationError::ReputationFrozen(_))));
+    }
+
+    #[test]
+    fn test_nan_weight_override_rejected() {
+        let mut reg = ReputationRegistry::new();
+        reg.register_publisher("pub-1", &ts(1));
+        let signal = ReputationSignal {
+            signal_id: "sig-nan".into(),
+            publisher_id: "pub-1".into(),
+            kind: SignalKind::CommunityReport,
+            observed_at: ts(2),
+            weight_override: Some(f64::NAN),
+            description: "NaN weight test".into(),
+            evidence: BTreeMap::new(),
+        };
+        let result = reg.ingest_signal(&signal, &ts(2));
+        assert!(matches!(
+            result,
+            Err(ReputationError::InvalidSignalWeight { .. })
+        ));
+    }
+
+    #[test]
+    fn test_nan_decay_rate_rejected() {
+        let mut reg = ReputationRegistry::new();
+        reg.register_publisher("pub-1", &ts(1));
+        // Poison the decay config with NaN rate
+        if let Some(pub_rec) = reg.publishers.get_mut("pub-1") {
+            pub_rec.decay_config.daily_rate = f64::NAN;
+        }
+        let result = reg.apply_decay("pub-1", 30, &ts(2));
+        assert!(matches!(
+            result,
+            Err(ReputationError::InvalidDecayRate { .. })
+        ));
+    }
+
+    #[test]
+    fn test_non_finite_score_is_untrusted() {
+        assert_eq!(
+            ReputationTier::from_score(f64::NAN),
+            ReputationTier::Untrusted
+        );
+        assert_eq!(
+            ReputationTier::from_score(f64::INFINITY),
+            ReputationTier::Untrusted
+        );
+        assert_eq!(
+            ReputationTier::from_score(f64::NEG_INFINITY),
+            ReputationTier::Untrusted
+        );
+    }
+
+    #[test]
+    fn test_deterministic_score_non_finite_weight_override_falls_back_to_default() {
+        let mut nan_signal = make_signal("sig-nan", "pub-1", SignalKind::ProvenanceConsistency);
+        nan_signal.weight_override = Some(f64::NAN);
+        let nan_score = deterministic_score(&[nan_signal], &DecayConfig::default());
+        assert!((nan_score - 35.0).abs() < f64::EPSILON);
+
+        let mut inf_signal = make_signal("sig-inf", "pub-1", SignalKind::ProvenanceConsistency);
+        inf_signal.weight_override = Some(f64::INFINITY);
+        let inf_score = deterministic_score(&[inf_signal], &DecayConfig::default());
+        assert!((inf_score - 35.0).abs() < f64::EPSILON);
     }
 }

@@ -302,11 +302,7 @@ impl TrustComplexityGate {
             );
         }
 
-        self.decisions.push(decision);
-        if self.decisions.len() > MAX_DECISIONS {
-            let overflow = self.decisions.len() - MAX_DECISIONS;
-            self.decisions.drain(0..overflow);
-        }
+        push_bounded(&mut self.decisions, decision, MAX_DECISIONS);
         Ok(())
     }
 
@@ -355,11 +351,7 @@ impl TrustComplexityGate {
             deterministic,
         };
 
-        self.replay_results.push(result.clone());
-        if self.replay_results.len() > MAX_REPLAY_RESULTS {
-            let overflow = self.replay_results.len() - MAX_REPLAY_RESULTS;
-            self.replay_results.drain(0..overflow);
-        }
+        push_bounded(&mut self.replay_results, result.clone(), MAX_REPLAY_RESULTS);
         result
     }
 
@@ -531,24 +523,29 @@ impl TrustComplexityGate {
         chain_depth: u32,
         detail: String,
     ) {
-        self.events.push(TrustAuditEvent {
+        let event = TrustAuditEvent {
             code: code.to_string(),
             decision_id: decision_id.to_string(),
             endpoint_group: endpoint_group.to_string(),
             outcome,
             chain_depth,
             detail,
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        };
+        push_bounded(&mut self.events, event, MAX_EVENTS);
     }
 }
 
 impl Default for TrustComplexityGate {
     fn default() -> Self {
         Self::new(ComplexityBudget::default(), 300)
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

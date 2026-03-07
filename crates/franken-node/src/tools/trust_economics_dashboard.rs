@@ -64,6 +64,15 @@ pub mod invariants {
 pub const MODEL_VERSION: &str = "ted-v1.0";
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_REPORTS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Attack categories
@@ -312,6 +321,9 @@ impl ExpectedLossModel {
         observed_frequency: f64,
         effectiveness: f64,
     ) {
+        if !observed_frequency.is_finite() || !effectiveness.is_finite() {
+            return;
+        }
         self.observation_count = self.observation_count.saturating_add(1);
         let n = self.observation_count as f64;
         let w = self.prior_weight;
@@ -470,7 +482,7 @@ impl TrustEconomicsDashboard {
             }),
         );
 
-        self.reports.push(report.clone());
+        push_bounded(&mut self.reports, report.clone(), MAX_REPORTS);
         report
     }
 
@@ -713,17 +725,13 @@ impl TrustEconomicsDashboard {
     }
 
     fn log(&mut self, event_code: &str, trace_id: &str, details: serde_json::Value) {
-        self.audit_log.push(TedAuditRecord {
+        push_bounded(&mut self.audit_log, TedAuditRecord {
             record_id: Uuid::now_v7().to_string(),
             event_code: event_code.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             details,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

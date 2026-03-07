@@ -17,6 +17,14 @@ use crate::security::constant_time::ct_eq;
 /// Maximum number of events retained in a decision stream before oldest entries are drained.
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Event code: checkpoint write persisted.
 pub const FN_CK_001_CHECKPOINT_SAVE: &str = "FN-CK-001";
 /// Event code: checkpoint restore/read performed.
@@ -386,7 +394,7 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
             let checkpoint_id = latest.checkpoint_id.clone();
             let previous_checkpoint_hash = latest.previous_checkpoint_hash.clone();
 
-            self.decision_stream.push(CheckpointEvent {
+            push_bounded(&mut self.decision_stream, CheckpointEvent {
                 event_code: FN_CK_005_IDEMPOTENT_REUSE.to_string(),
                 event_name: CHECKPOINT_IDEMPOTENT_REUSE.to_string(),
                 orchestration_id: orchestration_id.to_string(),
@@ -398,13 +406,9 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
                 trace_id: trace_id.to_string(),
                 contract_status: "idempotent".to_string(),
                 wall_clock_time: now_unix_secs(),
-            });
-            if self.decision_stream.len() > MAX_EVENTS {
-                let overflow = self.decision_stream.len() - MAX_EVENTS;
-                self.decision_stream.drain(0..overflow);
-            }
+            }, MAX_EVENTS);
 
-            self.decision_stream.push(CheckpointEvent {
+            push_bounded(&mut self.decision_stream, CheckpointEvent {
                 event_code: FN_CK_008_DECISION_STREAM_APPEND.to_string(),
                 event_name: CHECKPOINT_DECISION_STREAM_APPEND.to_string(),
                 orchestration_id: orchestration_id.to_string(),
@@ -416,11 +420,7 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
                 trace_id: trace_id.to_string(),
                 contract_status: "appended".to_string(),
                 wall_clock_time: now_unix_secs(),
-            });
-            if self.decision_stream.len() > MAX_EVENTS {
-                let overflow = self.decision_stream.len() - MAX_EVENTS;
-                self.decision_stream.drain(0..overflow);
-            }
+            }, MAX_EVENTS);
 
             return Ok(checkpoint_id);
         }
@@ -461,7 +461,7 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
         };
         let contract_status = if inserted { "saved" } else { "idempotent" };
 
-        self.decision_stream.push(CheckpointEvent {
+        push_bounded(&mut self.decision_stream, CheckpointEvent {
             event_code: save_event_code.to_string(),
             event_name: save_event_name.to_string(),
             orchestration_id: orchestration_id.to_string(),
@@ -473,13 +473,9 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
             trace_id: trace_id.to_string(),
             contract_status: contract_status.to_string(),
             wall_clock_time: now_unix_secs(),
-        });
-        if self.decision_stream.len() > MAX_EVENTS {
-            let overflow = self.decision_stream.len() - MAX_EVENTS;
-            self.decision_stream.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
 
-        self.decision_stream.push(CheckpointEvent {
+        push_bounded(&mut self.decision_stream, CheckpointEvent {
             event_code: FN_CK_008_DECISION_STREAM_APPEND.to_string(),
             event_name: CHECKPOINT_DECISION_STREAM_APPEND.to_string(),
             orchestration_id: orchestration_id.to_string(),
@@ -491,11 +487,7 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
             trace_id: trace_id.to_string(),
             contract_status: "appended".to_string(),
             wall_clock_time: now_unix_secs(),
-        });
-        if self.decision_stream.len() > MAX_EVENTS {
-            let overflow = self.decision_stream.len() - MAX_EVENTS;
-            self.decision_stream.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
 
         Ok(checkpoint_id)
     }

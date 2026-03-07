@@ -9,6 +9,14 @@ use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 pub mod event_codes {
     pub const BULKHEAD_PERMIT_ACQUIRED: &str = "BULKHEAD_PERMIT_ACQUIRED";
     pub const BULKHEAD_PERMIT_RELEASED: &str = "BULKHEAD_PERMIT_RELEASED";
@@ -170,11 +178,7 @@ impl GlobalBulkhead {
     }
 
     fn emit_event(&mut self, event: BulkheadEvent) {
-        self.events.push(event);
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        push_bounded(&mut self.events, event, MAX_EVENTS);
     }
 
     pub fn try_acquire(

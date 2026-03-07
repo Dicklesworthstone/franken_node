@@ -539,7 +539,7 @@ impl FleetControlManager {
             let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
             self.events.drain(0..overflow);
         }
-        self.events.push(event);
+        push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
             operation_id: op_id,
@@ -622,7 +622,7 @@ impl FleetControlManager {
             let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
             self.events.drain(0..overflow);
         }
-        self.events.push(event);
+        push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
             operation_id: op_id,
@@ -682,7 +682,7 @@ impl FleetControlManager {
             let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
             self.events.drain(0..overflow);
         }
-        self.events.push(event);
+        push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
             operation_id: op_id,
@@ -752,7 +752,7 @@ impl FleetControlManager {
             let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
             self.events.drain(0..overflow);
         }
-        self.events.push(event);
+        push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
             operation_id: op_id,
@@ -1049,6 +1049,14 @@ pub fn handle_reconcile(
         data: result,
         page: None,
     })
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────

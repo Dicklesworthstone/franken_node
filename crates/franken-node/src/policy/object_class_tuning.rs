@@ -244,6 +244,14 @@ pub fn default_tuning(class: &ObjectClass) -> Option<ClassTuning> {
 /// Maximum events before oldest-first eviction.
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Policy engine that resolves per-class tuning with override support.
 pub struct ObjectClassTuningEngine {
     overrides: BTreeMap<ObjectClass, ClassTuning>,
@@ -260,15 +268,11 @@ impl ObjectClassTuningEngine {
 
     pub fn with_init_event() -> Self {
         let mut engine = Self::new();
-        engine.events.push(TuningEvent {
+        push_bounded(&mut engine.events, TuningEvent {
             code: OC_POLICY_ENGINE_INIT.to_string(),
             class_id: String::new(),
             detail: "Policy engine initialized with benchmark defaults".to_string(),
-        });
-        if engine.events.len() > MAX_EVENTS {
-            let overflow = engine.events.len() - MAX_EVENTS;
-            engine.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
         engine
     }
 
@@ -288,15 +292,11 @@ impl ObjectClassTuningEngine {
     ) -> Result<(), TuningError> {
         // Validate
         if let Err(e) = tuning.validate() {
-            self.events.push(TuningEvent {
+            push_bounded(&mut self.events, TuningEvent {
                 code: OC_POLICY_OVERRIDE_REJECTED.to_string(),
                 class_id: class.label().to_string(),
                 detail: format!("Override rejected: {}", e),
-            });
-            if self.events.len() > MAX_EVENTS {
-                let overflow = self.events.len() - MAX_EVENTS;
-                self.events.drain(0..overflow);
-            }
+            }, MAX_EVENTS);
             return Err(e);
         }
 
@@ -325,15 +325,11 @@ impl ObjectClassTuningEngine {
 
         self.overrides.insert(class.clone(), tuning);
 
-        self.events.push(TuningEvent {
+        push_bounded(&mut self.events, TuningEvent {
             code: OC_POLICY_OVERRIDE_APPLIED.to_string(),
             class_id: class.label().to_string(),
             detail: format!("before=[{}], after=[{}]", before_desc, after_desc),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
 
         Ok(())
     }
@@ -360,15 +356,11 @@ impl ObjectClassTuningEngine {
 
     /// Load benchmark baseline data (emits event).
     pub fn load_benchmark_baseline(&mut self, measurements: &[BenchmarkMeasurement]) {
-        self.events.push(TuningEvent {
+        push_bounded(&mut self.events, TuningEvent {
             code: OC_BENCHMARK_BASELINE_LOADED.to_string(),
             class_id: String::new(),
             detail: format!("Loaded {} benchmark measurements", measurements.len()),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 
     /// Export policy report as CSV rows.

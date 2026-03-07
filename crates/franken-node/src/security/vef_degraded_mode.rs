@@ -285,6 +285,14 @@ struct DegradedContext {
 /// Maximum audit log entries before oldest-first eviction.
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// The VEF degraded-mode policy engine.
 ///
 /// INV-VEF-DM-DETERMINISTIC: identical metric sequences produce identical
@@ -309,11 +317,7 @@ impl VefDegradedModeEngine {
     }
 
     fn push_audit_event(&mut self, event: VefDegradedModeEvent) {
-        self.audit_log.push(event);
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
     }
 
     #[must_use]

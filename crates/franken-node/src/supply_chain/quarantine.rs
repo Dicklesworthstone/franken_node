@@ -17,6 +17,15 @@ const MAX_RECORDS: usize = 4096;
 
 /// Maximum propagation status entries before oldest are evicted.
 const MAX_PROPAGATION_STATUS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -1032,11 +1041,7 @@ impl QuarantineRegistry {
         };
 
         entry.entry_hash = compute_entry_hash(&entry);
-        if self.audit_trail.len() >= MAX_AUDIT_TRAIL {
-            let overflow = self.audit_trail.len() + 1 - MAX_AUDIT_TRAIL;
-            self.audit_trail.drain(0..overflow);
-        }
-        self.audit_trail.push(entry);
+        push_bounded(&mut self.audit_trail, entry, MAX_AUDIT_TRAIL);
     }
 }
 

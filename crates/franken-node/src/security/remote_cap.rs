@@ -15,6 +15,14 @@ use sha2::{Digest, Sha256};
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 fn constant_time_eq(a: &str, b: &str) -> bool {
     crate::security::constant_time::ct_eq(a, b)
 }
@@ -438,7 +446,7 @@ impl CapabilityGate {
         trace_id: &str,
     ) {
         if self.connectivity_mode == ConnectivityMode::LocalOnly {
-            self.audit_log.push(build_audit_event(
+            self.push_audit(build_audit_event(
                 "REMOTECAP_LOCAL_MODE_ACTIVE",
                 "RC_LOCAL_MODE_ACTIVE",
                 None,
@@ -450,8 +458,7 @@ impl CapabilityGate {
                 true,
                 None,
             ));
-            self.trim_audit_log();
-        }
+            }
     }
 
     /// Revoke a token and ensure subsequent checks fail.
@@ -474,8 +481,7 @@ impl CapabilityGate {
             true,
             None,
         );
-        self.audit_log.push(event.clone());
-        self.trim_audit_log();
+        self.push_audit(event.clone());
         event
     }
 
@@ -522,7 +528,7 @@ impl CapabilityGate {
                 operation,
                 endpoint: endpoint.to_string(),
             };
-            self.audit_log.push(build_audit_event(
+            self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
                 "RC_CHECK_DENIED",
                 cap.map(|token| token.token_id.clone()),
@@ -534,13 +540,12 @@ impl CapabilityGate {
                 false,
                 Some(err.code().to_string()),
             ));
-            self.trim_audit_log();
-            return Err(err);
+                return Err(err);
         }
 
         let Some(cap) = cap else {
             let err = RemoteCapError::Missing;
-            self.audit_log.push(build_audit_event(
+            self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
                 "RC_CHECK_DENIED",
                 None,
@@ -552,15 +557,14 @@ impl CapabilityGate {
                 false,
                 Some(err.code().to_string()),
             ));
-            self.trim_audit_log();
-            return Err(err);
+                return Err(err);
         };
 
         if self.revoked_tokens.contains(&cap.token_id) {
             let err = RemoteCapError::Revoked {
                 token_id: cap.token_id.clone(),
             };
-            self.audit_log.push(build_audit_event(
+            self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
                 "RC_CHECK_DENIED",
                 Some(cap.token_id.clone()),
@@ -572,8 +576,7 @@ impl CapabilityGate {
                 false,
                 Some(err.code().to_string()),
             ));
-            self.trim_audit_log();
-            return Err(err);
+                return Err(err);
         }
 
         let payload = canonical_payload(
@@ -587,7 +590,7 @@ impl CapabilityGate {
         let expected_signature = keyed_digest(&self.verification_secret, &payload)?;
         if !constant_time_eq(&cap.signature, &expected_signature) {
             let err = RemoteCapError::InvalidSignature;
-            self.audit_log.push(build_audit_event(
+            self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
                 "RC_CHECK_DENIED",
                 Some(cap.token_id.clone()),
@@ -599,8 +602,7 @@ impl CapabilityGate {
                 false,
                 Some(err.code().to_string()),
             ));
-            self.trim_audit_log();
-            return Err(err);
+                return Err(err);
         }
 
         // Expiry is fail-closed at the exact boundary: once `now` reaches
@@ -610,7 +612,7 @@ impl CapabilityGate {
                 now_epoch_secs,
                 expires_at_epoch_secs: cap.expires_at_epoch_secs,
             };
-            self.audit_log.push(build_audit_event(
+            self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
                 "RC_CHECK_DENIED",
                 Some(cap.token_id.clone()),
@@ -622,8 +624,7 @@ impl CapabilityGate {
                 false,
                 Some(err.code().to_string()),
             ));
-            self.trim_audit_log();
-            return Err(err);
+                return Err(err);
         }
 
         if !cap.scope.allows_operation(operation) || !cap.scope.allows_endpoint(endpoint) {
@@ -631,7 +632,7 @@ impl CapabilityGate {
                 operation,
                 endpoint: endpoint.to_string(),
             };
-            self.audit_log.push(build_audit_event(
+            self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
                 "RC_CHECK_DENIED",
                 Some(cap.token_id.clone()),
@@ -643,15 +644,14 @@ impl CapabilityGate {
                 false,
                 Some(err.code().to_string()),
             ));
-            self.trim_audit_log();
-            return Err(err);
+                return Err(err);
         }
 
         if cap.single_use && self.consumed_tokens.contains(&cap.token_id) {
             let err = RemoteCapError::ReplayDetected {
                 token_id: cap.token_id.clone(),
             };
-            self.audit_log.push(build_audit_event(
+            self.push_audit(build_audit_event(
                 "REMOTECAP_DENIED",
                 "RC_CHECK_DENIED",
                 Some(cap.token_id.clone()),
@@ -663,8 +663,7 @@ impl CapabilityGate {
                 false,
                 Some(err.code().to_string()),
             ));
-            self.trim_audit_log();
-            return Err(err);
+                return Err(err);
         }
 
         if cap.single_use && consume_single_use {
@@ -676,7 +675,7 @@ impl CapabilityGate {
         } else {
             ("REMOTECAP_RECHECK_PASSED", "RC_RECHECK_PASSED")
         };
-        self.audit_log.push(build_audit_event(
+        self.push_audit(build_audit_event(
             event_code,
             legacy_event_code,
             Some(cap.token_id.clone()),
@@ -688,7 +687,6 @@ impl CapabilityGate {
             true,
             None,
         ));
-        self.trim_audit_log();
         Ok(())
     }
 
@@ -697,11 +695,8 @@ impl CapabilityGate {
         &self.audit_log
     }
 
-    fn trim_audit_log(&mut self) {
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+    fn push_audit(&mut self, event: RemoteCapAuditEvent) {
+        push_bounded(&mut self.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

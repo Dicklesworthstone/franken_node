@@ -54,6 +54,15 @@ pub mod invariants {
 pub const SCHEMA_VERSION: &str = "vbr-v1.0";
 pub const MIN_QUALITY_SCORE: f64 = 0.8;
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_DOWNLOADS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 /// Release type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -280,12 +289,12 @@ impl VerifierBenchmarkReleases {
             return Err(format!("release not found: {release_id}"));
         }
         let did = Uuid::now_v7().to_string();
-        self.downloads.push(DownloadRecord {
+        push_bounded(&mut self.downloads, DownloadRecord {
             download_id: did.clone(),
             release_id: release_id.to_string(),
             context: context.to_string(),
             timestamp: Utc::now().to_rfc3339(),
-        });
+        }, MAX_DOWNLOADS);
         let release = self
             .releases
             .get_mut(release_id)
@@ -397,17 +406,13 @@ impl VerifierBenchmarkReleases {
     }
 
     fn log(&mut self, event_code: &str, trace_id: &str, details: serde_json::Value) {
-        self.audit_log.push(VbrAuditRecord {
+        push_bounded(&mut self.audit_log, VbrAuditRecord {
             record_id: Uuid::now_v7().to_string(),
             event_code: event_code.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             details,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

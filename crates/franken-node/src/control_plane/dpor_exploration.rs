@@ -147,11 +147,11 @@ impl ProtocolModel {
     }
 
     pub fn add_operation(&mut self, op: Operation) {
-        self.operations.push(op);
+        push_bounded(&mut self.operations, op, MAX_OPERATIONS);
     }
 
     pub fn add_safety_property(&mut self, prop: SafetyProperty) {
-        self.safety_properties.push(prop);
+        push_bounded(&mut self.safety_properties, prop, MAX_SAFETY_PROPERTIES);
     }
 
     /// Estimate total possible schedules (upper bound: n!).
@@ -395,6 +395,16 @@ impl fmt::Display for DporError {
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 /// Maximum exploration results before oldest-first eviction.
 const MAX_RESULTS: usize = 4096;
+const MAX_OPERATIONS: usize = 4096;
+const MAX_SAFETY_PROPERTIES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
 
 /// The DPOR schedule exploration framework.
 pub struct DporExplorer {
@@ -448,18 +458,18 @@ impl DporExplorer {
         let estimated = model.estimated_schedules();
         let op_count = model.operations.len();
 
-        self.audit_log.push(DporAuditRecord {
-            event_code: event_codes::DPOR_EXPLORATION_START.to_string(),
-            model_name: model_name.to_string(),
-            detail: format!("estimated {} schedules, {} ops", estimated, op_count),
-            trace_id: trace_id.to_string(),
-            timestamp_ms: 0,
-            schema_version: SCHEMA_VERSION.to_string(),
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(
+            &mut self.audit_log,
+            DporAuditRecord {
+                event_code: event_codes::DPOR_EXPLORATION_START.to_string(),
+                model_name: model_name.to_string(),
+                detail: format!("estimated {} schedules, {} ops", estimated, op_count),
+                trace_id: trace_id.to_string(),
+                timestamp_ms: 0,
+                schema_version: SCHEMA_VERSION.to_string(),
+            },
+            MAX_AUDIT_LOG_ENTRIES,
+        );
 
         // Generate valid linearizations respecting dependencies
         let schedules = self.generate_linearizations(model);
@@ -514,30 +524,26 @@ impl DporExplorer {
             verdict,
         };
 
-        self.audit_log.push(DporAuditRecord {
-            event_code: event_codes::DPOR_EXPLORATION_COMPLETE.to_string(),
-            model_name: model_name.to_string(),
-            detail: format!(
-                "explored {}, pruned {}, violations {}, coverage {:.1}%",
-                result.explored_count,
-                result.pruned_count,
-                result.violations.len(),
-                result.coverage_pct
-            ),
-            trace_id: trace_id.to_string(),
-            timestamp_ms: 0,
-            schema_version: SCHEMA_VERSION.to_string(),
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(
+            &mut self.audit_log,
+            DporAuditRecord {
+                event_code: event_codes::DPOR_EXPLORATION_COMPLETE.to_string(),
+                model_name: model_name.to_string(),
+                detail: format!(
+                    "explored {}, pruned {}, violations {}, coverage {:.1}%",
+                    result.explored_count,
+                    result.pruned_count,
+                    result.violations.len(),
+                    result.coverage_pct
+                ),
+                trace_id: trace_id.to_string(),
+                timestamp_ms: 0,
+                schema_version: SCHEMA_VERSION.to_string(),
+            },
+            MAX_AUDIT_LOG_ENTRIES,
+        );
 
-        self.results.push(result.clone());
-        if self.results.len() > MAX_RESULTS {
-            let overflow = self.results.len() - MAX_RESULTS;
-            self.results.drain(0..overflow);
-        }
+        push_bounded(&mut self.results, result.clone(), MAX_RESULTS);
         Ok(result)
     }
 

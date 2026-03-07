@@ -9,6 +9,14 @@ use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -274,15 +282,11 @@ impl ZoneSegmentationEngine {
         }
         let zone_id = policy.zone_id.clone();
         self.zones.insert(zone_id.clone(), policy);
-        self.events.push(ZoneEvent {
+        push_bounded(&mut self.events, ZoneEvent {
             code: EVT_ZONE_REGISTERED.to_string(),
             zone_id: zone_id.clone(),
             detail: format!("Zone registered: {zone_id}"),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
         Ok(())
     }
 
@@ -303,15 +307,11 @@ impl ZoneSegmentationEngine {
         let tenant_id = binding.tenant_id.clone();
         let zone_id = binding.zone_id.clone();
         self.tenants.insert(tenant_id.clone(), binding);
-        self.events.push(ZoneEvent {
+        push_bounded(&mut self.events, ZoneEvent {
             code: EVT_TENANT_BOUND.to_string(),
             zone_id: zone_id.clone(),
             detail: format!("Tenant {tenant_id} bound to zone {zone_id}"),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
         Ok(())
     }
 

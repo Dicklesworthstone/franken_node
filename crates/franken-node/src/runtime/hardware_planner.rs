@@ -36,6 +36,8 @@ pub const MAX_RISK_LEVEL: u32 = 100;
 
 /// Maximum number of audit-log entries retained (ring-buffer style).
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_DECISIONS: usize = 4096;
+const MAX_DISPATCHES: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Invariant constants
@@ -758,7 +760,7 @@ impl HardwarePlanner {
                 timestamp_ms,
                 schema_version: SCHEMA_VERSION.to_string(),
             };
-            self.decisions.push(decision.clone());
+            push_bounded(&mut self.decisions, decision.clone(), MAX_DECISIONS);
             return Err(HardwarePlannerError::NoCapableTarget {
                 workload_id: request.workload_id.clone(),
             });
@@ -806,7 +808,7 @@ impl HardwarePlanner {
                 timestamp_ms,
                 schema_version: SCHEMA_VERSION.to_string(),
             };
-            self.decisions.push(decision.clone());
+            push_bounded(&mut self.decisions, decision.clone(), MAX_DECISIONS);
             return Err(HardwarePlannerError::RiskExceeded {
                 workload_id: request.workload_id.clone(),
             });
@@ -843,7 +845,7 @@ impl HardwarePlanner {
                 timestamp_ms,
                 schema_version: SCHEMA_VERSION.to_string(),
             };
-            self.decisions.push(decision.clone());
+            push_bounded(&mut self.decisions, decision.clone(), MAX_DECISIONS);
             return Err(HardwarePlannerError::CapacityExhausted {
                 workload_id: request.workload_id.clone(),
             });
@@ -883,7 +885,7 @@ impl HardwarePlanner {
             timestamp_ms,
             schema_version: SCHEMA_VERSION.to_string(),
         };
-        self.decisions.push(decision.clone());
+        push_bounded(&mut self.decisions, decision.clone(), MAX_DECISIONS);
         Ok(decision)
     }
 
@@ -1037,7 +1039,7 @@ impl HardwarePlanner {
             schema_version: SCHEMA_VERSION.to_string(),
         });
 
-        self.dispatches.push(token.clone());
+        push_bounded(&mut self.dispatches, token.clone(), MAX_DISPATCHES);
         Ok(token)
     }
 

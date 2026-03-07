@@ -14,6 +14,16 @@ use sha2::{Digest, Sha256};
 use crate::security::constant_time::ct_eq;
 
 const MAX_HISTORY_ENTRIES: usize = 4096;
+const MAX_BET_ENTRIES: usize = 4096;
+const MAX_TELEMETRY: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ── Event codes ──────────────────────────────────────────────────────────────
 
@@ -365,7 +375,7 @@ impl ReportingPipeline {
 
     /// Register a moonshot bet-status entry.
     pub fn register_bet(&mut self, entry: MoonshotBetEntry) {
-        self.bet_entries.push(entry);
+        push_bounded(&mut self.bet_entries, entry, MAX_BET_ENTRIES);
     }
 
     /// Generate the final report.
@@ -428,11 +438,7 @@ impl ReportingPipeline {
             &format!("report v{} generated", version),
         );
 
-        self.history.push(report.clone());
-        if self.history.len() > MAX_HISTORY_ENTRIES {
-            let overflow = self.history.len() - MAX_HISTORY_ENTRIES;
-            self.history.drain(0..overflow);
-        }
+        push_bounded(&mut self.history, report.clone(), MAX_HISTORY_ENTRIES);
         Ok(report)
     }
 
@@ -699,12 +705,12 @@ impl ReportingPipeline {
     }
 
     fn emit(&mut self, event_code: &str, trace_id: &str, timestamp_secs: u64, detail: &str) {
-        self.telemetry.push(PipelineEvent {
+        push_bounded(&mut self.telemetry, PipelineEvent {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
             timestamp_secs,
             detail: detail.to_string(),
-        });
+        }, MAX_TELEMETRY);
     }
 }
 

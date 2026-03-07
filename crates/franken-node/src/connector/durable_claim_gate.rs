@@ -414,20 +414,19 @@ impl DurableClaimGate {
         marker_count: usize,
         proof_count: usize,
     ) {
-        self.events.push(ClaimGateEvent {
+        let claim_id = claim.claim_id.clone();
+        let trace_id = claim.trace_id.clone();
+        let epoch = claim.epoch;
+        push_bounded(&mut self.events, ClaimGateEvent {
             event_code: event_code.to_string(),
-            claim_id: claim.claim_id.clone(),
+            claim_id,
             proof_type,
             denial_reason,
             marker_count,
             proof_count,
-            trace_id: claim.trace_id.clone(),
-            epoch: claim.epoch,
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+            trace_id,
+            epoch,
+        }, MAX_EVENTS);
     }
 }
 
@@ -472,6 +471,15 @@ fn hash_witnesses(proof_hashes: &[String]) -> String {
         hasher.update(b"|");
     }
     hex::encode(hasher.finalize())
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 #[cfg(test)]

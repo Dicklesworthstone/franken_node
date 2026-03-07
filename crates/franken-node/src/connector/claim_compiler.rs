@@ -618,16 +618,12 @@ impl ClaimCompiler {
     }
 
     fn emit(&mut self, event_code: &str, claim_id: &str, detail: &str, trace_id: &str) {
-        self.events.push(ClaimCompilerEvent {
+        push_bounded(&mut self.events, ClaimCompilerEvent {
             event_code: event_code.to_string(),
             claim_id: claim_id.to_string(),
             detail: detail.to_string(),
             trace_id: trace_id.to_string(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 
@@ -724,6 +720,15 @@ fn compute_scoreboard_digest(entries: &BTreeMap<String, ScoreEntry>) -> String {
         hasher.update(b"|");
     }
     hex::encode(hasher.finalize())
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // ===========================================================================

@@ -16,6 +16,8 @@ use serde::{Deserialize, Serialize};
 use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
+#[allow(dead_code)]
+const MAX_ENTRIES: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -289,7 +291,7 @@ impl ControlEvidenceEmitter {
             ),
         );
 
-        self.entries.push(entry);
+        push_bounded(&mut self.entries, entry, MAX_EVENTS);
         Ok(())
     }
 
@@ -405,22 +407,26 @@ impl ControlEvidenceEmitter {
         decision_type: DecisionType,
         detail: String,
     ) {
-        self.events.push(ControlEvidenceEvent {
+        push_bounded(&mut self.events, ControlEvidenceEvent {
             code: code.to_string(),
             decision_id: decision_id.to_string(),
             decision_type: decision_type.label().to_string(),
             detail,
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 
 impl Default for ControlEvidenceEmitter {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

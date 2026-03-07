@@ -669,18 +669,17 @@ impl CancellationProtocol {
     }
 
     fn emit_event(&mut self, event_code: &str, detail: &str) {
-        self.audit_log.push(CancellationAuditEvent {
+        let phase = self.phase;
+        let workflow = self.budget.workflow.clone();
+        let trace_id = self.trace_id.clone();
+        push_bounded(&mut self.audit_log, CancellationAuditEvent {
             event_code: event_code.to_string(),
-            phase: self.phase,
-            workflow: self.budget.workflow.clone(),
-            trace_id: self.trace_id.clone(),
+            phase,
+            workflow,
+            trace_id,
             detail: detail.to_string(),
             schema_version: SCHEMA_VERSION.to_string(),
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 
@@ -713,6 +712,15 @@ pub fn generate_timing_csv(rows: &[TimingRow]) -> String {
         ));
     }
     csv
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

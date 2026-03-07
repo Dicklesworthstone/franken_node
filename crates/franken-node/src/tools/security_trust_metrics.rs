@@ -81,6 +81,9 @@ pub mod invariants {
 /// Scoring formula version for reproducibility.
 pub const SCORING_FORMULA_VERSION: &str = "secm-v1";
 
+/// Maximum number of reports before oldest-first eviction.
+const MAX_REPORTS: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // Security co-metric categories
 // ---------------------------------------------------------------------------
@@ -395,7 +398,7 @@ impl CoMetricEngine {
             content_hash,
         };
 
-        self.reports.push(report.clone());
+        push_bounded(&mut self.reports, report.clone(), MAX_REPORTS);
         report
     }
 
@@ -436,6 +439,14 @@ impl CoMetricEngine {
                 )
             },
         }
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

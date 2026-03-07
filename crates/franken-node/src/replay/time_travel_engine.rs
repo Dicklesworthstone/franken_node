@@ -51,6 +51,14 @@ const MAX_REGISTERED_TRACES: usize = 1024;
 /// Maximum steps in a single TraceBuilder.
 const MAX_TRACE_STEPS: usize = 8192;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ---------------------------------------------------------------------------
 // Invariant constants (internal TTR invariants)
 // ---------------------------------------------------------------------------
@@ -548,27 +556,20 @@ impl TraceBuilder {
         timestamp_ns: u64,
     ) -> u64 {
         let seq = self.next_seq;
-        if self.steps.len() >= MAX_TRACE_STEPS {
-            let overflow = self.steps.len() + 1 - MAX_TRACE_STEPS;
-            self.steps.drain(0..overflow);
-        }
-        self.steps.push(TraceStep::new(
+        push_bounded(&mut self.steps, TraceStep::new(
             seq,
             input,
             output,
             side_effects,
             timestamp_ns,
-        ));
-        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() + 1 - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
-        self.audit_log.push(AuditEntry::new(
+        ), MAX_TRACE_STEPS);
+        let trace_id = self.trace_id.clone();
+        push_bounded(&mut self.audit_log, AuditEntry::new(
             event_codes::TTR_002,
-            &self.trace_id,
+            &trace_id,
             &format!("Step {seq} recorded"),
             timestamp_ns,
-        ));
+        ), MAX_AUDIT_LOG_ENTRIES);
         self.next_seq = self.next_seq.saturating_add(1);
         seq
     }
@@ -595,7 +596,7 @@ impl TraceBuilder {
         // Validate immediately after construction
         match trace.validate() {
             Ok(()) => {
-                self.audit_log.push(AuditEntry::new(
+                push_bounded(&mut self.audit_log, AuditEntry::new(
                     event_codes::TTR_003,
                     &self.trace_id,
                     &format!(
@@ -604,22 +605,22 @@ impl TraceBuilder {
                         &trace_digest[..16]
                     ),
                     0,
-                ));
-                self.audit_log.push(AuditEntry::new(
+                ), MAX_AUDIT_LOG_ENTRIES);
+                push_bounded(&mut self.audit_log, AuditEntry::new(
                     event_codes::TTR_009,
                     &self.trace_id,
                     "Trace integrity check passed",
                     0,
-                ));
+                ), MAX_AUDIT_LOG_ENTRIES);
                 Ok((trace, self.audit_log))
             }
             Err(e) => {
-                self.audit_log.push(AuditEntry::new(
+                push_bounded(&mut self.audit_log, AuditEntry::new(
                     event_codes::TTR_010,
                     &self.trace_id,
                     &format!("Trace integrity check failed: {e}"),
                     0,
-                ));
+                ), MAX_AUDIT_LOG_ENTRIES);
                 Err(e)
             }
         }
@@ -807,15 +808,12 @@ impl ReplayEngine {
             })?;
 
         // Emit TTR-004: Replay started
-        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-            self.audit_log.drain(0..1);
-        }
-        self.audit_log.push(AuditEntry::new(
+        push_bounded(&mut self.audit_log, AuditEntry::new(
             event_codes::TTR_004,
             trace_id,
             &format!("Replay started: {} steps", trace.steps.len()),
             0,
-        ));
+        ), MAX_AUDIT_LOG_ENTRIES);
 
         let mut divergences = Vec::new();
         let mut replay_duration_ns: u64 = 0;
@@ -850,15 +848,12 @@ impl ReplayEngine {
 
             if output_match && effects_match {
                 // TTR-005: step identical
-                if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-                    self.audit_log.drain(0..1);
-                }
-                self.audit_log.push(AuditEntry::new(
+                push_bounded(&mut self.audit_log, AuditEntry::new(
                     event_codes::TTR_005,
                     trace_id,
                     &format!("Step {} identical", step.seq),
                     step.timestamp_ns,
-                ));
+                ), MAX_AUDIT_LOG_ENTRIES);
             } else {
                 let kind = match (output_match, effects_match) {
                     (false, true) => DivergenceKind::OutputMismatch,
@@ -870,15 +865,12 @@ impl ReplayEngine {
                     step.seq, kind, output_match, effects_match
                 );
                 // TTR-006: step diverged
-                if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-                    self.audit_log.drain(0..1);
-                }
-                self.audit_log.push(AuditEntry::new(
+                push_bounded(&mut self.audit_log, AuditEntry::new(
                     event_codes::TTR_006,
                     trace_id,
                     &explanation,
                     step.timestamp_ns,
-                ));
+                ), MAX_AUDIT_LOG_ENTRIES);
                 divergences.push(Divergence {
                     step_seq: step.seq,
                     kind,
@@ -901,12 +893,12 @@ impl ReplayEngine {
         if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
             self.audit_log.drain(0..1);
         }
-        self.audit_log.push(AuditEntry::new(
+        push_bounded(&mut self.audit_log, AuditEntry::new(
             event_codes::TTR_007,
             trace_id,
             &format!("Replay completed: verdict={verdict}"),
             0,
-        ));
+        ), MAX_AUDIT_LOG_ENTRIES);
 
         Ok(ReplayResult {
             trace_id: trace_id.to_string(),

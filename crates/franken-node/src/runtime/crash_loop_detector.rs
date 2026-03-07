@@ -8,6 +8,14 @@ use std::collections::BTreeMap;
 
 const DEFAULT_MAX_INCIDENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Configuration for crash-loop detection thresholds.
 #[derive(Debug, Clone)]
 pub struct CrashLoopConfig {
@@ -185,11 +193,8 @@ impl CrashLoopDetector {
     }
 
     fn push_incident(&mut self, incident: CrashLoopIncident) {
-        self.incidents.push(incident);
-        if self.incidents.len() > self.max_incidents {
-            let overflow = self.incidents.len() - self.max_incidents;
-            self.incidents.drain(0..overflow);
-        }
+        let cap = self.max_incidents;
+        push_bounded(&mut self.incidents, incident, cap);
     }
 
     /// Record a crash event. Returns the current crash count within the window.

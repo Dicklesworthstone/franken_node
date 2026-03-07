@@ -24,6 +24,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+/// Maximum phase transitions before oldest-first eviction.
+const MAX_TRANSITIONS: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -594,15 +597,17 @@ impl EvictionSaga {
         event_code: &str,
         outcome: &str,
     ) {
-        self.transitions.push(PhaseTransition {
-            saga_id: self.saga_id.clone(),
-            artifact_id: self.artifact_id.clone(),
+        let saga_id = self.saga_id.clone();
+        let artifact_id = self.artifact_id.clone();
+        push_bounded(&mut self.transitions, PhaseTransition {
+            saga_id,
+            artifact_id,
             from_phase: from,
             to_phase: to,
             event_code: event_code.to_string(),
             timestamp_epoch_ms: PhaseTransition::now_epoch_ms(),
             outcome: outcome.to_string(),
-        });
+        }, MAX_TRANSITIONS);
     }
 
     /// Generate content hash for verification evidence.
@@ -627,6 +632,15 @@ impl EvictionSaga {
 
 /// Schema version for JSONL saga trace format.
 pub const SCHEMA_VERSION: &str = "es-v1.0";
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
+}
 
 // ---------------------------------------------------------------------------
 // Tests

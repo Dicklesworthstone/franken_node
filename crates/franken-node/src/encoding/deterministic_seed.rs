@@ -18,6 +18,16 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
+const MAX_BUMP_RECORDS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Constant-time byte comparison (inline to avoid cross-crate path issues in test harnesses).
 fn ct_eq_bytes_inline(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
@@ -342,7 +352,7 @@ impl DeterministicSeedDeriver {
                 // [SEED_VERSION_BUMP] structured log point
                 let _event = EVENT_SEED_VERSION_BUMP;
 
-                self.bump_records.push(record.clone());
+                push_bounded(&mut self.bump_records, record.clone(), MAX_BUMP_RECORDS);
                 self.last_config_hashes
                     .insert(*domain, (new_config_hash, config.version));
                 Some(record)

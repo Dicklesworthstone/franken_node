@@ -52,6 +52,14 @@ const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 /// Maximum number of schema version records retained.
 const MAX_SCHEMA_VERSIONS: usize = 1024;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 pub const INV_FSA_TIER1_DURABLE: &str = "INV-FSA-TIER1-DURABLE";
 pub const INV_FSA_REPLAY_DETERMINISTIC: &str = "INV-FSA-REPLAY-DETERMINISTIC";
 pub const INV_FSA_CONCURRENT_SAFE: &str = "INV-FSA-CONCURRENT-SAFE";
@@ -317,11 +325,7 @@ impl FrankensqliteAdapter {
         self.write_count = self.write_count.saturating_add(1);
 
         if class == PersistenceClass::AuditLog {
-            self.audit_log.push((key.to_string(), value.to_vec()));
-            if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-                let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-                self.audit_log.drain(0..overflow);
-            }
+            push_bounded(&mut self.audit_log, (key.to_string(), value.to_vec()), MAX_AUDIT_LOG_ENTRIES);
         }
 
         let latency = start.elapsed().as_micros() as u64;
@@ -415,15 +419,11 @@ impl FrankensqliteAdapter {
                 reason: "version already applied".into(),
             });
         }
-        self.schema_versions.push(SchemaVersion {
+        push_bounded(&mut self.schema_versions, SchemaVersion {
             version,
             applied_at: "2026-02-20T00:00:00Z".into(),
             description: description.to_string(),
-        });
-        if self.schema_versions.len() > MAX_SCHEMA_VERSIONS {
-            let overflow = self.schema_versions.len() - MAX_SCHEMA_VERSIONS;
-            self.schema_versions.drain(0..overflow);
-        }
+        }, MAX_SCHEMA_VERSIONS);
         Ok(())
     }
 
@@ -482,15 +482,11 @@ impl FrankensqliteAdapter {
     }
 
     fn emit_event(&mut self, code: &str, class: &str, detail: String) {
-        self.events.push(AdapterEvent {
+        push_bounded(&mut self.events, AdapterEvent {
             code: code.to_string(),
             persistence_class: class.to_string(),
             detail,
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 

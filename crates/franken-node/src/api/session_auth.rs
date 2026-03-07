@@ -390,6 +390,14 @@ impl std::fmt::Display for SessionError {
 /// Maximum session events before oldest-first eviction.
 const MAX_SESSION_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 pub struct SessionManager {
     config: SessionConfig,
     sessions: BTreeMap<String, AuthenticatedSession>,
@@ -415,11 +423,7 @@ impl SessionManager {
     }
 
     fn push_event(&mut self, event: SessionEvent) {
-        self.events.push(event);
-        if self.events.len() > MAX_SESSION_EVENTS {
-            let overflow = self.events.len() - MAX_SESSION_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        push_bounded(&mut self.events, event, MAX_SESSION_EVENTS);
     }
 
     /// Current number of active/establishing sessions.

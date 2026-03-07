@@ -8,6 +8,16 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+const MAX_BLOCKED_SOURCES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Report schema version.
 pub const SCHEMA_VERSION: &str = "claim-compiler-v1.0";
 
@@ -138,7 +148,7 @@ impl CompilerConfig {
     }
 
     pub fn with_blocked_source(mut self, source_id: impl Into<String>) -> Self {
-        self.blocked_sources.push(source_id.into());
+        push_bounded(&mut self.blocked_sources, source_id.into(), MAX_BLOCKED_SOURCES);
         self
     }
 }

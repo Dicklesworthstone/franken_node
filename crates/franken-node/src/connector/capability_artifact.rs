@@ -670,11 +670,7 @@ impl AdmissionGate {
     }
 
     fn push_audit(&mut self, entry: AuditEntry) {
-        self.audit_log.push(entry);
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_log, entry, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 
@@ -791,11 +787,7 @@ impl EnvelopeEnforcer {
     }
 
     fn push_enforcement_audit(&mut self, entry: AuditEntry) {
-        self.enforcement_log.push(entry);
-        if self.enforcement_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.enforcement_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.enforcement_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.enforcement_log, entry, MAX_AUDIT_LOG_ENTRIES);
     }
 
     /// Check for drift: any used capability not in admitted set, or any
@@ -862,6 +854,15 @@ pub fn build_test_artifact(artifact_id: &str, capabilities: &[(&str, &str)]) -> 
     }
     envelope.bind_to(&identity);
     ExtensionArtifact::new(identity, Some(envelope))
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // ---------------------------------------------------------------------------

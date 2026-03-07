@@ -623,7 +623,7 @@ impl ControlPlaneDivergenceGate {
             ),
             event_code: event_codes::DG_002_MUTATION_BLOCKED.to_string(),
         };
-        self.blocked_mutations.push(result.clone());
+        push_bounded(&mut self.blocked_mutations, result.clone(), MAX_BLOCKED_MUTATIONS);
         if self.blocked_mutations.len() > MAX_BLOCKED_MUTATIONS {
             let overflow = self.blocked_mutations.len() - MAX_BLOCKED_MUTATIONS;
             self.blocked_mutations.drain(0..overflow);
@@ -710,7 +710,7 @@ impl ControlPlaneDivergenceGate {
             reason: format!("divergence at epoch {epoch}"),
         };
 
-        self.quarantined_partitions.push(partition.clone());
+        push_bounded(&mut self.quarantined_partitions, partition.clone(), MAX_QUARANTINED_PARTITIONS);
         if self.quarantined_partitions.len() > MAX_QUARANTINED_PARTITIONS {
             let overflow = self.quarantined_partitions.len() - MAX_QUARANTINED_PARTITIONS;
             self.quarantined_partitions.drain(0..overflow);
@@ -781,7 +781,7 @@ impl ControlPlaneDivergenceGate {
             trace_id: trace_id.to_string(),
         };
 
-        self.alerts.push(alert.clone());
+        push_bounded(&mut self.alerts, alert.clone(), MAX_ALERTS);
         if self.alerts.len() > MAX_ALERTS {
             let overflow = self.alerts.len() - MAX_ALERTS;
             self.alerts.drain(0..overflow);
@@ -942,7 +942,7 @@ impl ControlPlaneDivergenceGate {
         trace_id: &str,
         epoch_id: u64,
     ) {
-        self.audit_log.push(GateAuditEntry {
+        push_bounded(&mut self.audit_log, GateAuditEntry {
             timestamp,
             event_code: event_code.to_string(),
             gate_state: self.state.label().to_string(),
@@ -950,17 +950,21 @@ impl ControlPlaneDivergenceGate {
             trace_id: trace_id.to_string(),
             node_id: self.node_id.clone(),
             epoch_id,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 
 impl Default for ControlPlaneDivergenceGate {
     fn default() -> Self {
         Self::new("default-node")
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

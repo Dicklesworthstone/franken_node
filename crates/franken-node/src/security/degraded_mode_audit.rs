@@ -101,6 +101,14 @@ pub fn validate_schema(event: &DegradedModeEvent) -> Result<(), AuditError> {
 
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Append-only audit log for degraded-mode events.
 ///
 /// INV-DM-IMMUTABLE: events cannot be modified or deleted.
@@ -120,11 +128,7 @@ impl DegradedModeAuditLog {
     /// INV-DM-SCHEMA-COMPLETE: validated before append.
     pub fn emit(&mut self, event: DegradedModeEvent) -> Result<(), AuditError> {
         validate_schema(&event)?;
-        self.events.push(event);
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        push_bounded(&mut self.events, event, MAX_EVENTS);
         Ok(())
     }
 

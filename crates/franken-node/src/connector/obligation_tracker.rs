@@ -270,11 +270,7 @@ impl ObligationTracker {
     }
 
     fn push_audit(&mut self, record: ObligationAuditRecord) {
-        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() + 1 - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
-        self.audit_log.push(record);
+        push_bounded(&mut self.audit_log, record, MAX_AUDIT_LOG_ENTRIES);
     }
 
     /// Count of currently reserved obligations for a specific flow.
@@ -495,11 +491,7 @@ impl ObligationTracker {
             schema_version: SCHEMA_VERSION.to_string(),
         };
 
-        if self.scan_results.len() >= MAX_SCAN_RESULTS {
-            let overflow = self.scan_results.len() + 1 - MAX_SCAN_RESULTS;
-            self.scan_results.drain(0..overflow);
-        }
-        self.scan_results.push(result.clone());
+        push_bounded(&mut self.scan_results, result.clone(), MAX_SCAN_RESULTS);
         result
     }
 
@@ -671,6 +663,15 @@ impl Drop for ObligationGuard {
             );
         }
     }
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────

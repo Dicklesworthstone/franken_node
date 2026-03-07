@@ -17,6 +17,16 @@ use std::time::Instant;
 use super::error::ApiError;
 use super::utf8_prefix;
 
+const MAX_SAMPLES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ── Trace Context ──────────────────────────────────────────────────────────
 
 /// W3C trace context extracted from request headers.
@@ -543,7 +553,7 @@ pub struct LatencyMetrics {
 
 impl LatencyMetrics {
     pub fn record(&mut self, latency_ms: f64) {
-        self.samples.push(latency_ms);
+        push_bounded(&mut self.samples, latency_ms, MAX_SAMPLES);
     }
 
     pub fn p50(&self) -> f64 {

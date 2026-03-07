@@ -282,6 +282,14 @@ const MAX_REVOKED_ENTRIES: usize = 4096;
 /// Maximum events before oldest-first eviction.
 const MAX_KEY_ROLE_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Enforces:
 /// - INV-KRS-ROLE-EXCLUSIVITY: a key_id is bound to at most one role.
 /// - INV-KRS-ONE-ACTIVE: lookup_by_role returns current active bindings.
@@ -307,19 +315,11 @@ impl KeyRoleRegistry {
     }
 
     fn push_event(&mut self, event: KeyRoleEvent) {
-        self.events.push(event);
-        if self.events.len() > MAX_KEY_ROLE_EVENTS {
-            let overflow = self.events.len() - MAX_KEY_ROLE_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        push_bounded(&mut self.events, event, MAX_KEY_ROLE_EVENTS);
     }
 
     fn push_revoked(&mut self, binding: KeyRoleBinding) {
-        self.revoked.push(binding);
-        if self.revoked.len() > MAX_REVOKED_ENTRIES {
-            let overflow = self.revoked.len() - MAX_REVOKED_ENTRIES;
-            self.revoked.drain(0..overflow);
-        }
+        push_bounded(&mut self.revoked, binding, MAX_REVOKED_ENTRIES);
     }
 
     /// Bind a key to a role.

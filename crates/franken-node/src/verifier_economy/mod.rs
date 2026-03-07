@@ -34,6 +34,14 @@ const MAX_DISPUTES: usize = 2048;
 /// Maximum replay capsules before oldest are evicted.
 const MAX_REPLAY_CAPSULES: usize = 2048;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -382,15 +390,12 @@ impl VerifierEconomyRegistry {
     }
 
     fn emit(&mut self, code: &str, detail: &str) {
-        if self.events.len() >= MAX_EVENTS {
-            let overflow = self.events.len() + 1 - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
-        self.events.push(VerifierEconomyEvent {
+        let ts = self.now_epoch();
+        push_bounded(&mut self.events, VerifierEconomyEvent {
             code: code.to_string(),
             detail: detail.to_string(),
-            timestamp: self.now_epoch(),
-        });
+            timestamp: ts,
+        }, MAX_EVENTS);
     }
 
     pub fn events(&self) -> &[VerifierEconomyEvent] {

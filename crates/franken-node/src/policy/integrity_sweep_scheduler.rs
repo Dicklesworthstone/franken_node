@@ -16,6 +16,14 @@ use std::time::Duration;
 
 const MAX_DECISIONS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
@@ -367,11 +375,7 @@ impl IntegritySweepScheduler {
         // [EVD-SWEEP-001]
         let _event = EVD_SWEEP_001;
 
-        self.decisions.push(decision);
-        if self.decisions.len() > MAX_DECISIONS {
-            let overflow = self.decisions.len() - MAX_DECISIONS;
-            self.decisions.drain(0..overflow);
-        }
+        push_bounded(&mut self.decisions, decision, MAX_DECISIONS);
 
         self
     }

@@ -25,6 +25,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
+const MAX_ALLOWED_CROSS_ZONE_TARGETS: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -117,7 +118,11 @@ impl ZonePolicy {
     pub fn allow_cross_zone(&mut self, target_zone: impl Into<String>) {
         let target = target_zone.into();
         if !self.allowed_cross_zone_targets.contains(&target) {
-            self.allowed_cross_zone_targets.push(target);
+            push_bounded(
+                &mut self.allowed_cross_zone_targets,
+                target,
+                MAX_ALLOWED_CROSS_ZONE_TARGETS,
+            );
         }
     }
 
@@ -594,16 +599,17 @@ impl ZoneSegmentationEngine {
     }
 
     fn emit_event(&mut self, code: &str, zone_id: &str, detail: &str) {
-        self.events.push(ZoneAuditEvent {
-            code: code.to_string(),
-            zone_id: zone_id.to_string(),
-            detail: detail.to_string(),
-            trace_id: format!("trace-{}", self.events.len()),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        let trace_id = format!("trace-{}", self.events.len());
+        push_bounded(
+            &mut self.events,
+            ZoneAuditEvent {
+                code: code.to_string(),
+                zone_id: zone_id.to_string(),
+                detail: detail.to_string(),
+                trace_id,
+            },
+            MAX_EVENTS,
+        );
     }
 
     // -- Report / gate pass -------------------------------------------------
@@ -645,6 +651,14 @@ impl Default for ZoneSegmentationEngine {
     fn default() -> Self {
         Self::new()
     }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
 }
 
 // ---------------------------------------------------------------------------

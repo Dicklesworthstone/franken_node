@@ -28,6 +28,9 @@ fn ct_eq_inline(a: &str, b: &str) -> bool {
 }
 use std::fmt;
 
+/// Maximum transition history entries before oldest-first eviction.
+const MAX_TRANSITIONS: usize = 4096;
+
 /// Stable event codes for structured logging.
 pub mod event_codes {
     pub const EPOCH_ADVANCED: &str = "EPOCH_ADVANCED";
@@ -436,7 +439,7 @@ impl EpochStore {
         // In production: write to WAL, fsync, then update in-memory state.
         self.current = new_epoch;
         self.committed = new_epoch;
-        self.transitions.push(transition.clone());
+        push_bounded(&mut self.transitions, transition.clone(), MAX_TRANSITIONS);
 
         Ok(transition)
     }
@@ -483,7 +486,7 @@ impl EpochStore {
 
         self.current = new_epoch;
         self.committed = new_epoch;
-        self.transitions.push(transition.clone());
+        push_bounded(&mut self.transitions, transition.clone(), MAX_TRANSITIONS);
 
         Ok(transition)
     }
@@ -520,6 +523,14 @@ impl EpochStore {
 impl Default for EpochStore {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

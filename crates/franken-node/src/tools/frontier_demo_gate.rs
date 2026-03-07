@@ -28,6 +28,16 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const MAX_EVENTS: usize = 4096;
+const MAX_REGISTERED_PROGRAMS: usize = 4096;
+const MAX_RESULTS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Schema version
@@ -325,7 +335,7 @@ impl DemoGateRunner {
     /// Register an additional program (idempotent if already present).
     pub fn register(&mut self, program: FrontierProgram) {
         if !self.registered_programs.contains(&program) {
-            self.registered_programs.push(program);
+            push_bounded(&mut self.registered_programs, program, MAX_REGISTERED_PROGRAMS);
             self.registered_programs.sort();
         }
     }
@@ -338,27 +348,19 @@ impl DemoGateRunner {
         } else {
             event_codes::DEMO_GATE_FAIL
         };
-        self.events.push(DemoEvent {
+        push_bounded(&mut self.events, DemoEvent {
             code: event_codes::DEMO_GATE_START.to_string(),
             program: Some(result.program),
             detail: format!("Starting gate for {}", result.program.display_name()),
             timestamp: chrono::Utc::now().to_rfc3339(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
-        self.events.push(DemoEvent {
+        }, MAX_EVENTS);
+        push_bounded(&mut self.events, DemoEvent {
             code: event_code.to_string(),
             program: Some(result.program),
             detail: result.detail.clone(),
             timestamp: chrono::Utc::now().to_rfc3339(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
-        self.results.push(result.clone());
+        }, MAX_EVENTS);
+        push_bounded(&mut self.results, result.clone(), MAX_RESULTS);
         result
     }
 
@@ -397,16 +399,12 @@ impl DemoGateRunner {
             timing,
         );
 
-        self.events.push(DemoEvent {
+        push_bounded(&mut self.events, DemoEvent {
             code: event_codes::MANIFEST_GENERATED.to_string(),
             program: None,
             detail: format!("Manifest fingerprint: {}", manifest.manifest_fingerprint),
             timestamp: chrono::Utc::now().to_rfc3339(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
 
         manifest
     }

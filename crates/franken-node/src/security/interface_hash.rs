@@ -9,6 +9,8 @@ use sha2::Digest;
 use std::collections::BTreeMap;
 use std::fmt;
 
+const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+
 // ── Domain-separated hash ───────────────────────────────────────────
 
 /// Compute a domain-separated hash: H(domain || ":" || data).
@@ -147,14 +149,18 @@ impl AdmissionTelemetry {
             }
         };
 
-        self.checks.push(AdmissionCheck {
-            connector_id: connector_id.to_string(),
-            domain: domain.to_string(),
-            admitted,
-            rejection_code,
-            trace_id: trace_id.to_string(),
-            timestamp: timestamp.to_string(),
-        });
+        push_bounded(
+            &mut self.checks,
+            AdmissionCheck {
+                connector_id: connector_id.to_string(),
+                domain: domain.to_string(),
+                admitted,
+                rejection_code,
+                trace_id: trace_id.to_string(),
+                timestamp: timestamp.to_string(),
+            },
+            MAX_AUDIT_LOG_ENTRIES,
+        );
 
         admitted
     }
@@ -168,6 +174,14 @@ impl AdmissionTelemetry {
             .collect();
         counts.sort_by_key(|(_, v)| std::cmp::Reverse(*v));
         counts
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

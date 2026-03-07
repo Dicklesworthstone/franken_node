@@ -11,6 +11,14 @@ use crate::security::constant_time::ct_eq;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Snapshot trigger policy.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SnapshotPolicy {
@@ -239,11 +247,7 @@ impl SnapshotTracker {
         };
 
         self.policy = new_policy;
-        self.audit_log.push(audit.clone());
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_log, audit.clone(), MAX_AUDIT_LOG_ENTRIES);
         Ok(audit)
     }
 }

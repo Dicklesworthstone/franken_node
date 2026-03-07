@@ -449,6 +449,9 @@ impl BocpdDetector {
 
     /// Process a new observation.
     pub fn observe(&mut self, x: f64, timestamp: u64) -> Option<RegimeShift> {
+        if !x.is_finite() {
+            return None;
+        }
         self.observation_count = self.observation_count.saturating_add(1);
         self.emit_event(BocpdEvent {
             code: EVT_OBSERVATION.to_string(),
@@ -1178,5 +1181,23 @@ mod tests {
         det.observe(10.0, 1000);
         assert!(!det.events().is_empty());
         assert_eq!(det.events()[0].code, EVT_OBSERVATION);
+    }
+
+    #[test]
+    fn test_nan_observation_is_ignored() {
+        let mut det = gaussian_detector("test");
+        let count_before = det.observation_count;
+        let result = det.observe(f64::NAN, 1000);
+        assert!(result.is_none());
+        assert_eq!(det.observation_count, count_before);
+    }
+
+    #[test]
+    fn test_inf_observation_is_ignored() {
+        let mut det = gaussian_detector("test");
+        let count_before = det.observation_count;
+        let result = det.observe(f64::INFINITY, 2000);
+        assert!(result.is_none());
+        assert_eq!(det.observation_count, count_before);
     }
 }

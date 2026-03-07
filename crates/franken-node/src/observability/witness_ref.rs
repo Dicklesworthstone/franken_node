@@ -16,6 +16,16 @@ use std::fmt;
 use super::evidence_ledger::{DecisionKind, EvidenceEntry};
 use crate::security::constant_time::ct_eq_bytes;
 
+const MAX_REFS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Stable event codes for structured logging.
 pub mod event_codes {
     pub const WITNESS_ATTACHED: &str = "EVD-WITNESS-001";
@@ -145,7 +155,7 @@ impl WitnessSet {
 
     /// Add a witness reference.
     pub fn add(&mut self, witness: WitnessRef) {
-        self.refs.push(witness);
+        push_bounded(&mut self.refs, witness, MAX_REFS);
     }
 
     /// Number of witness references.

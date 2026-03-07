@@ -743,11 +743,15 @@ impl UpdateCopilot {
     }
 
     fn log_interaction(&mut self, interaction: CopilotInteraction) {
-        self.interactions.push(interaction);
-        if self.interactions.len() > MAX_INTERACTIONS {
-            let overflow = self.interactions.len() - MAX_INTERACTIONS;
-            self.interactions.drain(0..overflow);
-        }
+        push_bounded(&mut self.interactions, interaction, MAX_INTERACTIONS);
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

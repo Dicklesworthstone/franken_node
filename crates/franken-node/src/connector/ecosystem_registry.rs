@@ -508,11 +508,7 @@ impl EcosystemRegistry {
             detail: detail.to_owned(),
         };
         entry.entry_hash = compute_audit_hash(&entry);
-        self.audit_trail.push(entry);
-        if self.audit_trail.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_trail.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_trail.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_trail, entry, MAX_AUDIT_LOG_ENTRIES);
     }
 
     fn emit_event(
@@ -523,17 +519,13 @@ impl EcosystemRegistry {
         timestamp: &str,
         trace_id: &str,
     ) {
-        self.events.push(RegistryEvent {
+        push_bounded(&mut self.events, RegistryEvent {
             event_code: event_code.to_owned(),
             extension_id: extension_id.to_owned(),
             detail: detail.to_owned(),
             timestamp: timestamp.to_owned(),
             trace_id: trace_id.to_owned(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 
@@ -551,6 +543,15 @@ fn compute_audit_hash(entry: &RegistryAuditEntry) -> String {
     let digest =
         Sha256::digest([b"ecosystem_registry_hash_v1:" as &[u8], payload.as_bytes()].concat());
     format!("sha256:{}", hex::encode(digest))
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // -- Tests ---------------------------------------------------------------------

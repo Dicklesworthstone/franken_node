@@ -34,6 +34,14 @@ const MAX_EVENTS: usize = 4096;
 /// Maximum number of proof receipts before oldest-first eviction.
 const MAX_RECEIPTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Error codes
 // ---------------------------------------------------------------------------
@@ -417,7 +425,7 @@ impl RetrievabilityGate {
             latency_ms: state.fetch_latency_ms,
         };
 
-        self.receipts.push(ProofReceipt {
+        push_bounded(&mut self.receipts, ProofReceipt {
             artifact_id: artifact_id.0.clone(),
             segment_id: segment_id.0.clone(),
             source_tier: source_tier.label().to_string(),
@@ -427,13 +435,9 @@ impl RetrievabilityGate {
             latency_ms: state.fetch_latency_ms,
             passed: true,
             failure_reason: None,
-        });
-        if self.receipts.len() > MAX_RECEIPTS {
-            let overflow = self.receipts.len() - MAX_RECEIPTS;
-            self.receipts.drain(0..overflow);
-        }
+        }, MAX_RECEIPTS);
 
-        self.events.push(GateEvent {
+        push_bounded(&mut self.events, GateEvent {
             code: RG_PROOF_PASSED.to_string(),
             artifact_id: artifact_id.0.clone(),
             segment_id: segment_id.0.clone(),
@@ -444,11 +448,7 @@ impl RetrievabilityGate {
                 state.fetch_latency_ms,
                 &expected_hash[..8.min(expected_hash.len())]
             ),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
 
         Ok(proof)
     }
@@ -475,21 +475,17 @@ impl RetrievabilityGate {
         ) {
             Ok(p) => p,
             Err(err) => {
-                self.events.push(GateEvent {
+                push_bounded(&mut self.events, GateEvent {
                     code: RG_EVICTION_BLOCKED.to_string(),
                     artifact_id: artifact_id.0.clone(),
                     segment_id: segment_id.0.clone(),
                     detail: format!("Eviction blocked: {}", err.reason.error_code()),
-                });
-                if self.events.len() > MAX_EVENTS {
-                    let overflow = self.events.len() - MAX_EVENTS;
-                    self.events.drain(0..overflow);
-                }
+                }, MAX_EVENTS);
                 return Err(err);
             }
         };
 
-        self.events.push(GateEvent {
+        push_bounded(&mut self.events, GateEvent {
             code: RG_EVICTION_PERMITTED.to_string(),
             artifact_id: artifact_id.0.clone(),
             segment_id: segment_id.0.clone(),
@@ -497,11 +493,7 @@ impl RetrievabilityGate {
                 "Eviction permitted after proof at ts={}",
                 proof.proof_timestamp
             ),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
 
         Ok(EvictionPermit {
             proof,
@@ -551,7 +543,7 @@ impl RetrievabilityGate {
         reason: &ProofFailureReason,
         latency_ms: u64,
     ) {
-        self.receipts.push(ProofReceipt {
+        push_bounded(&mut self.receipts, ProofReceipt {
             artifact_id: artifact_id.0.clone(),
             segment_id: segment_id.0.clone(),
             source_tier: source_tier.label().to_string(),
@@ -561,22 +553,14 @@ impl RetrievabilityGate {
             latency_ms,
             passed: false,
             failure_reason: Some(reason.to_string()),
-        });
-        if self.receipts.len() > MAX_RECEIPTS {
-            let overflow = self.receipts.len() - MAX_RECEIPTS;
-            self.receipts.drain(0..overflow);
-        }
+        }, MAX_RECEIPTS);
 
-        self.events.push(GateEvent {
+        push_bounded(&mut self.events, GateEvent {
             code: RG_PROOF_FAILED.to_string(),
             artifact_id: artifact_id.0.clone(),
             segment_id: segment_id.0.clone(),
             detail: format!("Proof failed: {}", reason),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 }
 

@@ -11,6 +11,7 @@ use std::fmt;
 use crate::security::remote_cap::{CapabilityGate, RemoteCap, RemoteOperation};
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_RULES: usize = 4096;
 
 /// Network protocol for egress rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -104,7 +105,7 @@ impl EgressPolicy {
     }
 
     pub fn add_rule(&mut self, rule: EgressRule) {
-        self.rules.push(rule);
+        push_bounded(&mut self.rules, rule, MAX_RULES);
     }
 
     /// Evaluate a request against the policy. Returns the action and

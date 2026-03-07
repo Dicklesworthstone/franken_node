@@ -167,6 +167,14 @@ fn next_level(current: HardeningLevel) -> Option<HardeningLevel> {
 /// Maximum trigger events before oldest-first eviction.
 const MAX_TRIGGER_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Automatic hardening trigger that escalates on guardrail rejections.
 ///
 /// INV-AUTOTRIG-LATENCY: escalation within config.max_trigger_latency_ms.
@@ -278,11 +286,7 @@ impl HardeningAutoTrigger {
                     to_level: target,
                     timestamp: timestamp_ms,
                 };
-                self.events.push(event);
-                if self.events.len() > MAX_TRIGGER_EVENTS {
-                    let overflow = self.events.len() - MAX_TRIGGER_EVENTS;
-                    self.events.drain(0..overflow);
-                }
+                push_bounded(&mut self.events, event, MAX_TRIGGER_EVENTS);
 
                 TriggerResult::Escalated {
                     from: current,

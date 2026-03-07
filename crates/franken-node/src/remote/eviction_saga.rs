@@ -9,6 +9,14 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 pub const SCHEMA_VERSION: &str = "es-v1.0";
@@ -163,18 +171,14 @@ impl SagaInstance {
     fn record_transition(&mut self, to_phase: SagaPhase, outcome: &str, max_transitions: usize) {
         let max_transitions = max_transitions.max(1);
         let from = self.phase;
-        self.transitions.push(PhaseTransition {
+        push_bounded(&mut self.transitions, PhaseTransition {
             saga_id: self.saga_id.clone(),
             artifact_id: self.artifact_id.clone(),
             from_phase: from,
             to_phase,
             timestamp_ms: 0, // Caller provides real timestamp
             outcome: outcome.to_string(),
-        });
-        if self.transitions.len() > max_transitions {
-            let overflow = self.transitions.len() - max_transitions;
-            self.transitions.drain(0..overflow);
-        }
+        }, max_transitions);
         self.phase = to_phase;
     }
 
@@ -227,15 +231,12 @@ impl EvictionSagaManager {
     }
 
     fn log(&mut self, event_code: &str, trace_id: &str, detail: serde_json::Value) {
-        self.audit_log.push(EsAuditRecord {
+        let cap = self.max_audit_records;
+        push_bounded(&mut self.audit_log, EsAuditRecord {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
             detail,
-        });
-        if self.audit_log.len() > self.max_audit_records {
-            let overflow = self.audit_log.len() - self.max_audit_records;
-            self.audit_log.drain(0..overflow);
-        }
+        }, cap);
     }
 
     fn ensure_remote_cap_active(

@@ -444,7 +444,7 @@ impl TokenChain {
             ));
         }
 
-        self.tokens.push(token);
+        push_bounded(&mut self.tokens, token, MAX_TOKENS);
         Ok(())
     }
 
@@ -475,6 +475,15 @@ impl TokenChain {
 
 /// Maximum events before oldest-first eviction.
 const MAX_EVENTS: usize = 4096;
+const MAX_TOKENS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
 
 /// Validates audience-bound token chains, enforcing expiry, replay detection,
 /// and audience matching.
@@ -505,18 +514,11 @@ impl TokenValidator {
         }
     }
 
-    fn enforce_events_cap(&mut self) {
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
-    }
-
     /// Record a root token issuance.
     pub fn record_issuance(&mut self, token: &AudienceBoundToken, trace_id: &str, now_ms: u64) {
         self.tokens_issued = self.tokens_issued.saturating_add(1);
         self.seen_nonces.insert(token.nonce.clone());
-        self.events.push(TokenEvent {
+        push_bounded(&mut self.events, TokenEvent {
             event_code: ABT_001.to_string(),
             token_id: token.token_id.as_str().to_string(),
             trace_id: trace_id.to_string(),
@@ -528,8 +530,7 @@ impl TokenValidator {
                 token.audience
             ),
             timestamp_ms: now_ms,
-        });
-        self.enforce_events_cap();
+        }, MAX_EVENTS);
     }
 
     /// Record a delegation event.
@@ -542,7 +543,7 @@ impl TokenValidator {
     ) {
         self.tokens_delegated = self.tokens_delegated.saturating_add(1);
         self.seen_nonces.insert(token.nonce.clone());
-        self.events.push(TokenEvent {
+        push_bounded(&mut self.events, TokenEvent {
             event_code: ABT_002.to_string(),
             token_id: token.token_id.as_str().to_string(),
             trace_id: trace_id.to_string(),
@@ -553,8 +554,7 @@ impl TokenValidator {
                 chain_depth, token.audience
             ),
             timestamp_ms: now_ms,
-        });
-        self.enforce_events_cap();
+        }, MAX_EVENTS);
     }
 
     /// Verify a full token chain against a requester identity.
@@ -586,7 +586,7 @@ impl TokenValidator {
             if token.is_expired(now_ms) {
                 self.tokens_rejected = self.tokens_rejected.saturating_add(1);
                 let err = TokenError::token_expired(&token.token_id);
-                self.events.push(TokenEvent {
+                push_bounded(&mut self.events, TokenEvent {
                     event_code: ABT_004.to_string(),
                     token_id: token.token_id.as_str().to_string(),
                     trace_id: trace_id.to_string(),
@@ -597,8 +597,7 @@ impl TokenValidator {
                         i, token.expires_at, now_ms
                     ),
                     timestamp_ms: now_ms,
-                });
-                self.enforce_events_cap();
+                }, MAX_EVENTS);
                 return Err(err);
             }
         }
@@ -631,7 +630,7 @@ impl TokenValidator {
             if self.seen_nonces.contains(&token.nonce) {
                 self.tokens_rejected = self.tokens_rejected.saturating_add(1);
                 let err = TokenError::replay_detected(&token.nonce);
-                self.events.push(TokenEvent {
+                push_bounded(&mut self.events, TokenEvent {
                     event_code: ABT_004.to_string(),
                     token_id: token.token_id.as_str().to_string(),
                     trace_id: trace_id.to_string(),
@@ -639,8 +638,7 @@ impl TokenValidator {
                     action_id: format!("verify-replay-{}", token.token_id),
                     detail: format!("Nonce '{}' replay detected", token.nonce),
                     timestamp_ms: now_ms,
-                });
-                self.enforce_events_cap();
+                }, MAX_EVENTS);
                 return Err(err);
             }
         }
@@ -674,7 +672,7 @@ impl TokenValidator {
         if !leaf.audience_contains(requester_id) {
             self.tokens_rejected = self.tokens_rejected.saturating_add(1);
             let err = TokenError::audience_mismatch(requester_id, &leaf.audience);
-            self.events.push(TokenEvent {
+            push_bounded(&mut self.events, TokenEvent {
                 event_code: ABT_004.to_string(),
                 token_id: leaf.token_id.as_str().to_string(),
                 trace_id: trace_id.to_string(),
@@ -685,8 +683,7 @@ impl TokenValidator {
                     requester_id, leaf.audience
                 ),
                 timestamp_ms: now_ms,
-            });
-            self.enforce_events_cap();
+            }, MAX_EVENTS);
             return Err(err);
         }
 
@@ -695,7 +692,7 @@ impl TokenValidator {
             self.seen_nonces.insert(token.nonce.clone());
         }
         self.tokens_verified = self.tokens_verified.saturating_add(1);
-        self.events.push(TokenEvent {
+        push_bounded(&mut self.events, TokenEvent {
             event_code: ABT_003.to_string(),
             token_id: leaf.token_id.as_str().to_string(),
             trace_id: trace_id.to_string(),
@@ -706,8 +703,7 @@ impl TokenValidator {
                 tokens.len()
             ),
             timestamp_ms: now_ms,
-        });
-        self.enforce_events_cap();
+        }, MAX_EVENTS);
 
         Ok(())
     }

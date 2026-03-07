@@ -55,6 +55,15 @@ pub const SCHEMA_VERSION: &str = "rga-v1.0";
 pub const MIN_TRUST_SCORE: f64 = 0.6;
 pub const DECAY_FACTOR: f64 = 0.95;
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_EDGES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 /// Node type in the reputation graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -223,7 +232,7 @@ impl ReputationGraphApis {
             trace_id,
             serde_json::json!({"edge_id": &eid, "weight": edge.weight}),
         );
-        self.edges.push(edge);
+        push_bounded(&mut self.edges, edge, MAX_EDGES);
         Ok(eid)
     }
 
@@ -388,17 +397,13 @@ impl ReputationGraphApis {
     }
 
     fn log(&mut self, event_code: &str, trace_id: &str, details: serde_json::Value) {
-        self.audit_log.push(RgaAuditRecord {
+        push_bounded(&mut self.audit_log, RgaAuditRecord {
             record_id: Uuid::now_v7().to_string(),
             event_code: event_code.to_string(),
             timestamp: Utc::now().to_rfc3339(),
             trace_id: trace_id.to_string(),
             details,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 

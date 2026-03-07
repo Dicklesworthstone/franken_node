@@ -16,6 +16,16 @@ use std::fmt;
 
 use super::correctness_envelope::{CorrectnessEnvelope, InvariantId, PolicyProposal};
 
+const MAX_REJECTED_MUTATIONS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ── Error classification ────────────────────────────────────────────
 
 /// Stable error classification for boundary violations.
@@ -236,7 +246,7 @@ impl ControllerBoundaryChecker {
             error_class: violation.stable_error_class,
             epoch_id: proposal.epoch_id,
         };
-        self.rejected_mutations.push(record);
+        push_bounded(&mut self.rejected_mutations, record, MAX_REJECTED_MUTATIONS);
         self.checks_rejected = self.checks_rejected.saturating_add(1);
         eprintln!(
             "EVD-BOUNDARY-003: audit trail write: invariant={}, controller={}, epoch={}",

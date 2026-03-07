@@ -23,6 +23,14 @@ use crate::security::constant_time::ct_eq;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 pub const SCHEMA_VERSION: &str = "tfg-v1.0";
 pub const BEAD_ID: &str = "bd-3u6o";
 pub const SECTION: &str = "10.15";
@@ -403,17 +411,13 @@ impl TransportFaultGate {
         seed: u64,
         detail: serde_json::Value,
     ) {
-        self.audit_log.push(TfgAuditRecord {
+        push_bounded(&mut self.audit_log, TfgAuditRecord {
             event_code: event_code.to_string(),
             protocol: protocol.to_string(),
             fault_mode: fault_mode.to_string(),
             seed,
             detail,
-        });
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        }, MAX_AUDIT_LOG_ENTRIES);
     }
 
     /// Simulate a single protocol under a specific fault mode and seed.

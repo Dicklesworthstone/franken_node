@@ -540,8 +540,7 @@ impl BarrierEngine {
             .or_default()
             .push(barrier_id);
 
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -568,8 +567,7 @@ impl BarrierEngine {
             ids.retain(|id| id != barrier_id);
         }
         self.rollout_states.remove(barrier_id);
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -599,8 +597,7 @@ impl BarrierEngine {
         )
         .with_override(justification);
 
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -635,8 +632,7 @@ impl BarrierEngine {
                             "required_tier": format!("{}", cfg.min_tier),
                         }),
                     );
-                    self.audit_log.push(receipt);
-                    self.enforce_audit_log_capacity();
+                    self.push_audit(receipt);
                     return Err(BarrierError::SandboxEscalation(format!(
                         "node {node_id} requires at least {}, currently at {current_tier}",
                         cfg.min_tier
@@ -658,8 +654,7 @@ impl BarrierEngine {
                             "capability": requested_capability,
                         }),
                     );
-                    self.audit_log.push(receipt);
-                    self.enforce_audit_log_capacity();
+                    self.push_audit(receipt);
                     return Err(BarrierError::SandboxEscalation(format!(
                         "capability '{requested_capability}' denied on node {node_id}"
                     )));
@@ -678,8 +673,7 @@ impl BarrierEngine {
                 "tier": format!("{current_tier}"),
             }),
         );
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -718,8 +712,7 @@ impl BarrierEngine {
                             "boundary": target_boundary,
                         }),
                     );
-                    self.audit_log.push(receipt);
-                    self.enforce_audit_log_capacity();
+                    self.push_audit(receipt);
                     return Err(BarrierError::FirewallViolation {
                         capability: capability.to_string(),
                         boundary: target_boundary.to_string(),
@@ -738,8 +731,7 @@ impl BarrierEngine {
                 "boundary": target_boundary,
             }),
         );
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -772,8 +764,7 @@ impl BarrierEngine {
                         "pinned_commit": cfg.pinned_commit,
                     }),
                 );
-                self.audit_log.push(receipt);
-                self.enforce_audit_log_capacity();
+                self.push_audit(receipt);
                 return Err(BarrierError::ForkPinVerification(format!(
                     "digest mismatch for node {node_id}: expected {}, got {artifact_digest}",
                     cfg.expected_digest
@@ -790,8 +781,7 @@ impl BarrierEngine {
                 "artifact_digest": artifact_digest,
             }),
         );
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -829,8 +819,7 @@ impl BarrierEngine {
                     "required_phase": format!("{required_phase}"),
                 }),
             );
-            self.audit_log.push(receipt);
-            self.enforce_audit_log_capacity();
+            self.push_audit(receipt);
             return Err(BarrierError::RolloutFenceBlocked {
                 phase: format!("{}", state.current_phase),
                 reason: format!(
@@ -850,8 +839,7 @@ impl BarrierEngine {
                 "required_phase": format!("{required_phase}"),
             }),
         );
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -898,8 +886,7 @@ impl BarrierEngine {
                 "to_phase": format!("{next_phase}"),
             }),
         );
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -937,8 +924,7 @@ impl BarrierEngine {
                 "to_phase": "canary",
             }),
         );
-        self.audit_log.push(receipt.clone());
-        self.enforce_audit_log_capacity();
+        self.push_audit(receipt.clone());
         Ok(receipt)
     }
 
@@ -1006,11 +992,8 @@ impl BarrierEngine {
     // Internal helpers
     // -----------------------------------------------------------------------
 
-    fn enforce_audit_log_capacity(&mut self) {
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+    fn push_audit(&mut self, entry: BarrierAuditReceipt) {
+        push_bounded(&mut self.audit_log, entry, MAX_AUDIT_LOG_ENTRIES);
     }
 
     fn get_node_barrier_ids(&self, node_id: &str) -> Vec<String> {
@@ -1097,6 +1080,14 @@ impl BarrierPlan {
             receipts.push(engine.apply_barrier(b, trace_id)?);
         }
         Ok(receipts)
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

@@ -9,6 +9,15 @@ use serde::{Deserialize, Serialize};
 
 // ── Capacity limits ─────────────────────────────────────────────────
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_EVIDENCE: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
 
 // ── Schema ──────────────────────────────────────────────────────────
 pub const SCHEMA_VERSION: &str = "evidence-capsule-v1.0";
@@ -82,7 +91,7 @@ impl EvidenceCapsule {
         if self.sealed {
             return Err(CapsuleError::AlreadySealed);
         }
-        self.evidence.push(ev);
+        push_bounded(&mut self.evidence, ev, MAX_EVIDENCE);
         Ok(())
     }
 
@@ -272,14 +281,10 @@ impl VerifierRegistry {
             });
         }
 
-        self.audit_log.push(format!(
+        push_bounded(&mut self.audit_log, format!(
             "{}: capsule={} target={}",
             EVIDENCE_CAPSULE_EXPORTED, capsule.capsule_id, target
-        ));
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        ), MAX_AUDIT_LOG_ENTRIES);
 
         Ok(ExportManifest {
             capsule_id: capsule.capsule_id.clone(),

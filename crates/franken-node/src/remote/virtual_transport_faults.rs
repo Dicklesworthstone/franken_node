@@ -9,6 +9,14 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ── Constants ────────────────────────────────────────────────────────────────
 
 pub const SCHEMA_VERSION: &str = "vtf-v1.0";
@@ -313,15 +321,12 @@ impl VirtualTransportFaultHarness {
     }
 
     fn log_audit(&mut self, event_code: &str, trace_id: &str, detail: serde_json::Value) {
-        if self.audit_log.len() >= self.max_audit_log_entries {
-            let overflow = self.audit_log.len() + 1 - self.max_audit_log_entries;
-            self.audit_log.drain(0..overflow);
-        }
-        self.audit_log.push(VtfAuditRecord {
+        let cap = self.max_audit_log_entries;
+        push_bounded(&mut self.audit_log, VtfAuditRecord {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
             detail,
-        });
+        }, cap);
     }
 
     fn record_fault(
@@ -332,16 +337,13 @@ impl VirtualTransportFaultHarness {
     ) -> u64 {
         let id = self.next_fault_id;
         self.next_fault_id = self.next_fault_id.saturating_add(1);
-        if self.fault_log.len() >= self.max_fault_log_entries {
-            let overflow = self.fault_log.len() + 1 - self.max_fault_log_entries;
-            self.fault_log.drain(0..overflow);
-        }
-        self.fault_log.push(FaultEvent {
+        let cap = self.max_fault_log_entries;
+        push_bounded(&mut self.fault_log, FaultEvent {
             fault_id: id,
             fault_class: fault_class.to_string(),
             message_id,
             details,
-        });
+        }, cap);
         id
     }
 

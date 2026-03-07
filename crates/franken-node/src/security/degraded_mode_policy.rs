@@ -11,6 +11,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_TRIGGER_CONDITIONS: usize = 4096;
+const MAX_MANDATORY_AUDIT_EVENTS: usize = 4096;
+const MAX_AUTO_RECOVERY_CRITERIA: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
 
 pub const DEGRADED_MODE_ENTERED: &str = "DEGRADED_MODE_ENTERED";
 pub const DEGRADED_MODE_EXITED: &str = "DEGRADED_MODE_EXITED";
@@ -56,7 +67,7 @@ impl DegradedModePolicy {
 
     #[must_use]
     pub fn with_trigger(mut self, trigger: TriggerCondition) -> Self {
-        self.trigger_conditions.push(trigger);
+        push_bounded(&mut self.trigger_conditions, trigger, MAX_TRIGGER_CONDITIONS);
         self
     }
 
@@ -74,13 +85,13 @@ impl DegradedModePolicy {
 
     #[must_use]
     pub fn with_mandatory_audit_event(mut self, spec: AuditEventSpec) -> Self {
-        self.mandatory_audit_events.push(spec);
+        push_bounded(&mut self.mandatory_audit_events, spec, MAX_MANDATORY_AUDIT_EVENTS);
         self
     }
 
     #[must_use]
     pub fn with_recovery_criterion(mut self, criterion: RecoveryCriterion) -> Self {
-        self.auto_recovery_criteria.push(criterion);
+        push_bounded(&mut self.auto_recovery_criteria, criterion, MAX_AUTO_RECOVERY_CRITERIA);
         self
     }
 
@@ -369,7 +380,7 @@ impl DegradedModePolicyEngine {
         let mode_name = self.policy.mode_name.clone();
         let denied_actions = self.policy.sorted_denied_actions();
 
-        self.audit_log.push(DegradedModeAuditEvent::TrustInputStale(
+        self.push_audit(DegradedModeAuditEvent::TrustInputStale(
             TrustInputStateEvent {
                 timestamp_secs: now_secs,
                 input_label: trigger.label(),
@@ -377,18 +388,16 @@ impl DegradedModePolicyEngine {
                 trace_id: trace_id.clone(),
             },
         ));
-        self.audit_log
-            .push(DegradedModeAuditEvent::DegradedModeEntered(
-                DegradedModeEnteredEvent {
-                    timestamp_secs: now_secs,
-                    mode_name,
-                    triggering_condition: trigger.label(),
-                    active_policy_version: active_policy_version.clone(),
-                    denied_actions,
-                    trace_id: trace_id.clone(),
-                },
-            ));
-        self.trim_audit_log();
+        self.push_audit(DegradedModeAuditEvent::DegradedModeEntered(
+            DegradedModeEnteredEvent {
+                timestamp_secs: now_secs,
+                mode_name,
+                triggering_condition: trigger.label(),
+                active_policy_version: active_policy_version.clone(),
+                denied_actions,
+                trace_id: trace_id.clone(),
+            },
+        ));
 
         self.state = DegradedModeState::Degraded;
         self.context = Some(DegradedContext {
@@ -432,18 +441,16 @@ impl DegradedModePolicyEngine {
         };
 
         if !matches!(self.state, DegradedModeState::Normal) {
-            self.audit_log
-                .push(DegradedModeAuditEvent::DegradedModeActionAudit(
-                    DegradedModeActionAudit {
-                        timestamp_secs: now_secs,
-                        action_name: action_name.to_string(),
-                        actor: actor.to_string(),
-                        permitted,
-                        denial_reason: denial_reason.clone(),
-                        trace_id: trace_id.to_string(),
-                    },
-                ));
-            self.trim_audit_log();
+            self.push_audit(DegradedModeAuditEvent::DegradedModeActionAudit(
+                DegradedModeActionAudit {
+                    timestamp_secs: now_secs,
+                    action_name: action_name.to_string(),
+                    actor: actor.to_string(),
+                    permitted,
+                    denial_reason: denial_reason.clone(),
+                    trace_id: trace_id.to_string(),
+                },
+            ));
         }
 
         ActionDecision {
@@ -458,6 +465,11 @@ impl DegradedModePolicyEngine {
             return;
         }
 
+        // Collect events and updates first to avoid borrow checker conflict
+        // (iterating &self.policy while calling &mut self).
+        let mut pending_events: Vec<DegradedModeAuditEvent> = Vec::new();
+        let mut pending_updates: Vec<(String, u64)> = Vec::new();
+
         for spec in &self.policy.mandatory_audit_events {
             let interval = spec
                 .interval_secs
@@ -469,31 +481,34 @@ impl DegradedModePolicyEngine {
             let expected = last.saturating_add(interval);
 
             if now_secs >= expected.saturating_add(interval) {
-                self.audit_log
-                    .push(DegradedModeAuditEvent::AuditEventMissed(
-                        AuditEventMissedEvent {
-                            timestamp_secs: now_secs,
-                            event_code: spec.event_code.clone(),
-                            expected_timestamp_secs: expected,
-                            trace_id: trace_id.to_string(),
-                        },
-                    ));
+                pending_events.push(DegradedModeAuditEvent::AuditEventMissed(
+                    AuditEventMissedEvent {
+                        timestamp_secs: now_secs,
+                        event_code: spec.event_code.clone(),
+                        expected_timestamp_secs: expected,
+                        trace_id: trace_id.to_string(),
+                    },
+                ));
             }
 
             if now_secs >= expected {
-                self.audit_log
-                    .push(DegradedModeAuditEvent::MandatoryAuditTick(
-                        MandatoryAuditTickEvent {
-                            timestamp_secs: now_secs,
-                            event_code: spec.event_code.clone(),
-                            trace_id: trace_id.to_string(),
-                        },
-                    ));
-                self.mandatory_event_last_emitted
-                    .insert(spec.event_code.clone(), now_secs);
+                pending_events.push(DegradedModeAuditEvent::MandatoryAuditTick(
+                    MandatoryAuditTickEvent {
+                        timestamp_secs: now_secs,
+                        event_code: spec.event_code.clone(),
+                        trace_id: trace_id.to_string(),
+                    },
+                ));
+                pending_updates.push((spec.event_code.clone(), now_secs));
             }
         }
-        self.trim_audit_log();
+
+        for event in pending_events {
+            self.push_audit(event);
+        }
+        for (code, ts) in pending_updates {
+            self.mandatory_event_last_emitted.insert(code, ts);
+        }
     }
 
     pub fn maybe_escalate_to_suspended(&mut self, now_secs: u64, trace_id: &str) {
@@ -510,20 +525,17 @@ impl DegradedModePolicyEngine {
         }
 
         self.state = DegradedModeState::Suspended;
-        self.audit_log
-            .push(DegradedModeAuditEvent::DegradedModeSuspended(
-                DegradedModeSuspendedEvent {
-                    timestamp_secs: now_secs,
-                    mode_name: self.policy.mode_name.clone(),
-                    active_policy_version: context.active_policy_version.clone(),
-                    reason: format!(
-                        "degraded_duration_exceeded:{}s",
-                        self.policy.max_degraded_duration_secs
-                    ),
-                    trace_id: trace_id.to_string(),
-                },
-            ));
-        self.trim_audit_log();
+        let mode_name = self.policy.mode_name.clone();
+        let max_dur = self.policy.max_degraded_duration_secs;
+        self.push_audit(DegradedModeAuditEvent::DegradedModeSuspended(
+            DegradedModeSuspendedEvent {
+                timestamp_secs: now_secs,
+                mode_name,
+                active_policy_version: context.active_policy_version.clone(),
+                reason: format!("degraded_duration_exceeded:{}s", max_dur),
+                trace_id: trace_id.to_string(),
+            },
+        ));
     }
 
     pub fn observe_recovery(&mut self, status: &RecoveryStatus, now_secs: u64, trace_id: &str) {
@@ -542,16 +554,16 @@ impl DegradedModePolicyEngine {
 
         if context.stabilization_started_at_secs.is_none() {
             context.stabilization_started_at_secs = Some(now_secs);
-            self.audit_log
-                .push(DegradedModeAuditEvent::TrustInputRefreshed(
-                    TrustInputStateEvent {
-                        timestamp_secs: now_secs,
-                        input_label: context.trigger_label.clone(),
-                        mode_name: self.policy.mode_name.clone(),
-                        trace_id: trace_id.to_string(),
-                    },
-                ));
-            self.trim_audit_log();
+            let input_label = context.trigger_label.clone();
+            let mode_name = self.policy.mode_name.clone();
+            self.push_audit(DegradedModeAuditEvent::TrustInputRefreshed(
+                TrustInputStateEvent {
+                    timestamp_secs: now_secs,
+                    input_label,
+                    mode_name,
+                    trace_id: trace_id.to_string(),
+                },
+            ));
             return;
         }
 
@@ -561,16 +573,16 @@ impl DegradedModePolicyEngine {
             return;
         }
 
-        self.audit_log
-            .push(DegradedModeAuditEvent::DegradedModeExited(
-                DegradedModeExitedEvent {
-                    timestamp_secs: now_secs,
-                    mode_name: self.policy.mode_name.clone(),
-                    active_policy_version: context.active_policy_version.clone(),
-                    trace_id: trace_id.to_string(),
-                },
-            ));
-        self.trim_audit_log();
+        let mode_name = self.policy.mode_name.clone();
+        let apv = context.active_policy_version.clone();
+        self.push_audit(DegradedModeAuditEvent::DegradedModeExited(
+            DegradedModeExitedEvent {
+                timestamp_secs: now_secs,
+                mode_name,
+                active_policy_version: apv,
+                trace_id: trace_id.to_string(),
+            },
+        ));
         self.state = DegradedModeState::Normal;
         self.context = None;
         self.mandatory_event_last_emitted.clear();
@@ -591,11 +603,8 @@ impl DegradedModePolicyEngine {
         }
     }
 
-    fn trim_audit_log(&mut self) {
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+    fn push_audit(&mut self, event: DegradedModeAuditEvent) {
+        push_bounded(&mut self.audit_log, event, MAX_AUDIT_LOG_ENTRIES);
     }
 
     fn all_recovery_criteria_satisfied(&self, status: &RecoveryStatus) -> bool {

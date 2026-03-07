@@ -25,6 +25,16 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
+const MAX_EVENT_LOG_ENTRIES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -776,12 +786,12 @@ impl RuntimeOracle {
     // -----------------------------------------------------------------------
 
     fn emit_event(&mut self, event_code: &str, message: &str, details: BTreeMap<String, String>) {
-        self.event_log.push(OracleEvent {
+        push_bounded(&mut self.event_log, OracleEvent {
             event_code: event_code.to_string(),
             trace_id: self.trace_id.clone(),
             message: message.to_string(),
             details,
-        });
+        }, MAX_EVENT_LOG_ENTRIES);
     }
 }
 

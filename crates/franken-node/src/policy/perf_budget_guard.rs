@@ -248,6 +248,14 @@ impl fmt::Display for PerfBudgetError {
 /// Maximum events before oldest-first eviction.
 const MAX_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 /// Guard that enforces performance budgets on control-plane hot paths.
 pub struct PerformanceBudgetGuard {
     policy: BudgetPolicy,
@@ -428,16 +436,13 @@ impl PerformanceBudgetGuard {
     }
 
     fn emit(&mut self, code: &str, hot_path: &str, detail: &str) {
-        self.events.push(PerfEvent {
+        let trace_id = self.trace_id.clone();
+        push_bounded(&mut self.events, PerfEvent {
             code: code.to_string(),
             hot_path: hot_path.to_string(),
             detail: detail.to_string(),
-            trace_id: self.trace_id.clone(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+            trace_id,
+        }, MAX_EVENTS);
     }
 
     fn parse_hot_path(&self, label: &str) -> HotPath {
@@ -681,16 +686,13 @@ impl TimingCollector {
     }
 
     fn emit(&mut self, code: &str, hot_path: &str, detail: &str) {
-        self.events.push(PerfEvent {
+        let trace_id = self.trace_id.clone();
+        push_bounded(&mut self.events, PerfEvent {
             code: code.to_string(),
             hot_path: hot_path.to_string(),
             detail: detail.to_string(),
-            trace_id: self.trace_id.clone(),
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+            trace_id,
+        }, MAX_EVENTS);
     }
 }
 

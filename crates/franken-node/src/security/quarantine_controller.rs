@@ -168,11 +168,7 @@ impl QuarantineController {
     ) -> Result<(QuarantineAction, f64), String> {
         // Sign the evidence entry
         let signed = self.sign_evidence(&event)?;
-        self.evidence_log.push(signed);
-        if self.evidence_log.len() > MAX_EVIDENCE_LOG_ENTRIES {
-            let overflow = self.evidence_log.len() - MAX_EVIDENCE_LOG_ENTRIES;
-            self.evidence_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.evidence_log, signed, MAX_EVIDENCE_LOG_ENTRIES);
 
         // Ingest into graph
         let (action, posterior) = self.graph.ingest_evidence(&event)?;
@@ -187,11 +183,7 @@ impl QuarantineController {
                 timestamp: event.timestamp,
                 event_code: ADV_005_ACTION_TRIGGERED.to_string(),
             };
-            self.action_log.push(record);
-            if self.action_log.len() > MAX_ACTION_LOG_ENTRIES {
-                let overflow = self.action_log.len() - MAX_ACTION_LOG_ENTRIES;
-                self.action_log.drain(0..overflow);
-            }
+            push_bounded(&mut self.action_log, record, MAX_ACTION_LOG_ENTRIES);
         }
 
         Ok((action, posterior))
@@ -286,6 +278,14 @@ impl QuarantineController {
             Err(_) => return false,
         };
         crate::security::constant_time::ct_eq(&expected, &entry.signature)
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

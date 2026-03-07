@@ -14,6 +14,8 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+const MAX_DECISIONS: usize = 4096;
+
 // ── Event codes ────────────────────────────────────────────────────
 
 pub mod event_codes {
@@ -457,7 +459,7 @@ impl IncidentBundleStore {
             });
         }
 
-        self.decisions.push(RetentionDecision {
+        push_bounded(&mut self.decisions, RetentionDecision {
             bundle_id: bundle.bundle_id.clone(),
             action: "create".into(),
             old_tier: None,
@@ -468,7 +470,7 @@ impl IncidentBundleStore {
             ),
             timestamp: now,
             event_code: event_codes::IBR_001.into(),
-        });
+        }, MAX_DECISIONS);
 
         self.total_bytes = self.total_bytes.saturating_add(bundle.size_bytes);
         self.bundles.insert(bundle.bundle_id.clone(), bundle);
@@ -561,7 +563,7 @@ impl IncidentBundleStore {
             }
         };
 
-        self.decisions.push(RetentionDecision {
+        push_bounded(&mut self.decisions, RetentionDecision {
             bundle_id: bundle_id.into(),
             action: "export".into(),
             old_tier: None,
@@ -569,7 +571,7 @@ impl IncidentBundleStore {
             reason: format!("exported as {} by {}", format, requester),
             timestamp: now,
             event_code: event_codes::IBR_003.into(),
-        });
+        }, MAX_DECISIONS);
 
         Ok(output)
     }
@@ -606,7 +608,7 @@ impl IncidentBundleStore {
                 };
                 bundle.retention_tier = tier;
                 bundle.last_tier_change_epoch = now;
-                self.decisions.push(decision.clone());
+                push_bounded(&mut self.decisions, decision.clone(), MAX_DECISIONS);
                 transitions.push(decision);
             }
         }
@@ -644,7 +646,7 @@ impl IncidentBundleStore {
                 })?;
         self.total_bytes = self.total_bytes.saturating_sub(removed.size_bytes);
 
-        self.decisions.push(RetentionDecision {
+        push_bounded(&mut self.decisions, RetentionDecision {
             bundle_id: bundle_id.into(),
             action: "delete".into(),
             old_tier: Some(removed.retention_tier.label().into()),
@@ -656,7 +658,7 @@ impl IncidentBundleStore {
             },
             timestamp: now,
             event_code: event_codes::IBR_004.into(),
-        });
+        }, MAX_DECISIONS);
 
         Ok(())
     }
@@ -683,7 +685,7 @@ impl IncidentBundleStore {
                 timestamp: now,
                 event_code: event_codes::IBR_004.into(),
             };
-            self.decisions.push(cleanup_decision.clone());
+            push_bounded(&mut self.decisions, cleanup_decision.clone(), MAX_DECISIONS);
             decisions.push(cleanup_decision);
         }
 
@@ -706,6 +708,14 @@ impl IncidentBundleStore {
             .values()
             .filter(|b| b.retention_tier == tier)
             .collect()
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

@@ -37,6 +37,9 @@ pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 10_000;
 /// Max number of retained barrier audit history entries.
 const MAX_BARRIER_HISTORY: usize = 4096;
 
+/// Max number of transcript entries per barrier before oldest-first eviction.
+const MAX_TRANSCRIPT_ENTRIES: usize = 4096;
+
 // ---- Event codes ----
 
 pub mod event_codes {
@@ -370,13 +373,13 @@ impl BarrierTranscript {
     }
 
     fn record(&mut self, event_code: &str, detail: &str, timestamp_ms: u64, trace_id: &str) {
-        self.entries.push(TranscriptEntry {
+        push_bounded(&mut self.entries, TranscriptEntry {
             event_code: event_code.to_string(),
             barrier_id: self.barrier_id.clone(),
             timestamp_ms,
             detail: detail.to_string(),
             trace_id: trace_id.to_string(),
-        });
+        }, MAX_TRANSCRIPT_ENTRIES);
     }
 
     /// Export transcript as JSONL string.
@@ -891,6 +894,14 @@ impl EpochTransitionBarrier {
 impl Default for EpochTransitionBarrier {
     fn default() -> Self {
         Self::new(BarrierConfig::default())
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 

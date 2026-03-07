@@ -204,11 +204,7 @@ impl ControlChannel {
     /// Append an audit entry with deterministic oldest-first eviction once
     /// the bounded capacity is reached.
     fn push_audit_entry(&mut self, entry: ChannelAuditEntry) {
-        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() + 1 - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
-        self.audit_log.push(entry);
+        push_bounded(&mut self.audit_log, entry, MAX_AUDIT_LOG_ENTRIES);
     }
 
     /// Process a message through the authenticated control channel.
@@ -346,6 +342,15 @@ impl ControlChannel {
     pub fn is_open(&self) -> bool {
         self.open
     }
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 #[cfg(test)]

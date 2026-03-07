@@ -16,6 +16,16 @@ use std::fmt;
 
 use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
 
+const MAX_FIELDS: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Stable event codes for structured logging.
 pub mod event_codes {
     pub const REPLAY_START: &str = "EVD-REPLAY-001";
@@ -138,11 +148,11 @@ impl ReplayDiff {
         expected: impl Into<String>,
         actual: impl Into<String>,
     ) {
-        self.fields.push(DiffField {
+        push_bounded(&mut self.fields, DiffField {
             field_name: field_name.into(),
             expected: expected.into(),
             actual: actual.into(),
-        });
+        }, MAX_FIELDS);
     }
 
     pub fn is_empty(&self) -> bool {

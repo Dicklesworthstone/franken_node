@@ -543,15 +543,12 @@ impl DurabilityController {
     // -- Events --------------------------------------------------------------
 
     fn emit(&mut self, code: &str, mode: &DurabilityMode, detail: String) {
-        self.events.push(DurabilityEvent {
+        let mode_label = mode.label();
+        push_bounded(&mut self.events, DurabilityEvent {
             code: code.to_string(),
-            mode: mode.label(),
+            mode: mode_label,
             detail,
-        });
-        if self.events.len() > MAX_EVENTS {
-            let overflow = self.events.len() - MAX_EVENTS;
-            self.events.drain(0..overflow);
-        }
+        }, MAX_EVENTS);
     }
 
     /// All events emitted by this controller.
@@ -563,6 +560,15 @@ impl DurabilityController {
     pub fn take_events(&mut self) -> Vec<DurabilityEvent> {
         std::mem::take(&mut self.events)
     }
+}
+
+/// Push an item to a bounded Vec, evicting oldest entries if at capacity.
+fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if vec.len() >= max {
+        let overflow = vec.len() + 1 - max;
+        vec.drain(0..overflow);
+    }
+    vec.push(item);
 }
 
 // ===========================================================================

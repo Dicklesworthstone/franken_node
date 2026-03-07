@@ -20,6 +20,14 @@ const MAX_WINDOWS_SEEN: usize = 4096;
 /// Maximum tracked jobs before oldest are evicted.
 const MAX_JOBS: usize = 2048;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 pub mod event_codes {
     pub const VEF_SCHED_001_WINDOW_SELECTED: &str = "VEF-SCHED-001";
     pub const VEF_SCHED_002_JOB_DISPATCHED: &str = "VEF-SCHED-002";
@@ -227,11 +235,7 @@ impl VefProofScheduler {
     }
 
     fn push_event(&mut self, event: SchedulerEvent) {
-        if self.events.len() >= MAX_SCHEDULER_EVENTS {
-            let overflow = self.events.len() + 1 - MAX_SCHEDULER_EVENTS;
-            self.events.drain(0..overflow);
-        }
-        self.events.push(event);
+        push_bounded(&mut self.events, event, MAX_SCHEDULER_EVENTS);
     }
 
     pub fn jobs(&self) -> &BTreeMap<String, ProofJob> {

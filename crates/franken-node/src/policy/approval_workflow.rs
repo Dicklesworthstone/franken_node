@@ -200,6 +200,16 @@ pub struct ChangeEvidencePackage {
     pub proposal_id: String,
 }
 
+const MAX_AUDIT_LEDGER_ENTRIES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ── Policy change engine ─────────────────────────────────────────────────────
 
 /// Engine managing the policy change approval workflow.
@@ -682,7 +692,7 @@ impl PolicyChangeEngine {
         };
 
         entry.entry_hash = compute_entry_hash(&entry);
-        self.audit_ledger.push(entry);
+        push_bounded(&mut self.audit_ledger, entry, MAX_AUDIT_LEDGER_ENTRIES);
     }
 }
 

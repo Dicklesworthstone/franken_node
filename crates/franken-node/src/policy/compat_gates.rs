@@ -257,7 +257,7 @@ impl ShimRegistry {
         }
         let idx = self.entries.len();
         self.index.insert(entry.shim_id.clone(), idx);
-        self.entries.push(entry);
+        push_bounded(&mut self.entries, entry, MAX_ENTRIES);
         Ok(())
     }
 
@@ -530,6 +530,15 @@ impl std::error::Error for CompatGateError {}
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 /// Maximum receipts before oldest-first eviction.
 const MAX_RECEIPTS: usize = 4096;
+const MAX_ENTRIES: usize = 4096;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() + 1 - cap;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
 
 /// The compatibility gate evaluator. Central entry point for gate checks,
 /// mode queries, and shim registry queries.
@@ -603,11 +612,7 @@ impl CompatGateEvaluator {
         };
 
         self.scopes.insert(scope_id.to_string(), scope_config);
-        self.receipts.push(receipt.clone());
-        if self.receipts.len() > MAX_RECEIPTS {
-            let overflow = self.receipts.len() - MAX_RECEIPTS;
-            self.receipts.drain(0..overflow);
-        }
+        push_bounded(&mut self.receipts, receipt.clone(), MAX_RECEIPTS);
         Ok(receipt)
     }
 
@@ -723,11 +728,7 @@ impl CompatGateEvaluator {
             event_code: decision.event_code().to_string(),
         };
 
-        self.audit_log.push(result.clone());
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_log, result.clone(), MAX_AUDIT_LOG_ENTRIES);
         Ok(result)
     }
 

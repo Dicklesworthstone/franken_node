@@ -661,11 +661,7 @@ impl BpetEconomicEngine {
     }
 
     fn log(&mut self, record: BpetAuditRecord) {
-        self.audit_log.push(record);
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
+        push_bounded(&mut self.audit_log, record, MAX_AUDIT_LOG_ENTRIES);
     }
 }
 
@@ -736,6 +732,14 @@ pub fn default_motif_library() -> Vec<CompromiseMotif> {
             typical_time_to_compromise_days: 365.0,
         },
     ]
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
 }
 
 // ---------------------------------------------------------------------------

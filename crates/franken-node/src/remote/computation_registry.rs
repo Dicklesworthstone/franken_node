@@ -21,6 +21,14 @@ pub const CR_DISPATCH_GATED: &str = "CR_DISPATCH_GATED";
 /// Maximum number of audit events before oldest-first eviction.
 const MAX_AUDIT_EVENTS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // Stable error codes required by the contract.
 pub const ERR_UNKNOWN_COMPUTATION: &str = "ERR_UNKNOWN_COMPUTATION";
 pub const ERR_MALFORMED_COMPUTATION_NAME: &str = "ERR_MALFORMED_COMPUTATION_NAME";
@@ -369,17 +377,13 @@ impl ComputationRegistry {
         computation_name: Option<String>,
         detail: String,
     ) {
-        self.audit_events.push(RegistryAuditEvent {
+        push_bounded(&mut self.audit_events, RegistryAuditEvent {
             event_code: event_code.to_string(),
             trace_id: trace_id.to_string(),
             registry_version: self.registry_version,
             computation_name,
             detail,
-        });
-        if self.audit_events.len() > MAX_AUDIT_EVENTS {
-            let overflow = self.audit_events.len() - MAX_AUDIT_EVENTS;
-            self.audit_events.drain(0..overflow);
-        }
+        }, MAX_AUDIT_EVENTS);
     }
 }
 

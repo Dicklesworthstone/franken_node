@@ -22,6 +22,9 @@ use sha2::Digest;
 
 use crate::control_plane::marker_stream::MarkerStream;
 
+/// Maximum rollback proofs before oldest-first eviction.
+const MAX_PROOFS: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -555,7 +558,7 @@ impl RollbackDetector {
                     trace_id: format!("rbd-{}-{}", last.epoch, sv.epoch),
                     detection_result: DetectionResult::RollbackDetected,
                 };
-                self.proofs.push(proof);
+                push_bounded(&mut self.proofs, proof, MAX_PROOFS);
                 return Err(ForkDetectionError::RfdRollbackDetected {
                     epoch: sv.epoch,
                     expected_parent: last.state_hash.clone(),
@@ -573,7 +576,7 @@ impl RollbackDetector {
                     trace_id: format!("rbd-{}-{}", last.epoch, sv.epoch),
                     detection_result: DetectionResult::RollbackDetected,
                 };
-                self.proofs.push(proof);
+                push_bounded(&mut self.proofs, proof, MAX_PROOFS);
                 return Err(ForkDetectionError::RfdRollbackDetected {
                     epoch: sv.epoch,
                     expected_parent: last.state_hash.clone(),
@@ -647,6 +650,14 @@ impl MarkerProofVerifier {
         }
 
         Ok(())
+    }
+}
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
     }
 }
 
