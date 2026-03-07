@@ -139,22 +139,31 @@ fn compute_digest(
     extensions: &BTreeSet<String>,
     policy_epoch: u64,
     anchor_fps: &BTreeSet<String>,
+    revocations: &BTreeSet<String>,
 ) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"trust_fabric_v1:");
+    hasher.update((trust_cards.len() as u64).to_le_bytes());
     for card in trust_cards {
+        hasher.update((card.len() as u64).to_le_bytes());
         hasher.update(card.as_bytes());
-        hasher.update(b"\x00");
     }
     hasher.update(revocation_ver.to_le_bytes());
+    hasher.update((extensions.len() as u64).to_le_bytes());
     for ext in extensions {
+        hasher.update((ext.len() as u64).to_le_bytes());
         hasher.update(ext.as_bytes());
-        hasher.update(b"\x00");
     }
     hasher.update(policy_epoch.to_le_bytes());
+    hasher.update((anchor_fps.len() as u64).to_le_bytes());
     for fp in anchor_fps {
+        hasher.update((fp.len() as u64).to_le_bytes());
         hasher.update(fp.as_bytes());
-        hasher.update(b"\x00");
+    }
+    hasher.update((revocations.len() as u64).to_le_bytes());
+    for rev in revocations {
+        hasher.update((rev.len() as u64).to_le_bytes());
+        hasher.update(rev.as_bytes());
     }
     hasher.finalize().into()
 }
@@ -201,6 +210,7 @@ impl TrustStateVector {
             &self.extensions,
             self.policy_epoch,
             &self.anchor_fps,
+            &self.revocations,
         );
     }
 

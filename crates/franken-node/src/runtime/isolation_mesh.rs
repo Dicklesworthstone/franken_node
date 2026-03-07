@@ -22,6 +22,7 @@ use std::fmt;
 pub const SCHEMA_VERSION: &str = "isolation-mesh-v1.0";
 
 const MAX_EVENTS: usize = 4096;
+const MAX_ELEVATION_HISTORY: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -645,13 +646,13 @@ impl IsolationMesh {
                     .ok_or_else(|| MeshError::UnknownWorkload {
                         workload_id: workload_id.to_string(),
                     })?;
-            placement.elevation_history.push(ElevationRecord {
+            push_bounded(&mut placement.elevation_history, ElevationRecord {
                 from_rail_id: old_rail_id,
                 from_level: current_level,
                 to_rail_id: target_rail_id.to_string(),
                 to_level: target_level,
                 at_ms: now_ms,
-            });
+            }, MAX_ELEVATION_HISTORY);
             placement.current_rail_id = target_rail_id.to_string();
             placement.current_level = target_level;
             placement.clone()
