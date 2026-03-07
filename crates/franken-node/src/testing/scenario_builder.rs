@@ -75,6 +75,9 @@ pub const INV_SB_IMMUTABLE: &str = "INV-SB-IMMUTABLE";
 pub const MIN_NODES: usize = 2;
 /// Maximum number of virtual nodes in a scenario.
 pub const MAX_NODES: usize = 10;
+/// Memory-safety capacity for the nodes Vec (must be > MAX_NODES to allow
+/// the `build()` validation to detect over-limit and return TooManyNodes).
+const MAX_NODES_CAP: usize = 4096;
 const MAX_ASSERTIONS: usize = 4096;
 const MAX_LINKS: usize = 4096;
 
@@ -456,7 +459,7 @@ impl ScenarioBuilder {
             id,
             name: name.into(),
             role,
-        }, MAX_NODES);
+        }, MAX_NODES_CAP);
         Ok(self)
     }
 

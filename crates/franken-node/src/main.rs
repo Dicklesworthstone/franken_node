@@ -4,7 +4,6 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use frankenengine_node::{
     api::{
-        self,
         fleet_quarantine::{
             FleetActionResult, FleetStatus, ReleaseRequest,
             handle_reconcile as handle_fleet_reconcile, handle_release as handle_fleet_release,
@@ -26,7 +25,6 @@ use frankenengine_node::{
     migration,
     ops,
     policy::{
-        self,
         bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
         decision_engine::{DecisionEngine, DecisionOutcome, DecisionReason},
         guardrail_monitor::{
@@ -40,7 +38,6 @@ use frankenengine_node::{
     },
     runtime,
     security::{
-        self,
         decision_receipt::{
             Decision, Receipt, ReceiptQuery, append_signed_receipt, demo_signing_key,
             export_receipts_to_path, write_receipts_markdown,
