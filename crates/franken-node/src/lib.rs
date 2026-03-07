@@ -21,6 +21,7 @@ pub mod observability;
 pub mod ops;
 #[cfg(feature = "extended-surfaces")]
 pub mod perf;
+#[cfg(feature = "extended-surfaces")]
 pub mod policy;
 #[cfg(feature = "extended-surfaces")]
 pub mod registry;

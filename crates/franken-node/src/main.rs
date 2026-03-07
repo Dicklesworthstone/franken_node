@@ -1,12 +1,23 @@
 #![forbid(unsafe_code)]
 
 mod cli;
+mod policy;
 
 use crate::cli::{
     BenchCommand, Cli, Command, FleetCommand, IncidentCommand, MigrateCommand, RegistryCommand,
     RemoteCapCommand, RemoteCapIssueArgs, TrustCardCommand, TrustCommand, VerifyCommand,
     VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs, VerifyModuleArgs,
     VerifyReleaseArgs,
+};
+use crate::policy::{
+    bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
+    decision_engine::{DecisionEngine, DecisionOutcome, DecisionReason},
+    guardrail_monitor::{
+        GuardrailCertificate, GuardrailFinding, GuardrailMonitorSet, GuardrailVerdict,
+        MemoryTailRiskTelemetry, ReliabilityTelemetry, SystemState,
+    },
+    hardening_state_machine::HardeningLevel,
+    policy_explainer::{PolicyExplainer, PolicyExplanation, WordingValidation, validate_wording},
 };
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -24,20 +35,7 @@ use frankenengine_node::{
         },
     },
     config::{self, CliOverrides, Profile},
-    ops,
-    policy::{
-        bayesian_diagnostics::{BayesianDiagnostics, CandidateRef, Observation},
-        decision_engine::{DecisionEngine, DecisionOutcome, DecisionReason},
-        guardrail_monitor::{
-            GuardrailCertificate, GuardrailFinding, GuardrailMonitorSet, GuardrailVerdict,
-            MemoryTailRiskTelemetry, ReliabilityTelemetry, SystemState,
-        },
-        hardening_state_machine::HardeningLevel,
-        policy_explainer::{
-            PolicyExplainer, PolicyExplanation, WordingValidation, validate_wording,
-        },
-    },
-    runtime,
+    ops, runtime,
     security::{
         decision_receipt::{
             Decision, Receipt, ReceiptQuery, append_signed_receipt, demo_signing_key,
@@ -75,6 +73,7 @@ use frankenengine_node::{
         },
     },
 };
+pub use frankenengine_node::{observability, security};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
