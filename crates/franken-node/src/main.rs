@@ -72,7 +72,7 @@ use frankenengine_node::{
     },
 };
 use crate::cli::{
-    self, BenchCommand, Cli, Command, FleetCommand, IncidentCommand, MigrateCommand,
+    BenchCommand, Cli, Command, FleetCommand, IncidentCommand, MigrateCommand,
     RegistryCommand, RemoteCapCommand, RemoteCapIssueArgs, TrustCardCommand, TrustCommand,
     VerifyCommand, VerifyCompatibilityArgs, VerifyCorpusArgs, VerifyMigrationArgs,
     VerifyModuleArgs, VerifyReleaseArgs,
