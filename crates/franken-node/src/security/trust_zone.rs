@@ -330,6 +330,11 @@ impl ZoneSegmentationEngine {
         self.tenant_bindings.retain(|_, b| b.zone_id != zone_id);
         // Remove resource mappings for this zone.
         self.resource_zone_map.retain(|_, z| z != zone_id);
+        // Remove key-zone bindings referencing this zone.
+        for zones in self.key_zone_bindings.values_mut() {
+            zones.retain(|z| z != zone_id);
+        }
+        self.key_zone_bindings.retain(|_, zones| !zones.is_empty());
         Ok(())
     }
 
@@ -965,6 +970,18 @@ mod tests {
         engine.bind_tenant(make_binding("t1", "staging")).unwrap();
         engine.delete_zone("staging").unwrap();
         assert!(engine.get_tenant_binding("t1").is_none());
+    }
+
+    #[test]
+    fn delete_zone_removes_key_zone_bindings() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
+            .unwrap();
+        engine.bind_key_to_zone("key-1", "staging");
+        assert!(engine.is_key_bound_to_zone("key-1", "staging"));
+        engine.delete_zone("staging").unwrap();
+        assert!(!engine.is_key_bound_to_zone("key-1", "staging"));
     }
 
     // ── Engine: tenant binding ────────────────────────────────────────────
