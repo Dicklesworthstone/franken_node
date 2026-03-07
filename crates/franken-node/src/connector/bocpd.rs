@@ -220,13 +220,17 @@ impl GaussianModel {
 
 /// Student-t PDF.
 fn student_t_pdf(x: f64, mu: f64, sigma_sq: f64, nu: f64) -> f64 {
+    if sigma_sq <= 0.0 || nu <= 0.0 {
+        return 1e-300;
+    }
     let z = (x - mu) / sigma_sq.sqrt();
     let log_coeff = ln_gamma((nu + 1.0) / 2.0)
         - ln_gamma(nu / 2.0)
         - 0.5 * (nu * PI).ln()
         - 0.5 * sigma_sq.ln();
     let log_body = -((nu + 1.0) / 2.0) * (1.0 + z * z / nu).ln();
-    (log_coeff + log_body).exp()
+    let result = (log_coeff + log_body).exp();
+    if result.is_finite() { result } else { 1e-300 }
 }
 
 /// Simple ln(Gamma) via Stirling approximation for moderate values.
@@ -313,9 +317,13 @@ impl PoissonModel {
 }
 
 fn neg_binomial_pmf(k: u64, r: f64, p: f64) -> f64 {
+    if p <= 0.0 || p >= 1.0 || r <= 0.0 {
+        return 1e-300;
+    }
     let log_coeff = ln_gamma(k as f64 + r) - ln_gamma(k as f64 + 1.0) - ln_gamma(r);
     let log_prob = r * p.ln() + (k as f64) * (1.0 - p).ln();
-    (log_coeff + log_prob).exp().max(1e-300)
+    let result = (log_coeff + log_prob).exp().max(1e-300);
+    if result.is_finite() { result } else { 1e-300 }
 }
 
 /// Categorical (Dirichlet prior) model for discrete distributions.
@@ -359,7 +367,10 @@ impl CategoricalModel {
         if category >= self.k {
             return 1e-300;
         }
-        let total = stats.counts.iter().sum::<f64>() + self.alpha0 * self.k as f64;
+        let total = stats.counts.iter().copied().fold(0.0_f64, |a, b| a + b) + self.alpha0 * self.k as f64;
+        if total <= 0.0 {
+            return 1e-300;
+        }
         (stats.counts[category] + self.alpha0) / total
     }
 }

@@ -11,6 +11,7 @@ use crate::security::constant_time::ct_eq_bytes;
 
 const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
 const MAX_EVENTS: usize = 4096;
+const MAX_MISSING_SOURCES: usize = 256;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -402,7 +403,7 @@ impl RecommendationEngine {
     /// Mark a data source as unavailable (triggers degraded mode).
     pub fn mark_source_unavailable(&mut self, source: &str) {
         if !self.missing_sources.contains(&source.to_string()) {
-            self.missing_sources.push(source.into());
+            push_bounded(&mut self.missing_sources, source.into(), MAX_MISSING_SOURCES);
         }
         if !self.degraded {
             self.degraded = true;

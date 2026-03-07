@@ -631,7 +631,7 @@ impl ReproBundleExporter {
         let bundle = generate_repro_bundle(ctx);
         push_bounded(&mut self.bundles, bundle, MAX_BUNDLES);
         // After push_bounded, the last element is always the one we just pushed.
-        self.bundles.last().unwrap()
+        self.bundles.last().expect("push_bounded guarantees non-empty")
     }
 
     /// Get all exported bundles.

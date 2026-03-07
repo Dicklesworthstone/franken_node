@@ -9,6 +9,8 @@
 use sha2::{Digest, Sha256};
 
 const MAX_EVENTS: usize = 4096;
+const MAX_GATE_RESULTS: usize = 4096;
+const MAX_SCOREBOARD: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -342,7 +344,7 @@ impl VefClaimIntegration {
             reason,
         };
 
-        self.gate_results.push(result.clone());
+        push_bounded(&mut self.gate_results, result.clone(), MAX_GATE_RESULTS);
         result
     }
 
@@ -379,7 +381,7 @@ impl VefClaimIntegration {
             ),
         });
 
-        self.scoreboard.push(entry.clone());
+        push_bounded(&mut self.scoreboard, entry.clone(), MAX_SCOREBOARD);
         entry
     }
 

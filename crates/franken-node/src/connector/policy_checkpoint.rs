@@ -27,6 +27,7 @@ use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const MAX_EVENTS: usize = 4096;
+const MAX_CHECKPOINTS: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -354,7 +355,7 @@ impl PolicyCheckpointChain {
             checkpoint_hash: checkpoint_hash.clone(),
         };
 
-        self.checkpoints.push(checkpoint);
+        push_bounded(&mut self.checkpoints, checkpoint, MAX_CHECKPOINTS);
         self.head_hash = Some(checkpoint_hash);
         self.next_seq = sequence.saturating_add(1);
 
@@ -446,7 +447,7 @@ impl PolicyCheckpointChain {
         let epoch = checkpoint.epoch_id;
         let channel_label = checkpoint.channel.label();
 
-        self.checkpoints.push(checkpoint);
+        push_bounded(&mut self.checkpoints, checkpoint, MAX_CHECKPOINTS);
         self.head_hash = Some(hash);
         self.next_seq = seq.saturating_add(1);
 

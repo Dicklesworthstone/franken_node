@@ -466,7 +466,7 @@ impl Supervisor {
         }
 
         // Record restart timestamp.
-        self.restart_timestamps.push(now_ms);
+        push_bounded(&mut self.restart_timestamps, now_ms, MAX_EVENTS);
 
         // INV-SUP-STRATEGY-DETERMINISTIC: deterministic strategy application.
         let children_to_restart = match self.strategy {
