@@ -286,6 +286,18 @@ fn deterministic_hash(data: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Compute a signature by binding a verifier identity to a binding hash.
+/// Uses length-prefixed encoding to prevent delimiter-collision ambiguity.
+fn compute_verifier_signature(verifier_identity: &str, binding_hash: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"connector_verifier_sdk_sig_v1:");
+    hasher.update((verifier_identity.len() as u64).to_le_bytes());
+    hasher.update(verifier_identity.as_bytes());
+    hasher.update((binding_hash.len() as u64).to_le_bytes());
+    hasher.update(binding_hash.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 /// Compute the binding hash for a claim and its evidence items.
 /// INV-VER-EVIDENCE-BOUND: result is bound to evidence.
 fn compute_binding_hash(claim: &Claim, evidence: &[Evidence]) -> String {
@@ -422,7 +434,7 @@ pub fn verify_claim(
     };
     let confidence = if all_pass { 1.0 } else { 0.0 };
     let binding_hash = compute_binding_hash(claim, evidence);
-    let signature = deterministic_hash(&format!("{verifier_identity}|{binding_hash}"));
+    let signature = compute_verifier_signature(verifier_identity, &binding_hash);
 
     Ok(VerificationResult {
         verdict,
@@ -528,7 +540,7 @@ pub fn verify_migration_artifact(
     let confidence = if all_pass { 1.0 } else { 0.0 };
     let canonical = serde_json::to_string(artifact).unwrap_or_else(|e| format!("__serde_err:{e}"));
     let binding_hash = deterministic_hash(&canonical);
-    let signature = deterministic_hash(&format!("{verifier_identity}|{binding_hash}"));
+    let signature = compute_verifier_signature(verifier_identity, &binding_hash);
 
     Ok(VerificationResult {
         verdict,
@@ -621,7 +633,7 @@ pub fn verify_trust_state(
         hasher.update(v.as_bytes());
     }
     let binding_hash = hex::encode(hasher.finalize());
-    let signature = deterministic_hash(&format!("{verifier_identity}|{binding_hash}"));
+    let signature = compute_verifier_signature(verifier_identity, &binding_hash);
 
     Ok(VerificationResult {
         verdict,
