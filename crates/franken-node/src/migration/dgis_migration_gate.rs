@@ -408,7 +408,7 @@ mod tests {
         let projected = GraphHealthSnapshot {
             cascade_risk: 0.28,
             fragility_findings: 5,
-            articulation_points: 3,
+            articulation_points: 2,
         };
         let evaluation = evaluate_admission(
             "trace-allow",
@@ -500,7 +500,7 @@ mod tests {
             GraphHealthSnapshot {
                 cascade_risk: 0.29,
                 fragility_findings: 5,
-                articulation_points: 3,
+                articulation_points: 2,
             },
             MigrationGateThresholds::default(),
             &[],
