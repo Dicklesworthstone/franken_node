@@ -471,10 +471,11 @@ fn sha256_hex(bytes: &[u8]) -> String {
 }
 
 fn compute_chain_hash(previous_hash: Option<&str>, payload: &str) -> String {
+    let prev = previous_hash.unwrap_or("GENESIS");
     let mut hasher = Sha256::new();
     hasher.update(b"decision_receipt_chain_v1:");
-    hasher.update(previous_hash.unwrap_or("GENESIS").as_bytes());
-    hasher.update(b":");
+    hasher.update(&(prev.len() as u64).to_le_bytes());
+    hasher.update(prev.as_bytes());
     hasher.update(payload.as_bytes());
     hex::encode(hasher.finalize())
 }

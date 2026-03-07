@@ -18,10 +18,10 @@ const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 /// Uses full-width SHA-256 output to preserve collision resistance.
 pub fn compute_hash(domain: &str, data: &[u8]) -> InterfaceHash {
     let mut hasher = sha2::Sha256::new();
-    // Domain separation: hash domain tag first, then separator, then data
+    // Domain separation: hash domain tag first, then length-prefixed domain, then data
     sha2::Digest::update(&mut hasher, b"interface_hash_v1:");
+    sha2::Digest::update(&mut hasher, &(domain.len() as u64).to_le_bytes());
     sha2::Digest::update(&mut hasher, domain.as_bytes());
-    sha2::Digest::update(&mut hasher, b":");
     sha2::Digest::update(&mut hasher, data);
     let hash_hex = format!("{:x}", sha2::Digest::finalize(hasher));
 
