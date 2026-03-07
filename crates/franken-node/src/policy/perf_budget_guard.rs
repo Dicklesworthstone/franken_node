@@ -323,19 +323,19 @@ impl PerformanceBudgetGuard {
 
             let mut violations = Vec::new();
 
-            if overhead_p95 >= budget.max_overhead_p95_pct {
+            if !overhead_p95.is_finite() || overhead_p95 >= budget.max_overhead_p95_pct {
                 violations.push(format!(
                     "p95 overhead {:.1}% exceeds budget {:.1}%",
                     overhead_p95, budget.max_overhead_p95_pct
                 ));
             }
-            if overhead_p99 >= budget.max_overhead_p99_pct {
+            if !overhead_p99.is_finite() || overhead_p99 >= budget.max_overhead_p99_pct {
                 violations.push(format!(
                     "p99 overhead {:.1}% exceeds budget {:.1}%",
                     overhead_p99, budget.max_overhead_p99_pct
                 ));
             }
-            if cold_start >= budget.max_cold_start_ms {
+            if !cold_start.is_finite() || cold_start >= budget.max_cold_start_ms {
                 violations.push(format!(
                     "cold-start {:.1}ms exceeds budget {:.1}ms",
                     cold_start, budget.max_cold_start_ms
@@ -560,6 +560,9 @@ impl TimingCollector {
 
     /// Record a baseline timing sample (microseconds).
     pub fn record_baseline(&mut self, hot_path: &str, duration_us: f64) {
+        if !duration_us.is_finite() {
+            return;
+        }
         self.baseline
             .entry(hot_path.to_string())
             .or_default()
@@ -573,6 +576,9 @@ impl TimingCollector {
 
     /// Record an integrated (asupersync) timing sample (microseconds).
     pub fn record_integrated(&mut self, hot_path: &str, duration_us: f64) {
+        if !duration_us.is_finite() {
+            return;
+        }
         self.integrated
             .entry(hot_path.to_string())
             .or_default()
@@ -586,6 +592,9 @@ impl TimingCollector {
 
     /// Record the cold-start duration for a hot path (milliseconds).
     pub fn record_cold_start(&mut self, hot_path: &str, cold_start_ms: f64) {
+        if !cold_start_ms.is_finite() {
+            return;
+        }
         self.cold_starts.insert(hot_path.to_string(), cold_start_ms);
         self.emit(
             PRF_008_COLD_START_TIMING,
@@ -1581,5 +1590,93 @@ mod tests {
         assert!(!result.overall_pass);
         assert_eq!(result.paths_within_budget, 1);
         assert_eq!(result.paths_over_budget, 1);
+    }
+
+    // -- NaN/Inf guards --
+
+    #[test]
+    fn test_nan_overhead_fails_closed() {
+        let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-nan");
+        let m = BenchmarkMeasurement {
+            hot_path: "lifecycle_transition".into(),
+            baseline_p50_us: f64::NAN,
+            baseline_p95_us: f64::NAN,
+            baseline_p99_us: f64::NAN,
+            integrated_p50_us: 110.0,
+            integrated_p95_us: 110.0,
+            integrated_p99_us: 130.0,
+            cold_start_ms: 10.0,
+        };
+        let result = guard.evaluate(&[m]).unwrap();
+        assert!(!result.overall_pass, "NaN overhead must fail closed");
+    }
+
+    #[test]
+    fn test_nan_cold_start_fails_closed() {
+        let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-nan-cs");
+        let m = BenchmarkMeasurement {
+            hot_path: "lifecycle_transition".into(),
+            baseline_p50_us: 70.0,
+            baseline_p95_us: 100.0,
+            baseline_p99_us: 130.0,
+            integrated_p50_us: 77.0,
+            integrated_p95_us: 105.0,
+            integrated_p99_us: 135.0,
+            cold_start_ms: f64::NAN,
+        };
+        let result = guard.evaluate(&[m]).unwrap();
+        assert!(!result.overall_pass, "NaN cold-start must fail closed");
+    }
+
+    #[test]
+    fn test_inf_overhead_fails_closed() {
+        let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-inf");
+        let m = BenchmarkMeasurement {
+            hot_path: "lifecycle_transition".into(),
+            baseline_p50_us: 70.0,
+            baseline_p95_us: 100.0,
+            baseline_p99_us: 130.0,
+            integrated_p50_us: f64::INFINITY,
+            integrated_p95_us: f64::INFINITY,
+            integrated_p99_us: f64::INFINITY,
+            cold_start_ms: 10.0,
+        };
+        let result = guard.evaluate(&[m]).unwrap();
+        assert!(!result.overall_pass, "Inf overhead must fail closed");
+    }
+
+    #[test]
+    fn test_collector_nan_baseline_ignored() {
+        let mut c = TimingCollector::new("trace-nan-bl");
+        c.record_baseline("test", f64::NAN);
+        c.record_baseline("test", 100.0);
+        assert_eq!(c.baseline_count("test"), 1);
+    }
+
+    #[test]
+    fn test_collector_nan_integrated_ignored() {
+        let mut c = TimingCollector::new("trace-nan-int");
+        c.record_integrated("test", f64::NAN);
+        c.record_integrated("test", 110.0);
+        assert_eq!(c.integrated_count("test"), 1);
+    }
+
+    #[test]
+    fn test_collector_nan_cold_start_ignored() {
+        let mut c = TimingCollector::new("trace-nan-cs2");
+        c.record_cold_start("test", f64::NAN);
+        c.record_baseline("test", 100.0);
+        c.record_integrated("test", 110.0);
+        let m = c.to_measurements();
+        assert_eq!(m[0].cold_start_ms, 0.0, "NaN cold-start must be ignored");
+    }
+
+    #[test]
+    fn test_collector_inf_samples_ignored() {
+        let mut c = TimingCollector::new("trace-inf-bl");
+        c.record_baseline("test", f64::INFINITY);
+        c.record_baseline("test", f64::NEG_INFINITY);
+        c.record_baseline("test", 100.0);
+        assert_eq!(c.baseline_count("test"), 1);
     }
 }

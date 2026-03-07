@@ -210,7 +210,13 @@ impl MeasurementResult {
         } else {
             0.0
         };
-        let within_budget = overhead_p95_pct <= budget.p95_overhead_pct
+        let inputs_finite = baseline_p95_us.is_finite()
+            && baseline_p99_us.is_finite()
+            && integrated_p95_us.is_finite()
+            && integrated_p99_us.is_finite()
+            && cold_start_ms.is_finite();
+        let within_budget = inputs_finite
+            && overhead_p95_pct <= budget.p95_overhead_pct
             && overhead_p99_pct <= budget.p99_overhead_pct
             && cold_start_ms <= budget.cold_start_ms;
 
@@ -1226,5 +1232,99 @@ mod tests {
         } else {
             panic!("Expected Fail");
         }
+    }
+
+    // ── NaN/Inf guards ────────────────────────────────────────────
+
+    #[test]
+    fn test_nan_baseline_fails_closed() {
+        let budget = HotPathBudget {
+            hot_path: HotPath::LifecycleTransition,
+            p95_overhead_pct: 15.0,
+            p99_overhead_pct: 25.0,
+            cold_start_ms: 50.0,
+        };
+        let r = MeasurementResult::from_measurements(
+            HotPath::LifecycleTransition,
+            70.0,          // baseline p50
+            f64::NAN,      // baseline p95 — NaN
+            130.0,         // baseline p99
+            77.0,          // integrated p50
+            105.0,         // integrated p95
+            135.0,         // integrated p99
+            10.0,          // cold start
+            &budget,
+            None,
+        );
+        assert!(!r.within_budget, "NaN baseline must fail closed");
+    }
+
+    #[test]
+    fn test_nan_integrated_fails_closed() {
+        let budget = HotPathBudget {
+            hot_path: HotPath::LifecycleTransition,
+            p95_overhead_pct: 15.0,
+            p99_overhead_pct: 25.0,
+            cold_start_ms: 50.0,
+        };
+        let r = MeasurementResult::from_measurements(
+            HotPath::LifecycleTransition,
+            70.0,
+            100.0,
+            130.0,
+            77.0,
+            f64::NAN,     // integrated p95 — NaN
+            135.0,
+            10.0,
+            &budget,
+            None,
+        );
+        assert!(!r.within_budget, "NaN integrated must fail closed");
+    }
+
+    #[test]
+    fn test_nan_cold_start_fails_closed() {
+        let budget = HotPathBudget {
+            hot_path: HotPath::LifecycleTransition,
+            p95_overhead_pct: 15.0,
+            p99_overhead_pct: 25.0,
+            cold_start_ms: 50.0,
+        };
+        let r = MeasurementResult::from_measurements(
+            HotPath::LifecycleTransition,
+            70.0,
+            100.0,
+            130.0,
+            77.0,
+            105.0,
+            135.0,
+            f64::NAN,     // cold start — NaN
+            &budget,
+            None,
+        );
+        assert!(!r.within_budget, "NaN cold-start must fail closed");
+    }
+
+    #[test]
+    fn test_inf_baseline_fails_closed() {
+        let budget = HotPathBudget {
+            hot_path: HotPath::LifecycleTransition,
+            p95_overhead_pct: 15.0,
+            p99_overhead_pct: 25.0,
+            cold_start_ms: 50.0,
+        };
+        let r = MeasurementResult::from_measurements(
+            HotPath::LifecycleTransition,
+            70.0,
+            f64::INFINITY,
+            130.0,
+            77.0,
+            105.0,
+            135.0,
+            10.0,
+            &budget,
+            None,
+        );
+        assert!(!r.within_budget, "Inf baseline must fail closed");
     }
 }
