@@ -275,8 +275,9 @@ impl GateEngine {
         use sha2::{Digest, Sha256};
         let mut h = Sha256::new();
         h.update(b"compat_gate_sign_v1:");
+        h.update((self.signing_key.len() as u64).to_le_bytes());
         h.update(&self.signing_key);
-        h.update(b"|");
+        h.update((payload.len() as u64).to_le_bytes());
         h.update(payload.as_bytes());
         let digest = h.finalize();
         format!("{:016x}", digest_prefix_u64(&digest))
@@ -485,7 +486,13 @@ impl GateEngine {
         let slot = self.allocate_trace_slot();
         let trace_id = slot.trace_id();
         let receipt_id = slot.receipt_id();
-        let payload = format!("receipt:{}:{}:{}", scope_id, shim_id, description);
+        // Length-prefixed fields prevent delimiter-collision ambiguity.
+        let payload = format!(
+            "receipt:{}:{}:{}:{}:{}:{}",
+            scope_id.len(), scope_id,
+            shim_id.len(), shim_id,
+            description.len(), description
+        );
         let sig = self.sign(&payload);
 
         let receipt = DivergenceReceipt {

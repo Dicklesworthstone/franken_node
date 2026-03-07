@@ -638,16 +638,17 @@ fn generate_plan(
         let pre_hash = {
             let mut h = Sha256::new();
             h.update(b"migration_pre_hash_v1:");
+            h.update(&(name.len() as u64).to_le_bytes());
             h.update(name.as_bytes());
-            h.update(b"|");
+            h.update(&(version.len() as u64).to_le_bytes());
             h.update(version.as_bytes());
             hex::encode(h.finalize())
         };
         let post_hash = {
             let mut h = Sha256::new();
             h.update(b"migration_post_hash_v1:");
+            h.update(&(name.len() as u64).to_le_bytes());
             h.update(name.as_bytes());
-            h.update(b"|");
             h.update(b"migrated");
             hex::encode(h.finalize())
         };
@@ -665,13 +666,14 @@ fn generate_plan(
     let plan_id = {
         let mut h = Sha256::new();
         h.update(b"migration_plan_id_v1:");
+        h.update(&(steps.len() as u64).to_le_bytes());
         for step in &steps {
+            h.update(&(step.target.len() as u64).to_le_bytes());
             h.update(step.target.as_bytes());
-            h.update(b"|");
+            h.update(&(step.pre_state_hash.len() as u64).to_le_bytes());
             h.update(step.pre_state_hash.as_bytes());
-            h.update(b"|");
+            h.update(&(step.post_state_hash.len() as u64).to_le_bytes());
             h.update(step.post_state_hash.as_bytes());
-            h.update(b"|");
         }
         format!("plan-{}", &hex::encode(h.finalize())[..16])
     };
@@ -728,11 +730,12 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
     let pre_hash = {
         let mut h = Sha256::new();
         h.update(b"migration_receipt_pre_v1:");
+        h.update(&(state.extensions.len() as u64).to_le_bytes());
         for (name, ver) in &state.extensions {
+            h.update(&(name.len() as u64).to_le_bytes());
             h.update(name.as_bytes());
-            h.update(b"|");
+            h.update(&(ver.len() as u64).to_le_bytes());
             h.update(ver.as_bytes());
-            h.update(b"|");
         }
         hex::encode(h.finalize())
     };
@@ -746,8 +749,8 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
     let post_hash = {
         let mut h = Sha256::new();
         h.update(b"migration_receipt_post_v1:");
+        h.update(&(pre_hash.len() as u64).to_le_bytes());
         h.update(pre_hash.as_bytes());
-        h.update(b"|");
         h.update(b"migrated");
         hex::encode(h.finalize())
     };
@@ -761,10 +764,11 @@ fn issue_receipt(state: &PipelineState) -> MigrationReceipt {
     let signature = {
         let mut h = Sha256::new();
         h.update(b"migration_receipt_sig_v1:");
+        h.update(&(pre_hash.len() as u64).to_le_bytes());
         h.update(pre_hash.as_bytes());
-        h.update(b"|");
+        h.update(&(plan_fingerprint.len() as u64).to_le_bytes());
         h.update(plan_fingerprint.as_bytes());
-        h.update(b"|");
+        h.update(&(post_hash.len() as u64).to_le_bytes());
         h.update(post_hash.as_bytes());
         format!("sig_{}", hex::encode(h.finalize()))
     };

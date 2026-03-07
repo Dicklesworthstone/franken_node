@@ -18,8 +18,9 @@ use crate::security::constant_time::ct_eq;
 fn hash_pair(left: &str, right: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"transparency_interior_v1:");
+    h.update((left.len() as u64).to_le_bytes());
     h.update(left.as_bytes());
-    h.update(b"|");
+    h.update((right.len() as u64).to_le_bytes());
     h.update(right.as_bytes());
     let digest = h.finalize();
     format!("{:x}", digest)

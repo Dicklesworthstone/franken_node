@@ -131,8 +131,9 @@ pub fn select_coordinator(
     for candidate in candidates {
         let mut h = Sha256::new();
         h.update(b"lease_coord_hash_v1:");
+        h.update(&(lease_id.len() as u64).to_le_bytes());
         h.update(lease_id.as_bytes());
-        h.update(b"|");
+        h.update(&(candidate.node_id.len() as u64).to_le_bytes());
         h.update(candidate.node_id.as_bytes());
         let digest = h.finalize();
         let hash = u64::from_le_bytes(digest[..8].try_into().unwrap_or([0u8; 8]));
