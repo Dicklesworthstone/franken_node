@@ -461,6 +461,8 @@ impl fmt::Display for StakingError {
 // ---------------------------------------------------------------------------
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_SLASH_EVENTS_PER_STAKE: usize = 256;
+const MAX_EVIDENCE_HASHES_PER_STAKE: usize = 256;
 
 /// Top-level state holding all stakes, slash events, appeals, and audit trail.
 ///
@@ -655,7 +657,7 @@ impl TrustGovernanceState {
                 ),
             ));
         }
-        used.push(evidence.evidence_hash.clone());
+        push_bounded(used, evidence.evidence_hash.clone(), MAX_EVIDENCE_HASHES_PER_STAKE);
 
         // INV-STAKE-SLASH-DETERMINISTIC: compute slash amount from policy
         let fraction = self
@@ -675,7 +677,7 @@ impl TrustGovernanceState {
         };
 
         record.state = StakeState::Slashed;
-        record.slash_events.push(event.clone());
+        push_bounded(&mut record.slash_events, event.clone(), MAX_SLASH_EVENTS_PER_STAKE);
 
         let publisher = record.publisher.clone();
 

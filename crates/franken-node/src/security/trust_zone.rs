@@ -26,6 +26,7 @@ use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
 const MAX_ALLOWED_CROSS_ZONE_TARGETS: usize = 4096;
+const MAX_KEY_ZONE_BINDINGS_PER_KEY: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -406,7 +407,10 @@ impl ZoneSegmentationEngine {
     pub fn bind_key_to_zone(&mut self, key_id: impl Into<String>, zone_id: impl Into<String>) {
         let key = key_id.into();
         let zone = zone_id.into();
-        self.key_zone_bindings.entry(key).or_default().push(zone);
+        let zones = self.key_zone_bindings.entry(key).or_default();
+        if !zones.contains(&zone) {
+            push_bounded(zones, zone, MAX_KEY_ZONE_BINDINGS_PER_KEY);
+        }
     }
 
     /// Check whether a key is bound to a specific zone.
@@ -1072,6 +1076,17 @@ mod tests {
         let mut engine = ZoneSegmentationEngine::new();
         engine.bind_key_to_zone("key-1", "prod");
         assert!(engine.validate_key_zone("key-1", "prod").is_ok());
+    }
+
+    #[test]
+    fn bind_key_to_zone_dedup() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine.bind_key_to_zone("key-1", "prod");
+        engine.bind_key_to_zone("key-1", "prod");
+        engine.bind_key_to_zone("key-1", "prod");
+        assert!(engine.is_key_bound_to_zone("key-1", "prod"));
+        // Duplicate bindings must not accumulate
+        assert_eq!(engine.key_zone_bindings.get("key-1").unwrap().len(), 1);
     }
 
     // ── Engine: cross-zone authorization ──────────────────────────────────
