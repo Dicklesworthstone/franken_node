@@ -159,17 +159,21 @@ fn derive_evidence_requirements(
 ) -> Vec<String> {
     let mut requirements = Vec::new();
 
-    if projected.instability_score - baseline.instability_score
-        >= thresholds.max_instability_delta_for_direct_admit
+    let instability_delta = projected.instability_score - baseline.instability_score;
+    if !instability_delta.is_finite()
+        || instability_delta >= thresholds.max_instability_delta_for_direct_admit
     {
         requirements.push("bpet.calibration_report".to_string());
         requirements.push("bpet.drift_explainer".to_string());
     }
-    if projected.drift_score >= thresholds.max_drift_score_for_direct_admit {
+    if !projected.drift_score.is_finite()
+        || projected.drift_score >= thresholds.max_drift_score_for_direct_admit
+    {
         requirements.push("bpet.longitudinal_drift_trace".to_string());
     }
-    if projected.regime_shift_probability
-        >= thresholds.max_regime_shift_probability_for_direct_admit
+    if !projected.regime_shift_probability.is_finite()
+        || projected.regime_shift_probability
+            >= thresholds.max_regime_shift_probability_for_direct_admit
     {
         requirements.push("bpet.regime_shift_counterfactuals".to_string());
         requirements.push("ops.signoff.two_person_rule".to_string());
@@ -241,13 +245,18 @@ pub fn evaluate_admission(
         events.drain(0..overflow);
     }
 
-    let needs_evidence = delta.instability_delta
-        >= thresholds.max_instability_delta_for_direct_admit
+    // NaN/Inf fail-closed: non-finite values must trigger the most restrictive path
+    let needs_evidence = !delta.instability_delta.is_finite()
+        || delta.instability_delta >= thresholds.max_instability_delta_for_direct_admit
+        || !projected.drift_score.is_finite()
         || projected.drift_score >= thresholds.max_drift_score_for_direct_admit
+        || !projected.regime_shift_probability.is_finite()
         || projected.regime_shift_probability
             >= thresholds.max_regime_shift_probability_for_direct_admit;
 
-    let severe = projected.instability_score >= thresholds.max_instability_score_for_staged_rollout
+    let severe = !projected.instability_score.is_finite()
+        || projected.instability_score >= thresholds.max_instability_score_for_staged_rollout
+        || !projected.regime_shift_probability.is_finite()
         || projected.regime_shift_probability
             >= thresholds.max_regime_shift_probability_for_staged_rollout;
 
@@ -356,9 +365,11 @@ pub fn evaluate_rollout_health(
         }
     };
 
-    let instability_violation = health.observed.instability_score >= step.max_instability_score;
-    let regime_violation =
-        health.observed.regime_shift_probability >= step.max_regime_shift_probability;
+    // NaN/Inf fail-closed: non-finite observed values trigger rollback
+    let instability_violation = !health.observed.instability_score.is_finite()
+        || health.observed.instability_score >= step.max_instability_score;
+    let regime_violation = !health.observed.regime_shift_probability.is_finite()
+        || health.observed.regime_shift_probability >= step.max_regime_shift_probability;
 
     if instability_violation || regime_violation {
         let reason = format!(
@@ -684,5 +695,127 @@ mod tests {
             first.additional_evidence_required,
             second.additional_evidence_required
         );
+    }
+
+    #[test]
+    fn nan_instability_score_blocks_admission() {
+        let projected = TrajectorySnapshot {
+            instability_score: f64::NAN,
+            drift_score: 0.20,
+            regime_shift_probability: 0.10,
+        };
+        let decision = evaluate_admission(
+            "trace-nan",
+            baseline(),
+            projected,
+            StabilityThresholds::default(),
+            "v1.0.0",
+        );
+        assert_ne!(decision.verdict, GateVerdict::Allow);
+    }
+
+    #[test]
+    fn nan_drift_score_blocks_admission() {
+        let projected = TrajectorySnapshot {
+            instability_score: 0.20,
+            drift_score: f64::NAN,
+            regime_shift_probability: 0.10,
+        };
+        let decision = evaluate_admission(
+            "trace-nan-drift",
+            baseline(),
+            projected,
+            StabilityThresholds::default(),
+            "v1.0.0",
+        );
+        assert_ne!(decision.verdict, GateVerdict::Allow);
+    }
+
+    #[test]
+    fn nan_regime_shift_blocks_admission() {
+        let projected = TrajectorySnapshot {
+            instability_score: 0.20,
+            drift_score: 0.20,
+            regime_shift_probability: f64::NAN,
+        };
+        let decision = evaluate_admission(
+            "trace-nan-regime",
+            baseline(),
+            projected,
+            StabilityThresholds::default(),
+            "v1.0.0",
+        );
+        assert_ne!(decision.verdict, GateVerdict::Allow);
+    }
+
+    #[test]
+    fn inf_instability_triggers_staged_rollout() {
+        let projected = TrajectorySnapshot {
+            instability_score: f64::INFINITY,
+            drift_score: 0.20,
+            regime_shift_probability: 0.10,
+        };
+        let decision = evaluate_admission(
+            "trace-inf",
+            baseline(),
+            projected,
+            StabilityThresholds::default(),
+            "v1.0.0",
+        );
+        assert_eq!(decision.verdict, GateVerdict::StagedRolloutRequired);
+    }
+
+    #[test]
+    fn nan_observed_instability_triggers_rollback() {
+        let projected = TrajectorySnapshot {
+            instability_score: 0.70,
+            drift_score: 0.40,
+            regime_shift_probability: 0.53,
+        };
+        let decision = evaluate_admission(
+            "trace-rb-nan",
+            baseline(),
+            projected,
+            StabilityThresholds::default(),
+            "v2.0.0",
+        );
+        let rollout = decision.staged_rollout.expect("staged rollout");
+        let health = RolloutHealthSnapshot {
+            phase: RolloutPhase::Canary,
+            observed: TrajectorySnapshot {
+                instability_score: f64::NAN,
+                drift_score: 0.20,
+                regime_shift_probability: 0.10,
+            },
+        };
+        let rollback = evaluate_rollout_health("trace-rb-nan", &rollout, &health);
+        assert!(rollback.should_rollback, "NaN observed instability must trigger rollback");
+    }
+
+    #[test]
+    fn nan_observed_regime_shift_triggers_rollback() {
+        let projected = TrajectorySnapshot {
+            instability_score: 0.70,
+            drift_score: 0.40,
+            regime_shift_probability: 0.53,
+        };
+        let decision = evaluate_admission(
+            "trace-rb-nan-regime",
+            baseline(),
+            projected,
+            StabilityThresholds::default(),
+            "v2.0.0",
+        );
+        let rollout = decision.staged_rollout.expect("staged rollout");
+        let health = RolloutHealthSnapshot {
+            phase: RolloutPhase::Canary,
+            observed: TrajectorySnapshot {
+                instability_score: 0.10,
+                drift_score: 0.20,
+                regime_shift_probability: f64::NAN,
+            },
+        };
+        let rollback = evaluate_rollout_health("trace-rb-nan-regime", &rollout, &health);
+        assert!(rollback.should_rollback, "NaN observed regime_shift must trigger rollback");
     }
 }
