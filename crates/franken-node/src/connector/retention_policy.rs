@@ -8,11 +8,11 @@ use std::collections::BTreeMap;
 const MAX_DECISIONS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() + 1 - cap;
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
-    items.push(item);
 }
 
 /// Retention class for a control-plane message.

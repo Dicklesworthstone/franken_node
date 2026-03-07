@@ -306,11 +306,11 @@ impl RemoteBulkhead {
         if cap == 0 {
             return;
         }
-        if items.len() >= cap {
-            let overflow = items.len() + 1 - cap;
+        items.push(item);
+        if items.len() > cap {
+            let overflow = items.len() - cap;
             items.drain(0..overflow);
         }
-        items.push(item);
     }
 
     fn log_event(&mut self, event_code: &str, now_ms: u64, detail: impl Into<String>) {

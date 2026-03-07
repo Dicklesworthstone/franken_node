@@ -13,11 +13,11 @@ use std::collections::{BTreeMap, BTreeSet};
 const MAX_EVENTS: usize = 4096;
 
 fn push_bounded_fn<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() + 1 - cap;
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
-    items.push(item);
 }
 
 /// Maximum trust records per TrustState before inserts are rejected.

@@ -478,11 +478,11 @@ const MAX_EVENTS: usize = 4096;
 const MAX_TOKENS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() + 1 - cap;
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
-    items.push(item);
 }
 
 /// Validates audience-bound token chains, enforcing expiry, replay detection,

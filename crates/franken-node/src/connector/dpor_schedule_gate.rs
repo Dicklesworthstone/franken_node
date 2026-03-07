@@ -855,11 +855,11 @@ impl DporScheduleGate {
 
 /// Push an item to a bounded Vec, evicting oldest entries if at capacity.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
-    if vec.len() >= max {
-        let overflow = vec.len() + 1 - max;
+    vec.push(item);
+    if vec.len() > max {
+        let overflow = vec.len() - max;
         vec.drain(0..overflow);
     }
-    vec.push(item);
 }
 
 // ===========================================================================

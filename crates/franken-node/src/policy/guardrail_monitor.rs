@@ -17,11 +17,11 @@ use std::fmt;
 const MAX_MONITORS: usize = 4096;
 
 fn push_bounded_box(items: &mut Vec<Box<dyn GuardrailMonitor>>, item: Box<dyn GuardrailMonitor>, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() + 1 - cap;
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
-    items.push(item);
 }
 
 use super::hardening_state_machine::HardeningLevel;

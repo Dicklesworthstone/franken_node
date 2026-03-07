@@ -30,11 +30,11 @@ pub const DEFAULT_STARVATION_THRESHOLD_TICKS: u32 = 3;
 pub const DEFAULT_MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() + 1 - cap;
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
-    items.push(item);
 }
 
 // ---- Event codes ----

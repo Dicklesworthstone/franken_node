@@ -535,10 +535,6 @@ impl FleetControlManager {
         // Emit event
         let event =
             FleetControlEvent::quarantine_initiated(&trace.trace_id, &scope.zone_id, extension_id);
-        if self.events.len() >= MAX_FLEET_EVENTS {
-            let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
-            self.events.drain(0..overflow);
-        }
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
@@ -618,10 +614,6 @@ impl FleetControlManager {
 
         let event =
             FleetControlEvent::revocation_issued(&trace.trace_id, &scope.zone_id, extension_id);
-        if self.events.len() >= MAX_FLEET_EVENTS {
-            let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
-            self.events.drain(0..overflow);
-        }
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
@@ -678,10 +670,6 @@ impl FleetControlManager {
         let receipt = self.build_receipt(&op_id, &identity.principal, &zone_id, &now);
 
         let event = FleetControlEvent::fleet_released(&trace.trace_id, &zone_id, incident_id);
-        if self.events.len() >= MAX_FLEET_EVENTS {
-            let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
-            self.events.drain(0..overflow);
-        }
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
@@ -748,10 +736,6 @@ impl FleetControlManager {
         };
 
         let event = FleetControlEvent::reconcile_completed(&trace.trace_id, zone_count);
-        if self.events.len() >= MAX_FLEET_EVENTS {
-            let overflow = self.events.len() + 1 - MAX_FLEET_EVENTS;
-            self.events.drain(0..overflow);
-        }
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {

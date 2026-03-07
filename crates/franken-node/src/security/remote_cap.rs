@@ -16,11 +16,11 @@ use sha2::{Digest, Sha256};
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() + 1 - cap;
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
-    items.push(item);
 }
 
 fn constant_time_eq(a: &str, b: &str) -> bool {
