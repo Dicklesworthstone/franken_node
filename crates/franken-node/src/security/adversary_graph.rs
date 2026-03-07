@@ -244,6 +244,10 @@ impl std::fmt::Display for QuarantineAction {
 
 /// Determine the quarantine action for a given risk posterior.
 pub fn action_for_risk(posterior: f64, thresholds: &PolicyThreshold) -> QuarantineAction {
+    // Fail-closed: non-finite posteriors trigger maximum quarantine.
+    if !posterior.is_finite() {
+        return QuarantineAction::Quarantine;
+    }
     if posterior >= thresholds.quarantine {
         QuarantineAction::Quarantine
     } else if posterior >= thresholds.revoke {
@@ -806,5 +810,29 @@ mod tests {
         let (old, new) = node.ingest_evidence(f64::INFINITY, 2);
         assert_eq!(old, old_posterior);
         assert_eq!(new, old_posterior);
+    }
+
+    #[test]
+    fn nan_posterior_quarantined_fail_closed() {
+        let t = PolicyThreshold::default();
+        assert_eq!(action_for_risk(f64::NAN, &t), QuarantineAction::Quarantine);
+    }
+
+    #[test]
+    fn inf_posterior_quarantined_fail_closed() {
+        let t = PolicyThreshold::default();
+        assert_eq!(
+            action_for_risk(f64::INFINITY, &t),
+            QuarantineAction::Quarantine
+        );
+    }
+
+    #[test]
+    fn neg_inf_posterior_quarantined_fail_closed() {
+        let t = PolicyThreshold::default();
+        assert_eq!(
+            action_for_risk(f64::NEG_INFINITY, &t),
+            QuarantineAction::Quarantine
+        );
     }
 }
