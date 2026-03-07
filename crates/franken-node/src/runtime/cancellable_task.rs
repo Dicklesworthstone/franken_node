@@ -35,6 +35,7 @@ pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 30_000;
 pub const MIN_DRAIN_TIMEOUT_MS: u64 = 500;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_CHILD_TASKS: usize = 1024;
 
 // ---------------------------------------------------------------------------
 // Invariant constants
@@ -543,7 +544,7 @@ impl CancellationRuntime {
             // Idempotent child-link registration avoids duplicate propagation events.
             return Ok(());
         }
-        parent.child_task_ids.push(child_id.to_string());
+        push_bounded(&mut parent.child_task_ids, child_id.to_string(), MAX_CHILD_TASKS);
         Ok(())
     }
 

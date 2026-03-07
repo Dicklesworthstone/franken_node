@@ -59,6 +59,7 @@ pub mod invariants {
 pub const SCHEMA_VERSION: &str = "rte-v1.0";
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_FINDINGS_PER_ENGAGEMENT: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -335,11 +336,10 @@ impl RedTeamEvaluations {
             }),
         );
 
-        self.engagements
+        let eng = self.engagements
             .get_mut(engagement_id)
-            .ok_or_else(|| format!("Engagement {engagement_id} not found"))?
-            .findings
-            .push(finding);
+            .ok_or_else(|| format!("Engagement {engagement_id} not found"))?;
+        push_bounded(&mut eng.findings, finding, MAX_FINDINGS_PER_ENGAGEMENT);
         Ok(())
     }
 
