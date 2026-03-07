@@ -311,6 +311,17 @@ pub fn compute_integrity_hash(bundle: &IncidentBundle) -> String {
     hasher.update(bundle.metadata.title.as_bytes());
     hasher.update((bundle.metadata.detected_by.len() as u64).to_le_bytes());
     hasher.update(bundle.metadata.detected_by.as_bytes());
+    // INV-IBR-INTEGRITY: include component_ids and tags so tampering is detected
+    hasher.update((bundle.metadata.component_ids.len() as u64).to_le_bytes());
+    for cid in &bundle.metadata.component_ids {
+        hasher.update((cid.len() as u64).to_le_bytes());
+        hasher.update(cid.as_bytes());
+    }
+    hasher.update((bundle.metadata.tags.len() as u64).to_le_bytes());
+    for tag in &bundle.metadata.tags {
+        hasher.update((tag.len() as u64).to_le_bytes());
+        hasher.update(tag.as_bytes());
+    }
     // Fixed-size numeric fields need no length-prefix
     hasher.update(bundle.log_count.to_le_bytes());
     hasher.update(bundle.trace_count.to_le_bytes());

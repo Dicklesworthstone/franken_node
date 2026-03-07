@@ -355,7 +355,16 @@ impl PolicyCheckpointChain {
             checkpoint_hash: checkpoint_hash.clone(),
         };
 
-        push_bounded(&mut self.checkpoints, checkpoint, MAX_CHECKPOINTS);
+        // Cannot use push_bounded here: evicting oldest checkpoints would
+        // shift indices so that cp.sequence != enumerate-index, violating
+        // INV-PCK-MONOTONIC and breaking verify_chain(). Reject at capacity.
+        if self.checkpoints.len() >= MAX_CHECKPOINTS {
+            return Err(CheckpointChainError::HashChainBreak {
+                index: MAX_CHECKPOINTS,
+                reason: "chain at capacity (MAX_CHECKPOINTS reached)".to_string(),
+            });
+        }
+        self.checkpoints.push(checkpoint);
         self.head_hash = Some(checkpoint_hash);
         self.next_seq = sequence.saturating_add(1);
 
@@ -459,7 +468,15 @@ impl PolicyCheckpointChain {
         let epoch = checkpoint.epoch_id;
         let channel_label = checkpoint.channel.label();
 
-        push_bounded(&mut self.checkpoints, checkpoint, MAX_CHECKPOINTS);
+        // Cannot use push_bounded: same INV-PCK-MONOTONIC reasoning as
+        // create_checkpoint — eviction breaks verify_chain().
+        if self.checkpoints.len() >= MAX_CHECKPOINTS {
+            return Err(CheckpointChainError::HashChainBreak {
+                index: MAX_CHECKPOINTS,
+                reason: "chain at capacity (MAX_CHECKPOINTS reached)".to_string(),
+            });
+        }
+        self.checkpoints.push(checkpoint);
         self.head_hash = Some(hash);
         self.next_seq = seq.saturating_add(1);
 
