@@ -880,14 +880,16 @@ impl ExfiltrationSentinel {
         let _inv_recall = INV_SENTINEL_RECALL_THRESHOLD;
         let _inv_prec = INV_SENTINEL_PRECISION_THRESHOLD;
 
-        let recall = if true_positives + false_negatives > 0 {
-            (true_positives as f64) / ((true_positives + false_negatives) as f64) * 100.0
+        let recall_denom = true_positives.saturating_add(false_negatives);
+        let recall = if recall_denom > 0 {
+            (true_positives as f64) / (recall_denom as f64) * 100.0
         } else {
             100.0
         };
 
-        let precision = if true_positives + false_positives > 0 {
-            (true_positives as f64) / ((true_positives + false_positives) as f64) * 100.0
+        let precision_denom = true_positives.saturating_add(false_positives);
+        let precision = if precision_denom > 0 {
+            (true_positives as f64) / (precision_denom as f64) * 100.0
         } else {
             100.0
         };
