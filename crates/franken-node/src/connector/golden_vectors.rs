@@ -7,6 +7,16 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+const MAX_VECTORS_PER_CATEGORY: usize = 1024;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
+        items.drain(0..overflow);
+    }
+    items.push(item);
+}
+
 // ── Schema categories ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -145,10 +155,8 @@ impl SchemaRegistry {
         if !self.schemas.contains_key(&vector.category) {
             return Err(SchemaError::MissingSchema(vector.category.to_string()));
         }
-        self.vectors
-            .entry(vector.category)
-            .or_default()
-            .push(vector);
+        let vectors = self.vectors.entry(vector.category).or_default();
+        push_bounded(vectors, vector, MAX_VECTORS_PER_CATEGORY);
         Ok(())
     }
 
