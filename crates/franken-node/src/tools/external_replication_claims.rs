@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 const MAX_REPLICATIONS: usize = 4096;
+const MAX_EVIDENCE_REFS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -268,7 +269,7 @@ impl ExternalReplicationClaims {
             .claims
             .get_mut(claim_id)
             .ok_or_else(|| format!("claim not found: {claim_id}"))?;
-        claim.evidence_refs.push(evidence_ref.to_string());
+        push_bounded(&mut claim.evidence_refs, evidence_ref.to_string(), MAX_EVIDENCE_REFS);
         self.log(
             event_codes::ERC_EVIDENCE_LINKED,
             trace_id,

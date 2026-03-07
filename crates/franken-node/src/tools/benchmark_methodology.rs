@@ -60,6 +60,7 @@ pub mod invariants {
 pub const PUB_VERSION: &str = "bmp-v1.0";
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_CITATIONS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -410,11 +411,10 @@ impl BenchmarkMethodology {
             }),
         );
 
-        self.publications
+        let pub_entry = self.publications
             .get_mut(pub_id)
-            .ok_or_else(|| format!("Publication {pub_id} not found"))?
-            .citations
-            .push(citation);
+            .ok_or_else(|| format!("Publication {pub_id} not found"))?;
+        push_bounded(&mut pub_entry.citations, citation, MAX_CITATIONS);
         Ok(())
     }
 

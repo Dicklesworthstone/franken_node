@@ -13,6 +13,8 @@ use sha2::{Digest, Sha256};
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 const MAX_EVENTS: usize = 4096;
+const MAX_LINEAGE_ENTRIES: usize = 4096;
+const MAX_COMPATIBILITY_ENTRIES: usize = 4096;
 
 // -- Event codes ---------------------------------------------------------------
 
@@ -299,7 +301,7 @@ impl EcosystemRegistry {
         }
         record.metadata.version = entry.version.clone();
         record.metadata.updated_at = timestamp.to_owned();
-        record.lineage.push(entry);
+        push_bounded(&mut record.lineage, entry, MAX_LINEAGE_ENTRIES);
         self.append_audit_entry(
             extension_id,
             ENE_001_REGISTRY_MUTATION,
@@ -350,7 +352,7 @@ impl EcosystemRegistry {
             .extensions
             .get_mut(extension_id)
             .ok_or_else(|| RegistryError::NotFound(extension_id.to_owned()))?;
-        record.compatibility.push(entry);
+        push_bounded(&mut record.compatibility, entry, MAX_COMPATIBILITY_ENTRIES);
         self.append_audit_entry(
             extension_id,
             ENE_001_REGISTRY_MUTATION,
