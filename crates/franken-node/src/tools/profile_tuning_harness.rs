@@ -95,7 +95,10 @@ pub struct PolicyDelta {
 impl PolicyDelta {
     /// Check if this delta represents a regression beyond the threshold.
     pub fn is_regression(&self, threshold_pct: f64) -> bool {
-        self.p99_encode_change_pct > threshold_pct || self.p99_decode_change_pct > threshold_pct
+        !self.p99_encode_change_pct.is_finite()
+            || !self.p99_decode_change_pct.is_finite()
+            || self.p99_encode_change_pct > threshold_pct
+            || self.p99_decode_change_pct > threshold_pct
     }
 }
 
@@ -276,6 +279,14 @@ impl ProfileTuningHarness {
             format!("Processed {} benchmark results", benchmarks.len()),
         );
 
+        let input_diagnostics = self.validate_inputs(baseline, benchmarks, previous_benchmarks);
+        if !input_diagnostics.is_empty() {
+            for diag in &input_diagnostics {
+                self.emit(PT_REGRESSION_REJECTED, format!("{}", diag));
+            }
+            return HarnessOutcome::Rejected(input_diagnostics);
+        }
+
         // Phase 2: compute candidates and deltas
         let candidates: Vec<CandidateUpdate> = benchmarks
             .iter()
@@ -332,6 +343,47 @@ impl ProfileTuningHarness {
         HarnessOutcome::Accepted(bundle)
     }
 
+    fn validate_inputs(
+        &self,
+        baseline: &[BaselineRow],
+        benchmarks: &[BenchmarkResult],
+        previous_benchmarks: Option<&[BenchmarkResult]>,
+    ) -> Vec<RegressionDiagnostic> {
+        let mut diagnostics = Vec::new();
+
+        for row in baseline {
+            if !row.overhead_ratio.is_finite() {
+                diagnostics.push(Self::non_finite_metric_diagnostic(
+                    &row.class_id,
+                    "baseline.overhead_ratio",
+                    self.config.regression_threshold_pct,
+                ));
+            }
+        }
+
+        for benchmark in benchmarks {
+            Self::push_non_finite_benchmark_diagnostics(
+                &mut diagnostics,
+                benchmark,
+                self.config.regression_threshold_pct,
+                None,
+            );
+        }
+
+        if let Some(previous) = previous_benchmarks {
+            for benchmark in previous {
+                Self::push_non_finite_benchmark_diagnostics(
+                    &mut diagnostics,
+                    benchmark,
+                    self.config.regression_threshold_pct,
+                    Some("previous"),
+                );
+            }
+        }
+
+        diagnostics
+    }
+
     /// Compute deltas between baseline and candidates.
     fn compute_deltas(
         &self,
@@ -360,18 +412,10 @@ impl ProfileTuningHarness {
                         let prev_bench = prev.iter().find(|p| p.class_id == candidate.class_id);
                         match prev_bench {
                             Some(p) => {
-                                let enc_change = if p.p99_encode_us > 0.0 {
-                                    ((candidate.p99_encode_us - p.p99_encode_us) / p.p99_encode_us)
-                                        * 100.0
-                                } else {
-                                    0.0
-                                };
-                                let dec_change = if p.p99_decode_us > 0.0 {
-                                    ((candidate.p99_decode_us - p.p99_decode_us) / p.p99_decode_us)
-                                        * 100.0
-                                } else {
-                                    0.0
-                                };
+                                let enc_change =
+                                    Self::percent_change(candidate.p99_encode_us, p.p99_encode_us);
+                                let dec_change =
+                                    Self::percent_change(candidate.p99_decode_us, p.p99_decode_us);
                                 (enc_change, dec_change)
                             }
                             None => (0.0, 0.0),
@@ -403,22 +447,20 @@ impl ProfileTuningHarness {
         let threshold = self.config.regression_threshold_pct;
 
         for delta in deltas {
-            if delta.p99_encode_change_pct > threshold {
-                diagnostics.push(RegressionDiagnostic {
-                    class_id: delta.class_id.clone(),
-                    metric: "p99_encode_us".to_string(),
-                    change_pct: delta.p99_encode_change_pct,
-                    threshold_pct: threshold,
-                });
-            }
-            if delta.p99_decode_change_pct > threshold {
-                diagnostics.push(RegressionDiagnostic {
-                    class_id: delta.class_id.clone(),
-                    metric: "p99_decode_us".to_string(),
-                    change_pct: delta.p99_decode_change_pct,
-                    threshold_pct: threshold,
-                });
-            }
+            Self::push_regression_diagnostic(
+                &mut diagnostics,
+                &delta.class_id,
+                "p99_encode_us",
+                delta.p99_encode_change_pct,
+                threshold,
+            );
+            Self::push_regression_diagnostic(
+                &mut diagnostics,
+                &delta.class_id,
+                "p99_decode_us",
+                delta.p99_decode_change_pct,
+                threshold,
+            );
         }
 
         diagnostics
@@ -484,6 +526,74 @@ impl ProfileTuningHarness {
             self.events.drain(0..overflow);
         }
     }
+
+    fn percent_change(current: f64, previous: f64) -> f64 {
+        if !current.is_finite() || !previous.is_finite() {
+            return f64::INFINITY;
+        }
+
+        if previous > 0.0 {
+            ((current - previous) / previous) * 100.0
+        } else {
+            0.0
+        }
+    }
+
+    fn push_regression_diagnostic(
+        diagnostics: &mut Vec<RegressionDiagnostic>,
+        class_id: &str,
+        metric: &str,
+        change_pct: f64,
+        threshold_pct: f64,
+    ) {
+        if !change_pct.is_finite() || change_pct > threshold_pct {
+            diagnostics.push(RegressionDiagnostic {
+                class_id: class_id.to_string(),
+                metric: metric.to_string(),
+                change_pct,
+                threshold_pct,
+            });
+        }
+    }
+
+    fn push_non_finite_benchmark_diagnostics(
+        diagnostics: &mut Vec<RegressionDiagnostic>,
+        benchmark: &BenchmarkResult,
+        threshold_pct: f64,
+        prefix: Option<&str>,
+    ) {
+        for (metric, value) in [
+            ("overhead_ratio", benchmark.overhead_ratio),
+            ("p50_encode_us", benchmark.p50_encode_us),
+            ("p99_encode_us", benchmark.p99_encode_us),
+            ("p50_decode_us", benchmark.p50_decode_us),
+            ("p99_decode_us", benchmark.p99_decode_us),
+        ] {
+            if !value.is_finite() {
+                let metric = prefix
+                    .map(|prefix| format!("{prefix}.{metric}"))
+                    .unwrap_or_else(|| metric.to_string());
+                diagnostics.push(Self::non_finite_metric_diagnostic(
+                    &benchmark.class_id,
+                    &metric,
+                    threshold_pct,
+                ));
+            }
+        }
+    }
+
+    fn non_finite_metric_diagnostic(
+        class_id: &str,
+        metric: &str,
+        threshold_pct: f64,
+    ) -> RegressionDiagnostic {
+        RegressionDiagnostic {
+            class_id: class_id.to_string(),
+            metric: metric.to_string(),
+            change_pct: f64::INFINITY,
+            threshold_pct,
+        }
+    }
 }
 
 /// Parse baseline CSV content into rows.
@@ -497,7 +607,12 @@ pub fn parse_baseline_csv(csv: &str) -> Vec<BaselineRow> {
                 Some(BaselineRow {
                     class_id: cols[0].trim().to_string(),
                     symbol_size_bytes: cols[1].trim().parse().unwrap_or(0),
-                    overhead_ratio: cols[2].trim().parse().unwrap_or(0.0),
+                    overhead_ratio: cols[2]
+                        .trim()
+                        .parse::<f64>()
+                        .ok()
+                        .filter(|value| value.is_finite())
+                        .unwrap_or(0.0),
                     fetch_priority: cols[3].trim().to_string(),
                     prefetch_policy: cols[4].trim().to_string(),
                 })
@@ -748,6 +863,24 @@ mod tests {
         assert!(!delta.is_regression(20.0));
     }
 
+    #[test]
+    fn test_delta_non_finite_change_is_regression() {
+        let delta = PolicyDelta {
+            class_id: "test".into(),
+            old_symbol_size: 256,
+            new_symbol_size: 256,
+            old_overhead: 0.02,
+            new_overhead: 0.02,
+            old_priority: "critical".into(),
+            new_priority: "critical".into(),
+            old_prefetch: "eager".into(),
+            new_prefetch: "eager".into(),
+            p99_encode_change_pct: f64::NAN,
+            p99_decode_change_pct: 0.0,
+        };
+        assert!(delta.is_regression(20.0));
+    }
+
     // -- RegressionDiagnostic ------------------------------------------
 
     #[test]
@@ -789,6 +922,15 @@ mod tests {
         let csv = "header\nshort,line\nok,256,0.02,crit,eager\n";
         let rows = parse_baseline_csv(csv);
         assert_eq!(rows.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_baseline_csv_sanitizes_non_finite_overhead_ratio() {
+        let csv = "class_id,symbol_size_bytes,overhead_ratio,fetch_priority,prefetch_policy\n\
+                   critical_marker,256,NaN,critical,eager\n";
+        let rows = parse_baseline_csv(csv);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].overhead_ratio, 0.0);
     }
 
     // -- Harness: successful run ---------------------------------------
@@ -924,6 +1066,54 @@ mod tests {
             .filter(|e| e.code == PT_REGRESSION_REJECTED)
             .collect();
         assert!(!reject_events.is_empty());
+    }
+
+    #[test]
+    fn test_harness_rejects_non_finite_benchmark_values() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut benchmarks = sample_benchmarks();
+        benchmarks[0].p99_encode_us = f64::NAN;
+
+        let outcome = harness.run(&sample_baseline(), &benchmarks, None);
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "p99_encode_us");
+            assert!(!diags[0].change_pct.is_finite());
+        } else {
+            panic!("Expected Rejected");
+        }
+    }
+
+    #[test]
+    fn test_harness_rejects_non_finite_previous_benchmark_values() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut previous = sample_benchmarks();
+        previous[0].p99_decode_us = f64::INFINITY;
+
+        let outcome = harness.run(&sample_baseline(), &sample_benchmarks(), Some(&previous));
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "previous.p99_decode_us");
+            assert!(!diags[0].change_pct.is_finite());
+        } else {
+            panic!("Expected Rejected");
+        }
+    }
+
+    #[test]
+    fn test_harness_rejects_non_finite_baseline_values() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut baseline = sample_baseline();
+        baseline[0].overhead_ratio = f64::NEG_INFINITY;
+
+        let outcome = harness.run(&baseline, &sample_benchmarks(), None);
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "baseline.overhead_ratio");
+            assert!(!diags[0].change_pct.is_finite());
+        } else {
+            panic!("Expected Rejected");
+        }
     }
 
     // -- Harness: events -----------------------------------------------
