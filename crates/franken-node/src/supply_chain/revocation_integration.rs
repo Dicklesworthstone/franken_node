@@ -74,8 +74,8 @@ impl RevocationIntegrationPolicy {
     pub fn default_policy() -> Self {
         Self {
             low_tier_max_age_secs: 6 * 60 * 60,
-            medium_tier_max_age_secs: 5 * 60,
-            high_tier_max_age_secs: 60 * 60,
+            medium_tier_max_age_secs: 60 * 60,
+            high_tier_max_age_secs: 5 * 60,
             propagation_sla_secs: 60,
         }
     }
@@ -223,12 +223,12 @@ impl RevocationIntegrationEngine {
     #[must_use]
     pub fn new(policy: RevocationIntegrationPolicy) -> Self {
         // Reuse 10.13 safety-tier freshness gate with explicit tier mapping:
-        // - high extension tier -> Risky freshness threshold
-        // - medium extension tier -> Dangerous freshness threshold
+        // - high extension tier -> Dangerous freshness threshold
+        // - medium extension tier -> Risky freshness threshold
         // - low extension tier -> handled as warning-only window
         let freshness_policy = FreshnessPolicy {
-            risky_max_age_secs: policy.high_tier_max_age_secs,
-            dangerous_max_age_secs: policy.medium_tier_max_age_secs,
+            risky_max_age_secs: policy.medium_tier_max_age_secs,
+            dangerous_max_age_secs: policy.high_tier_max_age_secs,
         };
 
         Self {
@@ -429,9 +429,9 @@ impl RevocationIntegrationEngine {
             }
             ExtensionSafetyTier::Medium | ExtensionSafetyTier::High => {
                 let mapped_tier = if context.safety_tier == ExtensionSafetyTier::High {
-                    SafetyTier::Risky
-                } else {
                     SafetyTier::Dangerous
+                } else {
+                    SafetyTier::Risky
                 };
 
                 let freshness = evaluate_freshness(
@@ -764,10 +764,15 @@ mod tests {
     fn default_policy_has_positive_max_ages() {
         let policy = RevocationIntegrationPolicy::default_policy();
         assert!(policy.max_age_for_tier(ExtensionSafetyTier::High) > 0);
+        assert!(policy.max_age_for_tier(ExtensionSafetyTier::Medium) > 0);
         assert!(policy.max_age_for_tier(ExtensionSafetyTier::Low) > 0);
         assert!(
-            policy.max_age_for_tier(ExtensionSafetyTier::Low)
+            policy.max_age_for_tier(ExtensionSafetyTier::Medium)
                 >= policy.max_age_for_tier(ExtensionSafetyTier::High)
+        );
+        assert!(
+            policy.max_age_for_tier(ExtensionSafetyTier::Low)
+                >= policy.max_age_for_tier(ExtensionSafetyTier::Medium)
         );
     }
 
@@ -785,6 +790,35 @@ mod tests {
         );
         let decision = engine.evaluate_operation(&ctx);
         assert!(decision.allowed, "fresh high-safety should be allowed");
+    }
+
+    #[test]
+    fn high_safety_is_stricter_than_medium_at_same_age() {
+        let mut engine = engine();
+        engine
+            .process_propagation(&propagation_update(1, "other-ext", 1_900, 1_905))
+            .expect("propagation");
+
+        let high = engine.evaluate_operation(&operation_context(
+            "ext-high",
+            ExtensionOperation::Invoke,
+            ExtensionSafetyTier::High,
+            600,
+        ));
+        let medium = engine.evaluate_operation(&operation_context(
+            "ext-medium",
+            ExtensionOperation::Install,
+            ExtensionSafetyTier::Medium,
+            600,
+        ));
+
+        assert!(
+            !high.allowed,
+            "high-safety actions must fail before medium actions at the same age"
+        );
+        assert_eq!(high.status, RevocationDecisionStatus::FailedStale);
+        assert!(medium.allowed, "medium-safety action should still pass at 600s");
+        assert_eq!(medium.status, RevocationDecisionStatus::Passed);
     }
 
     #[test]
@@ -865,8 +899,16 @@ mod tests {
 
     #[test]
     fn safety_tier_ordering() {
-        // High is stricter than Low
+        // High is stricter than Medium, which is stricter than Low.
         let policy = RevocationIntegrationPolicy::default_policy();
+        assert!(
+            policy.max_age_for_tier(ExtensionSafetyTier::High)
+                <= policy.max_age_for_tier(ExtensionSafetyTier::Medium)
+        );
+        assert!(
+            policy.max_age_for_tier(ExtensionSafetyTier::Medium)
+                <= policy.max_age_for_tier(ExtensionSafetyTier::Low)
+        );
         assert!(
             policy.max_age_for_tier(ExtensionSafetyTier::High)
                 <= policy.max_age_for_tier(ExtensionSafetyTier::Low)
