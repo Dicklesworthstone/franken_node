@@ -243,8 +243,17 @@ impl MmrCheckpoint {
             return self.rebuild_from_stream(stream);
         }
 
-        while self.leaf_hashes.len() < stream_size {
-            let idx = self.leaf_hashes.len() as u64;
+        // When stream is larger than capacity, only retain the most recent
+        // MAX_LEAF_HASHES entries to avoid an infinite loop where push_bounded
+        // evicts as fast as we push.
+        let start_idx = if stream_size > MAX_LEAF_HASHES {
+            self.leaf_hashes.clear();
+            (stream_size - MAX_LEAF_HASHES) as u64
+        } else {
+            self.leaf_hashes.len() as u64
+        };
+
+        for idx in start_idx..(stream_size as u64) {
             let marker = stream.get(idx).ok_or(ProofError::InvalidProof {
                 reason: format!("marker missing at sequence {idx}"),
             })?;

@@ -281,6 +281,8 @@ pub struct ReportingPipeline {
     history: Vec<CategoryShiftReport>,
     telemetry: Vec<PipelineEvent>,
     next_claim_id: u32,
+    /// Monotonic report version counter (not reset by history eviction).
+    next_report_version: u64,
 }
 
 impl Default for ReportingPipeline {
@@ -300,6 +302,7 @@ impl ReportingPipeline {
             history: Vec::new(),
             telemetry: Vec::new(),
             next_claim_id: 1,
+            next_report_version: 1,
         }
     }
 
@@ -414,7 +417,8 @@ impl ReportingPipeline {
         let mut bet_status = self.bet_entries.clone();
         bet_status.sort_by(|a, b| a.initiative_id.cmp(&b.initiative_id));
 
-        let version = (self.history.len() as u64).saturating_add(1);
+        let version = self.next_report_version;
+        self.next_report_version = self.next_report_version.saturating_add(1);
 
         let mut report = CategoryShiftReport {
             version,
