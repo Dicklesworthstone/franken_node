@@ -824,4 +824,24 @@ mod tests {
             "NaN observed regime_shift must trigger rollback"
         );
     }
+
+    #[test]
+    fn builds_migration_report() {
+        let projected = TrajectorySnapshot {
+            instability_score: 0.23,
+            drift_score: 0.20,
+            regime_shift_probability: 0.14,
+        };
+        let decision = evaluate_admission(
+            "trace-bpet-report",
+            baseline(),
+            projected,
+            StabilityThresholds::default(),
+            "v2.0.0",
+        );
+
+        let report = build_migration_report("migration-001", decision.clone());
+        assert_eq!(report.migration_id, "migration-001");
+        assert_eq!(report.admission, decision);
+    }
 }
