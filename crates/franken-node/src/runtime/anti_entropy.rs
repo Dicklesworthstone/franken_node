@@ -436,7 +436,7 @@ impl AntiEntropyReconciler {
             }
 
             // INV-AE-EPOCH: reject future-epoch records.
-            if record.epoch > local.current_epoch() + self.config.epoch_tolerance {
+            if record.epoch > local.current_epoch().saturating_add(self.config.epoch_tolerance) {
                 self.push_event(ReconciliationEvent {
                     code: EVT_RECORD_REJECTED.to_string(),
                     detail: format!(
