@@ -525,7 +525,7 @@ impl MarkerStream {
     pub fn verify_integrity(&self) -> Result<(), MarkerStreamError> {
         let base_seq = self.markers.first().map_or(0, |m| m.sequence);
         for (i, marker) in self.markers.iter().enumerate() {
-            let expected_seq = base_seq + i as u64;
+            let expected_seq = base_seq.saturating_add(i as u64);
 
             // Dense sequence check
             if marker.sequence != expected_seq {
