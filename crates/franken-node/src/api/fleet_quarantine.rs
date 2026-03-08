@@ -27,27 +27,31 @@ use serde::{Deserialize, Serialize};
 const MAX_FLEET_EVENTS: usize = 4096;
 
 /// Maximum incident handles before oldest are evicted.
+#[cfg(any(test, feature = "extended-surfaces"))]
 const MAX_INCIDENTS: usize = 2048;
 
 /// Maximum zone status entries before oldest are evicted.
+#[cfg(any(test, feature = "extended-surfaces"))]
 const MAX_ZONE_STATUS: usize = 2048;
 
 use super::error::ApiError;
-use super::middleware::{
-    AuthIdentity, AuthMethod, EndpointGroup, EndpointLifecycle, PolicyHook, RouteMetadata,
-    TraceContext,
-};
+use super::middleware::{AuthIdentity, TraceContext};
+#[cfg(any(test, feature = "extended-surfaces"))]
+use super::middleware::{AuthMethod, EndpointGroup, EndpointLifecycle, PolicyHook, RouteMetadata};
 use super::trust_card_routes::ApiResponse;
 
 // ── Event Codes ───────────────────────────────────────────────────────────
 
 /// FLEET-001: Quarantine initiated for extension in zone.
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub const FLEET_QUARANTINE_INITIATED: &str = "FLEET-001";
 
 /// FLEET-002: Revocation issued for extension.
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub const FLEET_REVOCATION_ISSUED: &str = "FLEET-002";
 
 /// FLEET-003: Convergence progress updated.
+#[cfg(feature = "extended-surfaces")]
 pub const FLEET_CONVERGENCE_PROGRESS: &str = "FLEET-003";
 
 /// FLEET-004: Fleet released (quarantine rolled back).
@@ -59,23 +63,31 @@ pub const FLEET_RECONCILE_COMPLETED: &str = "FLEET-005";
 // ── Error Codes ───────────────────────────────────────────────────────────
 
 pub const FLEET_SCOPE_INVALID: &str = "FLEET_SCOPE_INVALID";
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub const FLEET_ZONE_UNREACHABLE: &str = "FLEET_ZONE_UNREACHABLE";
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub const FLEET_CONVERGENCE_TIMEOUT: &str = "FLEET_CONVERGENCE_TIMEOUT";
 pub const FLEET_ROLLBACK_FAILED: &str = "FLEET_ROLLBACK_FAILED";
 pub const FLEET_NOT_ACTIVATED: &str = "FLEET_NOT_ACTIVATED";
 
 // ── Invariant Tags ────────────────────────────────────────────────────────
 
+#[cfg(feature = "extended-surfaces")]
 pub const INV_FLEET_ZONE_SCOPE: &str = "INV-FLEET-ZONE-SCOPE";
+#[cfg(feature = "extended-surfaces")]
 pub const INV_FLEET_RECEIPT: &str = "INV-FLEET-RECEIPT";
+#[cfg(feature = "extended-surfaces")]
 pub const INV_FLEET_CONVERGENCE: &str = "INV-FLEET-CONVERGENCE";
+#[cfg(feature = "extended-surfaces")]
 pub const INV_FLEET_SAFE_START: &str = "INV-FLEET-SAFE-START";
+#[cfg(feature = "extended-surfaces")]
 pub const INV_FLEET_ROLLBACK: &str = "INV-FLEET-ROLLBACK";
 
 // ── Domain Types ──────────────────────────────────────────────────────────
 
 /// Quarantine scope limits blast-radius to zones/tenants.
 /// Enforces INV-FLEET-ZONE-SCOPE.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuarantineScope {
     /// Zone identifier (required).
@@ -89,6 +101,7 @@ pub struct QuarantineScope {
 }
 
 /// Revocation scope with extension and zone targeting.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationScope {
     /// Zone identifier (required).
@@ -102,6 +115,7 @@ pub struct RevocationScope {
 }
 
 /// Severity of a revocation action.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RevocationSeverity {
     /// Advisory only — logged but not enforced.
@@ -113,6 +127,7 @@ pub enum RevocationSeverity {
 }
 
 /// A fleet action requested by the operator.
+#[cfg(feature = "extended-surfaces")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FleetAction {
     /// Quarantine an extension in a scope.
@@ -250,8 +265,10 @@ pub enum FleetControlError {
     /// Scope validation failed.
     ScopeInvalid { code: String, detail: String },
     /// Target zone is unreachable.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     ZoneUnreachable { code: String, zone_id: String },
     /// Convergence timed out.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     ConvergenceTimeout { code: String, elapsed_seconds: u32 },
     /// Rollback failed during release.
     RollbackFailed {
@@ -271,6 +288,7 @@ impl FleetControlError {
         }
     }
 
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn zone_unreachable(zone_id: &str) -> Self {
         Self::ZoneUnreachable {
             code: FLEET_ZONE_UNREACHABLE.to_string(),
@@ -278,6 +296,7 @@ impl FleetControlError {
         }
     }
 
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn convergence_timeout(elapsed: u32) -> Self {
         Self::ConvergenceTimeout {
             code: FLEET_CONVERGENCE_TIMEOUT.to_string(),
@@ -303,7 +322,9 @@ impl FleetControlError {
     pub fn error_code(&self) -> &str {
         match self {
             Self::ScopeInvalid { code, .. } => code,
+            #[cfg(any(test, feature = "extended-surfaces"))]
             Self::ZoneUnreachable { code, .. } => code,
+            #[cfg(any(test, feature = "extended-surfaces"))]
             Self::ConvergenceTimeout { code, .. } => code,
             Self::RollbackFailed { code, .. } => code,
             Self::NotActivated { code } => code,
@@ -331,6 +352,7 @@ pub struct FleetControlEvent {
 }
 
 impl FleetControlEvent {
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn quarantine_initiated(trace_id: &str, zone_id: &str, extension_id: &str) -> Self {
         Self {
             event_code: FLEET_QUARANTINE_INITIATED.to_string(),
@@ -343,6 +365,7 @@ impl FleetControlEvent {
         }
     }
 
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn revocation_issued(trace_id: &str, zone_id: &str, extension_id: &str) -> Self {
         Self {
             event_code: FLEET_REVOCATION_ISSUED.to_string(),
@@ -355,6 +378,7 @@ impl FleetControlEvent {
         }
     }
 
+    #[cfg(feature = "extended-surfaces")]
     pub fn convergence_progress(trace_id: &str, zone_id: &str, progress_pct: u8) -> Self {
         let mut metadata = BTreeMap::new();
         metadata.insert("progress_pct".to_string(), progress_pct.to_string());
@@ -483,6 +507,7 @@ impl FleetControlManager {
     }
 
     /// Check if the manager is activated.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn is_activated(&self) -> bool {
         self.activated
     }
@@ -490,6 +515,7 @@ impl FleetControlManager {
     /// Quarantine an extension within a scope.
     /// INV-FLEET-ZONE-SCOPE: scope must have a valid zone_id.
     /// INV-FLEET-RECEIPT: produces a signed decision receipt.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn quarantine(
         &mut self,
         extension_id: &str,
@@ -578,6 +604,7 @@ impl FleetControlManager {
 
     /// Revoke an extension.
     /// INV-FLEET-ZONE-SCOPE: scope must have a valid zone_id.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn revoke(
         &mut self,
         extension_id: &str,
@@ -778,11 +805,13 @@ impl FleetControlManager {
     }
 
     /// Return all events in the audit trail.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn events(&self) -> &[FleetControlEvent] {
         &self.events
     }
 
     /// Return all active incidents.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn active_incidents(&self) -> Vec<&IncidentHandle> {
         self.incidents
             .values()
@@ -791,11 +820,13 @@ impl FleetControlManager {
     }
 
     /// Return all zone IDs known to the manager.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn zones(&self) -> Vec<String> {
         self.zone_status.keys().cloned().collect()
     }
 
     /// Return the total number of incidents (all statuses).
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn incident_count(&self) -> usize {
         self.incidents.len()
     }
@@ -857,12 +888,14 @@ impl Default for FleetControlManager {
 
 // ── Request / Response types for API handlers ─────────────────────────────
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct QuarantineRequest {
     pub extension_id: String,
     pub scope: QuarantineScope,
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevokeRequest {
     pub extension_id: String,
@@ -874,11 +907,13 @@ pub struct ReleaseRequest {
     pub incident_id: String,
 }
 
+#[cfg(feature = "extended-surfaces")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatusRequest {
     pub zone_id: String,
 }
 
+#[cfg(feature = "extended-surfaces")]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconcileResult {
     pub zones_reconciled: usize,
@@ -888,6 +923,7 @@ pub struct ReconcileResult {
 
 // ── Route Metadata ────────────────────────────────────────────────────────
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub fn quarantine_route_metadata() -> Vec<RouteMetadata> {
     vec![
         RouteMetadata {
@@ -955,6 +991,7 @@ pub fn quarantine_route_metadata() -> Vec<RouteMetadata> {
 
 // ── API Handlers ──────────────────────────────────────────────────────────
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub fn handle_quarantine(
     identity: &AuthIdentity,
     trace: &TraceContext,
@@ -975,6 +1012,7 @@ pub fn handle_quarantine(
     })
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub fn handle_revoke(
     identity: &AuthIdentity,
     trace: &TraceContext,

@@ -4,14 +4,17 @@
 //! HTTP problem responses with stable `type`, `title`, `status`, `detail`,
 //! `instance`, `code`, and `trace_id` fields.
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 use crate::connector::error_code_registry::{ErrorCodeEntry, Severity};
 
 /// RFC 7807 Problem Details response.
 ///
 /// All control-plane API error responses use this format with
 /// `Content-Type: application/problem+json`.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProblemDetail {
     /// URI reference identifying the problem type.
@@ -50,6 +53,7 @@ pub struct ProblemDetail {
 }
 
 /// Map error code severity to a default HTTP status.
+#[cfg(any(test, feature = "extended-surfaces"))]
 fn severity_to_status(severity: Severity) -> u16 {
     match severity {
         Severity::Fatal => 500,
@@ -61,6 +65,7 @@ fn severity_to_status(severity: Severity) -> u16 {
 /// Well-known error code to HTTP status overrides.
 ///
 /// Codes not listed here fall back to [`severity_to_status`].
+#[cfg(any(test, feature = "extended-surfaces"))]
 fn code_to_status(code: &str) -> Option<u16> {
     match code {
         // Auth/authz failures
@@ -77,6 +82,7 @@ fn code_to_status(code: &str) -> Option<u16> {
     }
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 impl ProblemDetail {
     /// Build a problem detail from an error code registry entry.
     pub fn from_registry_entry(
@@ -153,35 +159,43 @@ impl ProblemDetail {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApiError {
     /// Authentication failed (401).
+    #[cfg(any(test, feature = "extended-surfaces"))]
     AuthFailed { detail: String, trace_id: String },
     /// Authorization denied by policy hook (403).
+    #[cfg(any(test, feature = "extended-surfaces"))]
     PolicyDenied {
         detail: String,
         trace_id: String,
         policy_hook: String,
     },
     /// Rate limit exceeded (429).
+    #[cfg(any(test, feature = "extended-surfaces"))]
     RateLimited {
         detail: String,
         trace_id: String,
         retry_after_ms: u64,
     },
     /// Resource not found (404).
+    #[cfg(feature = "extended-surfaces")]
     NotFound { detail: String, trace_id: String },
     /// Lease or fencing conflict (409).
+    #[cfg(feature = "extended-surfaces")]
     Conflict { detail: String, trace_id: String },
     /// Bad request (400).
     BadRequest { detail: String, trace_id: String },
     /// Internal error (500).
     Internal { detail: String, trace_id: String },
     /// Service degraded (503).
+    #[cfg(feature = "extended-surfaces")]
     ServiceDegraded { detail: String, trace_id: String },
 }
 
 impl ApiError {
     /// Convert to an RFC 7807 problem detail.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn to_problem(&self, instance: &str) -> ProblemDetail {
         match self {
+            #[cfg(any(test, feature = "extended-surfaces"))]
             ApiError::AuthFailed { detail, trace_id } => ProblemDetail::new(
                 "FASTAPI_AUTH_FAIL",
                 "Authentication failed",
@@ -190,6 +204,7 @@ impl ApiError {
                 instance,
                 trace_id,
             ),
+            #[cfg(any(test, feature = "extended-surfaces"))]
             ApiError::PolicyDenied {
                 detail,
                 trace_id,
@@ -206,6 +221,7 @@ impl ApiError {
                 p.recovery_hint = Some(format!("policy hook: {policy_hook}"));
                 p
             }
+            #[cfg(any(test, feature = "extended-surfaces"))]
             ApiError::RateLimited {
                 detail,
                 trace_id,
@@ -223,6 +239,7 @@ impl ApiError {
                 p.retry_after_ms = Some(*retry_after_ms);
                 p
             }
+            #[cfg(feature = "extended-surfaces")]
             ApiError::NotFound { detail, trace_id } => ProblemDetail::new(
                 "FASTAPI_NOT_FOUND",
                 "Resource not found",
@@ -231,6 +248,7 @@ impl ApiError {
                 instance,
                 trace_id,
             ),
+            #[cfg(feature = "extended-surfaces")]
             ApiError::Conflict { detail, trace_id } => ProblemDetail::new(
                 "FASTAPI_CONFLICT",
                 "Conflict",
@@ -255,6 +273,7 @@ impl ApiError {
                 instance,
                 trace_id,
             ),
+            #[cfg(feature = "extended-surfaces")]
             ApiError::ServiceDegraded { detail, trace_id } => ProblemDetail::new(
                 "FASTAPI_SERVICE_DEGRADED",
                 "Service degraded",
@@ -270,13 +289,19 @@ impl ApiError {
 impl std::fmt::Display for ApiError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            #[cfg(any(test, feature = "extended-surfaces"))]
             ApiError::AuthFailed { detail, .. } => write!(f, "auth failed: {detail}"),
+            #[cfg(any(test, feature = "extended-surfaces"))]
             ApiError::PolicyDenied { detail, .. } => write!(f, "policy denied: {detail}"),
+            #[cfg(any(test, feature = "extended-surfaces"))]
             ApiError::RateLimited { detail, .. } => write!(f, "rate limited: {detail}"),
+            #[cfg(feature = "extended-surfaces")]
             ApiError::NotFound { detail, .. } => write!(f, "not found: {detail}"),
+            #[cfg(feature = "extended-surfaces")]
             ApiError::Conflict { detail, .. } => write!(f, "conflict: {detail}"),
             ApiError::BadRequest { detail, .. } => write!(f, "bad request: {detail}"),
             ApiError::Internal { detail, .. } => write!(f, "internal error: {detail}"),
+            #[cfg(feature = "extended-surfaces")]
             ApiError::ServiceDegraded { detail, .. } => write!(f, "service degraded: {detail}"),
         }
     }

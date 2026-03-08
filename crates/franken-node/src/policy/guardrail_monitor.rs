@@ -35,6 +35,7 @@ pub mod event_codes {
     pub const GUARD_PASS: &str = "EVD-GUARD-001";
     pub const GUARD_BLOCK: &str = "EVD-GUARD-002";
     pub const GUARD_WARN: &str = "EVD-GUARD-003";
+    #[cfg(feature = "extended-surfaces")]
     pub const GUARD_THRESHOLD_RECONFIGURED: &str = "EVD-GUARD-004";
 }
 
@@ -92,6 +93,7 @@ impl GuardrailVerdict {
     }
 
     /// True if this verdict blocks the action.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn is_blocked(&self) -> bool {
         matches!(self, Self::Block { .. })
     }
@@ -739,6 +741,7 @@ impl GuardrailMonitor for EvidenceEmissionGuardrail {
 
 /// Rejection event from a guardrail monitor (used by downstream consumers).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub struct GuardrailRejection {
     pub monitor_name: String,
     pub budget_id: BudgetId,
@@ -800,11 +803,13 @@ impl GuardrailMonitorSet {
     }
 
     /// Number of registered monitors.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn monitor_count(&self) -> usize {
         self.monitors.len()
     }
 
     /// Run all monitors and return the most restrictive verdict.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn check_all(&self, state: &SystemState) -> GuardrailVerdict {
         let mut most_restrictive = GuardrailVerdict::Allow;
 
@@ -819,6 +824,7 @@ impl GuardrailMonitorSet {
     }
 
     /// Run all monitors and return all individual verdicts.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn check_all_detailed(&self, state: &SystemState) -> Vec<(&str, GuardrailVerdict)> {
         self.monitors
             .iter()
@@ -861,6 +867,7 @@ impl GuardrailMonitorSet {
     }
 
     /// Check if the proposed action is allowed and produce rejection if not.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn evaluate(&self, state: &SystemState) -> Result<(), GuardrailRejection> {
         let certificate = self.certify(state);
         for finding in certificate.findings {

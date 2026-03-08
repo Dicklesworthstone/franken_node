@@ -30,6 +30,7 @@ pub const EVD_EXPLAIN_002: &str = "EVD-EXPLAIN-002";
 /// Wording validation failed (includes offending terms).
 pub const EVD_EXPLAIN_003: &str = "EVD-EXPLAIN-003";
 /// Explanation serialized for API.
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub const EVD_EXPLAIN_004: &str = "EVD-EXPLAIN-004";
 
 // ---------------------------------------------------------------------------
@@ -365,6 +366,7 @@ impl PolicyExplainer {
     /// Serialize explanation to JSON.
     ///
     /// [EVD-EXPLAIN-004] explanation serialized.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn to_json(explanation: &PolicyExplanation) -> Result<String, serde_json::Error> {
         let _event = EVD_EXPLAIN_004;
         serde_json::to_string_pretty(explanation)

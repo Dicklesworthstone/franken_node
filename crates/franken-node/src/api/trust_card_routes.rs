@@ -10,9 +10,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::supply_chain::trust_card::{
-    TrustCard, TrustCardComparison, TrustCardError, TrustCardInput, TrustCardListFilter,
-    TrustCardMutation, TrustCardRegistry, paginate,
+    TrustCard, TrustCardComparison, TrustCardError, TrustCardListFilter, TrustCardRegistry,
+    paginate,
 };
+#[cfg(any(test, feature = "extended-surfaces"))]
+use crate::supply_chain::trust_card::{TrustCardInput, TrustCardMutation};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pagination {
@@ -68,6 +70,7 @@ fn paged_response<T: Clone>(
     })
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub fn create_trust_card(
     registry: &mut TrustCardRegistry,
     input: TrustCardInput,
@@ -82,6 +85,7 @@ pub fn create_trust_card(
     })
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub fn update_trust_card(
     registry: &mut TrustCardRegistry,
     extension_id: &str,

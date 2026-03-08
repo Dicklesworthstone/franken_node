@@ -14,6 +14,7 @@
 use std::fmt;
 
 /// Stable event codes for structured logging.
+#[cfg(feature = "extended-surfaces")]
 pub mod event_codes {
     pub const HARDEN_ESCALATED: &str = "EVD-HARDEN-001";
     pub const HARDEN_REGRESSION_REJECTED: &str = "EVD-HARDEN-002";
@@ -63,6 +64,7 @@ impl HardeningLevel {
     }
 
     /// All levels in ascending order.
+    #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn all() -> &'static [HardeningLevel] {
         &[
             Self::Baseline,
@@ -93,6 +95,7 @@ impl fmt::Display for HardeningLevel {
 }
 
 /// A governance rollback artifact authorizing a downward hardening transition.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GovernanceRollbackArtifact {
     pub artifact_id: String,
@@ -102,6 +105,7 @@ pub struct GovernanceRollbackArtifact {
     pub signature: String,
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 impl GovernanceRollbackArtifact {
     /// Validate the artifact has all required fields populated.
     pub fn validate(&self) -> Result<(), HardeningError> {
@@ -131,6 +135,7 @@ impl GovernanceRollbackArtifact {
 }
 
 /// A record of a single hardening transition.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TransitionRecord {
     pub from_level: HardeningLevel,
@@ -141,6 +146,7 @@ pub struct TransitionRecord {
 }
 
 /// What triggered the hardening transition.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransitionTrigger {
     /// Normal upward escalation.
@@ -153,6 +159,7 @@ pub enum TransitionTrigger {
 }
 
 /// Errors from hardening state machine operations.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HardeningError {
     /// Attempted to escalate to the same or lower level.
@@ -171,6 +178,7 @@ pub enum HardeningError {
     AlreadyAtMaximumLevel,
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 impl HardeningError {
     pub fn code(&self) -> &'static str {
         match self {
@@ -182,6 +190,7 @@ impl HardeningError {
     }
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 impl fmt::Display for HardeningError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -211,8 +220,10 @@ impl fmt::Display for HardeningError {
     }
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 const MAX_TRANSITION_LOG_ENTRIES: usize = 4096;
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
     if items.len() > cap {
@@ -227,12 +238,14 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 /// INV-HARDEN-GOVERNANCE: rollback requires valid signed governance artifact.
 /// INV-HARDEN-AUDITABLE: all transitions are recorded.
 /// INV-HARDEN-DURABLE: state can be replayed from the transition log.
+#[cfg(any(test, feature = "extended-surfaces"))]
 #[derive(Debug)]
 pub struct HardeningStateMachine {
     current_level: HardeningLevel,
     transition_log: Vec<TransitionRecord>,
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 impl HardeningStateMachine {
     /// Create a new state machine at Baseline level.
     pub fn new() -> Self {
@@ -354,6 +367,7 @@ impl HardeningStateMachine {
     }
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 impl Default for HardeningStateMachine {
     fn default() -> Self {
         Self::new()
