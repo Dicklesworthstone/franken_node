@@ -1,8 +1,40 @@
 #![forbid(unsafe_code)]
 
-mod api;
+mod api {
+    #[path = "error.rs"]
+    pub mod error;
+    #[path = "fleet_quarantine.rs"]
+    pub mod fleet_quarantine;
+    #[path = "middleware.rs"]
+    pub mod middleware;
+    #[path = "trust_card_routes.rs"]
+    pub mod trust_card_routes;
+
+    pub(crate) fn utf8_prefix(input: &str, max_chars: usize) -> &str {
+        if max_chars == 0 {
+            return "";
+        }
+
+        let end = input
+            .char_indices()
+            .nth(max_chars)
+            .map_or(input.len(), |(idx, _)| idx);
+        &input[..end]
+    }
+}
 mod cli;
-mod policy;
+mod policy {
+    #[path = "bayesian_diagnostics.rs"]
+    pub mod bayesian_diagnostics;
+    #[path = "decision_engine.rs"]
+    pub mod decision_engine;
+    #[path = "guardrail_monitor.rs"]
+    pub mod guardrail_monitor;
+    #[path = "hardening_state_machine.rs"]
+    pub mod hardening_state_machine;
+    #[path = "policy_explainer.rs"]
+    pub mod policy_explainer;
+}
 
 use crate::api::{
     fleet_quarantine::{

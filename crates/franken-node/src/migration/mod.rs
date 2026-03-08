@@ -8,7 +8,9 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub mod bpet_migration_gate;
+#[cfg(any(test, feature = "extended-surfaces"))]
 pub mod dgis_migration_gate;
 
 const MAX_FINDINGS_PER_CATEGORY: usize = 16;
