@@ -786,8 +786,7 @@ impl CapabilityEnforcer {
         self.audit_log.push(entry);
         if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
             let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.chain_anchor_hash =
-                Some(self.audit_log[overflow - 1].hash());
+            self.chain_anchor_hash = Some(self.audit_log[overflow - 1].hash());
             self.audit_log.drain(0..overflow);
         }
     }

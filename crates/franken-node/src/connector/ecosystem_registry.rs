@@ -520,8 +520,7 @@ impl EcosystemRegistry {
         self.audit_trail.push(entry);
         if self.audit_trail.len() > MAX_AUDIT_LOG_ENTRIES {
             let overflow = self.audit_trail.len() - MAX_AUDIT_LOG_ENTRIES;
-            self.chain_anchor_hash =
-                Some(self.audit_trail[overflow - 1].entry_hash.clone());
+            self.chain_anchor_hash = Some(self.audit_trail[overflow - 1].entry_hash.clone());
             self.audit_trail.drain(0..overflow);
         }
     }

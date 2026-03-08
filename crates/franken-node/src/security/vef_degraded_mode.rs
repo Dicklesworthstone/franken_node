@@ -145,10 +145,8 @@ impl VefDegradedModeConfig {
             1.0
         };
         ProofLagSlo::new(
-            (self.quarantine_slo.max_proof_lag_secs as f64 * safe_mult)
-                .min(u64::MAX as f64) as u64,
-            (self.quarantine_slo.max_backlog_depth as f64 * safe_mult)
-                .min(u64::MAX as f64) as u64,
+            (self.quarantine_slo.max_proof_lag_secs as f64 * safe_mult).min(u64::MAX as f64) as u64,
+            (self.quarantine_slo.max_backlog_depth as f64 * safe_mult).min(u64::MAX as f64) as u64,
             self.halt_error_rate,
         )
     }
@@ -1295,7 +1293,10 @@ mod tests {
             error_rate: f64::NAN,
             heartbeat_age_secs: 0,
         };
-        assert!(slo.breached_by(&metrics), "NaN error_rate must breach SLO (fail-closed)");
+        assert!(
+            slo.breached_by(&metrics),
+            "NaN error_rate must breach SLO (fail-closed)"
+        );
     }
 
     #[test]
@@ -1307,7 +1308,10 @@ mod tests {
             error_rate: f64::INFINITY,
             heartbeat_age_secs: 0,
         };
-        assert!(slo.breached_by(&metrics), "Inf error_rate must breach SLO (fail-closed)");
+        assert!(
+            slo.breached_by(&metrics),
+            "Inf error_rate must breach SLO (fail-closed)"
+        );
     }
 
     #[test]
@@ -1319,7 +1323,10 @@ mod tests {
             error_rate: f64::NEG_INFINITY,
             heartbeat_age_secs: 0,
         };
-        assert!(slo.breached_by(&metrics), "NEG_INFINITY error_rate must breach SLO (fail-closed)");
+        assert!(
+            slo.breached_by(&metrics),
+            "NEG_INFINITY error_rate must breach SLO (fail-closed)"
+        );
     }
 
     #[test]
@@ -1333,7 +1340,11 @@ mod tests {
         };
         engine.observe_metrics(&metrics, 1000, "corr-nan");
         // NaN breaches all SLO tiers (restricted, quarantine, halt) → Halt
-        assert_eq!(engine.mode(), VefMode::Halt, "NaN error_rate must escalate to halt");
+        assert_eq!(
+            engine.mode(),
+            VefMode::Halt,
+            "NaN error_rate must escalate to halt"
+        );
     }
 
     #[test]

@@ -855,7 +855,6 @@ impl Default for FleetControlManager {
     }
 }
 
-
 // ── Request / Response types for API handlers ─────────────────────────────
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

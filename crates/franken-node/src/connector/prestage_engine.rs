@@ -518,7 +518,10 @@ mod tests {
     fn neg_inf_probability_not_staged() {
         let candidates = vec![cand("a1", 100, f64::NEG_INFINITY)];
         let (decisions, report) = evaluate_candidates(&candidates, &config(), "tr", "ts").unwrap();
-        assert!(!decisions[0].staged, "NEG_INFINITY probability must not be staged");
+        assert!(
+            !decisions[0].staged,
+            "NEG_INFINITY probability must not be staged"
+        );
         assert_eq!(report.staged_count, 0);
     }
 

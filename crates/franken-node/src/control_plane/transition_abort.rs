@@ -204,7 +204,11 @@ impl ForceTransitionPolicy {
             .collect::<Vec<_>>()
             .join(",");
         // Length-prefixed encoding prevents delimiter-collision ambiguity.
-        for field in [joined.as_str(), self.operator_id.as_str(), self.audit_reason.as_str()] {
+        for field in [
+            joined.as_str(),
+            self.operator_id.as_str(),
+            self.audit_reason.as_str(),
+        ] {
             sha2::Digest::update(&mut hasher, (field.len() as u64).to_le_bytes());
             sha2::Digest::update(&mut hasher, field.as_bytes());
         }

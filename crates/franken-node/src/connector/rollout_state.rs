@@ -11,8 +11,8 @@ use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use crate::control_plane::control_epoch::{
-    check_artifact_epoch, ControlEpoch, EpochArtifactEvent, EpochRejection, EpochRejectionReason,
-    ValidityWindowPolicy,
+    ControlEpoch, EpochArtifactEvent, EpochRejection, EpochRejectionReason, ValidityWindowPolicy,
+    check_artifact_epoch,
 };
 
 use super::cancellation_protocol::CancellationPhase;
@@ -445,7 +445,7 @@ fn now_iso8601() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::connector::health_gate::{standard_checks, HealthGateResult};
+    use crate::connector::health_gate::{HealthGateResult, standard_checks};
     use crate::control_plane::control_epoch::ValidityWindowPolicy;
     use tempfile::TempDir;
 

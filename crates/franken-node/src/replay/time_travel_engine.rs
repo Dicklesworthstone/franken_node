@@ -563,8 +563,13 @@ impl TraceBuilder {
         // INV-TTR-STEP-ORDER and causing validate() to reject the trace.
         // Instead, cap at MAX_TRACE_STEPS and silently stop recording.
         if self.steps.len() < MAX_TRACE_STEPS {
-            self.steps
-                .push(TraceStep::new(seq, input, output, side_effects, timestamp_ns));
+            self.steps.push(TraceStep::new(
+                seq,
+                input,
+                output,
+                side_effects,
+                timestamp_ns,
+            ));
         }
         let trace_id = self.trace_id.clone();
         push_bounded(

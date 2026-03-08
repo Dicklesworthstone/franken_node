@@ -1246,13 +1246,13 @@ mod tests {
         };
         let r = MeasurementResult::from_measurements(
             HotPath::LifecycleTransition,
-            70.0,          // baseline p50
-            f64::NAN,      // baseline p95 — NaN
-            130.0,         // baseline p99
-            77.0,          // integrated p50
-            105.0,         // integrated p95
-            135.0,         // integrated p99
-            10.0,          // cold start
+            70.0,     // baseline p50
+            f64::NAN, // baseline p95 — NaN
+            130.0,    // baseline p99
+            77.0,     // integrated p50
+            105.0,    // integrated p95
+            135.0,    // integrated p99
+            10.0,     // cold start
             &budget,
             None,
         );
@@ -1273,7 +1273,7 @@ mod tests {
             100.0,
             130.0,
             77.0,
-            f64::NAN,     // integrated p95 — NaN
+            f64::NAN, // integrated p95 — NaN
             135.0,
             10.0,
             &budget,
@@ -1298,7 +1298,7 @@ mod tests {
             77.0,
             105.0,
             135.0,
-            f64::NAN,     // cold start — NaN
+            f64::NAN, // cold start — NaN
             &budget,
             None,
         );

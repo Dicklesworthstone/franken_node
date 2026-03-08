@@ -1180,10 +1180,12 @@ mod tests {
         );
         store.store(bundle, 1000).unwrap();
         assert!(!store.decisions().is_empty());
-        assert!(store
-            .decisions()
-            .iter()
-            .any(|d| d.event_code == event_codes::IBR_001));
+        assert!(
+            store
+                .decisions()
+                .iter()
+                .any(|d| d.event_code == event_codes::IBR_001)
+        );
     }
 
     #[test]

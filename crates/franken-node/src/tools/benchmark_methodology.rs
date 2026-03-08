@@ -411,7 +411,8 @@ impl BenchmarkMethodology {
             }),
         );
 
-        let pub_entry = self.publications
+        let pub_entry = self
+            .publications
             .get_mut(pub_id)
             .ok_or_else(|| format!("Publication {pub_id} not found"))?;
         push_bounded(&mut pub_entry.citations, citation, MAX_CITATIONS);

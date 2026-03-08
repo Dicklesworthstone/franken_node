@@ -544,7 +544,11 @@ impl CancellationRuntime {
             // Idempotent child-link registration avoids duplicate propagation events.
             return Ok(());
         }
-        push_bounded(&mut parent.child_task_ids, child_id.to_string(), MAX_CHILD_TASKS);
+        push_bounded(
+            &mut parent.child_task_ids,
+            child_id.to_string(),
+            MAX_CHILD_TASKS,
+        );
         Ok(())
     }
 

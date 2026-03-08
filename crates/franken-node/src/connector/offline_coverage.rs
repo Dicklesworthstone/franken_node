@@ -533,7 +533,11 @@ mod tests {
         let alerts = t
             .check_slos(&[slo("coverage", f64::NAN)], "prod", 200, "trace-nan")
             .unwrap();
-        assert_eq!(alerts.len(), 1, "NaN threshold must trigger SLO breach (fail-closed)");
+        assert_eq!(
+            alerts.len(),
+            1,
+            "NaN threshold must trigger SLO breach (fail-closed)"
+        );
     }
 
     #[test]
@@ -543,7 +547,11 @@ mod tests {
         let alerts = t
             .check_slos(&[slo("coverage", f64::INFINITY)], "prod", 200, "trace-inf")
             .unwrap();
-        assert_eq!(alerts.len(), 1, "Inf threshold must trigger SLO breach (fail-closed)");
+        assert_eq!(
+            alerts.len(),
+            1,
+            "Inf threshold must trigger SLO breach (fail-closed)"
+        );
     }
 
     #[test]

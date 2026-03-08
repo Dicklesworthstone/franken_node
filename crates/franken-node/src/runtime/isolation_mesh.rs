@@ -646,13 +646,17 @@ impl IsolationMesh {
                     .ok_or_else(|| MeshError::UnknownWorkload {
                         workload_id: workload_id.to_string(),
                     })?;
-            push_bounded(&mut placement.elevation_history, ElevationRecord {
-                from_rail_id: old_rail_id,
-                from_level: current_level,
-                to_rail_id: target_rail_id.to_string(),
-                to_level: target_level,
-                at_ms: now_ms,
-            }, MAX_ELEVATION_HISTORY);
+            push_bounded(
+                &mut placement.elevation_history,
+                ElevationRecord {
+                    from_rail_id: old_rail_id,
+                    from_level: current_level,
+                    to_rail_id: target_rail_id.to_string(),
+                    to_level: target_level,
+                    at_ms: now_ms,
+                },
+                MAX_ELEVATION_HISTORY,
+            );
             placement.current_rail_id = target_rail_id.to_string();
             placement.current_level = target_level;
             placement.clone()

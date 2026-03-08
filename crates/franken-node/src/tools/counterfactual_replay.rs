@@ -543,7 +543,8 @@ where
 
             if original.decision != counterfactual.decision {
                 changed_decisions = changed_decisions.saturating_add(1);
-                let delta = i64::try_from(counterfactual.expected_loss).unwrap_or(i64::MAX)
+                let delta = i64::try_from(counterfactual.expected_loss)
+                    .unwrap_or(i64::MAX)
                     .saturating_sub(i64::try_from(original.expected_loss).unwrap_or(i64::MAX));
                 divergence_points.push(DivergenceRecord {
                     sequence_number: original.sequence_number,

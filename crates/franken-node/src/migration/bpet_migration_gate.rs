@@ -789,7 +789,10 @@ mod tests {
             },
         };
         let rollback = evaluate_rollout_health("trace-rb-nan", &rollout, &health);
-        assert!(rollback.should_rollback, "NaN observed instability must trigger rollback");
+        assert!(
+            rollback.should_rollback,
+            "NaN observed instability must trigger rollback"
+        );
     }
 
     #[test]
@@ -816,6 +819,9 @@ mod tests {
             },
         };
         let rollback = evaluate_rollout_health("trace-rb-nan-regime", &rollout, &health);
-        assert!(rollback.should_rollback, "NaN observed regime_shift must trigger rollback");
+        assert!(
+            rollback.should_rollback,
+            "NaN observed regime_shift must trigger rollback"
+        );
     }
 }

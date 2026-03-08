@@ -406,8 +406,7 @@ impl MarkerStream {
         self.markers.push(marker);
         if self.markers.len() > MAX_MARKERS {
             let overflow = self.markers.len() - MAX_MARKERS;
-            self.chain_anchor_hash =
-                Some(self.markers[overflow - 1].marker_hash.clone());
+            self.chain_anchor_hash = Some(self.markers[overflow - 1].marker_hash.clone());
             self.markers.drain(0..overflow);
         }
         self.total_appended = self.total_appended.saturating_add(1);

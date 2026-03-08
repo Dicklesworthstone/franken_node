@@ -967,10 +967,7 @@ impl QuarantineRegistry {
     /// Verify audit trail integrity (hash chain).
     pub fn verify_audit_integrity(&self) -> Result<bool, QuarantineError> {
         let genesis_hash = format!("{:x}", Sha256::digest(b"quarantine_genesis_v1:"));
-        let first_expected = self
-            .chain_anchor_hash
-            .as_deref()
-            .unwrap_or(&genesis_hash);
+        let first_expected = self.chain_anchor_hash.as_deref().unwrap_or(&genesis_hash);
 
         for (i, entry) in self.audit_trail.iter().enumerate() {
             let expected_prev = if i == 0 {
@@ -1083,8 +1080,7 @@ impl QuarantineRegistry {
         self.audit_trail.push(entry);
         if self.audit_trail.len() > MAX_AUDIT_TRAIL {
             let overflow = self.audit_trail.len() - MAX_AUDIT_TRAIL;
-            self.chain_anchor_hash =
-                Some(self.audit_trail[overflow - 1].entry_hash.clone());
+            self.chain_anchor_hash = Some(self.audit_trail[overflow - 1].entry_hash.clone());
             self.audit_trail.drain(0..overflow);
         }
     }
@@ -1503,8 +1499,7 @@ mod tests {
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
             .unwrap();
         reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
-            .unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
         reg.trigger_recall(make_recall("q-001")).unwrap();
 
         // Push more receipts than the cap.

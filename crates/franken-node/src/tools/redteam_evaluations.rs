@@ -336,7 +336,8 @@ impl RedTeamEvaluations {
             }),
         );
 
-        let eng = self.engagements
+        let eng = self
+            .engagements
             .get_mut(engagement_id)
             .ok_or_else(|| format!("Engagement {engagement_id} not found"))?;
         push_bounded(&mut eng.findings, finding, MAX_FINDINGS_PER_ENGAGEMENT);

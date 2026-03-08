@@ -614,10 +614,7 @@ impl PolicyChangeEngine {
         // After push_bounded eviction the first retained entry's prev_hash
         // points to the evicted entry — not to genesis.  Use the saved
         // chain_anchor_hash (the last evicted entry's hash) when available.
-        let first_expected = self
-            .chain_anchor_hash
-            .as_ref()
-            .unwrap_or(&genesis_hash);
+        let first_expected = self.chain_anchor_hash.as_ref().unwrap_or(&genesis_hash);
 
         for (i, entry) in self.audit_ledger.iter().enumerate() {
             let expected_prev = if i == 0 {
@@ -727,8 +724,7 @@ impl PolicyChangeEngine {
         if self.audit_ledger.len() > MAX_AUDIT_LEDGER_ENTRIES {
             let overflow = self.audit_ledger.len() - MAX_AUDIT_LEDGER_ENTRIES;
             // Save the entry_hash of the last entry being evicted as anchor.
-            self.chain_anchor_hash =
-                Some(self.audit_ledger[overflow - 1].entry_hash.clone());
+            self.chain_anchor_hash = Some(self.audit_ledger[overflow - 1].entry_hash.clone());
             self.audit_ledger.drain(0..overflow);
         }
     }

@@ -657,7 +657,11 @@ impl TrustGovernanceState {
                 ),
             ));
         }
-        push_bounded(used, evidence.evidence_hash.clone(), MAX_EVIDENCE_HASHES_PER_STAKE);
+        push_bounded(
+            used,
+            evidence.evidence_hash.clone(),
+            MAX_EVIDENCE_HASHES_PER_STAKE,
+        );
 
         // INV-STAKE-SLASH-DETERMINISTIC: compute slash amount from policy
         let fraction = self
@@ -677,7 +681,11 @@ impl TrustGovernanceState {
         };
 
         record.state = StakeState::Slashed;
-        push_bounded(&mut record.slash_events, event.clone(), MAX_SLASH_EVENTS_PER_STAKE);
+        push_bounded(
+            &mut record.slash_events,
+            event.clone(),
+            MAX_SLASH_EVENTS_PER_STAKE,
+        );
 
         let publisher = record.publisher.clone();
 
