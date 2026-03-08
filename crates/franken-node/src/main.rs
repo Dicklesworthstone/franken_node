@@ -1,8 +1,20 @@
 #![forbid(unsafe_code)]
 
+mod api;
 mod cli;
 mod policy;
 
+use crate::api::{
+    fleet_quarantine::{
+        FleetActionResult, FleetStatus, ReleaseRequest, handle_reconcile as handle_fleet_reconcile,
+        handle_release as handle_fleet_release, handle_status as handle_fleet_status,
+    },
+    middleware::{AuthIdentity, AuthMethod, TraceContext},
+    trust_card_routes::{
+        Pagination, compare_trust_card_versions, compare_trust_cards, get_trust_card,
+        get_trust_cards_by_publisher, list_trust_cards, search_trust_cards,
+    },
+};
 use crate::cli::{
     BenchCommand, Cli, Command, FleetCommand, IncidentCommand, MigrateCommand, RegistryCommand,
     RemoteCapCommand, RemoteCapIssueArgs, TrustCardCommand, TrustCommand, VerifyCommand,
@@ -22,18 +34,6 @@ use crate::policy::{
 use anyhow::{Context, Result};
 use clap::Parser;
 use frankenengine_node::{
-    api::{
-        fleet_quarantine::{
-            FleetActionResult, FleetStatus, ReleaseRequest,
-            handle_reconcile as handle_fleet_reconcile, handle_release as handle_fleet_release,
-            handle_status as handle_fleet_status,
-        },
-        middleware::{AuthIdentity, AuthMethod, TraceContext},
-        trust_card_routes::{
-            Pagination, compare_trust_card_versions, compare_trust_cards, get_trust_card,
-            get_trust_cards_by_publisher, list_trust_cards, search_trust_cards,
-        },
-    },
     config::{self, CliOverrides, Profile},
     ops, runtime,
     security::{
@@ -44,7 +44,6 @@ use frankenengine_node::{
         remote_cap::{CapabilityProvider, RemoteOperation, RemoteScope},
     },
     supply_chain::{
-        self,
         extension_registry::{
             ExtensionSignature, ExtensionStatus, ProvenanceAttestation, RegistrationRequest,
             SignedExtension, SignedExtensionRegistry, VersionEntry,
@@ -73,7 +72,7 @@ use frankenengine_node::{
         },
     },
 };
-pub use frankenengine_node::{observability, security};
+pub use frankenengine_node::{connector, control_plane, observability, security, supply_chain};
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
@@ -2019,9 +2018,7 @@ mod registry_command_tests {
 #[cfg(test)]
 mod fleet_command_tests {
     use super::*;
-    use frankenengine_node::api::fleet_quarantine::{
-        ConvergencePhase, ConvergenceState, DecisionReceipt,
-    };
+    use crate::api::fleet_quarantine::{ConvergencePhase, ConvergenceState, DecisionReceipt};
 
     #[test]
     fn fleet_cli_identity_has_operator_and_admin_roles() {

@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 extern crate self as frankenengine_node;
 
+#[cfg(feature = "extended-surfaces")]
 pub mod api;
 #[cfg(feature = "extended-surfaces")]
 pub mod claims;
