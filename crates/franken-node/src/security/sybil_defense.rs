@@ -548,7 +548,7 @@ impl SybilDetector {
                 timestamps.sort_unstable();
 
                 let mut burst_detected = false;
-                let required_signals_in_window = self.burst_threshold + 1;
+                let required_signals_in_window = self.burst_threshold.saturating_add(1);
                 if timestamps.len() >= required_signals_in_window {
                     for i in 0..=timestamps.len() - required_signals_in_window {
                         if timestamps[i + required_signals_in_window - 1] - timestamps[i]
