@@ -837,6 +837,16 @@ impl QuarantineRegistry {
                 message: "Quarantine order disappeared during operation".to_string(),
             })?;
 
+        if record.state != QuarantineState::RecallTriggered {
+            return Err(QuarantineError {
+                code: ERR_QUARANTINE_INVALID_TRANSITION.to_owned(),
+                message: format!(
+                    "Cannot complete recall: order {order_id} is in state {:?}, expected RecallTriggered",
+                    record.state
+                ),
+            });
+        }
+
         record.state = QuarantineState::RecallCompleted;
         push_bounded(
             &mut record.state_history,
@@ -1517,5 +1527,25 @@ mod tests {
 
         let record = reg.get_record("q-001").unwrap();
         assert!(record.recall_receipts.len() <= MAX_RECALL_RECEIPTS);
+    }
+
+    #[test]
+    fn test_complete_recall_requires_recall_triggered_state() {
+        let mut reg = QuarantineRegistry::new();
+        let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
+        reg.initiate_quarantine(order).unwrap();
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .unwrap();
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
+
+        // Attempt to complete recall without triggering it first (state = Isolated).
+        let err = reg
+            .complete_recall("q-001", "2026-01-15T00:05:00Z")
+            .unwrap_err();
+        assert_eq!(
+            err.code, ERR_QUARANTINE_INVALID_TRANSITION,
+            "complete_recall must reject non-RecallTriggered state"
+        );
     }
 }
