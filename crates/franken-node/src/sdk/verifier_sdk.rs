@@ -217,6 +217,18 @@ fn deterministic_hash(data: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Deterministic SHA-256 hash over multiple fields using length-prefixed encoding.
+/// Prevents hash collision when fields contain delimiters.
+fn deterministic_hash_fields(fields: &[&str]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"verifier_sdk_v1:");
+    for field in fields {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
 #[allow(dead_code)]
 fn now_timestamp() -> String {
     "2026-02-21T00:00:00Z".to_string()
@@ -349,19 +361,18 @@ impl VerifierSdk {
             VerifyVerdict::Fail(failures)
         };
 
-        let binding_input = format!(
-            "{}|{}|{}",
-            request.artifact_id,
-            request.artifact_hash,
-            request.claims.join(",")
-        );
-        let binding_hash = deterministic_hash(&binding_input);
+        let claims_joined = request.claims.join(",");
+        let binding_hash = deterministic_hash_fields(&[
+            &request.artifact_id,
+            &request.artifact_hash,
+            &claims_joined,
+        ]);
 
         Ok(VerificationReport {
             request_id: format!("vreq-{}", &deterministic_hash(&request.artifact_id)[..24]),
             verdict,
             evidence,
-            trace_id: format!("vtrc-{}", &deterministic_hash(&binding_input)[..24]),
+            trace_id: format!("vtrc-{}", &binding_hash[..24]),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
             verifier_identity: self.config.verifier_identity.clone(),
@@ -477,19 +488,19 @@ impl VerifierSdk {
             VerifyVerdict::Fail(failures)
         };
 
-        let binding_input = format!(
-            "capsule:{}|v{}|inputs:{}",
-            capsule.capsule_id,
-            capsule.format_version,
-            capsule.inputs.len()
-        );
-        let binding_hash = deterministic_hash(&binding_input);
+        let format_ver_str = capsule.format_version.to_string();
+        let inputs_len_str = capsule.inputs.len().to_string();
+        let binding_hash = deterministic_hash_fields(&[
+            &capsule.capsule_id,
+            &format_ver_str,
+            &inputs_len_str,
+        ]);
 
         Ok(VerificationReport {
             request_id: format!("vcap-{}", &deterministic_hash(&capsule.capsule_id)[..24]),
             verdict,
             evidence,
-            trace_id: format!("vtrc-{}", &deterministic_hash(&binding_input)[..24]),
+            trace_id: format!("vtrc-{}", &binding_hash[..24]),
             schema_tag: SCHEMA_TAG.to_string(),
             api_version: API_VERSION.to_string(),
             verifier_identity: self.config.verifier_identity.clone(),
@@ -1215,5 +1226,38 @@ mod tests {
         let h1 = deterministic_hash("input_a");
         let h2 = deterministic_hash("input_b");
         assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn test_deterministic_hash_fields_consistency() {
+        let h1 = deterministic_hash_fields(&["a", "b", "c"]);
+        let h2 = deterministic_hash_fields(&["a", "b", "c"]);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 64);
+    }
+
+    #[test]
+    fn test_deterministic_hash_fields_no_collision_on_delimiter() {
+        // "a|b" + "c" vs "a" + "b|c" must differ with length-prefixed encoding
+        let h1 = deterministic_hash_fields(&["a|b", "c"]);
+        let h2 = deterministic_hash_fields(&["a", "b|c"]);
+        assert_ne!(h1, h2, "length-prefixed hash must distinguish field boundaries");
+    }
+
+    #[test]
+    fn test_artifact_binding_hash_resists_delimiter_collision() {
+        let sdk = test_sdk();
+        let mut req1 = valid_request();
+        req1.artifact_id = "art|fake_hash".to_string();
+        req1.artifact_hash = "rest".to_string();
+        let mut req2 = valid_request();
+        req2.artifact_id = "art".to_string();
+        req2.artifact_hash = "fake_hash|rest".to_string();
+        let r1 = sdk.verify_artifact(&req1).unwrap();
+        let r2 = sdk.verify_artifact(&req2).unwrap();
+        assert_ne!(
+            r1.binding_hash, r2.binding_hash,
+            "binding hash must differ when fields contain delimiters"
+        );
     }
 }
