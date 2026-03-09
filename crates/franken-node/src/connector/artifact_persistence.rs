@@ -254,18 +254,15 @@ impl ArtifactStore {
         let seq_list = self.sequences.entry(artifact_type).or_default();
         seq_list.push(artifact_id.to_string());
         // Evict oldest artifacts when total exceeds capacity
-        if self.artifacts.len() > MAX_TOTAL_ARTIFACTS {
-            // Find the type with the most entries and evict its oldest
-            if let Some((_, evict_list)) = self
+        if self.artifacts.len() > MAX_TOTAL_ARTIFACTS
+            && let Some((_, evict_list)) = self
                 .sequences
                 .iter_mut()
                 .max_by_key(|(_, v)| v.len())
-            {
-                if let Some(evicted_id) = evict_list.first().cloned() {
-                    evict_list.remove(0);
-                    self.artifacts.remove(&evicted_id);
-                }
-            }
+            && let Some(evicted_id) = evict_list.first().cloned()
+        {
+            evict_list.remove(0);
+            self.artifacts.remove(&evicted_id);
         }
         self.next_sequence
             .insert(artifact_type, seq.saturating_add(1));
