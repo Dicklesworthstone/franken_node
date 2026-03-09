@@ -1065,7 +1065,7 @@ impl SafeModeController {
         // 5. Check evidence freshness (staleness detection).
         if input.last_evidence_epoch > 0
             && input.current_epoch.saturating_sub(input.last_evidence_epoch)
-                > input.staleness_threshold
+                >= input.staleness_threshold
         {
             inconsistencies.push(format!(
                 "evidence frontier stale: last epoch {}, current epoch {}, threshold {}",
@@ -2216,6 +2216,25 @@ mod tests {
         let receipt = SafeModeController::verify_trust_state(&input);
         assert!(!receipt.pass);
         assert_eq!(receipt.disposition, DegradedDisposition::WidenUncertainty);
+        assert!(receipt.anomalies.iter().any(|a| matches!(a, AnomalyClassification::StaleFrontier { .. })));
+    }
+
+    #[test]
+    fn test_verify_trust_state_stale_frontier_at_exact_boundary() {
+        // Fail-closed: when age == threshold, evidence IS stale.
+        let entries = vec!["entry1".to_string()];
+        let hash = SafeModeController::compute_evidence_digest(&entries);
+        let input = TrustVerificationInput {
+            trust_state_hash: hash,
+            evidence_entries: entries,
+            current_epoch: 150,
+            last_evidence_epoch: 100,
+            staleness_threshold: 50, // age = 150 - 100 = 50 == threshold
+            entry_reason: SafeModeEntryReason::ExplicitFlag,
+            timestamp: "2026-02-20T00:00:00Z".to_string(),
+        };
+        let receipt = SafeModeController::verify_trust_state(&input);
+        assert!(!receipt.pass, "at exact staleness boundary, evidence must be treated as stale (fail-closed)");
         assert!(receipt.anomalies.iter().any(|a| matches!(a, AnomalyClassification::StaleFrontier { .. })));
     }
 
