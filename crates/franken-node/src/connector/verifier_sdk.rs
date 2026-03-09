@@ -342,22 +342,20 @@ pub(crate) fn verify_ed25519_signature_hex(
 ) -> Result<(), VerifierSdkError> {
     let key_bytes = hex_blob(public_key, 32)?;
     let signature_bytes = hex_blob(signature, 64)?;
-    let verifying_key = VerifyingKey::from_bytes(
-        &key_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| VerifierSdkError::SignatureInvalid("invalid verifying key".to_string()))?,
-    )
-    .map_err(|_| VerifierSdkError::SignatureInvalid("invalid verifying key".to_string()))?;
+    let verifying_key =
+        VerifyingKey::from_bytes(&key_bytes.as_slice().try_into().map_err(|_| {
+            VerifierSdkError::SignatureInvalid("invalid verifying key".to_string())
+        })?)
+        .map_err(|_| VerifierSdkError::SignatureInvalid("invalid verifying key".to_string()))?;
     let signature = ed25519_dalek::Signature::from_bytes(
         &signature_bytes
             .as_slice()
             .try_into()
             .map_err(|_| VerifierSdkError::SignatureInvalid("invalid signature".to_string()))?,
     );
-    verifying_key
-        .verify(payload, &signature)
-        .map_err(|_| VerifierSdkError::SignatureInvalid("signature verification failed".to_string()))
+    verifying_key.verify(payload, &signature).map_err(|_| {
+        VerifierSdkError::SignatureInvalid("signature verification failed".to_string())
+    })
 }
 
 fn canonical_migration_artifact_payload(
@@ -367,8 +365,9 @@ fn canonical_migration_artifact_payload(
     canonical.remove("signature");
     canonical.remove("signature_algorithm");
     canonical.remove("signer_public_key");
-    serde_json::to_vec(&canonical)
-        .map_err(|err| VerifierSdkError::InvalidClaim(format!("artifact canonicalization failed: {err}")))
+    serde_json::to_vec(&canonical).map_err(|err| {
+        VerifierSdkError::InvalidClaim(format!("artifact canonicalization failed: {err}"))
+    })
 }
 
 /// Compute a signature by binding a verifier identity to a binding hash.
@@ -1615,7 +1614,7 @@ mod tests {
         let result = verify_claim(&claim, &evidence, "v1").unwrap();
         assert_eq!(result.verdict, Verdict::Fail);
     }
-}
+
     fn test_signing_key(seed: u8) -> SigningKey {
         SigningKey::from_bytes(&[seed; 32])
     }
@@ -1639,3 +1638,4 @@ mod tests {
             serde_json::json!(hex::encode(signature.to_bytes())),
         );
     }
+}
