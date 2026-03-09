@@ -4,7 +4,7 @@
   "title": "Section 10.11 verification gate: FrankenSQLite-Inspired Runtime Systems",
   "verdict": "PASS",
   "overall_pass": true,
-  "generated_at": "2026-02-22T05:35:00Z",
+  "generated_at": "2026-03-09T07:25:00Z",
   "gate": true,
   "gated_beads": 14,
   "checks": {
