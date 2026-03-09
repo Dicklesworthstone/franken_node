@@ -162,8 +162,11 @@ impl VefMetrics {
     pub fn digest(&self) -> [u8; 32] {
         let mut hasher = Sha256::new();
         hasher.update(b"vef_metrics_v1:");
-        hasher.update(self.coverage_pct.to_le_bytes());
-        hasher.update(self.validity_rate.to_le_bytes());
+        // Canonicalize non-finite f64 to 0.0 for deterministic hashing.
+        let coverage = if self.coverage_pct.is_finite() { self.coverage_pct } else { 0.0 };
+        let validity = if self.validity_rate.is_finite() { self.validity_rate } else { 0.0 };
+        hasher.update(coverage.to_le_bytes());
+        hasher.update(validity.to_le_bytes());
         hasher.update(self.proof_count.to_le_bytes());
         hasher.update(self.gap_count.to_le_bytes());
         hasher.finalize().into()
@@ -228,8 +231,8 @@ impl ScoreboardEntry {
         hasher.update(b"vef_scoreboard_v1:");
         hasher.update(metrics.digest());
         for link in evidence_links {
+            hasher.update((link.proof_id.len() as u64).to_le_bytes());
             hasher.update(link.proof_id.as_bytes());
-            hasher.update(b"\x00");
         }
         hasher.finalize().into()
     }
@@ -824,5 +827,44 @@ mod tests {
 
         let err = VefClaimError::NoEvidence("missing".into());
         assert!(format!("{err}").contains(ERR_VEF_CLAIM_NO_EVIDENCE));
+    }
+
+    // -- Regression: NaN determinism in VefMetrics::digest --
+
+    #[test]
+    fn nan_metrics_produce_deterministic_digest() {
+        let mut m1 = good_metrics();
+        m1.coverage_pct = f64::NAN;
+        let mut m2 = good_metrics();
+        m2.coverage_pct = f64::NAN;
+        // Both NaN values must canonicalize to 0.0, producing identical digests.
+        assert_eq!(m1.digest(), m2.digest());
+    }
+
+    #[test]
+    fn inf_metrics_produce_deterministic_digest() {
+        let mut m = good_metrics();
+        m.validity_rate = f64::INFINITY;
+        let baseline = good_metrics();
+        // Inf validity_rate must not match a normal 0.99 validity_rate.
+        assert_ne!(m.digest(), baseline.digest());
+    }
+
+    // -- Regression: length-prefixed evidence link hash --
+
+    #[test]
+    fn scoreboard_digest_resists_delimiter_collision() {
+        let links_a = vec![
+            EvidenceLink { proof_id: "ab".into(), action_class: "fs".into(), verification_time: 1, valid: true },
+            EvidenceLink { proof_id: "c".into(), action_class: "fs".into(), verification_time: 1, valid: true },
+        ];
+        let links_b = vec![
+            EvidenceLink { proof_id: "a".into(), action_class: "fs".into(), verification_time: 1, valid: true },
+            EvidenceLink { proof_id: "bc".into(), action_class: "fs".into(), verification_time: 1, valid: true },
+        ];
+        let m = good_metrics();
+        let d_a = ScoreboardEntry::compute_digest(&m, &links_a);
+        let d_b = ScoreboardEntry::compute_digest(&m, &links_b);
+        assert_ne!(d_a, d_b, "different proof_id splits must produce different digests");
     }
 }
