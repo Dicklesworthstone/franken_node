@@ -72,18 +72,22 @@ impl EgressRule {
 }
 
 /// Match host patterns: exact match or wildcard prefix (*.example.com).
+/// DNS hostnames are case-insensitive (RFC 4343); comparisons are normalized
+/// to prevent deny-rule bypass via casing tricks like "EVIL.COM" vs "evil.com".
 fn host_matches(pattern: &str, host: &str) -> bool {
     if pattern == "*" {
         return true;
     }
-    if let Some(suffix) = pattern.strip_prefix("*") {
+    let p = pattern.to_ascii_lowercase();
+    let h = host.to_ascii_lowercase();
+    if let Some(suffix) = p.strip_prefix('*') {
         if suffix.starts_with('.') {
-            host.ends_with(suffix) && host.len() > suffix.len()
+            h.ends_with(suffix) && h.len() > suffix.len()
         } else {
             false
         }
     } else {
-        pattern == host
+        p == h
     }
 }
 
@@ -630,5 +634,25 @@ mod tests {
             detail: "missing capability token".into(),
         };
         assert!(e4.to_string().contains("GUARD_REMOTE_CAP_DENIED"));
+    }
+
+    #[test]
+    fn test_host_matches_case_insensitive() {
+        // RFC 4343: DNS hostnames are case-insensitive.
+        // Deny rules must match regardless of casing to prevent bypass.
+        assert!(host_matches("evil.com", "EVIL.COM"));
+        assert!(host_matches("EVIL.COM", "evil.com"));
+        assert!(host_matches("Evil.Com", "eViL.cOm"));
+
+        // Wildcard suffix must also be case-insensitive
+        assert!(host_matches("*.evil.com", "sub.EVIL.COM"));
+        assert!(host_matches("*.EVIL.COM", "sub.evil.com"));
+
+        // Global wildcard still works
+        assert!(host_matches("*", "anything.COM"));
+
+        // Non-matching hosts still don't match
+        assert!(!host_matches("evil.com", "good.com"));
+        assert!(!host_matches("*.evil.com", "evil.com"));
     }
 }

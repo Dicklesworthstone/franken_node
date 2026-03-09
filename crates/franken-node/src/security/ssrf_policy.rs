@@ -245,7 +245,7 @@ impl SsrfPolicyTemplate {
     fn find_allowlist(&self, host: &str, port: u16) -> Option<&AllowlistEntry> {
         self.allowlist
             .iter()
-            .find(|e| e.host == host && e.port.is_none_or(|p| p == port))
+            .find(|e| e.host.eq_ignore_ascii_case(host) && e.port.is_none_or(|p| p == port))
     }
 
     /// Evaluate a request against the SSRF policy.
@@ -867,5 +867,40 @@ mod tests {
             reason: "empty".into(),
         };
         assert!(e4.to_string().contains("SSRF_TEMPLATE_INVALID"));
+    }
+
+    #[test]
+    fn test_find_allowlist_case_insensitive() {
+        // DNS hostnames are case-insensitive (RFC 4343).
+        // Uppercase host must still match a lowercase allowlist entry.
+        let mut policy = SsrfPolicyTemplate::default_template("test-conn".into());
+        policy.allowlist.push(AllowlistEntry {
+            host: "api.example.com".into(),
+            port: Some(443),
+            reason: "test".into(),
+            receipt: PolicyReceipt {
+                receipt_id: "r1".into(),
+                connector_id: "test-conn".into(),
+                host: "api.example.com".into(),
+                issued_at: "2026-01-01T00:00:00Z".into(),
+                reason: "test".into(),
+                trace_id: "t1".into(),
+            },
+        });
+
+        // Exact case → match
+        let found = policy.find_allowlist("api.example.com", 443);
+        assert!(found.is_some());
+
+        // Mixed case → must still match
+        let found_upper = policy.find_allowlist("API.EXAMPLE.COM", 443);
+        assert!(found_upper.is_some(), "uppercase host must match lowercase allowlist entry");
+
+        let found_mixed = policy.find_allowlist("Api.Example.Com", 443);
+        assert!(found_mixed.is_some(), "mixed-case host must match lowercase allowlist entry");
+
+        // Wrong port → no match regardless of case
+        let wrong_port = policy.find_allowlist("API.EXAMPLE.COM", 80);
+        assert!(wrong_port.is_none());
     }
 }
