@@ -11,6 +11,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use super::certification::{DerivationMetadata, VerifiedEvidenceRef};
+
 const MAX_TELEMETRY: usize = 4096;
 const MAX_CARD_VERSIONS: usize = 512;
 const MAX_AUDIT_HISTORY: usize = 256;
@@ -21,6 +23,24 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
+}
+
+/// Compute a domain-separated hash for trust-card derivation evidence.
+fn compute_trust_card_derivation_hash(refs: &[VerifiedEvidenceRef], derived_at: u64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"trust_card_derivation_v1:");
+    hasher.update(derived_at.to_le_bytes());
+    for r in refs {
+        hasher.update((r.evidence_id.len() as u64).to_le_bytes());
+        hasher.update(r.evidence_id.as_bytes());
+        let type_tag = serde_json::to_string(&r.evidence_type).unwrap_or_default();
+        hasher.update((type_tag.len() as u64).to_le_bytes());
+        hasher.update(type_tag.as_bytes());
+        hasher.update(r.verified_at_epoch.to_le_bytes());
+        hasher.update((r.verification_receipt_hash.len() as u64).to_le_bytes());
+        hasher.update(r.verification_receipt_hash.as_bytes());
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 pub const TRUST_CARD_CREATED: &str = "TRUST_CARD_CREATED";
@@ -56,6 +76,10 @@ pub enum TrustCardError {
     InvalidRegistryKey,
     #[error("invalid pagination: page={page}, per_page={per_page}")]
     InvalidPagination { page: usize, per_page: usize },
+    #[error("trust card creation requires at least one verified evidence reference")]
+    EvidenceMissing,
+    #[error("upgrading certification level requires evidence references")]
+    EvidenceRequiredForUpgrade,
 }
 
 impl From<serde_json::Error> for TrustCardError {
@@ -180,6 +204,8 @@ pub struct TrustCard {
     pub last_verified_timestamp: String,
     pub user_facing_risk_assessment: RiskAssessment,
     pub audit_history: Vec<AuditRecord>,
+    /// Derivation metadata linking this trust card to verified upstream evidence.
+    pub derivation_evidence: Option<DerivationMetadata>,
     pub card_hash: String,
     pub registry_signature: String,
 }
@@ -199,6 +225,9 @@ pub struct TrustCardInput {
     pub dependency_trust_summary: Vec<DependencyTrustStatus>,
     pub last_verified_timestamp: String,
     pub user_facing_risk_assessment: RiskAssessment,
+    /// Verified evidence references binding this trust card to upstream verification.
+    /// At least one evidence reference is required for card creation (fail-closed).
+    pub evidence_refs: Vec<VerifiedEvidenceRef>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -210,6 +239,8 @@ pub struct TrustCardMutation {
     pub reputation_trend: Option<ReputationTrend>,
     pub user_facing_risk_assessment: Option<RiskAssessment>,
     pub last_verified_timestamp: Option<String>,
+    /// Evidence references required when upgrading certification level.
+    pub evidence_refs: Option<Vec<VerifiedEvidenceRef>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -301,6 +332,19 @@ impl TrustCardRegistry {
         now_secs: u64,
         trace_id: &str,
     ) -> Result<TrustCard, TrustCardError> {
+        // Evidence binding gate: at least one evidence reference is required.
+        if input.evidence_refs.is_empty() {
+            return Err(TrustCardError::EvidenceMissing);
+        }
+
+        let derivation_hash =
+            compute_trust_card_derivation_hash(&input.evidence_refs, now_secs);
+        let derivation = DerivationMetadata {
+            evidence_refs: input.evidence_refs.clone(),
+            derived_at_epoch: now_secs,
+            derivation_chain_hash: derivation_hash,
+        };
+
         let extension_id = input.extension.extension_id.clone();
         let previous = self
             .cards_by_extension
@@ -332,6 +376,7 @@ impl TrustCardRegistry {
                 detail: "trust card created".to_string(),
                 trace_id: trace_id.to_string(),
             }],
+            derivation_evidence: Some(derivation),
             card_hash: String::new(),
             registry_signature: String::new(),
         };
@@ -381,11 +426,29 @@ impl TrustCardRegistry {
             .ok_or_else(|| TrustCardError::NotFound(extension_id.to_string()))?
             .clone();
 
+        // Monotone upgrade enforcement: upgrading certification requires evidence.
+        if let Some(level) = mutation.certification_level {
+            if level > latest.certification_level && mutation.evidence_refs.is_none() {
+                return Err(TrustCardError::EvidenceRequiredForUpgrade);
+            }
+        }
+
         let mut next = latest.clone();
         next.trust_card_version = latest.trust_card_version.saturating_add(1);
         next.previous_version_hash = Some(latest.card_hash.clone());
         if let Some(level) = mutation.certification_level {
             next.certification_level = level;
+        }
+
+        // Update derivation evidence if new evidence refs are provided.
+        if let Some(refs) = &mutation.evidence_refs {
+            let derivation_hash =
+                compute_trust_card_derivation_hash(refs, now_secs);
+            next.derivation_evidence = Some(DerivationMetadata {
+                evidence_refs: refs.clone(),
+                derived_at_epoch: now_secs,
+                derivation_chain_hash: derivation_hash,
+            });
         }
         if let Some(status) = mutation.revocation_status {
             if matches!(status, RevocationStatus::Revoked { .. }) {
@@ -1029,6 +1092,24 @@ pub fn to_canonical_json<T: Serialize>(value: &T) -> Result<String, TrustCardErr
     Ok(serde_json::to_string(&canonical)?)
 }
 
+fn demo_evidence_refs() -> Vec<VerifiedEvidenceRef> {
+    use super::certification::EvidenceType;
+    vec![
+        VerifiedEvidenceRef {
+            evidence_id: "ev-demo-prov-001".to_string(),
+            evidence_type: EvidenceType::ProvenanceChain,
+            verified_at_epoch: 1000,
+            verification_receipt_hash: "a".repeat(64),
+        },
+        VerifiedEvidenceRef {
+            evidence_id: "ev-demo-rep-001".to_string(),
+            evidence_type: EvidenceType::ReputationSignal,
+            verified_at_epoch: 1000,
+            verification_receipt_hash: "b".repeat(64),
+        },
+    ]
+}
+
 pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError> {
     let mut registry = TrustCardRegistry::default();
     let base_trace = "trace-demo";
@@ -1082,6 +1163,7 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
                     "Token validation extension with strong provenance and no local disk access"
                         .to_string(),
             },
+            evidence_refs: demo_evidence_refs(),
         },
         now_secs,
         base_trace,
@@ -1130,6 +1212,7 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
                     "Telemetry extension with elevated network and local spool behavior; monitor closely"
                         .to_string(),
             },
+            evidence_refs: demo_evidence_refs(),
         },
         now_secs.saturating_add(1),
         base_trace,
@@ -1151,6 +1234,7 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
                 summary: "Revoked due to publisher compromise; do not deploy".to_string(),
             }),
             last_verified_timestamp: Some("2026-02-20T12:01:00Z".to_string()),
+            evidence_refs: None, // Demotion: no new evidence required.
         },
         now_secs.saturating_add(2),
         base_trace,
@@ -1226,6 +1310,24 @@ fn canonicalize_value(value: Value) -> Value {
 mod tests {
     use super::*;
 
+    fn test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
+        use super::super::certification::EvidenceType;
+        vec![
+            VerifiedEvidenceRef {
+                evidence_id: "ev-test-prov-001".to_string(),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: 900,
+                verification_receipt_hash: "c".repeat(64),
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "ev-test-rep-001".to_string(),
+                evidence_type: EvidenceType::ReputationSignal,
+                verified_at_epoch: 900,
+                verification_receipt_hash: "d".repeat(64),
+            },
+        ]
+    }
+
     fn sample_input() -> TrustCardInput {
         TrustCardInput {
             extension: ExtensionIdentity {
@@ -1266,6 +1368,7 @@ mod tests {
                 level: RiskLevel::Low,
                 summary: "low risk".to_string(),
             },
+            evidence_refs: test_evidence_refs(),
         }
     }
 
@@ -1300,6 +1403,7 @@ mod tests {
                     reputation_trend: None,
                     user_facing_risk_assessment: None,
                     last_verified_timestamp: None,
+                    evidence_refs: Some(test_evidence_refs()),
                 },
                 1_020,
                 "trace",
@@ -1544,6 +1648,118 @@ mod tests {
         assert!(ts.contains('T'), "must contain T separator: {ts}");
         assert!(ts.ends_with('Z'), "must end with Z: {ts}");
         assert_eq!(ts, "2023-11-14T22:13:20Z");
+    }
+
+    // ── Evidence binding adversarial tests ──────────────────────────────
+
+    #[test]
+    fn create_rejects_empty_evidence() {
+        let mut registry = TrustCardRegistry::default();
+        let mut input = sample_input();
+        input.evidence_refs = vec![];
+        let err = registry.create(input, 1_000, "trace").expect_err("must fail");
+        assert!(matches!(err, TrustCardError::EvidenceMissing));
+    }
+
+    #[test]
+    fn create_includes_derivation_evidence() {
+        let mut registry = TrustCardRegistry::default();
+        let card = registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        let derivation = card
+            .derivation_evidence
+            .as_ref()
+            .expect("derivation must be present");
+        assert_eq!(derivation.evidence_refs.len(), 2);
+        assert!(derivation.derivation_chain_hash.starts_with("sha256:"));
+        assert_eq!(derivation.derived_at_epoch, 1_000);
+    }
+
+    #[test]
+    fn update_upgrade_without_evidence_rejected() {
+        let mut registry = TrustCardRegistry::default();
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        // Silver (from sample) → Platinum without evidence → error.
+        let err = registry
+            .update(
+                "npm:@acme/plugin",
+                TrustCardMutation {
+                    certification_level: Some(CertificationLevel::Platinum),
+                    revocation_status: None,
+                    active_quarantine: None,
+                    reputation_score_basis_points: None,
+                    reputation_trend: None,
+                    user_facing_risk_assessment: None,
+                    last_verified_timestamp: None,
+                    evidence_refs: None,
+                },
+                1_020,
+                "trace",
+            )
+            .expect_err("upgrade without evidence must fail");
+        assert!(matches!(err, TrustCardError::EvidenceRequiredForUpgrade));
+    }
+
+    #[test]
+    fn update_demotion_without_evidence_allowed() {
+        let mut registry = TrustCardRegistry::default();
+        // Create with Gold level.
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        // Gold → Bronze is a demotion — should succeed without evidence.
+        let card = registry
+            .update(
+                "npm:@acme/plugin",
+                TrustCardMutation {
+                    certification_level: Some(CertificationLevel::Bronze),
+                    revocation_status: None,
+                    active_quarantine: None,
+                    reputation_score_basis_points: None,
+                    reputation_trend: None,
+                    user_facing_risk_assessment: None,
+                    last_verified_timestamp: None,
+                    evidence_refs: None,
+                },
+                1_020,
+                "trace",
+            )
+            .expect("demotion without evidence should succeed");
+        assert_eq!(card.certification_level, CertificationLevel::Bronze);
+    }
+
+    #[test]
+    fn update_with_evidence_replaces_derivation() {
+        let mut registry = TrustCardRegistry::default();
+        registry
+            .create(sample_input(), 1_000, "trace")
+            .expect("create");
+        let new_refs = test_evidence_refs();
+        let card = registry
+            .update(
+                "npm:@acme/plugin",
+                TrustCardMutation {
+                    certification_level: Some(CertificationLevel::Platinum),
+                    revocation_status: None,
+                    active_quarantine: None,
+                    reputation_score_basis_points: None,
+                    reputation_trend: None,
+                    user_facing_risk_assessment: None,
+                    last_verified_timestamp: None,
+                    evidence_refs: Some(new_refs),
+                },
+                2_000,
+                "trace",
+            )
+            .expect("upgrade with evidence should succeed");
+        let derivation = card
+            .derivation_evidence
+            .as_ref()
+            .expect("derivation updated");
+        assert_eq!(derivation.derived_at_epoch, 2_000);
     }
 
     #[test]

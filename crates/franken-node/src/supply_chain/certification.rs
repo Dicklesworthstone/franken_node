@@ -24,6 +24,8 @@ pub const CERTIFICATION_DEMOTED: &str = "CERTIFICATION_DEMOTED";
 pub const CERTIFICATION_POLICY_ENFORCED: &str = "CERTIFICATION_POLICY_ENFORCED";
 pub const CERTIFICATION_GATE_PASS: &str = "CERTIFICATION_GATE_PASS";
 pub const CERTIFICATION_GATE_REJECT: &str = "CERTIFICATION_GATE_REJECT";
+pub const CERTIFICATION_EVIDENCE_MISSING: &str = "CERTIFICATION_EVIDENCE_MISSING";
+pub const CERTIFICATION_EVIDENCE_VALIDATED: &str = "CERTIFICATION_EVIDENCE_VALIDATED";
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -187,6 +189,9 @@ pub struct CertificationInput {
     pub has_audit_attestation: bool,
     /// Audit attestation details if provided.
     pub audit_attestation: Option<AuditAttestation>,
+    /// Verified evidence references binding this input to upstream verification.
+    /// At minimum, provenance and reputation evidence must be provided.
+    pub evidence_refs: Vec<VerifiedEvidenceRef>,
 }
 
 /// Third-party audit attestation details.
@@ -197,6 +202,59 @@ pub struct AuditAttestation {
     pub scope: String,
     pub findings_summary: String,
     pub attestation_hash: String,
+}
+
+// ── Evidence binding types ───────────────────────────────────────────────────
+
+/// Evidence type categories for verified evidence references.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceType {
+    ProvenanceChain,
+    ReputationSignal,
+    TestCoverageReport,
+    AuditReport,
+    ManifestAdmission,
+    RevocationCheck,
+}
+
+/// A reference to a verified upstream evidence record. Trust cards and
+/// certification results carry these to prove their decisions are grounded
+/// in canonical verification, not caller-supplied assertions.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifiedEvidenceRef {
+    pub evidence_id: String,
+    pub evidence_type: EvidenceType,
+    pub verified_at_epoch: u64,
+    pub verification_receipt_hash: String,
+}
+
+/// Derivation metadata linking downstream trust decisions to upstream evidence.
+/// Every trust card and certification result carries this so another verifier
+/// can reconstruct why a decision was made.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivationMetadata {
+    pub evidence_refs: Vec<VerifiedEvidenceRef>,
+    pub derived_at_epoch: u64,
+    pub derivation_chain_hash: String,
+}
+
+/// Compute a domain-separated hash over the derivation evidence chain.
+pub(crate) fn compute_derivation_hash(refs: &[VerifiedEvidenceRef], derived_at: u64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"certification_derivation_v1:");
+    hasher.update(derived_at.to_le_bytes());
+    for r in refs {
+        hasher.update((r.evidence_id.len() as u64).to_le_bytes());
+        hasher.update(r.evidence_id.as_bytes());
+        let type_tag = serde_json::to_string(&r.evidence_type).unwrap_or_default();
+        hasher.update((type_tag.len() as u64).to_le_bytes());
+        hasher.update(type_tag.as_bytes());
+        hasher.update(r.verified_at_epoch.to_le_bytes());
+        hasher.update((r.verification_receipt_hash.len() as u64).to_le_bytes());
+        hasher.update(r.verification_receipt_hash.as_bytes());
+    }
+    format!("sha256:{}", hex::encode(hasher.finalize()))
 }
 
 // ── Certification evaluation ─────────────────────────────────────────────────
@@ -216,6 +274,8 @@ pub struct CertificationResult {
     pub unsatisfied_criteria: Vec<String>,
     /// Maximum achievable level given current evidence.
     pub max_achievable: CertificationLevel,
+    /// Derivation metadata linking this result to verified upstream evidence.
+    pub derivation: Option<DerivationMetadata>,
 }
 
 /// Evaluate the certification level for an extension.
@@ -223,6 +283,22 @@ pub struct CertificationResult {
 /// This is a deterministic function: same inputs produce identical results.
 #[must_use]
 pub fn evaluate_certification(input: &CertificationInput) -> CertificationResult {
+    // Evidence binding gate: at least one evidence reference is required.
+    // Without verified evidence, certification cannot proceed (fail-closed).
+    if input.evidence_refs.is_empty() {
+        return CertificationResult {
+            extension_id: input.extension_id.clone(),
+            level: CertificationLevel::Uncertified,
+            explanation: "No verified evidence references provided; certification \
+                          requires upstream evidence binding."
+                .to_string(),
+            satisfied_criteria: vec![],
+            unsatisfied_criteria: vec!["evidence_binding_present".to_owned()],
+            max_achievable: CertificationLevel::Uncertified,
+            derivation: None,
+        };
+    }
+
     let mut satisfied = Vec::new();
     let mut unsatisfied = Vec::new();
 
@@ -260,7 +336,8 @@ pub fn evaluate_certification(input: &CertificationInput) -> CertificationResult
     } else {
         unsatisfied.push("reproducible_build_evidence".to_owned());
     }
-    let adequate_coverage = input.test_coverage_pct.is_some_and(|pct| pct >= 80.0);
+    let adequate_coverage =
+        input.test_coverage_pct.is_some_and(|pct| pct.is_finite() && pct >= 80.0);
     if input.has_test_coverage_evidence && adequate_coverage {
         satisfied.push("test_coverage_above_80pct".to_owned());
     } else {
@@ -307,6 +384,14 @@ pub fn evaluate_certification(input: &CertificationInput) -> CertificationResult
         unsatisfied.len(),
     );
 
+    let derivation_hash =
+        compute_derivation_hash(&input.evidence_refs, 0);
+    let derivation = DerivationMetadata {
+        evidence_refs: input.evidence_refs.clone(),
+        derived_at_epoch: 0, // Caller-supplied via evaluate_and_register timestamp
+        derivation_chain_hash: derivation_hash,
+    };
+
     CertificationResult {
         extension_id: input.extension_id.clone(),
         level,
@@ -314,6 +399,7 @@ pub fn evaluate_certification(input: &CertificationInput) -> CertificationResult
         satisfied_criteria: satisfied,
         unsatisfied_criteria: unsatisfied,
         max_achievable,
+        derivation: Some(derivation),
     }
 }
 
@@ -752,6 +838,23 @@ mod tests {
         format!("2026-01-{n:02}T00:00:00Z")
     }
 
+    fn sample_evidence_refs() -> Vec<VerifiedEvidenceRef> {
+        vec![
+            VerifiedEvidenceRef {
+                evidence_id: "ev-prov-001".to_string(),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: 1000,
+                verification_receipt_hash: "a".repeat(64),
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "ev-rep-001".to_string(),
+                evidence_type: EvidenceType::ReputationSignal,
+                verified_at_epoch: 1000,
+                verification_receipt_hash: "b".repeat(64),
+            },
+        ]
+    }
+
     fn make_input(
         ext_id: &str,
         provenance: ProvenanceLevel,
@@ -771,6 +874,7 @@ mod tests {
             has_reproducible_build_evidence: false,
             has_audit_attestation: false,
             audit_attestation: None,
+            evidence_refs: sample_evidence_refs(),
         }
     }
 
@@ -1177,5 +1281,83 @@ mod tests {
         let result = evaluate_certification(&input);
         assert!(!result.explanation.is_empty());
         assert!(result.explanation.contains("ext-1"));
+    }
+
+    // ── Evidence binding adversarial tests ──────────────────────────────
+
+    #[test]
+    fn test_no_evidence_returns_uncertified() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::PublisherSigned,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.evidence_refs = vec![];
+        let result = evaluate_certification(&input);
+        assert_eq!(result.level, CertificationLevel::Uncertified);
+        assert!(result.derivation.is_none());
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"evidence_binding_present".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_nan_coverage_blocks_verified() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::SignedReproducible,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(f64::NAN);
+        let result = evaluate_certification(&input);
+        // NaN is not >= 80.0, so Verified is blocked — should be Standard.
+        assert_eq!(result.level, CertificationLevel::Standard);
+    }
+
+    #[test]
+    fn test_inf_coverage_blocks_verified() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::SignedReproducible,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(f64::INFINITY);
+        let result = evaluate_certification(&input);
+        // Infinity is not finite, so Verified is blocked — should be Standard.
+        assert_eq!(result.level, CertificationLevel::Standard);
+    }
+
+    #[test]
+    fn test_derivation_metadata_present_with_evidence() {
+        let input = make_input(
+            "ext-1",
+            ProvenanceLevel::PublisherSigned,
+            ReputationTier::Provisional,
+            30.0,
+        );
+        let result = evaluate_certification(&input);
+        let derivation = result.derivation.as_ref().expect("derivation must be present");
+        assert_eq!(derivation.evidence_refs.len(), 2);
+        assert!(derivation.derivation_chain_hash.starts_with("sha256:"));
+    }
+
+    #[test]
+    fn test_derivation_hash_deterministic() {
+        let refs = sample_evidence_refs();
+        let h1 = compute_derivation_hash(&refs, 42);
+        let h2 = compute_derivation_hash(&refs, 42);
+        assert_eq!(h1, h2);
+        // Different epoch produces different hash.
+        let h3 = compute_derivation_hash(&refs, 43);
+        assert_ne!(h1, h3);
     }
 }

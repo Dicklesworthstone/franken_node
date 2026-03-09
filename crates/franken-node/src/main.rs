@@ -2892,6 +2892,7 @@ fn revoke_trust_card(
                     summary: "Revoked by operator action via trust revoke.".to_string(),
                 }),
                 last_verified_timestamp: Some(now_rfc3339),
+                evidence_refs: None, // Demotion/revocation: no new evidence required.
             },
             now_secs,
             "trace-cli-trust-revoke",
@@ -2946,6 +2947,7 @@ fn quarantine_trust_cards(
                     reputation_trend: None,
                     user_facing_risk_assessment: None,
                     last_verified_timestamp: Some(now_rfc3339.clone()),
+                    evidence_refs: None, // Quarantine: no new evidence required.
                 },
                 now_secs,
                 "trace-cli-trust-quarantine",

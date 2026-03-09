@@ -188,11 +188,29 @@ pub fn compare_trust_card_versions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supply_chain::certification::{EvidenceType, VerifiedEvidenceRef};
     use crate::supply_chain::trust_card::{
         CapabilityDeclaration, CapabilityRisk, CertificationLevel, ExtensionIdentity,
         PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
         TrustCardInput, TrustCardMutation, demo_registry,
     };
+
+    fn route_test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
+        vec![
+            VerifiedEvidenceRef {
+                evidence_id: "ev-route-prov-001".to_string(),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: 500,
+                verification_receipt_hash: "e".repeat(64),
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "ev-route-rep-001".to_string(),
+                evidence_type: EvidenceType::ReputationSignal,
+                verified_at_epoch: 500,
+                verification_receipt_hash: "f".repeat(64),
+            },
+        ]
+    }
 
     fn sample_input(extension_id: &str) -> TrustCardInput {
         TrustCardInput {
@@ -231,6 +249,7 @@ mod tests {
                 level: RiskLevel::Medium,
                 summary: "medium".to_string(),
             },
+            evidence_refs: route_test_evidence_refs(),
         }
     }
 
@@ -305,6 +324,7 @@ mod tests {
                 reputation_trend: None,
                 user_facing_risk_assessment: None,
                 last_verified_timestamp: Some("2026-02-20T01:00:00Z".to_string()),
+                evidence_refs: Some(route_test_evidence_refs()),
             },
             2_100,
             "trace-update",
