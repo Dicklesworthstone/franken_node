@@ -8,7 +8,7 @@
 //! Schema version: sup-v1.0
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::time::Instant;
 
@@ -353,6 +353,12 @@ pub struct SupervisorHealth {
     pub oldest_restart_age_ms: Option<u64>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RestartWindowView {
+    active_count: usize,
+    oldest_restart_age_ms: Option<u64>,
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -495,7 +501,7 @@ pub struct Supervisor {
     /// Monotonic counter for insertion order.
     next_order: u64,
     /// Restart timestamps within the current sliding window (monotonic ms).
-    restart_timestamps: Vec<u64>,
+    restart_timestamps: VecDeque<u64>,
     /// Current escalation depth.
     escalation_depth: u32,
     /// Accumulated event log.
@@ -554,7 +560,7 @@ impl Supervisor {
             max_escalation_depth,
             children: BTreeMap::new(),
             next_order: 0,
-            restart_timestamps: Vec::new(),
+            restart_timestamps: VecDeque::new(),
             escalation_depth: 0,
             events: Vec::new(),
             clock,
@@ -653,11 +659,8 @@ impl Supervisor {
             return Ok(SupervisionAction::Ignore);
         }
 
-        // Prune restart timestamps outside the sliding window.
         let now_ms = self.current_time_ms();
-        let time_window_ms = self.time_window_ms;
-        self.restart_timestamps
-            .retain(|&ts| now_ms.saturating_sub(ts) <= time_window_ms);
+        self.prune_expired_restarts(now_ms);
 
         // INV-SUP-BUDGET-BOUND: check budget.
         let restart_count = u32::try_from(self.restart_timestamps.len()).unwrap_or(u32::MAX);
@@ -699,7 +702,7 @@ impl Supervisor {
         }
 
         // Record restart timestamp.
-        push_bounded(&mut self.restart_timestamps, now_ms, MAX_EVENTS);
+        push_bounded_deque(&mut self.restart_timestamps, now_ms, MAX_EVENTS);
 
         // INV-SUP-STRATEGY-DETERMINISTIC: deterministic strategy application.
         let children_to_restart = match self.strategy {
@@ -806,7 +809,7 @@ impl Supervisor {
 
     /// Return a health snapshot of the supervisor.
     ///
-    /// Emits `SUP-008` (supervisor.health_report).
+    /// Returns a `SUP-008`-compatible snapshot without mutating the event log.
     pub fn health_status(&self) -> SupervisorHealth {
         let now_ms = self.current_time_ms();
         let active_children = u32::try_from(
@@ -817,12 +820,9 @@ impl Supervisor {
         )
         .unwrap_or(u32::MAX);
 
-        let active_restart_timestamps = self.active_restart_timestamps(now_ms);
-        let restart_count = u32::try_from(active_restart_timestamps.len()).unwrap_or(u32::MAX);
+        let restart_window = self.restart_window_view(now_ms);
+        let restart_count = u32::try_from(restart_window.active_count).unwrap_or(u32::MAX);
         let budget_remaining = self.max_restarts.saturating_sub(restart_count);
-        let oldest_restart_age_ms = active_restart_timestamps
-            .first()
-            .map(|ts| now_ms.saturating_sub(*ts));
 
         SupervisorHealth {
             active_children,
@@ -830,8 +830,21 @@ impl Supervisor {
             budget_remaining,
             escalation_depth: self.escalation_depth,
             current_time_ms: now_ms,
-            oldest_restart_age_ms,
+            oldest_restart_age_ms: restart_window.oldest_restart_age_ms,
         }
+    }
+
+    /// Record a structured `SUP-008` health report in the event log.
+    pub fn record_health_report(&mut self) -> SupervisorHealth {
+        let health = self.health_status();
+        push_bounded(
+            &mut self.events,
+            SupervisionEvent::HealthReport {
+                health: health.clone(),
+            },
+            MAX_EVENTS,
+        );
+        health
     }
 
     /// Return accumulated supervision events.
@@ -849,12 +862,39 @@ impl Supervisor {
         self.children.get(name).map(|r| r.state)
     }
 
-    fn active_restart_timestamps(&self, now_ms: u64) -> Vec<u64> {
-        self.restart_timestamps
+    fn prune_expired_restarts(&mut self, now_ms: u64) {
+        while matches!(
+            self.restart_timestamps.front(),
+            Some(&timestamp) if !self.restart_within_window(now_ms, timestamp)
+        ) {
+            let _ = self.restart_timestamps.pop_front();
+        }
+    }
+
+    fn restart_window_view(&self, now_ms: u64) -> RestartWindowView {
+        match self
+            .restart_timestamps
             .iter()
-            .copied()
-            .filter(|&timestamp| self.restart_within_window(now_ms, timestamp))
-            .collect()
+            .position(|&timestamp| self.restart_within_window(now_ms, timestamp))
+        {
+            Some(active_start_index) => {
+                let oldest_restart_age_ms = self
+                    .restart_timestamps
+                    .get(active_start_index)
+                    .map(|timestamp| now_ms.saturating_sub(*timestamp));
+                RestartWindowView {
+                    active_count: self
+                        .restart_timestamps
+                        .len()
+                        .saturating_sub(active_start_index),
+                    oldest_restart_age_ms,
+                }
+            }
+            None => RestartWindowView {
+                active_count: 0,
+                oldest_restart_age_ms: None,
+            },
+        }
     }
 
     fn restart_within_window(&self, now_ms: u64, restart_timestamp_ms: u64) -> bool {
@@ -874,6 +914,13 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 }
 
+fn push_bounded_deque<T>(items: &mut VecDeque<T>, item: T, cap: usize) {
+    items.push_back(item);
+    while items.len() > cap {
+        let _ = items.pop_front();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -881,6 +928,188 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::hint::black_box;
+    use syn::{ImplItem, Item};
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+    #[serde(rename_all = "snake_case")]
+    enum ReferenceAction {
+        Restart,
+        Escalate,
+        Shutdown,
+        Ignore,
+    }
+
+    #[derive(Debug, Clone)]
+    struct ReferenceRestartBudgetKernel {
+        max_restarts: u32,
+        time_window_ms: u64,
+        max_escalation_depth: u32,
+        restart_timestamps: Vec<u64>,
+        escalation_depth: u32,
+        child_state: ChildState,
+    }
+
+    impl ReferenceRestartBudgetKernel {
+        fn new(max_restarts: u32, time_window_ms: u64, max_escalation_depth: u32) -> Self {
+            Self {
+                max_restarts,
+                time_window_ms,
+                max_escalation_depth,
+                restart_timestamps: Vec::new(),
+                escalation_depth: 0,
+                child_state: ChildState::Running,
+            }
+        }
+
+        fn handle_failure(&mut self, now_ms: u64, restart_type: RestartType) -> ReferenceAction {
+            self.child_state = ChildState::Failed;
+            if restart_type == RestartType::Temporary {
+                return ReferenceAction::Ignore;
+            }
+
+            self.restart_timestamps
+                .retain(|timestamp| now_ms.saturating_sub(*timestamp) <= self.time_window_ms);
+
+            let restart_count = u32::try_from(self.restart_timestamps.len()).unwrap_or(u32::MAX);
+            if restart_count >= self.max_restarts {
+                self.escalation_depth = self.escalation_depth.saturating_add(1);
+                if self.escalation_depth > self.max_escalation_depth {
+                    return ReferenceAction::Shutdown;
+                }
+                return ReferenceAction::Escalate;
+            }
+
+            push_bounded(&mut self.restart_timestamps, now_ms, MAX_EVENTS);
+            self.child_state = ChildState::Running;
+            ReferenceAction::Restart
+        }
+
+        fn health_status(&self, now_ms: u64) -> SupervisorHealth {
+            let active_restart_timestamps: Vec<u64> = self
+                .restart_timestamps
+                .iter()
+                .copied()
+                .filter(|timestamp| now_ms.saturating_sub(*timestamp) <= self.time_window_ms)
+                .collect();
+            let restart_count = u32::try_from(active_restart_timestamps.len()).unwrap_or(u32::MAX);
+            let budget_remaining = self.max_restarts.saturating_sub(restart_count);
+            let oldest_restart_age_ms = active_restart_timestamps
+                .first()
+                .map(|timestamp| now_ms.saturating_sub(*timestamp));
+
+            SupervisorHealth {
+                active_children: u32::from(self.child_state == ChildState::Running),
+                restart_count,
+                budget_remaining,
+                escalation_depth: self.escalation_depth,
+                current_time_ms: now_ms,
+                oldest_restart_age_ms,
+            }
+        }
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+    struct RestartBudgetCounterexample {
+        delta_sequence_ms: Vec<u64>,
+        step_index: usize,
+        now_ms: u64,
+        expected_action: ReferenceAction,
+        actual_action: ReferenceAction,
+        expected_health: SupervisorHealth,
+        actual_health: SupervisorHealth,
+    }
+
+    fn action_kind(action: &SupervisionAction) -> ReferenceAction {
+        match action {
+            SupervisionAction::Restart { .. } => ReferenceAction::Restart,
+            SupervisionAction::Escalate { .. } => ReferenceAction::Escalate,
+            SupervisionAction::Shutdown { .. } => ReferenceAction::Shutdown,
+            SupervisionAction::Ignore => ReferenceAction::Ignore,
+        }
+    }
+
+    fn verify_schedule_equivalence(
+        delta_sequence_ms: &[u64],
+    ) -> Result<(), RestartBudgetCounterexample> {
+        let mut sup =
+            Supervisor::with_deterministic_clock(SupervisionStrategy::OneForOne, 2, 1_000, 8, 0);
+        let restart_type = RestartType::Permanent;
+        sup.add_child(ChildSpec {
+            name: "worker".to_string(),
+            restart_type,
+            shutdown_timeout_ms: 5_000,
+        })
+        .unwrap();
+        let mut reference = ReferenceRestartBudgetKernel::new(2, 1_000, 8);
+
+        for (step_index, delta_ms) in delta_sequence_ms.iter().copied().enumerate() {
+            sup.advance_clock_ms(delta_ms).unwrap();
+            let now_ms = sup.current_time_ms();
+
+            let expected_action = reference.handle_failure(now_ms, restart_type);
+            let actual_action = sup.handle_failure("worker").unwrap();
+            let actual_action = action_kind(&actual_action);
+            let expected_health = reference.health_status(now_ms);
+            let actual_health = sup.health_status();
+
+            if expected_action != actual_action || expected_health != actual_health {
+                return Err(RestartBudgetCounterexample {
+                    delta_sequence_ms: delta_sequence_ms.to_vec(),
+                    step_index,
+                    now_ms,
+                    expected_action,
+                    actual_action,
+                    expected_health,
+                    actual_health,
+                });
+            }
+        }
+
+        Ok(())
+    }
+
+    fn find_minimal_counterexample(
+        delta_options_ms: &[u64],
+        max_schedule_len: usize,
+    ) -> Option<RestartBudgetCounterexample> {
+        let mut candidate = Vec::new();
+        for target_len in 1..=max_schedule_len {
+            if let Some(counterexample) =
+                enumerate_counterexample(delta_options_ms, target_len, &mut candidate)
+            {
+                return Some(counterexample);
+            }
+        }
+        None
+    }
+
+    fn enumerate_counterexample(
+        delta_options_ms: &[u64],
+        target_len: usize,
+        candidate: &mut Vec<u64>,
+    ) -> Option<RestartBudgetCounterexample> {
+        if candidate.len() == target_len {
+            return verify_schedule_equivalence(candidate).err();
+        }
+
+        for &delta_ms in delta_options_ms {
+            candidate.push(delta_ms);
+            if let Some(counterexample) =
+                enumerate_counterexample(delta_options_ms, target_len, candidate)
+            {
+                return Some(counterexample);
+            }
+            let _ = candidate.pop();
+        }
+
+        None
+    }
+
+    fn adversarial_burst_schedule(iterations: usize) -> Vec<u64> {
+        let pattern = [0_u64, 1, 999, 1_000, 1_001, 0, 250, 0];
+        pattern.into_iter().cycle().take(iterations).collect()
+    }
 
     fn make_spec(name: &str) -> ChildSpec {
         ChildSpec {
@@ -1063,6 +1292,36 @@ mod tests {
     }
 
     #[test]
+    fn test_health_window_expires_without_mutating_kernel() {
+        let mut sup =
+            Supervisor::with_deterministic_clock(SupervisionStrategy::OneForOne, 3, 1_000, 3, 0);
+        sup.add_child(make_spec("w")).unwrap();
+        sup.handle_failure("w").unwrap();
+        sup.advance_clock_ms(1_001).unwrap();
+
+        let health = sup.health_status();
+        assert_eq!(health.restart_count, 0);
+        assert_eq!(health.budget_remaining, 3);
+        assert_eq!(health.oldest_restart_age_ms, None);
+    }
+
+    #[test]
+    fn test_record_health_report_emits_structured_event() {
+        let mut sup = make_supervisor();
+        sup.add_child(make_spec("w")).unwrap();
+
+        let health = sup.record_health_report();
+        let events = sup.events();
+
+        assert_eq!(health.active_children, 1);
+        assert!(matches!(
+            events.last(),
+            Some(SupervisionEvent::HealthReport { health: event_health })
+                if event_health == &health
+        ));
+    }
+
+    #[test]
     fn test_events_emitted() {
         let mut sup = make_supervisor();
         sup.add_child(make_spec("w")).unwrap();
@@ -1174,55 +1433,125 @@ mod tests {
 
     #[test]
     fn test_restart_budget_matches_reference_window_model() {
-        let delta_options = [0_u64, 250, 999, 1_001];
+        let delta_options_ms = [0_u64, 1, 250, 999, 1_000, 1_001];
+        let counterexample = find_minimal_counterexample(&delta_options_ms, 4);
 
-        for first_delta in delta_options {
-            for second_delta in delta_options {
-                for third_delta in delta_options {
-                    let mut sup = Supervisor::with_deterministic_clock(
-                        SupervisionStrategy::OneForOne,
-                        2,
-                        1_000,
-                        8,
-                        0,
-                    );
-                    sup.add_child(make_spec("worker")).unwrap();
+        if let Some(counterexample) = counterexample {
+            panic!(
+                "restart budget diverged from reference kernel:\n{}",
+                serde_json::to_string_pretty(&counterexample).unwrap()
+            );
+        }
+    }
 
-                    let mut reference_restart_times: Vec<u64> = Vec::new();
+    #[test]
+    fn test_adversarial_burst_schedule_matches_reference_kernel() {
+        let schedule = adversarial_burst_schedule(64);
+        let result = verify_schedule_equivalence(&schedule);
+        assert_eq!(result, Ok(()));
+    }
 
-                    for delta in [first_delta, second_delta, third_delta] {
-                        sup.advance_clock_ms(delta).unwrap();
-                        let now_ms = sup.current_time_ms();
-                        reference_restart_times
-                            .retain(|timestamp| now_ms.saturating_sub(*timestamp) <= 1_000);
+    #[test]
+    fn test_supervision_source_rejects_synthetic_time_stubs() {
+        let source = include_str!("supervision.rs");
+        let syntax = syn::parse_file(source).unwrap();
 
-                        let expected_escalation = reference_restart_times.len() >= 2;
-                        let action = sup.handle_failure("worker").unwrap();
+        let forbidden_idents = [
+            ["computed", "now", "ms"].join("_"),
+            ["synthetic", "now", "ms"].join("_"),
+            ["proxy", "now", "ms"].join("_"),
+            ["stub", "now", "ms"].join("_"),
+        ];
 
-                        assert_eq!(
-                            matches!(action, SupervisionAction::Escalate { .. }),
-                            expected_escalation,
-                            "delta sequence {:?} produced unexpected action at now_ms={}",
-                            [first_delta, second_delta, third_delta],
-                            now_ms
-                        );
-
-                        if !expected_escalation {
-                            reference_restart_times.push(now_ms);
+        let mut function_names: Vec<String> = Vec::new();
+        let mut trait_names: Vec<String> = Vec::new();
+        let mut struct_names: Vec<String> = Vec::new();
+        for item in syntax.items {
+            match item {
+                Item::Fn(function) => function_names.push(function.sig.ident.to_string()),
+                Item::Trait(item_trait) => trait_names.push(item_trait.ident.to_string()),
+                Item::Struct(item_struct) => struct_names.push(item_struct.ident.to_string()),
+                Item::Impl(item_impl) => {
+                    for impl_item in item_impl.items {
+                        if let ImplItem::Fn(function) = impl_item {
+                            function_names.push(function.sig.ident.to_string());
                         }
-
-                        let health = sup.health_status();
-                        assert_eq!(
-                            usize::try_from(health.restart_count).unwrap(),
-                            reference_restart_times.len(),
-                            "health drift for delta sequence {:?} at now_ms={}",
-                            [first_delta, second_delta, third_delta],
-                            now_ms
-                        );
                     }
                 }
+                _ => {}
             }
         }
+
+        for forbidden_ident in forbidden_idents {
+            assert!(
+                !function_names.iter().any(|ident| ident == &forbidden_ident),
+                "forbidden synthetic-time stub reintroduced: {forbidden_ident}"
+            );
+        }
+        assert!(trait_names.iter().any(|name| name == "MonotonicClock"));
+        assert!(
+            struct_names
+                .iter()
+                .any(|name| name == "SteadyMonotonicClock")
+        );
+        assert!(
+            struct_names
+                .iter()
+                .any(|name| name == "DeterministicMonotonicClock")
+        );
+    }
+
+    #[test]
+    #[ignore = "benchmark-only: compare against retained Vec reference kernel via hyperfine"]
+    fn benchmark_reference_restart_budget_kernel() {
+        let schedule = adversarial_burst_schedule(2_000_000);
+        let mut reference = ReferenceRestartBudgetKernel::new(4, 2_000, 8);
+        let mut now_ms = 0_u64;
+        let mut signature = 0_u64;
+
+        for delta_ms in schedule {
+            now_ms = now_ms.saturating_add(delta_ms);
+            let action = reference.handle_failure(now_ms, RestartType::Permanent);
+            let health = reference.health_status(now_ms);
+            signature = signature
+                .wrapping_add(u64::from(health.restart_count))
+                .wrapping_add(u64::from(health.budget_remaining))
+                .wrapping_add(match action {
+                    ReferenceAction::Restart => 1,
+                    ReferenceAction::Escalate => 3,
+                    ReferenceAction::Shutdown => 7,
+                    ReferenceAction::Ignore => 11,
+                });
+        }
+
+        assert_ne!(black_box(signature), 0);
+    }
+
+    #[test]
+    #[ignore = "benchmark-only: compare monotone queue kernel against retained Vec reference"]
+    fn benchmark_monotone_queue_restart_budget_kernel() {
+        let schedule = adversarial_burst_schedule(2_000_000);
+        let mut sup =
+            Supervisor::with_deterministic_clock(SupervisionStrategy::OneForOne, 4, 2_000, 8, 0);
+        sup.add_child(make_spec("worker")).unwrap();
+        let mut signature = 0_u64;
+
+        for delta_ms in schedule {
+            sup.advance_clock_ms(delta_ms).unwrap();
+            let action = sup.handle_failure("worker").unwrap();
+            let health = sup.health_status();
+            signature = signature
+                .wrapping_add(u64::from(health.restart_count))
+                .wrapping_add(u64::from(health.budget_remaining))
+                .wrapping_add(match action_kind(&action) {
+                    ReferenceAction::Restart => 1,
+                    ReferenceAction::Escalate => 3,
+                    ReferenceAction::Shutdown => 7,
+                    ReferenceAction::Ignore => 11,
+                });
+        }
+
+        assert_ne!(black_box(signature), 0);
     }
 
     #[test]
