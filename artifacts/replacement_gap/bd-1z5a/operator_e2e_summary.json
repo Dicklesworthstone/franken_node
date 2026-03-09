@@ -1,0 +1,35 @@
+{
+  "schema_version": "replacement-gap-operator-e2e-v1",
+  "bead_id": "bd-1z5a.3",
+  "parent_bead": "bd-1z5a",
+  "trace_id": "trace-bd-1z5a-operator-e2e-final",
+  "suite": "verifier_replay_operator_suite",
+  "verdict": "PASS",
+  "stage_count": 5,
+  "pass_count": 5,
+  "fail_count": 0,
+  "required_stage_ids": [
+    "capsule_verify_success",
+    "capsule_verify_reject_tampered",
+    "capsule_verify_fraud_proof",
+    "capsule_verify_quarantine_replay",
+    "verifier_score_update"
+  ],
+  "missing_stage_ids": [],
+  "required_event_codes": [
+    "CAPSULE_VERIFY_PASSED",
+    "CAPSULE_VERIFY_REJECTED",
+    "CAPSULE_VERIFY_FRAUD_PROOF_EXTRACTED",
+    "CAPSULE_VERIFY_QUARANTINE_REPLAYED",
+    "VERIFIER_SCORE_UPDATED"
+  ],
+  "missing_event_codes": [],
+  "build_ids": [],
+  "stage_ids": [
+    "capsule_verify_success",
+    "capsule_verify_reject_tampered",
+    "capsule_verify_fraud_proof",
+    "capsule_verify_quarantine_replay",
+    "verifier_score_update"
+  ]
+}
