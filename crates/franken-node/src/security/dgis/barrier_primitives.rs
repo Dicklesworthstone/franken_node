@@ -25,6 +25,9 @@ use crate::security::constant_time::ct_eq;
 /// Maximum number of audit log entries before oldest-first eviction.
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+/// Maximum number of barriers per node before oldest-first eviction.
+const MAX_BARRIERS_PER_NODE: usize = 256;
+
 /// Stable event codes for DGIS barrier enforcement.
 pub mod event_codes {
     pub const BARRIER_APPLIED: &str = "DGIS-BARRIER-001";
@@ -535,10 +538,8 @@ impl BarrierEngine {
         let node_id = barrier.node_id.clone();
 
         self.barriers.insert(barrier_id.clone(), barrier);
-        self.node_barriers
-            .entry(node_id)
-            .or_default()
-            .push(barrier_id);
+        let node_list = self.node_barriers.entry(node_id).or_default();
+        push_bounded(node_list, barrier_id, MAX_BARRIERS_PER_NODE);
 
         self.push_audit(receipt.clone());
         Ok(receipt)

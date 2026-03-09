@@ -110,9 +110,12 @@ pub struct EvidenceRef {
 }
 
 impl EvidenceRef {
-    /// Validate portability: no absolute paths.
+    /// Validate portability: no absolute paths, no path traversal.
     pub fn is_portable(&self) -> bool {
-        !self.relative_path.starts_with('/') && !self.relative_path.contains(":\\")
+        !self.relative_path.starts_with('/')
+            && !self.relative_path.contains(":\\")
+            && !self.relative_path.contains('\\')
+            && !self.relative_path.split('/').any(|seg| seg == "..")
     }
 }
 
@@ -823,6 +826,28 @@ mod tests {
             decision_kind: "admit".into(),
             epoch_id: 1,
             relative_path: "/absolute/path.json".into(),
+        };
+        assert!(!r.is_portable());
+    }
+
+    #[test]
+    fn evidence_ref_rejects_path_traversal() {
+        let r = EvidenceRef {
+            evidence_id: "EVD-003".into(),
+            decision_kind: "admit".into(),
+            epoch_id: 1,
+            relative_path: "evidence/../../etc/passwd".into(),
+        };
+        assert!(!r.is_portable());
+    }
+
+    #[test]
+    fn evidence_ref_rejects_backslash() {
+        let r = EvidenceRef {
+            evidence_id: "EVD-004".into(),
+            decision_kind: "admit".into(),
+            epoch_id: 1,
+            relative_path: "evidence\\foo.json".into(),
         };
         assert!(!r.is_portable());
     }

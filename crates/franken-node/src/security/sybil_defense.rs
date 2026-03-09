@@ -611,7 +611,7 @@ impl SybilDetector {
                         })
                         .count();
 
-                    if new_count as f64 / matches.len() as f64 > 0.8 {
+                    if new_count as f64 / matches.len() as f64 >= 0.8 {
                         coordinated_group.extend(matches);
                     }
                 }

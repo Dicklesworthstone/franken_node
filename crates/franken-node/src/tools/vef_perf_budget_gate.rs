@@ -34,6 +34,9 @@ pub const VEF_PERF_004: &str = "VEF-PERF-004";
 pub const VEF_PERF_005: &str = "VEF-PERF-005";
 pub const VEF_PERF_ERR_001: &str = "VEF-PERF-ERR-001";
 
+/// Maximum audit log entries before oldest-first eviction.
+const MAX_AUDIT_LOG: usize = 4096;
+
 // ── Invariant constants ─────────────────────────────────────────────────
 
 pub const INV_VEF_PBG_BUDGET: &str = "INV-VEF-PBG-BUDGET";
@@ -203,7 +206,8 @@ impl MeasuredLatency {
     /// True if measurement variance is within noise tolerance.
     #[must_use]
     pub fn is_stable(&self, max_cv_pct: f64) -> bool {
-        self.coefficient_of_variation_pct <= max_cv_pct
+        self.coefficient_of_variation_pct.is_finite()
+            && self.coefficient_of_variation_pct <= max_cv_pct
     }
 }
 
@@ -735,8 +739,12 @@ impl VefPerfBudgetGate {
         corr_id: &str,
         details: BTreeMap<String, serde_json::Value>,
     ) {
-        self.audit_log
-            .push(VefPerfEvent::new(code, op, mode, corr_id, details));
+        let event = VefPerfEvent::new(code, op, mode, corr_id, details);
+        self.audit_log.push(event);
+        if self.audit_log.len() > MAX_AUDIT_LOG {
+            let overflow = self.audit_log.len() - MAX_AUDIT_LOG;
+            self.audit_log.drain(0..overflow);
+        }
     }
 }
 
