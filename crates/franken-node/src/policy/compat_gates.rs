@@ -16,9 +16,331 @@
 //! - **INV-PCG-TRANSITION**: Mode transitions are policy-gated: escalating
 //!   risk requires approval; de-escalating is auto-approved but audited.
 
+use chrono::{DateTime, Duration, Utc};
+use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
+
+type HmacSha256 = Hmac<Sha256>;
+
+const COMPAT_POLICY_PREDICATE_DOMAIN: &str = "franken_node.policy.compat.predicate.v1";
+const COMPAT_MODE_RECEIPT_DOMAIN: &str = "franken_node.policy.compat.mode_receipt.v1";
+const COMPAT_DEFAULT_TTL_SECS: i64 = 3600;
+
+pub mod reason_codes {
+    pub const POLICY_COMPAT_ALLOW: &str = "POLICY_COMPAT_ALLOW";
+    pub const POLICY_COMPAT_DENY_MODE: &str = "POLICY_COMPAT_DENY_MODE";
+    pub const POLICY_COMPAT_DENY_UNKNOWN_STRICT: &str = "POLICY_COMPAT_DENY_UNKNOWN_STRICT";
+    pub const POLICY_COMPAT_AUDIT_UNKNOWN: &str = "POLICY_COMPAT_AUDIT_UNKNOWN";
+    pub const POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE: &str =
+        "POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE";
+    pub const POLICY_COMPAT_STALE_PREDICATE: &str = "POLICY_COMPAT_STALE_PREDICATE";
+    pub const POLICY_COMPAT_MODE_RECEIPT_SIGNED: &str = "POLICY_COMPAT_MODE_RECEIPT_SIGNED";
+    pub const POLICY_COMPAT_SCOPE_WIDENING: &str = "POLICY_COMPAT_SCOPE_WIDENING";
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilitySignatureAlgorithm {
+    Ed25519,
+    HmacSha256,
+}
+
+impl CompatibilitySignatureAlgorithm {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Ed25519 => "ed25519",
+            Self::HmacSha256 => "hmac_sha256",
+        }
+    }
+}
+
+impl fmt::Display for CompatibilitySignatureAlgorithm {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityFreshnessState {
+    Fresh,
+    Stale,
+    InvalidTimestamp,
+}
+
+impl CompatibilityFreshnessState {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Fresh => "fresh",
+            Self::Stale => "stale",
+            Self::InvalidTimestamp => "invalid_timestamp",
+        }
+    }
+}
+
+impl fmt::Display for CompatibilityFreshnessState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CompatibilityProofMetadata {
+    pub algorithm: CompatibilitySignatureAlgorithm,
+    pub key_id: String,
+    pub parent_receipt_id: Option<String>,
+    pub attenuation_trace: Vec<String>,
+    pub scope_delta: Vec<String>,
+    pub reason_codes: Vec<String>,
+    pub recovery_hints: Vec<String>,
+    pub explanation_digest: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct CompiledPolicyPredicate {
+    pub predicate_id: String,
+    pub normalized_activation_condition: String,
+    pub attenuation_trace: Vec<String>,
+}
+
+pub(crate) fn build_proof_metadata(
+    algorithm: CompatibilitySignatureAlgorithm,
+    parent_receipt_id: Option<String>,
+    attenuation_trace: Vec<String>,
+    scope_delta: Vec<String>,
+    reason_codes: Vec<String>,
+    recovery_hints: Vec<String>,
+) -> CompatibilityProofMetadata {
+    let key_id = match algorithm {
+        CompatibilitySignatureAlgorithm::Ed25519 => compatibility_external_key_id(),
+        CompatibilitySignatureAlgorithm::HmacSha256 => compatibility_internal_key_id(),
+    };
+
+    let explanation_digest = explanation_digest(
+        &reason_codes,
+        &attenuation_trace,
+        &scope_delta,
+        &recovery_hints,
+    );
+
+    CompatibilityProofMetadata {
+        algorithm,
+        key_id,
+        parent_receipt_id,
+        attenuation_trace,
+        scope_delta,
+        reason_codes,
+        recovery_hints,
+        explanation_digest,
+    }
+}
+
+pub(crate) fn compile_policy_predicate(
+    predicate_id: &str,
+    activation_condition: &str,
+    attenuation_trace: Vec<String>,
+) -> CompiledPolicyPredicate {
+    CompiledPolicyPredicate {
+        predicate_id: predicate_id.to_string(),
+        normalized_activation_condition: normalize_policy_expression(activation_condition),
+        attenuation_trace,
+    }
+}
+
+pub(crate) fn normalize_policy_expression(expression: &str) -> String {
+    let mut tokens: Vec<String> = expression
+        .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '-' | '.')))
+        .filter(|token| !token.is_empty())
+        .map(|token| token.to_ascii_lowercase())
+        .collect();
+    tokens.sort();
+    tokens.dedup();
+    tokens.join("&&")
+}
+
+pub(crate) fn explanation_digest(
+    reason_codes: &[String],
+    attenuation_trace: &[String],
+    scope_delta: &[String],
+    recovery_hints: &[String],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"franken_node.policy.compat.explanation_digest.v1:");
+    for segment in [reason_codes, attenuation_trace, scope_delta, recovery_hints] {
+        hasher.update((segment.len() as u64).to_le_bytes());
+        for item in segment {
+            hasher.update((item.len() as u64).to_le_bytes());
+            hasher.update(item.as_bytes());
+        }
+    }
+    hex::encode(hasher.finalize())
+}
+
+pub(crate) fn default_receipt_expiry(issued_at: &str) -> String {
+    DateTime::parse_from_rfc3339(issued_at)
+        .map(|ts| (ts.with_timezone(&Utc) + Duration::seconds(COMPAT_DEFAULT_TTL_SECS)).to_rfc3339())
+        .unwrap_or_else(|_| issued_at.to_string())
+}
+
+pub(crate) fn compute_freshness_state(
+    issued_at: &str,
+    expires_at: &str,
+) -> CompatibilityFreshnessState {
+    let Ok(issued) = DateTime::parse_from_rfc3339(issued_at) else {
+        return CompatibilityFreshnessState::InvalidTimestamp;
+    };
+    let Ok(expires) = DateTime::parse_from_rfc3339(expires_at) else {
+        return CompatibilityFreshnessState::InvalidTimestamp;
+    };
+    if expires.with_timezone(&Utc) <= issued.with_timezone(&Utc) {
+        return CompatibilityFreshnessState::InvalidTimestamp;
+    }
+    if Utc::now() <= expires.with_timezone(&Utc) {
+        CompatibilityFreshnessState::Fresh
+    } else {
+        CompatibilityFreshnessState::Stale
+    }
+}
+
+pub(crate) fn compatibility_external_key_id() -> String {
+    let vk = compatibility_policy_verifying_key();
+    key_id_from_bytes(b"franken_node.policy.compat.external_key_id.v1:", vk.as_bytes())
+}
+
+pub(crate) fn compatibility_internal_key_id() -> String {
+    key_id_from_bytes(
+        b"franken_node.policy.compat.internal_key_id.v1:",
+        &compatibility_hmac_key(),
+    )
+}
+
+fn compatibility_policy_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&seed_from_label(
+        b"franken_node.policy.compat.ed25519.seed.v1:",
+    ))
+}
+
+fn compatibility_policy_verifying_key() -> VerifyingKey {
+    compatibility_policy_signing_key().verifying_key()
+}
+
+fn compatibility_hmac_key() -> [u8; 32] {
+    seed_from_label(b"franken_node.policy.compat.hmac.seed.v1:")
+}
+
+fn seed_from_label(label: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(label);
+    let mut seed = [0u8; 32];
+    seed.copy_from_slice(&digest[..32]);
+    seed
+}
+
+fn key_id_from_bytes(domain: &[u8], bytes: &[u8]) -> String {
+    let digest = Sha256::digest([domain, bytes].concat());
+    hex::encode(&digest[..8])
+}
+
+fn canonicalize_compat_value(value: serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut entries: Vec<(String, serde_json::Value)> = map.into_iter().collect();
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut canonical = serde_json::Map::with_capacity(entries.len());
+            for (key, nested) in entries {
+                canonical.insert(key, canonicalize_compat_value(nested));
+            }
+            serde_json::Value::Object(canonical)
+        }
+        serde_json::Value::Array(values) => serde_json::Value::Array(
+            values.into_iter().map(canonicalize_compat_value).collect(),
+        ),
+        other => other,
+    }
+}
+
+fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::Error> {
+    let json = serde_json::to_value(value)?;
+    let canonical = canonicalize_compat_value(json);
+    serde_json::to_vec(&canonical)
+}
+
+fn signature_preimage<T: Serialize>(
+    domain: &str,
+    value: &T,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let canonical_payload = canonical_json_bytes(value)?;
+    let mut preimage = Vec::with_capacity(16 + domain.len() + canonical_payload.len());
+    preimage.extend_from_slice(b"compat_preimage_v1:");
+    preimage.extend_from_slice(&(domain.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(domain.as_bytes());
+    preimage.extend_from_slice(&(canonical_payload.len() as u64).to_le_bytes());
+    preimage.extend_from_slice(&canonical_payload);
+    Ok(preimage)
+}
+
+pub(crate) fn sign_ed25519_canonical<T: Serialize>(
+    domain: &str,
+    value: &T,
+) -> Result<String, serde_json::Error> {
+    let preimage = signature_preimage(domain, value)?;
+    let signature = compatibility_policy_signing_key().sign(&preimage);
+    Ok(hex::encode(signature.to_bytes()))
+}
+
+pub(crate) fn verify_ed25519_canonical<T: Serialize>(
+    domain: &str,
+    value: &T,
+    signature_hex: &str,
+    key_id: &str,
+) -> bool {
+    if !crate::security::constant_time::ct_eq(key_id, &compatibility_external_key_id()) {
+        return false;
+    }
+    let Ok(signature_bytes) = hex::decode(signature_hex) else {
+        return false;
+    };
+    let Ok(signature_array) = <[u8; 64]>::try_from(signature_bytes.as_slice()) else {
+        return false;
+    };
+    let signature = ed25519_dalek::Signature::from_bytes(&signature_array);
+    let Ok(preimage) = signature_preimage(domain, value) else {
+        return false;
+    };
+    compatibility_policy_verifying_key()
+        .verify(&preimage, &signature)
+        .is_ok()
+}
+
+pub(crate) fn sign_hmac_canonical<T: Serialize>(
+    domain: &str,
+    value: &T,
+) -> Result<String, serde_json::Error> {
+    let preimage = signature_preimage(domain, value)?;
+    let Ok(mut mac) = HmacSha256::new_from_slice(&compatibility_hmac_key()) else {
+        return Ok(String::new());
+    };
+    mac.update(&preimage);
+    Ok(hex::encode(mac.finalize().into_bytes()))
+}
+
+pub(crate) fn verify_hmac_canonical<T: Serialize>(
+    domain: &str,
+    value: &T,
+    signature_hex: &str,
+    key_id: &str,
+) -> bool {
+    if !crate::security::constant_time::ct_eq(key_id, &compatibility_internal_key_id()) {
+        return false;
+    }
+    let Ok(expected) = sign_hmac_canonical(domain, value) else {
+        return false;
+    };
+    crate::security::constant_time::ct_eq(signature_hex, &expected)
+}
 
 // ── Event Codes ──────────────────────────────────────────────────────────────
 
@@ -323,6 +645,12 @@ pub struct PolicyPredicate {
     pub attenuation: Vec<AttenuationConstraint>,
     /// Boolean condition for activation (serialized expression).
     pub activation_condition: String,
+    /// RFC3339 timestamp when the predicate was signed.
+    pub issued_at: String,
+    /// RFC3339 timestamp after which the predicate is stale.
+    pub expires_at: String,
+    /// Structured proof metadata emitted with every predicate.
+    pub proof: CompatibilityProofMetadata,
 }
 
 /// A scope-limiting constraint that narrows predicate applicability.
@@ -332,11 +660,57 @@ pub struct AttenuationConstraint {
     pub scope_value: String,
 }
 
+#[derive(Debug, Serialize)]
+struct PolicyPredicateSigningPayload<'a> {
+    predicate_id: &'a str,
+    attenuation: &'a [AttenuationConstraint],
+    activation_condition: &'a str,
+    issued_at: &'a str,
+    expires_at: &'a str,
+    proof: &'a CompatibilityProofMetadata,
+}
+
+impl<'a> From<&'a PolicyPredicate> for PolicyPredicateSigningPayload<'a> {
+    fn from(value: &'a PolicyPredicate) -> Self {
+        Self {
+            predicate_id: &value.predicate_id,
+            attenuation: &value.attenuation,
+            activation_condition: &value.activation_condition,
+            issued_at: &value.issued_at,
+            expires_at: &value.expires_at,
+            proof: &value.proof,
+        }
+    }
+}
+
 impl PolicyPredicate {
-    /// Verify the predicate signature (placeholder — real impl uses ed25519).
     pub fn verify_signature(&self) -> bool {
-        // Signature must be non-empty hex string of at least 64 chars
-        self.signature.len() >= 64 && self.signature.chars().all(|c| c.is_ascii_hexdigit())
+        if compute_freshness_state(&self.issued_at, &self.expires_at)
+            != CompatibilityFreshnessState::Fresh
+        {
+            return false;
+        }
+        verify_ed25519_canonical(
+            COMPAT_POLICY_PREDICATE_DOMAIN,
+            &PolicyPredicateSigningPayload::from(self),
+            &self.signature,
+            &self.proof.key_id,
+        )
+    }
+
+    pub fn compile(&self) -> CompiledPolicyPredicate {
+        compile_policy_predicate(
+            &self.predicate_id,
+            &self.activation_condition,
+            self.attenuation
+                .iter()
+                .map(|constraint| format!("{}={}", constraint.scope_type, constraint.scope_value))
+                .collect(),
+        )
+    }
+
+    pub fn freshness_state(&self) -> CompatibilityFreshnessState {
+        compute_freshness_state(&self.issued_at, &self.expires_at)
     }
 
     /// Check if the predicate applies to the given scope.
@@ -408,6 +782,18 @@ pub struct GateCheckResult {
     pub scope_id: String,
     /// Event code emitted.
     pub event_code: String,
+    /// Stable reason codes for allow/deny/audit outcomes.
+    pub reason_codes: Vec<String>,
+    /// Machine-readable explanation of attenuation applied to the request.
+    pub attenuation_trace: Vec<String>,
+    /// Human-readable delta between parent and derived scope.
+    pub scope_delta: Vec<String>,
+    /// Current freshness state of the authority material consulted.
+    pub freshness_state: CompatibilityFreshnessState,
+    /// Recovery hints for operators.
+    pub recovery_hints: Vec<String>,
+    /// Digest of the explanation bundle for stable correlation.
+    pub explanation_digest: String,
 }
 
 // ── Mode Selection Receipt ───────────────────────────────────────────────────
@@ -425,6 +811,8 @@ pub struct ModeSelectionReceipt {
     pub previous_mode: Option<CompatibilityMode>,
     /// When the mode was activated.
     pub activated_at: String,
+    /// RFC3339 time after which the receipt is stale.
+    pub expires_at: String,
     /// Hex-encoded signature over receipt body.
     pub signature: String,
     /// Who requested the transition.
@@ -435,12 +823,60 @@ pub struct ModeSelectionReceipt {
     pub approval_required: bool,
     /// Whether the transition was approved.
     pub approved: bool,
+    /// Structured proof metadata emitted with every receipt.
+    pub proof: CompatibilityProofMetadata,
+}
+
+#[derive(Debug, Serialize)]
+struct ModeSelectionReceiptSigningPayload<'a> {
+    receipt_id: &'a str,
+    scope_id: &'a str,
+    mode: CompatibilityMode,
+    previous_mode: Option<CompatibilityMode>,
+    activated_at: &'a str,
+    expires_at: &'a str,
+    requestor: &'a str,
+    justification: &'a str,
+    approval_required: bool,
+    approved: bool,
+    proof: &'a CompatibilityProofMetadata,
+}
+
+impl<'a> From<&'a ModeSelectionReceipt> for ModeSelectionReceiptSigningPayload<'a> {
+    fn from(value: &'a ModeSelectionReceipt) -> Self {
+        Self {
+            receipt_id: &value.receipt_id,
+            scope_id: &value.scope_id,
+            mode: value.mode,
+            previous_mode: value.previous_mode,
+            activated_at: &value.activated_at,
+            expires_at: &value.expires_at,
+            requestor: &value.requestor,
+            justification: &value.justification,
+            approval_required: value.approval_required,
+            approved: value.approved,
+            proof: &value.proof,
+        }
+    }
 }
 
 impl ModeSelectionReceipt {
-    /// Verify receipt signature (placeholder — real impl uses ed25519).
     pub fn verify_signature(&self) -> bool {
-        self.signature.len() >= 64 && self.signature.chars().all(|c| c.is_ascii_hexdigit())
+        if compute_freshness_state(&self.activated_at, &self.expires_at)
+            != CompatibilityFreshnessState::Fresh
+        {
+            return false;
+        }
+        verify_hmac_canonical(
+            COMPAT_MODE_RECEIPT_DOMAIN,
+            &ModeSelectionReceiptSigningPayload::from(self),
+            &self.signature,
+            &self.proof.key_id,
+        )
+    }
+
+    pub fn freshness_state(&self) -> CompatibilityFreshnessState {
+        compute_freshness_state(&self.activated_at, &self.expires_at)
     }
 }
 
@@ -551,6 +987,7 @@ pub struct CompatGateEvaluator {
     scopes: BTreeMap<String, ScopeConfig>,
     audit_log: Vec<GateCheckResult>,
     receipts: Vec<ModeSelectionReceipt>,
+    compiled_predicates: BTreeMap<String, CompiledPolicyPredicate>,
 }
 
 impl CompatGateEvaluator {
@@ -560,6 +997,7 @@ impl CompatGateEvaluator {
             scopes: BTreeMap::new(),
             audit_log: Vec::new(),
             receipts: Vec::new(),
+            compiled_predicates: BTreeMap::new(),
         }
     }
 
@@ -594,18 +1032,41 @@ impl CompatGateEvaluator {
             });
         }
 
-        let receipt = ModeSelectionReceipt {
+        let activated_at = Utc::now().to_rfc3339();
+        let expires_at = default_receipt_expiry(&activated_at);
+        let scope_delta = match previous_mode {
+            Some(prev) if prev != mode => vec![format!("mode:{}->{}", prev.label(), mode.label())],
+            Some(prev) => vec![format!("mode:{}->{}", prev.label(), mode.label())],
+            None => vec![format!("mode:unset->{}", mode.label())],
+        };
+        let proof = build_proof_metadata(
+            CompatibilitySignatureAlgorithm::HmacSha256,
+            None,
+            vec![format!("scope={scope_id}")],
+            scope_delta,
+            vec![reason_codes::POLICY_COMPAT_MODE_RECEIPT_SIGNED.to_string()],
+            vec!["request explicit approval before risk escalation".to_string()],
+        );
+        let mut receipt = ModeSelectionReceipt {
             receipt_id: format!("rcpt-{}-{}", scope_id, self.receipts.len()),
             scope_id: scope_id.to_string(),
             mode,
             previous_mode,
-            activated_at: chrono::Utc::now().to_rfc3339(),
-            signature: "a".repeat(64), // placeholder signature
+            activated_at,
+            expires_at,
+            signature: String::new(),
             requestor: requestor.to_string(),
             justification: justification.to_string(),
             approval_required: previous_mode.is_some_and(|p| p.is_escalation_to(mode)),
             approved: approval,
+            proof,
         };
+        receipt.signature =
+            sign_hmac_canonical(COMPAT_MODE_RECEIPT_DOMAIN, &ModeSelectionReceiptSigningPayload::from(&receipt))
+                .map_err(|reason| CompatGateError::InvalidPredicate {
+                    predicate_id: format!("mode-receipt:{scope_id}"),
+                    reason: format!("failed canonicalizing receipt payload: {reason}"),
+                })?;
 
         let scope_config = ScopeConfig {
             scope_id: scope_id.to_string(),
@@ -617,6 +1078,31 @@ impl CompatGateEvaluator {
         self.scopes.insert(scope_id.to_string(), scope_config);
         push_bounded(&mut self.receipts, receipt.clone(), MAX_RECEIPTS);
         Ok(receipt)
+    }
+
+    pub fn add_policy_predicate(
+        &mut self,
+        scope_id: &str,
+        predicate: PolicyPredicate,
+    ) -> Result<(), CompatGateError> {
+        if !predicate.verify_signature() {
+            return Err(CompatGateError::InvalidPredicate {
+                predicate_id: predicate.predicate_id.clone(),
+                reason: "signature verification failed or predicate is stale".to_string(),
+            });
+        }
+
+        let compiled = predicate.compile();
+        self.compiled_predicates
+            .insert(predicate.predicate_id.clone(), compiled);
+
+        let Some(scope) = self.scopes.get_mut(scope_id) else {
+            return Err(CompatGateError::ScopeNotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        push_bounded(&mut scope.policy_predicates, predicate, MAX_ENTRIES);
+        Ok(())
     }
 
     /// Get the current mode for a scope.
