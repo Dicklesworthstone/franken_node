@@ -26,10 +26,8 @@ use std::fmt;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub(crate) const COMPAT_POLICY_PREDICATE_DOMAIN: &str =
-    "franken_node.policy.compat.predicate.v1";
-pub(crate) const COMPAT_MODE_RECEIPT_DOMAIN: &str =
-    "franken_node.policy.compat.mode_receipt.v1";
+pub(crate) const COMPAT_POLICY_PREDICATE_DOMAIN: &str = "franken_node.policy.compat.predicate.v1";
+pub(crate) const COMPAT_MODE_RECEIPT_DOMAIN: &str = "franken_node.policy.compat.mode_receipt.v1";
 pub(crate) const COMPAT_TRANSITION_RECEIPT_DOMAIN: &str =
     "franken_node.policy.compat.transition_receipt.v1";
 pub(crate) const COMPAT_DIVERGENCE_RECEIPT_DOMAIN: &str =
@@ -41,8 +39,11 @@ pub mod reason_codes {
     pub const POLICY_COMPAT_DENY_MODE: &str = "POLICY_COMPAT_DENY_MODE";
     pub const POLICY_COMPAT_DENY_UNKNOWN_STRICT: &str = "POLICY_COMPAT_DENY_UNKNOWN_STRICT";
     pub const POLICY_COMPAT_AUDIT_UNKNOWN: &str = "POLICY_COMPAT_AUDIT_UNKNOWN";
+    pub const POLICY_COMPAT_INVALID_RECEIPT_SIGNATURE: &str =
+        "POLICY_COMPAT_INVALID_RECEIPT_SIGNATURE";
     pub const POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE: &str =
         "POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE";
+    pub const POLICY_COMPAT_STALE_RECEIPT: &str = "POLICY_COMPAT_STALE_RECEIPT";
     pub const POLICY_COMPAT_STALE_PREDICATE: &str = "POLICY_COMPAT_STALE_PREDICATE";
     pub const POLICY_COMPAT_MODE_RECEIPT_SIGNED: &str = "POLICY_COMPAT_MODE_RECEIPT_SIGNED";
     pub const POLICY_COMPAT_SCOPE_WIDENING: &str = "POLICY_COMPAT_SCOPE_WIDENING";
@@ -157,6 +158,25 @@ pub(crate) fn compile_policy_predicate(
     }
 }
 
+pub(crate) fn validate_scope_attenuation_for_scope(
+    scope_id: &str,
+    attenuation: &[AttenuationConstraint],
+) -> Result<Vec<String>, String> {
+    let mut scope_delta = Vec::new();
+    for constraint in attenuation {
+        if constraint.scope_type == "scope" && constraint.scope_value != scope_id {
+            return Err(format!(
+                "attenuation scope {} widens beyond active scope {}",
+                constraint.scope_value, scope_id
+            ));
+        }
+        if constraint.scope_type == "scope" {
+            scope_delta.push(format!("scope:{}->{}", constraint.scope_value, scope_id));
+        }
+    }
+    Ok(scope_delta)
+}
+
 pub(crate) fn normalize_policy_expression(expression: &str) -> String {
     let mut tokens: Vec<String> = expression
         .split(|ch: char| !(ch.is_ascii_alphanumeric() || matches!(ch, '_' | ':' | '-' | '.')))
@@ -188,7 +208,9 @@ pub(crate) fn explanation_digest(
 
 pub(crate) fn default_receipt_expiry(issued_at: &str) -> String {
     DateTime::parse_from_rfc3339(issued_at)
-        .map(|ts| (ts.with_timezone(&Utc) + Duration::seconds(COMPAT_DEFAULT_TTL_SECS)).to_rfc3339())
+        .map(|ts| {
+            (ts.with_timezone(&Utc) + Duration::seconds(COMPAT_DEFAULT_TTL_SECS)).to_rfc3339()
+        })
         .unwrap_or_else(|_| issued_at.to_string())
 }
 
@@ -214,7 +236,10 @@ pub(crate) fn compute_freshness_state(
 
 pub(crate) fn compatibility_external_key_id() -> String {
     let vk = compatibility_policy_verifying_key();
-    key_id_from_bytes(b"franken_node.policy.compat.external_key_id.v1:", vk.as_bytes())
+    key_id_from_bytes(
+        b"franken_node.policy.compat.external_key_id.v1:",
+        vk.as_bytes(),
+    )
 }
 
 pub(crate) fn compatibility_internal_key_id() -> String {
@@ -261,9 +286,9 @@ fn canonicalize_compat_value(value: serde_json::Value) -> serde_json::Value {
             }
             serde_json::Value::Object(canonical)
         }
-        serde_json::Value::Array(values) => serde_json::Value::Array(
-            values.into_iter().map(canonicalize_compat_value).collect(),
-        ),
+        serde_json::Value::Array(values) => {
+            serde_json::Value::Array(values.into_iter().map(canonicalize_compat_value).collect())
+        }
         other => other,
     }
 }
@@ -274,10 +299,7 @@ fn canonical_json_bytes<T: Serialize>(value: &T) -> Result<Vec<u8>, serde_json::
     serde_json::to_vec(&canonical)
 }
 
-fn signature_preimage<T: Serialize>(
-    domain: &str,
-    value: &T,
-) -> Result<Vec<u8>, serde_json::Error> {
+fn signature_preimage<T: Serialize>(domain: &str, value: &T) -> Result<Vec<u8>, serde_json::Error> {
     let canonical_payload = canonical_json_bytes(value)?;
     let mut preimage = Vec::with_capacity(16 + domain.len() + canonical_payload.len());
     preimage.extend_from_slice(b"compat_preimage_v1:");
@@ -346,6 +368,24 @@ pub(crate) fn verify_hmac_canonical<T: Serialize>(
         return false;
     };
     crate::security::constant_time::ct_eq(signature_hex, &expected)
+}
+
+fn authority_cache_key<T: Serialize>(
+    domain: &str,
+    value: &T,
+    signature_hex: &str,
+    key_id: &str,
+) -> Result<String, serde_json::Error> {
+    let preimage = signature_preimage(domain, value)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"compat_authority_cache_v1:");
+    hasher.update((preimage.len() as u64).to_le_bytes());
+    hasher.update(&preimage);
+    hasher.update((signature_hex.len() as u64).to_le_bytes());
+    hasher.update(signature_hex.as_bytes());
+    hasher.update((key_id.len() as u64).to_le_bytes());
+    hasher.update(key_id.as_bytes());
+    Ok(hex::encode(hasher.finalize()))
 }
 
 // ── Event Codes ──────────────────────────────────────────────────────────────
@@ -704,7 +744,7 @@ impl PolicyPredicate {
         )
     }
 
-    pub fn compile(&self) -> CompiledPolicyPredicate {
+    pub(crate) fn compile(&self) -> CompiledPolicyPredicate {
         compile_policy_predicate(
             &self.predicate_id,
             &self.activation_condition,
@@ -994,6 +1034,8 @@ pub struct CompatGateEvaluator {
     audit_log: Vec<GateCheckResult>,
     receipts: Vec<ModeSelectionReceipt>,
     compiled_predicates: BTreeMap<String, CompiledPolicyPredicate>,
+    validated_receipts: BTreeMap<String, String>,
+    validated_predicates: BTreeMap<String, String>,
 }
 
 impl CompatGateEvaluator {
@@ -1004,6 +1046,8 @@ impl CompatGateEvaluator {
             audit_log: Vec::new(),
             receipts: Vec::new(),
             compiled_predicates: BTreeMap::new(),
+            validated_receipts: BTreeMap::new(),
+            validated_predicates: BTreeMap::new(),
         }
     }
 
@@ -1067,12 +1111,14 @@ impl CompatGateEvaluator {
             approved: approval,
             proof,
         };
-        receipt.signature =
-            sign_hmac_canonical(COMPAT_MODE_RECEIPT_DOMAIN, &ModeSelectionReceiptSigningPayload::from(&receipt))
-                .map_err(|reason| CompatGateError::InvalidPredicate {
-                    predicate_id: format!("mode-receipt:{scope_id}"),
-                    reason: format!("failed canonicalizing receipt payload: {reason}"),
-                })?;
+        receipt.signature = sign_hmac_canonical(
+            COMPAT_MODE_RECEIPT_DOMAIN,
+            &ModeSelectionReceiptSigningPayload::from(&receipt),
+        )
+        .map_err(|reason| CompatGateError::InvalidPredicate {
+            predicate_id: format!("mode-receipt:{scope_id}"),
+            reason: format!("failed canonicalizing receipt payload: {reason}"),
+        })?;
 
         let scope_config = ScopeConfig {
             scope_id: scope_id.to_string(),
@@ -1081,8 +1127,30 @@ impl CompatGateEvaluator {
             policy_predicates: Vec::new(),
         };
 
+        let receipt_cache_key = authority_cache_key(
+            COMPAT_MODE_RECEIPT_DOMAIN,
+            &ModeSelectionReceiptSigningPayload::from(&receipt),
+            &receipt.signature,
+            &receipt.proof.key_id,
+        )
+        .map_err(|reason| CompatGateError::InvalidPredicate {
+            predicate_id: format!("mode-receipt:{scope_id}"),
+            reason: format!("failed to canonicalize receipt cache key: {reason}"),
+        })?;
+
         self.scopes.insert(scope_id.to_string(), scope_config);
         push_bounded(&mut self.receipts, receipt.clone(), MAX_RECEIPTS);
+        self.validated_receipts
+            .insert(scope_id.to_string(), receipt_cache_key);
+        tracing::info!(
+            event_code = %event_codes::PCG_MODE_TRANSITION,
+            scope_id = scope_id,
+            receipt_id = %receipt.receipt_id,
+            mode = %receipt.mode,
+            previous_mode = ?receipt.previous_mode,
+            approved = receipt.approved,
+            "compatibility mode receipt issued"
+        );
         Ok(receipt)
     }
 
@@ -1098,16 +1166,42 @@ impl CompatGateEvaluator {
             });
         }
 
+        validate_scope_attenuation_for_scope(scope_id, &predicate.attenuation).map_err(
+            |reason| CompatGateError::InvalidPredicate {
+                predicate_id: predicate.predicate_id.clone(),
+                reason,
+            },
+        )?;
+
         let compiled = predicate.compile();
         self.compiled_predicates
             .insert(predicate.predicate_id.clone(), compiled);
+        let predicate_cache_key = authority_cache_key(
+            COMPAT_POLICY_PREDICATE_DOMAIN,
+            &PolicyPredicateSigningPayload::from(&predicate),
+            &predicate.signature,
+            &predicate.proof.key_id,
+        )
+        .map_err(|reason| CompatGateError::InvalidPredicate {
+            predicate_id: predicate.predicate_id.clone(),
+            reason: format!("failed to canonicalize predicate cache key: {reason}"),
+        })?;
 
         let Some(scope) = self.scopes.get_mut(scope_id) else {
             return Err(CompatGateError::ScopeNotFound {
                 scope_id: scope_id.to_string(),
             });
         };
+        let predicate_id = predicate.predicate_id.clone();
         push_bounded(&mut scope.policy_predicates, predicate, MAX_ENTRIES);
+        self.validated_predicates
+            .insert(predicate_id, predicate_cache_key);
+        tracing::info!(
+            event_code = %event_codes::PCG_RECEIPT_ISSUED,
+            scope_id = scope_id,
+            predicate_count = scope.policy_predicates.len(),
+            "compatibility policy predicate registered"
+        );
         Ok(())
     }
 
@@ -1133,16 +1227,16 @@ impl CompatGateEvaluator {
         scope_id: &str,
         trace_id: &str,
     ) -> Result<GateCheckResult, CompatGateError> {
-        let (mode, scope_receipt_freshness, scope_predicates) = {
-            let scope = self
-                .scopes
-                .get(scope_id)
-                .ok_or_else(|| CompatGateError::ScopeNotFound {
-                    scope_id: scope_id.to_string(),
-                })?;
+        let (mode, scope_receipt, scope_predicates) = {
+            let scope =
+                self.scopes
+                    .get(scope_id)
+                    .ok_or_else(|| CompatGateError::ScopeNotFound {
+                        scope_id: scope_id.to_string(),
+                    })?;
             (
                 scope.mode,
-                scope.receipt.freshness_state(),
+                scope.receipt.clone(),
                 scope.policy_predicates.clone(),
             )
         };
@@ -1151,7 +1245,115 @@ impl CompatGateEvaluator {
         let mut attenuation_trace = Vec::new();
         let mut scope_delta = vec![format!("scope={scope_id}")];
         let mut recovery_hints = Vec::new();
-        let mut freshness_state = scope_receipt_freshness;
+        let mut freshness_state = scope_receipt.freshness_state();
+
+        if freshness_state != CompatibilityFreshnessState::Fresh {
+            rationale.push(format!(
+                "scope receipt {} is {}",
+                scope_receipt.receipt_id,
+                freshness_state.label()
+            ));
+            reason_codes.push(reason_codes::POLICY_COMPAT_STALE_RECEIPT.to_string());
+            recovery_hints.push(
+                "re-issue the scope mode receipt before evaluating compatibility".to_string(),
+            );
+            let explanation_digest = explanation_digest(
+                &reason_codes,
+                &attenuation_trace,
+                &scope_delta,
+                &recovery_hints,
+            );
+            let result = GateCheckResult {
+                decision: GateDecision::Deny,
+                rationale,
+                trace_id: trace_id.to_string(),
+                receipt_id: Some(scope_receipt.receipt_id.clone()),
+                package_id: package_id.to_string(),
+                mode,
+                scope_id: scope_id.to_string(),
+                event_code: GateDecision::Deny.event_code().to_string(),
+                reason_codes,
+                attenuation_trace,
+                scope_delta,
+                freshness_state,
+                recovery_hints,
+                explanation_digest,
+            };
+            tracing::info!(
+                event_code = %result.event_code,
+                trace_id = %result.trace_id,
+                scope_id = %result.scope_id,
+                package_id = %result.package_id,
+                decision = %result.decision,
+                reason_codes = ?result.reason_codes,
+                freshness_state = %result.freshness_state,
+                "compatibility gate evaluated"
+            );
+            push_bounded(&mut self.audit_log, result.clone(), MAX_AUDIT_LOG_ENTRIES);
+            return Ok(result);
+        }
+
+        let receipt_cache_key = authority_cache_key(
+            COMPAT_MODE_RECEIPT_DOMAIN,
+            &ModeSelectionReceiptSigningPayload::from(&scope_receipt),
+            &scope_receipt.signature,
+            &scope_receipt.proof.key_id,
+        )
+        .map_err(|reason| CompatGateError::InvalidPredicate {
+            predicate_id: format!("mode-receipt:{scope_id}"),
+            reason: format!("failed to canonicalize receipt cache key: {reason}"),
+        })?;
+        let receipt_cached = self.validated_receipts.get(scope_id).is_some_and(|cached| {
+            crate::security::constant_time::ct_eq(cached, &receipt_cache_key)
+        });
+
+        if !receipt_cached && !scope_receipt.verify_signature() {
+            rationale.push(format!(
+                "scope receipt {} failed signature verification",
+                scope_receipt.receipt_id
+            ));
+            reason_codes.push(reason_codes::POLICY_COMPAT_INVALID_RECEIPT_SIGNATURE.to_string());
+            recovery_hints.push(
+                "re-sign the scope mode receipt with the canonical internal authenticator"
+                    .to_string(),
+            );
+            let explanation_digest = explanation_digest(
+                &reason_codes,
+                &attenuation_trace,
+                &scope_delta,
+                &recovery_hints,
+            );
+            let result = GateCheckResult {
+                decision: GateDecision::Deny,
+                rationale,
+                trace_id: trace_id.to_string(),
+                receipt_id: Some(scope_receipt.receipt_id.clone()),
+                package_id: package_id.to_string(),
+                mode,
+                scope_id: scope_id.to_string(),
+                event_code: GateDecision::Deny.event_code().to_string(),
+                reason_codes,
+                attenuation_trace,
+                scope_delta,
+                freshness_state,
+                recovery_hints,
+                explanation_digest,
+            };
+            tracing::info!(
+                event_code = %result.event_code,
+                trace_id = %result.trace_id,
+                scope_id = %result.scope_id,
+                package_id = %result.package_id,
+                decision = %result.decision,
+                reason_codes = ?result.reason_codes,
+                freshness_state = %result.freshness_state,
+                "compatibility gate evaluated"
+            );
+            push_bounded(&mut self.audit_log, result.clone(), MAX_AUDIT_LOG_ENTRIES);
+            return Ok(result);
+        }
+        self.validated_receipts
+            .insert(scope_id.to_string(), receipt_cache_key);
 
         for predicate in &scope_predicates {
             freshness_state = predicate.freshness_state();
@@ -1165,6 +1367,12 @@ impl CompatGateEvaluator {
                 recovery_hints.push(
                     "re-issue the compatibility predicate with a fresh validity window".to_string(),
                 );
+                let explanation_digest = explanation_digest(
+                    &reason_codes,
+                    &attenuation_trace,
+                    &scope_delta,
+                    &recovery_hints,
+                );
                 let result = GateCheckResult {
                     decision: GateDecision::Deny,
                     rationale,
@@ -1179,26 +1387,54 @@ impl CompatGateEvaluator {
                     scope_delta,
                     freshness_state,
                     recovery_hints,
-                    explanation_digest: explanation_digest(
-                        &reason_codes,
-                        &attenuation_trace,
-                        &scope_delta,
-                        &recovery_hints,
-                    ),
+                    explanation_digest,
                 };
+                tracing::info!(
+                    event_code = %result.event_code,
+                    trace_id = %result.trace_id,
+                    scope_id = %result.scope_id,
+                    package_id = %result.package_id,
+                    decision = %result.decision,
+                    reason_codes = ?result.reason_codes,
+                    freshness_state = %result.freshness_state,
+                    "compatibility gate evaluated"
+                );
                 push_bounded(&mut self.audit_log, result.clone(), MAX_AUDIT_LOG_ENTRIES);
                 return Ok(result);
             }
-            if !predicate.verify_signature() {
+            let predicate_cache_key = authority_cache_key(
+                COMPAT_POLICY_PREDICATE_DOMAIN,
+                &PolicyPredicateSigningPayload::from(predicate),
+                &predicate.signature,
+                &predicate.proof.key_id,
+            )
+            .map_err(|reason| CompatGateError::InvalidPredicate {
+                predicate_id: predicate.predicate_id.clone(),
+                reason: format!("failed to canonicalize predicate cache key: {reason}"),
+            })?;
+            let predicate_cached = self
+                .validated_predicates
+                .get(&predicate.predicate_id)
+                .is_some_and(|cached| {
+                    crate::security::constant_time::ct_eq(cached, &predicate_cache_key)
+                });
+
+            if !predicate_cached && !predicate.verify_signature() {
                 rationale.push(format!(
                     "predicate {} failed signature verification",
                     predicate.predicate_id
                 ));
-                reason_codes.push(
-                    reason_codes::POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE.to_string(),
-                );
+                reason_codes
+                    .push(reason_codes::POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE.to_string());
                 recovery_hints.push(
-                    "re-sign the compatibility predicate with the canonical policy signer".to_string(),
+                    "re-sign the compatibility predicate with the canonical policy signer"
+                        .to_string(),
+                );
+                let explanation_digest = explanation_digest(
+                    &reason_codes,
+                    &attenuation_trace,
+                    &scope_delta,
+                    &recovery_hints,
                 );
                 let result = GateCheckResult {
                     decision: GateDecision::Deny,
@@ -1214,13 +1450,68 @@ impl CompatGateEvaluator {
                     scope_delta,
                     freshness_state,
                     recovery_hints,
-                    explanation_digest: explanation_digest(
-                        &reason_codes,
-                        &attenuation_trace,
-                        &scope_delta,
-                        &recovery_hints,
-                    ),
+                    explanation_digest,
                 };
+                tracing::info!(
+                    event_code = %result.event_code,
+                    trace_id = %result.trace_id,
+                    scope_id = %result.scope_id,
+                    package_id = %result.package_id,
+                    decision = %result.decision,
+                    reason_codes = ?result.reason_codes,
+                    freshness_state = %result.freshness_state,
+                    "compatibility gate evaluated"
+                );
+                push_bounded(&mut self.audit_log, result.clone(), MAX_AUDIT_LOG_ENTRIES);
+                return Ok(result);
+            }
+            self.validated_predicates
+                .insert(predicate.predicate_id.clone(), predicate_cache_key);
+
+            if let Err(reason) =
+                validate_scope_attenuation_for_scope(scope_id, &predicate.attenuation)
+            {
+                rationale.push(format!(
+                    "predicate {} rejected: {reason}",
+                    predicate.predicate_id
+                ));
+                reason_codes.push(reason_codes::POLICY_COMPAT_SCOPE_WIDENING.to_string());
+                recovery_hints.push(
+                    "narrow the predicate attenuation so it preserves the active scope envelope"
+                        .to_string(),
+                );
+                let explanation_digest = explanation_digest(
+                    &reason_codes,
+                    &attenuation_trace,
+                    &scope_delta,
+                    &recovery_hints,
+                );
+                let result = GateCheckResult {
+                    decision: GateDecision::Deny,
+                    rationale,
+                    trace_id: trace_id.to_string(),
+                    receipt_id: Some(format!("gate-rcpt-{}-{}", scope_id, self.audit_log.len())),
+                    package_id: package_id.to_string(),
+                    mode,
+                    scope_id: scope_id.to_string(),
+                    event_code: GateDecision::Deny.event_code().to_string(),
+                    reason_codes,
+                    attenuation_trace,
+                    scope_delta,
+                    freshness_state,
+                    recovery_hints,
+                    explanation_digest,
+                };
+                tracing::info!(
+                    event_code = %result.event_code,
+                    trace_id = %result.trace_id,
+                    scope_id = %result.scope_id,
+                    package_id = %result.package_id,
+                    decision = %result.decision,
+                    reason_codes = ?result.reason_codes,
+                    freshness_state = %result.freshness_state,
+                    "compatibility gate evaluated"
+                );
                 push_bounded(&mut self.audit_log, result.clone(), MAX_AUDIT_LOG_ENTRIES);
                 return Ok(result);
             }
@@ -1229,14 +1520,13 @@ impl CompatGateEvaluator {
                 .compiled_predicates
                 .entry(predicate.predicate_id.clone())
                 .or_insert_with(|| predicate.compile());
+            attenuation_trace.extend(predicate.proof.attenuation_trace.iter().cloned());
             attenuation_trace.extend(compiled.attenuation_trace.iter().cloned());
-            scope_delta.extend(predicate.attenuation.iter().filter_map(|constraint| {
-                if constraint.scope_type == "scope" && constraint.scope_value != scope_id {
-                    Some(format!("scope:{}->{}", constraint.scope_value, scope_id))
-                } else {
-                    None
-                }
-            }));
+            scope_delta.extend(predicate.proof.scope_delta.iter().cloned());
+            scope_delta.extend(
+                validate_scope_attenuation_for_scope(scope_id, &predicate.attenuation)
+                    .unwrap_or_default(),
+            );
         }
 
         // Look up the package in the shim registry
@@ -1280,7 +1570,8 @@ impl CompatGateEvaluator {
                         ));
                         reason_codes.push(reason_codes::POLICY_COMPAT_AUDIT_UNKNOWN.to_string());
                         recovery_hints.push(
-                            "inspect the emitted receipt and lockstep evidence before rollout".to_string(),
+                            "inspect the emitted receipt and lockstep evidence before rollout"
+                                .to_string(),
                         );
                         GateDecision::Audit
                     }
@@ -1304,7 +1595,8 @@ impl CompatGateEvaluator {
                         reason_codes
                             .push(reason_codes::POLICY_COMPAT_DENY_UNKNOWN_STRICT.to_string());
                         recovery_hints.push(
-                            "register the shim or re-run under balanced mode with explicit audit".to_string(),
+                            "register the shim or re-run under balanced mode with explicit audit"
+                                .to_string(),
                         );
                         GateDecision::Deny
                     }
@@ -1312,7 +1604,8 @@ impl CompatGateEvaluator {
                         rationale.push("balanced mode: unknown packages audited".to_string());
                         reason_codes.push(reason_codes::POLICY_COMPAT_AUDIT_UNKNOWN.to_string());
                         recovery_hints.push(
-                            "capture a divergence receipt and inspect the audited package".to_string(),
+                            "capture a divergence receipt and inspect the audited package"
+                                .to_string(),
                         );
                         GateDecision::Audit
                     }
@@ -1338,6 +1631,12 @@ impl CompatGateEvaluator {
         };
 
         let result = GateCheckResult {
+            explanation_digest: explanation_digest(
+                &reason_codes,
+                &attenuation_trace,
+                &scope_delta,
+                &recovery_hints,
+            ),
             decision,
             rationale,
             trace_id: trace_id.to_string(),
@@ -1351,14 +1650,18 @@ impl CompatGateEvaluator {
             scope_delta: scope_delta.clone(),
             freshness_state,
             recovery_hints: recovery_hints.clone(),
-            explanation_digest: explanation_digest(
-                &reason_codes,
-                &attenuation_trace,
-                &scope_delta,
-                &recovery_hints,
-            ),
         };
 
+        tracing::info!(
+            event_code = %result.event_code,
+            trace_id = %result.trace_id,
+            scope_id = %result.scope_id,
+            package_id = %result.package_id,
+            decision = %result.decision,
+            reason_codes = ?result.reason_codes,
+            freshness_state = %result.freshness_state,
+            "compatibility gate evaluated"
+        );
         push_bounded(&mut self.audit_log, result.clone(), MAX_AUDIT_LOG_ENTRIES);
         Ok(result)
     }
@@ -1613,6 +1916,80 @@ mod tests {
         eval
     }
 
+    fn future_window() -> (String, String) {
+        let issued_at = "2099-01-01T00:00:00Z".to_string();
+        let expires_at = "2099-01-01T01:00:00Z".to_string();
+        (issued_at, expires_at)
+    }
+
+    fn stale_window() -> (String, String) {
+        let issued_at = "2000-01-01T00:00:00Z".to_string();
+        let expires_at = "2000-01-01T01:00:00Z".to_string();
+        (issued_at, expires_at)
+    }
+
+    fn signed_test_predicate(attenuation: Vec<AttenuationConstraint>) -> PolicyPredicate {
+        let (issued_at, expires_at) = future_window();
+        let proof = build_proof_metadata(
+            CompatibilitySignatureAlgorithm::Ed25519,
+            Some("parent-compat-receipt".to_string()),
+            attenuation
+                .iter()
+                .map(|constraint| format!("{}={}", constraint.scope_type, constraint.scope_value))
+                .collect(),
+            vec!["scope:parent->project-1".to_string()],
+            vec!["POLICY_COMPAT_TEST_PREDICATE".to_string()],
+            vec!["re-sign the predicate if the signature changes".to_string()],
+        );
+        let mut predicate = PolicyPredicate {
+            predicate_id: "pred-1".to_string(),
+            signature: String::new(),
+            attenuation,
+            activation_condition: "mode == balanced".to_string(),
+            issued_at,
+            expires_at,
+            proof,
+        };
+        predicate.signature = sign_ed25519_canonical(
+            COMPAT_POLICY_PREDICATE_DOMAIN,
+            &PolicyPredicateSigningPayload::from(&predicate),
+        )
+        .unwrap();
+        predicate
+    }
+
+    fn signed_test_receipt() -> ModeSelectionReceipt {
+        let (activated_at, expires_at) = future_window();
+        let proof = build_proof_metadata(
+            CompatibilitySignatureAlgorithm::HmacSha256,
+            Some("parent-mode-receipt".to_string()),
+            vec!["scope=project-1".to_string()],
+            vec!["mode:strict->balanced".to_string()],
+            vec!["POLICY_COMPAT_TEST_RECEIPT".to_string()],
+            vec!["re-issue the receipt if freshness expires".to_string()],
+        );
+        let mut receipt = ModeSelectionReceipt {
+            receipt_id: "r1".to_string(),
+            scope_id: "s1".to_string(),
+            mode: CompatibilityMode::Balanced,
+            previous_mode: Some(CompatibilityMode::Strict),
+            activated_at,
+            expires_at,
+            signature: String::new(),
+            requestor: "admin".to_string(),
+            justification: "test".to_string(),
+            approval_required: true,
+            approved: true,
+            proof,
+        };
+        receipt.signature = sign_hmac_canonical(
+            COMPAT_MODE_RECEIPT_DOMAIN,
+            &ModeSelectionReceiptSigningPayload::from(&receipt),
+        )
+        .unwrap();
+        receipt
+    }
+
     // ── CompatibilityBand ──
 
     #[test]
@@ -1839,50 +2216,39 @@ mod tests {
 
     #[test]
     fn predicate_signature_valid() {
-        let pred = PolicyPredicate {
-            predicate_id: "pred-1".to_string(),
-            signature: "a".repeat(64),
-            attenuation: vec![],
-            activation_condition: "true".to_string(),
-        };
+        let pred = signed_test_predicate(vec![]);
         assert!(pred.verify_signature());
     }
 
     #[test]
     fn predicate_signature_too_short() {
-        let pred = PolicyPredicate {
-            predicate_id: "pred-1".to_string(),
-            signature: "abcd".to_string(),
-            attenuation: vec![],
-            activation_condition: "true".to_string(),
-        };
+        let mut pred = signed_test_predicate(vec![]);
+        pred.signature = "abcd".to_string();
         assert!(!pred.verify_signature());
     }
 
     #[test]
     fn predicate_scope_universal() {
-        let pred = PolicyPredicate {
-            predicate_id: "pred-1".to_string(),
-            signature: "a".repeat(64),
-            attenuation: vec![],
-            activation_condition: "true".to_string(),
-        };
+        let pred = signed_test_predicate(vec![]);
         assert!(pred.applies_to_scope("scope", "any"));
     }
 
     #[test]
     fn predicate_scope_attenuated() {
-        let pred = PolicyPredicate {
-            predicate_id: "pred-1".to_string(),
-            signature: "a".repeat(64),
-            attenuation: vec![AttenuationConstraint {
-                scope_type: "project".to_string(),
-                scope_value: "proj-1".to_string(),
-            }],
-            activation_condition: "true".to_string(),
-        };
+        let pred = signed_test_predicate(vec![AttenuationConstraint {
+            scope_type: "project".to_string(),
+            scope_value: "proj-1".to_string(),
+        }]);
         assert!(pred.applies_to_scope("project", "proj-1"));
         assert!(!pred.applies_to_scope("project", "proj-2"));
+    }
+
+    #[test]
+    fn predicate_same_length_forgery_rejected() {
+        let mut pred = signed_test_predicate(vec![]);
+        pred.activation_condition = "mode == legacyyy".to_string();
+        assert_eq!(pred.activation_condition.len(), "mode == balanced".len());
+        assert!(!pred.verify_signature());
     }
 
     // ── GateDecision ──
@@ -1996,6 +2362,21 @@ mod tests {
             Some(CompatibilityMode::Balanced)
         );
         assert_eq!(eval.get_mode("nonexistent"), None);
+    }
+
+    #[test]
+    fn add_policy_predicate_rejects_scope_widening() {
+        let mut eval = evaluator_with_scope();
+        let err = eval
+            .add_policy_predicate(
+                "project-1",
+                signed_test_predicate(vec![AttenuationConstraint {
+                    scope_type: "scope".to_string(),
+                    scope_value: "project-2".to_string(),
+                }]),
+            )
+            .unwrap_err();
+        assert!(matches!(err, CompatGateError::InvalidPredicate { .. }));
     }
 
     // ── Gate Evaluation ──
@@ -2122,6 +2503,117 @@ mod tests {
             .unwrap();
         assert_eq!(result.decision, GateDecision::Allow);
         assert!(result.receipt_id.is_none());
+    }
+
+    #[test]
+    fn gate_eval_rejects_tampered_scope_receipt() {
+        let mut eval = evaluator_with_scope();
+        let scope = eval.scopes.get_mut("project-1").unwrap();
+        scope.receipt.justification = "initial setvp".to_string();
+        assert_eq!(scope.receipt.justification.len(), "initial setup".len());
+
+        let result = eval
+            .evaluate_gate("shim-edge-1", "project-1", "trace-tampered-receipt")
+            .unwrap();
+        assert_eq!(result.decision, GateDecision::Deny);
+        assert!(
+            result
+                .reason_codes
+                .contains(&reason_codes::POLICY_COMPAT_INVALID_RECEIPT_SIGNATURE.to_string())
+        );
+    }
+
+    #[test]
+    fn gate_eval_rejects_stale_scope_receipt() {
+        let mut eval = evaluator_with_scope();
+        let scope = eval.scopes.get_mut("project-1").unwrap();
+        let (activated_at, expires_at) = stale_window();
+        scope.receipt.activated_at = activated_at;
+        scope.receipt.expires_at = expires_at;
+        scope.receipt.signature = sign_hmac_canonical(
+            COMPAT_MODE_RECEIPT_DOMAIN,
+            &ModeSelectionReceiptSigningPayload::from(&scope.receipt),
+        )
+        .unwrap();
+
+        let result = eval
+            .evaluate_gate("shim-edge-1", "project-1", "trace-stale-receipt")
+            .unwrap();
+        assert_eq!(result.decision, GateDecision::Deny);
+        assert!(
+            result
+                .reason_codes
+                .contains(&reason_codes::POLICY_COMPAT_STALE_RECEIPT.to_string())
+        );
+    }
+
+    #[test]
+    fn gate_eval_rejects_scope_widening_predicate() {
+        let mut eval = evaluator_with_scope();
+        let mut pred = signed_test_predicate(vec![AttenuationConstraint {
+            scope_type: "scope".to_string(),
+            scope_value: "project-2".to_string(),
+        }]);
+        pred.proof = build_proof_metadata(
+            CompatibilitySignatureAlgorithm::Ed25519,
+            Some("parent-compat-receipt".to_string()),
+            vec!["scope=project-2".to_string()],
+            vec!["scope:project-2->project-1".to_string()],
+            vec![reason_codes::POLICY_COMPAT_SCOPE_WIDENING.to_string()],
+            vec!["narrow the predicate before retrying".to_string()],
+        );
+        pred.signature = sign_ed25519_canonical(
+            COMPAT_POLICY_PREDICATE_DOMAIN,
+            &PolicyPredicateSigningPayload::from(&pred),
+        )
+        .unwrap();
+        eval.scopes
+            .get_mut("project-1")
+            .unwrap()
+            .policy_predicates
+            .push(pred);
+
+        let result = eval
+            .evaluate_gate("shim-edge-1", "project-1", "trace-scope-widen")
+            .unwrap();
+        assert_eq!(result.decision, GateDecision::Deny);
+        assert!(
+            result
+                .reason_codes
+                .contains(&reason_codes::POLICY_COMPAT_SCOPE_WIDENING.to_string())
+        );
+    }
+
+    #[test]
+    fn gate_eval_caches_compiled_predicates_under_budget() {
+        let mut eval = evaluator_with_scope();
+        let predicate = signed_test_predicate(vec![AttenuationConstraint {
+            scope_type: "scope".to_string(),
+            scope_value: "project-1".to_string(),
+        }]);
+        eval.add_policy_predicate("project-1", predicate).unwrap();
+
+        eval.evaluate_gate("shim-edge-1", "project-1", "trace-warmup")
+            .unwrap();
+
+        let mut samples = Vec::with_capacity(512);
+        for idx in 0..512 {
+            let started = std::time::Instant::now();
+            let result = eval
+                .evaluate_gate("shim-edge-1", "project-1", &format!("trace-bench-{idx}"))
+                .unwrap();
+            assert_eq!(result.decision, GateDecision::Allow);
+            samples.push(started.elapsed().as_nanos() as u64);
+        }
+
+        samples.sort_unstable();
+        let p99 = samples[(samples.len() * 99 / 100).min(samples.len() - 1)];
+        assert!(
+            p99 < 1_000_000,
+            "cached gate evaluation p99 {}ns exceeded 1ms budget",
+            p99
+        );
+        assert_eq!(eval.compiled_predicates.len(), 1);
     }
 
     // ── Audit Log ──
@@ -2337,6 +2829,12 @@ mod tests {
             mode: CompatibilityMode::Strict,
             scope_id: "s1".to_string(),
             event_code: "PCG-002".to_string(),
+            reason_codes: vec!["POLICY_COMPAT_DENY_MODE".to_string()],
+            attenuation_trace: vec!["scope=project-1".to_string()],
+            scope_delta: vec!["scope:root->s1".to_string()],
+            freshness_state: CompatibilityFreshnessState::Fresh,
+            recovery_hints: vec!["retry with approval".to_string()],
+            explanation_digest: "digest".to_string(),
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: GateCheckResult = serde_json::from_str(&json).unwrap();
@@ -2346,18 +2844,7 @@ mod tests {
 
     #[test]
     fn mode_selection_receipt_serde() {
-        let receipt = ModeSelectionReceipt {
-            receipt_id: "r1".to_string(),
-            scope_id: "s1".to_string(),
-            mode: CompatibilityMode::Balanced,
-            previous_mode: Some(CompatibilityMode::Strict),
-            activated_at: "2026-01-01T00:00:00Z".to_string(),
-            signature: "a".repeat(64),
-            requestor: "admin".to_string(),
-            justification: "test".to_string(),
-            approval_required: true,
-            approved: true,
-        };
+        let receipt = signed_test_receipt();
         let json = serde_json::to_string(&receipt).unwrap();
         let parsed: ModeSelectionReceipt = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.receipt_id, "r1");
@@ -2371,6 +2858,26 @@ mod tests {
         let json = serde_json::to_string(&report).unwrap();
         let parsed: CompatGateReport = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.total_shims, 4);
+    }
+
+    #[test]
+    fn compatibility_sources_do_not_reintroduce_placeholder_signature_shortcuts() {
+        let compat_gates_src = include_str!("compat_gates.rs");
+        let compatibility_gate_src = include_str!("compatibility_gate.rs");
+        for banned in [
+            ["placeholder", "signature"].join(" "),
+            ["Simplified", "HMAC", "for", "demonstration"].join(" "),
+            ["compat", "gate", "sign", "v1:"].join("_"),
+        ] {
+            assert!(
+                !compat_gates_src.contains(&banned),
+                "compat_gates.rs should not contain banned shortcut marker: {banned}"
+            );
+            assert!(
+                !compatibility_gate_src.contains(&banned),
+                "compatibility_gate.rs should not contain banned shortcut marker: {banned}"
+            );
+        }
     }
 
     // ── Edge Cases ──

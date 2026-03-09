@@ -16,9 +16,12 @@ reconciled entry.  Epoch boundaries are enforced fail-closed.
 1. Each node computes an MMR digest over its trust-state records.
 2. Nodes exchange digests and diff via MMR prefix comparison → O(delta).
 3. Missing/divergent records are bundled with MMR inclusion proofs.
-4. Records are applied through a two-phase obligation channel (atomic).
-5. Epoch-scoped validity: reject records from future epochs.
-6. Fork detection: divergent histories trigger halt-and-alert.
+4. Same-ID conflicts are resolved deterministically by higher `epoch`, then
+   later `recorded_at_ms`, then lexicographically greater `origin_node_id`;
+   only exact precedence ties with different digests are treated as forks.
+5. Records are applied through a two-phase obligation channel (atomic).
+6. Epoch-scoped validity: reject records from future epochs.
+7. Fork detection: divergent histories trigger halt-and-alert.
 
 ## Data Structures
 
@@ -36,11 +39,13 @@ reconciled entry.  Epoch boundaries are enforced fail-closed.
 
 | Field       | Type     | Description                         |
 |-------------|----------|-------------------------------------|
-| id          | String   | Unique record identifier            |
-| epoch       | u64      | Epoch in which record was created   |
-| payload     | Vec<u8>  | Record payload bytes                |
-| mmr_pos     | u64      | MMR leaf position                   |
-| mmr_proof   | Vec<[u8;32]> | MMR inclusion proof hashes    |
+| id              | String      | Unique record identifier                 |
+| epoch           | u64         | Epoch in which record was created        |
+| recorded_at_ms  | u64         | Monotonic origin timestamp               |
+| origin_node_id  | String      | Deterministic final tie-breaker          |
+| payload         | Vec<u8>     | Record payload bytes                     |
+| mmr_pos         | u64         | MMR leaf position                        |
+| mmr_proof       | Vec<[u8;32]>| MMR inclusion proof hashes               |
 
 ### `ReconciliationResult`
 

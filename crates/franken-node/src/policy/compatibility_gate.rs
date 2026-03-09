@@ -10,11 +10,11 @@ use chrono::{DateTime, Utc};
 
 use super::compat_gates::{
     COMPAT_DIVERGENCE_RECEIPT_DOMAIN, COMPAT_POLICY_PREDICATE_DOMAIN,
-    COMPAT_TRANSITION_RECEIPT_DOMAIN, CompatibilityFreshnessState,
-    CompatibilityProofMetadata, CompatibilitySignatureAlgorithm, CompiledPolicyPredicate,
-    build_proof_metadata, compile_policy_predicate, compute_freshness_state,
-    default_receipt_expiry, explanation_digest, sign_ed25519_canonical, sign_hmac_canonical,
-    verify_ed25519_canonical, verify_hmac_canonical,
+    COMPAT_TRANSITION_RECEIPT_DOMAIN, CompatibilityFreshnessState, CompatibilityProofMetadata,
+    CompatibilitySignatureAlgorithm, CompiledPolicyPredicate, build_proof_metadata,
+    compile_policy_predicate, compute_freshness_state, default_receipt_expiry, explanation_digest,
+    reason_codes, sign_ed25519_canonical, sign_hmac_canonical,
+    validate_scope_attenuation_for_scope, verify_ed25519_canonical, verify_hmac_canonical,
 };
 
 // ---------------------------------------------------------------------------
@@ -163,7 +163,7 @@ pub struct ShimEntry {
 }
 
 /// Policy predicate with cryptographic signature and attenuation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PolicyPredicate {
     pub predicate_id: String,
     pub signature: String,
@@ -253,6 +253,52 @@ fn predicate_signing_payload(predicate: &PolicyPredicate) -> PredicateSigningPay
         expires_at: &predicate.expires_at,
         proof: &predicate.proof,
     }
+}
+
+fn scope_mode_signing_payload(scope_mode: &ScopeMode) -> ScopeModeSigningPayload<'_> {
+    ScopeModeSigningPayload {
+        scope_id: &scope_mode.scope_id,
+        mode: scope_mode.mode.label(),
+        activated_at: &scope_mode.activated_at,
+        expires_at: &scope_mode.expires_at,
+        policy_predicate: scope_mode.policy_predicate.as_ref(),
+        proof: &scope_mode.proof,
+    }
+}
+
+fn transition_receipt_signing_payload(
+    receipt: &ModeTransitionReceipt,
+) -> ModeTransitionReceiptSigningPayload<'_> {
+    ModeTransitionReceiptSigningPayload {
+        transition_id: &receipt.transition_id,
+        scope_id: &receipt.scope_id,
+        from_mode: receipt.from_mode.label(),
+        to_mode: receipt.to_mode.label(),
+        approved: receipt.approved,
+        issued_at: &receipt.issued_at,
+        expires_at: &receipt.expires_at,
+        rationale: &receipt.rationale,
+        trace_id: &receipt.trace_id,
+        proof: &receipt.proof,
+    }
+}
+
+fn predicate_scope_delta(
+    scope_id: &str,
+    predicate: &PolicyPredicate,
+) -> Result<Vec<String>, String> {
+    let attenuation: Vec<super::compat_gates::AttenuationConstraint> = predicate
+        .attenuation
+        .iter()
+        .filter_map(|entry| {
+            let (scope_type, scope_value) = entry.split_once('=')?;
+            Some(super::compat_gates::AttenuationConstraint {
+                scope_type: scope_type.to_string(),
+                scope_value: scope_value.to_string(),
+            })
+        })
+        .collect();
+    validate_scope_attenuation_for_scope(scope_id, &attenuation)
 }
 
 const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
@@ -386,9 +432,9 @@ impl GateEngine {
         let trace_id = self.next_trace_id();
 
         // Look up scope mode; default to Strict if unset.
-        let (scope_mode, policy_predicate) = self
-            .scope_modes
-            .get(&req.scope)
+        let scope_state = self.scope_modes.get(&req.scope).cloned();
+        let (scope_mode, policy_predicate) = scope_state
+            .as_ref()
             .map(|s| (s.mode, s.policy_predicate.clone()))
             .unwrap_or((CompatMode::Strict, None));
 
@@ -398,6 +444,100 @@ impl GateEngine {
         let mut scope_delta = vec![format!("scope={}", req.scope)];
         let mut recovery_hints = Vec::new();
         let mut freshness_state = CompatibilityFreshnessState::Fresh;
+
+        if let Some(scope_mode_state) = &scope_state {
+            freshness_state = compute_freshness_state(
+                &scope_mode_state.activated_at,
+                &scope_mode_state.expires_at,
+            );
+            if freshness_state != CompatibilityFreshnessState::Fresh {
+                reason_codes.push(reason_codes::POLICY_COMPAT_STALE_RECEIPT.to_string());
+                recovery_hints.push(
+                    "re-issue the scope mode receipt before retrying the gate check".to_string(),
+                );
+                let rationale = GateRationale {
+                    matched_predicates: Vec::new(),
+                    explanation: format!(
+                        "scope {} denied: active scope mode receipt is {}",
+                        req.scope,
+                        freshness_state.label()
+                    ),
+                    reason_codes: reason_codes.clone(),
+                    attenuation_trace: attenuation_trace.clone(),
+                    scope_delta: scope_delta.clone(),
+                    freshness_state,
+                    recovery_hints: recovery_hints.clone(),
+                    explanation_digest: explanation_digest(
+                        &reason_codes,
+                        &attenuation_trace,
+                        &scope_delta,
+                        &recovery_hints,
+                    ),
+                };
+                tracing::info!(
+                    event_code = %PCG_002,
+                    trace_id = %trace_id,
+                    scope_id = %req.scope,
+                    package_id = %req.package_id,
+                    decision = "deny",
+                    reason_codes = ?reason_codes,
+                    freshness_state = %freshness_state,
+                    "compatibility gate evaluated"
+                );
+                self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
+                return GateCheckResult {
+                    decision: Verdict::Deny,
+                    rationale,
+                    trace_id,
+                    receipt_id: None,
+                    event_code: PCG_002.to_string(),
+                };
+            }
+            if !self.verify_scope_mode_signature(scope_mode_state) {
+                reason_codes
+                    .push(reason_codes::POLICY_COMPAT_INVALID_RECEIPT_SIGNATURE.to_string());
+                recovery_hints.push(
+                    "re-sign the active scope mode receipt with the canonical internal authenticator"
+                        .to_string(),
+                );
+                let rationale = GateRationale {
+                    matched_predicates: Vec::new(),
+                    explanation: format!(
+                        "scope {} denied: active scope mode receipt failed verification",
+                        req.scope
+                    ),
+                    reason_codes: reason_codes.clone(),
+                    attenuation_trace: attenuation_trace.clone(),
+                    scope_delta: scope_delta.clone(),
+                    freshness_state,
+                    recovery_hints: recovery_hints.clone(),
+                    explanation_digest: explanation_digest(
+                        &reason_codes,
+                        &attenuation_trace,
+                        &scope_delta,
+                        &recovery_hints,
+                    ),
+                };
+                tracing::info!(
+                    event_code = %PCG_002,
+                    trace_id = %trace_id,
+                    scope_id = %req.scope,
+                    package_id = %req.package_id,
+                    decision = "deny",
+                    reason_codes = ?reason_codes,
+                    freshness_state = %freshness_state,
+                    "compatibility gate evaluated"
+                );
+                self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
+                return GateCheckResult {
+                    decision: Verdict::Deny,
+                    rationale,
+                    trace_id,
+                    receipt_id: None,
+                    event_code: PCG_002.to_string(),
+                };
+            }
+        }
 
         if let Some(predicate) = &policy_predicate {
             freshness_state = compute_freshness_state(&predicate.issued_at, &predicate.expires_at);
@@ -409,7 +549,8 @@ impl GateEngine {
                     &predicate.proof.key_id,
                 )
             {
-                reason_codes.push("POLICY_COMPAT_INVALID_PREDICATE".to_string());
+                reason_codes
+                    .push(reason_codes::POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE.to_string());
                 recovery_hints.push(
                     "refresh and re-sign the scope policy predicate before retrying the gate check"
                         .to_string(),
@@ -432,6 +573,59 @@ impl GateEngine {
                         &recovery_hints,
                     ),
                 };
+                tracing::info!(
+                    event_code = %PCG_002,
+                    trace_id = %trace_id,
+                    scope_id = %req.scope,
+                    package_id = %req.package_id,
+                    decision = "deny",
+                    reason_codes = ?reason_codes,
+                    freshness_state = %freshness_state,
+                    "compatibility gate evaluated"
+                );
+                self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
+                return GateCheckResult {
+                    decision: Verdict::Deny,
+                    rationale,
+                    trace_id,
+                    receipt_id: None,
+                    event_code: PCG_002.to_string(),
+                };
+            }
+
+            if let Err(reason) = predicate_scope_delta(&req.scope, predicate) {
+                reason_codes.push(reason_codes::POLICY_COMPAT_SCOPE_WIDENING.to_string());
+                recovery_hints.push(
+                    "narrow the predicate attenuation so it preserves the active scope".to_string(),
+                );
+                let rationale = GateRationale {
+                    matched_predicates: Vec::new(),
+                    explanation: format!(
+                        "scope {} denied: attached policy predicate widens scope ({reason})",
+                        req.scope
+                    ),
+                    reason_codes: reason_codes.clone(),
+                    attenuation_trace: attenuation_trace.clone(),
+                    scope_delta: scope_delta.clone(),
+                    freshness_state,
+                    recovery_hints: recovery_hints.clone(),
+                    explanation_digest: explanation_digest(
+                        &reason_codes,
+                        &attenuation_trace,
+                        &scope_delta,
+                        &recovery_hints,
+                    ),
+                };
+                tracing::info!(
+                    event_code = %PCG_002,
+                    trace_id = %trace_id,
+                    scope_id = %req.scope,
+                    package_id = %req.package_id,
+                    decision = "deny",
+                    reason_codes = ?reason_codes,
+                    freshness_state = %freshness_state,
+                    "compatibility gate evaluated"
+                );
                 self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
                 return GateCheckResult {
                     decision: Verdict::Deny,
@@ -453,53 +647,59 @@ impl GateEngine {
                     )
                 });
             matched.push(compiled.predicate_id.clone());
+            attenuation_trace.extend(predicate.proof.attenuation_trace.iter().cloned());
             attenuation_trace.extend(compiled.attenuation_trace.iter().cloned());
-            scope_delta.extend(
-                predicate
-                    .attenuation
-                    .iter()
-                    .filter(|entry| entry != &req.scope)
-                    .map(|entry| format!("scope:{entry}->{}", req.scope)),
-            );
+            scope_delta.extend(predicate.proof.scope_delta.iter().cloned());
+            scope_delta.extend(predicate_scope_delta(&req.scope, predicate).unwrap_or_default());
         }
 
         // Policy: requested mode must not exceed scope's configured mode risk level.
-        let (decision, explanation) =
-            if req.requested_mode.risk_level() <= scope_mode.risk_level() {
-                reason_codes.push("POLICY_COMPAT_ALLOW".to_string());
-                (
-                    Verdict::Allow,
-                    format!(
-                        "Package {} allowed under {} mode (scope {} permits up to {})",
-                        req.package_id,
-                        req.requested_mode.label(),
-                        req.scope,
-                        scope_mode.label()
-                    ),
-                )
-            } else {
-                reason_codes.push("POLICY_COMPAT_DENY_MODE".to_string());
-                recovery_hints.push(
-                    "request a scope mode transition with explicit justification before retrying"
-                        .to_string(),
-                );
-                (
-                    Verdict::Deny,
-                    format!(
-                        "Package {} denied: requested {} exceeds scope {} ceiling {}",
-                        req.package_id,
-                        req.requested_mode.label(),
-                        req.scope,
-                        scope_mode.label()
-                    ),
-                )
-            };
+        let (decision, explanation) = if req.requested_mode.risk_level() <= scope_mode.risk_level()
+        {
+            reason_codes.push(reason_codes::POLICY_COMPAT_ALLOW.to_string());
+            (
+                Verdict::Allow,
+                format!(
+                    "Package {} allowed under {} mode (scope {} permits up to {})",
+                    req.package_id,
+                    req.requested_mode.label(),
+                    req.scope,
+                    scope_mode.label()
+                ),
+            )
+        } else {
+            reason_codes.push(reason_codes::POLICY_COMPAT_DENY_MODE.to_string());
+            recovery_hints.push(
+                "request a scope mode transition with explicit justification before retrying"
+                    .to_string(),
+            );
+            (
+                Verdict::Deny,
+                format!(
+                    "Package {} denied: requested {} exceeds scope {} ceiling {}",
+                    req.package_id,
+                    req.requested_mode.label(),
+                    req.scope,
+                    scope_mode.label()
+                ),
+            )
+        };
 
         let event_code = match decision {
             Verdict::Allow => PCG_001,
             Verdict::Deny | Verdict::Audit => PCG_002,
         };
 
+        tracing::info!(
+            event_code = %event_code,
+            trace_id = %trace_id,
+            scope_id = %req.scope,
+            package_id = %req.package_id,
+            decision = %decision.label(),
+            reason_codes = ?reason_codes,
+            freshness_state = %freshness_state,
+            "compatibility gate evaluated"
+        );
         self.emit_audit(event_code, &req.scope, &explanation, &trace_id);
 
         GateCheckResult {
@@ -550,25 +750,88 @@ impl GateEngine {
         };
         scope_mode.receipt_signature = sign_hmac_canonical(
             COMPAT_TRANSITION_RECEIPT_DOMAIN,
-            &ScopeModeSigningPayload {
-                scope_id: &scope_mode.scope_id,
-                mode: scope_mode.mode.label(),
-                activated_at: &scope_mode.activated_at,
-                expires_at: &scope_mode.expires_at,
-                policy_predicate: scope_mode.policy_predicate.as_ref(),
-                proof: &scope_mode.proof,
-            },
+            &scope_mode_signing_payload(&scope_mode),
         )
         .unwrap_or_default();
-        self.scope_modes.insert(
-            scope_id.to_string(),
-            scope_mode,
+        tracing::info!(
+            event_code = %PCG_003,
+            scope_id = scope_id,
+            mode = %scope_mode.mode.label(),
+            "compatibility scope mode set"
         );
+        self.scope_modes.insert(scope_id.to_string(), scope_mode);
     }
 
     /// Query the current mode for a scope.
     pub fn query_mode(&self, scope_id: &str) -> Option<&ScopeMode> {
         self.scope_modes.get(scope_id)
+    }
+
+    pub fn verify_scope_mode_signature(&self, scope_mode: &ScopeMode) -> bool {
+        if compute_freshness_state(&scope_mode.activated_at, &scope_mode.expires_at)
+            != CompatibilityFreshnessState::Fresh
+        {
+            return false;
+        }
+        verify_hmac_canonical(
+            COMPAT_TRANSITION_RECEIPT_DOMAIN,
+            &scope_mode_signing_payload(scope_mode),
+            &scope_mode.receipt_signature,
+            &scope_mode.proof.key_id,
+        )
+    }
+
+    pub fn verify_transition_signature(&self, receipt: &ModeTransitionReceipt) -> bool {
+        if compute_freshness_state(&receipt.issued_at, &receipt.expires_at)
+            != CompatibilityFreshnessState::Fresh
+        {
+            return false;
+        }
+        verify_hmac_canonical(
+            COMPAT_TRANSITION_RECEIPT_DOMAIN,
+            &transition_receipt_signing_payload(receipt),
+            &receipt.receipt_signature,
+            &receipt.proof.key_id,
+        )
+    }
+
+    pub fn set_scope_policy_predicate(
+        &mut self,
+        scope_id: &str,
+        predicate: PolicyPredicate,
+    ) -> Result<(), String> {
+        if compute_freshness_state(&predicate.issued_at, &predicate.expires_at)
+            != CompatibilityFreshnessState::Fresh
+        {
+            return Err("scope policy predicate is stale".to_string());
+        }
+        if !verify_ed25519_canonical(
+            COMPAT_POLICY_PREDICATE_DOMAIN,
+            &predicate_signing_payload(&predicate),
+            &predicate.signature,
+            &predicate.proof.key_id,
+        ) {
+            return Err("scope policy predicate signature verification failed".to_string());
+        }
+        predicate_scope_delta(scope_id, &predicate).map_err(|reason| reason.to_string())?;
+        let compiled = compile_policy_predicate(
+            &predicate.predicate_id,
+            &predicate.activation_condition,
+            predicate.attenuation.clone(),
+        );
+        self.compiled_predicates
+            .insert(predicate.predicate_id.clone(), compiled);
+
+        let Some(scope_mode) = self.scope_modes.get_mut(scope_id) else {
+            return Err(format!("scope {scope_id} not found"));
+        };
+        scope_mode.policy_predicate = Some(predicate);
+        scope_mode.receipt_signature = sign_hmac_canonical(
+            COMPAT_TRANSITION_RECEIPT_DOMAIN,
+            &scope_mode_signing_payload(scope_mode),
+        )
+        .map_err(|err| format!("failed canonicalizing scope mode payload: {err}"))?;
+        Ok(())
     }
 
     /// Request a mode transition. Escalations (higher risk) require approval;
@@ -652,21 +915,19 @@ impl GateEngine {
         };
         receipt.receipt_signature = sign_hmac_canonical(
             COMPAT_TRANSITION_RECEIPT_DOMAIN,
-            &ModeTransitionReceiptSigningPayload {
-                transition_id: &receipt.transition_id,
-                scope_id: &receipt.scope_id,
-                from_mode: receipt.from_mode.label(),
-                to_mode: receipt.to_mode.label(),
-                approved: receipt.approved,
-                issued_at: &receipt.issued_at,
-                expires_at: &receipt.expires_at,
-                rationale: &receipt.rationale,
-                trace_id: &receipt.trace_id,
-                proof: &receipt.proof,
-            },
+            &transition_receipt_signing_payload(&receipt),
         )
         .map_err(|err| format!("failed canonicalizing transition receipt payload: {err}"))?;
 
+        tracing::info!(
+            event_code = %PCG_003,
+            trace_id = %trace_id,
+            scope_id = %req.scope_id,
+            approved = approved,
+            from_mode = %req.from_mode.label(),
+            to_mode = %req.to_mode.label(),
+            "compatibility mode transition evaluated"
+        );
         if approved {
             self.emit_audit(PCG_003, &req.scope_id, &rationale, &trace_id);
         }
@@ -729,6 +990,14 @@ impl GateEngine {
         )
         .unwrap_or_default();
 
+        tracing::info!(
+            event_code = %PCG_004,
+            trace_id = %trace_id,
+            scope_id = scope_id,
+            shim_id = shim_id,
+            severity = severity,
+            "compatibility divergence receipt issued"
+        );
         self.emit_audit(
             PCG_004,
             scope_id,
@@ -848,6 +1117,47 @@ mod tests {
         });
         engine.set_scope_mode("tenant-1", CompatMode::Balanced);
         engine
+    }
+
+    fn future_window() -> (String, String) {
+        (
+            "2099-01-01T00:00:00Z".to_string(),
+            "2099-01-01T01:00:00Z".to_string(),
+        )
+    }
+
+    fn stale_window() -> (String, String) {
+        (
+            "2000-01-01T00:00:00Z".to_string(),
+            "2000-01-01T01:00:00Z".to_string(),
+        )
+    }
+
+    fn signed_scope_predicate(scope_id: &str, attenuation: Vec<String>) -> PolicyPredicate {
+        let (issued_at, expires_at) = future_window();
+        let proof = build_proof_metadata(
+            CompatibilitySignatureAlgorithm::Ed25519,
+            Some("scope-parent".to_string()),
+            attenuation.clone(),
+            vec![format!("scope:{scope_id}->{scope_id}")],
+            vec![reason_codes::POLICY_COMPAT_ALLOW.to_string()],
+            vec!["re-sign the predicate before reusing it".to_string()],
+        );
+        let mut predicate = PolicyPredicate {
+            predicate_id: format!("pred-{scope_id}"),
+            signature: String::new(),
+            attenuation,
+            activation_condition: "mode == balanced".to_string(),
+            issued_at,
+            expires_at,
+            proof,
+        };
+        predicate.signature = sign_ed25519_canonical(
+            COMPAT_POLICY_PREDICATE_DOMAIN,
+            &predicate_signing_payload(&predicate),
+        )
+        .unwrap();
+        predicate
     }
 
     #[test]
@@ -1153,6 +1463,135 @@ mod tests {
         let mode = engine.query_mode("tenant-1").unwrap();
         assert_eq!(mode.mode, CompatMode::Balanced);
         assert!(!mode.receipt_signature.is_empty());
+    }
+
+    #[test]
+    fn test_scope_mode_signature_verification_rejects_same_length_forgery() {
+        let mut engine = test_engine();
+        let forged = {
+            let scope_mode = engine.scope_modes.get_mut("tenant-1").unwrap();
+            scope_mode.expires_at = "2099-01-01T01:00:00Z".to_string();
+            scope_mode.activated_at = "2099-01-01T00:00:00Z".to_string();
+            scope_mode.receipt_signature = sign_hmac_canonical(
+                COMPAT_TRANSITION_RECEIPT_DOMAIN,
+                &scope_mode_signing_payload(scope_mode),
+            )
+            .unwrap();
+            scope_mode.scope_id = "tenant-x".to_string();
+            assert_eq!(scope_mode.scope_id.len(), "tenant-1".len());
+            scope_mode.clone()
+        };
+        assert!(!engine.verify_scope_mode_signature(&forged));
+    }
+
+    #[test]
+    fn test_scope_mode_signature_verification_rejects_stale_receipts() {
+        let mut engine = test_engine();
+        let stale = {
+            let scope_mode = engine.scope_modes.get_mut("tenant-1").unwrap();
+            let (activated_at, expires_at) = stale_window();
+            scope_mode.activated_at = activated_at;
+            scope_mode.expires_at = expires_at;
+            scope_mode.receipt_signature = sign_hmac_canonical(
+                COMPAT_TRANSITION_RECEIPT_DOMAIN,
+                &scope_mode_signing_payload(scope_mode),
+            )
+            .unwrap();
+            scope_mode.clone()
+        };
+        assert!(!engine.verify_scope_mode_signature(&stale));
+    }
+
+    #[test]
+    fn test_set_scope_policy_predicate_rejects_scope_widening() {
+        let mut engine = test_engine();
+        let err = engine
+            .set_scope_policy_predicate(
+                "tenant-1",
+                signed_scope_predicate("tenant-1", vec!["scope=tenant-2".to_string()]),
+            )
+            .unwrap_err();
+        assert!(err.contains("widens beyond active scope"));
+    }
+
+    #[test]
+    fn test_gate_check_denies_tampered_scope_mode_receipt() {
+        let mut engine = test_engine();
+        {
+            let scope_mode = engine.scope_modes.get_mut("tenant-1").unwrap();
+            scope_mode.scope_id = "tenant-x".to_string();
+            assert_eq!(scope_mode.scope_id.len(), "tenant-1".len());
+        }
+        let result = engine.gate_check(&GateCheckRequest {
+            package_id: "npm:test-pkg".into(),
+            requested_mode: CompatMode::Strict,
+            scope: "tenant-1".into(),
+            policy_context: BTreeMap::new(),
+        });
+        assert_eq!(result.decision, Verdict::Deny);
+        assert!(
+            result
+                .rationale
+                .reason_codes
+                .contains(&reason_codes::POLICY_COMPAT_INVALID_RECEIPT_SIGNATURE.to_string())
+        );
+    }
+
+    #[test]
+    fn test_gate_check_denies_scope_widening_predicate() {
+        let mut engine = test_engine();
+        engine
+            .set_scope_policy_predicate(
+                "tenant-1",
+                signed_scope_predicate("tenant-1", vec!["scope=tenant-1".to_string()]),
+            )
+            .unwrap();
+        {
+            let scope_mode = engine.scope_modes.get_mut("tenant-1").unwrap();
+            let predicate = scope_mode.policy_predicate.as_mut().unwrap();
+            predicate.attenuation = vec!["scope=tenant-2".to_string()];
+            predicate.signature = sign_ed25519_canonical(
+                COMPAT_POLICY_PREDICATE_DOMAIN,
+                &predicate_signing_payload(predicate),
+            )
+            .unwrap();
+            scope_mode.receipt_signature = sign_hmac_canonical(
+                COMPAT_TRANSITION_RECEIPT_DOMAIN,
+                &scope_mode_signing_payload(scope_mode),
+            )
+            .unwrap();
+        }
+
+        let result = engine.gate_check(&GateCheckRequest {
+            package_id: "npm:test-pkg".into(),
+            requested_mode: CompatMode::Strict,
+            scope: "tenant-1".into(),
+            policy_context: BTreeMap::new(),
+        });
+        assert_eq!(result.decision, Verdict::Deny);
+        assert!(
+            result
+                .rationale
+                .reason_codes
+                .contains(&reason_codes::POLICY_COMPAT_SCOPE_WIDENING.to_string())
+        );
+    }
+
+    #[test]
+    fn test_transition_receipt_verification_rejects_same_length_forgery() {
+        let mut engine = test_engine();
+        let mut receipt = engine
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "tenant-1".into(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::Strict,
+                justification: "tightening policy".into(),
+                requestor: "admin".into(),
+            })
+            .unwrap();
+        receipt.rationale = "tightening policx".to_string();
+        assert_eq!(receipt.rationale.len(), "tightening policy".len());
+        assert!(!engine.verify_transition_signature(&receipt));
     }
 
     #[test]

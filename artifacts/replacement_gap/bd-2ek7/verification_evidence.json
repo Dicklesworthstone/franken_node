@@ -1,0 +1,80 @@
+{
+  "artifact_type": "verification_evidence",
+  "bead_id": "bd-2ek7",
+  "title": "Replace placeholder compatibility signatures and demo signing paths with canonical policy verifier",
+  "section": "10.5",
+  "verdict": "PASS",
+  "timestamp": "2026-03-09T03:36:54Z",
+  "artifacts": {
+    "compat_gates": "crates/franken-node/src/policy/compat_gates.rs",
+    "compatibility_gate": "crates/franken-node/src/policy/compatibility_gate.rs",
+    "integration_test": "tests/integration/compatibility_policy_pipeline.rs",
+    "cargo_integration_wrapper": "crates/franken-node/tests/compatibility_policy_pipeline.rs",
+    "verification_summary": "artifacts/replacement_gap/bd-2ek7/verification_summary.md",
+    "verification_evidence": "artifacts/replacement_gap/bd-2ek7/verification_evidence.json"
+  },
+  "verification_steps": [
+    {
+      "name": "rch_cargo_check_extended_surfaces_default",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extcompat cargo check -p frankenengine-node --features extended-surfaces --tests --message-format short",
+      "status": "FAIL",
+      "detail": "Worker hit exit=137 after reaching frankenengine-node; treated as remote resource pressure, not a Rust diagnostic."
+    },
+    {
+      "name": "rch_cargo_check_extended_surfaces_lowmem",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 RUSTFLAGS='-Cdebuginfo=0' CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extcompat_lowmem cargo check -p frankenengine-node --features extended-surfaces --tests --message-format short",
+      "status": "PASS",
+      "detail": "Feature-gated policy surfaces compiled successfully on a constrained worker."
+    },
+    {
+      "name": "rch_compat_gates_unit_tests",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extcompat_tests cargo test -p frankenengine-node --features extended-surfaces --lib compat_gates::tests -- --nocapture",
+      "status": "PASS",
+      "detail": "79 passed, 0 failed. Adversarial forged-input, stale-receipt, scope-widening, shortcut-regression, and cached-p99 coverage all passed."
+    },
+    {
+      "name": "rch_fmt_check_package",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_fmt cargo fmt --check -p frankenengine-node",
+      "status": "FAIL",
+      "detail": "Formatting diffs are currently present in unrelated files under active work (notably api/session_auth.rs and connector/control_channel.rs), so package-level fmt is not a bd-2ek7-specific signal."
+    },
+    {
+      "name": "rch_compatibility_gate_unit_tests",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 RUSTFLAGS='-Cdebuginfo=0' CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extcompat_lowmem cargo test -p frankenengine-node --features extended-surfaces --lib compatibility_gate::tests -- --nocapture",
+      "status": "PASS",
+      "detail": "33 passed, 0 failed after correcting the scope-widening test fixture to re-sign the enclosing scope receipt."
+    },
+    {
+      "name": "rch_integration_compatibility_policy_pipeline",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 RUSTFLAGS='-Cdebuginfo=0' CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extcompat_lowmem cargo test -p frankenengine-node --features extended-surfaces --test compatibility_policy_pipeline -- --nocapture",
+      "status": "PASS",
+      "detail": "Added a minimal cargo-visible wrapper at crates/franken-node/tests/compatibility_policy_pipeline.rs; rerun passed 2 tests, 0 failures."
+    },
+    {
+      "name": "rch_clippy_package_all_targets",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 RUSTFLAGS='-Cdebuginfo=0' CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extclippy cargo clippy -p frankenengine-node --features extended-surfaces --all-targets -- -D warnings",
+      "status": "FAIL",
+      "detail": "Remote lane surfaced an unrelated pre-existing lint in crates/franken-node/src/verifier_economy/mod.rs:1084 (clippy::too_many_arguments in a test helper) before the worker exited."
+    },
+    {
+      "name": "rch_clippy_package_lib_extended_surfaces",
+      "command": "rch exec -- env CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=1 RUSTFLAGS='-Cdebuginfo=0' CARGO_TARGET_DIR=/data/projects/rch_target_crimsonglacier_extclippy_lib cargo clippy -p frankenengine-node --features extended-surfaces --lib -- -D warnings",
+      "status": "PASS",
+      "detail": "Feature-gated library surface containing compat_gates and compatibility_gate passed clippy with -D warnings."
+    }
+  ],
+  "reason_codes_covered": [
+    "POLICY_COMPAT_ALLOW",
+    "POLICY_COMPAT_DENY_MODE",
+    "POLICY_COMPAT_INVALID_RECEIPT_SIGNATURE",
+    "POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE",
+    "POLICY_COMPAT_SCOPE_WIDENING",
+    "POLICY_COMPAT_STALE_RECEIPT",
+    "POLICY_COMPAT_STALE_PREDICATE"
+  ],
+  "notes": [
+    "The relevant policy modules are only compiled when feature extended-surfaces is enabled.",
+    "Package-level fmt and all-targets clippy remain noisy because the repository currently has unrelated active-worktree edits outside bd-2ek7 surfaces.",
+    "Bead-local implementation, unit coverage, integration coverage, and library-surface linting are complete."
+  ]
+}
