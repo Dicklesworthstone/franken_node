@@ -58,7 +58,7 @@ impl Direction {
 }
 
 /// Channel configuration.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelConfig {
     pub replay_window_size: u64,
     pub require_auth: bool,
@@ -227,10 +227,24 @@ pub fn validate_config(config: &ChannelConfig) -> Result<(), ChannelError> {
     Ok(())
 }
 
+/// Input fields for building a transcript preimage.
+///
+/// Bundles the parameters that are bound into the HMAC to satisfy clippy's
+/// argument-count lint while keeping each field named and explicit.
+pub struct TranscriptFields<'a> {
+    pub channel_id: &'a str,
+    pub subject_id: &'a str,
+    pub audience: &'a str,
+    pub direction: Direction,
+    pub sequence_number: u64,
+    pub payload_hash: &'a str,
+    pub epoch: ControlEpoch,
+    pub nonce: &'a [u8; 16],
+}
+
 /// Build the transcript preimage that the HMAC binds.
 ///
 /// Format (all variable-length fields are length-prefixed):
-///   domain_separator ||
 ///   len(channel_id) || channel_id ||
 ///   len(subject_id) || subject_id ||
 ///   len(audience)   || audience   ||
@@ -239,16 +253,7 @@ pub fn validate_config(config: &ChannelConfig) -> Result<(), ChannelError> {
 ///   len(payload_hash) || payload_hash ||
 ///   epoch (8 bytes LE) ||
 ///   nonce (16 bytes)
-fn build_transcript_preimage(
-    channel_id: &str,
-    subject_id: &str,
-    audience: &str,
-    direction: Direction,
-    sequence_number: u64,
-    payload_hash: &str,
-    epoch: ControlEpoch,
-    nonce: &[u8; 16],
-) -> Vec<u8> {
+fn build_transcript_preimage(fields: &TranscriptFields<'_>) -> Vec<u8> {
     let mut buf = Vec::with_capacity(256);
 
     // Length-prefixed fields to prevent delimiter collision attacks.
@@ -257,25 +262,38 @@ fn build_transcript_preimage(
         buf.extend_from_slice(field);
     }
 
-    append_lp(&mut buf, channel_id.as_bytes());
-    append_lp(&mut buf, subject_id.as_bytes());
-    append_lp(&mut buf, audience.as_bytes());
-    buf.push(direction.tag());
-    buf.extend_from_slice(&sequence_number.to_le_bytes());
-    append_lp(&mut buf, payload_hash.as_bytes());
-    buf.extend_from_slice(&epoch.value().to_le_bytes());
-    buf.extend_from_slice(nonce);
+    append_lp(&mut buf, fields.channel_id.as_bytes());
+    append_lp(&mut buf, fields.subject_id.as_bytes());
+    append_lp(&mut buf, fields.audience.as_bytes());
+    buf.push(fields.direction.tag());
+    buf.extend_from_slice(&fields.sequence_number.to_le_bytes());
+    append_lp(&mut buf, fields.payload_hash.as_bytes());
+    buf.extend_from_slice(&fields.epoch.value().to_le_bytes());
+    buf.extend_from_slice(fields.nonce);
     buf
+}
+
+/// Compute the HMAC over a transcript preimage using the epoch-scoped key.
+fn compute_transcript_mac(preimage: &[u8], epoch: ControlEpoch, root_secret: &RootSecret) -> [u8; SIGNATURE_LEN] {
+    let derived_key = derive_epoch_key(root_secret, epoch, CONTROL_CHANNEL_DOMAIN);
+    let mut hmac =
+        HmacSha256::new_from_slice(derived_key.as_bytes()).expect("HMAC key length is constant");
+    hmac.update(TRANSCRIPT_HMAC_PREFIX);
+    hmac.update(preimage);
+    let result = hmac.finalize().into_bytes();
+    let mut mac = [0u8; SIGNATURE_LEN];
+    mac.copy_from_slice(&result);
+    mac
 }
 
 /// Sign a control-channel message and produce a `ChannelCredential`.
 ///
 /// The caller provides the root secret and epoch; the function derives the
 /// epoch-scoped HMAC key and computes the transcript-bound MAC.
+#[allow(clippy::too_many_arguments)]
 pub fn sign_channel_message(
-    channel_id: &str,
+    config: &ChannelConfig,
     subject_id: &str,
-    audience: &str,
     direction: Direction,
     sequence_number: u64,
     payload_hash: &str,
@@ -283,26 +301,18 @@ pub fn sign_channel_message(
     nonce: [u8; 16],
     root_secret: &RootSecret,
 ) -> ChannelCredential {
-    let preimage = build_transcript_preimage(
-        channel_id,
+    let fields = TranscriptFields {
+        channel_id: &config.channel_id,
         subject_id,
-        audience,
+        audience: &config.audience,
         direction,
         sequence_number,
         payload_hash,
         epoch,
-        &nonce,
-    );
-
-    let derived_key = derive_epoch_key(root_secret, epoch, CONTROL_CHANNEL_DOMAIN);
-    // HMAC with domain separator prefix.
-    let mut hmac =
-        HmacSha256::new_from_slice(derived_key.as_bytes()).expect("HMAC key length is constant");
-    hmac.update(TRANSCRIPT_HMAC_PREFIX);
-    hmac.update(&preimage);
-    let result = hmac.finalize().into_bytes();
-    let mut mac = [0u8; SIGNATURE_LEN];
-    mac.copy_from_slice(&result);
+        nonce: &nonce,
+    };
+    let preimage = build_transcript_preimage(&fields);
+    let mac = compute_transcript_mac(&preimage, epoch, root_secret);
 
     ChannelCredential {
         subject_id: subject_id.into(),
@@ -364,27 +374,18 @@ impl ControlChannel {
         // (The credential does not carry audience explicitly; it is bound
         // into the transcript via the channel config.)
 
-        let preimage = build_transcript_preimage(
-            &self.config.channel_id,
-            &msg.credential.subject_id,
-            &self.config.audience,
-            msg.direction,
-            msg.sequence_number,
-            &msg.payload_hash,
-            msg.credential.epoch,
-            &msg.credential.nonce,
-        );
-
-        let derived_key = derive_epoch_key(
-            &self.root_secret,
-            msg.credential.epoch,
-            CONTROL_CHANNEL_DOMAIN,
-        );
-        let mut hmac = HmacSha256::new_from_slice(derived_key.as_bytes())
-            .map_err(|e| format!("hmac_init_failed: {e}"))?;
-        hmac.update(TRANSCRIPT_HMAC_PREFIX);
-        hmac.update(&preimage);
-        let expected = hmac.finalize().into_bytes();
+        let fields = TranscriptFields {
+            channel_id: &self.config.channel_id,
+            subject_id: &msg.credential.subject_id,
+            audience: &self.config.audience,
+            direction: msg.direction,
+            sequence_number: msg.sequence_number,
+            payload_hash: &msg.payload_hash,
+            epoch: msg.credential.epoch,
+            nonce: &msg.credential.nonce,
+        };
+        let preimage = build_transcript_preimage(&fields);
+        let expected = compute_transcript_mac(&preimage, msg.credential.epoch, &self.root_secret);
 
         if !ct_eq_bytes(&msg.credential.mac, &expected) {
             return Err("transcript_mac_mismatch".into());
@@ -604,7 +605,6 @@ mod tests {
     fn signed_msg(id: &str, dir: Direction, seq: u64) -> ChannelMessage {
         let nonce = {
             let mut n = [0u8; 16];
-            // Use message_id + seq as a simple unique nonce for tests.
             let bytes = format!("{id}:{seq}");
             for (i, b) in bytes.as_bytes().iter().enumerate() {
                 if i < 16 {
@@ -615,16 +615,10 @@ mod tests {
         };
         let payload_hash = "test-payload-hash";
         let epoch = ControlEpoch::new(1);
+        let cfg = config();
         let credential = sign_channel_message(
-            "test-channel",
-            "test-subject",
-            "test-audience",
-            dir,
-            seq,
-            payload_hash,
-            epoch,
-            nonce,
-            &test_secret(),
+            &cfg, "test-subject", dir, seq, payload_hash,
+            epoch, nonce, &test_secret(),
         );
         ChannelMessage {
             message_id: id.into(),
@@ -966,11 +960,11 @@ mod tests {
     #[test]
     fn adversarial_payload_swap_under_reused_auth() {
         // Valid credential for payload "A", but message carries payload "B".
-        let mut ch = ControlChannel::new(config(), test_secret()).unwrap();
+        let cfg = config();
+        let mut ch = ControlChannel::new(cfg.clone(), test_secret()).unwrap();
         let nonce = [0x01; 16];
         let cred = sign_channel_message(
-            "test-channel", "test-subject", "test-audience",
-            Direction::Send, 1, "payload-A",
+            &cfg, "test-subject", Direction::Send, 1, "payload-A",
             ControlEpoch::new(1), nonce, &test_secret(),
         );
         let m = ChannelMessage {
@@ -987,10 +981,15 @@ mod tests {
     #[test]
     fn adversarial_cross_channel_replay() {
         // Credential signed for channel-A replayed on channel-B.
+        let cfg_a = ChannelConfig {
+            replay_window_size: 10,
+            require_auth: true,
+            channel_id: "channel-A".into(),
+            audience: "test-audience".into(),
+        };
         let nonce = [0x02; 16];
         let cred = sign_channel_message(
-            "channel-A", "test-subject", "test-audience",
-            Direction::Send, 1, "hash",
+            &cfg_a, "test-subject", Direction::Send, 1, "hash",
             ControlEpoch::new(1), nonce, &test_secret(),
         );
 
@@ -1015,12 +1014,10 @@ mod tests {
 
     #[test]
     fn adversarial_stale_epoch_reuse() {
-        // Credential from epoch 1 when channel expects same root but
-        // the epoch-scoped key changes with epoch.
+        let cfg = config();
         let nonce = [0x03; 16];
         let stale_cred = sign_channel_message(
-            "test-channel", "test-subject", "test-audience",
-            Direction::Send, 1, "hash",
+            &cfg, "test-subject", Direction::Send, 1, "hash",
             ControlEpoch::new(1), nonce, &test_secret(),
         );
 
@@ -1031,7 +1028,7 @@ mod tests {
             ..stale_cred
         };
 
-        let mut ch = ControlChannel::new(config(), test_secret()).unwrap();
+        let mut ch = ControlChannel::new(cfg, test_secret()).unwrap();
         let m = ChannelMessage {
             message_id: "stale".into(),
             direction: Direction::Send,
@@ -1045,15 +1042,14 @@ mod tests {
 
     #[test]
     fn adversarial_wrong_direction_replay() {
-        // Credential signed for Send direction replayed as Receive.
+        let cfg = config();
         let nonce = [0x04; 16];
         let cred = sign_channel_message(
-            "test-channel", "test-subject", "test-audience",
-            Direction::Send, 1, "hash",
+            &cfg, "test-subject", Direction::Send, 1, "hash",
             ControlEpoch::new(1), nonce, &test_secret(),
         );
 
-        let mut ch = ControlChannel::new(config(), test_secret()).unwrap();
+        let mut ch = ControlChannel::new(cfg, test_secret()).unwrap();
         let m = ChannelMessage {
             message_id: "dir-swap".into(),
             direction: Direction::Receive, // swapped!
@@ -1067,16 +1063,15 @@ mod tests {
 
     #[test]
     fn adversarial_wrong_secret_rejected() {
-        // Credential signed with a different root secret.
+        let cfg = config();
         let other_secret = RootSecret::from_bytes([0xCD; SIGNATURE_LEN]);
         let nonce = [0x05; 16];
         let cred = sign_channel_message(
-            "test-channel", "test-subject", "test-audience",
-            Direction::Send, 1, "hash",
+            &cfg, "test-subject", Direction::Send, 1, "hash",
             ControlEpoch::new(1), nonce, &other_secret,
         );
 
-        let mut ch = ControlChannel::new(config(), test_secret()).unwrap();
+        let mut ch = ControlChannel::new(cfg, test_secret()).unwrap();
         let m = ChannelMessage {
             message_id: "wrong-key".into(),
             direction: Direction::Send,
@@ -1090,15 +1085,14 @@ mod tests {
 
     #[test]
     fn adversarial_sequence_number_tamper() {
-        // Credential signed for seq 1, but message claims seq 2.
+        let cfg = config();
         let nonce = [0x06; 16];
         let cred = sign_channel_message(
-            "test-channel", "test-subject", "test-audience",
-            Direction::Send, 1, "hash",
+            &cfg, "test-subject", Direction::Send, 1, "hash",
             ControlEpoch::new(1), nonce, &test_secret(),
         );
 
-        let mut ch = ControlChannel::new(config(), test_secret()).unwrap();
+        let mut ch = ControlChannel::new(cfg, test_secret()).unwrap();
         let m = ChannelMessage {
             message_id: "seq-tamper".into(),
             direction: Direction::Send,
@@ -1112,13 +1106,12 @@ mod tests {
 
     #[test]
     fn adversarial_nonce_reuse_within_epoch() {
-        // Same nonce used twice — second attempt must be rejected.
-        let mut ch = ControlChannel::new(config(), test_secret()).unwrap();
+        let cfg = config();
+        let mut ch = ControlChannel::new(cfg.clone(), test_secret()).unwrap();
         let nonce = [0x07; 16];
 
         let cred1 = sign_channel_message(
-            "test-channel", "test-subject", "test-audience",
-            Direction::Send, 1, "hash",
+            &cfg, "test-subject", Direction::Send, 1, "hash",
             ControlEpoch::new(1), nonce, &test_secret(),
         );
         let m1 = ChannelMessage {
@@ -1131,8 +1124,7 @@ mod tests {
         ch.process_message(&m1, "ts").unwrap();
 
         let cred2 = sign_channel_message(
-            "test-channel", "test-subject", "test-audience",
-            Direction::Send, 2, "hash2",
+            &cfg, "test-subject", Direction::Send, 2, "hash2",
             ControlEpoch::new(1), nonce, // same nonce!
             &test_secret(),
         );
@@ -1149,11 +1141,9 @@ mod tests {
 
     #[test]
     fn sign_verify_round_trip() {
-        // Directly verify that sign_channel_message produces a credential
-        // that the channel accepts.
         let cfg = config();
         let secret = test_secret();
-        let mut ch = ControlChannel::new(cfg, secret.clone()).unwrap();
+        let mut ch = ControlChannel::new(cfg.clone(), secret.clone()).unwrap();
 
         for seq in 1..=5 {
             let nonce = {
@@ -1162,8 +1152,7 @@ mod tests {
                 n
             };
             let cred = sign_channel_message(
-                "test-channel", "alice", "test-audience",
-                Direction::Send, seq, "payload",
+                &cfg, "alice", Direction::Send, seq, "payload",
                 ControlEpoch::new(1), nonce, &secret,
             );
             let m = ChannelMessage {
