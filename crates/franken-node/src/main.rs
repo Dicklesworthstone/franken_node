@@ -83,7 +83,7 @@ use frankenengine_node::{
     },
     supply_chain::{
         extension_registry::{
-            ExtensionSignature, ExtensionStatus, ProvenanceAttestation, RegistrationRequest,
+            AdmissionKernel, ExtensionSignature, ExtensionStatus, RegistrationRequest,
             SignedExtension, SignedExtensionRegistry, VersionEntry,
         },
         trust_card::{
@@ -2049,7 +2049,7 @@ mod registry_command_tests {
             ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_'
         }));
         assert_eq!(request.initial_version.content_hash, hash);
-        assert_eq!(request.signature.signature_hex.len(), 128);
+        assert_eq!(request.signature.signature_bytes.len(), 64);
     }
 }
 
@@ -2303,24 +2303,69 @@ fn build_registry_seed_request(
         }
         hex::encode(hasher.finalize())
     };
-    let signature_hex = format!("{attestation_hash}{attestation_hash}");
+    let manifest_bytes = format!("manifest:{}:{}:{}", name, publisher_id, version).into_bytes();
+
+    // Generate a deterministic seed key for CLI demos
+    let seed_bytes = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(b"registry_seed_key_v1:");
+        h.update(publisher_id.as_bytes());
+        let d = h.finalize();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&d);
+        arr
+    };
+    let sk = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+    let vk = sk.verifying_key();
+    let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&vk);
+    let signature_bytes = supply_chain::artifact_signing::sign_bytes(&sk, &manifest_bytes);
+
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut provenance = supply_chain::provenance::ProvenanceAttestation {
+        schema_version: "1.0".to_string(),
+        source_repository_url: format!("https://github.com/{publisher_id}/{name}"),
+        build_system_identifier: "github-actions".to_string(),
+        builder_identity: publisher_id.to_string(),
+        builder_version: version.to_string(),
+        vcs_commit_sha: attestation_hash[..12].to_string(),
+        build_timestamp_epoch: now_epoch.saturating_sub(60),
+        reproducibility_hash: attestation_hash.clone(),
+        input_hash: attestation_hash.clone(),
+        output_hash: attestation_hash.clone(),
+        slsa_level_claim: 2,
+        envelope_format: supply_chain::provenance::AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+        links: vec![
+            supply_chain::provenance::AttestationLink {
+                role: supply_chain::provenance::ChainLinkRole::Publisher,
+                signer_id: publisher_id.to_string(),
+                signer_version: version.to_string(),
+                signature: String::new(),
+                signed_payload_hash: attestation_hash,
+                issued_at_epoch: now_epoch.saturating_sub(60),
+                expires_at_epoch: now_epoch.saturating_add(86400),
+                revoked: false,
+            },
+        ],
+        custom_claims: std::collections::BTreeMap::new(),
+    };
+    let _ = supply_chain::provenance::sign_links_in_place(&mut provenance);
+
     RegistrationRequest {
         name: name.to_string(),
         description: description.to_string(),
         publisher_id: publisher_id.to_string(),
         signature: ExtensionSignature {
-            key_id: format!("{publisher_id}-key"),
+            key_id: key_id.to_string(),
             algorithm: "ed25519".to_string(),
-            signature_hex,
+            signature_bytes,
             signed_at: chrono::Utc::now().to_rfc3339(),
         },
-        provenance: ProvenanceAttestation {
-            publisher_id: publisher_id.to_string(),
-            build_system: "github-actions".to_string(),
-            source_repository: format!("https://github.com/{publisher_id}/{name}"),
-            vcs_commit: attestation_hash[..12].to_string(),
-            attestation_hash,
-        },
+        provenance,
         initial_version: VersionEntry {
             version: version.to_string(),
             parent_version: None,
@@ -2337,11 +2382,47 @@ fn build_registry_seed_request(
             compatible_with: vec!["franken-node".to_string()],
         },
         tags: tags.iter().map(|tag| (*tag).to_string()).collect(),
+        manifest_bytes,
+        transparency_proof: None,
     }
 }
 
 fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
-    let mut registry = SignedExtensionRegistry::default();
+    // Build a key ring with the deterministic seed keys for all publishers
+    let mut key_ring = supply_chain::artifact_signing::KeyRing::new();
+    for publisher_id in ["acme-sec", "beta-observability", "gamma-runtime"] {
+        let seed_bytes = {
+            use sha2::Digest;
+            let mut h = sha2::Sha256::new();
+            h.update(b"registry_seed_key_v1:");
+            h.update(publisher_id.as_bytes());
+            let d = h.finalize();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&d);
+            arr
+        };
+        let sk = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+        key_ring.add_key(sk.verifying_key());
+    }
+
+    let admission_kernel = AdmissionKernel {
+        key_ring,
+        provenance_policy: supply_chain::provenance::VerificationPolicy::development_profile(),
+        transparency_policy: supply_chain::transparency_verifier::TransparencyPolicy {
+            required: false,
+            pinned_roots: vec![],
+        },
+    };
+
+    let mut registry = SignedExtensionRegistry::new(
+        supply_chain::extension_registry::RegistryConfig::default(),
+        admission_kernel,
+    );
+
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
 
     let baseline = [
         build_registry_seed_request(
@@ -2369,7 +2450,7 @@ fn registry_cli_registry() -> Result<SignedExtensionRegistry> {
 
     let mut ids = Vec::new();
     for request in baseline {
-        let result = registry.register(request, "trace-cli-registry-seed");
+        let result = registry.register(request, "trace-cli-registry-seed", now_epoch);
         if !result.success {
             anyhow::bail!("failed seeding extension registry: {}", result.detail);
         }
@@ -2433,23 +2514,68 @@ fn build_registry_publish_request(package_path: &Path, content_hash: &str) -> Re
             .unwrap_or_else(|_| "local-operator".to_string()),
     );
 
+    let manifest_bytes = format!("manifest:{}:{}", name, content_hash).into_bytes();
+
+    // Generate a deterministic key from publisher_id for CLI demo
+    let seed_bytes = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(b"registry_publish_key_v1:");
+        h.update(publisher_id.as_bytes());
+        let d = h.finalize();
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&d);
+        arr
+    };
+    let sk = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+    let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&sk.verifying_key());
+    let signature_bytes = supply_chain::artifact_signing::sign_bytes(&sk, &manifest_bytes);
+
+    let now_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+
+    let mut provenance = supply_chain::provenance::ProvenanceAttestation {
+        schema_version: "1.0".to_string(),
+        source_repository_url: "local://workspace".to_string(),
+        build_system_identifier: "franken-node-cli".to_string(),
+        builder_identity: publisher_id.clone(),
+        builder_version: "1.0.0".to_string(),
+        vcs_commit_sha: content_hash[..12].to_string(),
+        build_timestamp_epoch: now_epoch.saturating_sub(60),
+        reproducibility_hash: content_hash.to_string(),
+        input_hash: content_hash.to_string(),
+        output_hash: content_hash.to_string(),
+        slsa_level_claim: 1,
+        envelope_format: supply_chain::provenance::AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+        links: vec![
+            supply_chain::provenance::AttestationLink {
+                role: supply_chain::provenance::ChainLinkRole::Publisher,
+                signer_id: publisher_id,
+                signer_version: "1.0.0".to_string(),
+                signature: String::new(),
+                signed_payload_hash: content_hash.to_string(),
+                issued_at_epoch: now_epoch.saturating_sub(60),
+                expires_at_epoch: now_epoch.saturating_add(86400),
+                revoked: false,
+            },
+        ],
+        custom_claims: std::collections::BTreeMap::new(),
+    };
+    let _ = supply_chain::provenance::sign_links_in_place(&mut provenance);
+
     RegistrationRequest {
-        name: name.clone(),
+        name,
         description: format!("CLI-published artifact from {}", package_path.display()),
-        publisher_id: publisher_id.clone(),
+        publisher_id: provenance.builder_identity.clone(),
         signature: ExtensionSignature {
-            key_id: format!("{publisher_id}-cli-key"),
+            key_id: key_id.to_string(),
             algorithm: "ed25519".to_string(),
-            signature_hex: format!("{content_hash}{content_hash}"),
+            signature_bytes,
             signed_at: chrono::Utc::now().to_rfc3339(),
         },
-        provenance: ProvenanceAttestation {
-            publisher_id,
-            build_system: "franken-node-cli".to_string(),
-            source_repository: "local://workspace".to_string(),
-            vcs_commit: content_hash[..12].to_string(),
-            attestation_hash: content_hash.to_string(),
-        },
+        provenance,
         initial_version: VersionEntry {
             version: "1.0.0".to_string(),
             parent_version: None,
@@ -2458,6 +2584,8 @@ fn build_registry_publish_request(package_path: &Path, content_hash: &str) -> Re
             compatible_with: vec!["franken-node".to_string()],
         },
         tags: vec!["cli-publish".to_string(), "local".to_string()],
+        manifest_bytes,
+        transparency_proof: None,
     }
 }
 
@@ -2482,12 +2610,12 @@ fn extension_assurance_level(extension: &SignedExtension) -> u8 {
         .signature
         .algorithm
         .eq_ignore_ascii_case("ed25519")
-        && extension.signature.signature_hex.len() >= 64
+        && extension.signature.signature_bytes.len() >= 64
     {
         score = score.saturating_add(1);
     }
-    if !extension.provenance.attestation_hash.is_empty()
-        && !extension.provenance.source_repository.is_empty()
+    if !extension.provenance.output_hash.is_empty()
+        && !extension.provenance.source_repository_url.is_empty()
     {
         score = score.saturating_add(1);
     }
@@ -2600,7 +2728,31 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
     let request = build_registry_publish_request(&args.package_path, &content_hash);
 
     let mut registry = registry_cli_registry()?;
-    let result = registry.register(request, "trace-cli-registry-publish");
+    // Register the publisher's key in the admission kernel so the signature can be verified
+    {
+        let publisher_id = normalize_registry_name(
+            &std::env::var("USER")
+                .or_else(|_| std::env::var("USERNAME"))
+                .unwrap_or_else(|_| "local-operator".to_string()),
+        );
+        let seed_bytes = {
+            use sha2::Digest;
+            let mut h = sha2::Sha256::new();
+            h.update(b"registry_publish_key_v1:");
+            h.update(publisher_id.as_bytes());
+            let d = h.finalize();
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&d);
+            arr
+        };
+        let sk = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
+        registry.register_publisher_key(sk.verifying_key());
+    }
+    let publish_epoch = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let result = registry.register(request, "trace-cli-registry-publish", publish_epoch);
     if !result.success {
         anyhow::bail!("registry publish failed: {}", result.detail);
     }
