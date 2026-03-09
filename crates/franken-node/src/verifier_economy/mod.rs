@@ -491,11 +491,10 @@ impl VerifierEconomyRegistry {
         if self.verifiers.len() >= MAX_VERIFIERS
             && !self.verifiers.contains_key(&verifier_id)
             && let Some(oldest_key) = self.verifiers.keys().next().cloned()
+            && let Some(evicted) = self.verifiers.remove(&oldest_key)
         {
-            if let Some(evicted) = self.verifiers.remove(&oldest_key) {
-                self.registered_public_keys.remove(&evicted.public_key);
-                self.parsed_verifier_keys.remove(&evicted.verifier_id);
-            }
+            self.registered_public_keys.remove(&evicted.public_key);
+            self.parsed_verifier_keys.remove(&evicted.verifier_id);
         }
         self.registered_public_keys
             .insert(verifier.public_key.clone());
@@ -637,11 +636,10 @@ impl VerifierEconomyRegistry {
         if self.attestations.len() >= MAX_ATTESTATIONS
             && !self.attestations.contains_key(&attestation_id)
             && let Some(oldest_key) = self.attestations.keys().next().cloned()
+            && let Some(evicted) = self.attestations.remove(&oldest_key)
         {
-            if let Some(evicted) = self.attestations.remove(&oldest_key) {
-                self.attestation_fingerprints
-                    .remove(&(evicted.verifier_id, evicted.evidence.execution_trace_hash));
-            }
+            self.attestation_fingerprints
+                .remove(&(evicted.verifier_id, evicted.evidence.execution_trace_hash));
         }
         self.attestation_fingerprints.insert(fingerprint);
         self.attestations

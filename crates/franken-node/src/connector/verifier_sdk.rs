@@ -424,39 +424,41 @@ fn canonical_migration_artifact_payload(
     })
 }
 
-fn verification_result_signature_payload(
-    verdict: &Verdict,
+struct VerificationResultSignatureView<'a> {
+    verdict: &'a Verdict,
     confidence_score: f64,
-    checked_assertions: &[AssertionResult],
-    execution_timestamp: &str,
-    verifier_identity: &str,
-    signature_algorithm: &str,
-    verifier_public_key: &str,
-    artifact_binding_hash: &str,
-) -> Vec<u8> {
+    checked_assertions: &'a [AssertionResult],
+    execution_timestamp: &'a str,
+    verifier_identity: &'a str,
+    signature_algorithm: &'a str,
+    verifier_public_key: &'a str,
+    artifact_binding_hash: &'a str,
+}
+
+fn verification_result_signature_payload(view: &VerificationResultSignatureView<'_>) -> Vec<u8> {
     let mut payload = Vec::new();
     payload.extend_from_slice(b"connector_verifier_sdk_result_v1:");
     append_length_prefixed(
         &mut payload,
-        match verdict {
+        match view.verdict {
             Verdict::Pass => "pass",
             Verdict::Fail => "fail",
             Verdict::Inconclusive => "inconclusive",
         },
     );
-    payload.extend_from_slice(&confidence_score.to_bits().to_le_bytes());
-    payload.extend_from_slice(&(checked_assertions.len() as u64).to_le_bytes());
-    for assertion in checked_assertions {
+    payload.extend_from_slice(&view.confidence_score.to_bits().to_le_bytes());
+    payload.extend_from_slice(&(view.checked_assertions.len() as u64).to_le_bytes());
+    for assertion in view.checked_assertions {
         append_length_prefixed(&mut payload, &assertion.assertion);
         payload.push(u8::from(assertion.passed));
         append_length_prefixed(&mut payload, &assertion.detail);
     }
     for field in [
-        execution_timestamp,
-        verifier_identity,
-        signature_algorithm,
-        verifier_public_key,
-        artifact_binding_hash,
+        view.execution_timestamp,
+        view.verifier_identity,
+        view.signature_algorithm,
+        view.verifier_public_key,
+        view.artifact_binding_hash,
     ] {
         append_length_prefixed(&mut payload, field);
     }
@@ -473,16 +475,16 @@ fn build_signed_verification_result(
     let execution_timestamp = now_timestamp();
     let signature_algorithm = "ed25519".to_string();
     let verifier_public_key = signer.public_key_hex();
-    let payload = verification_result_signature_payload(
-        &verdict,
+    let payload = verification_result_signature_payload(&VerificationResultSignatureView {
+        verdict: &verdict,
         confidence_score,
-        &checked_assertions,
-        &execution_timestamp,
-        signer.verifier_identity(),
-        &signature_algorithm,
-        &verifier_public_key,
-        &artifact_binding_hash,
-    );
+        checked_assertions: &checked_assertions,
+        execution_timestamp: &execution_timestamp,
+        verifier_identity: signer.verifier_identity(),
+        signature_algorithm: &signature_algorithm,
+        verifier_public_key: &verifier_public_key,
+        artifact_binding_hash: &artifact_binding_hash,
+    });
     let verifier_signature = signer.sign(&payload);
 
     VerificationResult {
@@ -508,16 +510,16 @@ pub fn verify_verification_result_signature(
         )));
     }
 
-    let payload = verification_result_signature_payload(
-        &result.verdict,
-        result.confidence_score,
-        &result.checked_assertions,
-        &result.execution_timestamp,
-        &result.verifier_identity,
-        &result.signature_algorithm,
-        &result.verifier_public_key,
-        &result.artifact_binding_hash,
-    );
+    let payload = verification_result_signature_payload(&VerificationResultSignatureView {
+        verdict: &result.verdict,
+        confidence_score: result.confidence_score,
+        checked_assertions: &result.checked_assertions,
+        execution_timestamp: &result.execution_timestamp,
+        verifier_identity: &result.verifier_identity,
+        signature_algorithm: &result.signature_algorithm,
+        verifier_public_key: &result.verifier_public_key,
+        artifact_binding_hash: &result.artifact_binding_hash,
+    });
     verify_ed25519_signature_hex(
         &result.verifier_public_key,
         &payload,
@@ -1299,10 +1301,12 @@ mod tests {
         let signer = test_verifier_signer("v1", 1);
         let result = verify_migration_artifact(&artifact, &signer).unwrap();
         assert_eq!(result.verdict, Verdict::Fail);
-        assert!(result
-            .checked_assertions
-            .iter()
-            .any(|assertion| assertion.assertion == "signature_valid" && !assertion.passed));
+        assert!(
+            result
+                .checked_assertions
+                .iter()
+                .any(|assertion| assertion.assertion == "signature_valid" && !assertion.passed)
+        );
     }
 
     // ── verify_trust_state ────────────────────────────────────────
