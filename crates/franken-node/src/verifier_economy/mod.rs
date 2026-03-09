@@ -17,6 +17,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::connector::verifier_sdk::{
+    compute_capsule_integrity_hash, verify_ed25519_signature_hex,
+};
 use crate::security::constant_time::ct_eq;
 
 /// Maximum events before oldest are evicted.
@@ -40,6 +43,38 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
+}
+
+fn push_length_prefixed(bytes: &mut Vec<u8>, value: &str) {
+    bytes.extend_from_slice(&(value.len() as u64).to_le_bytes());
+    bytes.extend_from_slice(value.as_bytes());
+}
+
+fn is_sha256_prefixed_hex(value: &str) -> bool {
+    let normalized = value.strip_prefix("sha256:").unwrap_or(value);
+    normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn attestation_signature_payload(submission: &AttestationSubmission) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"verifier_economy_attestation_v1:");
+    push_length_prefixed(&mut payload, &submission.verifier_id);
+    push_length_prefixed(&mut payload, &submission.claim.dimension.to_string());
+    push_length_prefixed(&mut payload, &submission.claim.statement);
+    payload.extend_from_slice(&submission.claim.score.to_bits().to_le_bytes());
+    push_length_prefixed(&mut payload, &submission.evidence.suite_id);
+    push_length_prefixed(&mut payload, &submission.evidence.execution_trace_hash);
+    payload.extend_from_slice(&(submission.evidence.measurements.len() as u64).to_le_bytes());
+    for measurement in &submission.evidence.measurements {
+        push_length_prefixed(&mut payload, measurement);
+    }
+    payload.extend_from_slice(&(submission.evidence.environment.len() as u64).to_le_bytes());
+    for (key, value) in &submission.evidence.environment {
+        push_length_prefixed(&mut payload, key);
+        push_length_prefixed(&mut payload, value);
+    }
+    push_length_prefixed(&mut payload, &submission.timestamp);
+    payload
 }
 
 // ---------------------------------------------------------------------------
@@ -69,6 +104,7 @@ pub const INV_VEP_PUBLISH: &str = "INV-VEP-PUBLISH";
 // ---------------------------------------------------------------------------
 
 pub const ERR_VEP_INVALID_SIGNATURE: &str = "ERR-VEP-INVALID-SIGNATURE";
+pub const ERR_VEP_INVALID_CAPSULE: &str = "ERR-VEP-INVALID-CAPSULE";
 pub const ERR_VEP_DUPLICATE_SUBMISSION: &str = "ERR-VEP-DUPLICATE-SUBMISSION";
 pub const ERR_VEP_UNREGISTERED_VERIFIER: &str = "ERR-VEP-UNREGISTERED-VERIFIER";
 pub const ERR_VEP_INCOMPLETE_PAYLOAD: &str = "ERR-VEP-INCOMPLETE-PAYLOAD";
@@ -506,8 +542,14 @@ impl VerifierEconomyRegistry {
             });
         }
 
+        let signature_payload = attestation_signature_payload(&submission);
+
         // INV-VEP-SIGNATURE: Verify signature
-        if !self.verify_signature(&submission.signature, &verifier.public_key) {
+        if !self.verify_signature(
+            &submission.signature,
+            &verifier.public_key,
+            &signature_payload,
+        ) {
             self.emit(
                 VEP_008,
                 &format!(
@@ -681,15 +723,18 @@ impl VerifierEconomyRegistry {
         self.attestations.len()
     }
 
-    // -- Signature verification (simplified) ----------------------------------
+    // -- Signature verification -----------------------------------------------
 
     /// Verify an attestation signature against the verifier's public key.
-    /// In production this would use Ed25519 verification; here we use a
-    /// simplified check that the key matches and signature is non-empty.
-    pub fn verify_signature(&self, sig: &AttestationSignature, expected_key: &str) -> bool {
-        sig.algorithm == "ed25519"
-            && crate::security::constant_time::ct_eq(&sig.public_key, expected_key)
-            && !sig.value.is_empty()
+    pub fn verify_signature(
+        &self,
+        sig: &AttestationSignature,
+        expected_key: &str,
+        payload: &[u8],
+    ) -> bool {
+        sig.algorithm.eq_ignore_ascii_case("ed25519")
+            && ct_eq(&sig.public_key, expected_key)
+            && verify_ed25519_signature_hex(expected_key, payload, &sig.value).is_ok()
     }
 
     // -- Reputation scoring ---------------------------------------------------
@@ -824,6 +869,12 @@ impl VerifierEconomyRegistry {
     // -- Replay capsules ------------------------------------------------------
 
     pub fn register_replay_capsule(&mut self, capsule: ReplayCapsule) -> VepResult<()> {
+        if !Self::verify_capsule_integrity(&capsule) {
+            return Err(VepError {
+                code: ERR_VEP_INVALID_CAPSULE.to_string(),
+                message: format!("Replay capsule {} failed integrity verification", capsule.capsule_id),
+            });
+        }
         let capsule_id = capsule.capsule_id.clone();
         if self.replay_capsules.len() >= MAX_REPLAY_CAPSULES
             && !self.replay_capsules.contains_key(&capsule_id)
@@ -845,6 +896,13 @@ impl VerifierEconomyRegistry {
                 message: format!("Replay capsule {} not found", capsule_id),
             })?;
 
+        if !Self::verify_capsule_integrity(&capsule) {
+            return Err(VepError {
+                code: ERR_VEP_INVALID_CAPSULE.to_string(),
+                message: format!("Replay capsule {} failed integrity verification", capsule_id),
+            });
+        }
+
         self.emit(VEP_007, &format!("Replay capsule accessed: {}", capsule_id));
 
         Ok(capsule)
@@ -852,12 +910,34 @@ impl VerifierEconomyRegistry {
 
     /// Verify replay capsule integrity by checking hash consistency.
     pub fn verify_capsule_integrity(capsule: &ReplayCapsule) -> bool {
-        // Simplified check: all hashes are non-empty and integrity_hash is set
-        !capsule.input_state_hash.is_empty()
-            && !capsule.execution_trace_hash.is_empty()
-            && !capsule.output_state_hash.is_empty()
-            && !capsule.expected_result_hash.is_empty()
-            && !capsule.integrity_hash.is_empty()
+        if capsule.capsule_id.is_empty() || capsule.attestation_id.is_empty() {
+            return false;
+        }
+
+        let component_hashes = [
+            &capsule.input_state_hash,
+            &capsule.execution_trace_hash,
+            &capsule.output_state_hash,
+            &capsule.expected_result_hash,
+            &capsule.integrity_hash,
+        ];
+        if component_hashes
+            .iter()
+            .any(|hash| !is_sha256_prefixed_hex(hash))
+        {
+            return false;
+        }
+
+        let expected_integrity = compute_capsule_integrity_hash(
+            &capsule.capsule_id,
+            &capsule.attestation_id,
+            &capsule.input_state_hash,
+            &capsule.execution_trace_hash,
+            &capsule.output_state_hash,
+            &capsule.expected_result_hash,
+        );
+
+        ct_eq(&capsule.integrity_hash, &expected_integrity)
     }
 
     // -- Trust scoreboard -----------------------------------------------------
