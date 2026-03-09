@@ -23,7 +23,7 @@
 //! - **INV-VER-RESULT-SIGNED**: Every verification result carries a verifier signature.
 //! - **INV-VER-TRANSPARENCY-APPEND**: Transparency log entries are append-only and hash-chained.
 
-use ed25519_dalek::{Verifier, VerifyingKey};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -335,27 +335,47 @@ pub(crate) fn compute_capsule_integrity_hash(
     format!("sha256:{}", hex::encode(Sha256::digest(payload)))
 }
 
+pub(crate) fn parse_ed25519_verifying_key_hex(
+    public_key: &str,
+) -> Result<VerifyingKey, VerifierSdkError> {
+    let key_bytes = hex_blob(public_key, 32)?;
+    VerifyingKey::from_bytes(
+        &key_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| VerifierSdkError::SignatureInvalid("invalid verifying key".to_string()))?,
+    )
+    .map_err(|_| VerifierSdkError::SignatureInvalid("invalid verifying key".to_string()))
+}
+
+fn parse_ed25519_signature_hex(signature: &str) -> Result<Signature, VerifierSdkError> {
+    let signature_bytes = hex_blob(signature, 64)?;
+    Ok(Signature::from_bytes(
+        &signature_bytes
+            .as_slice()
+            .try_into()
+            .map_err(|_| VerifierSdkError::SignatureInvalid("invalid signature".to_string()))?,
+    ))
+}
+
+pub(crate) fn verify_ed25519_signature_with_key_hex(
+    verifying_key: &VerifyingKey,
+    payload: &[u8],
+    signature: &str,
+) -> Result<(), VerifierSdkError> {
+    let signature = parse_ed25519_signature_hex(signature)?;
+    verifying_key.verify(payload, &signature).map_err(|_| {
+        VerifierSdkError::SignatureInvalid("signature verification failed".to_string())
+    })
+}
+
 pub(crate) fn verify_ed25519_signature_hex(
     public_key: &str,
     payload: &[u8],
     signature: &str,
 ) -> Result<(), VerifierSdkError> {
-    let key_bytes = hex_blob(public_key, 32)?;
-    let signature_bytes = hex_blob(signature, 64)?;
-    let verifying_key =
-        VerifyingKey::from_bytes(&key_bytes.as_slice().try_into().map_err(|_| {
-            VerifierSdkError::SignatureInvalid("invalid verifying key".to_string())
-        })?)
-        .map_err(|_| VerifierSdkError::SignatureInvalid("invalid verifying key".to_string()))?;
-    let signature = ed25519_dalek::Signature::from_bytes(
-        &signature_bytes
-            .as_slice()
-            .try_into()
-            .map_err(|_| VerifierSdkError::SignatureInvalid("invalid signature".to_string()))?,
-    );
-    verifying_key.verify(payload, &signature).map_err(|_| {
-        VerifierSdkError::SignatureInvalid("signature verification failed".to_string())
-    })
+    let verifying_key = parse_ed25519_verifying_key_hex(public_key)?;
+    verify_ed25519_signature_with_key_hex(&verifying_key, payload, signature)
 }
 
 fn canonical_migration_artifact_payload(

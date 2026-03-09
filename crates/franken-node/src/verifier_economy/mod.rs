@@ -13,12 +13,15 @@
 // Event codes: VEP-001 .. VEP-008
 // Invariants:  INV-VEP-ATTESTATION, INV-VEP-SIGNATURE, INV-VEP-REPUTATION, INV-VEP-PUBLISH
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use ed25519_dalek::VerifyingKey;
+
 use crate::connector::verifier_sdk::{
-    compute_capsule_integrity_hash, verify_ed25519_signature_hex,
+    compute_capsule_integrity_hash, parse_ed25519_verifying_key_hex, verify_ed25519_signature_hex,
+    verify_ed25519_signature_with_key_hex,
 };
 use crate::security::constant_time::ct_eq;
 
@@ -376,6 +379,12 @@ impl fmt::Display for VepError {
 
 pub type VepResult<T> = Result<T, VepError>;
 
+#[derive(Default)]
+struct PublishedVerifierStats {
+    attestation_count: usize,
+    dimensions: BTreeSet<VerificationDimension>,
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -383,10 +392,13 @@ pub type VepResult<T> = Result<T, VepError>;
 /// Central registry for the verifier economy.
 pub struct VerifierEconomyRegistry {
     verifiers: BTreeMap<String, Verifier>,
+    registered_public_keys: BTreeSet<String>,
     attestations: BTreeMap<String, Attestation>,
+    attestation_fingerprints: BTreeSet<(String, String)>,
     disputes: BTreeMap<String, Dispute>,
     replay_capsules: BTreeMap<String, ReplayCapsule>,
     events: Vec<VerifierEconomyEvent>,
+    parsed_verifier_keys: BTreeMap<String, VerifyingKey>,
     next_verifier_id: u64,
     next_attestation_id: u64,
     next_dispute_id: u64,
@@ -406,10 +418,13 @@ impl VerifierEconomyRegistry {
     pub fn new() -> Self {
         Self {
             verifiers: BTreeMap::new(),
+            registered_public_keys: BTreeSet::new(),
             attestations: BTreeMap::new(),
+            attestation_fingerprints: BTreeSet::new(),
             disputes: BTreeMap::new(),
             replay_capsules: BTreeMap::new(),
             events: Vec::new(),
+            parsed_verifier_keys: BTreeMap::new(),
             next_verifier_id: 1,
             next_attestation_id: 1,
             next_dispute_id: 1,
@@ -450,11 +465,7 @@ impl VerifierEconomyRegistry {
 
     pub fn register_verifier(&mut self, reg: VerifierRegistration) -> VepResult<Verifier> {
         // Check for duplicate public key
-        if self
-            .verifiers
-            .values()
-            .any(|v| crate::security::constant_time::ct_eq(&v.public_key, &reg.public_key))
-        {
+        if self.registered_public_keys.contains(&reg.public_key) {
             return Err(VepError {
                 code: ERR_VEP_DUPLICATE_SUBMISSION.to_string(),
                 message: "A verifier with this public key is already registered".to_string(),
@@ -481,8 +492,13 @@ impl VerifierEconomyRegistry {
             && !self.verifiers.contains_key(&verifier_id)
             && let Some(oldest_key) = self.verifiers.keys().next().cloned()
         {
-            self.verifiers.remove(&oldest_key);
+            if let Some(evicted) = self.verifiers.remove(&oldest_key) {
+                self.registered_public_keys.remove(&evicted.public_key);
+                self.parsed_verifier_keys.remove(&evicted.verifier_id);
+            }
         }
+        self.registered_public_keys
+            .insert(verifier.public_key.clone());
         self.verifiers.insert(verifier_id.clone(), verifier.clone());
         self.emit(VEP_005, &format!("Verifier registered: {}", verifier_id));
 
@@ -512,8 +528,8 @@ impl VerifierEconomyRegistry {
         // INV-VEP-PUBLISH: Stage 1 — Submission
 
         // Check verifier is registered
-        let verifier = match self.verifiers.get(&submission.verifier_id) {
-            Some(v) => v.clone(),
+        let verifier_public_key = match self.verifiers.get(&submission.verifier_id) {
+            Some(v) => v.public_key.clone(),
             None => {
                 self.emit(
                     VEP_008,
@@ -545,9 +561,10 @@ impl VerifierEconomyRegistry {
         let signature_payload = attestation_signature_payload(&submission);
 
         // INV-VEP-SIGNATURE: Verify signature
-        if !self.verify_signature(
+        if !self.verify_signature_with_cached_key(
             &submission.signature,
-            &verifier.public_key,
+            &submission.verifier_id,
+            &verifier_public_key,
             &signature_payload,
         ) {
             self.emit(
@@ -583,14 +600,13 @@ impl VerifierEconomyRegistry {
             });
         }
 
+        let fingerprint = (
+            submission.verifier_id.clone(),
+            submission.evidence.execution_trace_hash.clone(),
+        );
+
         // Check for duplicate submission
-        if self.attestations.values().any(|a| {
-            a.verifier_id == submission.verifier_id
-                && ct_eq(
-                    &a.evidence.execution_trace_hash,
-                    &submission.evidence.execution_trace_hash,
-                )
-        }) {
+        if self.attestation_fingerprints.contains(&fingerprint) {
             self.emit(
                 VEP_008,
                 &format!(
@@ -622,8 +638,12 @@ impl VerifierEconomyRegistry {
             && !self.attestations.contains_key(&attestation_id)
             && let Some(oldest_key) = self.attestations.keys().next().cloned()
         {
-            self.attestations.remove(&oldest_key);
+            if let Some(evicted) = self.attestations.remove(&oldest_key) {
+                self.attestation_fingerprints
+                    .remove(&(evicted.verifier_id, evicted.evidence.execution_trace_hash));
+            }
         }
+        self.attestation_fingerprints.insert(fingerprint);
         self.attestations
             .insert(attestation_id.clone(), attestation.clone());
         self.emit(
@@ -735,6 +755,33 @@ impl VerifierEconomyRegistry {
         sig.algorithm.eq_ignore_ascii_case("ed25519")
             && ct_eq(&sig.public_key, expected_key)
             && verify_ed25519_signature_hex(expected_key, payload, &sig.value).is_ok()
+    }
+
+    fn verify_signature_with_cached_key(
+        &mut self,
+        sig: &AttestationSignature,
+        verifier_id: &str,
+        expected_key: &str,
+        payload: &[u8],
+    ) -> bool {
+        if !sig.algorithm.eq_ignore_ascii_case("ed25519") || !ct_eq(&sig.public_key, expected_key) {
+            return false;
+        }
+
+        if let Some(verifying_key) = self.parsed_verifier_keys.get(verifier_id) {
+            return verify_ed25519_signature_with_key_hex(verifying_key, payload, &sig.value)
+                .is_ok();
+        }
+
+        let parsed_key = match parse_ed25519_verifying_key_hex(expected_key) {
+            Ok(key) => key,
+            Err(_) => return false,
+        };
+        let verifying_key = self
+            .parsed_verifier_keys
+            .entry(verifier_id.to_string())
+            .or_insert(parsed_key);
+        verify_ed25519_signature_with_key_hex(verifying_key, payload, &sig.value).is_ok()
     }
 
     // -- Reputation scoring ---------------------------------------------------
@@ -950,56 +997,44 @@ impl VerifierEconomyRegistry {
 
     /// Build the public trust scoreboard.
     pub fn build_scoreboard(&self) -> TrustScoreboard {
-        let mut entries = Vec::new();
+        let mut published_stats = BTreeMap::<String, PublishedVerifierStats>::new();
+        let mut total_attestations = 0;
 
+        // Single-pass accumulation keeps scoreboard construction O(V + A).
+        for attestation in self.attestations.values() {
+            if attestation.state != AttestationState::Published {
+                continue;
+            }
+            total_attestations += 1;
+            let stats = published_stats
+                .entry(attestation.verifier_id.clone())
+                .or_default();
+            stats.attestation_count += 1;
+            stats.dimensions.insert(attestation.claim.dimension.clone());
+        }
+
+        let mut entries = Vec::new();
+        let mut aggregate_score_sum = 0.0;
         for verifier in self.verifiers.values() {
             if !verifier.active {
                 continue;
             }
-
-            let att_count = self
-                .attestations
-                .values()
-                .filter(|a| {
-                    a.verifier_id == verifier.verifier_id && a.state == AttestationState::Published
-                })
-                .count();
-
-            let dims_covered: Vec<VerificationDimension> = self
-                .attestations
-                .values()
-                .filter(|a| {
-                    a.verifier_id == verifier.verifier_id && a.state == AttestationState::Published
-                })
-                .map(|a| a.claim.dimension.clone())
-                .collect::<std::collections::BTreeSet<_>>()
-                .into_iter()
-                .collect();
-
+            let published = published_stats
+                .remove(&verifier.verifier_id)
+                .unwrap_or_default();
+            aggregate_score_sum += verifier.reputation_score as f64;
             entries.push(ScoreboardEntry {
                 verifier_id: verifier.verifier_id.clone(),
                 verifier_name: verifier.name.clone(),
                 reputation_score: verifier.reputation_score,
                 reputation_tier: verifier.reputation_tier.clone(),
-                attestation_count: att_count,
-                dimensions_covered: dims_covered,
+                attestation_count: published.attestation_count,
+                dimensions_covered: published.dimensions.into_iter().collect(),
             });
         }
-
-        let total_attestations = self
-            .attestations
-            .values()
-            .filter(|a| a.state == AttestationState::Published)
-            .count();
-
         let total_verifiers = entries.len();
-
         let aggregate_score = if total_verifiers > 0 {
-            entries
-                .iter()
-                .map(|e| e.reputation_score as f64)
-                .sum::<f64>()
-                / total_verifiers as f64
+            aggregate_score_sum / total_verifiers as f64
         } else {
             0.0
         };
@@ -1294,6 +1329,22 @@ mod tests {
         let v = reg.register_verifier(make_registration()).unwrap();
         let sub1 = make_submission(&v.verifier_id, &registration_signing_key());
         reg.submit_attestation(sub1).unwrap();
+        let sub2 = make_submission(&v.verifier_id, &registration_signing_key());
+        let result = reg.submit_attestation(sub2);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ERR_VEP_DUPLICATE_SUBMISSION);
+    }
+
+    #[test]
+    fn test_submit_duplicate_rejected_after_publish_state_change() {
+        let mut reg = make_registry();
+        let v = reg.register_verifier(make_registration()).unwrap();
+        let sub1 = make_submission(&v.verifier_id, &registration_signing_key());
+        let attestation = reg.submit_attestation(sub1).unwrap();
+        reg.review_attestation(&attestation.attestation_id).unwrap();
+        reg.publish_attestation(&attestation.attestation_id)
+            .unwrap();
+
         let sub2 = make_submission(&v.verifier_id, &registration_signing_key());
         let result = reg.submit_attestation(sub2);
         assert!(result.is_err());
@@ -1607,6 +1658,54 @@ mod tests {
         assert_eq!(sb.total_attestations, 1);
     }
 
+    #[test]
+    fn test_scoreboard_ignores_inactive_verifiers_but_preserves_global_published_count() {
+        let mut reg = make_registry();
+        let signing_key = registration_signing_key();
+
+        let verifier_one = reg.register_verifier(make_registration()).unwrap();
+        let mut second_registration = make_registration();
+        second_registration.public_key =
+            hex::encode(test_signing_key(7).verifying_key().to_bytes());
+        second_registration.name = "Dormant Verifier".to_string();
+        let verifier_two = reg.register_verifier(second_registration).unwrap();
+
+        let attestation_one = reg
+            .submit_attestation(make_submission(&verifier_one.verifier_id, &signing_key))
+            .unwrap();
+        reg.review_attestation(&attestation_one.attestation_id)
+            .unwrap();
+        reg.publish_attestation(&attestation_one.attestation_id)
+            .unwrap();
+
+        let second_signing_key = test_signing_key(7);
+        let attestation_two = reg
+            .submit_attestation(make_submission_with(
+                &verifier_two.verifier_id,
+                &second_signing_key,
+                VerificationDimension::Security,
+                "Dormant security claim",
+                0.84,
+                "suite-dormant",
+                "trace-dormant",
+                "2026-02-20T12:03:00Z",
+            ))
+            .unwrap();
+        reg.review_attestation(&attestation_two.attestation_id)
+            .unwrap();
+        reg.publish_attestation(&attestation_two.attestation_id)
+            .unwrap();
+        reg.verifiers
+            .get_mut(&verifier_two.verifier_id)
+            .unwrap()
+            .active = false;
+
+        let scoreboard = reg.build_scoreboard();
+        assert_eq!(scoreboard.total_attestations, 2);
+        assert_eq!(scoreboard.total_verifiers, 1);
+        assert_eq!(scoreboard.entries[0].verifier_id, verifier_one.verifier_id);
+    }
+
     // -- Anti-gaming tests ----------------------------------------------------
 
     #[test]
@@ -1860,6 +1959,34 @@ mod tests {
             &hex::encode(signing_key.verifying_key().to_bytes()),
             &attestation_signature_payload(&submission),
         ));
+    }
+
+    #[test]
+    fn test_submit_attestation_populates_and_reuses_verifying_key_cache() {
+        let mut reg = make_registry();
+        let verifier = reg.register_verifier(make_registration()).unwrap();
+        let signing_key = registration_signing_key();
+
+        assert!(reg.parsed_verifier_keys.is_empty());
+
+        reg.submit_attestation(make_submission(&verifier.verifier_id, &signing_key))
+            .unwrap();
+        assert_eq!(reg.parsed_verifier_keys.len(), 1);
+        assert!(reg.parsed_verifier_keys.contains_key(&verifier.verifier_id));
+
+        reg.reset_submission_counts();
+        reg.submit_attestation(make_submission_with(
+            &verifier.verifier_id,
+            &signing_key,
+            VerificationDimension::Security,
+            "Fresh trace for cache reuse",
+            0.88,
+            "suite-cache",
+            "trace-cache-reuse",
+            "2026-02-20T13:00:00Z",
+        ))
+        .unwrap();
+        assert_eq!(reg.parsed_verifier_keys.len(), 1);
     }
 
     // -- Default trait test ----------------------------------------------------
