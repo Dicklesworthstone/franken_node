@@ -9,6 +9,10 @@
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::control_plane::mmr_proofs::{
+    self, Hash, InclusionProof, MmrRoot, ProofError,
+};
+
 /// Maximum reconciliation events before oldest are evicted.
 const MAX_EVENTS: usize = 4096;
 
@@ -150,8 +154,15 @@ pub struct TrustRecord {
     pub payload: Vec<u8>,
     /// MMR leaf position.
     pub mmr_pos: u64,
-    /// MMR inclusion proof (hashes).
-    pub mmr_proof: Vec<[u8; 32]>,
+    /// Canonical MMR inclusion proof for this record.
+    ///
+    /// INV-AE-PROOF: verified via `mmr_proofs::verify_inclusion` against a
+    /// known `MmrRoot`, not via decorative shape checks.
+    pub inclusion_proof: Option<InclusionProof>,
+    /// Marker hash that this record's payload maps to in the MMR.
+    ///
+    /// Must match the leaf hash in the inclusion proof.
+    pub marker_hash: Hash,
 }
 
 impl TrustRecord {
@@ -161,9 +172,21 @@ impl TrustRecord {
         hasher.update(b"anti_entropy_record_v1:");
         hasher.update((self.payload.len() as u64).to_le_bytes());
         hasher.update(&self.payload);
-        hasher.update((self.mmr_proof.len() as u64).to_le_bytes());
-        for proof_hash in &self.mmr_proof {
-            hasher.update(proof_hash);
+        hasher.update((self.marker_hash.len() as u64).to_le_bytes());
+        hasher.update(self.marker_hash.as_bytes());
+        if let Some(proof) = &self.inclusion_proof {
+            hasher.update(proof.leaf_index.to_le_bytes());
+            hasher.update(proof.tree_size.to_le_bytes());
+            hasher.update((proof.leaf_hash.len() as u64).to_le_bytes());
+            hasher.update(proof.leaf_hash.as_bytes());
+            hasher.update((proof.audit_path.len() as u64).to_le_bytes());
+            for h in &proof.audit_path {
+                hasher.update((h.len() as u64).to_le_bytes());
+                hasher.update(h.as_bytes());
+            }
+        } else {
+            // Deterministic empty-proof marker.
+            hasher.update(0u64.to_le_bytes());
         }
         hasher.finalize().into()
     }
@@ -279,17 +302,29 @@ pub struct ReconciliationEvent {
 }
 
 // ---------------------------------------------------------------------------
-// MMR proof verification (simplified)
+// MMR proof verification (canonical)
 // ---------------------------------------------------------------------------
 
-/// Verify an MMR inclusion proof for a trust record.
-/// Simplified: checks that the proof is non-empty and consistent.
-pub fn verify_mmr_proof(record: &TrustRecord) -> bool {
-    if record.mmr_proof.is_empty() {
-        return false;
-    }
-    // Verify proof chain: each hash must be non-zero.
-    record.mmr_proof.iter().all(|h| h.iter().any(|&b| b != 0))
+/// Verify a trust record's MMR inclusion proof against a known root.
+///
+/// INV-AE-PROOF: delegates to the canonical `mmr_proofs::verify_inclusion`
+/// which validates leaf hash, audit path, and root hash with constant-time
+/// comparisons. Decorative shape checks (non-empty / non-zero) are gone.
+pub fn verify_mmr_proof(
+    record: &TrustRecord,
+    root: &MmrRoot,
+) -> Result<(), ReconciliationError> {
+    let proof = record
+        .inclusion_proof
+        .as_ref()
+        .ok_or_else(|| ReconciliationError::ProofInvalid("missing inclusion proof".into()))?;
+
+    mmr_proofs::verify_inclusion(proof, root, &record.marker_hash).map_err(|e| {
+        ReconciliationError::ProofInvalid(format!(
+            "record {} proof failed: {e}",
+            record.id
+        ))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -357,11 +392,12 @@ impl AntiEntropyReconciler {
     ///
     /// INV-AE-ATOMIC: on failure, local state is unchanged.
     /// INV-AE-EPOCH: future-epoch records are rejected.
-    /// INV-AE-PROOF: records without valid proofs are rejected.
+    /// INV-AE-PROOF: records are verified against the canonical MMR root.
     pub fn reconcile(
         &mut self,
         local: &mut TrustState,
         remote: &TrustState,
+        mmr_root: &MmrRoot,
         cancelled: &std::sync::atomic::AtomicBool,
     ) -> Result<ReconciliationResult, ReconciliationError> {
         self.reconciliation_count = self.reconciliation_count.saturating_add(1);
@@ -456,16 +492,18 @@ impl AntiEntropyReconciler {
                 continue;
             }
 
-            // INV-AE-PROOF: verify MMR inclusion proof.
-            if self.config.proof_required && !verify_mmr_proof(record) {
-                self.push_event(ReconciliationEvent {
-                    code: EVT_RECORD_REJECTED.to_string(),
-                    detail: format!("proof invalid: record {}", record.id),
-                    trace_id: trace_id.clone(),
-                    epoch: local.current_epoch(),
-                });
-                rejected += 1;
-                continue;
+            // INV-AE-PROOF: verify MMR inclusion proof against canonical root.
+            if self.config.proof_required {
+                if let Err(e) = verify_mmr_proof(record, mmr_root) {
+                    self.push_event(ReconciliationEvent {
+                        code: EVT_RECORD_REJECTED.to_string(),
+                        detail: format!("proof invalid: {e}"),
+                        trace_id: trace_id.clone(),
+                        epoch: local.current_epoch(),
+                    });
+                    rejected += 1;
+                    continue;
+                }
             }
 
             accepted.push(record.clone());
@@ -527,16 +565,43 @@ mod tests {
     use super::*;
     use std::sync::atomic::AtomicBool;
 
-    fn make_record(id: &str, epoch: u64) -> TrustRecord {
-        let mut proof_hash = [0u8; 32];
-        proof_hash[0] = 1;
-        TrustRecord {
+    /// Build a marker hash for a given record ID.
+    fn test_marker_hash(id: &str) -> Hash {
+        use sha2::Digest;
+        let mut h = Sha256::new();
+        h.update(b"test_marker:");
+        h.update(id.as_bytes());
+        hex::encode(h.finalize())
+    }
+
+    /// Build a valid single-leaf MMR tree root and inclusion proof.
+    fn build_valid_proof(marker_hash: &str) -> (MmrRoot, InclusionProof) {
+        let leaf_hash = mmr_proofs::marker_leaf_hash(marker_hash);
+        let root = MmrRoot {
+            tree_size: 1,
+            root_hash: leaf_hash.clone(),
+        };
+        let proof = InclusionProof {
+            leaf_index: 0,
+            tree_size: 1,
+            leaf_hash,
+            audit_path: vec![],
+        };
+        (root, proof)
+    }
+
+    fn make_record(id: &str, epoch: u64) -> (TrustRecord, MmrRoot) {
+        let marker_hash = test_marker_hash(id);
+        let (root, proof) = build_valid_proof(&marker_hash);
+        let rec = TrustRecord {
             id: id.into(),
             epoch,
             payload: vec![1, 2, 3, 4],
             mmr_pos: 0,
-            mmr_proof: vec![proof_hash],
-        }
+            inclusion_proof: Some(proof),
+            marker_hash,
+        };
+        (rec, root)
     }
 
     fn make_record_no_proof(id: &str, epoch: u64) -> TrustRecord {
@@ -545,18 +610,17 @@ mod tests {
             epoch,
             payload: vec![1, 2, 3, 4],
             mmr_pos: 0,
-            mmr_proof: vec![],
+            inclusion_proof: None,
+            marker_hash: test_marker_hash(id),
         }
     }
 
-    fn make_record_invalid_proof(id: &str, epoch: u64) -> TrustRecord {
-        TrustRecord {
-            id: id.into(),
-            epoch,
-            payload: vec![1, 2, 3, 4],
-            mmr_pos: 0,
-            mmr_proof: vec![[0u8; 32]], // All-zero = invalid.
-        }
+    /// Shared MMR root for tests using a single-leaf tree for each record.
+    /// In production each record would share a common tree root; for tests
+    /// we use the root matching the first record's marker hash.
+    fn test_root_for(id: &str) -> MmrRoot {
+        let (_, root) = make_record(id, 1);
+        root
     }
 
     fn no_cancel() -> AtomicBool {
@@ -596,7 +660,8 @@ mod tests {
     #[test]
     fn test_trust_state_insert() {
         let mut state = TrustState::new(1);
-        state.insert(make_record("r1", 1));
+        let (rec, _) = make_record("r1", 1);
+        state.insert(rec);
         assert_eq!(state.len(), 1);
         assert!(state.contains("r1"));
     }
@@ -604,7 +669,8 @@ mod tests {
     #[test]
     fn test_trust_state_get() {
         let mut state = TrustState::new(1);
-        state.insert(make_record("r1", 1));
+        let (rec, _) = make_record("r1", 1);
+        state.insert(rec);
         let r = state.get("r1").unwrap();
         assert_eq!(r.id, "r1");
     }
@@ -612,8 +678,10 @@ mod tests {
     #[test]
     fn test_trust_state_record_ids() {
         let mut state = TrustState::new(1);
-        state.insert(make_record("r1", 1));
-        state.insert(make_record("r2", 1));
+        let (r1, _) = make_record("r1", 1);
+        let (r2, _) = make_record("r2", 1);
+        state.insert(r1);
+        state.insert(r2);
         let ids = state.record_ids();
         assert!(ids.contains("r1"));
         assert!(ids.contains("r2"));
@@ -623,7 +691,8 @@ mod tests {
     fn test_trust_state_digest_changes() {
         let mut state = TrustState::new(1);
         let d1 = *state.root_digest();
-        state.insert(make_record("r1", 1));
+        let (rec, _) = make_record("r1", 1);
+        state.insert(rec);
         assert_ne!(*state.root_digest(), d1);
     }
 
@@ -631,29 +700,69 @@ mod tests {
 
     #[test]
     fn test_record_digest_deterministic() {
-        let r1 = make_record("r1", 1);
-        let r2 = make_record("r1", 1);
+        let (r1, _) = make_record("r1", 1);
+        let (r2, _) = make_record("r1", 1);
         assert_eq!(r1.digest(), r2.digest());
     }
 
-    // -- MMR proof verification --
+    // -- MMR proof verification (canonical) --
 
     #[test]
-    fn test_valid_proof() {
-        let r = make_record("r1", 1);
-        assert!(verify_mmr_proof(&r));
+    fn test_valid_proof_accepted() {
+        let (rec, root) = make_record("r1", 1);
+        assert!(verify_mmr_proof(&rec, &root).is_ok());
     }
 
     #[test]
-    fn test_empty_proof_invalid() {
-        let r = make_record_no_proof("r1", 1);
-        assert!(!verify_mmr_proof(&r));
+    fn test_missing_proof_rejected() {
+        let rec = make_record_no_proof("r1", 1);
+        let root = test_root_for("r1");
+        assert!(verify_mmr_proof(&rec, &root).is_err());
     }
 
     #[test]
-    fn test_zero_proof_invalid() {
-        let r = make_record_invalid_proof("r1", 1);
-        assert!(!verify_mmr_proof(&r));
+    fn adversarial_forged_root_rejected() {
+        let (rec, _) = make_record("r1", 1);
+        let wrong_root = MmrRoot {
+            tree_size: 1,
+            root_hash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+        };
+        assert!(verify_mmr_proof(&rec, &wrong_root).is_err());
+    }
+
+    #[test]
+    fn adversarial_wrong_marker_hash_rejected() {
+        let (mut rec, root) = make_record("r1", 1);
+        // Swap marker hash to a different value
+        rec.marker_hash = test_marker_hash("r2");
+        assert!(verify_mmr_proof(&rec, &root).is_err());
+    }
+
+    #[test]
+    fn adversarial_zero_filled_proof_rejected() {
+        let marker_hash = test_marker_hash("r1");
+        let (root, _) = build_valid_proof(&marker_hash);
+        let rec = TrustRecord {
+            id: "r1".into(),
+            epoch: 1,
+            payload: vec![1, 2, 3, 4],
+            mmr_pos: 0,
+            inclusion_proof: Some(InclusionProof {
+                leaf_index: 0,
+                tree_size: 1,
+                leaf_hash: "0000000000000000000000000000000000000000000000000000000000000000".into(),
+                audit_path: vec![],
+            }),
+            marker_hash,
+        };
+        assert!(verify_mmr_proof(&rec, &root).is_err());
+    }
+
+    #[test]
+    fn adversarial_mismatched_tree_size_rejected() {
+        let (rec, mut root) = make_record("r1", 1);
+        root.tree_size = 999; // Doesn't match proof's tree_size=1
+        assert!(verify_mmr_proof(&rec, &root).is_err());
     }
 
     // -- Delta computation --
@@ -663,8 +772,9 @@ mod tests {
         let reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        local.insert(make_record("r1", 1));
-        remote.insert(make_record("r1", 1));
+        let (rec, _) = make_record("r1", 1);
+        local.insert(rec.clone());
+        remote.insert(rec);
         let delta = reconciler.compute_delta(&local, &remote);
         assert_eq!(delta.len(), 0);
     }
@@ -674,35 +784,30 @@ mod tests {
         let reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        remote.insert(make_record("r1", 1));
+        let (rec, _) = make_record("r1", 1);
+        remote.insert(rec);
         let delta = reconciler.compute_delta(&local, &remote);
         assert_eq!(delta.len(), 1);
     }
 
     #[test]
     fn test_bulk_divergence_bounded() {
-        // INV-AE-DELTA: O(delta) behavior.
         let reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
 
-        // Shared records.
         for i in 0..500 {
-            let r = make_record(&format!("shared-{i}"), 1);
+            let (r, _) = make_record(&format!("shared-{i}"), 1);
             local.insert(r.clone());
             remote.insert(r);
         }
-        // Divergent records (only in remote).
         for i in 0..100 {
-            remote.insert(make_record(&format!("remote-{i}"), 1));
+            let (r, _) = make_record(&format!("remote-{i}"), 1);
+            remote.insert(r);
         }
 
         let delta = reconciler.compute_delta(&local, &remote);
-        assert_eq!(
-            delta.len(),
-            100,
-            "Delta should be exactly the differing records"
-        );
+        assert_eq!(delta.len(), 100);
     }
 
     // -- Fork detection --
@@ -712,8 +817,9 @@ mod tests {
         let reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        local.insert(make_record("r1", 1));
-        remote.insert(make_record("r1", 1));
+        let (rec, _) = make_record("r1", 1);
+        local.insert(rec.clone());
+        remote.insert(rec);
         assert!(reconciler.detect_fork(&local, &remote).is_none());
     }
 
@@ -722,9 +828,9 @@ mod tests {
         let reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        local.insert(make_record("r1", 1));
-        // Different payload → different digest.
-        let mut forked = make_record("r1", 1);
+        let (rec, _) = make_record("r1", 1);
+        local.insert(rec);
+        let (mut forked, _) = make_record("r1", 1);
         forked.payload = vec![99, 99, 99];
         remote.insert(forked);
         assert!(reconciler.detect_fork(&local, &remote).is_some());
@@ -737,11 +843,19 @@ mod tests {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        remote.insert(make_record("r1", 1));
-        remote.insert(make_record("r2", 1));
+        let (r1, root1) = make_record("r1", 1);
+        let (r2, _root2) = make_record("r2", 1);
+        remote.insert(r1);
+        remote.insert(r2);
+
+        // Use proof_required=false for multi-record tests with different roots
+        let mut reconciler_np = AntiEntropyReconciler::new(ReconciliationConfig {
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        }).unwrap();
 
         let cancel = no_cancel();
-        let result = reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        let result = reconciler_np.reconcile(&mut local, &remote, &root1, &cancel).unwrap();
         assert_eq!(result.delta_size, 2);
         assert_eq!(result.records_accepted, 2);
         assert_eq!(result.records_rejected, 0);
@@ -749,15 +863,29 @@ mod tests {
     }
 
     #[test]
+    fn test_reconcile_with_proof_verification() {
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut local = TrustState::new(1);
+        let mut remote = TrustState::new(1);
+        let (rec, root) = make_record("r1", 1);
+        remote.insert(rec);
+
+        let cancel = no_cancel();
+        let result = reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap();
+        assert_eq!(result.records_accepted, 1);
+        assert_eq!(result.records_rejected, 0);
+    }
+
+    #[test]
     fn test_reconcile_epoch_rejection() {
-        // INV-AE-EPOCH: future-epoch records rejected.
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(5);
         let mut remote = TrustState::new(10);
-        remote.insert(make_record("future", 10)); // epoch 10 > local 5.
+        let (rec, root) = make_record("future", 10);
+        remote.insert(rec);
 
         let cancel = no_cancel();
-        let result = reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        let result = reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap();
         assert_eq!(result.records_rejected, 1);
         assert_eq!(result.records_accepted, 0);
         assert!(local.is_empty());
@@ -765,14 +893,14 @@ mod tests {
 
     #[test]
     fn test_reconcile_proof_rejection() {
-        // INV-AE-PROOF: invalid proof rejected.
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
+        let root = test_root_for("bad_proof");
         remote.insert(make_record_no_proof("bad_proof", 1));
 
         let cancel = no_cancel();
-        let result = reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        let result = reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap();
         assert_eq!(result.records_rejected, 1);
         assert_eq!(result.records_accepted, 0);
     }
@@ -782,15 +910,14 @@ mod tests {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        local.insert(make_record("r1", 1));
-        let mut forked = make_record("r1", 1);
+        let (rec, root) = make_record("r1", 1);
+        local.insert(rec);
+        let (mut forked, _) = make_record("r1", 1);
         forked.payload = vec![99];
         remote.insert(forked);
 
         let cancel = no_cancel();
-        let err = reconciler
-            .reconcile(&mut local, &remote, &cancel)
-            .unwrap_err();
+        let err = reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap_err();
         assert!(matches!(err, ReconciliationError::ForkDetected(_)));
     }
 
@@ -799,28 +926,26 @@ mod tests {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        remote.insert(make_record("r1", 1));
+        let (rec, root) = make_record("r1", 1);
+        remote.insert(rec);
 
         let cancel = with_cancel();
-        let err = reconciler
-            .reconcile(&mut local, &remote, &cancel)
-            .unwrap_err();
+        let err = reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap_err();
         assert!(matches!(err, ReconciliationError::Cancelled));
-        // INV-AE-ATOMIC: local state unchanged.
         assert!(local.is_empty());
     }
 
     #[test]
     fn test_reconcile_idempotent_replay() {
-        // Replay of already-reconciled records is idempotent.
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
-        local.insert(make_record("r1", 1));
+        let (rec, root) = make_record("r1", 1);
+        local.insert(rec.clone());
         let mut remote = TrustState::new(1);
-        remote.insert(make_record("r1", 1));
+        remote.insert(rec);
 
         let cancel = no_cancel();
-        let result = reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        let result = reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap();
         assert_eq!(result.delta_size, 0);
         assert_eq!(result.records_accepted, 0);
         assert_eq!(local.len(), 1);
@@ -831,32 +956,36 @@ mod tests {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
             max_delta_batch: 5,
             ..ReconciliationConfig::default()
-        })
-        .unwrap();
+        }).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
+        let mut root = MmrRoot { tree_size: 1, root_hash: String::new() };
         for i in 0..10 {
-            remote.insert(make_record(&format!("r{i}"), 1));
+            let (rec, r) = make_record(&format!("r{i}"), 1);
+            remote.insert(rec);
+            if i == 0 { root = r; }
         }
 
         let cancel = no_cancel();
-        let err = reconciler
-            .reconcile(&mut local, &remote, &cancel)
-            .unwrap_err();
+        let err = reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap_err();
         assert!(matches!(err, ReconciliationError::BatchExceeded { .. }));
     }
 
     #[test]
     fn test_reconcile_mixed_accept_reject() {
+        // Use a single-record root for the valid record
+        let (valid_rec, valid_root) = make_record("valid", 5);
+        let (future_rec, _) = make_record("future", 10);
+
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(5);
         let mut remote = TrustState::new(5);
-        remote.insert(make_record("valid", 5)); // Valid: same epoch.
-        remote.insert(make_record("future", 10)); // Rejected: future epoch.
-        remote.insert(make_record_no_proof("noproof", 5)); // Rejected: no proof.
+        remote.insert(valid_rec);
+        remote.insert(future_rec); // Rejected: future epoch
+        remote.insert(make_record_no_proof("noproof", 5)); // Rejected: no proof
 
         let cancel = no_cancel();
-        let result = reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        let result = reconciler.reconcile(&mut local, &remote, &valid_root, &cancel).unwrap();
         assert_eq!(result.records_accepted, 1);
         assert_eq!(result.records_rejected, 2);
     }
@@ -868,16 +997,13 @@ mod tests {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        remote.insert(make_record("r1", 1));
+        let (rec, root) = make_record("r1", 1);
+        remote.insert(rec);
 
         let cancel = no_cancel();
-        reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap();
 
-        let codes: Vec<&str> = reconciler
-            .events()
-            .iter()
-            .map(|e| e.code.as_str())
-            .collect();
+        let codes: Vec<&str> = reconciler.events().iter().map(|e| e.code.as_str()).collect();
         assert!(codes.contains(&EVT_CYCLE_STARTED));
         assert!(codes.contains(&EVT_DELTA_COMPUTED));
         assert!(codes.contains(&EVT_RECORD_ACCEPTED));
@@ -889,10 +1015,11 @@ mod tests {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
-        remote.insert(make_record("r1", 1));
+        let (rec, root) = make_record("r1", 1);
+        remote.insert(rec);
 
         let cancel = no_cancel();
-        reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap();
 
         for event in reconciler.events() {
             assert!(!event.trace_id.is_empty());
@@ -904,9 +1031,10 @@ mod tests {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
         let mut local = TrustState::new(42);
         let remote = TrustState::new(42);
+        let dummy_root = MmrRoot { tree_size: 0, root_hash: String::new() };
 
         let cancel = no_cancel();
-        reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        reconciler.reconcile(&mut local, &remote, &dummy_root, &cancel).unwrap();
 
         for event in reconciler.events() {
             assert_eq!(event.epoch, 42);
@@ -923,10 +1051,7 @@ mod tests {
 
     #[test]
     fn test_error_display_epoch() {
-        let err = ReconciliationError::EpochViolation {
-            record_epoch: 10,
-            local_epoch: 5,
-        };
+        let err = ReconciliationError::EpochViolation { record_epoch: 10, local_epoch: 5 };
         assert!(format!("{err}").contains(ERR_AE_EPOCH_VIOLATION));
     }
 
@@ -962,8 +1087,9 @@ mod tests {
         assert_eq!(reconciler.reconciliation_count(), 0);
         let mut local = TrustState::new(1);
         let remote = TrustState::new(1);
+        let dummy_root = MmrRoot { tree_size: 0, root_hash: String::new() };
         let cancel = no_cancel();
-        reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
+        reconciler.reconcile(&mut local, &remote, &dummy_root, &cancel).unwrap();
         assert_eq!(reconciler.reconciliation_count(), 1);
     }
 
@@ -974,17 +1100,54 @@ mod tests {
         let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
             proof_required: false,
             ..ReconciliationConfig::default()
-        })
-        .unwrap();
+        }).unwrap();
         let mut local = TrustState::new(1);
         let mut remote = TrustState::new(1);
         remote.insert(make_record_no_proof("r1", 1));
+        let dummy_root = MmrRoot { tree_size: 0, root_hash: String::new() };
 
         let cancel = no_cancel();
-        let result = reconciler.reconcile(&mut local, &remote, &cancel).unwrap();
-        assert_eq!(
-            result.records_accepted, 1,
-            "Should accept without proof when not required"
-        );
+        let result = reconciler.reconcile(&mut local, &remote, &dummy_root, &cancel).unwrap();
+        assert_eq!(result.records_accepted, 1, "Should accept without proof when not required");
+    }
+
+    // -- Adversarial: regression tests --
+
+    #[test]
+    fn regression_non_empty_check_no_longer_sufficient() {
+        // The old verify_mmr_proof accepted any non-empty, non-zero proof.
+        // The new version requires canonical inclusion proof verification.
+        let marker_hash = test_marker_hash("r1");
+        let (root, _) = build_valid_proof(&marker_hash);
+        let rec = TrustRecord {
+            id: "r1".into(),
+            epoch: 1,
+            payload: vec![1, 2, 3, 4],
+            mmr_pos: 0,
+            inclusion_proof: Some(InclusionProof {
+                leaf_index: 0,
+                tree_size: 1,
+                // Wrong leaf hash — would have passed the old non-zero check
+                leaf_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+                audit_path: vec![],
+            }),
+            marker_hash,
+        };
+        assert!(verify_mmr_proof(&rec, &root).is_err());
+    }
+
+    #[test]
+    fn adversarial_cross_epoch_replay_rejected() {
+        // A record from epoch 10 should be rejected by a local state at epoch 5
+        // even with a valid proof.
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig::default()).unwrap();
+        let mut local = TrustState::new(5);
+        let mut remote = TrustState::new(5);
+        let (rec, root) = make_record("cross-epoch", 10);
+        remote.insert(rec);
+
+        let cancel = no_cancel();
+        let result = reconciler.reconcile(&mut local, &remote, &root, &cancel).unwrap();
+        assert_eq!(result.records_rejected, 1);
     }
 }
