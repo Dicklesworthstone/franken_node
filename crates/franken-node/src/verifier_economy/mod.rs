@@ -872,7 +872,10 @@ impl VerifierEconomyRegistry {
         if !Self::verify_capsule_integrity(&capsule) {
             return Err(VepError {
                 code: ERR_VEP_INVALID_CAPSULE.to_string(),
-                message: format!("Replay capsule {} failed integrity verification", capsule.capsule_id),
+                message: format!(
+                    "Replay capsule {} failed integrity verification",
+                    capsule.capsule_id
+                ),
             });
         }
         let capsule_id = capsule.capsule_id.clone();
@@ -899,7 +902,10 @@ impl VerifierEconomyRegistry {
         if !Self::verify_capsule_integrity(&capsule) {
             return Err(VepError {
                 code: ERR_VEP_INVALID_CAPSULE.to_string(),
-                message: format!("Replay capsule {} failed integrity verification", capsule_id),
+                message: format!(
+                    "Replay capsule {} failed integrity verification",
+                    capsule_id
+                ),
             });
         }
 
@@ -1034,16 +1040,31 @@ impl VerifierEconomyRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use sha2::{Digest, Sha256};
 
     fn make_registry() -> VerifierEconomyRegistry {
         VerifierEconomyRegistry::new()
     }
 
+    fn test_signing_key(seed: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed; 32])
+    }
+
+    fn registration_signing_key() -> SigningKey {
+        test_signing_key(1)
+    }
+
+    fn sample_sha256(label: &str) -> String {
+        format!("sha256:{}", hex::encode(Sha256::digest(label.as_bytes())))
+    }
+
     fn make_registration() -> VerifierRegistration {
+        let signing_key = registration_signing_key();
         VerifierRegistration {
             name: "Acme Verifiers".to_string(),
             contact: "verify@acme.example".to_string(),
-            public_key: "ed25519-pub-key-acme-001".to_string(),
+            public_key: hex::encode(signing_key.verifying_key().to_bytes()),
             capabilities: vec![
                 VerificationDimension::Compatibility,
                 VerificationDimension::Security,
@@ -1052,35 +1073,91 @@ mod tests {
         }
     }
 
-    fn make_submission(verifier_id: &str, public_key: &str) -> AttestationSubmission {
-        AttestationSubmission {
+    fn sign_submission(submission: &mut AttestationSubmission, signing_key: &SigningKey) {
+        submission.signature.algorithm = "ed25519".to_string();
+        submission.signature.public_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let payload = attestation_signature_payload(submission);
+        let signature = signing_key.sign(&payload);
+        submission.signature.value = hex::encode(signature.to_bytes());
+    }
+
+    fn make_submission_with(
+        verifier_id: &str,
+        signing_key: &SigningKey,
+        dimension: VerificationDimension,
+        statement: &str,
+        score: f64,
+        suite_id: &str,
+        trace_label: &str,
+        timestamp: &str,
+    ) -> AttestationSubmission {
+        let mut submission = AttestationSubmission {
             verifier_id: verifier_id.to_string(),
             claim: AttestationClaim {
-                dimension: VerificationDimension::Compatibility,
-                statement: "franken_node API is compatible with v2.0 spec".to_string(),
-                score: 0.95,
+                dimension,
+                statement: statement.to_string(),
+                score,
             },
             evidence: AttestationEvidence {
-                suite_id: "suite-compat-v1".to_string(),
+                suite_id: suite_id.to_string(),
                 measurements: vec!["endpoint-coverage: 98%".to_string()],
-                execution_trace_hash: "sha256:abc123".to_string(),
+                execution_trace_hash: sample_sha256(trace_label),
                 environment: BTreeMap::from([
                     ("os".to_string(), "linux".to_string()),
                     ("rust".to_string(), "nightly-2026-02-15".to_string()),
                 ]),
             },
             signature: AttestationSignature {
-                algorithm: "ed25519".to_string(),
-                public_key: public_key.to_string(),
-                value: "sig-value-001".to_string(),
+                algorithm: String::new(),
+                public_key: String::new(),
+                value: String::new(),
             },
-            timestamp: "2026-02-20T12:00:00Z".to_string(),
+            timestamp: timestamp.to_string(),
+        };
+        sign_submission(&mut submission, signing_key);
+        submission
+    }
+
+    fn make_submission(verifier_id: &str, signing_key: &SigningKey) -> AttestationSubmission {
+        make_submission_with(
+            verifier_id,
+            signing_key,
+            VerificationDimension::Compatibility,
+            "franken_node API is compatible with v2.0 spec",
+            0.95,
+            "suite-compat-v1",
+            "trace-compat-v1",
+            "2026-02-20T12:00:00Z",
+        )
+    }
+
+    fn make_capsule(capsule_id: &str, attestation_id: &str, label: &str) -> ReplayCapsule {
+        let input_state_hash = sample_sha256(&format!("{label}:input"));
+        let execution_trace_hash = sample_sha256(&format!("{label}:trace"));
+        let output_state_hash = sample_sha256(&format!("{label}:output"));
+        let expected_result_hash = sample_sha256(&format!("{label}:expected"));
+        let integrity_hash = compute_capsule_integrity_hash(
+            capsule_id,
+            attestation_id,
+            &input_state_hash,
+            &execution_trace_hash,
+            &output_state_hash,
+            &expected_result_hash,
+        );
+        ReplayCapsule {
+            capsule_id: capsule_id.to_string(),
+            attestation_id: attestation_id.to_string(),
+            input_state_hash,
+            execution_trace_hash,
+            output_state_hash,
+            expected_result_hash,
+            integrity_hash,
         }
     }
 
     fn register_and_submit(reg: &mut VerifierEconomyRegistry) -> (Verifier, Attestation) {
         let v = reg.register_verifier(make_registration()).unwrap();
-        let sub = make_submission(&v.verifier_id, &v.public_key);
+        let sub = make_submission(&v.verifier_id, &registration_signing_key());
         let att = reg.submit_attestation(sub).unwrap();
         (v, att)
     }
@@ -1159,7 +1236,7 @@ mod tests {
     #[test]
     fn test_submit_unregistered_verifier_rejected() {
         let mut reg = make_registry();
-        let sub = make_submission("ver-9999", "some-key");
+        let sub = make_submission("ver-9999", &test_signing_key(99));
         let result = reg.submit_attestation(sub);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_VEP_UNREGISTERED_VERIFIER);
@@ -1169,8 +1246,19 @@ mod tests {
     fn test_submit_invalid_signature_rejected() {
         let mut reg = make_registry();
         let v = reg.register_verifier(make_registration()).unwrap();
-        let mut sub = make_submission(&v.verifier_id, &v.public_key);
+        let mut sub = make_submission(&v.verifier_id, &registration_signing_key());
         sub.signature.algorithm = "rsa".to_string(); // Wrong algorithm
+        let result = reg.submit_attestation(sub);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code, ERR_VEP_INVALID_SIGNATURE);
+    }
+
+    #[test]
+    fn test_submit_tampered_payload_rejected() {
+        let mut reg = make_registry();
+        let v = reg.register_verifier(make_registration()).unwrap();
+        let mut sub = make_submission(&v.verifier_id, &registration_signing_key());
+        sub.claim.statement.push_str(" but tampered after signing");
         let result = reg.submit_attestation(sub);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_VEP_INVALID_SIGNATURE);
@@ -1180,8 +1268,9 @@ mod tests {
     fn test_submit_empty_statement_rejected() {
         let mut reg = make_registry();
         let v = reg.register_verifier(make_registration()).unwrap();
-        let mut sub = make_submission(&v.verifier_id, &v.public_key);
+        let mut sub = make_submission(&v.verifier_id, &registration_signing_key());
         sub.claim.statement = String::new();
+        sign_submission(&mut sub, &registration_signing_key());
         let result = reg.submit_attestation(sub);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_VEP_INCOMPLETE_PAYLOAD);
@@ -1191,8 +1280,9 @@ mod tests {
     fn test_submit_empty_suite_id_rejected() {
         let mut reg = make_registry();
         let v = reg.register_verifier(make_registration()).unwrap();
-        let mut sub = make_submission(&v.verifier_id, &v.public_key);
+        let mut sub = make_submission(&v.verifier_id, &registration_signing_key());
         sub.evidence.suite_id = String::new();
+        sign_submission(&mut sub, &registration_signing_key());
         let result = reg.submit_attestation(sub);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_VEP_INCOMPLETE_PAYLOAD);
@@ -1202,9 +1292,9 @@ mod tests {
     fn test_submit_duplicate_rejected() {
         let mut reg = make_registry();
         let v = reg.register_verifier(make_registration()).unwrap();
-        let sub1 = make_submission(&v.verifier_id, &v.public_key);
+        let sub1 = make_submission(&v.verifier_id, &registration_signing_key());
         reg.submit_attestation(sub1).unwrap();
-        let sub2 = make_submission(&v.verifier_id, &v.public_key);
+        let sub2 = make_submission(&v.verifier_id, &registration_signing_key());
         let result = reg.submit_attestation(sub2);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_VEP_DUPLICATE_SUBMISSION);
@@ -1457,15 +1547,7 @@ mod tests {
     #[test]
     fn test_register_and_access_capsule() {
         let mut reg = make_registry();
-        let capsule = ReplayCapsule {
-            capsule_id: "cap-001".to_string(),
-            attestation_id: "att-001".to_string(),
-            input_state_hash: "sha256:input".to_string(),
-            execution_trace_hash: "sha256:trace".to_string(),
-            output_state_hash: "sha256:output".to_string(),
-            expected_result_hash: "sha256:expected".to_string(),
-            integrity_hash: "sha256:integrity".to_string(),
-        };
+        let capsule = make_capsule("cap-001", "att-001", "capsule-001");
         reg.register_replay_capsule(capsule).unwrap();
         let accessed = reg.access_replay_capsule("cap-001").unwrap();
         assert_eq!(accessed.capsule_id, "cap-001");
@@ -1474,15 +1556,7 @@ mod tests {
     #[test]
     fn test_access_capsule_emits_vep007() {
         let mut reg = make_registry();
-        let capsule = ReplayCapsule {
-            capsule_id: "cap-002".to_string(),
-            attestation_id: "att-002".to_string(),
-            input_state_hash: "sha256:a".to_string(),
-            execution_trace_hash: "sha256:b".to_string(),
-            output_state_hash: "sha256:c".to_string(),
-            expected_result_hash: "sha256:d".to_string(),
-            integrity_hash: "sha256:e".to_string(),
-        };
+        let capsule = make_capsule("cap-002", "att-002", "capsule-002");
         reg.register_replay_capsule(capsule).unwrap();
         reg.access_replay_capsule("cap-002").unwrap();
         assert!(reg.events().iter().any(|e| e.code == VEP_007));
@@ -1490,30 +1564,24 @@ mod tests {
 
     #[test]
     fn test_capsule_integrity_valid() {
-        let capsule = ReplayCapsule {
-            capsule_id: "cap-003".to_string(),
-            attestation_id: "att-003".to_string(),
-            input_state_hash: "sha256:i".to_string(),
-            execution_trace_hash: "sha256:t".to_string(),
-            output_state_hash: "sha256:o".to_string(),
-            expected_result_hash: "sha256:e".to_string(),
-            integrity_hash: "sha256:h".to_string(),
-        };
+        let capsule = make_capsule("cap-003", "att-003", "capsule-003");
         assert!(VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
     }
 
     #[test]
     fn test_capsule_integrity_invalid_empty_hash() {
-        let capsule = ReplayCapsule {
-            capsule_id: "cap-004".to_string(),
-            attestation_id: "att-004".to_string(),
-            input_state_hash: String::new(),
-            execution_trace_hash: "sha256:t".to_string(),
-            output_state_hash: "sha256:o".to_string(),
-            expected_result_hash: "sha256:e".to_string(),
-            integrity_hash: "sha256:h".to_string(),
-        };
+        let mut capsule = make_capsule("cap-004", "att-004", "capsule-004");
+        capsule.input_state_hash = String::new();
         assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
+    }
+
+    #[test]
+    fn test_register_replay_capsule_rejects_tampered_integrity_hash() {
+        let mut reg = make_registry();
+        let mut capsule = make_capsule("cap-005", "att-005", "capsule-005");
+        capsule.integrity_hash = sample_sha256("tampered-integrity");
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
     }
 
     // -- Scoreboard tests -----------------------------------------------------
@@ -1547,72 +1615,43 @@ mod tests {
         reg.max_submissions_per_window = 2;
 
         let v = reg.register_verifier(make_registration()).unwrap();
+        let signing_key = registration_signing_key();
 
-        let sub1 = AttestationSubmission {
-            verifier_id: v.verifier_id.clone(),
-            claim: AttestationClaim {
-                dimension: VerificationDimension::Compatibility,
-                statement: "Claim 1".to_string(),
-                score: 0.9,
-            },
-            evidence: AttestationEvidence {
-                suite_id: "suite-1".to_string(),
-                measurements: vec![],
-                execution_trace_hash: "sha256:trace1".to_string(),
-                environment: BTreeMap::new(),
-            },
-            signature: AttestationSignature {
-                algorithm: "ed25519".to_string(),
-                public_key: v.public_key.clone(),
-                value: "sig1".to_string(),
-            },
-            timestamp: "2026-02-20T12:00:00Z".to_string(),
-        };
+        let sub1 = make_submission_with(
+            &v.verifier_id,
+            &signing_key,
+            VerificationDimension::Compatibility,
+            "Claim 1",
+            0.9,
+            "suite-1",
+            "trace-1",
+            "2026-02-20T12:00:00Z",
+        );
         reg.submit_attestation(sub1).unwrap();
 
-        let sub2 = AttestationSubmission {
-            verifier_id: v.verifier_id.clone(),
-            claim: AttestationClaim {
-                dimension: VerificationDimension::Security,
-                statement: "Claim 2".to_string(),
-                score: 0.85,
-            },
-            evidence: AttestationEvidence {
-                suite_id: "suite-2".to_string(),
-                measurements: vec![],
-                execution_trace_hash: "sha256:trace2".to_string(),
-                environment: BTreeMap::new(),
-            },
-            signature: AttestationSignature {
-                algorithm: "ed25519".to_string(),
-                public_key: v.public_key.clone(),
-                value: "sig2".to_string(),
-            },
-            timestamp: "2026-02-20T12:01:00Z".to_string(),
-        };
+        let sub2 = make_submission_with(
+            &v.verifier_id,
+            &signing_key,
+            VerificationDimension::Security,
+            "Claim 2",
+            0.85,
+            "suite-2",
+            "trace-2",
+            "2026-02-20T12:01:00Z",
+        );
         reg.submit_attestation(sub2).unwrap();
 
         // Third submission should be rate-limited
-        let sub3 = AttestationSubmission {
-            verifier_id: v.verifier_id.clone(),
-            claim: AttestationClaim {
-                dimension: VerificationDimension::Performance,
-                statement: "Claim 3".to_string(),
-                score: 0.80,
-            },
-            evidence: AttestationEvidence {
-                suite_id: "suite-3".to_string(),
-                measurements: vec![],
-                execution_trace_hash: "sha256:trace3".to_string(),
-                environment: BTreeMap::new(),
-            },
-            signature: AttestationSignature {
-                algorithm: "ed25519".to_string(),
-                public_key: v.public_key.clone(),
-                value: "sig3".to_string(),
-            },
-            timestamp: "2026-02-20T12:02:00Z".to_string(),
-        };
+        let sub3 = make_submission_with(
+            &v.verifier_id,
+            &signing_key,
+            VerificationDimension::Performance,
+            "Claim 3",
+            0.80,
+            "suite-3",
+            "trace-3",
+            "2026-02-20T12:02:00Z",
+        );
         let result = reg.submit_attestation(sub3);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_VEP_ANTI_GAMING);
@@ -1624,7 +1663,7 @@ mod tests {
         reg.max_submissions_per_window = 0; // Trigger immediately
 
         let v = reg.register_verifier(make_registration()).unwrap();
-        let sub = make_submission(&v.verifier_id, &v.public_key);
+        let sub = make_submission(&v.verifier_id, &registration_signing_key());
         let _ = reg.submit_attestation(sub);
         assert!(reg.events().iter().any(|e| e.code == VEP_006));
     }
@@ -1633,31 +1672,22 @@ mod tests {
     fn test_selective_reporting_check_passes() {
         let mut reg = make_registry();
         let v = reg.register_verifier(make_registration()).unwrap();
+        let signing_key = registration_signing_key();
 
         // Submit attestations in two different dimensions
-        let sub1 = make_submission(&v.verifier_id, &v.public_key);
+        let sub1 = make_submission(&v.verifier_id, &signing_key);
         reg.submit_attestation(sub1).unwrap();
 
-        let sub2 = AttestationSubmission {
-            verifier_id: v.verifier_id.clone(),
-            claim: AttestationClaim {
-                dimension: VerificationDimension::Security,
-                statement: "Security claim".to_string(),
-                score: 0.8,
-            },
-            evidence: AttestationEvidence {
-                suite_id: "suite-sec".to_string(),
-                measurements: vec![],
-                execution_trace_hash: "sha256:unique".to_string(),
-                environment: BTreeMap::new(),
-            },
-            signature: AttestationSignature {
-                algorithm: "ed25519".to_string(),
-                public_key: v.public_key.clone(),
-                value: "sig-sec".to_string(),
-            },
-            timestamp: "2026-02-20T12:01:00Z".to_string(),
-        };
+        let sub2 = make_submission_with(
+            &v.verifier_id,
+            &signing_key,
+            VerificationDimension::Security,
+            "Security claim",
+            0.8,
+            "suite-sec",
+            "trace-unique",
+            "2026-02-20T12:01:00Z",
+        );
         reg.submit_attestation(sub2).unwrap();
 
         // With 2 dimensions submitted: 2 >= 2, no selective reporting
@@ -1671,32 +1701,23 @@ mod tests {
         let mut reg = make_registry();
         reg.max_submissions_per_window = 1;
         let v = reg.register_verifier(make_registration()).unwrap();
-        let sub = make_submission(&v.verifier_id, &v.public_key);
+        let signing_key = registration_signing_key();
+        let sub = make_submission(&v.verifier_id, &signing_key);
         reg.submit_attestation(sub).unwrap();
 
         // Reset and try again with different trace hash
         reg.reset_submission_counts();
 
-        let sub2 = AttestationSubmission {
-            verifier_id: v.verifier_id.clone(),
-            claim: AttestationClaim {
-                dimension: VerificationDimension::Security,
-                statement: "New claim".to_string(),
-                score: 0.9,
-            },
-            evidence: AttestationEvidence {
-                suite_id: "suite-new".to_string(),
-                measurements: vec![],
-                execution_trace_hash: "sha256:new-trace".to_string(),
-                environment: BTreeMap::new(),
-            },
-            signature: AttestationSignature {
-                algorithm: "ed25519".to_string(),
-                public_key: v.public_key.clone(),
-                value: "sig-new".to_string(),
-            },
-            timestamp: "2026-02-20T13:00:00Z".to_string(),
-        };
+        let sub2 = make_submission_with(
+            &v.verifier_id,
+            &signing_key,
+            VerificationDimension::Security,
+            "New claim",
+            0.9,
+            "suite-new",
+            "trace-new",
+            "2026-02-20T13:00:00Z",
+        );
         assert!(reg.submit_attestation(sub2).is_ok());
     }
 
@@ -1780,45 +1801,65 @@ mod tests {
     #[test]
     fn test_verify_signature_valid() {
         let reg = make_registry();
-        let sig = AttestationSignature {
-            algorithm: "ed25519".to_string(),
-            public_key: "key-abc".to_string(),
-            value: "sig-value".to_string(),
-        };
-        assert!(reg.verify_signature(&sig, "key-abc"));
+        let signing_key = registration_signing_key();
+        let submission = make_submission("ver-0001", &signing_key);
+        assert!(reg.verify_signature(
+            &submission.signature,
+            &hex::encode(signing_key.verifying_key().to_bytes()),
+            &attestation_signature_payload(&submission),
+        ));
     }
 
     #[test]
     fn test_verify_signature_wrong_key() {
         let reg = make_registry();
-        let sig = AttestationSignature {
-            algorithm: "ed25519".to_string(),
-            public_key: "key-abc".to_string(),
-            value: "sig-value".to_string(),
-        };
-        assert!(!reg.verify_signature(&sig, "key-xyz"));
+        let signing_key = registration_signing_key();
+        let submission = make_submission("ver-0001", &signing_key);
+        assert!(!reg.verify_signature(
+            &submission.signature,
+            &hex::encode(test_signing_key(2).verifying_key().to_bytes()),
+            &attestation_signature_payload(&submission),
+        ));
     }
 
     #[test]
     fn test_verify_signature_wrong_algorithm() {
         let reg = make_registry();
-        let sig = AttestationSignature {
-            algorithm: "rsa".to_string(),
-            public_key: "key-abc".to_string(),
-            value: "sig-value".to_string(),
-        };
-        assert!(!reg.verify_signature(&sig, "key-abc"));
+        let signing_key = registration_signing_key();
+        let mut submission = make_submission("ver-0001", &signing_key);
+        submission.signature.algorithm = "rsa".to_string();
+        assert!(!reg.verify_signature(
+            &submission.signature,
+            &hex::encode(signing_key.verifying_key().to_bytes()),
+            &attestation_signature_payload(&submission),
+        ));
     }
 
     #[test]
     fn test_verify_signature_empty_value() {
         let reg = make_registry();
-        let sig = AttestationSignature {
-            algorithm: "ed25519".to_string(),
-            public_key: "key-abc".to_string(),
-            value: String::new(),
-        };
-        assert!(!reg.verify_signature(&sig, "key-abc"));
+        let signing_key = registration_signing_key();
+        let mut submission = make_submission("ver-0001", &signing_key);
+        submission.signature.value = String::new();
+        assert!(!reg.verify_signature(
+            &submission.signature,
+            &hex::encode(signing_key.verifying_key().to_bytes()),
+            &attestation_signature_payload(&submission),
+        ));
+    }
+
+    #[test]
+    fn test_verify_signature_rejects_tampered_payload() {
+        let reg = make_registry();
+        let signing_key = registration_signing_key();
+        let mut submission = make_submission("ver-0001", &signing_key);
+        let original_signature = submission.signature.clone();
+        submission.claim.statement.push_str(" tampered");
+        assert!(!reg.verify_signature(
+            &original_signature,
+            &hex::encode(signing_key.verifying_key().to_bytes()),
+            &attestation_signature_payload(&submission),
+        ));
     }
 
     // -- Default trait test ----------------------------------------------------
@@ -1868,6 +1909,7 @@ mod tests {
     #[test]
     fn test_error_code_constants() {
         assert_eq!(ERR_VEP_INVALID_SIGNATURE, "ERR-VEP-INVALID-SIGNATURE");
+        assert_eq!(ERR_VEP_INVALID_CAPSULE, "ERR-VEP-INVALID-CAPSULE");
         assert_eq!(ERR_VEP_DUPLICATE_SUBMISSION, "ERR-VEP-DUPLICATE-SUBMISSION");
         assert_eq!(
             ERR_VEP_UNREGISTERED_VERIFIER,

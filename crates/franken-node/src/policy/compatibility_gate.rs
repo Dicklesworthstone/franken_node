@@ -8,6 +8,15 @@ use std::time::SystemTime;
 
 use chrono::{DateTime, Utc};
 
+use super::compat_gates::{
+    COMPAT_DIVERGENCE_RECEIPT_DOMAIN, COMPAT_POLICY_PREDICATE_DOMAIN,
+    COMPAT_TRANSITION_RECEIPT_DOMAIN, CompatibilityFreshnessState,
+    CompatibilityProofMetadata, CompatibilitySignatureAlgorithm, CompiledPolicyPredicate,
+    build_proof_metadata, compile_policy_predicate, compute_freshness_state,
+    default_receipt_expiry, explanation_digest, sign_ed25519_canonical, sign_hmac_canonical,
+    verify_ed25519_canonical, verify_hmac_canonical,
+};
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -74,6 +83,12 @@ impl Verdict {
 pub struct GateRationale {
     pub matched_predicates: Vec<String>,
     pub explanation: String,
+    pub reason_codes: Vec<String>,
+    pub attenuation_trace: Vec<String>,
+    pub scope_delta: Vec<String>,
+    pub freshness_state: CompatibilityFreshnessState,
+    pub recovery_hints: Vec<String>,
+    pub explanation_digest: String,
 }
 
 /// Request for a gate check evaluation.
@@ -100,6 +115,7 @@ pub struct GateCheckResult {
 pub struct DivergenceReceipt {
     pub receipt_id: String,
     pub timestamp: String,
+    pub expires_at: String,
     pub scope_id: String,
     pub shim_id: String,
     pub divergence_description: String,
@@ -107,6 +123,7 @@ pub struct DivergenceReceipt {
     pub signature: String,
     pub trace_id: String,
     pub resolved: bool,
+    pub proof: CompatibilityProofMetadata,
 }
 
 /// A signed mode-transition receipt.
@@ -117,9 +134,12 @@ pub struct ModeTransitionReceipt {
     pub from_mode: CompatMode,
     pub to_mode: CompatMode,
     pub approved: bool,
+    pub issued_at: String,
+    pub expires_at: String,
     pub receipt_signature: String,
     pub rationale: String,
     pub trace_id: String,
+    pub proof: CompatibilityProofMetadata,
 }
 
 /// Mode transition request.
@@ -149,6 +169,9 @@ pub struct PolicyPredicate {
     pub signature: String,
     pub attenuation: Vec<String>,
     pub activation_condition: String,
+    pub issued_at: String,
+    pub expires_at: String,
+    pub proof: CompatibilityProofMetadata,
 }
 
 /// Structured audit event for gate decisions.
@@ -167,8 +190,69 @@ pub struct ScopeMode {
     pub scope_id: String,
     pub mode: CompatMode,
     pub activated_at: String,
+    pub expires_at: String,
     pub receipt_signature: String,
     pub policy_predicate: Option<PolicyPredicate>,
+    pub proof: CompatibilityProofMetadata,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ScopeModeSigningPayload<'a> {
+    scope_id: &'a str,
+    mode: &'a str,
+    activated_at: &'a str,
+    expires_at: &'a str,
+    policy_predicate: Option<&'a PolicyPredicate>,
+    proof: &'a CompatibilityProofMetadata,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct ModeTransitionReceiptSigningPayload<'a> {
+    transition_id: &'a str,
+    scope_id: &'a str,
+    from_mode: &'a str,
+    to_mode: &'a str,
+    approved: bool,
+    issued_at: &'a str,
+    expires_at: &'a str,
+    rationale: &'a str,
+    trace_id: &'a str,
+    proof: &'a CompatibilityProofMetadata,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct DivergenceReceiptSigningPayload<'a> {
+    receipt_id: &'a str,
+    timestamp: &'a str,
+    expires_at: &'a str,
+    scope_id: &'a str,
+    shim_id: &'a str,
+    divergence_description: &'a str,
+    severity: &'a str,
+    trace_id: &'a str,
+    resolved: bool,
+    proof: &'a CompatibilityProofMetadata,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct PredicateSigningPayload<'a> {
+    predicate_id: &'a str,
+    attenuation: &'a [String],
+    activation_condition: &'a str,
+    issued_at: &'a str,
+    expires_at: &'a str,
+    proof: &'a CompatibilityProofMetadata,
+}
+
+fn predicate_signing_payload(predicate: &PolicyPredicate) -> PredicateSigningPayload<'_> {
+    PredicateSigningPayload {
+        predicate_id: &predicate.predicate_id,
+        attenuation: &predicate.attenuation,
+        activation_condition: &predicate.activation_condition,
+        issued_at: &predicate.issued_at,
+        expires_at: &predicate.expires_at,
+        proof: &predicate.proof,
+    }
 }
 
 const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
@@ -197,7 +281,8 @@ pub struct GateEngine {
     pub divergence_receipts: Vec<DivergenceReceipt>,
     pub audit_trail: Vec<GateAuditEvent>,
     pub transition_receipts: Vec<ModeTransitionReceipt>,
-    signing_key: Vec<u8>,
+    _signing_key: Vec<u8>,
+    compiled_predicates: BTreeMap<String, CompiledPolicyPredicate>,
     next_trace: u64,
     trace_epoch: u64,
 }
@@ -222,14 +307,6 @@ impl TraceSlot {
     }
 }
 
-fn digest_prefix_u64(digest: &[u8]) -> u64 {
-    let mut prefix = [0u8; 8];
-    if let Some(first_eight) = digest.get(..8) {
-        prefix.copy_from_slice(first_eight);
-    }
-    u64::from_le_bytes(prefix)
-}
-
 impl GateEngine {
     /// Create a new gate engine with a signing key.
     pub fn new(signing_key: Vec<u8>) -> Self {
@@ -239,7 +316,8 @@ impl GateEngine {
             divergence_receipts: Vec::new(),
             audit_trail: Vec::new(),
             transition_receipts: Vec::new(),
-            signing_key,
+            _signing_key: signing_key,
+            compiled_predicates: BTreeMap::new(),
             next_trace: 1,
             trace_epoch: 0,
         }
@@ -269,19 +347,6 @@ impl GateEngine {
     fn now_iso(&self) -> String {
         let now: DateTime<Utc> = SystemTime::now().into();
         now.to_rfc3339()
-    }
-
-    fn sign(&self, payload: &str) -> String {
-        // Simplified HMAC for demonstration; production uses ring/hmac.
-        use sha2::{Digest, Sha256};
-        let mut h = Sha256::new();
-        h.update(b"compat_gate_sign_v1:");
-        h.update((self.signing_key.len() as u64).to_le_bytes());
-        h.update(&self.signing_key);
-        h.update((payload.len() as u64).to_le_bytes());
-        h.update(payload.as_bytes());
-        let digest = h.finalize();
-        format!("{:016x}", digest_prefix_u64(&digest))
     }
 
     fn emit_audit(&mut self, event_code: &str, scope_id: &str, detail: &str, trace_id: &str) {
@@ -321,15 +386,87 @@ impl GateEngine {
         let trace_id = self.next_trace_id();
 
         // Look up scope mode; default to Strict if unset.
-        let scope_mode = self
+        let (scope_mode, policy_predicate) = self
             .scope_modes
             .get(&req.scope)
-            .map(|s| s.mode)
-            .unwrap_or(CompatMode::Strict);
+            .map(|s| (s.mode, s.policy_predicate.clone()))
+            .unwrap_or((CompatMode::Strict, None));
+
+        let mut matched = vec!["mode_risk_ceiling".to_string()];
+        let mut reason_codes = Vec::new();
+        let mut attenuation_trace = Vec::new();
+        let mut scope_delta = vec![format!("scope={}", req.scope)];
+        let mut recovery_hints = Vec::new();
+        let mut freshness_state = CompatibilityFreshnessState::Fresh;
+
+        if let Some(predicate) = &policy_predicate {
+            freshness_state = compute_freshness_state(&predicate.issued_at, &predicate.expires_at);
+            if freshness_state != CompatibilityFreshnessState::Fresh
+                || !verify_ed25519_canonical(
+                    COMPAT_POLICY_PREDICATE_DOMAIN,
+                    &predicate_signing_payload(predicate),
+                    &predicate.signature,
+                    &predicate.proof.key_id,
+                )
+            {
+                reason_codes.push("POLICY_COMPAT_INVALID_PREDICATE".to_string());
+                recovery_hints.push(
+                    "refresh and re-sign the scope policy predicate before retrying the gate check"
+                        .to_string(),
+                );
+                let rationale = GateRationale {
+                    matched_predicates: Vec::new(),
+                    explanation: format!(
+                        "scope {} denied: attached policy predicate failed verification",
+                        req.scope
+                    ),
+                    reason_codes: reason_codes.clone(),
+                    attenuation_trace: attenuation_trace.clone(),
+                    scope_delta: scope_delta.clone(),
+                    freshness_state,
+                    recovery_hints: recovery_hints.clone(),
+                    explanation_digest: explanation_digest(
+                        &reason_codes,
+                        &attenuation_trace,
+                        &scope_delta,
+                        &recovery_hints,
+                    ),
+                };
+                self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
+                return GateCheckResult {
+                    decision: Verdict::Deny,
+                    rationale,
+                    trace_id,
+                    receipt_id: None,
+                    event_code: PCG_002.to_string(),
+                };
+            }
+
+            let compiled = self
+                .compiled_predicates
+                .entry(predicate.predicate_id.clone())
+                .or_insert_with(|| {
+                    compile_policy_predicate(
+                        &predicate.predicate_id,
+                        &predicate.activation_condition,
+                        predicate.attenuation.clone(),
+                    )
+                });
+            matched.push(compiled.predicate_id.clone());
+            attenuation_trace.extend(compiled.attenuation_trace.iter().cloned());
+            scope_delta.extend(
+                predicate
+                    .attenuation
+                    .iter()
+                    .filter(|entry| entry != &req.scope)
+                    .map(|entry| format!("scope:{entry}->{}", req.scope)),
+            );
+        }
 
         // Policy: requested mode must not exceed scope's configured mode risk level.
-        let (decision, explanation, matched) =
+        let (decision, explanation) =
             if req.requested_mode.risk_level() <= scope_mode.risk_level() {
+                reason_codes.push("POLICY_COMPAT_ALLOW".to_string());
                 (
                     Verdict::Allow,
                     format!(
@@ -339,9 +476,13 @@ impl GateEngine {
                         req.scope,
                         scope_mode.label()
                     ),
-                    vec!["mode_risk_ceiling".to_string()],
                 )
             } else {
+                reason_codes.push("POLICY_COMPAT_DENY_MODE".to_string());
+                recovery_hints.push(
+                    "request a scope mode transition with explicit justification before retrying"
+                        .to_string(),
+                );
                 (
                     Verdict::Deny,
                     format!(
@@ -351,7 +492,6 @@ impl GateEngine {
                         req.scope,
                         scope_mode.label()
                     ),
-                    vec!["mode_risk_ceiling".to_string()],
                 )
             };
 
@@ -367,6 +507,17 @@ impl GateEngine {
             rationale: GateRationale {
                 matched_predicates: matched,
                 explanation,
+                reason_codes: reason_codes.clone(),
+                attenuation_trace: attenuation_trace.clone(),
+                scope_delta: scope_delta.clone(),
+                freshness_state,
+                recovery_hints: recovery_hints.clone(),
+                explanation_digest: explanation_digest(
+                    &reason_codes,
+                    &attenuation_trace,
+                    &scope_delta,
+                    &recovery_hints,
+                ),
             },
             trace_id,
             receipt_id: None,
@@ -378,22 +529,40 @@ impl GateEngine {
 
     /// Set the initial mode for a scope (no transition workflow).
     pub fn set_scope_mode(&mut self, scope_id: &str, mode: CompatMode) {
-        let sig = self.sign(&format!(
-            "mode:{}:{}:{}:{}",
-            scope_id.len(),
-            scope_id,
-            mode.label().len(),
-            mode.label()
-        ));
+        let activated_at = self.now_iso();
+        let expires_at = default_receipt_expiry(&activated_at);
+        let proof = build_proof_metadata(
+            CompatibilitySignatureAlgorithm::HmacSha256,
+            None,
+            vec![format!("scope={scope_id}")],
+            vec![format!("mode:unset->{}", mode.label())],
+            vec!["POLICY_COMPAT_SCOPE_MODE_SET".to_string()],
+            vec!["re-issue the scope mode receipt if freshness expires".to_string()],
+        );
+        let mut scope_mode = ScopeMode {
+            scope_id: scope_id.to_string(),
+            mode,
+            activated_at,
+            expires_at,
+            receipt_signature: String::new(),
+            policy_predicate: None,
+            proof,
+        };
+        scope_mode.receipt_signature = sign_hmac_canonical(
+            COMPAT_TRANSITION_RECEIPT_DOMAIN,
+            &ScopeModeSigningPayload {
+                scope_id: &scope_mode.scope_id,
+                mode: scope_mode.mode.label(),
+                activated_at: &scope_mode.activated_at,
+                expires_at: &scope_mode.expires_at,
+                policy_predicate: scope_mode.policy_predicate.as_ref(),
+                proof: &scope_mode.proof,
+            },
+        )
+        .unwrap_or_default();
         self.scope_modes.insert(
             scope_id.to_string(),
-            ScopeMode {
-                scope_id: scope_id.to_string(),
-                mode,
-                activated_at: self.now_iso(),
-                receipt_signature: sig,
-                policy_predicate: None,
-            },
+            scope_mode,
         );
     }
 
@@ -434,13 +603,8 @@ impl GateEngine {
 
         let slot = self.allocate_trace_slot();
         let trace_id = slot.trace_id();
-        let payload = format!(
-            "transition:{}:{}->{}",
-            req.scope_id,
-            req.from_mode.label(),
-            req.to_mode.label()
-        );
-        let sig = self.sign(&payload);
+        let issued_at = self.now_iso();
+        let expires_at = default_receipt_expiry(&issued_at);
 
         if approved {
             self.set_scope_mode(&req.scope_id, req.to_mode);
@@ -461,16 +625,47 @@ impl GateEngine {
             )
         };
 
-        let receipt = ModeTransitionReceipt {
+        let proof = build_proof_metadata(
+            CompatibilitySignatureAlgorithm::HmacSha256,
+            None,
+            vec![format!("scope={}", req.scope_id)],
+            vec![format!(
+                "mode:{}->{}",
+                req.from_mode.label(),
+                req.to_mode.label()
+            )],
+            vec!["POLICY_COMPAT_MODE_TRANSITION".to_string()],
+            vec!["expand the justification if escalation approval is denied".to_string()],
+        );
+        let mut receipt = ModeTransitionReceipt {
             transition_id: slot.transition_id(),
             scope_id: req.scope_id.clone(),
             from_mode: req.from_mode,
             to_mode: req.to_mode,
             approved,
-            receipt_signature: sig,
+            issued_at,
+            expires_at,
+            receipt_signature: String::new(),
             rationale: rationale.clone(),
             trace_id: trace_id.clone(),
+            proof,
         };
+        receipt.receipt_signature = sign_hmac_canonical(
+            COMPAT_TRANSITION_RECEIPT_DOMAIN,
+            &ModeTransitionReceiptSigningPayload {
+                transition_id: &receipt.transition_id,
+                scope_id: &receipt.scope_id,
+                from_mode: receipt.from_mode.label(),
+                to_mode: receipt.to_mode.label(),
+                approved: receipt.approved,
+                issued_at: &receipt.issued_at,
+                expires_at: &receipt.expires_at,
+                rationale: &receipt.rationale,
+                trace_id: &receipt.trace_id,
+                proof: &receipt.proof,
+            },
+        )
+        .map_err(|err| format!("failed canonicalizing transition receipt payload: {err}"))?;
 
         if approved {
             self.emit_audit(PCG_003, &req.scope_id, &rationale, &trace_id);
@@ -493,29 +688,46 @@ impl GateEngine {
         let slot = self.allocate_trace_slot();
         let trace_id = slot.trace_id();
         let receipt_id = slot.receipt_id();
-        // Length-prefixed fields prevent delimiter-collision ambiguity.
-        let payload = format!(
-            "receipt:{}:{}:{}:{}:{}:{}",
-            scope_id.len(),
-            scope_id,
-            shim_id.len(),
-            shim_id,
-            description.len(),
-            description
+        let timestamp = self.now_iso();
+        let expires_at = default_receipt_expiry(&timestamp);
+        let proof = build_proof_metadata(
+            CompatibilitySignatureAlgorithm::Ed25519,
+            None,
+            vec![format!("scope={scope_id}")],
+            vec![format!("shim={shim_id}")],
+            vec!["POLICY_COMPAT_DIVERGENCE_RECEIPT".to_string()],
+            vec!["verify the external receipt before accepting the divergence".to_string()],
         );
-        let sig = self.sign(&payload);
 
-        let receipt = DivergenceReceipt {
+        let mut receipt = DivergenceReceipt {
             receipt_id: receipt_id.clone(),
-            timestamp: self.now_iso(),
+            timestamp,
+            expires_at,
             scope_id: scope_id.to_string(),
             shim_id: shim_id.to_string(),
             divergence_description: description.to_string(),
             severity: severity.to_string(),
-            signature: sig,
+            signature: String::new(),
             trace_id: trace_id.clone(),
             resolved: false,
+            proof,
         };
+        receipt.signature = sign_ed25519_canonical(
+            COMPAT_DIVERGENCE_RECEIPT_DOMAIN,
+            &DivergenceReceiptSigningPayload {
+                receipt_id: &receipt.receipt_id,
+                timestamp: &receipt.timestamp,
+                expires_at: &receipt.expires_at,
+                scope_id: &receipt.scope_id,
+                shim_id: &receipt.shim_id,
+                divergence_description: &receipt.divergence_description,
+                severity: &receipt.severity,
+                trace_id: &receipt.trace_id,
+                resolved: receipt.resolved,
+                proof: &receipt.proof,
+            },
+        )
+        .unwrap_or_default();
 
         self.emit_audit(
             PCG_004,
@@ -543,18 +755,28 @@ impl GateEngine {
 
     /// Verify a divergence receipt's signature.
     pub fn verify_receipt_signature(&self, receipt: &DivergenceReceipt) -> bool {
-        // Length-prefixed fields must match emit_divergence_receipt().
-        let payload = format!(
-            "receipt:{}:{}:{}:{}:{}:{}",
-            receipt.scope_id.len(),
-            receipt.scope_id,
-            receipt.shim_id.len(),
-            receipt.shim_id,
-            receipt.divergence_description.len(),
-            receipt.divergence_description
-        );
-        let expected = self.sign(&payload);
-        crate::security::constant_time::ct_eq(&receipt.signature, &expected)
+        if compute_freshness_state(&receipt.timestamp, &receipt.expires_at)
+            != CompatibilityFreshnessState::Fresh
+        {
+            return false;
+        }
+        verify_ed25519_canonical(
+            COMPAT_DIVERGENCE_RECEIPT_DOMAIN,
+            &DivergenceReceiptSigningPayload {
+                receipt_id: &receipt.receipt_id,
+                timestamp: &receipt.timestamp,
+                expires_at: &receipt.expires_at,
+                scope_id: &receipt.scope_id,
+                shim_id: &receipt.shim_id,
+                divergence_description: &receipt.divergence_description,
+                severity: &receipt.severity,
+                trace_id: &receipt.trace_id,
+                resolved: receipt.resolved,
+                proof: &receipt.proof,
+            },
+            &receipt.signature,
+            &receipt.proof.key_id,
+        )
     }
 
     // ---- Audit trail ----
