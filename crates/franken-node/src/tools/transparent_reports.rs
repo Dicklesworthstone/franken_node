@@ -58,6 +58,7 @@ pub mod invariants {
 
 pub const REPORT_VERSION: &str = "tr-v1.0";
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+const MAX_CORRECTIVE_ACTIONS: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -378,11 +379,15 @@ impl TransparentReports {
             }),
         );
 
-        self.reports
+        let report = self
+            .reports
             .get_mut(report_id)
-            .ok_or_else(|| format!("Report {report_id} not found"))?
-            .corrective_actions
-            .push(action);
+            .ok_or_else(|| format!("Report {report_id} not found"))?;
+        push_bounded(
+            &mut report.corrective_actions,
+            action,
+            MAX_CORRECTIVE_ACTIONS,
+        );
         Ok(())
     }
 

@@ -17,6 +17,7 @@ use std::fmt;
 use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
 
 const MAX_FIELDS: usize = 4096;
+const MAX_RESULTS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -339,8 +340,11 @@ impl EvidenceReplayValidator {
                 entry.decision_id
             );
             self.unresolvable_count = self.unresolvable_count.saturating_add(1);
-            self.results
-                .push((entry.decision_id.clone(), result.clone()));
+            push_bounded(
+                &mut self.results,
+                (entry.decision_id.clone(), result.clone()),
+                MAX_RESULTS,
+            );
             return result;
         }
 
@@ -358,8 +362,11 @@ impl EvidenceReplayValidator {
                 entry.decision_id
             );
             self.unresolvable_count = self.unresolvable_count.saturating_add(1);
-            self.results
-                .push((entry.decision_id.clone(), result.clone()));
+            push_bounded(
+                &mut self.results,
+                (entry.decision_id.clone(), result.clone()),
+                MAX_RESULTS,
+            );
             return result;
         }
 

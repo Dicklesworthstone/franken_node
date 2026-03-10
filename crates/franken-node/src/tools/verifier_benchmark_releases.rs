@@ -55,6 +55,7 @@ pub const SCHEMA_VERSION: &str = "vbr-v1.0";
 pub const MIN_QUALITY_SCORE: f64 = 0.8;
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 const MAX_DOWNLOADS: usize = 4096;
+const MAX_ARTIFACTS_PER_RELEASE: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -223,11 +224,11 @@ impl VerifierBenchmarkReleases {
             trace_id,
             serde_json::json!({"release_id": release_id, "artifact": &artifact.filename}),
         );
-        self.releases
+        let rel = self
+            .releases
             .get_mut(release_id)
-            .ok_or_else(|| format!("release not found: {release_id}"))?
-            .artifacts
-            .push(artifact);
+            .ok_or_else(|| format!("release not found: {release_id}"))?;
+        push_bounded(&mut rel.artifacts, artifact, MAX_ARTIFACTS_PER_RELEASE);
         Ok(())
     }
 
