@@ -1,5 +1,5 @@
 use crate::config::Config;
-use crate::ops::telemetry_bridge::TelemetryBridge;
+use crate::ops::telemetry_bridge::{ShutdownReason, TelemetryBridge};
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
@@ -103,6 +103,14 @@ impl EngineDispatcher {
     /// Dispatches execution to the external franken_engine binary.
     /// Serializes policy capabilities and limits into environment variables
     /// or command-line arguments to establish the trust boundary.
+    ///
+    /// Telemetry lifecycle:
+    /// 1. Start telemetry bridge (returns owned handle)
+    /// 2. Launch engine process with socket path
+    /// 3. Wait for engine to exit
+    /// 4. Stop telemetry bridge with appropriate reason
+    /// 5. Join telemetry workers (drain remaining events)
+    /// 6. Clean up temp directory
     pub fn dispatch_run(&self, app_path: &Path, config: &Config, policy_mode: &str) -> Result<()> {
         let bin_path = resolve_engine_binary_path(&self.engine_bin_path);
         if bin_path == "franken-engine" && !Path::new(&self.engine_bin_path).exists() {
@@ -123,11 +131,11 @@ impl EngineDispatcher {
             .to_string_lossy()
             .into_owned();
 
-        // Spawn background listener to record telemetry events for deterministic replay
+        // Start telemetry bridge and obtain explicit lifecycle handle
         let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
-        let telemetry = TelemetryBridge::new(&socket_path, Arc::clone(&adapter));
-        telemetry
-            .start_listener()
+        let telemetry = TelemetryBridge::new(&socket_path, adapter);
+        let telemetry_handle = telemetry
+            .start()
             .context("Failed to start telemetry bridge")?;
 
         let mut cmd = Command::new(&bin_path);
@@ -135,18 +143,40 @@ impl EngineDispatcher {
             .arg(app_path)
             .arg("--policy")
             .arg(policy_mode)
-            // Pass the serialized policy config to the engine
             .env("FRANKEN_ENGINE_POLICY_PAYLOAD", &serialized_config)
-            .env("FRANKEN_ENGINE_TELEMETRY_SOCKET", &socket_path);
+            .env(
+                "FRANKEN_ENGINE_TELEMETRY_SOCKET",
+                telemetry_handle.socket_path().to_string_lossy().as_ref(),
+            );
 
         let status = cmd
             .status()
             .context("Failed to spawn franken_engine process")?;
 
+        // Determine shutdown reason from engine exit status
+        let exit_code = status.code();
+        let reason = ShutdownReason::EngineExit { exit_code };
+
+        // Stop and drain telemetry before any exit
+        let report = telemetry_handle
+            .stop_and_join(reason)
+            .map_err(|err| anyhow::anyhow!("{err}"))?;
+
+        if !report.drain_completed {
+            eprintln!(
+                "Warning: telemetry drain did not complete within {}ms ({} events persisted, {} shed, {} dropped)",
+                report.drain_duration_ms,
+                report.persisted_total,
+                report.shed_total,
+                report.dropped_total,
+            );
+        }
+
+        // Clean up temp directory explicitly before potential process exit
+        drop(temp_dir);
+
         if !status.success() {
-            if let Some(code) = status.code() {
-                // `process::exit` skips normal destruction, so drop the tempdir first.
-                drop(temp_dir);
+            if let Some(code) = exit_code {
                 std::process::exit(code);
             } else {
                 anyhow::bail!("franken_engine exited abnormally (terminated by signal)");
