@@ -47,6 +47,17 @@ pub const API_VERSION: &str = "1.0.0";
 /// Schema tag embedded in every verification report.
 pub const SCHEMA_TAG: &str = "vsk-v1.0";
 
+/// Stable posture marker for this structural verifier SDK surface.
+///
+/// Replacement-critical verifier work must use the stronger connector and
+/// verifier-economy signed-capsule paths until the canonical shared kernel
+/// lands under bd-1z5a.
+pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str =
+    "structural_only_not_replacement_critical";
+
+/// Stable rule id used by shortcut-regression guardrails.
+pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::SDK_VERIFIER";
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -647,6 +658,29 @@ impl VerifierSdk {
 mod tests {
     use super::super::replay_capsule::*;
     use super::*;
+
+    const SDK_VERIFIER_SOURCE: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/verifier_sdk.rs"));
+    const SDK_REPLAY_CAPSULE_SOURCE: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/sdk/replay_capsule.rs"));
+    const CONNECTOR_VERIFIER_SOURCE: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/connector/verifier_sdk.rs"));
+    const VERIFIER_ECONOMY_SOURCE: &str =
+        include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/verifier_economy/mod.rs"));
+
+    fn assert_guard_contains(rule_id: &str, path: &str, source: &str, needle: &str) {
+        assert!(
+            source.contains(needle),
+            "{rule_id}: expected `{path}` to contain `{needle}`"
+        );
+    }
+
+    fn assert_guard_absent(rule_id: &str, path: &str, source: &str, needle: &str) {
+        assert!(
+            !source.contains(needle),
+            "{rule_id}: unexpected `{needle}` in `{path}`"
+        );
+    }
 
     fn test_sdk() -> VerifierSdk {
         VerifierSdk::with_defaults()
@@ -1258,6 +1292,96 @@ mod tests {
         assert_ne!(
             r1.binding_hash, r2.binding_hash,
             "binding hash must differ when fields contain delimiters"
+        );
+    }
+
+    #[test]
+    fn test_structural_only_markers_are_stable() {
+        assert_eq!(
+            STRUCTURAL_ONLY_SECURITY_POSTURE,
+            "structural_only_not_replacement_critical"
+        );
+        assert_eq!(STRUCTURAL_ONLY_RULE_ID, "VERIFIER_SHORTCUT_GUARD::SDK_VERIFIER");
+        assert_eq!(
+            super::super::replay_capsule::STRUCTURAL_ONLY_SECURITY_POSTURE,
+            "structural_only_not_replacement_critical"
+        );
+        assert_eq!(
+            super::super::replay_capsule::STRUCTURAL_ONLY_RULE_ID,
+            "VERIFIER_SHORTCUT_GUARD::SDK_REPLAY_CAPSULE"
+        );
+    }
+
+    #[test]
+    fn test_shortcut_regression_guard_keeps_strong_verifier_anchors() {
+        assert_guard_contains(
+            "VERIFIER_SHORTCUT_GUARD::VEP_CAPSULE_INTEGRITY",
+            "src/verifier_economy/mod.rs",
+            VERIFIER_ECONOMY_SOURCE,
+            "compute_capsule_integrity_hash(",
+        );
+        assert_guard_contains(
+            "VERIFIER_SHORTCUT_GUARD::VEP_TRACE_COMMITMENT",
+            "src/verifier_economy/mod.rs",
+            VERIFIER_ECONOMY_SOURCE,
+            "compute_trace_commitment_root(",
+        );
+        assert_guard_contains(
+            "VERIFIER_SHORTCUT_GUARD::VEP_SIGNATURE_VERIFY",
+            "src/verifier_economy/mod.rs",
+            VERIFIER_ECONOMY_SOURCE,
+            "verify_ed25519_signature_hex(",
+        );
+
+        assert_guard_contains(
+            "VERIFIER_SHORTCUT_GUARD::CONNECTOR_SIGNATURE_VERIFY",
+            "src/connector/verifier_sdk.rs",
+            CONNECTOR_VERIFIER_SOURCE,
+            "verify_ed25519_signature_hex(",
+        );
+        assert_guard_contains(
+            "VERIFIER_SHORTCUT_GUARD::CONNECTOR_RESULT_SIGNATURE_VERIFY",
+            "src/connector/verifier_sdk.rs",
+            CONNECTOR_VERIFIER_SOURCE,
+            "verify_verification_result_signature(",
+        );
+        assert_guard_contains(
+            "VERIFIER_SHORTCUT_GUARD::CONNECTOR_CANONICAL_ARTIFACT_PAYLOAD",
+            "src/connector/verifier_sdk.rs",
+            CONNECTOR_VERIFIER_SOURCE,
+            "canonical_migration_artifact_payload(",
+        );
+
+        assert_guard_contains(
+            STRUCTURAL_ONLY_RULE_ID,
+            "src/sdk/verifier_sdk.rs",
+            SDK_VERIFIER_SOURCE,
+            STRUCTURAL_ONLY_SECURITY_POSTURE,
+        );
+        assert_guard_contains(
+            super::super::replay_capsule::STRUCTURAL_ONLY_RULE_ID,
+            "src/sdk/replay_capsule.rs",
+            SDK_REPLAY_CAPSULE_SOURCE,
+            super::super::replay_capsule::STRUCTURAL_ONLY_SECURITY_POSTURE,
+        );
+        assert_guard_contains(
+            "VERIFIER_SHORTCUT_GUARD::CONNECTOR_REPLAY_HELPER_MARKER",
+            "src/connector/verifier_sdk.rs",
+            CONNECTOR_VERIFIER_SOURCE,
+            "STRUCTURAL_ONLY_REPLAY_HELPER_POSTURE",
+        );
+
+        assert_guard_absent(
+            "VERIFIER_SHORTCUT_GUARD::NO_SDK_CAPSULE_IMPORT_IN_VEP",
+            "src/verifier_economy/mod.rs",
+            VERIFIER_ECONOMY_SOURCE,
+            "src/sdk/replay_capsule.rs",
+        );
+        assert_guard_absent(
+            "VERIFIER_SHORTCUT_GUARD::NO_SDK_CAPSULE_IMPORT_IN_CONNECTOR",
+            "src/connector/verifier_sdk.rs",
+            CONNECTOR_VERIFIER_SOURCE,
+            "super::super::replay_capsule::ReplayCapsule",
         );
     }
 }

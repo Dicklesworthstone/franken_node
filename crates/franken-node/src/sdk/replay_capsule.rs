@@ -36,6 +36,16 @@ pub const MIN_FORMAT_VERSION: u32 = 1;
 /// Schema identifier for the replay capsule format.
 pub const CAPSULE_SCHEMA_ID: &str = "replay-capsule-v1";
 
+/// Stable posture marker for this structural replay capsule helper.
+///
+/// Replacement-critical signed capsule verification must use the stronger
+/// connector/verifier-economy paths until the canonical shared kernel lands.
+pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str =
+    "structural_only_not_replacement_critical";
+
+/// Stable rule id used by shortcut-regression guardrails.
+pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::SDK_REPLAY_CAPSULE";
+
 // ---------------------------------------------------------------------------
 // Core types
 // ---------------------------------------------------------------------------

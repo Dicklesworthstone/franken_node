@@ -84,6 +84,17 @@ pub mod invariants {
 /// Schema version for the verifier SDK format.
 pub const SCHEMA_VERSION: &str = "ver-v1.0";
 
+/// Stable posture marker for the hash-only replay helper in this module.
+///
+/// Replacement-critical signed capsule verification must use the stronger
+/// `connector::universal_verifier_sdk` and verifier-economy paths instead.
+pub const STRUCTURAL_ONLY_REPLAY_HELPER_POSTURE: &str =
+    "structural_only_helper_not_replacement_critical";
+
+/// Stable rule id used by shortcut-regression guardrails.
+pub const STRUCTURAL_ONLY_REPLAY_HELPER_RULE_ID: &str =
+    "VERIFIER_SHORTCUT_GUARD::CONNECTOR_REPLAY_HELPER";
+
 // ---------------------------------------------------------------------------
 // Verdict
 // ---------------------------------------------------------------------------
@@ -1010,6 +1021,8 @@ pub fn verify_trust_state(
 ///
 /// INV-VER-OFFLINE-CAPABLE: replay is local.
 /// INV-VER-DETERMINISTIC: same capsule produces the same result.
+/// `STRUCTURAL_ONLY_REPLAY_HELPER_POSTURE` applies here: this helper is a
+/// deterministic smoke-check, not a signed replacement-critical verifier.
 pub fn replay_capsule(capsule_data: &str, expected_output_hash: &str) -> ReplayResult {
     // Compute deterministic hash of capsule data as actual output
     let actual_hash = deterministic_hash(capsule_data);
