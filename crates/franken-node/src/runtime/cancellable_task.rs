@@ -846,6 +846,18 @@ impl CancellationRuntime {
                 .filter(|o| o.terminal_state == "pending")
                 .map(|o| o.obligation_id.clone())
                 .collect();
+            let record = FinalizeRecord {
+                task_id: task_id.to_string(),
+                cancel_reason: cancel_reason.to_string(),
+                drain_status: drain_result.clone(),
+                obligation_closure_proof: obligation_proof.clone(),
+                cancel_requested_ms,
+                drain_started_ms,
+                drain_completed_ms,
+                finalize_started_ms: Some(timestamp_ms),
+                finalize_completed_ms: Some(timestamp_ms),
+                schema_version: SCHEMA_VERSION.to_string(),
+            };
 
             self.emit_audit(CancellableTaskAuditEvent {
                 event_code: event_codes::FN_CX_010.to_string(),
@@ -867,6 +879,29 @@ impl CancellationRuntime {
                     })?;
             entry.phase = TaskPhase::Finalized;
             entry.finalize_completed_ms = Some(timestamp_ms);
+            entry.finalize_record = Some(record);
+
+            self.emit_audit(CancellableTaskAuditEvent {
+                event_code: event_codes::FN_CX_007.to_string(),
+                task_id: task_id.to_string(),
+                from_phase: TaskPhase::Finalizing,
+                to_phase: TaskPhase::Finalized,
+                timestamp_ms,
+                trace_id: trace_id.to_string(),
+                detail: "FinalizeRecord produced with incomplete closure proof".to_string(),
+                schema_version: SCHEMA_VERSION.to_string(),
+            });
+
+            self.emit_audit(CancellableTaskAuditEvent {
+                event_code: event_codes::FN_CX_008.to_string(),
+                task_id: task_id.to_string(),
+                from_phase: TaskPhase::Finalized,
+                to_phase: TaskPhase::Finalized,
+                timestamp_ms,
+                trace_id: trace_id.to_string(),
+                detail: "lane slot released after incomplete closure proof".to_string(),
+                schema_version: SCHEMA_VERSION.to_string(),
+            });
 
             return Err(CancellableTaskError::ClosureIncomplete {
                 task_id: task_id.to_string(),
@@ -1301,14 +1336,26 @@ mod tests {
             .finalize_task("task-1", "test", proof, 1400, "t1")
             .unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_CXT_CLOSURE_INCOMPLETE);
+        assert_eq!(rt.current_phase("task-1"), Some(TaskPhase::Finalized));
+        assert_eq!(rt.active_count(), 0);
+        assert_eq!(rt.finalized_count(), 1);
 
-        // FN-CX-010 emitted
-        let closure_events: Vec<_> = rt
+        let task = rt.get_task("task-1").expect("task should remain tracked");
+        let record = task
+            .finalize_record
+            .as_ref()
+            .expect("closure failure should still produce a finalize record");
+        assert!(!record.obligation_closure_proof.all_closed);
+        assert_eq!(record.finalize_completed_ms, Some(1400));
+
+        let codes: Vec<&str> = rt
             .audit_log()
             .iter()
-            .filter(|e| e.event_code == event_codes::FN_CX_010)
+            .map(|e| e.event_code.as_str())
             .collect();
-        assert_eq!(closure_events.len(), 1);
+        assert!(codes.contains(&event_codes::FN_CX_010));
+        assert!(codes.contains(&event_codes::FN_CX_007));
+        assert!(codes.contains(&event_codes::FN_CX_008));
     }
 
     // ---- Audit log ----

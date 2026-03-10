@@ -157,7 +157,6 @@ pub fn evaluate_gate(
     trace_id: &str,
     timestamp: &str,
 ) -> GateDecision {
-    // Check attestations
     let missing: Vec<AttestationType> = policy
         .required_attestations
         .iter()
@@ -169,6 +168,19 @@ pub fn evaluate_gate(
         .build_assurance
         .meets_minimum(policy.min_build_assurance);
     let builder_trusted = policy.trusted_builders.contains(&provenance.builder_id);
+
+    if let Err(ProvenanceError::PolicyInvalid { reason }) = policy.validate() {
+        return GateDecision {
+            artifact_id: provenance.artifact_id.clone(),
+            passed: false,
+            missing_attestations: missing,
+            assurance_ok,
+            builder_trusted,
+            failure_reason: Some(GateFailure::PolicyInvalid { reason }),
+            trace_id: trace_id.to_string(),
+            timestamp: timestamp.to_string(),
+        };
+    }
 
     let passed = missing.is_empty() && assurance_ok && builder_trusted;
 
@@ -365,6 +377,25 @@ mod tests {
     #[test]
     fn valid_policy_passes() {
         assert!(test_policy().validate().is_ok());
+    }
+
+    #[test]
+    fn invalid_policy_fails_closed_with_policy_invalid_reason() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Slsa],
+            min_build_assurance: BuildAssurance::Verified,
+            trusted_builders: vec![],
+        };
+
+        let result = evaluate_gate(&policy, &good_provenance(), "t-invalid", "ts");
+        assert!(!result.passed);
+        assert!(result.assurance_ok);
+        assert!(!result.builder_trusted);
+        assert_eq!(result.missing_attestations, vec![AttestationType::Slsa]);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::PolicyInvalid { .. })
+        ));
     }
 
     // === GateFailure display ===

@@ -22,11 +22,10 @@
 //! - **INV-VTK-VERSIONED**: Toolkit version embedded in every report.
 //! - **INV-VTK-GATED**: Validation failures block claim publication.
 
-use chrono::Utc;
+use chrono::{TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -60,6 +59,8 @@ pub const TOOLKIT_VERSION: &str = "vtk-v1.0";
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 const MAX_REPORTS: usize = 4096;
+const DETERMINISTIC_TIME_BASE_SECONDS: i64 = 1_735_689_600; // 2025-01-01T00:00:00Z
+const DETERMINISTIC_TIME_WINDOW_SECONDS: u64 = 365 * 24 * 60 * 60;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -67,6 +68,38 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         let overflow = items.len() - cap;
         items.drain(0..overflow);
     }
+}
+
+fn deterministic_digest(domain: &[u8], fields: &[&str]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(domain);
+    for field in fields {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+
+    let digest = hasher.finalize();
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(&digest);
+    bytes
+}
+
+fn deterministic_id(prefix: &str, domain: &[u8], fields: &[&str]) -> String {
+    let digest = deterministic_digest(domain, fields);
+    format!("{prefix}-{}", hex::encode(&digest[..16]))
+}
+
+fn deterministic_timestamp(domain: &[u8], fields: &[&str], ordinal: usize) -> String {
+    let digest = deterministic_digest(domain, fields);
+    let mut prefix = [0u8; 8];
+    prefix.copy_from_slice(&digest[..8]);
+    let offset = (u64::from_le_bytes(prefix) % DETERMINISTIC_TIME_WINDOW_SECONDS)
+        .saturating_add(ordinal as u64);
+    let timestamp = Utc
+        .timestamp_opt(DETERMINISTIC_TIME_BASE_SECONDS + offset as i64, 0)
+        .single()
+        .expect("deterministic timestamp must be representable");
+    timestamp.to_rfc3339()
 }
 
 // ---------------------------------------------------------------------------
@@ -181,6 +214,16 @@ pub enum ValidationVerdict {
     Partial,
 }
 
+impl ValidationVerdict {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Pass => "PASS",
+            Self::Fail => "FAIL",
+            Self::Partial => "PARTIAL",
+        }
+    }
+}
+
 /// Link in the evidence chain connecting validation steps.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvidenceLink {
@@ -260,6 +303,8 @@ impl VerifierToolkit {
         claims: &[VerifiableClaim],
         trace_id: &str,
     ) -> ValidationReport {
+        let run_seed = self.run_seed(claims, trace_id);
+        let mut audit_index = 0usize;
         let mut claim_results = Vec::new();
         let mut evidence_chain = Vec::new();
         let mut parent_hash = "genesis".to_string();
@@ -272,10 +317,18 @@ impl VerifierToolkit {
                     "claim_id": &claim.claim_id,
                     "claim_type": claim.claim_type.label(),
                 }),
+                &run_seed,
+                &mut audit_index,
             );
 
-            let result =
-                self.validate_single_claim(claim, trace_id, &mut evidence_chain, &mut parent_hash);
+            let result = self.validate_single_claim(
+                claim,
+                trace_id,
+                &run_seed,
+                &mut audit_index,
+                &mut evidence_chain,
+                &mut parent_hash,
+            );
             claim_results.push(result);
         }
 
@@ -299,10 +352,21 @@ impl VerifierToolkit {
         let content_hash = hex::encode(Sha256::digest(
             [b"verifier_toolkit_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
         ));
+        let verdict_label = verdict.label();
+        let report_id = deterministic_id(
+            "vtk-report",
+            b"verifier_toolkit_report_id_v1:",
+            &[content_hash.as_str(), verdict_label],
+        );
+        let report_timestamp = deterministic_timestamp(
+            b"verifier_toolkit_report_ts_v1:",
+            &[content_hash.as_str(), verdict_label],
+            0,
+        );
 
         let report = ValidationReport {
-            report_id: Uuid::now_v7().to_string(),
-            timestamp: Utc::now().to_rfc3339(),
+            report_id,
+            timestamp: report_timestamp,
             toolkit_version: self.config.toolkit_version.clone(),
             claims_validated: claims.len(),
             claims_passed: passed,
@@ -322,6 +386,8 @@ impl VerifierToolkit {
                 "passed": passed,
                 "failed": failed,
             }),
+            &run_seed,
+            &mut audit_index,
         );
 
         push_bounded(&mut self.reports, report.clone(), MAX_REPORTS);
@@ -352,6 +418,8 @@ impl VerifierToolkit {
         &mut self,
         claim: &VerifiableClaim,
         trace_id: &str,
+        run_seed: &str,
+        audit_index: &mut usize,
         evidence_chain: &mut Vec<EvidenceLink>,
         parent_hash: &mut String,
     ) -> ClaimValidationResult {
@@ -379,6 +447,8 @@ impl VerifierToolkit {
                 "claim_id": &claim.claim_id,
                 "valid": schema_valid,
             }),
+            run_seed,
+            audit_index,
         );
 
         evidence_chain.push(EvidenceLink {
@@ -412,6 +482,8 @@ impl VerifierToolkit {
                 "claim_id": &claim.claim_id,
                 "verified": evidence_verified,
             }),
+            run_seed,
+            audit_index,
         );
 
         evidence_chain.push(EvidenceLink {
@@ -448,6 +520,8 @@ impl VerifierToolkit {
                 "claim_id": &claim.claim_id,
                 "metrics_ok": metrics_ok,
             }),
+            run_seed,
+            audit_index,
         );
 
         evidence_chain.push(EvidenceLink {
@@ -485,6 +559,8 @@ impl VerifierToolkit {
                 "claim_id": &claim.claim_id,
                 "cross_ok": cross_ok,
             }),
+            run_seed,
+            audit_index,
         );
 
         evidence_chain.push(EvidenceLink {
@@ -509,6 +585,8 @@ impl VerifierToolkit {
                     "metrics": metrics_ok,
                     "cross_check": cross_ok,
                 }),
+                run_seed,
+                audit_index,
             );
         }
 
@@ -585,18 +663,54 @@ impl VerifierToolkit {
         hex::encode(hasher.finalize())
     }
 
-    fn log(&mut self, event_code: &str, trace_id: &str, details: serde_json::Value) {
+    fn run_seed(&self, claims: &[VerifiableClaim], trace_id: &str) -> String {
+        let seed_input = serde_json::json!({
+            "claims": claims,
+            "trace_id": trace_id,
+            "toolkit_version": &self.config.toolkit_version,
+            "strict_mode": self.config.strict_mode,
+            "require_evidence_hashes": self.config.require_evidence_hashes,
+            "cross_check_enabled": self.config.cross_check_enabled,
+        })
+        .to_string();
+        hex::encode(deterministic_digest(
+            b"verifier_toolkit_run_seed_v1:",
+            &[seed_input.as_str()],
+        ))
+    }
+
+    fn log(
+        &mut self,
+        event_code: &str,
+        trace_id: &str,
+        details: serde_json::Value,
+        run_seed: &str,
+        audit_index: &mut usize,
+    ) {
+        let ordinal = *audit_index;
+        let ordinal_string = ordinal.to_string();
+        let details_string =
+            serde_json::to_string(&details).expect("serializing verifier toolkit audit details");
         push_bounded(
             &mut self.audit_log,
             VtkAuditRecord {
-                record_id: Uuid::now_v7().to_string(),
+                record_id: deterministic_id(
+                    "vtk-audit",
+                    b"verifier_toolkit_audit_id_v1:",
+                    &[run_seed, event_code, ordinal_string.as_str(), details_string.as_str()],
+                ),
                 event_code: event_code.to_string(),
-                timestamp: Utc::now().to_rfc3339(),
+                timestamp: deterministic_timestamp(
+                    b"verifier_toolkit_audit_ts_v1:",
+                    &[run_seed, event_code, ordinal_string.as_str()],
+                    ordinal,
+                ),
                 trace_id: trace_id.to_string(),
                 details,
             },
             MAX_AUDIT_LOG_ENTRIES,
         );
+        *audit_index = ordinal.saturating_add(1);
     }
 }
 
@@ -607,6 +721,7 @@ impl VerifierToolkit {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     fn make_trace() -> String {
         Uuid::now_v7().to_string()
@@ -791,8 +906,23 @@ mod tests {
         let mut t2 = VerifierToolkit::default();
         let r1 = t1.validate_claims(&claims, "trace-det");
         let r2 = t2.validate_claims(&claims, "trace-det");
-        assert_eq!(r1.content_hash, r2.content_hash);
-        assert_eq!(r1.overall_verdict, r2.overall_verdict);
+        assert_eq!(r1, r2);
+    }
+
+    #[test]
+    fn repeated_runs_keep_same_audit_identity_fields() {
+        let mut toolkit = VerifierToolkit::default();
+        let claims = vec![sample_claim("det-1")];
+
+        let first_report = toolkit.validate_claims(&claims, "trace-det");
+        let first_records = toolkit.audit_log().to_vec();
+
+        let second_report = toolkit.validate_claims(&claims, "trace-det");
+        let second_records = toolkit.audit_log()[first_records.len()..].to_vec();
+
+        assert_eq!(first_report.report_id, second_report.report_id);
+        assert_eq!(first_report.timestamp, second_report.timestamp);
+        assert_eq!(first_records, second_records);
     }
 
     // === Evidence chain ===
