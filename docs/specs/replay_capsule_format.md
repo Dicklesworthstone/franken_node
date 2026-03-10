@@ -7,24 +7,29 @@
 ## Overview
 
 This specification defines the universal verifier SDK replay capsule format.
-External verifiers replay signed capsules to reproduce claim verdicts without
-requiring privileged internal access. The capsule schema and verification APIs
-are stable and versioned.
+External verifiers replay structurally bound capsules to reproduce claim
+verdicts without requiring privileged internal access. The capsule schema and
+verification APIs are stable and versioned.
 
 The capsule format builds on the verifier-economy SDK (Section 10.12) and the
 universal verifier SDK module (`connector::universal_verifier_sdk`), providing
 the public-facing surface that third-party verifiers consume.
 
+The standalone workspace crate `sdk/verifier` is structural-only. It exposes
+deterministic schema, replay, and structural signature digest helpers for
+external tooling, but it is not the replacement-critical canonical verifier and
+does not claim detached cryptographic verification authority.
+
 ## Capsule Format
 
-A replay capsule is a self-contained, signed unit consisting of:
+A replay capsule is a self-contained, structurally bound unit consisting of:
 
 1. **CapsuleManifest** -- metadata describing the capsule's contents, schema
    version, claim type, expected output hash, and creator identity.
 2. **Payload** -- serialized data to replay.
 3. **Inputs** -- deterministic-ordered (BTreeMap) input artifacts keyed by
    reference identifier.
-4. **Signature** -- cryptographic signature covering the manifest, payload,
+4. **Signature** -- structural signature digest covering the manifest, payload,
    and inputs.
 
 ### Schema Version
@@ -32,7 +37,7 @@ A replay capsule is a self-contained, signed unit consisting of:
 All capsules carry `schema_version = "vsdk-v1.0"`. The version is checked
 during manifest validation; unsupported versions are rejected.
 
-### Signature Coverage
+### Structural Signature Coverage
 
 The signature covers the following fields concatenated with `|`:
 
@@ -45,7 +50,8 @@ The signature covers the following fields concatenated with `|`:
 ## Replay Protocol
 
 1. Validate the capsule manifest (schema version, required fields).
-2. Verify the capsule signature against the computed signing payload.
+2. Verify the capsule structural signature digest against the computed signing
+   payload.
 3. Verify the payload is non-empty.
 4. Compute the deterministic output hash from payload and inputs.
 5. Compare the actual output hash against `expected_output_hash`.
@@ -108,7 +114,7 @@ Multi-step verification workflows are modeled as `VerificationSession`:
 | INV-VSDK-NO-PRIVILEGE           | External verifiers never require privileged access        |
 | INV-VSDK-SCHEMA-VERSIONED       | Every capsule and manifest carries a schema version       |
 | INV-VSDK-SESSION-MONOTONIC      | Session steps are append-only                             |
-| INV-VSDK-SIGNATURE-BOUND        | Signature covers full capsule payload                     |
+| INV-VSDK-SIGNATURE-BOUND        | Structural signature digest binds full capsule payload    |
 
 ## Types
 
@@ -127,8 +133,8 @@ Multi-step verification workflows are modeled as `VerificationSession`:
 ## Core Operations
 
 - `validate_manifest(manifest)` -- validate capsule manifest completeness
-- `verify_capsule_signature(capsule)` -- verify capsule signature integrity
-- `sign_capsule(capsule)` -- compute and set capsule signature
+- `verify_capsule_signature(capsule)` -- verify capsule structural signature digest
+- `sign_capsule(capsule)` -- compute and set capsule structural signature digest
 - `replay_capsule(capsule, verifier_identity)` -- replay and produce verdict
 - `create_session(id, verifier)` -- create new verification session
 - `record_session_step(session, result)` -- append replay result to session

@@ -7,13 +7,19 @@
 ## Objective
 
 Publish a universal verifier SDK and replay capsule format that enables external
-verifiers to replay signed capsules and reproduce claim verdicts without
+verifiers to replay structurally bound capsules and reproduce claim verdicts without
 privileged internal access. The capsule schema and verification APIs must be
 stable and versioned.
 
+The standalone workspace crate `sdk/verifier` is structural-only. Its
+`sign_capsule` and `verify_signature` helpers provide deterministic structural
+signature digest binding for external tooling, but they are not the
+replacement-critical canonical verifier and must not be presented as detached
+cryptographic authority.
+
 ## Acceptance Criteria
 
-1. External verifiers can replay signed capsules and reproduce claim verdicts
+1. External verifiers can replay structurally bound capsules and reproduce claim verdicts
    without privileged internal access.
 2. Capsule schema and verification APIs are stable and versioned
    (`VSDK_SCHEMA_VERSION = "vsdk-v1.0"`).
@@ -72,13 +78,13 @@ stable and versioned.
 | INV-VSDK-NO-PRIVILEGE        | No privileged internal access required     |
 | INV-VSDK-SCHEMA-VERSIONED    | Every capsule carries schema version       |
 | INV-VSDK-SESSION-MONOTONIC   | Session steps are append-only              |
-| INV-VSDK-SIGNATURE-BOUND     | Signature covers full capsule payload      |
+| INV-VSDK-SIGNATURE-BOUND     | Structural signature digest binds full capsule payload |
 
 ### Core Operations
 
 - `validate_manifest(manifest)` -- validate capsule manifest completeness
-- `verify_capsule_signature(capsule)` -- verify capsule signature integrity
-- `sign_capsule(capsule)` -- compute and set capsule signature
+- `verify_capsule_signature(capsule)` -- verify capsule structural signature digest
+- `sign_capsule(capsule)` -- compute and set capsule structural signature digest
 - `replay_capsule(capsule, verifier_identity)` -- replay and produce verdict
 - `create_session(id, verifier)` -- create new verification session
 - `record_session_step(session, result)` -- append replay result to session

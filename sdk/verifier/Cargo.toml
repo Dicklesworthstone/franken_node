@@ -2,7 +2,7 @@
 name = "frankenengine-verifier-sdk"
 version = "0.1.0"
 edition = "2024"
-description = "Universal verifier SDK for replaying signed capsules and reproducing claim verdicts"
+description = "Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts"
 license = "MIT"
 
 [dependencies]

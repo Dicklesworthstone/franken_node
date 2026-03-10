@@ -13,12 +13,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
-from datetime import datetime, timezone
-from pathlib import Path
 
 
 BEAD = "bd-nbwo"
@@ -31,6 +31,8 @@ SECTION = "10.17"
 IMPL_FILE = ROOT / "crates/franken-node/src/connector/universal_verifier_sdk.rs"
 MOD_FILE = ROOT / "crates/franken-node/src/connector/mod.rs"
 SPEC_FILE = ROOT / "docs/specs/replay_capsule_format.md"
+CONTRACT_FILE = ROOT / "docs/specs/section_10_17/bd-nbwo_contract.md"
+SDK_CARGO_FILE = ROOT / "sdk/verifier/Cargo.toml"
 SDK_MOD_FILE = ROOT / "sdk/verifier/src/lib.rs"
 SDK_CAPSULE_FILE = ROOT / "sdk/verifier/src/capsule.rs"
 CONFORMANCE_TEST = ROOT / "tests/conformance/verifier_sdk_capsule_replay.rs"
@@ -144,12 +146,54 @@ def run_all_checks() -> list[dict]:
     impl_src = _read(IMPL_FILE)
     mod_src = _read(MOD_FILE)
     spec_src = _read(SPEC_FILE)
+    contract_src = _read(CONTRACT_FILE)
+    sdk_cargo_src = _read(SDK_CARGO_FILE)
     sdk_mod_src = _read(SDK_MOD_FILE)
     sdk_capsule_src = _read(SDK_CAPSULE_FILE)
+    sdk_doc_src = "\n".join((spec_src, contract_src))
+
+    workspace_sdk_posture_explicit = (
+        'pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";'
+        in sdk_mod_src
+        and 'pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK";'
+        in sdk_mod_src
+    )
+    workspace_capsule_posture_explicit = (
+        'pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";'
+        in sdk_capsule_src
+        and 'pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_REPLAY_CAPSULE";'
+        in sdk_capsule_src
+        and "structural signature digest" in sdk_capsule_src
+    )
+    workspace_docs_structural_only = (
+        "structural-only" in sdk_doc_src and "structural signature digest" in sdk_doc_src
+    )
+    workspace_docs_avoid_overclaim = all(
+        marker not in sdk_doc_src
+        for marker in (
+            "cryptographic signature",
+            "signature integrity",
+            "signed capsules",
+            "self-contained, signed unit",
+        )
+    )
+    workspace_metadata_structural_only = (
+        'description = "Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts"'
+        in sdk_cargo_src
+    )
+    workspace_metadata_avoid_overclaim = all(
+        marker not in sdk_cargo_src
+        for marker in (
+            "signed capsules",
+            "cryptographic authority",
+        )
+    )
 
     # -- File existence checks -----------------------------------------------
 
     checks.append(_check("Spec file exists", SPEC_FILE.exists(), str(SPEC_FILE)))
+    checks.append(_check("Contract file exists", CONTRACT_FILE.exists(), str(CONTRACT_FILE)))
+    checks.append(_check("SDK Cargo.toml exists", SDK_CARGO_FILE.exists(), str(SDK_CARGO_FILE)))
     checks.append(_check("Implementation file exists", IMPL_FILE.exists(), str(IMPL_FILE)))
     checks.append(_check("SDK lib.rs exists", SDK_MOD_FILE.exists(), str(SDK_MOD_FILE)))
     checks.append(_check("SDK capsule.rs exists", SDK_CAPSULE_FILE.exists(), str(SDK_CAPSULE_FILE)))
@@ -164,20 +208,56 @@ def run_all_checks() -> list[dict]:
     # -- Event codes in SDK facade -------------------------------------------
 
     for code in REQUIRED_EVENT_CODES:
-        found = code in sdk_mod_src or code in sdk_capsule_src or code in spec_src
+        found = code in sdk_mod_src or code in sdk_capsule_src or code in sdk_doc_src
         checks.append(_check(f"Event code {code}", found, code))
 
     # -- Error codes in SDK facade -------------------------------------------
 
     for code in REQUIRED_ERROR_CODES:
-        found = code in sdk_mod_src or code in sdk_capsule_src or code in spec_src
+        found = code in sdk_mod_src or code in sdk_capsule_src or code in sdk_doc_src
         checks.append(_check(f"Error code {code}", found, code))
 
     # -- Invariants in SDK facade --------------------------------------------
 
     for inv in REQUIRED_INVARIANTS:
-        found = inv in sdk_mod_src or inv in sdk_capsule_src or inv in spec_src
+        found = inv in sdk_mod_src or inv in sdk_capsule_src or inv in sdk_doc_src
         checks.append(_check(f"Invariant {inv}", found, inv))
+
+    checks.append(_check(
+        "Workspace SDK structural-only posture explicit",
+        workspace_sdk_posture_explicit,
+        "sdk/verifier/src/lib.rs structural-only posture markers",
+    ))
+
+    checks.append(_check(
+        "Workspace replay capsule structural-only posture explicit",
+        workspace_capsule_posture_explicit,
+        "sdk/verifier/src/capsule.rs structural-only posture markers",
+    ))
+
+    checks.append(_check(
+        "Public SDK docs mark structural-only posture",
+        workspace_docs_structural_only,
+        "replay capsule spec and bd-nbwo contract carry structural-only posture markers",
+    ))
+
+    checks.append(_check(
+        "Public SDK docs avoid cryptographic overclaim",
+        workspace_docs_avoid_overclaim,
+        "spec/contract avoid signed-capsule or cryptographic-signature wording",
+    ))
+
+    checks.append(_check(
+        "SDK package metadata marks structural-only posture",
+        workspace_metadata_structural_only,
+        "sdk/verifier/Cargo.toml description aligns with structural-only posture",
+    ))
+
+    checks.append(_check(
+        "SDK package metadata avoids signed-capsule overclaim",
+        workspace_metadata_avoid_overclaim,
+        "sdk/verifier/Cargo.toml avoids signed-capsule or authority overclaim wording",
+    ))
 
     # -- Implementation event codes ------------------------------------------
 
@@ -332,6 +412,18 @@ def run_all() -> dict:
             "no_privileged_access": True,
             "schema_versioned": True,
             "signature_bound": True,
+            "structural_only_posture_explicit": all(
+                check["passed"]
+                for check in checks
+                if check["check"] in {
+                    "Workspace SDK structural-only posture explicit",
+                    "Workspace replay capsule structural-only posture explicit",
+                    "Public SDK docs mark structural-only posture",
+                    "Public SDK docs avoid cryptographic overclaim",
+                    "SDK package metadata marks structural-only posture",
+                    "SDK package metadata avoids signed-capsule overclaim",
+                }
+            ),
         },
         "events": events,
         "summary": "\n".join(summary_lines),

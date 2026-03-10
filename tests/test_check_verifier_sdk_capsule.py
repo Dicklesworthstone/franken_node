@@ -72,6 +72,13 @@ class TestCapsuleContract(unittest.TestCase):
         self.assertTrue(contract["no_privileged_access"])
         self.assertTrue(contract["schema_versioned"])
         self.assertTrue(contract["signature_bound"])
+        self.assertTrue(contract["structural_only_posture_explicit"])
+
+    def test_package_metadata_checks_present(self):
+        result = mod.run_all()
+        check_names = {check["check"] for check in result["checks"]}
+        self.assertIn("SDK package metadata marks structural-only posture", check_names)
+        self.assertIn("SDK package metadata avoids signed-capsule overclaim", check_names)
 
 
 class TestEvents(unittest.TestCase):

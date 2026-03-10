@@ -1,8 +1,16 @@
 //! Replay capsule types and operations for external verifiers.
 //!
 //! This module provides the public-facing capsule format that external verifiers
-//! use to replay signed capsules and reproduce claim verdicts without privileged
-//! internal access.
+//! use to replay structurally bound capsules and reproduce claim verdicts
+//! without privileged internal access.
+//!
+//! # Security Posture
+//!
+//! This module is structural-only. `sign_capsule` and `verify_signature`
+//! compute and compare a deterministic SHA-256 structural signature digest so
+//! external tools can reproduce capsule content binding without implying a
+//! detached cryptographic attestation surface. The replacement-critical
+//! canonical verifier lives elsewhere.
 //!
 //! # Invariants
 //!
@@ -20,6 +28,12 @@ use super::{
     ERR_CAPSULE_ACCESS_DENIED, ERR_CAPSULE_REPLAY_DIVERGED, ERR_CAPSULE_SCHEMA_MISMATCH,
     ERR_CAPSULE_SIGNATURE_INVALID, ERR_CAPSULE_VERDICT_MISMATCH, SDK_VERSION,
 };
+
+/// Explicit posture marker for the standalone workspace replay capsule surface.
+pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";
+
+/// Stable rule id for guardrails that must fence the workspace replay capsule surface.
+pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_REPLAY_CAPSULE";
 
 // ---------------------------------------------------------------------------
 // Capsule types
@@ -237,15 +251,15 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), CapsuleError>
     Ok(())
 }
 
-/// Sign a capsule by computing its signature.
+/// Sign a capsule by computing its structural signature digest.
 ///
-/// The signature covers the manifest, payload, and inputs via
+/// The structural signature digest binds the manifest, payload, and inputs via
 /// length-prefixed SHA-256 hashing.
 pub fn sign_capsule(capsule: &mut ReplayCapsule) {
     capsule.signature = compute_signing_payload(capsule);
 }
 
-/// Verify a capsule's signature against the computed signing payload.
+/// Verify a capsule's structural signature digest against the computed signing payload.
 ///
 /// Uses constant-time comparison to prevent timing side-channels.
 pub fn verify_signature(capsule: &ReplayCapsule) -> Result<(), CapsuleError> {
@@ -349,6 +363,18 @@ pub fn build_reference_capsule() -> ReplayCapsule {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_structural_only_posture_markers_defined() {
+        assert_eq!(
+            STRUCTURAL_ONLY_SECURITY_POSTURE,
+            "structural_only_not_replacement_critical"
+        );
+        assert_eq!(
+            STRUCTURAL_ONLY_RULE_ID,
+            "VERIFIER_SHORTCUT_GUARD::WORKSPACE_REPLAY_CAPSULE"
+        );
+    }
 
     #[test]
     fn test_build_reference_capsule() {

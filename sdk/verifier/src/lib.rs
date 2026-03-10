@@ -4,8 +4,15 @@
 //!
 //! This module re-exports the core verifier SDK types and operations for
 //! external consumption. External verifiers depend on this crate to replay
-//! signed capsules and reproduce claim verdicts without privileged internal
-//! access.
+//! structurally bound capsules and reproduce claim verdicts without privileged
+//! internal access.
+//!
+//! # Security Posture
+//!
+//! This workspace crate is structural-only. It publishes deterministic schema,
+//! digest, and replay helpers for external tooling, but it is not the
+//! replacement-critical canonical verifier and it does not claim detached
+//! cryptographic verification authority.
 //!
 //! # Schema Version
 //!
@@ -44,6 +51,12 @@ pub const SDK_VERSION: &str = "vsdk-v1.0";
 
 /// Minimum supported SDK version.
 pub const SDK_VERSION_MIN: &str = "vsdk-v1.0";
+
+/// Explicit posture marker for the standalone workspace SDK surface.
+pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";
+
+/// Stable rule id for guardrails that must fence the workspace SDK surface.
+pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK";
 
 // ---------------------------------------------------------------------------
 // Event codes (public-facing)
@@ -139,6 +152,18 @@ mod tests {
     #[test]
     fn test_sdk_version_min_constant() {
         assert_eq!(SDK_VERSION_MIN, "vsdk-v1.0");
+    }
+
+    #[test]
+    fn test_structural_only_posture_markers_defined() {
+        assert_eq!(
+            STRUCTURAL_ONLY_SECURITY_POSTURE,
+            "structural_only_not_replacement_critical"
+        );
+        assert_eq!(
+            STRUCTURAL_ONLY_RULE_ID,
+            "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK"
+        );
     }
 
     #[test]
