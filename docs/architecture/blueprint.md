@@ -245,6 +245,18 @@ meets all of the following:
 4. The work does not merely replace a local semantic model with a runtime substrate for aesthetic consistency.
 5. The resulting ownership boundary remains clearer, not blurrier, than the current three-kernel split.
 
+### Runtime Guardrail Exception Path
+
+The Tokio/bootstrap guardrail introduced under `bd-1now.3` is intentionally
+strict: `franken_node` must not regain ambient executor scaffolding by default.
+If a future change introduces a real async boundary and needs a Tokio bootstrap
+or direct runtime builder in this crate, all of the following must happen in
+the same implementation cluster:
+
+1. Update this decision record to name the new boundary, its owner, and why an ambient executor is now justified.
+2. Update `scripts/check_tokio_bootstrap_guardrail.py` with an intentional exception entry for the exact source file and rationale; do not use a broad wildcard or a silent bypass.
+3. Land matching proof in the guardrail verification lane (`bd-1now.3.2` or its successor), including both a failing forbidden-case fixture and an allowed-case fixture for the newly approved boundary.
+
 ## 8.8 Five Alignment Contracts
 
 ### AC-01: Scope Boundary
