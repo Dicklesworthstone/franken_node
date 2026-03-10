@@ -1,13 +1,13 @@
 {
   "artifact_type": "verification_evidence",
   "bead_id": "bd-1z5a",
-  "support_bead_id": "bd-1z5a.5",
+  "support_bead_id": "bd-1z5a.10",
   "title": "Replace verifier-economy and replay-capsule trust surrogates with canonical signed capsule verifier",
   "section": "10.17",
   "verdict": "PARTIAL",
-  "timestamp": "2026-03-09T19:40:00Z",
+  "timestamp": "2026-03-10T18:44:07Z",
   "overall_bead_status": "in_progress",
-  "artifact_scope": "Support-bead evidence pack for current external replay, quarantine, scoreboard, and fraud-proof witness verification state after the passing operator E2E bundle landed.",
+  "artifact_scope": "Support-bead evidence pack for the current external replay, quarantine, scoreboard, fraud-proof witness, and artifact-level coherence verification state after the passing operator E2E bundle landed.",
   "artifacts": {
     "verification_summary": "artifacts/replacement_gap/bd-1z5a/verification_summary.md",
     "verification_evidence": "artifacts/replacement_gap/bd-1z5a/verification_evidence.json",
@@ -28,7 +28,9 @@
     "verifier_economy_checker": "scripts/check_verifier_economy.py",
     "verifier_sdk_checker": "scripts/check_verifier_sdk.py",
     "verifier_economy_checker_tests": "tests/test_check_verifier_economy.py",
-    "verifier_sdk_checker_tests": "tests/test_check_verifier_sdk.py"
+    "verifier_sdk_checker_tests": "tests/test_check_verifier_sdk.py",
+    "evidence_pack_coherence_checker": "scripts/check_bd_1z5a_evidence_pack.py",
+    "evidence_pack_coherence_checker_tests": "tests/test_check_bd_1z5a_evidence_pack.py"
   },
   "verification_steps": [
     {
@@ -60,6 +62,30 @@
       "command": "PYTHONDONTWRITEBYTECODE=1 python3 -B -m unittest tests/test_check_verifier_replay_operator_e2e.py",
       "status": "PASS",
       "detail": "9 tests passed in 0.110s. Confirms the operator E2E checker continues to require the normalized passing bundle shape."
+    },
+    {
+      "name": "python_check_bd_1z5a_evidence_pack_json",
+      "command": "python3 scripts/check_bd_1z5a_evidence_pack.py --json",
+      "status": "PASS",
+      "detail": "19/19 checks passed on 2026-03-10. Confirms replacement-gap artifact paths, fixture ids, operator bundle/log linkage, fraud-proof witness references, canonical summary markdown, and stale-gap text defenses remain coherent."
+    },
+    {
+      "name": "python_check_bd_1z5a_evidence_pack_self_test",
+      "command": "python3 scripts/check_bd_1z5a_evidence_pack.py --self-test --json",
+      "status": "PASS",
+      "detail": "Internal mutation self-test passed on 2026-03-10. The synthetic stale-gap regression still forces a FAIL verdict as expected."
+    },
+    {
+      "name": "python_unittest_bd_1z5a_evidence_pack",
+      "command": "python3 -m unittest tests/test_check_bd_1z5a_evidence_pack.py",
+      "status": "PASS",
+      "detail": "11 tests passed on 2026-03-10. Covers missing artifact references, missing required fixture ids, fraud-proof mismatches, stale-gap text regression, and markdown drift mutations."
+    },
+    {
+      "name": "python_py_compile_bd_1z5a_evidence_pack",
+      "command": "python3 -m py_compile scripts/check_bd_1z5a_evidence_pack.py tests/test_check_bd_1z5a_evidence_pack.py",
+      "status": "PASS",
+      "detail": "Syntax-only compile sanity passed on 2026-03-10 for the evidence-pack coherence checker and its regression suite."
     },
     {
       "name": "rch_clippy_tests_current_tree",
@@ -102,7 +128,8 @@
     "Deterministic replay and scoreboard evidence already exist at the section-10.17 layer via the universal capsule report and public trust scoreboard snapshot.",
     "Rust conformance tests exist for the capsule report and scoreboard report, and the replacement-gap fixture index links them as reusable external-verification inputs.",
     "The replacement-gap operator shell harness now exists under tests/e2e and produces a passing operator bundle with the required CAPSULE_VERIFY_* and VERIFIER_SCORE_* event families.",
-    "A machine-readable fraud-proof witness bundle now records the successful capsule_verify_fraud_proof stage, stable fraud_proof_id, trace binding, and source artifact references."
+    "A machine-readable fraud-proof witness bundle now records the successful capsule_verify_fraud_proof stage, stable fraud_proof_id, trace binding, and source artifact references.",
+    "The replacement-gap evidence pack now has a first-class coherence checker that fails on missing artifact references, missing required fixture ids, operator bundle/log/fraud witness drift, summary markdown drift, and stale gap language regressions."
   ],
   "outstanding_gaps": [
     "The parent bead remains in progress on the reserved core verifier Rust surfaces owned in other lanes.",
@@ -110,7 +137,8 @@
   ],
   "notes": [
     "This artifact pack is intentionally partial and support-scoped: it captures the truthful current state of verifier evidence while bd-1z5a core implementation work continues elsewhere.",
-    "The current replay fixture inventory now includes the dedicated replacement-gap operator harness, checker, structured log, and witness-reference bundle in addition to the section-10.17 reports and conformance tests.",
+    "The current replay fixture inventory now includes the dedicated replacement-gap operator harness, checker, structured log, witness-reference bundle, and evidence-pack coherence checker in addition to the section-10.17 reports and conformance tests.",
+    "This refresh records the bd-1z5a.9 artifact-level guard explicitly so downstream reviewers can discover it from the pack itself rather than only from thread history.",
     "The earlier bd-1z5a.2 gap statements about missing operator shell coverage, missing CAPSULE_VERIFY_* / VERIFIER_SCORE_* markers, and a missing fraud-proof bundle are now obsolete and have been replaced by concrete artifact paths in this refreshed pack."
   ]
 }

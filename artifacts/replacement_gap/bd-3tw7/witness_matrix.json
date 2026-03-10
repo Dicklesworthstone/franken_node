@@ -1,0 +1,215 @@
+[
+  {
+    "detail": "all 1 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/connector/migration_pipeline.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_migration_pipeline.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/connector/migration_pipeline.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "migration",
+    "witness_family": "forged migration inputs whose names previously spoofed heuristics",
+    "witness_id": "migration_placeholder_prefix_shortcuts"
+  },
+  {
+    "detail": "all 1 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/policy/compat_gates.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_compat_gates.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/policy/compat_gates.rs",
+      "crates/franken-node/src/policy/compatibility_gate.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "policy",
+    "witness_family": "forged compatibility receipts and placeholder signature shortcuts",
+    "witness_id": "compatibility_placeholder_signature_shortcuts"
+  },
+  {
+    "detail": "all 5 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/runtime/safe_mode.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_safe_mode.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/runtime/safe_mode.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "runtime_safe_mode",
+    "witness_family": "stale safe-mode frontier and trust-digest drift fail closed",
+    "witness_id": "safe_mode_stale_frontier_fail_closed"
+  },
+  {
+    "detail": "all 4 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/runtime/anti_entropy.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_anti_entropy_reconciliation.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/runtime/anti_entropy.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "runtime_anti_entropy",
+    "witness_family": "zero-filled or decorative anti-entropy proofs must not pass",
+    "witness_id": "anti_entropy_canonical_proof_verification"
+  },
+  {
+    "detail": "all 3 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/supply_chain/extension_registry.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_signed_extension_registry.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/supply_chain/extension_registry.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "supply_chain_extension_registry",
+    "witness_family": "forged extension manifests with valid-looking but invalid signatures",
+    "witness_id": "extension_registry_shape_only_signature_shortcuts"
+  },
+  {
+    "detail": "all 3 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/connector/control_channel.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_control_channel.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/connector/control_channel.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "control_channel",
+    "witness_family": "guessed control tokens and non-empty credential shortcuts",
+    "witness_id": "control_channel_non_empty_token_shortcut"
+  },
+  {
+    "detail": "all 5 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/api/session_auth.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_session_auth.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/api/session_auth.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "api_session_auth",
+    "witness_family": "decorative session signatures and forged transcript MACs",
+    "witness_id": "session_auth_opaque_signature_regression"
+  },
+  {
+    "detail": "all 5 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/supply_chain/trust_card.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_trust_card.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/supply_chain/trust_card.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "supply_chain_trust_card",
+    "witness_family": "caller-injected trust-card inputs without verified evidence",
+    "witness_id": "trust_card_evidence_binding"
+  },
+  {
+    "detail": "all 5 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "crates/franken-node/src/supply_chain/certification.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_certification_levels.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "crates/franken-node/src/supply_chain/certification.rs"
+    ],
+    "support_bead": "bd-3tw7.1",
+    "surface": "supply_chain_certification",
+    "witness_family": "caller-supplied certification assertions without verified evidence",
+    "witness_id": "certification_evidence_binding"
+  },
+  {
+    "detail": "all 5 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "sdk/verifier/src/lib.rs",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_verifier_sdk_capsule.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "sdk/verifier/src/lib.rs",
+      "sdk/verifier/src/capsule.rs",
+      "docs/specs/replay_capsule_format.md",
+      "docs/specs/section_10_17/bd-nbwo_contract.md"
+    ],
+    "support_bead": "bd-3tw7.2",
+    "surface": "workspace_verifier_sdk",
+    "witness_family": "public verifier sdk surface must remain explicitly structural-only",
+    "witness_id": "workspace_verifier_sdk_structural_only_posture"
+  },
+  {
+    "detail": "all 1 required anchor(s) present",
+    "missing_required_markers": [],
+    "offending_path": "sdk/verifier/Cargo.toml",
+    "pass": true,
+    "present_banned_markers": [],
+    "reason_code": "TRUTHFULNESS_GATE_STATIC_PASS",
+    "related_checkers": [
+      "scripts/check_verifier_sdk_capsule.py"
+    ],
+    "remediation_bead": "bd-3tw7",
+    "source_paths": [
+      "sdk/verifier/Cargo.toml"
+    ],
+    "support_bead": "bd-3tw7.4",
+    "surface": "workspace_verifier_sdk_metadata",
+    "witness_family": "public verifier sdk package metadata must remain structural-only",
+    "witness_id": "workspace_verifier_sdk_package_metadata_truthfulness"
+  }
+]

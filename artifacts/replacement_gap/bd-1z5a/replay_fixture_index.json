@@ -1,7 +1,7 @@
 {
   "bead_id": "bd-1z5a",
-  "support_bead_id": "bd-1z5a.5",
-  "generated_at": "2026-03-09T19:40:00Z",
+  "support_bead_id": "bd-1z5a.10",
+  "generated_at": "2026-03-10T18:44:07Z",
   "fixtures": [
     {
       "id": "capsule_certification_report",
@@ -148,6 +148,31 @@
         "trace binding for witness lookup",
         "machine-readable source artifact references",
         "minimal operator-facing recheck steps"
+      ]
+    },
+    {
+      "id": "evidence_pack_coherence_checker",
+      "kind": "python_checker",
+      "path": "scripts/check_bd_1z5a_evidence_pack.py",
+      "inputs": [
+        "artifacts/replacement_gap/bd-1z5a/verification_evidence.json",
+        "artifacts/replacement_gap/bd-1z5a/verification_summary.md",
+        "artifacts/replacement_gap/bd-1z5a/replay_fixture_index.json",
+        "artifacts/replacement_gap/bd-1z5a/operator_e2e_summary.json",
+        "artifacts/replacement_gap/bd-1z5a/operator_e2e_summary.md",
+        "artifacts/replacement_gap/bd-1z5a/operator_e2e_bundle.json",
+        "artifacts/replacement_gap/bd-1z5a/operator_e2e_log.jsonl",
+        "artifacts/replacement_gap/bd-1z5a/fraud_proof_bundle.json"
+      ],
+      "coverage": [
+        "replacement-gap artifact paths resolve",
+        "fixture-index reference paths stay coherent",
+        "operator bundle, structured log, and fraud witness agree on trace and fraud-proof identity",
+        "operator summary markdown stays canonical",
+        "stale gap language does not return to the evidence pack"
+      ],
+      "paired_tests": [
+        "tests/test_check_bd_1z5a_evidence_pack.py"
       ]
     }
   ],
