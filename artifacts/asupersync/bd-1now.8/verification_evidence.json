@@ -1,0 +1,93 @@
+{
+  "bead_id": "bd-1now.8",
+  "title": "Selective Asupersync verification gate: comprehensive unit+e2e+logging + rch evidence",
+  "generated_at": "2026-03-10T16:55:00Z",
+  "agent": "CrimsonCrane",
+  "trace_id": "trace-bd-1now-8-verification-gate",
+  "schema_version": "1.0.0",
+  "status": "in_progress",
+  "cluster_evidence": {
+    "tokio_guardrail": {
+      "bead": "bd-1now.3.2",
+      "status": "PASS",
+      "evidence_path": "artifacts/asupersync/bd-1now.3.2/tokio_guardrail_e2e_summary.json",
+      "checks": {
+        "guardrail_checker_json": {
+          "verdict": "PASS",
+          "scanned_files": 294,
+          "unapproved_violations": 0,
+          "rules": ["tokio-attr-main", "tokio-runtime-direct", "tokio-builder-direct-current-thread", "tokio-builder-direct-multi-thread"]
+        },
+        "guardrail_unit_tests": {
+          "verdict": "PASS",
+          "tests_passed": 8,
+          "tests_failed": 0,
+          "framework": "pytest"
+        },
+        "guardrail_e2e_suite": {
+          "verdict": "PASS",
+          "stages": 3,
+          "stages_passed": 3,
+          "stages_failed": 0,
+          "stage_details": [
+            {"id": "allowed_clean_tree", "expected_exit": 0, "actual_exit": 0, "verdict": "PASS"},
+            {"id": "forbidden_tokio_main", "expected_exit": 1, "actual_exit": 1, "verdict": "PASS", "reason_code": "TKG-001"},
+            {"id": "forbidden_aliased_builder", "expected_exit": 1, "actual_exit": 1, "verdict": "PASS", "reason_code": "TKG-006"}
+          ]
+        }
+      }
+    },
+    "telemetry_e2e_orchestration": {
+      "bead": "bd-1now.4.6",
+      "status": "PASS",
+      "evidence_path": "artifacts/asupersync/bd-1now.4.6/telemetry_e2e_summary.json",
+      "stages_total": 13,
+      "stages_passed": 13,
+      "stages_failed": 0,
+      "stage_families": [
+        "compile", "unit-baseline", "normal-lifecycle", "multi-event",
+        "abnormal-exit", "backpressure", "oversized-reject", "multi-conn",
+        "worker-cleanup", "transitions", "key-format", "stale-recovery", "event-fields"
+      ]
+    },
+    "telemetry_perf_characterization": {
+      "bead": "bd-1now.4.7",
+      "status": "PASS",
+      "evidence_path": "artifacts/asupersync/bd-1now.4.7/telemetry_perf_summary.json",
+      "metrics": {
+        "steady_state_throughput_events_per_sec": 818,
+        "enqueue_p99_latency_us": 12,
+        "enqueue_max_latency_us": 12,
+        "burst_acceptance_rate_pct": 100.0,
+        "drain_shutdown_latency_ms": 110,
+        "multi_connection_throughput_events_per_sec": 817
+      },
+      "design_budgets": {
+        "queue_capacity": 256,
+        "max_event_bytes": 65536,
+        "max_active_connections": 64,
+        "enqueue_timeout_ms": 50,
+        "drain_timeout_ms": 5000
+      }
+    },
+    "telemetry_operator_guide": {
+      "bead": "bd-1now.4.8",
+      "status": "PASS",
+      "evidence_path": "docs/runbooks/telemetry_bridge_operator_guide.md",
+      "covers": [
+        "lifecycle_states", "event_codes", "reason_codes",
+        "troubleshooting_scenarios", "log_patterns"
+      ]
+    },
+    "semantic_boundary_proof_harness": {
+      "bead": "bd-1now.5.3",
+      "status": "PENDING",
+      "note": "Blocked by bd-1now.5.1 (semantic-twin inventory in progress by CalmSnow) and bd-1now.5.2 (anti-drift safeguards). Will be verified once those land."
+    }
+  },
+  "rch_validation": {
+    "status": "in_progress",
+    "note": "rch cargo test for telemetry_bridge running. Targeted test run pending completion."
+  },
+  "overall_verdict": "PARTIAL — 4/5 clusters verified PASS. Semantic boundary cluster (bd-1now.5.3) pending dependency chain completion."
+}

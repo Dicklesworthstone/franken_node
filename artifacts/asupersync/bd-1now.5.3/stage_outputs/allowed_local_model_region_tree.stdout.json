@@ -1,0 +1,39 @@
+{
+  "schema_version": "ownership-check/v2",
+  "verdict": "PASS",
+  "timestamp": "2026-03-10T17:08:13.605905+00:00",
+  "policy_contract": {
+    "path": "docs/architecture/tri_kernel_ownership_contract.md",
+    "policy_matrix_heading": "## Semantic Twin Inventory And Classification Matrix",
+    "rule_catalog_heading": "### Anti-Drift Rule Catalog"
+  },
+  "rule_catalog": [
+    {
+      "rule_id": "OWN-SEMB-001",
+      "reason_code": "SEMANTIC_BOUNDARY_CONTRACT_DRIFT",
+      "summary": "semantic-boundary contract and checker drifted out of alignment"
+    },
+    {
+      "rule_id": "OWN-SEMB-002",
+      "reason_code": "UNDOCUMENTED_SEMANTIC_FAMILY",
+      "summary": "a protected semantic-family filename appeared outside the sanctioned path set"
+    },
+    {
+      "rule_id": "OWN-SEMB-003",
+      "reason_code": "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING",
+      "summary": "franken_node imported another kernel's internal module directly"
+    }
+  ],
+  "registry_capabilities": 16,
+  "files_scanned": 1,
+  "category_counts": {
+    "contract_alignment": 0,
+    "cross_track_redefinition": 0,
+    "semantic_family_drift": 0,
+    "internal_boundary_crossing": 0
+  },
+  "active_violations": 0,
+  "waived_violations": 0,
+  "violations": [],
+  "waived": []
+}

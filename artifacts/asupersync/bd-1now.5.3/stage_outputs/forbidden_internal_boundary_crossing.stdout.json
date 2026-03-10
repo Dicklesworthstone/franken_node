@@ -1,0 +1,50 @@
+{
+  "schema_version": "ownership-check/v2",
+  "verdict": "FAIL",
+  "timestamp": "2026-03-10T17:08:14.104509+00:00",
+  "policy_contract": {
+    "path": "docs/architecture/tri_kernel_ownership_contract.md",
+    "policy_matrix_heading": "## Semantic Twin Inventory And Classification Matrix",
+    "rule_catalog_heading": "### Anti-Drift Rule Catalog"
+  },
+  "rule_catalog": [
+    {
+      "rule_id": "OWN-SEMB-001",
+      "reason_code": "SEMANTIC_BOUNDARY_CONTRACT_DRIFT",
+      "summary": "semantic-boundary contract and checker drifted out of alignment"
+    },
+    {
+      "rule_id": "OWN-SEMB-002",
+      "reason_code": "UNDOCUMENTED_SEMANTIC_FAMILY",
+      "summary": "a protected semantic-family filename appeared outside the sanctioned path set"
+    },
+    {
+      "rule_id": "OWN-SEMB-003",
+      "reason_code": "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING",
+      "summary": "franken_node imported another kernel's internal module directly"
+    }
+  ],
+  "registry_capabilities": 16,
+  "files_scanned": 1,
+  "category_counts": {
+    "contract_alignment": 0,
+    "cross_track_redefinition": 0,
+    "semantic_family_drift": 0,
+    "internal_boundary_crossing": 1
+  },
+  "active_violations": 1,
+  "waived_violations": 0,
+  "violations": [
+    {
+      "rule_id": "OWN-SEMB-003",
+      "reason_code": "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING",
+      "file": "crates/franken-node/src/control_plane/internal_boundary_probe.rs",
+      "severity": "error",
+      "detail": "forbidden internal import detected: use franken_engine::scheduler_internal::",
+      "remediation": "Import the public adapter/facade surface instead of reaching into another kernel's internal modules.",
+      "import_snippet": "use franken_engine::scheduler_internal::",
+      "waived": false
+    }
+  ],
+  "waived": []
+}

@@ -1,0 +1,132 @@
+{
+  "schema_version": "v1",
+  "generated_utc": "2026-02-20",
+  "source": "PLAN_TO_CREATE_FRANKEN_NODE.md section 10.N",
+  "governance_rules": {
+    "one_owner_per_capability": true,
+    "non_owners_limited_to": ["integration", "adoption", "policy", "release-gating"],
+    "duplicate_implementation_allowed": false,
+    "ci_enforcement_bead": "bd-2yhs"
+  },
+  "capabilities": [
+    {
+      "id": "CAP-001",
+      "domain": "Remote registry, idempotency, saga semantics",
+      "canonical_owner": "10.14",
+      "integration_tracks": ["10.15"],
+      "integration_roles": {"10.15": "policy-gated integration"}
+    },
+    {
+      "id": "CAP-002",
+      "domain": "Epoch validity + transition barriers",
+      "canonical_owner": "10.14",
+      "integration_tracks": ["10.15"],
+      "integration_roles": {"10.15": "control workflow integration"}
+    },
+    {
+      "id": "CAP-003",
+      "domain": "Evidence ledger + replay validator",
+      "canonical_owner": "10.14",
+      "integration_tracks": ["10.15"],
+      "integration_roles": {"10.15": "mandatory adoption and release gating"}
+    },
+    {
+      "id": "CAP-004",
+      "domain": "Fault harness, cancellation injection, DPOR exploration",
+      "canonical_owner": "10.14",
+      "integration_tracks": ["10.15"],
+      "integration_roles": {"10.15": "control-plane enforcement gate"}
+    },
+    {
+      "id": "CAP-005",
+      "domain": "Verifier SDK, replay capsules, claim compiler, trust scoreboard",
+      "canonical_owner": "10.17",
+      "integration_tracks": ["10.9", "10.12"],
+      "integration_roles": {"10.9": "ecosystem distribution", "10.12": "adoption"}
+    },
+    {
+      "id": "CAP-006a",
+      "domain": "Semantic oracle L1 (product layer)",
+      "canonical_owner": "10.2",
+      "integration_tracks": [],
+      "integration_roles": {}
+    },
+    {
+      "id": "CAP-006b",
+      "domain": "Semantic oracle L2 (engine boundary)",
+      "canonical_owner": "10.17",
+      "integration_tracks": [],
+      "integration_roles": {}
+    },
+    {
+      "id": "CAP-007",
+      "domain": "Authenticated control channel + anti-replay framing",
+      "canonical_owner": "10.13",
+      "integration_tracks": ["10.10", "10.15"],
+      "integration_roles": {"10.10": "adoption", "10.15": "policy rollout"}
+    },
+    {
+      "id": "CAP-008",
+      "domain": "Revocation freshness semantics",
+      "canonical_owner": "10.13",
+      "integration_tracks": ["10.4", "10.10"],
+      "integration_roles": {"10.4": "ecosystem adoption", "10.10": "policy adoption"}
+    },
+    {
+      "id": "CAP-009",
+      "domain": "Stable error taxonomy + recovery contract",
+      "canonical_owner": "10.13",
+      "integration_tracks": ["10.8", "10.10"],
+      "integration_roles": {"10.8": "operations adoption", "10.10": "product-surface adoption"}
+    },
+    {
+      "id": "CAP-010",
+      "domain": "Trust protocol vectors, golden fixtures",
+      "canonical_owner": "10.13+10.14",
+      "integration_tracks": ["10.7", "10.10"],
+      "integration_roles": {"10.7": "release gates", "10.10": "publication gates"}
+    },
+    {
+      "id": "CAP-011",
+      "domain": "Verifiable execution fabric (policy-constraint compiler, receipt commitments, proof generation/verification)",
+      "canonical_owner": "10.18",
+      "integration_tracks": ["10.17", "10.15"],
+      "integration_roles": {"10.17": "verifier/claim surfaces", "10.15": "control-plane gates"}
+    },
+    {
+      "id": "CAP-012",
+      "domain": "Adversarial trust commons federation (privacy-preserving signal sharing, global priors, incentive weighting)",
+      "canonical_owner": "10.19",
+      "integration_tracks": ["10.17", "10.15", "10.4"],
+      "integration_roles": {"10.17": "adversary graph/reputation", "10.15": "trust controls", "10.4": "trust controls"}
+    },
+    {
+      "id": "CAP-013",
+      "domain": "Dependency graph immune system (topological risk model, contagion simulator, preemptive barrier planner)",
+      "canonical_owner": "10.20",
+      "integration_tracks": ["10.17", "10.15", "10.19"],
+      "integration_roles": {"10.17": "adversary/economic scoring", "10.15": "containment", "10.19": "federated enrichment"}
+    },
+    {
+      "id": "CAP-014",
+      "domain": "Behavioral phenotype evolution tracker (longitudinal genome modeling, drift/regime-shift detection, hazard scoring)",
+      "canonical_owner": "10.21",
+      "integration_tracks": ["10.17", "10.20", "10.19", "10.2", "10.15"],
+      "integration_roles": {"10.17": "adversary/trust scoring", "10.20": "topological prioritization", "10.19": "federated temporal intelligence", "10.2": "migration-control gating", "10.15": "migration-control gating"}
+    },
+    {
+      "id": "CAP-015",
+      "domain": "Spec-first Node/Bun compatibility extraction, fixture-oracle baselining",
+      "canonical_owner": "10.2",
+      "integration_tracks": ["10.3", "10.7"],
+      "integration_roles": {"10.3": "migration automation", "10.7": "release verification"}
+    }
+  ],
+  "oracle_close_condition": {
+    "components": ["L1_product_oracle", "L2_engine_boundary_oracle", "release_policy_linkage"],
+    "L1_product_oracle_owner": "10.2",
+    "L2_engine_boundary_oracle_owner": "10.17",
+    "release_policy_linkage_owner": "10.2",
+    "all_must_be_green": true
+  }
+}

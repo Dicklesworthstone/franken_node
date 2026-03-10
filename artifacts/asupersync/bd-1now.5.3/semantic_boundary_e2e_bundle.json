@@ -1,0 +1,23 @@
+{
+  "schema_version": "semantic-boundary-e2e-bundle-v1",
+  "bead_id": "bd-1now.5.3",
+  "trace_id": "trace-bd-1now-5-3-semantic-boundary-e2e",
+  "generated_at": "2026-03-10T17:08:14.203106+00:00",
+  "summary_json": "artifacts/asupersync/bd-1now.5.3/semantic_boundary_e2e_summary.json",
+  "log_jsonl": "artifacts/asupersync/bd-1now.5.3/semantic_boundary_e2e_log.jsonl",
+  "stage_results_jsonl": "artifacts/asupersync/bd-1now.5.3/semantic_boundary_stage_results.jsonl",
+  "artifact_dir": "artifacts/asupersync/bd-1now.5.3",
+  "scripts": [
+    "tests/e2e/semantic_boundary_policy_suite.sh",
+    "scripts/check_ownership_violations.py"
+  ],
+  "required_rule_ids": [
+    "OWN-SEMB-002",
+    "OWN-SEMB-003"
+  ],
+  "required_reason_codes": [
+    "UNDOCUMENTED_SEMANTIC_FAMILY",
+    "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING"
+  ],
+  "verdict": "PASS"
+}

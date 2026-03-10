@@ -1,0 +1,170 @@
+{
+  "schema_version": "semantic-boundary-e2e-v1",
+  "bead_id": "bd-1now.5.3",
+  "trace_id": "trace-bd-1now-5-3-semantic-boundary-e2e",
+  "generated_at": "2026-03-10T17:08:14.203106+00:00",
+  "case_count": 4,
+  "pass_count": 4,
+  "fail_count": 0,
+  "required_case_ids": [
+    "allowed_local_model_region_tree",
+    "allowed_canonical_alignment_cancellation",
+    "forbidden_duplicate_family_runtime_cancellation",
+    "forbidden_internal_boundary_crossing"
+  ],
+  "required_rule_ids": [
+    "OWN-SEMB-002",
+    "OWN-SEMB-003"
+  ],
+  "required_reason_codes": [
+    "UNDOCUMENTED_SEMANTIC_FAMILY",
+    "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING"
+  ],
+  "observed_rule_ids": [
+    "OWN-SEMB-002",
+    "OWN-SEMB-003"
+  ],
+  "observed_reason_codes": [
+    "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING",
+    "UNDOCUMENTED_SEMANTIC_FAMILY"
+  ],
+  "missing_case_ids": [],
+  "missing_rule_ids": [],
+  "missing_reason_codes": [],
+  "log_jsonl": "artifacts/asupersync/bd-1now.5.3/semantic_boundary_e2e_log.jsonl",
+  "stage_results_jsonl": "artifacts/asupersync/bd-1now.5.3/semantic_boundary_stage_results.jsonl",
+  "cases": [
+    {
+      "case_id": "allowed_local_model_region_tree",
+      "category": "allow",
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "expected_verdict": "PASS",
+      "actual_verdict": "PASS",
+      "expected_rule_id": null,
+      "actual_rule_ids": [],
+      "expected_reason_code": null,
+      "actual_reason_codes": [],
+      "status": "pass",
+      "stdout_path": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/stage_outputs/allowed_local_model_region_tree.stdout.json",
+      "stderr_path": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/stage_outputs/allowed_local_model_region_tree.stderr.log",
+      "workspace": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/workspaces/trace-bd-1now-5-3-semantic-boundary-e2e/allowed_local_model_region_tree",
+      "schema_version": "ownership-check/v2",
+      "category_counts": {
+        "contract_alignment": 0,
+        "cross_track_redefinition": 0,
+        "semantic_family_drift": 0,
+        "internal_boundary_crossing": 0
+      },
+      "violations": []
+    },
+    {
+      "case_id": "allowed_canonical_alignment_cancellation",
+      "category": "allow",
+      "expected_exit": 0,
+      "actual_exit": 0,
+      "expected_verdict": "PASS",
+      "actual_verdict": "PASS",
+      "expected_rule_id": null,
+      "actual_rule_ids": [],
+      "expected_reason_code": null,
+      "actual_reason_codes": [],
+      "status": "pass",
+      "stdout_path": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/stage_outputs/allowed_canonical_alignment_cancellation.stdout.json",
+      "stderr_path": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/stage_outputs/allowed_canonical_alignment_cancellation.stderr.log",
+      "workspace": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/workspaces/trace-bd-1now-5-3-semantic-boundary-e2e/allowed_canonical_alignment_cancellation",
+      "schema_version": "ownership-check/v2",
+      "category_counts": {
+        "contract_alignment": 0,
+        "cross_track_redefinition": 0,
+        "semantic_family_drift": 0,
+        "internal_boundary_crossing": 0
+      },
+      "violations": []
+    },
+    {
+      "case_id": "forbidden_duplicate_family_runtime_cancellation",
+      "category": "deny",
+      "expected_exit": 1,
+      "actual_exit": 1,
+      "expected_verdict": "FAIL",
+      "actual_verdict": "FAIL",
+      "expected_rule_id": "OWN-SEMB-002",
+      "actual_rule_ids": [
+        "OWN-SEMB-002"
+      ],
+      "expected_reason_code": "UNDOCUMENTED_SEMANTIC_FAMILY",
+      "actual_reason_codes": [
+        "UNDOCUMENTED_SEMANTIC_FAMILY"
+      ],
+      "status": "pass",
+      "stdout_path": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/stage_outputs/forbidden_duplicate_family_runtime_cancellation.stdout.json",
+      "stderr_path": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/stage_outputs/forbidden_duplicate_family_runtime_cancellation.stderr.log",
+      "workspace": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/workspaces/trace-bd-1now-5-3-semantic-boundary-e2e/forbidden_duplicate_family_runtime_cancellation",
+      "schema_version": "ownership-check/v2",
+      "category_counts": {
+        "contract_alignment": 0,
+        "cross_track_redefinition": 0,
+        "semantic_family_drift": 1,
+        "internal_boundary_crossing": 0
+      },
+      "violations": [
+        {
+          "rule_id": "OWN-SEMB-002",
+          "reason_code": "UNDOCUMENTED_SEMANTIC_FAMILY",
+          "file": "crates/franken-node/src/runtime/cancellation_protocol.rs",
+          "severity": "error",
+          "detail": "cancellation_protocol.rs belongs to protected semantic family cancellation-protocol but crates/franken-node/src/runtime/cancellation_protocol.rs is not in the sanctioned path set",
+          "remediation": "Reuse an existing sanctioned surface or update the semantic-twin matrix and anti-drift checker in the same change.",
+          "family_id": "cancellation-protocol",
+          "policy_outcome": "Wrap canonical ownership",
+          "documented_paths": [
+            "crates/franken-node/src/connector/cancellation_protocol.rs",
+            "crates/franken-node/src/control_plane/cancellation_protocol.rs"
+          ],
+          "waived": false
+        }
+      ]
+    },
+    {
+      "case_id": "forbidden_internal_boundary_crossing",
+      "category": "deny",
+      "expected_exit": 1,
+      "actual_exit": 1,
+      "expected_verdict": "FAIL",
+      "actual_verdict": "FAIL",
+      "expected_rule_id": "OWN-SEMB-003",
+      "actual_rule_ids": [
+        "OWN-SEMB-003"
+      ],
+      "expected_reason_code": "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING",
+      "actual_reason_codes": [
+        "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING"
+      ],
+      "status": "pass",
+      "stdout_path": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/stage_outputs/forbidden_internal_boundary_crossing.stdout.json",
+      "stderr_path": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/stage_outputs/forbidden_internal_boundary_crossing.stderr.log",
+      "workspace": "/data/projects/franken_node/artifacts/asupersync/bd-1now.5.3/workspaces/trace-bd-1now-5-3-semantic-boundary-e2e/forbidden_internal_boundary_crossing",
+      "schema_version": "ownership-check/v2",
+      "category_counts": {
+        "contract_alignment": 0,
+        "cross_track_redefinition": 0,
+        "semantic_family_drift": 0,
+        "internal_boundary_crossing": 1
+      },
+      "violations": [
+        {
+          "rule_id": "OWN-SEMB-003",
+          "reason_code": "FORBIDDEN_INTERNAL_BOUNDARY_CROSSING",
+          "file": "crates/franken-node/src/control_plane/internal_boundary_probe.rs",
+          "severity": "error",
+          "detail": "forbidden internal import detected: use franken_engine::scheduler_internal::",
+          "remediation": "Import the public adapter/facade surface instead of reaching into another kernel's internal modules.",
+          "import_snippet": "use franken_engine::scheduler_internal::",
+          "waived": false
+        }
+      ]
+    }
+  ],
+  "verdict": "PASS"
+}
