@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Universal Verifier SDK -- public facade module.
 //!
 //! This module re-exports the core verifier SDK types and operations for

@@ -13,6 +13,9 @@
 
 use std::collections::BTreeMap;
 
+use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
+
 use super::{
     ERR_CAPSULE_ACCESS_DENIED, ERR_CAPSULE_REPLAY_DIVERGED, ERR_CAPSULE_SCHEMA_MISMATCH,
     ERR_CAPSULE_SIGNATURE_INVALID, ERR_CAPSULE_VERDICT_MISMATCH, SDK_VERSION,
@@ -121,30 +124,78 @@ impl std::fmt::Display for CapsuleError {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Compute a deterministic hash (XOR-based, hex-encoded).
-///
-/// INV-CAPSULE-VERDICT-REPRODUCIBLE: same inputs always yield same output.
-fn deterministic_hash(data: &str) -> String {
-    let mut hash = [0u8; 32];
-    for (i, b) in data.bytes().enumerate() {
-        hash[i % 32] ^= b;
-    }
-    // Manual hex encoding without external dependency
-    let hex_chars: Vec<String> = hash.iter().map(|b| format!("{b:02x}")).collect();
-    hex_chars.join("")
+/// Constant-time string comparison to prevent timing side-channels on
+/// signature/hash verification.
+fn ct_eq(a: &str, b: &str) -> bool {
+    ct_eq_bytes(a.as_bytes(), b.as_bytes())
 }
 
-/// Compute the signing payload for a capsule.
-fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
-    let mut parts = Vec::new();
-    parts.push(capsule.manifest.capsule_id.clone());
-    parts.push(capsule.manifest.schema_version.clone());
-    parts.push(capsule.manifest.expected_output_hash.clone());
-    parts.push(capsule.payload.clone());
-    for (k, v) in &capsule.inputs {
-        parts.push(format!("{k}={v}"));
+/// Constant-time byte slice comparison.
+fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
     }
-    parts.join("|")
+    a.ct_eq(b).into()
+}
+
+/// Compute a deterministic hash (SHA-256, hex-encoded) with domain separator.
+///
+/// External verifiers may use this for ad-hoc hashing of capsule-related data.
+///
+/// INV-CAPSULE-VERDICT-REPRODUCIBLE: same inputs always yield same output.
+pub fn deterministic_hash(data: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"verifier_sdk_capsule_v1:");
+    hasher.update(data.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// Compute the deterministic replay hash for a capsule's payload and inputs.
+///
+/// Uses length-prefixed encoding to prevent payload-input delimiter collision:
+/// without length-prefixing, a payload containing "|key=value" would hash
+/// identically to a shorter payload with that key-value pair in inputs.
+fn compute_replay_hash(payload: &str, inputs: &BTreeMap<String, String>) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"verifier_sdk_capsule_replay_v1:");
+    hasher.update((payload.len() as u64).to_le_bytes());
+    hasher.update(payload.as_bytes());
+    hasher.update((inputs.len() as u64).to_le_bytes());
+    for (k, v) in inputs {
+        hasher.update((k.len() as u64).to_le_bytes());
+        hasher.update(k.as_bytes());
+        hasher.update((v.len() as u64).to_le_bytes());
+        hasher.update(v.as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
+/// Compute the signing payload for a capsule using length-prefixed SHA-256.
+///
+/// Uses length-prefixed encoding to prevent delimiter-collision ambiguity
+/// across manifest fields, payload, and inputs.
+///
+/// INV-CAPSULE-VERDICT-REPRODUCIBLE: deterministic for same capsule contents.
+fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"verifier_sdk_capsule_signing_v1:");
+    for field in [
+        capsule.manifest.capsule_id.as_str(),
+        capsule.manifest.schema_version.as_str(),
+        capsule.manifest.expected_output_hash.as_str(),
+        capsule.payload.as_str(),
+    ] {
+        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(field.as_bytes());
+    }
+    hasher.update((capsule.inputs.len() as u64).to_le_bytes());
+    for (k, v) in &capsule.inputs {
+        hasher.update((k.len() as u64).to_le_bytes());
+        hasher.update(k.as_bytes());
+        hasher.update((v.len() as u64).to_le_bytes());
+        hasher.update(v.as_bytes());
+    }
+    hex::encode(hasher.finalize())
 }
 
 // ---------------------------------------------------------------------------
@@ -188,17 +239,18 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), CapsuleError>
 
 /// Sign a capsule by computing its signature.
 ///
-/// The signature covers the manifest, payload, and inputs.
+/// The signature covers the manifest, payload, and inputs via
+/// length-prefixed SHA-256 hashing.
 pub fn sign_capsule(capsule: &mut ReplayCapsule) {
-    let payload = compute_signing_payload(capsule);
-    capsule.signature = deterministic_hash(&payload);
+    capsule.signature = compute_signing_payload(capsule);
 }
 
 /// Verify a capsule's signature against the computed signing payload.
+///
+/// Uses constant-time comparison to prevent timing side-channels.
 pub fn verify_signature(capsule: &ReplayCapsule) -> Result<(), CapsuleError> {
-    let payload = compute_signing_payload(capsule);
-    let expected = deterministic_hash(&payload);
-    if capsule.signature != expected {
+    let expected = compute_signing_payload(capsule);
+    if !ct_eq(&capsule.signature, &expected) {
         return Err(CapsuleError::SignatureInvalid(format!(
             "expected={expected}, actual={}",
             capsule.signature
@@ -226,12 +278,8 @@ pub fn replay(
         return Err(CapsuleError::EmptyPayload("payload is empty".into()));
     }
 
-    // Step 4: Compute actual output hash
-    let mut replay_input = capsule.payload.clone();
-    for (k, v) in &capsule.inputs {
-        replay_input.push_str(&format!("|{k}={v}"));
-    }
-    let actual_hash = deterministic_hash(&replay_input);
+    // Step 4: Compute actual output hash using length-prefixed encoding
+    let actual_hash = compute_replay_hash(&capsule.payload, &capsule.inputs);
 
     // Step 5: Compare
     let verdict = if actual_hash == capsule.manifest.expected_output_hash {
@@ -270,11 +318,7 @@ pub fn build_reference_capsule() -> ReplayCapsule {
     let payload = "reference_payload_data".to_string();
 
     // Compute expected output hash exactly as replay does
-    let mut replay_input = payload.clone();
-    for (k, v) in &inputs {
-        replay_input.push_str(&format!("|{k}={v}"));
-    }
-    let expected_hash = deterministic_hash(&replay_input);
+    let expected_hash = compute_replay_hash(&payload, &inputs);
 
     let manifest = CapsuleManifest {
         schema_version: SDK_VERSION.to_string(),
@@ -469,5 +513,114 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);
+    }
+
+    // -- Security regression tests ------------------------------------------
+
+    #[test]
+    fn test_hash_uses_sha256_not_xor() {
+        // Verify the hash is SHA-256 (collision-resistant), not XOR-based.
+        // XOR hash: "ab" and "ba" could collide. SHA-256 will not.
+        let h1 = deterministic_hash("ab");
+        let h2 = deterministic_hash("ba");
+        assert_ne!(h1, h2, "hash must distinguish permuted inputs (not XOR)");
+
+        // XOR hash maps all single-char inputs of same byte to same slot,
+        // making strings that differ only in repeated chars collide.
+        let h3 = deterministic_hash("aaa");
+        let h4 = deterministic_hash("a");
+        assert_ne!(h3, h4, "hash must distinguish different-length same-char inputs");
+    }
+
+    #[test]
+    fn test_signing_payload_delimiter_collision_resistance() {
+        // Pipe-delimited "A|B" signing would let an attacker craft a capsule_id
+        // containing "|" that produces the same signing payload as a different
+        // capsule. Length-prefixed encoding prevents this.
+        let mut capsule_a = build_reference_capsule();
+        capsule_a.manifest.capsule_id = "id-a|vsdk-v1.0".to_string();
+        capsule_a.manifest.schema_version = SDK_VERSION.to_string();
+        sign_capsule(&mut capsule_a);
+
+        let mut capsule_b = build_reference_capsule();
+        capsule_b.manifest.capsule_id = "id-a".to_string();
+        capsule_b.manifest.schema_version = SDK_VERSION.to_string();
+        sign_capsule(&mut capsule_b);
+
+        assert_ne!(
+            capsule_a.signature, capsule_b.signature,
+            "signing must resist delimiter collision in capsule_id"
+        );
+    }
+
+    #[test]
+    fn test_replay_hash_payload_input_collision_resistance() {
+        // Without length-prefixed encoding, a payload "data|key=val" with no
+        // inputs would hash identically to payload "data" with input key=val.
+        let inputs_empty = BTreeMap::new();
+        let h1 = compute_replay_hash("data|artifact_a=content_of_a", &inputs_empty);
+
+        let mut inputs_with = BTreeMap::new();
+        inputs_with.insert("artifact_a".to_string(), "content_of_a".to_string());
+        let h2 = compute_replay_hash("data", &inputs_with);
+
+        assert_ne!(
+            h1, h2,
+            "replay hash must distinguish payload-embedded vs actual inputs"
+        );
+    }
+
+    #[test]
+    fn test_constant_time_comparison_used() {
+        // Verify that ct_eq works correctly (same and different strings).
+        assert!(ct_eq("hello", "hello"));
+        assert!(!ct_eq("hello", "hellx"));
+        assert!(!ct_eq("hello", "hell"));
+        assert!(ct_eq("", ""));
+        assert!(ct_eq_bytes(b"test", b"test"));
+        assert!(!ct_eq_bytes(b"test", b"tesx"));
+    }
+
+    #[test]
+    fn test_forged_same_length_signature_rejected() {
+        // Adversarial: forged signature with same length as real one
+        let capsule = build_reference_capsule();
+        let mut forged = capsule.clone();
+        // Create a 64-char hex string that differs from the real signature
+        forged.signature = "a".repeat(64);
+        assert_ne!(forged.signature, capsule.signature);
+        match verify_signature(&forged) {
+            Err(CapsuleError::SignatureInvalid(_)) => {}
+            other => panic!("expected SignatureInvalid for forged sig, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_payload_swap_under_reused_signature() {
+        // Adversarial: swap payload but keep old signature
+        let capsule = build_reference_capsule();
+        let mut swapped = capsule.clone();
+        swapped.payload = "completely_different_payload".to_string();
+        // Don't re-sign — attacker reuses old signature
+        match replay(&swapped, "v1") {
+            Err(CapsuleError::SignatureInvalid(_)) => {}
+            other => panic!("expected SignatureInvalid for swapped payload, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_cross_claim_replay_rejected() {
+        // Adversarial: take signature from capsule A, apply to capsule B
+        let capsule_a = build_reference_capsule();
+        let mut capsule_b = build_reference_capsule();
+        capsule_b.manifest.capsule_id = "capsule-different-001".to_string();
+        capsule_b.manifest.expected_output_hash =
+            compute_replay_hash(&capsule_b.payload, &capsule_b.inputs);
+        // Reuse capsule_a's signature
+        capsule_b.signature = capsule_a.signature.clone();
+        match verify_signature(&capsule_b) {
+            Err(CapsuleError::SignatureInvalid(_)) => {}
+            other => panic!("expected SignatureInvalid for cross-claim replay, got {other:?}"),
+        }
     }
 }

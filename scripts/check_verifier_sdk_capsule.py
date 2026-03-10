@@ -31,8 +31,8 @@ SECTION = "10.17"
 IMPL_FILE = ROOT / "crates/franken-node/src/connector/universal_verifier_sdk.rs"
 MOD_FILE = ROOT / "crates/franken-node/src/connector/mod.rs"
 SPEC_FILE = ROOT / "docs/specs/replay_capsule_format.md"
-SDK_MOD_FILE = ROOT / "sdk/verifier/mod.rs"
-SDK_CAPSULE_FILE = ROOT / "sdk/verifier/capsule.rs"
+SDK_MOD_FILE = ROOT / "sdk/verifier/src/lib.rs"
+SDK_CAPSULE_FILE = ROOT / "sdk/verifier/src/capsule.rs"
 CONFORMANCE_TEST = ROOT / "tests/conformance/verifier_sdk_capsule_replay.rs"
 UNIT_TEST_FILE = ROOT / "tests/test_check_verifier_sdk_capsule.py"
 REPORT_FILE = ROOT / "artifacts/10.17/verifier_sdk_certification_report.json"
@@ -151,7 +151,7 @@ def run_all_checks() -> list[dict]:
 
     checks.append(_check("Spec file exists", SPEC_FILE.exists(), str(SPEC_FILE)))
     checks.append(_check("Implementation file exists", IMPL_FILE.exists(), str(IMPL_FILE)))
-    checks.append(_check("SDK mod.rs exists", SDK_MOD_FILE.exists(), str(SDK_MOD_FILE)))
+    checks.append(_check("SDK lib.rs exists", SDK_MOD_FILE.exists(), str(SDK_MOD_FILE)))
     checks.append(_check("SDK capsule.rs exists", SDK_CAPSULE_FILE.exists(), str(SDK_CAPSULE_FILE)))
     checks.append(_check(
         "Wired into connector/mod.rs",

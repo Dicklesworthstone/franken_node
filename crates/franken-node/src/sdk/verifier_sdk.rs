@@ -630,9 +630,9 @@ impl VerifierSdk {
             VerifyVerdict::Fail(failures)
         };
 
-        let chain_binding_parts: Vec<String> =
-            reports.iter().map(|r| r.binding_hash.clone()).collect();
-        let chain_binding = deterministic_hash(&chain_binding_parts.join("|"));
+        let chain_binding_refs: Vec<&str> =
+            reports.iter().map(|r| r.binding_hash.as_str()).collect();
+        let chain_binding = deterministic_hash_fields(&chain_binding_refs);
 
         Ok(VerificationReport {
             request_id: format!("vchn-{}", &deterministic_hash(&chain_binding)[..24]),

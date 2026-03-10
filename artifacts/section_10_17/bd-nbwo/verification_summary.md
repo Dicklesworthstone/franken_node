@@ -17,8 +17,9 @@ and verification APIs are stable and versioned.
 | Replay capsule spec        | `docs/specs/replay_capsule_format.md`                              | PASS   |
 | Bead contract              | `docs/specs/section_10_17/bd-nbwo_contract.md`                     | PASS   |
 | Implementation (Rust)      | `crates/franken-node/src/connector/universal_verifier_sdk.rs`      | PASS   |
-| SDK facade (mod.rs)        | `sdk/verifier/mod.rs`                                              | PASS   |
-| SDK facade (capsule.rs)    | `sdk/verifier/capsule.rs`                                          | PASS   |
+| SDK crate Cargo.toml       | `sdk/verifier/Cargo.toml`                                          | PASS   |
+| SDK crate (lib.rs)         | `sdk/verifier/src/lib.rs`                                          | PASS   |
+| SDK crate (capsule.rs)     | `sdk/verifier/src/capsule.rs`                                      | PASS   |
 | Conformance test           | `tests/conformance/verifier_sdk_capsule_replay.rs`                 | PASS   |
 | Gate script                | `scripts/check_verifier_sdk_capsule.py`                            | PASS   |
 | Unit test suite            | `tests/test_check_verifier_sdk_capsule.py`                         | PASS   |
@@ -85,12 +86,28 @@ Public-facing: ERR_CAPSULE_SIGNATURE_INVALID, ERR_CAPSULE_SCHEMA_MISMATCH,
 ERR_CAPSULE_REPLAY_DIVERGED, ERR_CAPSULE_VERDICT_MISMATCH,
 ERR_SDK_VERSION_UNSUPPORTED, ERR_CAPSULE_ACCESS_DENIED.
 
+## Security Hardening (CrimsonCrane, 2026-03-10)
+
+The SDK facade crate was hardened to eliminate three security bugs:
+
+| Bug | Before | After |
+|-----|--------|-------|
+| Weak hash | XOR-based (collisions trivial) | SHA-256 with domain separator |
+| Delimiter collision | Pipe-delimited field concatenation | Length-prefixed encoding |
+| Timing attack | `!=` string comparison | `ct_eq` via `subtle::ConstantTimeEq` |
+
+The SDK facade is now a proper Cargo crate (`frankenengine-verifier-sdk`) added to the
+workspace, with `sha2`, `hex`, and `subtle` dependencies. 6 adversarial regression tests
+cover: XOR collision resistance, delimiter collision, payload-input confusion, forged
+same-length signatures, payload swap under reused signature, and cross-claim replay.
+
 ## Verification
 
 - Check script: `scripts/check_verifier_sdk_capsule.py` -- 70/70 checks PASS
 - Self-test: 15/15 checks PASS
 - Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 13/13 tests PASS
-- Rust unit tests: 52 inline tests in implementation, 30 in SDK facade
+- Rust unit tests: 54 inline tests in implementation, 37 in SDK facade crate
+- Clippy: 0 warnings with `-D warnings`
 - All types are Send + Sync, serde-serializable, BTreeMap for determinism
 
 ## Relationship to Existing Code

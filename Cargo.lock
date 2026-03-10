@@ -441,6 +441,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "frankenengine-verifier-sdk"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "sha2",
+ "subtle",
+]
+
+[[package]]
 name = "generic-array"
 version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"

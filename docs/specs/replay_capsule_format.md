@@ -144,5 +144,5 @@ Multi-step verification workflows are modeled as `VerificationSession`:
 ## Implementation
 
 - Module: `crates/franken-node/src/connector/universal_verifier_sdk.rs`
-- SDK facade: `sdk/verifier/mod.rs` and `sdk/verifier/capsule.rs`
+- SDK crate: `sdk/verifier/` (`frankenengine-verifier-sdk`)
 - Conformance test: `tests/conformance/verifier_sdk_capsule_replay.rs`

@@ -1,6 +1,7 @@
 [workspace]
 members = [
   "crates/franken-node",
+  "sdk/verifier",
 ]
 resolver = "2"
 

@@ -19,14 +19,14 @@
       "detail": "/data/projects/franken_node/crates/franken-node/src/connector/universal_verifier_sdk.rs"
     },
     {
-      "check": "SDK mod.rs exists",
+      "check": "SDK lib.rs exists",
       "passed": true,
-      "detail": "/data/projects/franken_node/sdk/verifier/mod.rs"
+      "detail": "/data/projects/franken_node/sdk/verifier/src/lib.rs"
     },
     {
       "check": "SDK capsule.rs exists",
       "passed": true,
-      "detail": "/data/projects/franken_node/sdk/verifier/capsule.rs"
+      "detail": "/data/projects/franken_node/sdk/verifier/src/capsule.rs"
     },
     {
       "check": "Wired into connector/mod.rs",
@@ -316,12 +316,12 @@
     {
       "check": "Rust unit tests >= 20",
       "passed": true,
-      "detail": "found 52"
+      "detail": "found 54"
     },
     {
       "check": "SDK facade tests >= 8",
       "passed": true,
-      "detail": "found 30"
+      "detail": "found 37"
     },
     {
       "check": "ReplayCapsule has signature field",
@@ -409,5 +409,5 @@
     }
   ],
   "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 70/70 passing\nVerdict: PASS",
-  "timestamp": "2026-02-22T05:33:58.940748+00:00"
+  "timestamp": "2026-03-10T18:10:33.269557+00:00"
 }

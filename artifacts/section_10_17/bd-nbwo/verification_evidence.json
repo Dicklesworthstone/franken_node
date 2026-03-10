@@ -8,8 +8,9 @@
     "docs/specs/replay_capsule_format.md",
     "docs/specs/section_10_17/bd-nbwo_contract.md",
     "crates/franken-node/src/connector/universal_verifier_sdk.rs",
-    "sdk/verifier/mod.rs",
-    "sdk/verifier/capsule.rs",
+    "sdk/verifier/Cargo.toml",
+    "sdk/verifier/src/lib.rs",
+    "sdk/verifier/src/capsule.rs",
     "tests/conformance/verifier_sdk_capsule_replay.rs",
     "scripts/check_verifier_sdk_capsule.py",
     "tests/test_check_verifier_sdk_capsule.py",
@@ -91,15 +92,23 @@
     ]
   },
   "rust_tests": {
-    "universal_verifier_sdk": 52,
-    "sdk_verifier_mod": 10,
-    "sdk_verifier_capsule": 20
+    "universal_verifier_sdk": 54,
+    "sdk_verifier_facade": 37
+  },
+  "security_hardening": {
+    "xor_hash_replaced_with_sha256": true,
+    "pipe_delimited_replaced_with_length_prefixed": true,
+    "timing_attack_fixed_with_ct_eq": true,
+    "domain_separators_added": true,
+    "adversarial_regression_tests": 6
   },
   "notes": [
     "The universal_verifier_sdk module (connector) provides the internal implementation.",
-    "The sdk/verifier/ facade provides the public-facing SDK surface.",
+    "The sdk/verifier/ crate provides the public-facing SDK surface as a proper Cargo crate.",
     "External verifiers can replay signed capsules without privileged access.",
     "Schema version vsdk-v1.0 is stable and versioned.",
-    "52 inline Rust tests in the implementation, 30 in the SDK facade."
+    "54 inline Rust tests in the implementation, 37 in the SDK facade crate.",
+    "SDK facade hardened: XOR hash -> SHA-256, pipe-delimited -> length-prefixed, != -> ct_eq.",
+    "6 adversarial regression tests: collision resistance, cross-claim replay, payload swap, forged sig."
   ]
 }
