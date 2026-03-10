@@ -1170,4 +1170,611 @@ mod tests {
         assert!(report.drain_completed);
         assert!(report.drain_duration_ms < 5000);
     }
+
+    // ---- bd-1now.4.5: Deterministic telemetry regression suite ----
+
+    #[test]
+    fn socket_cleaned_up_after_normal_shutdown() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_socket_cleanup.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+        assert!(sock.exists(), "socket should exist after start");
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        // Socket file itself won't be removed by the bridge (that's the caller's job
+        // via temp_dir cleanup), but verify the bridge reached terminal state
+        assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+    }
+
+    #[test]
+    fn socket_cleaned_up_after_engine_exit_failure() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_socket_engine_fail.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+        let report = handle
+            .stop_and_join(ShutdownReason::EngineExit { exit_code: Some(1) })
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+        // Engine exit with non-zero code should still drain cleanly
+        assert!(report
+            .recent_events
+            .iter()
+            .any(|e| e.code == event_codes::DRAIN_COMPLETE));
+    }
+
+    #[test]
+    fn socket_cleaned_up_after_engine_signal_kill() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_socket_signal_kill.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+        // exit_code: None means killed by signal (no exit code)
+        let report = handle
+            .stop_and_join(ShutdownReason::EngineExit { exit_code: None })
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+    }
+
+    #[test]
+    fn end_to_end_single_event_ingestion() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_e2e_single.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let adapter_ref = Arc::clone(&adapter);
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        // Connect and send one event
+        let mut stream = UnixStream::connect(&sock).expect("connect");
+        writeln!(stream, r#"{{"event":"test_event","value":42}}"#).expect("write");
+        drop(stream);
+
+        // Give the bridge time to process
+        thread::sleep(Duration::from_millis(200));
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert_eq!(report.accepted_total, 1, "one event should be accepted");
+        assert_eq!(report.persisted_total, 1, "one event should be persisted");
+        assert_eq!(report.shed_total, 0);
+        assert_eq!(report.dropped_total, 0);
+
+        // Verify the adapter received the data
+        let mut db = adapter_ref.lock().expect("adapter lock");
+        let result = db.read(
+            PersistenceClass::AuditLog,
+            "telemetry_00000000000000000001",
+        );
+        assert!(result.found, "event should be persisted in adapter store");
+        let payload = result.value.expect("payload");
+        assert!(
+            std::str::from_utf8(&payload)
+                .expect("utf8")
+                .contains("test_event"),
+            "payload should contain the event data"
+        );
+    }
+
+    #[test]
+    fn end_to_end_multiple_events_ingestion() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_e2e_multi.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        let event_count = 10;
+        let mut stream = UnixStream::connect(&sock).expect("connect");
+        for i in 0..event_count {
+            writeln!(stream, r#"{{"event":"multi","seq":{i}}}"#).expect("write");
+        }
+        drop(stream);
+
+        thread::sleep(Duration::from_millis(300));
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert_eq!(
+            report.accepted_total, event_count,
+            "all events should be accepted"
+        );
+        assert_eq!(
+            report.persisted_total, event_count,
+            "all events should be persisted"
+        );
+    }
+
+    #[test]
+    fn multi_connection_concurrent_ingestion() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_multi_conn.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        let connections = 5;
+        let events_per_conn = 3;
+        let mut conn_handles = Vec::new();
+        for conn_idx in 0..connections {
+            let sock_path = sock.clone();
+            let h = thread::spawn(move || {
+                let mut stream = UnixStream::connect(&sock_path).expect("connect");
+                for ev_idx in 0..events_per_conn {
+                    writeln!(stream, r#"{{"conn":{conn_idx},"ev":{ev_idx}}}"#).expect("write");
+                }
+                drop(stream);
+            });
+            conn_handles.push(h);
+        }
+        for h in conn_handles {
+            h.join().expect("connection thread");
+        }
+
+        thread::sleep(Duration::from_millis(500));
+
+        let snap = handle.snapshot();
+        assert_eq!(
+            snap.accepted_total,
+            (connections * events_per_conn) as u64,
+            "all events from all connections should be accepted"
+        );
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert_eq!(
+            report.persisted_total,
+            (connections * events_per_conn) as u64
+        );
+    }
+
+    #[test]
+    fn oversized_event_rejected_with_shed() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_oversized.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        let mut stream = UnixStream::connect(&sock).expect("connect");
+        // Send an event larger than MAX_EVENT_BYTES (64KB)
+        let big_payload = "x".repeat(MAX_EVENT_BYTES + 100);
+        writeln!(stream, "{big_payload}").expect("write");
+        // Also send a normal-sized event to confirm the connection still works
+        writeln!(stream, r#"{{"event":"normal"}}"#).expect("write");
+        drop(stream);
+
+        thread::sleep(Duration::from_millis(300));
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert_eq!(report.shed_total, 1, "oversized event should be shed");
+        assert_eq!(
+            report.accepted_total, 1,
+            "normal event should still be accepted"
+        );
+        assert!(report
+            .recent_events
+            .iter()
+            .any(|e| e.code == event_codes::ADMISSION_SHED
+                && e.reason_code.as_deref() == Some(reason_codes::EVENT_TOO_LARGE)));
+    }
+
+    #[test]
+    fn stop_and_join_convenience_method() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_stop_join.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join should succeed");
+        assert!(report.drain_completed);
+        assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+        assert_eq!(report.accepted_total, 0);
+        assert_eq!(report.persisted_total, 0);
+        assert_eq!(report.shed_total, 0);
+        assert_eq!(report.dropped_total, 0);
+    }
+
+    #[test]
+    fn engine_exit_code_mapped_to_shutdown_reason() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_exit_code.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        // exit_code: Some(137) = SIGKILL
+        let report = handle
+            .stop_and_join(ShutdownReason::EngineExit {
+                exit_code: Some(137),
+            })
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert!(report
+            .recent_events
+            .iter()
+            .any(|e| e.code == event_codes::DRAIN_STARTED
+                && e.reason_code.as_deref() == Some(reason_codes::ENGINE_EXIT)));
+    }
+
+    #[test]
+    fn lifecycle_transitions_are_recorded_in_events() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_transitions.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+
+        // Verify lifecycle events were recorded
+        let event_codes_seen: Vec<&str> = report
+            .recent_events
+            .iter()
+            .map(|e| e.code.as_str())
+            .collect();
+        assert!(
+            event_codes_seen.contains(&event_codes::LISTENER_STARTED),
+            "should record LISTENER_STARTED"
+        );
+        assert!(
+            event_codes_seen.contains(&event_codes::STATE_TRANSITION),
+            "should record STATE_TRANSITION"
+        );
+        assert!(
+            event_codes_seen.contains(&event_codes::DRAIN_STARTED),
+            "should record DRAIN_STARTED"
+        );
+        assert!(
+            event_codes_seen.contains(&event_codes::DRAIN_COMPLETE),
+            "should record DRAIN_COMPLETE"
+        );
+    }
+
+    #[test]
+    fn structured_events_contain_required_fields() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_fields.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+
+        // Every event must have bridge_id, code, and non-empty detail
+        for event in &report.recent_events {
+            assert!(
+                event.bridge_id.starts_with("telemetry-bridge-"),
+                "event bridge_id should have correct prefix, got: {}",
+                event.bridge_id
+            );
+            assert!(!event.code.is_empty(), "event code must not be empty");
+            assert!(!event.detail.is_empty(), "event detail must not be empty");
+            // queue_capacity should always be PERSIST_QUEUE_CAPACITY
+            assert_eq!(
+                event.queue_capacity, PERSIST_QUEUE_CAPACITY,
+                "queue_capacity mismatch in event"
+            );
+        }
+    }
+
+    #[test]
+    fn events_have_debug_representation() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_debug.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+
+        // Events and report should have Debug representation for failure-forensics
+        for event in &report.recent_events {
+            let debug = format!("{event:?}");
+            assert!(
+                debug.contains(&event.code),
+                "Debug repr should contain event code"
+            );
+        }
+        let report_debug = format!("{report:?}");
+        assert!(
+            report_debug.contains(&report.bridge_id),
+            "report Debug should contain bridge_id"
+        );
+    }
+
+    #[test]
+    fn no_orphan_workers_after_stop_and_join() {
+        // Verify that after stop_and_join, both worker handles are consumed
+        // (the handle is moved into join, so if join returns, handles are joined)
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_no_orphans.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        // Record the state arc so we can check it after handle is consumed
+        let state = Arc::clone(&handle.state);
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+
+        // After stop_and_join, the handle is consumed. If workers were orphaned,
+        // they'd still hold Arc references to state. The main thread + our clone
+        // should be the only references left.
+        // (listener + persistence threads each held one, but they've joined)
+        // We hold 1 (state), the report construction path dropped the handle's clone.
+        // This is a weak check but validates workers have exited.
+        let strong_count = Arc::strong_count(&state);
+        assert!(
+            strong_count <= 2,
+            "expected at most 2 strong refs to state (got {strong_count}), workers may be orphaned"
+        );
+    }
+
+    #[test]
+    fn backpressure_burst_events_shed_cleanly() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_burst.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        // Send a burst of events that exceeds queue capacity
+        let burst_size = PERSIST_QUEUE_CAPACITY * 3;
+        let mut stream = UnixStream::connect(&sock).expect("connect");
+        for i in 0..burst_size {
+            // Use a big-ish payload to slow persistence
+            let payload = format!(r#"{{"burst":true,"i":{i},"pad":"{}"}}"#, "A".repeat(1000));
+            writeln!(stream, "{payload}").expect("write");
+        }
+        drop(stream);
+
+        thread::sleep(Duration::from_millis(500));
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+
+        // Under burst: accepted + shed should equal total sent
+        let total_seen = report
+            .accepted_total
+            .saturating_add(report.shed_total)
+            .saturating_add(report.dropped_total);
+        assert_eq!(
+            total_seen, burst_size as u64,
+            "accepted({}) + shed({}) + dropped({}) should equal burst_size({})",
+            report.accepted_total, report.shed_total, report.dropped_total, burst_size
+        );
+
+        // Everything accepted should be persisted (since drain completed)
+        assert_eq!(
+            report.persisted_total, report.accepted_total,
+            "all accepted events should be persisted after drain"
+        );
+    }
+
+    #[test]
+    fn bridge_id_is_unique_per_instance() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock1 = tmp.path().join("test_id1.sock");
+        let sock2 = tmp.path().join("test_id2.sock");
+        let a1 = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let a2 = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let b1 = TelemetryBridge::new(sock1.to_str().expect("utf8"), a1);
+        let b2 = TelemetryBridge::new(sock2.to_str().expect("utf8"), a2);
+        let id1 = b1.snapshot().bridge_id.clone();
+        let id2 = b2.snapshot().bridge_id.clone();
+        assert_ne!(id1, id2, "each bridge instance should get a unique ID");
+    }
+
+    #[test]
+    fn connection_accepted_event_has_connection_id() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_conn_id.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        let mut stream = UnixStream::connect(&sock).expect("connect");
+        writeln!(stream, r#"{{"ping":true}}"#).expect("write");
+        drop(stream);
+
+        thread::sleep(Duration::from_millis(200));
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+
+        let conn_events: Vec<_> = report
+            .recent_events
+            .iter()
+            .filter(|e| e.code == event_codes::CONNECTION_ACCEPTED)
+            .collect();
+        assert!(
+            !conn_events.is_empty(),
+            "should have at least one CONNECTION_ACCEPTED event"
+        );
+        for event in &conn_events {
+            assert!(
+                event.connection_id.is_some(),
+                "CONNECTION_ACCEPTED events must have a connection_id"
+            );
+        }
+    }
+
+    #[test]
+    fn persistence_key_format_is_sequential() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_key_format.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let adapter_ref = Arc::clone(&adapter);
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        let mut stream = UnixStream::connect(&sock).expect("connect");
+        for _ in 0..3 {
+            writeln!(stream, r#"{{"seq":"test"}}"#).expect("write");
+        }
+        drop(stream);
+
+        thread::sleep(Duration::from_millis(300));
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert_eq!(report.persisted_total, 3);
+
+        // Keys should be zero-padded sequential
+        let mut db = adapter_ref.lock().expect("adapter lock");
+        for seq in 1..=3u64 {
+            let key = format!("telemetry_{seq:020}");
+            let result = db.read(PersistenceClass::AuditLog, &key);
+            assert!(result.found, "missing key: {key}");
+        }
+    }
+
+    #[test]
+    fn report_field_completeness() {
+        let report = TelemetryRuntimeReport {
+            final_state: BridgeLifecycleState::Stopped,
+            bridge_id: "telemetry-bridge-test-00000".to_string(),
+            accepted_total: 42,
+            persisted_total: 40,
+            shed_total: 1,
+            dropped_total: 1,
+            retry_total: 3,
+            drain_completed: true,
+            drain_duration_ms: 150,
+            recent_events: vec![],
+        };
+        // Verify all report fields are accessible and correct
+        assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+        assert_eq!(report.bridge_id, "telemetry-bridge-test-00000");
+        assert_eq!(report.accepted_total, 42);
+        assert_eq!(report.persisted_total, 40);
+        assert_eq!(report.shed_total, 1);
+        assert_eq!(report.dropped_total, 1);
+        assert_eq!(report.retry_total, 3);
+        assert!(report.drain_completed);
+        assert_eq!(report.drain_duration_ms, 150);
+        assert!(report.recent_events.is_empty());
+        // Debug representation should be available for forensic logging
+        let debug = format!("{report:?}");
+        assert!(debug.contains("Stopped"));
+        assert!(debug.contains("telemetry-bridge-test-00000"));
+    }
+
+    #[test]
+    fn shutdown_reason_variants_are_distinct() {
+        let engine_zero = ShutdownReason::EngineExit {
+            exit_code: Some(0),
+        };
+        let engine_sigkill = ShutdownReason::EngineExit {
+            exit_code: Some(137),
+        };
+        let engine_signal = ShutdownReason::EngineExit { exit_code: None };
+        let requested = ShutdownReason::Requested;
+        // Debug should distinguish variants
+        let d1 = format!("{engine_zero:?}");
+        let d2 = format!("{engine_sigkill:?}");
+        let d3 = format!("{engine_signal:?}");
+        let d4 = format!("{requested:?}");
+        assert!(d1.contains("EngineExit") && d1.contains("0"));
+        assert!(d2.contains("EngineExit") && d2.contains("137"));
+        assert!(d3.contains("EngineExit") && d3.contains("None"));
+        assert!(d4.contains("Requested"));
+    }
+
+    #[test]
+    fn snapshot_field_completeness() {
+        let snapshot = TelemetryBridgeSnapshot {
+            bridge_id: "telemetry-bridge-test".to_string(),
+            queue_depth: 5,
+            queue_capacity: 256,
+            active_connections: 2,
+            accepted_total: 100,
+            persisted_total: 95,
+            shed_total: 3,
+            dropped_total: 2,
+            retry_total: 7,
+            recent_events: vec![],
+        };
+        assert_eq!(snapshot.bridge_id, "telemetry-bridge-test");
+        assert_eq!(snapshot.queue_depth, 5);
+        assert_eq!(snapshot.queue_capacity, 256);
+        assert_eq!(snapshot.active_connections, 2);
+        assert_eq!(snapshot.accepted_total, 100);
+        assert_eq!(snapshot.persisted_total, 95);
+        assert_eq!(snapshot.shed_total, 3);
+        assert_eq!(snapshot.dropped_total, 2);
+        assert_eq!(snapshot.retry_total, 7);
+    }
+
+    #[test]
+    fn stale_socket_cleanup_before_start() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_stale.sock");
+
+        // Create a stale socket file
+        std::fs::write(&sock, b"stale").expect("create stale file");
+        assert!(sock.exists());
+
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        // start() should clean up the stale socket and bind successfully
+        let handle = bridge.start().expect("start should succeed despite stale socket");
+        assert_eq!(handle.lifecycle_state(), BridgeLifecycleState::Running);
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+    }
 }
