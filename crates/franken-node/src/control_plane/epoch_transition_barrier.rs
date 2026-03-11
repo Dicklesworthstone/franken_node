@@ -583,6 +583,9 @@ impl EpochTransitionBarrier {
             trace_id,
         );
 
+        // Transcript phase must track instance phase — instance starts Draining.
+        transcript.phase = BarrierPhase::Draining;
+
         let instance = BarrierInstance {
             barrier_id,
             current_epoch,
@@ -965,6 +968,13 @@ mod tests {
         assert_eq!(inst.target_epoch, 6);
         assert_eq!(inst.participants.len(), 3);
         assert!(b.is_barrier_active());
+    }
+
+    #[test]
+    fn propose_sets_transcript_phase_to_draining() {
+        let mut b = make_barrier(2);
+        let inst = b.propose(0, 1, 1000, "t-phase").unwrap();
+        assert_eq!(inst.transcript.phase, BarrierPhase::Draining);
     }
 
     #[test]
