@@ -407,28 +407,30 @@ pub fn verify_release(
                         )),
                     });
                 } else {
-                    // 3. Verify detached signature if present.
-                    let sig_ok = match detached_sigs.get(name) {
+                    // Every manifest-listed artifact must carry a detached
+                    // signature; otherwise a checksum-only substitution slips
+                    // through as valid.
+                    let signature_failure = match detached_sigs.get(name) {
                         Some(sig) => match key_ring.get_key(&manifest.key_id) {
-                            Some(vk) => verify_signature(vk, content, sig).is_ok(),
-                            None => false,
+                            Some(vk) if verify_signature(vk, content, sig).is_ok() => None,
+                            Some(_) | None => Some("detached signature invalid"),
                         },
-                        None => true,
+                        None => Some("detached signature missing"),
                     };
 
-                    if sig_ok {
+                    if let Some(reason) = signature_failure {
+                        results.push(ArtifactVerificationResult {
+                            artifact_name: name.clone(),
+                            passed: false,
+                            key_id: key_id_str,
+                            failure_reason: Some(reason.into()),
+                        });
+                    } else {
                         results.push(ArtifactVerificationResult {
                             artifact_name: name.clone(),
                             passed: true,
                             key_id: key_id_str,
                             failure_reason: None,
-                        });
-                    } else {
-                        results.push(ArtifactVerificationResult {
-                            artifact_name: name.clone(),
-                            passed: false,
-                            key_id: key_id_str,
-                            failure_reason: Some("detached signature invalid".into()),
                         });
                     }
                 }
@@ -759,6 +761,29 @@ mod tests {
                 .as_ref()
                 .unwrap()
                 .contains("artifact missing")
+        );
+    }
+
+    #[test]
+    fn test_verify_release_missing_detached_signature() {
+        let (sk, _vk, ring) = setup_keys();
+        let content = b"release binary v1.0";
+        let name = "franken-node-v1.0.tar.gz";
+        let manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
+
+        let mut arts = BTreeMap::new();
+        arts.insert(name.to_string(), content.to_vec());
+        let sigs = BTreeMap::new();
+
+        let report = verify_release(&manifest, &arts, &sigs, &ring);
+        assert!(!report.overall_pass);
+        assert!(!report.results[0].passed);
+        assert!(
+            report.results[0]
+                .failure_reason
+                .as_ref()
+                .unwrap()
+                .contains("signature missing")
         );
     }
 
