@@ -2192,10 +2192,10 @@ mod tests {
         let sub3 = make_submission_with(
             &v.verifier_id,
             &signing_key,
-            VerificationDimension::Determinism,
-            "Determinism claim rejected",
+            VerificationDimension::Performance,
+            "Performance claim rejected",
             0.7,
-            "suite-det-rej",
+            "suite-perf-rej",
             "trace-rej",
             "2026-02-20T12:03:00Z",
         );
