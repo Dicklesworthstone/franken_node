@@ -355,6 +355,9 @@ impl EcosystemRegistry {
             .extensions
             .get_mut(extension_id)
             .ok_or_else(|| RegistryError::NotFound(extension_id.to_owned()))?;
+        if record.metadata.status == ExtensionStatus::Revoked {
+            return Err(RegistryError::Revoked(extension_id.to_owned()));
+        }
         push_bounded(&mut record.compatibility, entry, MAX_COMPATIBILITY_ENTRIES);
         self.append_audit_entry(
             extension_id,
@@ -384,6 +387,9 @@ impl EcosystemRegistry {
             .extensions
             .get_mut(extension_id)
             .ok_or_else(|| RegistryError::NotFound(extension_id.to_owned()))?;
+        if record.metadata.status == ExtensionStatus::Revoked {
+            return Err(RegistryError::Revoked(extension_id.to_owned()));
+        }
         record.metadata.status = ExtensionStatus::Deprecated;
         record.metadata.updated_at = timestamp.to_owned();
         self.append_audit_entry(
@@ -557,6 +563,7 @@ fn compute_audit_hash(entry: &RegistryAuditEntry) -> String {
         &entry.timestamp,
         &entry.extension_id,
         &entry.event_code,
+        &entry.event_type,
         &entry.detail,
     ] {
         hasher.update((field.len() as u64).to_le_bytes());
@@ -906,5 +913,71 @@ mod tests {
         // All entries should chain correctly
         reg.verify_audit_integrity().unwrap();
         assert_eq!(reg.audit_trail_len(), 4);
+    }
+
+    // -- Regression tests for security bugs ------------------------------------
+
+    #[test]
+    fn test_audit_hash_includes_event_type() {
+        // Bug: compute_audit_hash omitted event_type, so two entries differing
+        // only in event_type produced identical hashes.
+        let entry_a = RegistryAuditEntry {
+            sequence: 1,
+            prev_hash: String::new(),
+            entry_hash: String::new(),
+            timestamp: "2026-01-01T00:00:00Z".to_owned(),
+            extension_id: "ext-1".to_owned(),
+            event_code: "ENE-001".to_owned(),
+            event_type: "version_added".to_owned(),
+            detail: "detail".to_owned(),
+        };
+        let entry_b = RegistryAuditEntry {
+            event_type: "deprecated".to_owned(),
+            ..entry_a.clone()
+        };
+        let hash_a = compute_audit_hash(&entry_a);
+        let hash_b = compute_audit_hash(&entry_b);
+        assert_ne!(
+            hash_a, hash_b,
+            "entries with different event_type must produce different hashes"
+        );
+    }
+
+    #[test]
+    fn test_deprecate_revoked_extension_rejected() {
+        // Bug: deprecate_extension did not check for Revoked state,
+        // allowing Revoked -> Deprecated transition.
+        let mut reg = EcosystemRegistry::new();
+        let meta = make_metadata("ext-1", "pub-1", "key-1");
+        reg.register_extension(meta, &ts(1), "t").unwrap();
+        reg.revoke_extension("ext-1", "compromised", &ts(2), "t")
+            .unwrap();
+        let result = reg.deprecate_extension("ext-1", &ts(3), "t");
+        assert!(
+            matches!(result, Err(RegistryError::Revoked(_))),
+            "deprecating a revoked extension should fail"
+        );
+    }
+
+    #[test]
+    fn test_add_compatibility_to_revoked_rejected() {
+        // Bug: add_compatibility did not check for Revoked state,
+        // allowing mutation of revoked extensions.
+        let mut reg = EcosystemRegistry::new();
+        let meta = make_metadata("ext-1", "pub-1", "key-1");
+        reg.register_extension(meta, &ts(1), "t").unwrap();
+        reg.revoke_extension("ext-1", "compromised", &ts(2), "t")
+            .unwrap();
+        let entry = CompatibilityEntry {
+            runtime: "node".to_owned(),
+            runtime_version: "20.0.0".to_owned(),
+            compatible: true,
+            tested_at: ts(3),
+        };
+        let result = reg.add_compatibility("ext-1", entry, &ts(3), "t");
+        assert!(
+            matches!(result, Err(RegistryError::Revoked(_))),
+            "adding compatibility to a revoked extension should fail"
+        );
     }
 }

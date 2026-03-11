@@ -597,7 +597,20 @@ fn contains_float_marker(payload: &[u8]) -> bool {
             let mut i = 0;
             while i < bytes.len() {
                 if bytes[i] == b'"' {
-                    in_string = !in_string;
+                    // Count preceding backslashes to handle escaped quotes.
+                    // A quote is escaped only if preceded by an ODD number of
+                    // backslashes (e.g. `\"` is escaped, `\\"` is not).
+                    let mut backslashes = 0usize;
+                    let mut j = i;
+                    while j > 0 && bytes[j - 1] == b'\\' {
+                        backslashes = backslashes.saturating_add(1);
+                        j -= 1;
+                    }
+                    if backslashes % 2 == 0 {
+                        // Unescaped quote — toggle string state
+                        in_string = !in_string;
+                    }
+                    // Odd backslashes means escaped quote — ignore it
                 } else if !in_string
                     && bytes[i] == b'.'
                     && i > 0
@@ -843,6 +856,43 @@ mod tests {
     fn test_float_detection_non_json() {
         let plain = b"just text with 3.14 in it";
         assert!(!contains_float_marker(plain)); // not JSON, not checked
+    }
+
+    #[test]
+    fn test_float_detection_escaped_quote_no_bypass() {
+        // An escaped quote inside a string value should NOT toggle string state.
+        // Without the fix, `\"` toggles out of string mode and `3.14` after
+        // the closing `"` would be missed (false negative) or a float inside
+        // a string would be falsely detected (false positive).
+        //
+        // Here the float 3.14 is inside a JSON string — must NOT trigger.
+        let json = br#"{"name": "foo\"3.14\"bar"}"#;
+        assert!(
+            !contains_float_marker(json),
+            "escaped quote must not toggle string tracking"
+        );
+    }
+
+    #[test]
+    fn test_float_detection_escaped_quote_real_float_detected() {
+        // Float is OUTSIDE a string value — must be detected even when escaped
+        // quotes appear elsewhere in the payload.
+        let json = br#"{"name": "foo\"bar", "score": 3.14}"#;
+        assert!(
+            contains_float_marker(json),
+            "real float after escaped-quote string must be detected"
+        );
+    }
+
+    #[test]
+    fn test_float_detection_double_backslash_before_quote() {
+        // `\\"` — the backslash is itself escaped, so the quote is UNescaped.
+        // The string ends at the `"` after `\\`, so `3.14` is outside the string.
+        let json = br#"{"val": "x\\", "n": 3.14}"#;
+        assert!(
+            contains_float_marker(json),
+            "double-backslash before quote means quote is real"
+        );
     }
 
     // ── CanonicalSerializer tests ───────────────────────────────────

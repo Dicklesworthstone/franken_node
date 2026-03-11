@@ -129,16 +129,25 @@ impl LwwMap {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OrSet {
     pub crdt_type: CrdtType,
-    pub adds: BTreeSet<String>,
-    pub removes: BTreeSet<String>,
+    pub adds: BTreeMap<String, BTreeSet<OrTag>>,
+    pub removes: BTreeMap<String, BTreeSet<OrTag>>,
+    pub next_dot_by_replica: BTreeMap<String, u64>,
+}
+
+/// Deterministic add-tag for OR-Set elements.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct OrTag {
+    pub replica_id: String,
+    pub counter: u64,
 }
 
 impl Default for OrSet {
     fn default() -> Self {
         Self {
             crdt_type: CrdtType::OrSet,
-            adds: BTreeSet::new(),
-            removes: BTreeSet::new(),
+            adds: BTreeMap::new(),
+            removes: BTreeMap::new(),
+            next_dot_by_replica: BTreeMap::new(),
         }
     }
 }
@@ -148,16 +157,45 @@ impl OrSet {
         Self::default()
     }
 
-    pub fn add(&mut self, element: String) {
-        self.adds.insert(element);
+    pub fn add(&mut self, replica_id: &str, element: String) {
+        if replica_id.is_empty() {
+            return;
+        }
+        let counter = self
+            .next_dot_by_replica
+            .entry(replica_id.to_string())
+            .or_insert(0);
+        if *counter == u64::MAX {
+            return;
+        }
+        *counter += 1;
+        self.adds.entry(element).or_default().insert(OrTag {
+            replica_id: replica_id.to_string(),
+            counter: *counter,
+        });
     }
 
     pub fn remove(&mut self, element: String) {
-        self.removes.insert(element);
+        let Some(observed_tags) = self.adds.get(&element) else {
+            return;
+        };
+        self.removes
+            .entry(element)
+            .or_default()
+            .extend(observed_tags.iter().cloned());
     }
 
     pub fn elements(&self) -> BTreeSet<&String> {
-        self.adds.difference(&self.removes).collect()
+        self.adds
+            .iter()
+            .filter_map(|(element, add_tags)| {
+                let removed_tags = self.removes.get(element);
+                add_tags
+                    .iter()
+                    .any(|tag| removed_tags.map_or(true, |removed| !removed.contains(tag)))
+                    .then_some(element)
+            })
+            .collect()
     }
 
     pub fn merge(&self, other: &OrSet) -> Result<OrSet, CrdtError> {
@@ -169,8 +207,33 @@ impl OrSet {
         }
         Ok(OrSet {
             crdt_type: CrdtType::OrSet,
-            adds: self.adds.union(&other.adds).cloned().collect(),
-            removes: self.removes.union(&other.removes).cloned().collect(),
+            adds: self.adds.iter().chain(other.adds.iter()).fold(
+                BTreeMap::new(),
+                |mut acc, (element, tags)| {
+                    acc.entry(element.clone())
+                        .or_insert_with(BTreeSet::new)
+                        .extend(tags.iter().cloned());
+                    acc
+                },
+            ),
+            removes: self.removes.iter().chain(other.removes.iter()).fold(
+                BTreeMap::new(),
+                |mut acc, (element, tags)| {
+                    acc.entry(element.clone())
+                        .or_insert_with(BTreeSet::new)
+                        .extend(tags.iter().cloned());
+                    acc
+                },
+            ),
+            next_dot_by_replica: self
+                .next_dot_by_replica
+                .iter()
+                .chain(other.next_dot_by_replica.iter())
+                .fold(BTreeMap::new(), |mut acc, (replica_id, counter)| {
+                    let entry = acc.entry(replica_id.clone()).or_insert(0);
+                    *entry = (*entry).max(*counter);
+                    acc
+                }),
         })
     }
 }
@@ -343,14 +406,14 @@ mod tests {
     #[test]
     fn or_set_add_visible() {
         let mut s = OrSet::new();
-        s.add("x".into());
+        s.add("r1", "x".into());
         assert!(s.elements().contains(&&"x".to_string()));
     }
 
     #[test]
     fn or_set_remove_hides() {
         let mut s = OrSet::new();
-        s.add("x".into());
+        s.add("r1", "x".into());
         s.remove("x".into());
         assert!(!s.elements().contains(&&"x".to_string()));
     }
@@ -358,9 +421,9 @@ mod tests {
     #[test]
     fn or_set_merge_commutative() {
         let mut a = OrSet::new();
-        a.add("x".into());
+        a.add("r1", "x".into());
         let mut b = OrSet::new();
-        b.add("y".into());
+        b.add("r2", "y".into());
         let ab = a.merge(&b).unwrap();
         let ba = b.merge(&a).unwrap();
         assert_eq!(ab.elements(), ba.elements());
@@ -369,9 +432,42 @@ mod tests {
     #[test]
     fn or_set_merge_idempotent() {
         let mut a = OrSet::new();
-        a.add("x".into());
+        a.add("r1", "x".into());
         let aa = a.merge(&a).unwrap();
         assert_eq!(aa.elements(), a.elements());
+    }
+
+    #[test]
+    fn or_set_remove_without_observation_does_not_tombstone_future_add() {
+        let mut s = OrSet::new();
+        s.remove("x".into());
+        s.add("r1", "x".into());
+        assert!(s.elements().contains(&&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_readd_after_remove_visible_again() {
+        let mut s = OrSet::new();
+        s.add("r1", "x".into());
+        s.remove("x".into());
+        s.add("r1", "x".into());
+        assert!(s.elements().contains(&&"x".to_string()));
+    }
+
+    #[test]
+    fn or_set_concurrent_add_wins_over_remove() {
+        let mut remove_branch = OrSet::new();
+        remove_branch.add("r1", "x".into());
+
+        let mut add_branch = remove_branch.clone();
+        remove_branch.remove("x".into());
+        add_branch.add("r2", "x".into());
+
+        let merged = remove_branch.merge(&add_branch).unwrap();
+        let reverse_merged = add_branch.merge(&remove_branch).unwrap();
+
+        assert!(merged.elements().contains(&&"x".to_string()));
+        assert_eq!(merged.elements(), reverse_merged.elements());
     }
 
     // === GCounter tests ===

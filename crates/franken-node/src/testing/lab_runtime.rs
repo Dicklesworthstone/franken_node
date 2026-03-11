@@ -413,10 +413,15 @@ impl TestClock {
 
         let mut fired = Vec::new();
 
-        // Collect all timer ticks <= new_tick. Using split_off to efficiently
-        // partition the BTreeMap.
-        let remaining = self.pending_timers.split_off(&(new_tick + 1));
-        let ready = std::mem::replace(&mut self.pending_timers, remaining);
+        // Collect all timer ticks <= new_tick without overflowing when
+        // `new_tick == u64::MAX`.
+        let mut remaining = self.pending_timers.split_off(&new_tick);
+        let callbacks_at_new_tick = remaining.remove(&new_tick);
+        let mut ready = std::mem::take(&mut self.pending_timers);
+        if let Some(callbacks) = callbacks_at_new_tick {
+            ready.insert(new_tick, callbacks);
+        }
+        self.pending_timers = remaining;
 
         for (tick, callbacks) in ready {
             for cb in callbacks {
@@ -1080,6 +1085,19 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn test_clock_advance_to_u64_max_fires_terminal_tick_timer() {
+        let mut clock = TestClock::new();
+        clock.current_tick = u64::MAX - 1;
+        clock.schedule_timer(1, "max-tick").unwrap();
+
+        let fired = clock.advance(1).unwrap();
+        assert_eq!(clock.now(), u64::MAX);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].0, u64::MAX);
+        assert_eq!(fired[0].1.label, "max-tick");
+    }
+
     // ---------------------------------------------------------------
     // FaultProfile validation
     // ---------------------------------------------------------------
@@ -1554,6 +1572,35 @@ mod tests {
         // With 50% drop, we expect some of each (deterministic with seed 42).
         assert!(delivered > 0, "some messages should be delivered");
         assert!(dropped > 0, "some messages should be dropped");
+    }
+
+    #[test]
+    fn test_lab_runtime_advance_clock_to_u64_max_records_timer_event() {
+        let mut rt = LabRuntime::new(default_config()).unwrap();
+        rt.test_clock.current_tick = u64::MAX - 1;
+        rt.schedule_timer(1, "terminal-timer").unwrap();
+
+        let fired = rt.advance_clock(1).unwrap();
+        assert_eq!(rt.now(), u64::MAX);
+        assert_eq!(fired.len(), 1);
+        assert_eq!(fired[0].0, u64::MAX);
+        assert_eq!(fired[0].1.label, "terminal-timer");
+
+        let timer_event = rt
+            .events()
+            .iter()
+            .find(|event| event.event_code == EVT_TIMER_FIRED)
+            .expect("timer event should be recorded");
+        assert_eq!(timer_event.tick, u64::MAX);
+        assert!(timer_event.payload.contains("terminal-timer"));
+
+        let advance_event = rt
+            .events()
+            .iter()
+            .find(|event| event.event_code == EVT_TEST_CLOCK_ADVANCED)
+            .expect("clock advance event should be recorded");
+        assert_eq!(advance_event.tick, u64::MAX);
+        assert!(advance_event.payload.contains(&format!("now={}", u64::MAX)));
     }
 
     // ---------------------------------------------------------------
