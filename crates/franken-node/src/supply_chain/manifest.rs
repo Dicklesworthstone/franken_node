@@ -327,6 +327,13 @@ fn validate_signature(signature: &ManifestSignature) -> Result<(), ManifestSchem
                     reason: "signer_key_ids must not contain empty entries".to_string(),
                 });
             }
+            let unique_keys: std::collections::BTreeSet<&str> =
+                policy.signer_key_ids.iter().map(|s| s.as_str()).collect();
+            if unique_keys.len() != policy.signer_key_ids.len() {
+                return Err(ManifestSchemaError::InvalidThresholdConfiguration {
+                    reason: "signer_key_ids must not contain duplicates".to_string(),
+                });
+            }
         }
     }
 
@@ -614,5 +621,23 @@ mod tests {
         assert!(!looks_like_base64("abc"));
         assert!(!looks_like_base64("abcd*==="));
         assert!(looks_like_base64("QUJDREVGR0hJSg=="));
+    }
+
+    #[test]
+    fn duplicate_signer_key_ids_rejected() {
+        let mut manifest = valid_manifest();
+        manifest.signature.threshold = Some(ThresholdSignaturePolicy {
+            threshold: 2,
+            total_signers: 3,
+            signer_key_ids: vec![
+                "key-a".to_string(),
+                "key-a".to_string(), // duplicate — would let one key satisfy threshold
+                "key-b".to_string(),
+            ],
+        });
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+        assert_eq!(error.code(), "EMS_THRESHOLD_INVALID");
+        assert!(error.to_string().contains("duplicates"));
     }
 }
