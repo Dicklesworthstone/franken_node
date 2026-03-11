@@ -47,6 +47,7 @@ use crate::supply_chain::transparency_verifier as tv;
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 const MAX_REVOCATIONS: usize = 4096;
 const MAX_ADMISSION_RECEIPTS: usize = 4096;
+const MAX_VERSIONS_PER_EXTENSION: usize = 1024;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -682,7 +683,7 @@ impl SignedExtensionRegistry {
                 detail: "Extension disappeared during version add".to_string(),
             };
         };
-        ext.versions.push(version.clone());
+        push_bounded(&mut ext.versions, version.clone(), MAX_VERSIONS_PER_EXTENSION);
         ext.updated_at = Utc::now().to_rfc3339();
 
         self.log(
@@ -1637,5 +1638,33 @@ mod tests {
         req.signature.signature_bytes = vec![0xFF; 64]; // valid length, wrong content
         let result = reg.register(req, &make_trace(), now_epoch());
         assert!(!result.success, "shape-only check would have accepted this");
+    }
+
+    // === Bounded versions ===
+
+    #[test]
+    fn versions_bounded_per_extension() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let epoch = now_epoch();
+        let req = valid_request("ext-bounded", &sk, epoch);
+        let result = reg.register(req, &make_trace(), epoch);
+        assert!(result.success);
+        let ext_id = result.extension_id.unwrap();
+
+        // Push MAX_VERSIONS_PER_EXTENSION + 10 versions — oldest should be evicted
+        for i in 0..(MAX_VERSIONS_PER_EXTENSION + 10) {
+            let ver = valid_version(&format!("{}.0.0", i));
+            let r = reg.add_version(&ext_id, ver, &make_trace());
+            assert!(r.success, "version add {i} failed: {}", r.detail);
+        }
+
+        let versions = reg.version_lineage(&ext_id).expect("extension exists");
+        assert!(
+            versions.len() <= MAX_VERSIONS_PER_EXTENSION,
+            "versions Vec must be bounded: got {} > max {}",
+            versions.len(),
+            MAX_VERSIONS_PER_EXTENSION,
+        );
     }
 }
