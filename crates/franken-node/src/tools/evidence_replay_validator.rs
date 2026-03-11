@@ -471,8 +471,11 @@ impl EvidenceReplayValidator {
                 self.unresolvable_count = self.unresolvable_count.saturating_add(1);
             }
         }
-        self.results
-            .push((entry.decision_id.clone(), result.clone()));
+        push_bounded(
+            &mut self.results,
+            (entry.decision_id.clone(), result.clone()),
+            MAX_RESULTS,
+        );
         result
     }
 
@@ -1038,5 +1041,23 @@ mod tests {
             );
         }
         assert_eq!(v.match_count(), 7);
+    }
+
+    #[test]
+    fn results_bounded_on_normal_path() {
+        // Regression: the main validate() path used raw .push() instead of
+        // push_bounded(), so valid results could accumulate unboundedly.
+        let mut v = EvidenceReplayValidator::new();
+        for i in 0..(MAX_RESULTS + 50) {
+            let e = test_replay_entry(&format!("DEC-{i:05}"), DecisionKind::Admit, 1);
+            let c = matching_context(&e);
+            v.validate(&e, &c);
+        }
+        assert!(
+            v.results().len() <= MAX_RESULTS,
+            "results Vec must be bounded: got {} > max {}",
+            v.results().len(),
+            MAX_RESULTS,
+        );
     }
 }
