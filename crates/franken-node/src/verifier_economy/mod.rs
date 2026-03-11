@@ -21,8 +21,8 @@ use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
 use crate::connector::verifier_sdk::{
-    compute_capsule_integrity_hash, compute_trace_commitment_root,
-    parse_ed25519_verifying_key_hex, verify_ed25519_signature_hex,
+    compute_capsule_integrity_hash, compute_trace_commitment_root, parse_ed25519_verifying_key_hex,
+    replay_capsule_signature_payload, verify_ed25519_signature_hex,
     verify_ed25519_signature_with_key_hex,
 };
 use crate::security::constant_time::ct_eq;
@@ -373,6 +373,7 @@ pub struct ReplayCapsule {
     pub output_state_hash: String,
     pub expected_result_hash: String,
     pub integrity_hash: String,
+    pub signature: AttestationSignature,
 }
 
 /// Scoreboard entry for a single verifier.
@@ -953,7 +954,7 @@ impl VerifierEconomyRegistry {
     // -- Replay capsules ------------------------------------------------------
 
     pub fn register_replay_capsule(&mut self, capsule: ReplayCapsule) -> VepResult<()> {
-        if !Self::verify_capsule_integrity(&capsule) {
+        if !self.verify_replay_capsule(&capsule) {
             return Err(VepError {
                 code: ERR_VEP_INVALID_CAPSULE.to_string(),
                 message: format!(
@@ -983,7 +984,7 @@ impl VerifierEconomyRegistry {
                 message: format!("Replay capsule {} not found", capsule_id),
             })?;
 
-        if !Self::verify_capsule_integrity(&capsule) {
+        if !self.verify_replay_capsule(&capsule) {
             return Err(VepError {
                 code: ERR_VEP_INVALID_CAPSULE.to_string(),
                 message: format!(
@@ -1063,6 +1064,59 @@ impl VerifierEconomyRegistry {
         );
 
         ct_eq(&capsule.integrity_hash, &expected_integrity)
+    }
+
+    fn verify_replay_capsule(&mut self, capsule: &ReplayCapsule) -> bool {
+        if !Self::verify_capsule_integrity(capsule) {
+            return false;
+        }
+
+        let verifier_public_key = match self.verifiers.get(&capsule.verifier_id) {
+            Some(verifier) => verifier.public_key.clone(),
+            None => return false,
+        };
+
+        let (attestation_verifier_id, expected_claim_metadata_hash) =
+            match self.attestations.get(&capsule.attestation_id) {
+                Some(attestation) => (
+                    attestation.verifier_id.clone(),
+                    compute_claim_metadata_hash(
+                        &attestation.claim.dimension,
+                        &attestation.claim.statement,
+                        attestation.claim.score,
+                        &attestation.evidence.suite_id,
+                    ),
+                ),
+                None => return false,
+            };
+        if attestation_verifier_id != capsule.verifier_id {
+            return false;
+        }
+        if !ct_eq(&capsule.claim_metadata_hash, &expected_claim_metadata_hash) {
+            return false;
+        }
+
+        let signature_payload = replay_capsule_signature_payload(
+            &capsule.capsule_id,
+            &capsule.schema_version,
+            &capsule.attestation_id,
+            &capsule.verifier_id,
+            &capsule.claim_metadata_hash,
+            &capsule.issued_at,
+            &capsule.expires_at,
+            &capsule.input_state_hash,
+            &capsule.trace_chunk_hashes,
+            &capsule.trace_commitment_root,
+            &capsule.output_state_hash,
+            &capsule.expected_result_hash,
+            &capsule.integrity_hash,
+        );
+        self.verify_signature_with_cached_key(
+            &capsule.signature,
+            &capsule.verifier_id,
+            &verifier_public_key,
+            &signature_payload,
+        )
     }
 
     // -- Trust scoreboard -----------------------------------------------------
@@ -1238,7 +1292,35 @@ mod tests {
         )
     }
 
-    fn make_capsule(capsule_id: &str, attestation_id: &str, label: &str) -> ReplayCapsule {
+    fn sign_capsule(capsule: &mut ReplayCapsule, signing_key: &SigningKey) {
+        capsule.signature.algorithm = "ed25519".to_string();
+        capsule.signature.public_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let payload = replay_capsule_signature_payload(
+            &capsule.capsule_id,
+            &capsule.schema_version,
+            &capsule.attestation_id,
+            &capsule.verifier_id,
+            &capsule.claim_metadata_hash,
+            &capsule.issued_at,
+            &capsule.expires_at,
+            &capsule.input_state_hash,
+            &capsule.trace_chunk_hashes,
+            &capsule.trace_commitment_root,
+            &capsule.output_state_hash,
+            &capsule.expected_result_hash,
+            &capsule.integrity_hash,
+        );
+        let signature = signing_key.sign(&payload);
+        capsule.signature.value = hex::encode(signature.to_bytes());
+    }
+
+    fn make_capsule(
+        capsule_id: &str,
+        verifier_id: &str,
+        attestation: &Attestation,
+        signing_key: &SigningKey,
+        label: &str,
+    ) -> ReplayCapsule {
         let input_state_hash = sample_sha256(&format!("{label}:input"));
         let trace_chunk_hashes = vec![
             sample_sha256(&format!("{label}:trace:chunk-0")),
@@ -1250,18 +1332,18 @@ mod tests {
         let output_state_hash = sample_sha256(&format!("{label}:output"));
         let expected_result_hash = sample_sha256(&format!("{label}:expected"));
         let claim_metadata_hash = compute_claim_metadata_hash(
-            &VerificationDimension::Compatibility,
-            &format!("{label} compatibility claim"),
-            0.95,
-            &format!("{label}:suite"),
+            &attestation.claim.dimension,
+            &attestation.claim.statement,
+            attestation.claim.score,
+            &attestation.evidence.suite_id,
         );
         let issued_at = "2026-03-10T00:00:00Z".to_string();
         let expires_at = "2026-03-10T01:00:00Z".to_string();
         let integrity_hash = compute_capsule_integrity_hash(
             capsule_id,
             REPLAY_CAPSULE_SCHEMA_VERSION,
-            attestation_id,
-            &format!("verifier-{label}"),
+            &attestation.attestation_id,
+            verifier_id,
             &claim_metadata_hash,
             &issued_at,
             &expires_at,
@@ -1270,11 +1352,11 @@ mod tests {
             &output_state_hash,
             &expected_result_hash,
         );
-        ReplayCapsule {
+        let mut capsule = ReplayCapsule {
             capsule_id: capsule_id.to_string(),
             schema_version: REPLAY_CAPSULE_SCHEMA_VERSION.to_string(),
-            attestation_id: attestation_id.to_string(),
-            verifier_id: format!("verifier-{label}"),
+            attestation_id: attestation.attestation_id.clone(),
+            verifier_id: verifier_id.to_string(),
             claim_metadata_hash,
             issued_at,
             expires_at,
@@ -1284,7 +1366,14 @@ mod tests {
             output_state_hash,
             expected_result_hash,
             integrity_hash,
-        }
+            signature: AttestationSignature {
+                algorithm: String::new(),
+                public_key: String::new(),
+                value: String::new(),
+            },
+        };
+        sign_capsule(&mut capsule, signing_key);
+        capsule
     }
 
     fn register_and_submit(reg: &mut VerifierEconomyRegistry) -> (Verifier, Attestation) {
@@ -1695,7 +1784,14 @@ mod tests {
     #[test]
     fn test_register_and_access_capsule() {
         let mut reg = make_registry();
-        let capsule = make_capsule("cap-001", "att-001", "capsule-001");
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let capsule = make_capsule(
+            "cap-001",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-001",
+        );
         reg.register_replay_capsule(capsule).unwrap();
         let accessed = reg.access_replay_capsule("cap-001").unwrap();
         assert_eq!(accessed.capsule_id, "cap-001");
@@ -1704,7 +1800,14 @@ mod tests {
     #[test]
     fn test_access_capsule_emits_vep007() {
         let mut reg = make_registry();
-        let capsule = make_capsule("cap-002", "att-002", "capsule-002");
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let capsule = make_capsule(
+            "cap-002",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-002",
+        );
         reg.register_replay_capsule(capsule).unwrap();
         reg.access_replay_capsule("cap-002").unwrap();
         assert!(reg.events().iter().any(|e| e.code == VEP_007));
@@ -1712,13 +1815,29 @@ mod tests {
 
     #[test]
     fn test_capsule_integrity_valid() {
-        let capsule = make_capsule("cap-003", "att-003", "capsule-003");
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let capsule = make_capsule(
+            "cap-003",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-003",
+        );
         assert!(VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
     }
 
     #[test]
     fn test_capsule_integrity_invalid_empty_hash() {
-        let mut capsule = make_capsule("cap-004", "att-004", "capsule-004");
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-004",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-004",
+        );
         capsule.input_state_hash = String::new();
         assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
     }
@@ -1726,7 +1845,14 @@ mod tests {
     #[test]
     fn test_register_replay_capsule_rejects_tampered_integrity_hash() {
         let mut reg = make_registry();
-        let mut capsule = make_capsule("cap-005", "att-005", "capsule-005");
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-005",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-005",
+        );
         capsule.integrity_hash = sample_sha256("tampered-integrity");
         let error = reg.register_replay_capsule(capsule).unwrap_err();
         assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
@@ -1734,43 +1860,141 @@ mod tests {
 
     #[test]
     fn test_capsule_integrity_rejects_tampered_verifier_id() {
-        let mut capsule = make_capsule("cap-006", "att-006", "capsule-006");
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-006",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-006",
+        );
         capsule.verifier_id = "verifier-tampered".to_string();
         assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
     }
 
     #[test]
     fn test_capsule_integrity_rejects_invalid_freshness_window() {
-        let mut capsule = make_capsule("cap-007", "att-007", "capsule-007");
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-007",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-007",
+        );
         capsule.expires_at = "2026-03-10T03:30:00Z".to_string();
         assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
     }
 
     #[test]
     fn test_capsule_integrity_rejects_tampered_trace_chunk_hash() {
-        let mut capsule = make_capsule("cap-008", "att-008", "capsule-008");
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-008",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-008",
+        );
         capsule.trace_chunk_hashes[1] = sample_sha256("tampered-trace-chunk");
         assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
     }
 
     #[test]
     fn test_capsule_trace_commitment_proof_roundtrip() {
-        let capsule = make_capsule("cap-009", "att-009", "capsule-009");
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let capsule = make_capsule(
+            "cap-009",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-009",
+        );
         let proof = crate::connector::verifier_sdk::build_trace_commitment_proof(
             &capsule.trace_chunk_hashes,
             1,
         )
         .expect("proof exists");
-        assert!(crate::connector::verifier_sdk::verify_trace_commitment_proof(
-            &capsule.trace_chunk_hashes[1],
-            &proof,
-            &capsule.trace_commitment_root
-        ));
-        assert!(!crate::connector::verifier_sdk::verify_trace_commitment_proof(
-            &capsule.trace_chunk_hashes[0],
-            &proof,
-            &capsule.trace_commitment_root
-        ));
+        assert!(
+            crate::connector::verifier_sdk::verify_trace_commitment_proof(
+                &capsule.trace_chunk_hashes[1],
+                &proof,
+                &capsule.trace_commitment_root
+            )
+        );
+        assert!(
+            !crate::connector::verifier_sdk::verify_trace_commitment_proof(
+                &capsule.trace_chunk_hashes[0],
+                &proof,
+                &capsule.trace_commitment_root
+            )
+        );
+    }
+
+    #[test]
+    fn test_register_replay_capsule_rejects_tampered_signature() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-010",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-010",
+        );
+        capsule.signature.value = "00".repeat(64);
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
+    }
+
+    #[test]
+    fn test_register_replay_capsule_rejects_claim_hash_not_bound_to_attestation() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-011",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-011",
+        );
+        capsule.claim_metadata_hash = sample_sha256("forged-claim-hash");
+        capsule.integrity_hash = compute_capsule_integrity_hash(
+            &capsule.capsule_id,
+            &capsule.schema_version,
+            &capsule.attestation_id,
+            &capsule.verifier_id,
+            &capsule.claim_metadata_hash,
+            &capsule.issued_at,
+            &capsule.expires_at,
+            &capsule.input_state_hash,
+            &capsule.trace_commitment_root,
+            &capsule.output_state_hash,
+            &capsule.expected_result_hash,
+        );
+        sign_capsule(&mut capsule, &registration_signing_key());
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
+    }
+
+    #[test]
+    fn test_register_replay_capsule_rejects_wrong_verifier_key() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-012",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-012",
+        );
+        sign_capsule(&mut capsule, &test_signing_key(7));
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
     }
 
     // -- Scoreboard tests -----------------------------------------------------

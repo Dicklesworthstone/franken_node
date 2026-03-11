@@ -512,6 +512,46 @@ pub(crate) fn compute_capsule_integrity_hash(
     format!("sha256:{}", hex::encode(Sha256::digest(payload)))
 }
 
+pub(crate) fn replay_capsule_signature_payload(
+    capsule_id: &str,
+    schema_version: &str,
+    attestation_id: &str,
+    verifier_id: &str,
+    claim_metadata_hash: &str,
+    issued_at: &str,
+    expires_at: &str,
+    input_state_hash: &str,
+    trace_chunk_hashes: &[String],
+    trace_commitment_root: &str,
+    output_state_hash: &str,
+    expected_result_hash: &str,
+    integrity_hash: &str,
+) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"connector_signed_capsule_signature_v1:");
+    for field in [
+        capsule_id,
+        schema_version,
+        attestation_id,
+        verifier_id,
+        claim_metadata_hash,
+        issued_at,
+        expires_at,
+        input_state_hash,
+        trace_commitment_root,
+        output_state_hash,
+        expected_result_hash,
+        integrity_hash,
+    ] {
+        append_length_prefixed(&mut payload, field);
+    }
+    payload.extend_from_slice(&(trace_chunk_hashes.len() as u64).to_le_bytes());
+    for hash in trace_chunk_hashes {
+        append_length_prefixed(&mut payload, hash);
+    }
+    payload
+}
+
 pub(crate) fn parse_ed25519_verifying_key_hex(
     public_key: &str,
 ) -> Result<VerifyingKey, VerifierSdkError> {

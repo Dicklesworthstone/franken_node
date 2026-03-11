@@ -31,12 +31,16 @@
 //! - **INV-VSDK-SIGNATURE-BOUND**: A capsule's signature covers the full capsule payload
 //!   including inputs, expected outputs, and manifest.
 
+use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 /// Maximum number of verification steps per session.
 const MAX_SESSION_STEPS: usize = 4096;
+const CAPSULE_SIGNATURE_ALGORITHM: &str = "ed25519";
+const CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY: &str = "signature_algorithm";
+const CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY: &str = "ed25519_public_key";
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -339,29 +343,56 @@ fn now_timestamp() -> String {
     "2026-02-21T00:00:00Z".to_string()
 }
 
-/// Compute the signing payload for a capsule.
-/// INV-VSDK-SIGNATURE-BOUND: covers manifest + payload + inputs.
-fn compute_signing_payload(capsule: &ReplayCapsule) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(b"universal_verifier_sdk_signing_v1:");
-    // Length-prefixed encoding prevents delimiter-collision ambiguity.
+fn append_length_prefixed(payload: &mut Vec<u8>, field: &str) {
+    payload.extend_from_slice(&(field.len() as u64).to_le_bytes());
+    payload.extend_from_slice(field.as_bytes());
+}
+
+/// Compute the canonical Ed25519 signing payload for a capsule.
+/// INV-VSDK-SIGNATURE-BOUND: covers the full manifest + payload + inputs.
+fn canonical_capsule_signature_payload(capsule: &ReplayCapsule) -> Vec<u8> {
+    let mut payload = Vec::new();
+    payload.extend_from_slice(b"universal_verifier_sdk_signing_v2:");
     for field in [
         capsule.manifest.capsule_id.as_str(),
         capsule.manifest.schema_version.as_str(),
+        capsule.manifest.description.as_str(),
+        capsule.manifest.claim_type.as_str(),
         capsule.manifest.expected_output_hash.as_str(),
+        capsule.manifest.created_at.as_str(),
+        capsule.manifest.creator_identity.as_str(),
         capsule.payload.as_str(),
     ] {
-        hasher.update((field.len() as u64).to_le_bytes());
-        hasher.update(field.as_bytes());
+        append_length_prefixed(&mut payload, field);
     }
-    hasher.update((capsule.inputs.len() as u64).to_le_bytes());
+    payload.extend_from_slice(&(capsule.manifest.input_refs.len() as u64).to_le_bytes());
+    for input_ref in &capsule.manifest.input_refs {
+        append_length_prefixed(&mut payload, input_ref);
+    }
+    payload.extend_from_slice(&(capsule.manifest.metadata.len() as u64).to_le_bytes());
+    for (key, value) in &capsule.manifest.metadata {
+        append_length_prefixed(&mut payload, key);
+        append_length_prefixed(&mut payload, value);
+    }
+    payload.extend_from_slice(&(capsule.inputs.len() as u64).to_le_bytes());
     for (k, v) in &capsule.inputs {
-        hasher.update((k.len() as u64).to_le_bytes());
-        hasher.update(k.as_bytes());
-        hasher.update((v.len() as u64).to_le_bytes());
-        hasher.update(v.as_bytes());
+        append_length_prefixed(&mut payload, k);
+        append_length_prefixed(&mut payload, v);
     }
-    hex::encode(hasher.finalize())
+    payload
+}
+
+fn capsule_signer_public_key(capsule: &ReplayCapsule) -> Result<&str, VsdkError> {
+    capsule
+        .manifest
+        .metadata
+        .get(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY)
+        .map(String::as_str)
+        .ok_or_else(|| {
+            VsdkError::ManifestIncomplete(format!(
+                "metadata missing {CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY}"
+            ))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -406,20 +437,55 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), VsdkError> {
             "creator_identity is empty".to_string(),
         ));
     }
+    let signature_algorithm = manifest
+        .metadata
+        .get(CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY)
+        .ok_or_else(|| {
+            VsdkError::ManifestIncomplete(format!(
+                "metadata missing {CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY}"
+            ))
+        })?;
+    if signature_algorithm != CAPSULE_SIGNATURE_ALGORITHM {
+        return Err(VsdkError::ManifestIncomplete(format!(
+            "unsupported signature algorithm: {signature_algorithm}"
+        )));
+    }
+    let signer_public_key = manifest
+        .metadata
+        .get(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY)
+        .ok_or_else(|| {
+            VsdkError::ManifestIncomplete(format!(
+                "metadata missing {CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY}"
+            ))
+        })?;
+    if signer_public_key.is_empty() {
+        return Err(VsdkError::ManifestIncomplete(format!(
+            "metadata {CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY} is empty"
+        )));
+    }
     Ok(())
 }
 
 /// Verify a capsule's signature.
 ///
-/// Recomputes the expected signature from the capsule's payload
-/// and compares it to the stored signature.
+/// Recomputes the canonical payload and verifies the detached Ed25519 signature
+/// against the signer public key embedded in manifest metadata.
 ///
 /// INV-VSDK-SIGNATURE-BOUND: signature covers full capsule payload.
 pub fn verify_capsule_signature(capsule: &ReplayCapsule) -> Result<(), VsdkError> {
-    let expected_sig = compute_signing_payload(capsule);
-    if !crate::security::constant_time::ct_eq(&capsule.signature, &expected_sig) {
+    let signer_public_key = capsule_signer_public_key(capsule)?;
+    let payload = canonical_capsule_signature_payload(capsule);
+    if crate::connector::verifier_sdk::verify_ed25519_signature_hex(
+        signer_public_key,
+        &payload,
+        &capsule.signature,
+    )
+    .is_err()
+    {
         return Err(VsdkError::SignatureMismatch {
-            expected: expected_sig,
+            expected: format!(
+                "valid {CAPSULE_SIGNATURE_ALGORITHM} signature for {CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY}={signer_public_key}"
+            ),
             actual: capsule.signature.clone(),
         });
     }
@@ -429,8 +495,17 @@ pub fn verify_capsule_signature(capsule: &ReplayCapsule) -> Result<(), VsdkError
 /// Sign a capsule (compute and set its signature field).
 ///
 /// INV-VSDK-SIGNATURE-BOUND: signature covers manifest + payload + inputs.
-pub fn sign_capsule(capsule: &mut ReplayCapsule) {
-    capsule.signature = compute_signing_payload(capsule);
+pub fn sign_capsule(capsule: &mut ReplayCapsule, signing_key: &SigningKey) {
+    capsule.manifest.metadata.insert(
+        CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY.to_string(),
+        CAPSULE_SIGNATURE_ALGORITHM.to_string(),
+    );
+    capsule.manifest.metadata.insert(
+        CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY.to_string(),
+        hex::encode(signing_key.verifying_key().to_bytes()),
+    );
+    let payload = canonical_capsule_signature_payload(capsule);
+    capsule.signature = hex::encode(signing_key.sign(&payload).to_bytes());
 }
 
 /// Replay a capsule and produce a result.
@@ -619,13 +694,17 @@ pub fn build_reference_capsule() -> ReplayCapsule {
         inputs,
         signature: String::new(),
     };
-    sign_capsule(&mut capsule);
+    sign_capsule(&mut capsule, &reference_signing_key());
     capsule
 }
 
 /// Build a reference capsule manifest for testing.
 pub fn build_reference_manifest() -> CapsuleManifest {
     build_reference_capsule().manifest
+}
+
+fn reference_signing_key() -> SigningKey {
+    SigningKey::from_bytes(&[17; 32])
 }
 
 /// Build a reference verification session for testing (with one step, sealed).
@@ -826,6 +905,35 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_validate_manifest_missing_signer_key() {
+        let mut manifest = build_reference_manifest();
+        manifest
+            .metadata
+            .remove(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY);
+        match validate_manifest(&manifest) {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_validate_manifest_wrong_signature_algorithm() {
+        let mut manifest = build_reference_manifest();
+        manifest.metadata.insert(
+            CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY.to_string(),
+            "sha256".to_string(),
+        );
+        match validate_manifest(&manifest) {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("unsupported signature algorithm"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
     // ── ReplayCapsule ──────────────────────────────────────────────
 
     #[test]
@@ -840,7 +948,23 @@ mod tests {
     fn test_sign_capsule_produces_nonempty_signature() {
         let capsule = build_reference_capsule();
         assert!(!capsule.signature.is_empty());
-        assert_eq!(capsule.signature.len(), 64);
+        assert_eq!(capsule.signature.len(), 128);
+        assert_eq!(
+            capsule
+                .manifest
+                .metadata
+                .get(CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY)
+                .map(String::as_str),
+            Some(CAPSULE_SIGNATURE_ALGORITHM)
+        );
+        assert_eq!(
+            capsule
+                .manifest
+                .metadata
+                .get(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY)
+                .map(String::len),
+            Some(64)
+        );
     }
 
     #[test]
@@ -863,6 +987,28 @@ mod tests {
     fn test_verify_capsule_signature_fail() {
         let mut capsule = build_reference_capsule();
         capsule.signature = "tampered_signature".to_string();
+        match verify_capsule_signature(&capsule) {
+            Err(VsdkError::SignatureMismatch { .. }) => {}
+            other => panic!("expected SignatureMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_capsule_signature_rejects_manifest_only_tamper() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.description = "tampered description".to_string();
+        match verify_capsule_signature(&capsule) {
+            Err(VsdkError::SignatureMismatch { .. }) => {}
+            other => panic!("expected SignatureMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_verify_capsule_signature_rejects_hash_surrogate() {
+        let mut capsule = build_reference_capsule();
+        capsule.signature = hex::encode(Sha256::digest(canonical_capsule_signature_payload(
+            &capsule,
+        )));
         match verify_capsule_signature(&capsule) {
             Err(VsdkError::SignatureMismatch { .. }) => {}
             other => panic!("expected SignatureMismatch, got {other:?}"),
@@ -896,7 +1042,7 @@ mod tests {
         let mut capsule = build_reference_capsule();
         capsule.manifest.expected_output_hash = "wrong_hash".to_string();
         // Re-sign after changing manifest
-        sign_capsule(&mut capsule);
+        sign_capsule(&mut capsule, &reference_signing_key());
         let result = replay_capsule(&capsule, "v1").unwrap();
         assert_eq!(result.verdict, CapsuleVerdict::Fail);
         assert_ne!(result.actual_output_hash, result.expected_output_hash);
@@ -906,7 +1052,7 @@ mod tests {
     fn test_replay_capsule_empty_payload() {
         let mut capsule = build_reference_capsule();
         capsule.payload = String::new();
-        sign_capsule(&mut capsule);
+        sign_capsule(&mut capsule, &reference_signing_key());
         match replay_capsule(&capsule, "v1") {
             Err(VsdkError::EmptyPayload(_)) => {}
             other => panic!("expected EmptyPayload, got {other:?}"),
@@ -927,7 +1073,7 @@ mod tests {
     fn test_replay_capsule_invalid_schema() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.schema_version = "bad-version".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&mut capsule, &reference_signing_key());
         match replay_capsule(&capsule, "v1") {
             Err(VsdkError::SchemaUnsupported(_)) => {}
             other => panic!("expected SchemaUnsupported, got {other:?}"),
@@ -1012,7 +1158,7 @@ mod tests {
     fn test_seal_session_with_failure() {
         let mut capsule = build_reference_capsule();
         capsule.manifest.expected_output_hash = "wrong".to_string();
-        sign_capsule(&mut capsule);
+        sign_capsule(&mut capsule, &reference_signing_key());
         let result = replay_capsule(&capsule, "v1").unwrap();
         let mut session = create_session("s1", "v1");
         record_session_step(&mut session, &result).unwrap();
@@ -1182,10 +1328,8 @@ mod tests {
         inputs.insert("artifact_a".to_string(), "content_of_a".to_string());
 
         let hash_with_inputs = compute_replay_hash("hello", &inputs);
-        let hash_payload_only = compute_replay_hash(
-            "hello|10:artifact_a=12:content_of_a",
-            &BTreeMap::new(),
-        );
+        let hash_payload_only =
+            compute_replay_hash("hello|10:artifact_a=12:content_of_a", &BTreeMap::new());
 
         assert_ne!(
             hash_with_inputs, hash_payload_only,
@@ -1228,8 +1372,17 @@ mod tests {
         assert_eq!(capsule.manifest.capsule_id, "capsule-ref-001");
         assert_eq!(capsule.manifest.schema_version, VSDK_SCHEMA_VERSION);
         assert!(!capsule.signature.is_empty());
+        assert_eq!(capsule.signature.len(), 128);
         assert!(!capsule.payload.is_empty());
         assert_eq!(capsule.inputs.len(), 2);
+        assert_eq!(
+            capsule
+                .manifest
+                .metadata
+                .get(CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY)
+                .map(String::as_str),
+            Some(CAPSULE_SIGNATURE_ALGORITHM)
+        );
     }
 
     #[test]
