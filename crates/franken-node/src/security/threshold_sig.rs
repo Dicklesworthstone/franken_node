@@ -65,6 +65,8 @@ pub struct SignerKey {
 /// A partial signature from one signer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PartialSignature {
+    /// Logical signer identity. This must match `key_id` for the signature
+    /// to count toward quorum, otherwise the signer identity is unauthenticated.
     pub signer_id: String,
     pub key_id: String,
     pub signature_hex: String,
@@ -203,6 +205,17 @@ pub fn verify_threshold(
         if !known_key_ids.contains(sig.key_id.as_str()) {
             if first_failure.is_none() {
                 first_failure = Some(FailureReason::UnknownSigner {
+                    signer_id: sig.signer_id.clone(),
+                });
+            }
+            continue;
+        }
+
+        // The signer identity must be bound to the configured key identity.
+        // Otherwise a valid signature can be replayed under an arbitrary label.
+        if sig.signer_id != sig.key_id {
+            if first_failure.is_none() {
+                first_failure = Some(FailureReason::InvalidSignature {
                     signer_id: sig.signer_id.clone(),
                 });
             }
@@ -482,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_key_with_different_signer_id_counted_once() {
+    fn duplicate_key_with_different_signer_id_rejected_as_invalid() {
         let config = test_config(2, 3);
         let mut artifact = signed_artifact(&config, "hash-abc", 1);
 
@@ -495,8 +508,28 @@ mod tests {
         assert_eq!(result.valid_signatures, 1);
         assert!(matches!(
             result.failure_reason,
-            Some(FailureReason::DuplicateSigner { .. })
+            Some(FailureReason::InvalidSignature { .. })
         ));
+    }
+
+    #[test]
+    fn mismatched_signer_id_does_not_count_toward_quorum() {
+        let config = test_config(2, 3);
+        let mut artifact = signed_artifact(&config, "hash-abc", 1);
+
+        let mut replay = sign(&config.signer_keys[1], "hash-abc");
+        replay.signer_id = "signer-0".to_string();
+        artifact.signatures.push(replay);
+
+        let result = verify_threshold(&config, &artifact, "t7c", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-0".to_string(),
+            })
+        );
     }
 
     // === Trace and timestamp ===
