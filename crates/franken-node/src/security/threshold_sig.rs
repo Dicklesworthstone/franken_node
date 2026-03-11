@@ -43,6 +43,14 @@ impl ThresholdConfig {
                 ),
             });
         }
+        let mut seen_key_ids = BTreeSet::new();
+        for signer in &self.signer_keys {
+            if !seen_key_ids.insert(signer.key_id.as_str()) {
+                return Err(ThresholdError::ConfigInvalid {
+                    reason: format!("duplicate signer key_id {}", signer.key_id),
+                });
+            }
+        }
         Ok(())
     }
 }
@@ -165,14 +173,16 @@ pub fn verify_threshold(
 ) -> VerificationResult {
     // Validate config first
     if let Err(e) = config.validate() {
+        let reason = match e {
+            ThresholdError::ConfigInvalid { reason } => reason,
+            other => other.to_string(),
+        };
         return VerificationResult {
             artifact_id: artifact.artifact_id.clone(),
             verified: false,
             valid_signatures: 0,
             threshold: config.threshold,
-            failure_reason: Some(FailureReason::ConfigInvalid {
-                reason: e.to_string(),
-            }),
+            failure_reason: Some(FailureReason::ConfigInvalid { reason }),
             trace_id: trace_id.to_string(),
             timestamp: timestamp.to_string(),
         };
@@ -359,6 +369,18 @@ mod tests {
         assert!(c.validate().is_err());
     }
 
+    #[test]
+    fn config_duplicate_key_ids_invalid() {
+        let mut c = test_config(2, 3);
+        c.signer_keys[1].key_id = c.signer_keys[0].key_id.clone();
+        assert_eq!(
+            c.validate(),
+            Err(ThresholdError::ConfigInvalid {
+                reason: "duplicate signer key_id signer-0".to_string(),
+            })
+        );
+    }
+
     // === Threshold verification ===
 
     #[test]
@@ -397,6 +419,19 @@ mod tests {
         let artifact = signed_artifact(&config, "hash-abc", 0);
         let result = verify_threshold(&config, &artifact, "t4", "ts");
         assert!(!result.verified);
+    }
+
+    #[test]
+    fn invalid_config_reason_is_not_double_prefixed() {
+        let config = test_config(0, 3);
+        let artifact = signed_artifact(&config, "hash-abc", 0);
+        let result = verify_threshold(&config, &artifact, "t4-invalid", "ts");
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::ConfigInvalid {
+                reason: "threshold must be > 0".to_string(),
+            })
+        );
     }
 
     // === Unknown signer ===

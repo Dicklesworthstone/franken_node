@@ -697,7 +697,12 @@ impl VerifierToolkit {
                 record_id: deterministic_id(
                     "vtk-audit",
                     b"verifier_toolkit_audit_id_v1:",
-                    &[run_seed, event_code, ordinal_string.as_str(), details_string.as_str()],
+                    &[
+                        run_seed,
+                        event_code,
+                        ordinal_string.as_str(),
+                        details_string.as_str(),
+                    ],
                 ),
                 event_code: event_code.to_string(),
                 timestamp: deterministic_timestamp(
