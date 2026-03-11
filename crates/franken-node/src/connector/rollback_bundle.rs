@@ -305,7 +305,10 @@ fn ct_eq_checksum_maps(left: &BTreeMap<String, String>, right: &BTreeMap<String,
 
     let mut mismatch = 0u8;
     for ((left_key, left_value), (right_key, right_value)) in left.iter().zip(right.iter()) {
-        mismatch |= u8::from(left_key != right_key);
+        mismatch |= u8::from(!crate::security::constant_time::ct_eq(
+            left_key,
+            right_key,
+        ));
         mismatch |= u8::from(!crate::security::constant_time::ct_eq(
             left_value,
             right_value,
@@ -1666,5 +1669,27 @@ mod tests {
         store.set_state(make_snapshot("1.0.0"));
         assert!(store.current_state().is_some());
         assert_eq!(store.current_state().unwrap().binary_version, "1.0.0");
+    }
+
+    #[test]
+    fn ct_eq_checksum_maps_uses_constant_time_on_keys() {
+        // Regression: keys were compared with `!=` instead of ct_eq.
+        // Both keys and values must use constant-time comparison.
+        let mut a = BTreeMap::new();
+        a.insert("key_alpha".to_string(), sha256_hex(b"val1"));
+        a.insert("key_beta".to_string(), sha256_hex(b"val2"));
+
+        let mut b = BTreeMap::new();
+        b.insert("key_alpha".to_string(), sha256_hex(b"val1"));
+        b.insert("key_beta".to_string(), sha256_hex(b"val2"));
+
+        // Identical maps must pass
+        assert!(ct_eq_checksum_maps(&a, &b));
+
+        // Single-char key difference must still detect mismatch
+        let mut c = BTreeMap::new();
+        c.insert("key_alphb".to_string(), sha256_hex(b"val1"));
+        c.insert("key_beta".to_string(), sha256_hex(b"val2"));
+        assert!(!ct_eq_checksum_maps(&a, &c));
     }
 }
