@@ -655,6 +655,12 @@ fn build_signed_verification_result(
     artifact_binding_hash: String,
     signer: &VerifierSigner,
 ) -> VerificationResult {
+    // Defense in depth: NaN/Inf confidence is nonsensical — clamp to 0.0.
+    let confidence_score = if confidence_score.is_finite() {
+        confidence_score
+    } else {
+        0.0
+    };
     let execution_timestamp = now_timestamp();
     let signature_algorithm = "ed25519".to_string();
     let verifier_public_key = signer.public_key_hex();
@@ -2116,5 +2122,48 @@ mod tests {
             "signature".to_string(),
             serde_json::json!(hex::encode(signature.to_bytes())),
         );
+    }
+
+    #[test]
+    fn nan_confidence_score_clamped_to_zero() {
+        let signer = test_verifier_signer("verifier-nan", 42);
+        let result = build_signed_verification_result(
+            Verdict::Pass,
+            f64::NAN,
+            vec![],
+            "binding-hash".to_string(),
+            &signer,
+        );
+        assert_eq!(result.confidence_score, 0.0);
+        // Signature must verify cleanly with the clamped value.
+        assert!(verify_verification_result_signature(&result).is_ok());
+    }
+
+    #[test]
+    fn infinity_confidence_score_clamped_to_zero() {
+        let signer = test_verifier_signer("verifier-inf", 43);
+        let result = build_signed_verification_result(
+            Verdict::Fail,
+            f64::INFINITY,
+            vec![],
+            "binding-hash".to_string(),
+            &signer,
+        );
+        assert_eq!(result.confidence_score, 0.0);
+        assert!(verify_verification_result_signature(&result).is_ok());
+    }
+
+    #[test]
+    fn neg_infinity_confidence_score_clamped_to_zero() {
+        let signer = test_verifier_signer("verifier-neginf", 44);
+        let result = build_signed_verification_result(
+            Verdict::Inconclusive,
+            f64::NEG_INFINITY,
+            vec![],
+            "binding-hash".to_string(),
+            &signer,
+        );
+        assert_eq!(result.confidence_score, 0.0);
+        assert!(verify_verification_result_signature(&result).is_ok());
     }
 }

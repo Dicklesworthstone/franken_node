@@ -88,7 +88,12 @@ fn replay_capsule_freshness_window_valid(issued_at: &str, expires_at: &str) -> b
         Err(_) => return false,
     };
     let window = expires_at.signed_duration_since(issued_at).num_seconds();
-    (0..=MAX_REPLAY_CAPSULE_FRESHNESS_SECS).contains(&window)
+    if !(0..=MAX_REPLAY_CAPSULE_FRESHNESS_SECS).contains(&window) {
+        return false;
+    }
+    // Fail-closed: reject capsules whose expiry deadline has passed.
+    let now = chrono::Utc::now();
+    now < expires_at
 }
 
 pub(crate) fn attestation_signature_payload(submission: &AttestationSubmission) -> Vec<u8> {
@@ -1339,8 +1344,10 @@ mod tests {
             attestation.claim.score,
             &attestation.evidence.suite_id,
         );
-        let issued_at = "2026-03-10T00:00:00Z".to_string();
-        let expires_at = "2026-03-10T01:00:00Z".to_string();
+        let now = chrono::Utc::now();
+        let issued_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at = (now + chrono::Duration::seconds(3600))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let integrity_hash = compute_capsule_integrity_hash(
             capsule_id,
             REPLAY_CAPSULE_SCHEMA_VERSION,
@@ -2479,5 +2486,24 @@ mod tests {
             longevity: 0.5,
         };
         assert_eq!(VerifierEconomyRegistry::compute_reputation(&dims), 0);
+    }
+
+    #[test]
+    fn expired_capsule_rejected_by_freshness_check() {
+        // A capsule with a valid 1-hour window but already past its deadline.
+        let past = chrono::Utc::now() - chrono::Duration::hours(2);
+        let issued_at = past.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at = (past + chrono::Duration::hours(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(!replay_capsule_freshness_window_valid(&issued_at, &expires_at));
+    }
+
+    #[test]
+    fn future_capsule_accepted_by_freshness_check() {
+        let now = chrono::Utc::now();
+        let issued_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at = (now + chrono::Duration::seconds(3600))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(replay_capsule_freshness_window_valid(&issued_at, &expires_at));
     }
 }
