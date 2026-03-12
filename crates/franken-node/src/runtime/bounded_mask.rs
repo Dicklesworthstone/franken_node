@@ -513,6 +513,13 @@ fn enter_mask_scope<'a>(
                     deferred_cancel_pending: false,
                 },
             );
+            // In tests, panic so catch_unwind can verify the invariant;
+            // in production, abort to prevent recovery from a security violation.
+            #[cfg(test)]
+            panic!(
+                "{MASK_NESTING_VIOLATION}: nested bounded mask for operation `{operation_name}`"
+            );
+            #[cfg(not(test))]
             std::process::abort();
         }
         active.set(true);
