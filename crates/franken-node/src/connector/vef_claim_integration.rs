@@ -12,6 +12,15 @@ const MAX_EVENTS: usize = 4096;
 const MAX_GATE_RESULTS: usize = 4096;
 const MAX_SCOREBOARD: usize = 4096;
 
+fn canonical_digest_f64(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+fn push_length_prefixed_str(hasher: &mut Sha256, value: &str) {
+    hasher.update((value.len() as u64).to_le_bytes());
+    hasher.update(value.as_bytes());
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -163,12 +172,23 @@ impl VefMetrics {
         let mut hasher = Sha256::new();
         hasher.update(b"vef_metrics_v1:");
         // Canonicalize non-finite f64 to 0.0 for deterministic hashing.
-        let coverage = if self.coverage_pct.is_finite() { self.coverage_pct } else { 0.0 };
-        let validity = if self.validity_rate.is_finite() { self.validity_rate } else { 0.0 };
+        let coverage = canonical_digest_f64(self.coverage_pct);
+        let validity = canonical_digest_f64(self.validity_rate);
+        let degraded_time_frac = canonical_digest_f64(self.degraded_time_frac);
         hasher.update(coverage.to_le_bytes());
         hasher.update(validity.to_le_bytes());
-        hasher.update(self.proof_count.to_le_bytes());
-        hasher.update(self.gap_count.to_le_bytes());
+        hasher.update((self.proof_count as u64).to_le_bytes());
+        hasher.update((self.gap_count as u64).to_le_bytes());
+        hasher.update(self.avg_proof_age_secs.to_le_bytes());
+        hasher.update(degraded_time_frac.to_le_bytes());
+        hasher.update((self.covered_classes.len() as u64).to_le_bytes());
+        for class in &self.covered_classes {
+            push_length_prefixed_str(&mut hasher, class);
+        }
+        hasher.update((self.gap_classes.len() as u64).to_le_bytes());
+        for class in &self.gap_classes {
+            push_length_prefixed_str(&mut hasher, class);
+        }
         hasher.finalize().into()
     }
 }
@@ -230,9 +250,12 @@ impl ScoreboardEntry {
         let mut hasher = Sha256::new();
         hasher.update(b"vef_scoreboard_v1:");
         hasher.update(metrics.digest());
+        hasher.update((evidence_links.len() as u64).to_le_bytes());
         for link in evidence_links {
-            hasher.update((link.proof_id.len() as u64).to_le_bytes());
-            hasher.update(link.proof_id.as_bytes());
+            push_length_prefixed_str(&mut hasher, &link.proof_id);
+            push_length_prefixed_str(&mut hasher, &link.action_class);
+            hasher.update(link.verification_time.to_le_bytes());
+            hasher.update([u8::from(link.valid)]);
         }
         hasher.finalize().into()
     }
@@ -850,21 +873,139 @@ mod tests {
         assert_ne!(m.digest(), baseline.digest());
     }
 
+    #[test]
+    fn metrics_digest_changes_when_avg_proof_age_changes() {
+        let baseline = good_metrics();
+        let mut changed = good_metrics();
+        changed.avg_proof_age_secs = baseline.avg_proof_age_secs + 1;
+        assert_ne!(baseline.digest(), changed.digest());
+    }
+
+    #[test]
+    fn metrics_digest_changes_when_degraded_fraction_changes() {
+        let baseline = good_metrics();
+        let mut changed = good_metrics();
+        changed.degraded_time_frac = 0.02;
+        assert_ne!(baseline.digest(), changed.digest());
+    }
+
+    #[test]
+    fn metrics_digest_changes_when_covered_classes_change() {
+        let baseline = good_metrics();
+        let mut changed = good_metrics();
+        changed.covered_classes.push("ipc_send".into());
+        assert_ne!(baseline.digest(), changed.digest());
+    }
+
+    #[test]
+    fn metrics_digest_changes_when_gap_classes_change() {
+        let baseline = low_metrics();
+        let mut changed = low_metrics();
+        changed.gap_classes.push("dns_lookup".into());
+        assert_ne!(baseline.digest(), changed.digest());
+    }
+
     // -- Regression: length-prefixed evidence link hash --
 
     #[test]
     fn scoreboard_digest_resists_delimiter_collision() {
         let links_a = vec![
-            EvidenceLink { proof_id: "ab".into(), action_class: "fs".into(), verification_time: 1, valid: true },
-            EvidenceLink { proof_id: "c".into(), action_class: "fs".into(), verification_time: 1, valid: true },
+            EvidenceLink {
+                proof_id: "ab".into(),
+                action_class: "fs".into(),
+                verification_time: 1,
+                valid: true,
+            },
+            EvidenceLink {
+                proof_id: "c".into(),
+                action_class: "fs".into(),
+                verification_time: 1,
+                valid: true,
+            },
         ];
         let links_b = vec![
-            EvidenceLink { proof_id: "a".into(), action_class: "fs".into(), verification_time: 1, valid: true },
-            EvidenceLink { proof_id: "bc".into(), action_class: "fs".into(), verification_time: 1, valid: true },
+            EvidenceLink {
+                proof_id: "a".into(),
+                action_class: "fs".into(),
+                verification_time: 1,
+                valid: true,
+            },
+            EvidenceLink {
+                proof_id: "bc".into(),
+                action_class: "fs".into(),
+                verification_time: 1,
+                valid: true,
+            },
         ];
         let m = good_metrics();
         let d_a = ScoreboardEntry::compute_digest(&m, &links_a);
         let d_b = ScoreboardEntry::compute_digest(&m, &links_b);
-        assert_ne!(d_a, d_b, "different proof_id splits must produce different digests");
+        assert_ne!(
+            d_a, d_b,
+            "different proof_id splits must produce different digests"
+        );
+    }
+
+    #[test]
+    fn scoreboard_digest_changes_when_action_class_changes() {
+        let metrics = good_metrics();
+        let baseline = vec![EvidenceLink {
+            proof_id: "proof-1".into(),
+            action_class: "fs_write".into(),
+            verification_time: 100,
+            valid: true,
+        }];
+        let changed = vec![EvidenceLink {
+            proof_id: "proof-1".into(),
+            action_class: "net_connect".into(),
+            verification_time: 100,
+            valid: true,
+        }];
+        assert_ne!(
+            ScoreboardEntry::compute_digest(&metrics, &baseline),
+            ScoreboardEntry::compute_digest(&metrics, &changed)
+        );
+    }
+
+    #[test]
+    fn scoreboard_digest_changes_when_verification_time_changes() {
+        let metrics = good_metrics();
+        let baseline = vec![EvidenceLink {
+            proof_id: "proof-1".into(),
+            action_class: "fs_write".into(),
+            verification_time: 100,
+            valid: true,
+        }];
+        let changed = vec![EvidenceLink {
+            proof_id: "proof-1".into(),
+            action_class: "fs_write".into(),
+            verification_time: 101,
+            valid: true,
+        }];
+        assert_ne!(
+            ScoreboardEntry::compute_digest(&metrics, &baseline),
+            ScoreboardEntry::compute_digest(&metrics, &changed)
+        );
+    }
+
+    #[test]
+    fn scoreboard_digest_changes_when_evidence_validity_changes() {
+        let metrics = good_metrics();
+        let baseline = vec![EvidenceLink {
+            proof_id: "proof-1".into(),
+            action_class: "fs_write".into(),
+            verification_time: 100,
+            valid: true,
+        }];
+        let changed = vec![EvidenceLink {
+            proof_id: "proof-1".into(),
+            action_class: "fs_write".into(),
+            verification_time: 100,
+            valid: false,
+        }];
+        assert_ne!(
+            ScoreboardEntry::compute_digest(&metrics, &baseline),
+            ScoreboardEntry::compute_digest(&metrics, &changed)
+        );
     }
 }
