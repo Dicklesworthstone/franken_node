@@ -240,25 +240,22 @@ pub fn evaluate_admission(
             baseline.instability_score, baseline.drift_score, baseline.regime_shift_probability
         ),
     )];
-    if events.len() > MAX_EVENTS {
-        let overflow = events.len() - MAX_EVENTS;
-        events.drain(0..overflow);
-    }
+
 
     // NaN/Inf fail-closed: non-finite values must trigger the most restrictive path
     let needs_evidence = !delta.instability_delta.is_finite()
-        || delta.instability_delta >= thresholds.max_instability_delta_for_direct_admit
+        || delta.instability_delta > thresholds.max_instability_delta_for_direct_admit
         || !projected.drift_score.is_finite()
-        || projected.drift_score >= thresholds.max_drift_score_for_direct_admit
+        || projected.drift_score > thresholds.max_drift_score_for_direct_admit
         || !projected.regime_shift_probability.is_finite()
         || projected.regime_shift_probability
-            >= thresholds.max_regime_shift_probability_for_direct_admit;
+            > thresholds.max_regime_shift_probability_for_direct_admit;
 
     let severe = !projected.instability_score.is_finite()
-        || projected.instability_score >= thresholds.max_instability_score_for_staged_rollout
+        || projected.instability_score > thresholds.max_instability_score_for_staged_rollout
         || !projected.regime_shift_probability.is_finite()
         || projected.regime_shift_probability
-            >= thresholds.max_regime_shift_probability_for_staged_rollout;
+            > thresholds.max_regime_shift_probability_for_staged_rollout;
 
     if !needs_evidence {
         events.push(gate_event(
@@ -332,10 +329,7 @@ pub fn evaluate_admission(
             evidence.len()
         ),
     ));
-    if events.len() > MAX_EVENTS {
-        let overflow = events.len() - MAX_EVENTS;
-        events.drain(0..overflow);
-    }
+
     AdmissionDecision {
         verdict: GateVerdict::RequireAdditionalEvidence,
         baseline,

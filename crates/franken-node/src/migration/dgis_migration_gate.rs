@@ -126,7 +126,7 @@ fn evaluate_policy(
     let mut reasons = Vec::new();
 
     if !delta.cascade_risk_delta.is_finite()
-        || delta.cascade_risk_delta >= thresholds.max_cascade_risk_delta
+        || delta.cascade_risk_delta > thresholds.max_cascade_risk_delta
     {
         reasons.push(RejectionReason {
             code: "DGIS-MIGRATE-RISK-DELTA".to_string(),
@@ -137,7 +137,7 @@ fn evaluate_policy(
         });
     }
 
-    if delta.new_fragility_findings >= i64::from(thresholds.max_new_fragility_findings) {
+    if delta.new_fragility_findings > i64::from(thresholds.max_new_fragility_findings) {
         reasons.push(RejectionReason {
             code: "DGIS-MIGRATE-FRAGILITY-DELTA".to_string(),
             detail: format!(
@@ -147,7 +147,7 @@ fn evaluate_policy(
         });
     }
 
-    if delta.new_articulation_points >= i64::from(thresholds.max_new_articulation_points) {
+    if delta.new_articulation_points > i64::from(thresholds.max_new_articulation_points) {
         reasons.push(RejectionReason {
             code: "DGIS-MIGRATE-ARTICULATION-DELTA".to_string(),
             detail: format!(
@@ -269,10 +269,6 @@ fn evaluate(
             baseline.cascade_risk, baseline.fragility_findings, baseline.articulation_points
         ),
     )];
-    if events.len() > MAX_EVENTS {
-        let overflow = events.len() - MAX_EVENTS;
-        events.drain(0..overflow);
-    }
 
     match verdict {
         GateVerdict::Allow => {
@@ -287,10 +283,6 @@ fn evaluate(
                 trace_id,
                 format!("phase={phase}: migration gate passed"),
             ));
-            if events.len() > MAX_EVENTS {
-                let overflow = events.len() - MAX_EVENTS;
-                events.drain(0..overflow);
-            }
         }
         GateVerdict::Block | GateVerdict::ReplanRequired => {
             let event_code = if phase == "admission" {
@@ -307,10 +299,6 @@ fn evaluate(
                     rejection_reasons.len()
                 ),
             ));
-            if events.len() > MAX_EVENTS {
-                let overflow = events.len() - MAX_EVENTS;
-                events.drain(0..overflow);
-            }
             for suggestion in &replan_suggestions {
                 events.push(gate_event(
                     event_codes::REPLAN_SUGGESTED,
@@ -318,10 +306,6 @@ fn evaluate(
                     trace_id,
                     format!("phase={phase}: suggested path={}", suggestion.path_id),
                 ));
-                if events.len() > MAX_EVENTS {
-                    let overflow = events.len() - MAX_EVENTS;
-                    events.drain(0..overflow);
-                }
             }
         }
     }
