@@ -13,8 +13,7 @@
 //!   under heavy Ready-tier load.
 
 use frankenengine_node::runtime::lane_scheduler::{
-    self, default_policy, task_classes, LaneMappingPolicy, LaneScheduler,
-    SchedulerLane, TaskClass,
+    self, LaneScheduler, SchedulerLane, TaskClass, default_policy, task_classes,
 };
 
 /// All well-known task classes from the 10.14 specification.
@@ -76,7 +75,8 @@ fn cancel_tier_maps_to_control_critical() {
             lane,
             SchedulerLane::ControlCritical,
             "cancel-tier class '{}' should map to ControlCritical, got {:?}",
-            tc, lane
+            tc,
+            lane
         );
     }
 }
@@ -89,7 +89,8 @@ fn ready_tier_maps_to_maintenance_or_background() {
         assert!(
             lane == SchedulerLane::Maintenance || lane == SchedulerLane::Background,
             "ready-tier class '{}' should map to Maintenance or Background, got {:?}",
-            tc, lane
+            tc,
+            lane
         );
     }
 }
@@ -103,11 +104,7 @@ fn budget_allocations_sum_correctly() {
     let timed_min = 30_u32;
     let ready_min = 10_u32;
     let total = cancel_min + timed_min + ready_min;
-    assert!(
-        total <= 100,
-        "minimum budget sum {} exceeds 100%",
-        total
-    );
+    assert!(total <= 100, "minimum budget sum {} exceeds 100%", total);
     assert_eq!(total, 60, "expected 60% allocated, 40% unallocated");
 }
 
@@ -122,17 +119,20 @@ fn priority_weights_reflect_cancel_gt_timed_gt_ready() {
     assert!(
         cc.priority_weight > re.priority_weight,
         "Cancel priority ({}) must exceed Timed priority ({})",
-        cc.priority_weight, re.priority_weight
+        cc.priority_weight,
+        re.priority_weight
     );
     assert!(
         re.priority_weight > mt.priority_weight,
         "Timed priority ({}) must exceed Ready/Maintenance priority ({})",
-        re.priority_weight, mt.priority_weight
+        re.priority_weight,
+        mt.priority_weight
     );
     assert!(
         mt.priority_weight > bg.priority_weight,
         "Maintenance priority ({}) must exceed Background priority ({})",
-        mt.priority_weight, bg.priority_weight
+        mt.priority_weight,
+        bg.priority_weight
     );
 }
 
@@ -217,7 +217,13 @@ fn starvation_detected_when_lane_idle_too_long() {
 
     let starved = sched.check_starvation(ts, "starve-check");
     let bg_starved = starved.iter().any(|e| {
-        matches!(e, lane_scheduler::LaneSchedulerError::Starvation { lane: SchedulerLane::Background, .. })
+        matches!(
+            e,
+            lane_scheduler::LaneSchedulerError::Starvation {
+                lane: SchedulerLane::Background,
+                ..
+            }
+        )
     });
     assert!(
         bg_starved,
@@ -248,25 +254,22 @@ fn workload_simulation_produces_metrics() {
         if sched.assign_task(&cancel_class, ts, "sim").is_ok() {
             cancel_runs += 1;
             // Complete immediately to free the slot.
-            let log = sched.audit_log();
-            if let Some(last) = log.last() {
-                let _ = sched.complete_task(&last.task_id, ts + 10, "sim");
+            if let Some(task_id) = sched.audit_log().last().map(|last| last.task_id.clone()) {
+                let _ = sched.complete_task(&task_id, ts + 10, "sim");
             }
         }
 
         if sched.assign_task(&timed_class, ts, "sim").is_ok() {
             timed_runs += 1;
-            let log = sched.audit_log();
-            if let Some(last) = log.last() {
-                let _ = sched.complete_task(&last.task_id, ts + 10, "sim");
+            if let Some(task_id) = sched.audit_log().last().map(|last| last.task_id.clone()) {
+                let _ = sched.complete_task(&task_id, ts + 10, "sim");
             }
         }
 
         if sched.assign_task(&ready_class, ts, "sim").is_ok() {
             ready_runs += 1;
-            let log = sched.audit_log();
-            if let Some(last) = log.last() {
-                let _ = sched.complete_task(&last.task_id, ts + 10, "sim");
+            if let Some(task_id) = sched.audit_log().last().map(|last| last.task_id.clone()) {
+                let _ = sched.complete_task(&task_id, ts + 10, "sim");
             }
         }
     }
@@ -280,7 +283,8 @@ fn workload_simulation_produces_metrics() {
     assert!(
         cancel_runs >= ready_runs,
         "Cancel runs ({}) should be >= Ready runs ({})",
-        cancel_runs, ready_runs
+        cancel_runs,
+        ready_runs
     );
 }
 
@@ -303,7 +307,11 @@ fn adversarial_ready_flood_does_not_block_cancel() {
 
     // Cancel task should STILL succeed.
     let result = sched.assign_task(&cancel_class, ts, "cancel");
-    assert!(result.is_ok(), "Cancel task blocked by Ready flood: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "Cancel task blocked by Ready flood: {:?}",
+        result.err()
+    );
     assert_eq!(result.unwrap().lane, SchedulerLane::ControlCritical);
 }
 
