@@ -2,7 +2,7 @@
   "gate": "control_channel_verification",
   "bead": "bd-v97o",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "ACC-IMPL",
@@ -28,8 +28,8 @@
     {
       "id": "ACC-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "Tests verified via section gate (1978 connector tests pass)"
+      "status": "FAIL",
+      "details": "0 tests passed"
     },
     {
       "id": "ACC-SPEC",
