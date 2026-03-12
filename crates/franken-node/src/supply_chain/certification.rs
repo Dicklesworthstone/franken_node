@@ -831,12 +831,10 @@ impl CertificationRegistry {
     ) {
         let evidence_max = record.evaluation.max_achievable;
         record.evaluation.level = new_level;
-        let (satisfied, unsatisfied) = criteria_snapshot_for_level(new_level);
-        record.evaluation.satisfied_criteria = satisfied;
-        record.evaluation.unsatisfied_criteria = unsatisfied;
         record.evaluation.explanation = format!(
             "Extension '{}' v{} manually adjusted from '{}' to '{}' at {}: {}. \
-             Evidence-derived max remains '{}'; criteria refreshed to match adjusted level.",
+             Evidence-derived max remains '{}'; criteria and derivation remain \
+             bound to the original verified evidence.",
             record.extension_id,
             record.version,
             old_level,
@@ -846,33 +844,6 @@ impl CertificationRegistry {
             evidence_max
         );
     }
-}
-
-/// Return (satisfied, unsatisfied) criteria consistent with `level`.
-///
-/// All criteria whose level-gate is at or below `level` appear in satisfied;
-/// the rest appear in unsatisfied.  Used by `refresh_manual_evaluation` to
-/// keep the embedded snapshot self-consistent after promote/demote.
-fn criteria_snapshot_for_level(level: CertificationLevel) -> (Vec<String>, Vec<String>) {
-    const ALL_CRITERIA: &[(CertificationLevel, &str)] = &[
-        (CertificationLevel::Basic, "publisher_identity_verified"),
-        (CertificationLevel::Basic, "manifest_declared"),
-        (CertificationLevel::Standard, "provenance_chain_verified"),
-        (CertificationLevel::Standard, "reputation_above_threshold"),
-        (CertificationLevel::Verified, "reproducible_build_evidence"),
-        (CertificationLevel::Verified, "test_coverage_above_80pct"),
-        (CertificationLevel::Audited, "third_party_audit_attestation"),
-    ];
-    let mut satisfied = Vec::new();
-    let mut unsatisfied = Vec::new();
-    for &(gate, name) in ALL_CRITERIA {
-        if gate.rank() <= level.rank() {
-            satisfied.push(name.to_owned());
-        } else {
-            unsatisfied.push(name.to_owned());
-        }
-    }
-    (satisfied, unsatisfied)
 }
 
 fn compute_entry_hash(entry: &CertificationAuditEntry) -> String {
@@ -1180,15 +1151,19 @@ mod tests {
         let record = reg.get_record("ext-1", "1.0.0").unwrap();
         assert_eq!(record.level, CertificationLevel::Verified);
         assert_eq!(record.evaluation.level, CertificationLevel::Verified);
+        assert_eq!(
+            record.evaluation.satisfied_criteria,
+            before.satisfied_criteria
+        );
+        assert_eq!(
+            record.evaluation.unsatisfied_criteria,
+            before.unsatisfied_criteria
+        );
         assert_eq!(record.evaluation.max_achievable, before.max_achievable);
-        // Criteria must be refreshed to match the new Verified level.
-        let (expected_sat, expected_unsat) =
-            criteria_snapshot_for_level(CertificationLevel::Verified);
-        assert_eq!(record.evaluation.satisfied_criteria, expected_sat);
-        assert_eq!(record.evaluation.unsatisfied_criteria, expected_unsat);
         assert_eq!(record.evaluation.derivation, before.derivation);
         assert!(record.evaluation.explanation.contains("manually adjusted"));
         assert!(record.evaluation.explanation.contains("max remains"));
+        assert!(record.evaluation.explanation.contains("remain bound"));
         assert!(record.evaluation.explanation.contains("verified"));
     }
 
@@ -1246,15 +1221,19 @@ mod tests {
         let record = reg.get_record("ext-1", "1.0.0").unwrap();
         assert_eq!(record.level, CertificationLevel::Basic);
         assert_eq!(record.evaluation.level, CertificationLevel::Basic);
+        assert_eq!(
+            record.evaluation.satisfied_criteria,
+            before.satisfied_criteria
+        );
+        assert_eq!(
+            record.evaluation.unsatisfied_criteria,
+            before.unsatisfied_criteria
+        );
         assert_eq!(record.evaluation.max_achievable, before.max_achievable);
-        // Criteria must be refreshed to match the new Basic level.
-        let (expected_sat, expected_unsat) =
-            criteria_snapshot_for_level(CertificationLevel::Basic);
-        assert_eq!(record.evaluation.satisfied_criteria, expected_sat);
-        assert_eq!(record.evaluation.unsatisfied_criteria, expected_unsat);
         assert_eq!(record.evaluation.derivation, before.derivation);
         assert!(record.evaluation.explanation.contains("trust degradation"));
         assert!(record.evaluation.explanation.contains("max remains"));
+        assert!(record.evaluation.explanation.contains("remain bound"));
         assert!(record.evaluation.explanation.contains("basic"));
     }
 
@@ -1502,7 +1481,7 @@ mod tests {
     }
 
     #[test]
-    fn promotion_criteria_gains_new_level_requirements() {
+    fn promotion_preserves_evidence_criteria_while_updating_effective_level() {
         // Start at Basic (publisher+manifest only), promote to Standard.
         let mut reg = CertificationRegistry::new();
         let input = make_input(
@@ -1517,27 +1496,33 @@ mod tests {
             CertificationLevel::Basic
         );
         let before = reg.get_record("ext-p", "1.0.0").unwrap().evaluation.clone();
-        // provenance + reputation should be unsatisfied before promotion.
-        assert!(before.unsatisfied_criteria.contains(&"provenance_chain_verified".to_owned()));
-        assert!(before.unsatisfied_criteria.contains(&"reputation_above_threshold".to_owned()));
 
-        reg.promote("ext-p", "1.0.0", CertificationLevel::Standard, "manual-ev", &ts(2))
-            .unwrap();
+        reg.promote(
+            "ext-p",
+            "1.0.0",
+            CertificationLevel::Standard,
+            "manual-ev",
+            &ts(2),
+        )
+        .unwrap();
 
         let after = reg.get_record("ext-p", "1.0.0").unwrap();
-        // After promotion to Standard, those criteria must now be satisfied.
-        assert!(after.evaluation.satisfied_criteria.contains(&"provenance_chain_verified".to_owned()));
-        assert!(after.evaluation.satisfied_criteria.contains(&"reputation_above_threshold".to_owned()));
-        // Higher-level criteria remain unsatisfied.
-        assert!(after.evaluation.unsatisfied_criteria.contains(&"reproducible_build_evidence".to_owned()));
-        assert!(after.evaluation.unsatisfied_criteria.contains(&"third_party_audit_attestation".to_owned()));
-        // max_achievable and derivation are unchanged.
+        assert_eq!(after.level, CertificationLevel::Standard);
+        assert_eq!(after.evaluation.level, CertificationLevel::Standard);
+        assert_eq!(
+            after.evaluation.satisfied_criteria,
+            before.satisfied_criteria
+        );
+        assert_eq!(
+            after.evaluation.unsatisfied_criteria,
+            before.unsatisfied_criteria
+        );
         assert_eq!(after.evaluation.max_achievable, before.max_achievable);
         assert_eq!(after.evaluation.derivation, before.derivation);
     }
 
     #[test]
-    fn demotion_criteria_loses_old_level_requirements() {
+    fn demotion_preserves_evidence_criteria_while_updating_effective_level() {
         // Start at Standard (provenance+reputation met), demote to Basic.
         let mut reg = CertificationRegistry::new();
         let input = make_input(
@@ -1552,24 +1537,27 @@ mod tests {
             CertificationLevel::Standard
         );
         let before = reg.get_record("ext-d", "1.0.0").unwrap().evaluation.clone();
-        // provenance + reputation should be satisfied before demotion.
-        assert!(before.satisfied_criteria.contains(&"provenance_chain_verified".to_owned()));
-        assert!(before.satisfied_criteria.contains(&"reputation_above_threshold".to_owned()));
 
-        reg.demote("ext-d", "1.0.0", CertificationLevel::Basic, "trust loss", &ts(2))
-            .unwrap();
+        reg.demote(
+            "ext-d",
+            "1.0.0",
+            CertificationLevel::Basic,
+            "trust loss",
+            &ts(2),
+        )
+        .unwrap();
 
         let after = reg.get_record("ext-d", "1.0.0").unwrap();
-        // After demotion to Basic, those criteria must now be unsatisfied.
-        assert!(after.evaluation.unsatisfied_criteria.contains(&"provenance_chain_verified".to_owned()));
-        assert!(after.evaluation.unsatisfied_criteria.contains(&"reputation_above_threshold".to_owned()));
-        // Basic-level criteria remain satisfied.
-        assert!(after.evaluation.satisfied_criteria.contains(&"publisher_identity_verified".to_owned()));
-        assert!(after.evaluation.satisfied_criteria.contains(&"manifest_declared".to_owned()));
-        // Exactly 2 satisfied, 5 unsatisfied for Basic.
-        assert_eq!(after.evaluation.satisfied_criteria.len(), 2);
-        assert_eq!(after.evaluation.unsatisfied_criteria.len(), 5);
-        // max_achievable and derivation are unchanged.
+        assert_eq!(after.level, CertificationLevel::Basic);
+        assert_eq!(after.evaluation.level, CertificationLevel::Basic);
+        assert_eq!(
+            after.evaluation.satisfied_criteria,
+            before.satisfied_criteria
+        );
+        assert_eq!(
+            after.evaluation.unsatisfied_criteria,
+            before.unsatisfied_criteria
+        );
         assert_eq!(after.evaluation.max_achievable, before.max_achievable);
         assert_eq!(after.evaluation.derivation, before.derivation);
     }

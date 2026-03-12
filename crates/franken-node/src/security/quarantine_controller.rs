@@ -176,7 +176,9 @@ impl QuarantineController {
 
         // Now that it succeeded, mutate sequence and evidence log
         let seq = self.next_sequence;
-        self.next_sequence = self.next_sequence.saturating_add(1);
+        self.next_sequence = self.next_sequence.checked_add(1).ok_or_else(|| {
+            format!("{ERR_QC_SEQUENCE_VIOLATION}: sequence counter overflow")
+        })?;
 
         let signed = SignedEvidenceEntry {
             event: event.clone(),
@@ -208,14 +210,14 @@ impl QuarantineController {
     pub fn replay_batch(
         &mut self,
         events: &[EvidenceEvent],
-        trace_id: &str,
+        _trace_id: &str,
     ) -> Result<(BTreeMap<EntityId, f64>, Vec<ActionRecord>), String> {
         let mut batch_actions = Vec::new();
         for event in events {
             let (action, posterior) = self.submit_evidence(event.clone())?;
             if action != QuarantineAction::None {
                 batch_actions.push(ActionRecord {
-                    trace_id: trace_id.to_string(),
+                    trace_id: event.trace_id.clone(),
                     entity_id: event.entity_id.clone(),
                     action,
                     risk_posterior: posterior,

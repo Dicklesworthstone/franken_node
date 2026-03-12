@@ -307,6 +307,7 @@ pub struct LaneCounters {
     pub completed_total: u64,
     pub rejected_total: u64,
     pub starvation_events: u64,
+    pub starvation_active: bool,
     pub last_completion_ms: Option<u64>,
 }
 
@@ -320,6 +321,7 @@ impl LaneCounters {
             completed_total: 0,
             rejected_total: 0,
             starvation_events: 0,
+            starvation_active: false,
             last_completion_ms: None,
         }
     }
@@ -633,48 +635,98 @@ impl LaneScheduler {
     pub fn check_starvation(&mut self, current_ms: u64, trace_id: &str) -> Vec<LaneSchedulerError> {
         let mut starved = Vec::new();
 
+        #[derive(Clone, Copy)]
+        enum StarvationTransition {
+            NewlyStarved { queue_depth: usize, elapsed: u64 },
+            Cleared { queue_depth: usize },
+        }
+
         // Collect starvation info first with immutable borrows.
         // This scheduler tracks queue depth, not per-item enqueue timestamps, so
         // `first_queued_at_ms` is the blocked-queue baseline: it starts when a
         // lane first blocks work and is rebased only when queued work is
         // actually admitted.
-        let mut starvation_info: Vec<(SchedulerLane, usize, u64)> = Vec::new();
+        let mut starvation_info: Vec<(
+            SchedulerLane,
+            Option<(usize, u64)>,
+            Option<StarvationTransition>,
+        )> = Vec::new();
         for config in self.policy.lane_configs.values() {
             let counters = &self.counters[config.lane.as_str()];
-            if counters.queued_count > 0
-                && let Some(first_queued_at_ms) =
-                    counters.first_queued_at_ms.or(counters.last_completion_ms)
-            {
-                let elapsed = current_ms.saturating_sub(first_queued_at_ms);
-                if elapsed >= config.starvation_window_ms {
-                    starvation_info.push((config.lane, counters.queued_count, elapsed));
-                }
-            }
+            let current_starvation = if counters.queued_count > 0 {
+                counters
+                    .first_queued_at_ms
+                    .or(counters.last_completion_ms)
+                    .map(|first_queued_at_ms| {
+                        let elapsed = current_ms.saturating_sub(first_queued_at_ms);
+                        (counters.queued_count, elapsed)
+                    })
+                    .filter(|(_, elapsed)| *elapsed >= config.starvation_window_ms)
+            } else {
+                None
+            };
+
+            let transition = match (counters.starvation_active, current_starvation) {
+                (false, Some((queue_depth, elapsed))) => Some(StarvationTransition::NewlyStarved {
+                    queue_depth,
+                    elapsed,
+                }),
+                (true, None) => Some(StarvationTransition::Cleared {
+                    queue_depth: counters.queued_count,
+                }),
+                _ => None,
+            };
+
+            starvation_info.push((config.lane, current_starvation, transition));
         }
 
-        // Now apply mutations with the collected info
-        for (lane, queue_depth, elapsed) in &starvation_info {
-            let err = LaneSchedulerError::Starvation {
-                lane: *lane,
-                queue_depth: *queue_depth,
-                elapsed_ms: *elapsed,
-            };
-            starved.push(err);
-
-            if let Some(c) = self.counters.get_mut(lane.as_str()) {
-                c.starvation_events = c.starvation_events.saturating_add(1);
+        // Now apply mutations with the collected info.
+        for (lane, current_starvation, transition) in starvation_info {
+            if let Some((queue_depth, elapsed)) = current_starvation {
+                starved.push(LaneSchedulerError::Starvation {
+                    lane,
+                    queue_depth,
+                    elapsed_ms: elapsed,
+                });
             }
 
-            self.push_audit_record(LaneAuditRecord {
-                event_code: event_codes::LANE_STARVED.to_string(),
-                task_id: String::new(),
-                task_class: String::new(),
-                lane: lane.to_string(),
-                timestamp_ms: current_ms,
-                detail: format!("queue_depth={queue_depth}, elapsed={elapsed}ms"),
-                trace_id: trace_id.to_string(),
-                schema_version: SCHEMA_VERSION.to_string(),
-            });
+            if let Some(counters) = self.counters.get_mut(lane.as_str()) {
+                counters.starvation_active = current_starvation.is_some();
+                if matches!(transition, Some(StarvationTransition::NewlyStarved { .. })) {
+                    counters.starvation_events = counters.starvation_events.saturating_add(1);
+                }
+            }
+
+            match transition {
+                Some(StarvationTransition::NewlyStarved {
+                    queue_depth,
+                    elapsed,
+                }) => {
+                    self.push_audit_record(LaneAuditRecord {
+                        event_code: event_codes::LANE_STARVED.to_string(),
+                        task_id: String::new(),
+                        task_class: String::new(),
+                        lane: lane.to_string(),
+                        timestamp_ms: current_ms,
+                        detail: format!("queue_depth={queue_depth}, elapsed={elapsed}ms"),
+                        trace_id: trace_id.to_string(),
+                        schema_version: SCHEMA_VERSION.to_string(),
+                    });
+                }
+                Some(StarvationTransition::Cleared { queue_depth }) => {
+                    self.push_audit_record(LaneAuditRecord {
+                        event_code: event_codes::LANE_STARVATION_CLEARED.to_string(),
+                        task_id: String::new(),
+                        task_class: String::new(),
+                        lane: lane.to_string(),
+                        timestamp_ms: current_ms,
+                        detail: format!("queue_depth={queue_depth}"),
+                        trace_id: trace_id.to_string(),
+                        schema_version: SCHEMA_VERSION.to_string(),
+                    });
+                }
+                None => {}
+            }
         }
 
         starved
@@ -1049,6 +1101,7 @@ mod tests {
 
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.starvation_events, 0);
+        assert!(!counters.starvation_active);
     }
 
     #[test]
@@ -1079,6 +1132,7 @@ mod tests {
 
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.starvation_events, 1);
+        assert!(counters.starvation_active);
         assert_eq!(counters.first_queued_at_ms, Some(1001));
 
         let audit = s.audit_log().last().unwrap();
@@ -1120,6 +1174,7 @@ mod tests {
 
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.starvation_events, 1);
+        assert!(counters.starvation_active);
         assert_eq!(counters.first_queued_at_ms, Some(1061));
     }
 
@@ -1156,6 +1211,60 @@ mod tests {
         let mut s = make_scheduler();
         let starved = s.check_starvation(100000, "t1");
         assert!(starved.is_empty());
+        assert!(
+            !s.lane_counter(SchedulerLane::Background)
+                .unwrap()
+                .starvation_active
+        );
+    }
+
+    #[test]
+    fn starvation_events_latch_until_queue_state_recovers() {
+        let mut p = LaneMappingPolicy::new();
+        let mut cfg = LaneConfig::new(SchedulerLane::Background, 10, 1);
+        cfg.starvation_window_ms = 100;
+        p.add_lane(cfg);
+        p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
+        let mut s = LaneScheduler::new(p).unwrap();
+
+        let active = s
+            .assign_task(&task_classes::log_rotation(), 1000, "t1")
+            .unwrap();
+        let _ = s.assign_task(&task_classes::log_rotation(), 1001, "t2");
+
+        let first = s.check_starvation(1200, "t3");
+        let second = s.check_starvation(1300, "t4");
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+
+        let starved_records = s
+            .audit_log()
+            .iter()
+            .filter(|entry| entry.event_code == event_codes::LANE_STARVED)
+            .count();
+        assert_eq!(starved_records, 1);
+        assert_eq!(
+            s.lane_counter(SchedulerLane::Background)
+                .unwrap()
+                .starvation_events,
+            1
+        );
+
+        s.complete_task(&active.task_id, 1301, "t5").unwrap();
+        let admitted = s
+            .assign_task(&task_classes::log_rotation(), 1302, "t6")
+            .unwrap();
+        assert_eq!(admitted.lane, SchedulerLane::Background);
+
+        let recovered = s.check_starvation(1303, "t7");
+        assert!(recovered.is_empty());
+
+        let counters = s.lane_counter(SchedulerLane::Background).unwrap();
+        assert!(!counters.starvation_active);
+
+        let audit = s.audit_log().last().unwrap();
+        assert_eq!(audit.event_code, event_codes::LANE_STARVATION_CLEARED);
+        assert!(audit.detail.contains("queue_depth=0"));
     }
 
     // ---- Hot reload ----
