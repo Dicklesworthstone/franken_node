@@ -66,3 +66,12 @@ justification = "Region ownership uses Instant::now() for latency tracking pendi
 signer = "BronzePond"
 expires_on = "2026-12-31"
 signature = "sha256:c204ef29c6f1217b663d1351dcb1ded0f0bf611f772c4d3a898009a18ddd6063"
+
+[[exceptions]]
+id = "AAL-008"
+module_path = "crates/franken-node/src/connector/supervision.rs"
+ambient_api = "std::time::Instant"
+justification = "Supervision tree uses Instant::now() for monotonic internal clocks."
+signer = "GeminiCLI"
+expires_on = "2026-12-31"
+signature = "sha256:cb64a8855af1474be8f9d5f4b65dc5d062116cf1c8892793fbb9f10349d8328e"

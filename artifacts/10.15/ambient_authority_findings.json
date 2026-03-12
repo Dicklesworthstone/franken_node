@@ -1,5 +1,5 @@
 {
-  "generated_on": "2026-03-06",
+  "generated_on": "2026-03-12",
   "findings": [
     {
       "module_path": "crates/franken-node/src/connector/durable_claim_gate.rs",
@@ -13,7 +13,7 @@
     {
       "module_path": "crates/franken-node/src/connector/eviction_saga.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 288,
+      "line": 291,
       "callsite": "SystemTime::now()",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-005",
@@ -22,7 +22,7 @@
     {
       "module_path": "crates/franken-node/src/connector/policy_checkpoint.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 663,
+      "line": 697,
       "callsite": "SystemTime::now()",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-006",
@@ -31,7 +31,7 @@
     {
       "module_path": "crates/franken-node/src/connector/region_ownership.rs",
       "ambient_api": "std::time::Instant",
-      "line": 381,
+      "line": 397,
       "callsite": "let start = Instant::now();",
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-007",
@@ -81,9 +81,27 @@
       "status": "allowlisted",
       "allowlist_entry_id": "AAL-004",
       "event_code": "AMB-003"
+    },
+    {
+      "module_path": "crates/franken-node/src/connector/supervision.rs",
+      "ambient_api": "std::time::Instant",
+      "line": 139,
+      "callsite": "started_at: Instant::now(),",
+      "status": "violation",
+      "allowlist_entry_id": null,
+      "event_code": "AMB-002"
     }
   ],
-  "violations": [],
+  "violations": [
+    {
+      "module_path": "crates/franken-node/src/connector/supervision.rs",
+      "ambient_api": "std::time::Instant",
+      "line": 139,
+      "callsite": "started_at: Instant::now(),",
+      "reason": "ambient authority API usage without allowlist entry",
+      "event_code": "AMB-002"
+    }
+  ],
   "events": [
     {
       "module_path": "crates/franken-node/src/conformance/connector_method_validator.rs",
@@ -298,7 +316,7 @@
     {
       "module_path": "crates/franken-node/src/connector/eviction_saga.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 288,
+      "line": 291,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-005 applied"
     },
@@ -459,7 +477,7 @@
     {
       "module_path": "crates/franken-node/src/connector/policy_checkpoint.rs",
       "ambient_api": "std::time::SystemTime",
-      "line": 663,
+      "line": 697,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-006 applied"
     },
@@ -487,7 +505,7 @@
     {
       "module_path": "crates/franken-node/src/connector/region_ownership.rs",
       "ambient_api": "std::time::Instant",
-      "line": 381,
+      "line": 397,
       "event_code": "AMB-003",
       "message": "allowlist exception AAL-007 applied"
     },
@@ -570,10 +588,10 @@
     },
     {
       "module_path": "crates/franken-node/src/connector/supervision.rs",
-      "ambient_api": null,
-      "line": null,
-      "event_code": "AMB-001",
-      "message": "module contains no ambient-authority calls"
+      "ambient_api": "std::time::Instant",
+      "line": 139,
+      "event_code": "AMB-002",
+      "message": "ambient authority API usage without allowlist entry"
     },
     {
       "module_path": "crates/franken-node/src/connector/telemetry_namespace.rs",
@@ -669,11 +687,11 @@
   ],
   "summary": {
     "modules_scanned": 80,
-    "findings_total": 9,
-    "violations": 0,
+    "findings_total": 10,
+    "violations": 1,
     "allowlisted": 9,
     "expired_allowlist": 0,
     "invalid_allowlist": 0,
-    "clean_modules": 74
+    "clean_modules": 73
   }
 }

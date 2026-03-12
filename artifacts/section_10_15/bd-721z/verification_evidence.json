@@ -1,13 +1,22 @@
 {
   "bead_id": "bd-721z",
   "gate": "ambient_authority_gate",
-  "generated_on": "2026-03-06",
-  "status": "pass",
+  "generated_on": "2026-03-12",
+  "status": "fail",
   "modules_scanned": 80,
-  "findings_total": 9,
-  "violations": 0,
+  "findings_total": 10,
+  "violations": 1,
   "allowlisted": 9,
   "expired_allowlist": 0,
   "invalid_allowlist": 0,
-  "violation_details": []
+  "violation_details": [
+    {
+      "module_path": "crates/franken-node/src/connector/supervision.rs",
+      "ambient_api": "std::time::Instant",
+      "line": 139,
+      "callsite": "started_at: Instant::now(),",
+      "reason": "ambient authority API usage without allowlist entry",
+      "event_code": "AMB-002"
+    }
+  ]
 }
