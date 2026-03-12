@@ -6,6 +6,7 @@ import subprocess
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = ROOT / "scripts" / "check_verifier_sdk_capsule.py"
@@ -85,6 +86,33 @@ class TestCapsuleContract(unittest.TestCase):
         )
         self.assertIn("SDK package metadata marks structural-only posture", check_names)
         self.assertIn("SDK package metadata avoids signed-capsule overclaim", check_names)
+
+    def test_structural_only_contract_fails_closed_when_required_check_missing(self):
+        baseline = mod.run_all_checks()
+        mutated_checks = [
+            check
+            for check in baseline
+            if check["check"] != "Workspace SDK structural-only posture explicit"
+        ]
+
+        with mock.patch.object(mod, "run_all_checks", return_value=mutated_checks):
+            contract = mod.run_all()["capsule_contract"]
+
+        self.assertFalse(contract["workspace_sdk_structural_only_posture_explicit"])
+
+    def test_connector_authority_contract_fails_closed_when_required_check_missing(self):
+        baseline = mod.run_all_checks()
+        mutated_checks = [
+            check
+            for check in baseline
+            if check["check"]
+            != "Public docs describe connector detached Ed25519 signature authority"
+        ]
+
+        with mock.patch.object(mod, "run_all_checks", return_value=mutated_checks):
+            contract = mod.run_all()["capsule_contract"]
+
+        self.assertFalse(contract["connector_signature_authority_explicit"])
 
 
 class TestEvents(unittest.TestCase):

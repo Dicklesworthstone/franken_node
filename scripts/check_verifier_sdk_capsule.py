@@ -135,6 +135,16 @@ def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "passed": ok, "detail": detail or ("ok" if ok else "FAIL")}
 
 
+def _required_checks_pass(checks: list[dict], required_names: set[str]) -> bool:
+    """Fail closed when any required check is missing or failing."""
+    passed_by_name = {
+        check.get("check"): bool(check.get("passed"))
+        for check in checks
+        if isinstance(check.get("check"), str)
+    }
+    return all(passed_by_name.get(name) is True for name in required_names)
+
+
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
@@ -417,21 +427,19 @@ def run_all() -> dict:
             "no_privileged_access": True,
             "schema_versioned": True,
             "signature_bound": True,
-            "workspace_sdk_structural_only_posture_explicit": all(
-                check["passed"]
-                for check in checks
-                if check["check"] in {
+            "workspace_sdk_structural_only_posture_explicit": _required_checks_pass(
+                checks,
+                {
                     "Workspace SDK structural-only posture explicit",
                     "Workspace replay capsule structural-only posture explicit",
                     "Public docs distinguish structural-only workspace SDK",
                     "SDK package metadata marks structural-only posture",
                     "SDK package metadata avoids signed-capsule overclaim",
-                }
+                },
             ),
-            "connector_signature_authority_explicit": all(
-                check["passed"]
-                for check in checks
-                if check["check"] == "Public docs describe connector detached Ed25519 signature authority"
+            "connector_signature_authority_explicit": _required_checks_pass(
+                checks,
+                {"Public docs describe connector detached Ed25519 signature authority"},
             ),
         },
         "events": events,

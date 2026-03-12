@@ -397,18 +397,23 @@ impl PolicyChangeEngine {
         }
 
         // Check if quorum is met.
+        // Use case-insensitive comparison consistent with sole-approver and
+        // dedup checks — otherwise a proposer can contribute to quorum by
+        // signing with a different case of their identity.
+        let proposer_lower = record.proposal.proposed_by.to_lowercase();
         let unique_approvers: Vec<&String> = record.approvals.iter().map(|a| &a.signer).collect();
         let non_proposer_approvals = unique_approvers
             .iter()
-            .filter(|a| ***a != record.proposal.proposed_by)
+            .filter(|a| a.to_lowercase() != proposer_lower)
             .count();
 
-        // Check if all required approvers have signed.
-        let required_met = record
-            .proposal
-            .required_approvers
-            .iter()
-            .all(|req| unique_approvers.contains(&req));
+        // Check if all required approvers have signed (case-insensitive).
+        let required_met = record.proposal.required_approvers.iter().all(|req| {
+            let req_lower = req.to_lowercase();
+            unique_approvers
+                .iter()
+                .any(|a| a.to_lowercase() == req_lower)
+        });
 
         let quorum_met = non_proposer_approvals >= self.min_quorum && required_met;
 
@@ -1089,6 +1094,57 @@ mod tests {
 
         assert!(engine.verify_audit_chain().unwrap());
         assert_eq!(engine.audit_ledger().len(), 100); // 50 proposals + 50 approvals
+    }
+
+    /// Regression: proposer must not be able to inflate the non-proposer
+    /// quorum count by signing with a different case of their identity.
+    #[test]
+    fn proposer_case_variant_does_not_count_as_non_proposer() {
+        let mut engine = PolicyChangeEngine::new(2);
+        // Proposer is "Alice"; required approvers are "bob" and "charlie".
+        let proposal = make_proposal("p-case", "Alice", vec!["bob", "charlie"]);
+        engine.propose(proposal).unwrap();
+
+        // Bob approves first (non-proposer).
+        engine.approve("p-case", make_signature("bob")).unwrap();
+
+        // "alice" (lowercase variant of proposer "Alice") tries to approve.
+        // The sole-approver check uses case-insensitive comparison so it
+        // correctly treats this as the proposer, but the quorum counter
+        // must ALSO use case-insensitive comparison.  Before the fix, the
+        // quorum counter would count "alice" as a non-proposer because
+        // "alice" != "Alice" (case-sensitive), reaching quorum = 2.
+        engine.approve("p-case", make_signature("alice")).unwrap();
+
+        // The proposal must NOT be Approved because the only non-proposer
+        // approver is "bob" (count = 1) which is less than min_quorum = 2.
+        let record = engine.get_proposal("p-case").unwrap();
+        assert_eq!(
+            record.state,
+            ProposalState::UnderReview,
+            "proposer case-variant must not inflate non-proposer quorum"
+        );
+    }
+
+    /// Regression: required_approvers check must be case-insensitive,
+    /// consistent with the dedup and sole-approver checks.
+    #[test]
+    fn required_approver_matched_case_insensitively() {
+        let mut engine = PolicyChangeEngine::new(2);
+        // Required approver is "Bob" (capitalised).
+        let proposal = make_proposal("p-ci", "alice", vec!["Bob", "charlie"]);
+        engine.propose(proposal).unwrap();
+
+        // "bob" (lowercase) signs — must satisfy the "Bob" requirement.
+        engine.approve("p-ci", make_signature("bob")).unwrap();
+        engine.approve("p-ci", make_signature("charlie")).unwrap();
+
+        let record = engine.get_proposal("p-ci").unwrap();
+        assert_eq!(
+            record.state,
+            ProposalState::Approved,
+            "case-insensitive required_approvers match must succeed"
+        );
     }
 
     #[test]

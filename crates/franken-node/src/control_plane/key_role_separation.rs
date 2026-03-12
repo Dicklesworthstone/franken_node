@@ -147,6 +147,10 @@ pub enum KeyRoleSeparationError {
     KeyNotFound { key_id: String },
     /// Key rotation failed.
     RotationFailed { role: KeyRole, reason: String },
+    /// Re-bind attempted with different public key material for the same
+    /// key_id and role. Fail closed: the caller must revoke the old binding
+    /// and bind a new key, or use rotate().
+    KeyMaterialMismatch { key_id: String, role: KeyRole },
 }
 
 impl KeyRoleSeparationError {
@@ -157,6 +161,7 @@ impl KeyRoleSeparationError {
             Self::KeyRoleMismatch { .. } => "KRS_KEY_ROLE_MISMATCH",
             Self::KeyNotFound { .. } => "KRS_KEY_NOT_FOUND",
             Self::RotationFailed { .. } => "KRS_ROTATION_FAILED",
+            Self::KeyMaterialMismatch { .. } => "KRS_KEY_MATERIAL_MISMATCH",
         }
     }
 }
@@ -189,6 +194,13 @@ impl fmt::Display for KeyRoleSeparationError {
                 write!(
                     f,
                     "KRS_ROTATION_FAILED: rotation for role {role} failed: {reason}"
+                )
+            }
+            Self::KeyMaterialMismatch { key_id, role } => {
+                write!(
+                    f,
+                    "KRS_KEY_MATERIAL_MISMATCH: key {key_id} already bound to \
+                     {role} with different public key material"
                 )
             }
         }
@@ -338,28 +350,36 @@ impl KeyRoleRegistry {
         trace_id: &str,
     ) -> Result<&KeyRoleBinding, KeyRoleSeparationError> {
         // Check INV-KRS-ROLE-EXCLUSIVITY: same key cannot serve two roles.
-        if let Some(existing_role) = self.active.get(key_id).map(|binding| binding.role) {
-            if existing_role != role {
+        if let Some(existing) = self.active.get(key_id) {
+            if existing.role != role {
                 self.push_event(KeyRoleEvent::violation(
                     key_id,
                     role,
-                    existing_role,
+                    existing.role,
                     trace_id,
                 ));
                 return Err(KeyRoleSeparationError::RoleSeparationViolation {
                     key_id: key_id.to_string(),
-                    existing_role,
+                    existing_role: existing.role,
                     attempted_role: role,
                 });
             }
-            // Re-binding to the same role is idempotent; return existing.
-            if existing_role == role {
-                return self.active.get(key_id).ok_or_else(|| {
-                    KeyRoleSeparationError::KeyNotFound {
-                        key_id: key_id.to_string(),
-                    }
+            // Re-binding to the same role: fail closed if the public key
+            // material differs — the caller may believe the new key is
+            // active when the old material would silently persist.
+            if existing.public_key_bytes != public_key_bytes {
+                return Err(KeyRoleSeparationError::KeyMaterialMismatch {
+                    key_id: key_id.to_string(),
+                    role,
                 });
             }
+            // Truly idempotent: same key_id, same role, same material.
+            return self
+                .active
+                .get(key_id)
+                .ok_or_else(|| KeyRoleSeparationError::KeyNotFound {
+                    key_id: key_id.to_string(),
+                });
         }
 
         let binding = KeyRoleBinding {
@@ -811,6 +831,43 @@ mod tests {
         );
         assert!(result.is_ok());
         assert_eq!(reg.active_count(), 1);
+    }
+
+    /// Regression: re-binding the same key_id + role with different public
+    /// key material must fail closed instead of silently returning the stale
+    /// binding.  Before the fix, the caller could believe their new key was
+    /// active when the old material was still in use.
+    #[test]
+    fn rebind_different_key_material_rejected() {
+        let mut reg = KeyRoleRegistry::new();
+        reg.bind(
+            "k-mat",
+            KeyRole::Signing,
+            pub_key(1),
+            "auth",
+            100,
+            3600,
+            &tid(1),
+        )
+        .unwrap();
+
+        // Same key_id and role, but different public key bytes.
+        let err = reg
+            .bind(
+                "k-mat",
+                KeyRole::Signing,
+                pub_key(99), // different material
+                "auth",
+                200,
+                7200,
+                &tid(2),
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code(), "KRS_KEY_MATERIAL_MISMATCH");
+        // Original binding must be unchanged.
+        let binding = reg.lookup("k-mat").unwrap();
+        assert_eq!(binding.public_key_bytes, pub_key(1));
     }
 
     // ---- Role exclusivity violation ----
