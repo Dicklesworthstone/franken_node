@@ -86,6 +86,12 @@ def load_jsonl(path: Path) -> tuple[bool, list[dict[str, Any]]]:
     return True, rows
 
 
+def load_text(path: Path) -> tuple[bool, str]:
+    if not path.is_file():
+        return False, ""
+    return True, path.read_text(encoding="utf-8")
+
+
 def valid_stage_provenance(row: dict[str, Any]) -> bool:
     build_id_kind = row.get("build_id_kind")
     worker_id = row.get("worker_id")
@@ -103,6 +109,70 @@ def valid_stage_provenance(row: dict[str, Any]) -> bool:
         and duration_ms > 0
         and rch_outcome == "remote"
     )
+
+
+def find_markdown_stage_row(summary_md_text: str, stage_id: str) -> str | None:
+    prefix = f"| {stage_id} |"
+    for line in summary_md_text.splitlines():
+        if line.startswith(prefix):
+            return line
+    return None
+
+
+def evaluate_summary_markdown(summary: dict[str, Any], summary_md_text: str) -> list[dict[str, Any]]:
+    checks: list[dict[str, Any]] = []
+
+    build_ids = summary.get("build_ids")
+    expected_build_ids_line = None
+    if isinstance(build_ids, list) and all(isinstance(build_id, int) and build_id > 0 for build_id in build_ids):
+        expected_build_ids_line = f"- Build IDs: `{', '.join(str(build_id) for build_id in build_ids)}`"
+    summary_md_build_ids_ok = bool(expected_build_ids_line) and expected_build_ids_line in summary_md_text
+    checks.append(
+        {
+            "check": "summary markdown lists the recovered build ids",
+            "id": "OP-E2E-SUMMARY-MD-BUILD-IDS",
+            "pass": summary_md_build_ids_ok,
+            "detail": expected_build_ids_line or "build_ids missing/invalid in summary json",
+        }
+    )
+
+    stage_provenance = summary.get("stage_provenance")
+    invalid_stage_rows: list[str] = []
+    if not isinstance(stage_provenance, dict):
+        invalid_stage_rows.append("stage_provenance")
+    else:
+        for stage_id in REQUIRED_STAGE_IDS:
+            provenance = stage_provenance.get(stage_id)
+            if not isinstance(provenance, dict) or not valid_stage_provenance(provenance):
+                invalid_stage_rows.append(f"{stage_id}:summary")
+                continue
+            markdown_row = find_markdown_stage_row(summary_md_text, stage_id)
+            if markdown_row is None:
+                invalid_stage_rows.append(f"{stage_id}:row")
+                continue
+
+            required_fragments = (
+                f"`{provenance['build_id']}`",
+                f"`{provenance['build_id_kind']}`",
+                f"`{provenance['worker_id']}`",
+                f"`{provenance['completed_at']}`",
+                str(provenance["duration_ms"]),
+            )
+            for fragment in required_fragments:
+                if fragment not in markdown_row:
+                    invalid_stage_rows.append(f"{stage_id}:{fragment}")
+                    break
+
+    checks.append(
+        {
+            "check": "summary markdown preserves per-stage provenance metadata",
+            "id": "OP-E2E-SUMMARY-MD-PROVENANCE",
+            "pass": not invalid_stage_rows,
+            "detail": "ok" if not invalid_stage_rows else ";".join(invalid_stage_rows[:8]),
+        }
+    )
+
+    return checks
 
 
 def evaluate(summary: dict[str, Any], bundle: dict[str, Any], logs: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -369,6 +439,7 @@ def run_checks() -> dict[str, Any]:
     summary_ok, summary = load_json(SUMMARY_JSON)
     bundle_ok, bundle = load_json(BUNDLE_JSON)
     logs_ok, logs = load_jsonl(LOG_JSONL)
+    summary_md_ok, summary_md_text = load_text(SUMMARY_MD)
 
     checks.append(
         {
@@ -397,6 +468,8 @@ def run_checks() -> dict[str, Any]:
 
     if summary_ok and bundle_ok and logs_ok:
         checks.extend(evaluate(summary, bundle, logs))
+    if summary_ok and summary_md_ok:
+        checks.extend(evaluate_summary_markdown(summary, summary_md_text))
 
     passed = sum(1 for check in checks if check["pass"])
     failed = len(checks) - passed

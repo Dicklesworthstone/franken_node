@@ -66,6 +66,12 @@ class TestRunChecks(unittest.TestCase):
         self.assertTrue(
             checks["OP-E2E-SUMMARY-PROVENANCE"]["pass"], checks["OP-E2E-SUMMARY-PROVENANCE"]["detail"]
         )
+        self.assertTrue(
+            checks["OP-E2E-SUMMARY-MD-BUILD-IDS"]["pass"], checks["OP-E2E-SUMMARY-MD-BUILD-IDS"]["detail"]
+        )
+        self.assertTrue(
+            checks["OP-E2E-SUMMARY-MD-PROVENANCE"]["pass"], checks["OP-E2E-SUMMARY-MD-PROVENANCE"]["detail"]
+        )
 
     def _failing(self, result):
         failures = [check for check in result["checks"] if not check["pass"]]
@@ -98,6 +104,40 @@ class TestCli(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(proc.returncode, 0, proc.stderr)
+
+
+class TestSummaryMarkdownRegression(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.summary = json.loads(mod.SUMMARY_JSON.read_text(encoding="utf-8"))
+        cls.summary_md = mod.SUMMARY_MD.read_text(encoding="utf-8")
+
+    def _checks(self, markdown_text):
+        return {check["id"]: check for check in mod.evaluate_summary_markdown(self.summary, markdown_text)}
+
+    def test_summary_markdown_matches_current_provenance(self):
+        checks = self._checks(self.summary_md)
+        self.assertTrue(
+            checks["OP-E2E-SUMMARY-MD-BUILD-IDS"]["pass"], checks["OP-E2E-SUMMARY-MD-BUILD-IDS"]["detail"]
+        )
+        self.assertTrue(
+            checks["OP-E2E-SUMMARY-MD-PROVENANCE"]["pass"], checks["OP-E2E-SUMMARY-MD-PROVENANCE"]["detail"]
+        )
+
+    def test_summary_markdown_fails_when_build_ids_drop(self):
+        build_ids = self.summary["build_ids"]
+        expected_line = f"- Build IDs: `{', '.join(str(build_id) for build_id in build_ids)}`"
+        mutated_line = f"- Build IDs: `{', '.join(str(build_id) for build_id in build_ids[:-1])}`"
+        mutated_markdown = self.summary_md.replace(expected_line, mutated_line, 1)
+        checks = self._checks(mutated_markdown)
+        self.assertFalse(checks["OP-E2E-SUMMARY-MD-BUILD-IDS"]["pass"])
+
+    def test_summary_markdown_fails_when_stage_row_loses_worker(self):
+        stage_id = mod.REQUIRED_STAGE_IDS[0]
+        worker_id = self.summary["stage_provenance"][stage_id]["worker_id"]
+        mutated_markdown = self.summary_md.replace(f"`{worker_id}`", "`worker-redacted`", 1)
+        checks = self._checks(mutated_markdown)
+        self.assertFalse(checks["OP-E2E-SUMMARY-MD-PROVENANCE"]["pass"])
 
 
 if __name__ == "__main__":
