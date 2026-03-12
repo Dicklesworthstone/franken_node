@@ -127,6 +127,12 @@ impl std::fmt::Display for CertificationLevel {
     }
 }
 
+impl Default for CertificationLevel {
+    fn default() -> Self {
+        Self::Uncertified
+    }
+}
+
 // ── Deployment contexts ──────────────────────────────────────────────────────
 
 /// Deployment contexts with different certification requirements.
@@ -282,11 +288,13 @@ pub struct CertificationResult {
     /// evaluation, not the current (manually adjusted) level. Downstream
     /// readers must use `evidence_derived_level` (not `level`) to interpret
     /// the criteria lists.
+    #[serde(default)]
     pub manually_adjusted: bool,
     /// The certification level that the evidence actually supports.
     /// Equals `level` for evidence-based evaluations; after a manual
     /// promotion or demotion this preserves the original evidence-derived
     /// level so downstream readers can detect the gap.
+    #[serde(default)]
     pub evidence_derived_level: CertificationLevel,
 }
 
