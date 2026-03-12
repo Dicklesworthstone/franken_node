@@ -1,9 +1,9 @@
 # Verification Summary: Verifier economy portal and external attestation publishing flow
 
 **Bead:** bd-m8p | **Section:** 10.9
-**Timestamp:** 2026-03-11T09:47:10.971840+00:00
+**Timestamp:** 2026-03-12T11:41:22.062728+00:00
 **Overall:** PASS
-**Checks:** 152/152 passed
+**Checks:** 171/171 passed
 
 ## Check Results
 
@@ -34,6 +34,7 @@
 - [PASS] rust_type: 'pub enum ReputationTier': found
 - [PASS] rust_type: 'pub enum AttestationState': found
 - [PASS] rust_type: 'pub enum DisputeOutcome': found
+- [PASS] rust_type: 'pub enum CapsuleVerificationFailure': found
 - [PASS] rust_type: 'pub struct AttestationClaim': found
 - [PASS] rust_type: 'pub struct AttestationEvidence': found
 - [PASS] rust_type: 'pub struct AttestationSignature': found
@@ -92,6 +93,16 @@
 - [PASS] rust_error_code: 'ERR-VEP-UNREGISTERED-VERIFIER': found
 - [PASS] rust_error_code: 'ERR-VEP-INCOMPLETE-PAYLOAD': found
 - [PASS] rust_error_code: 'ERR-VEP-ANTI-GAMING': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-SCHEMA': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-FRESHNESS': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-ATTESTATION-BINDING': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-TRACE-COMMITMENT': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-INTEGRITY-HASH': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-SIGNATURE': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-MISSING-FIELDS': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-HASH-FORMAT': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-VERIFIER-MISMATCH': found
+- [PASS] rust_capsule_reason_code: 'ERR-VEP-CAPSULE-CLAIM-MISMATCH': found
 - [PASS] rust_test: 'test_register_verifier': found
 - [PASS] rust_test: 'test_register_emits_vep005': found
 - [PASS] rust_test: 'test_duplicate_public_key_rejected': found
@@ -152,13 +163,21 @@
 - [PASS] rust_test: 'test_event_code_constants': found
 - [PASS] rust_test: 'test_invariant_constants': found
 - [PASS] rust_test: 'test_error_code_constants': found
+- [PASS] rust_test: 'test_capsule_reason_code_constants': found
+- [PASS] rust_test: 'test_capsule_rejection_missing_capsule_id': found
+- [PASS] rust_test: 'test_access_capsule_rejection_freshness_reason_code': found
+- [PASS] rust_test: 'test_access_capsule_rejection_attestation_binding_reason_code': found
+- [PASS] rust_test: 'test_capsule_verification_failure_display': found
+- [PASS] rust_test: 'test_capsule_verification_failure_codes_deterministic': found
 - [PASS] replacement_critical:attestation_signature_path: required_markers: all required markers present
 - [PASS] replacement_critical:attestation_signature_path: no_shortcuts: no shortcut markers found
 - [PASS] replacement_critical:cached_verifying_key_path: required_markers: all required markers present
 - [PASS] replacement_critical:cached_verifying_key_path: no_shortcuts: no shortcut markers found
 - [PASS] replacement_critical:capsule_integrity_path: required_markers: all required markers present
 - [PASS] replacement_critical:capsule_integrity_path: no_shortcuts: no shortcut markers found
-- [PASS] rust_test_count: 78 tests (minimum 50)
+- [PASS] replacement_critical:capsule_rejection_error_surface: required_markers: all required markers present
+- [PASS] replacement_critical:capsule_rejection_error_surface: no_shortcuts: no shortcut markers found
+- [PASS] rust_test_count: 92 tests (minimum 50)
 
 ## Artifacts
 

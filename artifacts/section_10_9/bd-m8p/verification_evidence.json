@@ -2,11 +2,11 @@
   "bead_id": "bd-m8p",
   "title": "Verifier economy portal and external attestation publishing flow",
   "section": "10.9",
-  "timestamp": "2026-03-11T09:47:10.971840+00:00",
+  "timestamp": "2026-03-12T11:41:22.062728+00:00",
   "verdict": "PASS",
   "overall_pass": true,
-  "total": 152,
-  "passed": 152,
+  "total": 171,
+  "passed": 171,
   "failed": 0,
   "checks": [
     {
@@ -141,6 +141,11 @@
     },
     {
       "check": "rust_type: 'pub enum DisputeOutcome'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_type: 'pub enum CapsuleVerificationFailure'",
       "pass": true,
       "detail": "found"
     },
@@ -431,6 +436,56 @@
     },
     {
       "check": "rust_error_code: 'ERR-VEP-ANTI-GAMING'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-SCHEMA'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-FRESHNESS'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-ATTESTATION-BINDING'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-TRACE-COMMITMENT'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-INTEGRITY-HASH'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-SIGNATURE'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-MISSING-FIELDS'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-HASH-FORMAT'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-VERIFIER-MISMATCH'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_capsule_reason_code: 'ERR-VEP-CAPSULE-CLAIM-MISMATCH'",
       "pass": true,
       "detail": "found"
     },
@@ -735,6 +790,36 @@
       "detail": "found"
     },
     {
+      "check": "rust_test: 'test_capsule_reason_code_constants'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_test: 'test_capsule_rejection_missing_capsule_id'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_test: 'test_access_capsule_rejection_freshness_reason_code'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_test: 'test_access_capsule_rejection_attestation_binding_reason_code'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_test: 'test_capsule_verification_failure_display'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "rust_test: 'test_capsule_verification_failure_codes_deterministic'",
+      "pass": true,
+      "detail": "found"
+    },
+    {
       "check": "replacement_critical:attestation_signature_path: required_markers",
       "pass": true,
       "detail": "all required markers present"
@@ -765,9 +850,19 @@
       "detail": "no shortcut markers found"
     },
     {
+      "check": "replacement_critical:capsule_rejection_error_surface: required_markers",
+      "pass": true,
+      "detail": "all required markers present"
+    },
+    {
+      "check": "replacement_critical:capsule_rejection_error_surface: no_shortcuts",
+      "pass": true,
+      "detail": "no shortcut markers found"
+    },
+    {
       "check": "rust_test_count",
       "pass": true,
-      "detail": "78 tests (minimum 50)"
+      "detail": "92 tests (minimum 50)"
     }
   ]
 }
