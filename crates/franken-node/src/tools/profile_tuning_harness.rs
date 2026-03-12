@@ -961,7 +961,7 @@ mod tests {
             assert!(!bundle.signature.is_empty());
             assert_eq!(bundle.version, 1);
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -972,7 +972,7 @@ mod tests {
         if let HarnessOutcome::Accepted(bundle) = outcome {
             assert_eq!(bundle.candidates.len(), 4);
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -983,7 +983,7 @@ mod tests {
         if let HarnessOutcome::Accepted(bundle) = outcome {
             assert_eq!(bundle.deltas.len(), 4);
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -996,7 +996,7 @@ mod tests {
             assert!(!bundle.run_id.is_empty());
             assert!(!bundle.timestamp.is_empty());
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -1007,7 +1007,7 @@ mod tests {
         if let HarnessOutcome::Accepted(ref bundle) = outcome {
             assert!(harness.verify_bundle(bundle));
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -1030,7 +1030,7 @@ mod tests {
             assert_eq!(b1.candidates, b2.candidates);
             assert_eq!(b1.deltas, b2.deltas);
         } else {
-            panic!("Expected both Accepted");
+            unreachable!("Expected both Accepted");
         }
     }
 
@@ -1058,7 +1058,7 @@ mod tests {
             assert_eq!(diags[0].class_id, "critical_marker");
             assert!(diags[0].change_pct > 20.0);
         } else {
-            panic!("Expected Rejected");
+            unreachable!("Expected Rejected");
         }
     }
 
@@ -1089,7 +1089,7 @@ mod tests {
             assert_eq!(diags[0].metric, "p99_encode_us");
             assert!(!diags[0].change_pct.is_finite());
         } else {
-            panic!("Expected Rejected");
+            unreachable!("Expected Rejected");
         }
     }
 
@@ -1105,7 +1105,7 @@ mod tests {
             assert_eq!(diags[0].metric, "previous.p99_decode_us");
             assert!(!diags[0].change_pct.is_finite());
         } else {
-            panic!("Expected Rejected");
+            unreachable!("Expected Rejected");
         }
     }
 
@@ -1121,7 +1121,7 @@ mod tests {
             assert_eq!(diags[0].metric, "baseline.overhead_ratio");
             assert!(!diags[0].change_pct.is_finite());
         } else {
-            panic!("Expected Rejected");
+            unreachable!("Expected Rejected");
         }
     }
 
@@ -1206,7 +1206,7 @@ mod tests {
         if let HarnessOutcome::Accepted(bundle) = outcome {
             assert!(bundle.previous_bundle_hash.is_none());
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -1217,7 +1217,7 @@ mod tests {
         let first_hash = if let HarnessOutcome::Accepted(ref b) = o1 {
             b.bundle_hash()
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         };
 
         let mut config2 = HarnessConfig::with_defaults();
@@ -1229,7 +1229,7 @@ mod tests {
         if let HarnessOutcome::Accepted(bundle) = o2 {
             assert_eq!(bundle.previous_bundle_hash, Some(first_hash));
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -1242,7 +1242,7 @@ mod tests {
         if let (HarnessOutcome::Accepted(b1), HarnessOutcome::Accepted(b2)) = (o1, o2) {
             assert_eq!(b1.bundle_hash(), b2.bundle_hash());
         } else {
-            panic!("Expected both Accepted");
+            unreachable!("Expected both Accepted");
         }
     }
 
@@ -1301,7 +1301,7 @@ mod tests {
             let parsed: SignedPolicyBundle = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, bundle);
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -1339,7 +1339,7 @@ mod tests {
             let mut wrong_harness = ProfileTuningHarness::new(wrong_key_config);
             assert!(!wrong_harness.verify_bundle(&bundle));
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -1353,7 +1353,7 @@ mod tests {
             assert!(bundle.candidates.is_empty());
             assert!(bundle.deltas.is_empty());
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -1372,7 +1372,7 @@ mod tests {
             assert_eq!(cm_delta.old_symbol_size, 256);
             assert_eq!(cm_delta.new_symbol_size, 256);
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 
@@ -1386,7 +1386,7 @@ mod tests {
                 assert_eq!(delta.p99_decode_change_pct, 0.0);
             }
         } else {
-            panic!("Expected Accepted");
+            unreachable!("Expected Accepted");
         }
     }
 }

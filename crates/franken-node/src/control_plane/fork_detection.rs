@@ -1021,7 +1021,7 @@ mod tests {
             assert_eq!(missing_start, 4);
             assert_eq!(missing_end, 10);
         } else {
-            panic!("Expected FillGap");
+            unreachable!("Expected FillGap");
         }
     }
 
@@ -1034,7 +1034,7 @@ mod tests {
         if let ReconciliationSuggestion::ResolveConflict { epoch, .. } = suggestion {
             assert_eq!(epoch, 5);
         } else {
-            panic!("Expected ResolveConflict");
+            unreachable!("Expected ResolveConflict");
         }
     }
 

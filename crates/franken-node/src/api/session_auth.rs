@@ -1677,7 +1677,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::MaxSessionsReached { limit } => assert_eq!(limit, 2),
-            other => panic!("unexpected error: {other}"),
+            other => unreachable!("unexpected error: {other}"),
         }
     }
 
@@ -1813,7 +1813,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::NoSession { session_id } => assert_eq!(session_id, "nonexistent"),
-            other => panic!("unexpected: {other}"),
+            other => unreachable!("unexpected: {other}"),
         }
     }
 
@@ -1830,7 +1830,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::SessionTerminated { session_id } => assert_eq!(session_id, "s1"),
-            other => panic!("unexpected: {other}"),
+            other => unreachable!("unexpected: {other}"),
         }
     }
 
@@ -1870,7 +1870,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::SessionExpired { session_id } => assert_eq!(session_id, "s1"),
-            other => panic!("unexpected: {other}"),
+            other => unreachable!("unexpected: {other}"),
         }
 
         let expiry_events: Vec<_> = mgr
@@ -1959,7 +1959,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::ReplayDetected { sequence, .. } => assert_eq!(sequence, 0),
-            other => panic!("unexpected: {other}"),
+            other => unreachable!("unexpected: {other}"),
         }
     }
 
@@ -2008,7 +2008,7 @@ mod tests {
             SessionError::RoleMismatch { expected_role, .. } => {
                 assert_eq!(expected_role, "Encryption")
             }
-            other => panic!("unexpected: {other}"),
+            other => unreachable!("unexpected: {other}"),
         }
     }
 
@@ -2020,7 +2020,7 @@ mod tests {
             SessionError::RoleMismatch { expected_role, .. } => {
                 assert_eq!(expected_role, "Signing")
             }
-            other => panic!("unexpected: {other}"),
+            other => unreachable!("unexpected: {other}"),
         }
     }
 
@@ -2259,7 +2259,7 @@ mod tests {
             SessionError::AuthFailed { reason, .. } => {
                 assert!(reason.contains("handshake MAC"));
             }
-            other => panic!("expected AuthFailed, got: {other}"),
+            other => unreachable!("expected AuthFailed, got: {other}"),
         }
     }
 
@@ -2283,7 +2283,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::AuthFailed { .. } => {}
-            other => panic!("expected AuthFailed, got: {other}"),
+            other => unreachable!("expected AuthFailed, got: {other}"),
         }
     }
 
@@ -2341,7 +2341,7 @@ mod tests {
             SessionError::AuthFailed { reason, .. } => {
                 assert!(reason.contains("message MAC"));
             }
-            other => panic!("expected AuthFailed, got: {other}"),
+            other => unreachable!("expected AuthFailed, got: {other}"),
         }
     }
 
@@ -2356,7 +2356,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::AuthFailed { .. } => {}
-            other => panic!("expected AuthFailed, got: {other}"),
+            other => unreachable!("expected AuthFailed, got: {other}"),
         }
     }
 
@@ -2372,7 +2372,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::AuthFailed { .. } => {}
-            other => panic!("expected AuthFailed, got: {other}"),
+            other => unreachable!("expected AuthFailed, got: {other}"),
         }
     }
 
@@ -2420,7 +2420,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             SessionError::AuthFailed { .. } => {}
-            other => panic!("expected AuthFailed, got: {other}"),
+            other => unreachable!("expected AuthFailed, got: {other}"),
         }
     }
 

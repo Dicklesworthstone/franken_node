@@ -607,6 +607,19 @@ fn canonical_migration_artifact_payload(
     })
 }
 
+fn migration_artifact_binding_hash(
+    canonical_payload: &[u8],
+    expected_signer_public_key: &str,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"connector_verifier_sdk_migration_binding_v2:");
+    hasher.update((canonical_payload.len() as u64).to_le_bytes());
+    hasher.update(canonical_payload);
+    hasher.update((expected_signer_public_key.len() as u64).to_le_bytes());
+    hasher.update(expected_signer_public_key.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
 struct VerificationResultSignatureView<'a> {
     verdict: &'a Verdict,
     confidence_score: f64,
@@ -867,6 +880,7 @@ pub fn verify_claim(
 /// INV-VER-DETERMINISTIC: same inputs produce the same result.
 pub fn verify_migration_artifact(
     artifact: &BTreeMap<String, serde_json::Value>,
+    expected_signer_public_key: &str,
     signer: &VerifierSigner,
 ) -> Result<VerificationResult, VerifierSdkError> {
     let mut assertions = Vec::new();
@@ -901,8 +915,23 @@ pub fn verify_migration_artifact(
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let signature_payload = canonical_migration_artifact_payload(artifact)?;
+    let signer_key_matches_expected = !expected_signer_public_key.is_empty()
+        && crate::security::constant_time::ct_eq(signer_public_key, expected_signer_public_key);
     let sig_ok = signature_algorithm.eq_ignore_ascii_case("ed25519")
+        && signer_key_matches_expected
         && verify_ed25519_signature_hex(signer_public_key, &signature_payload, sig).is_ok();
+    assertions.push(AssertionResult {
+        assertion: "signer_public_key_matches_expected".to_string(),
+        passed: signer_key_matches_expected,
+        detail: if signer_key_matches_expected {
+            "artifact signer matches trusted key".to_string()
+        } else {
+            format!(
+                "trusted signer mismatch: expected={}, actual={}",
+                expected_signer_public_key, signer_public_key
+            )
+        },
+    });
     assertions.push(AssertionResult {
         assertion: "signature_valid".to_string(),
         passed: sig_ok,
@@ -910,6 +939,22 @@ pub fn verify_migration_artifact(
             "ed25519 signature verified".to_string()
         } else {
             "signature missing or invalid".to_string()
+        },
+    });
+
+    // Check content_hash
+    let ch = artifact
+        .get("content_hash")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let ch_ok = is_sha256_hex(ch);
+    assertions.push(AssertionResult {
+        assertion: "content_hash_valid".to_string(),
+        passed: ch_ok,
+        detail: if ch_ok {
+            "sha256 digest shape valid".to_string()
+        } else {
+            format!("invalid hash shape: {ch}")
         },
     });
 
@@ -939,22 +984,6 @@ pub fn verify_migration_artifact(
         },
     });
 
-    // Check content_hash
-    let ch = artifact
-        .get("content_hash")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let ch_ok = is_sha256_hex(ch);
-    assertions.push(AssertionResult {
-        assertion: "content_hash_valid".to_string(),
-        passed: ch_ok,
-        detail: if ch_ok {
-            "sha256 digest shape valid".to_string()
-        } else {
-            format!("invalid hash shape: {ch}")
-        },
-    });
-
     let all_pass = assertions.iter().all(|a| a.passed);
     let verdict = if all_pass {
         Verdict::Pass
@@ -962,9 +991,8 @@ pub fn verify_migration_artifact(
         Verdict::Fail
     };
     let confidence = if all_pass { 1.0 } else { 0.0 };
-    let binding_hash = deterministic_hash(
-        std::str::from_utf8(&signature_payload).unwrap_or("__non_utf8_artifact_payload"),
-    );
+    let binding_hash =
+        migration_artifact_binding_hash(&signature_payload, expected_signer_public_key);
     Ok(build_signed_verification_result(
         verdict,
         confidence,
@@ -1430,7 +1458,12 @@ mod tests {
         );
         sign_migration_artifact(&mut artifact, &signing_key);
         let signer = test_verifier_signer("v1", 1);
-        let result = verify_migration_artifact(&artifact, &signer).unwrap();
+        let result = verify_migration_artifact(
+            &artifact,
+            &hex::encode(signing_key.verifying_key().to_bytes()),
+            &signer,
+        )
+        .unwrap();
         assert_eq!(result.verdict, Verdict::Pass);
         verify_verification_result_signature(&result).expect("signature must verify");
     }
@@ -1449,7 +1482,12 @@ mod tests {
             serde_json::json!(format!("sha256:{}", "aa".repeat(32))),
         );
         let signer = test_verifier_signer("v1", 1);
-        let result = verify_migration_artifact(&artifact, &signer).unwrap();
+        let result = verify_migration_artifact(
+            &artifact,
+            &hex::encode(test_signing_key(7).verifying_key().to_bytes()),
+            &signer,
+        )
+        .unwrap();
         assert_eq!(result.verdict, Verdict::Fail);
     }
 
@@ -1467,8 +1505,9 @@ mod tests {
         );
         sign_migration_artifact(&mut artifact, &signing_key);
         let signer = test_verifier_signer("v1", 1);
-        let r1 = verify_migration_artifact(&artifact, &signer).unwrap();
-        let r2 = verify_migration_artifact(&artifact, &signer).unwrap();
+        let trusted_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let r1 = verify_migration_artifact(&artifact, &trusted_key, &signer).unwrap();
+        let r2 = verify_migration_artifact(&artifact, &trusted_key, &signer).unwrap();
         assert_eq!(r1.artifact_binding_hash, r2.artifact_binding_hash);
     }
 
@@ -1490,7 +1529,12 @@ mod tests {
         );
 
         let signer = test_verifier_signer("v1", 1);
-        let result = verify_migration_artifact(&artifact, &signer).unwrap();
+        let result = verify_migration_artifact(
+            &artifact,
+            &hex::encode(signing_key.verifying_key().to_bytes()),
+            &signer,
+        )
+        .unwrap();
         assert_eq!(result.verdict, Verdict::Fail);
         assert!(
             result
@@ -1498,6 +1542,50 @@ mod tests {
                 .iter()
                 .any(|assertion| assertion.assertion == "signature_valid" && !assertion.passed)
         );
+    }
+
+    #[test]
+    fn test_verify_migration_artifact_untrusted_embedded_key_fails() {
+        let signing_key = test_signing_key(12);
+        let mut artifact = BTreeMap::new();
+        artifact.insert("schema_version".to_string(), serde_json::json!("ma-v1.0"));
+        artifact.insert("rollback_receipt".to_string(), serde_json::json!({}));
+        artifact.insert("preconditions".to_string(), serde_json::json!(["pre1"]));
+        artifact.insert(
+            "content_hash".to_string(),
+            serde_json::json!(format!("sha256:{}", "ef".repeat(32))),
+        );
+        sign_migration_artifact(&mut artifact, &signing_key);
+
+        let signer = test_verifier_signer("v1", 1);
+        let untrusted_key = hex::encode(test_signing_key(99).verifying_key().to_bytes());
+        let result = verify_migration_artifact(&artifact, &untrusted_key, &signer).unwrap();
+        assert_eq!(result.verdict, Verdict::Fail);
+        assert!(result.checked_assertions.iter().any(|assertion| {
+            assertion.assertion == "signer_public_key_matches_expected" && !assertion.passed
+        }));
+    }
+
+    #[test]
+    fn test_verify_migration_artifact_binding_hash_depends_on_trusted_key() {
+        let signing_key = test_signing_key(13);
+        let mut artifact = BTreeMap::new();
+        artifact.insert("schema_version".to_string(), serde_json::json!("ma-v1.0"));
+        artifact.insert("rollback_receipt".to_string(), serde_json::json!({}));
+        artifact.insert("preconditions".to_string(), serde_json::json!(["pre1"]));
+        artifact.insert(
+            "content_hash".to_string(),
+            serde_json::json!(format!("sha256:{}", "f0".repeat(32))),
+        );
+        sign_migration_artifact(&mut artifact, &signing_key);
+
+        let signer = test_verifier_signer("v1", 1);
+        let trusted_key = hex::encode(signing_key.verifying_key().to_bytes());
+        let other_key = hex::encode(test_signing_key(14).verifying_key().to_bytes());
+        let trusted = verify_migration_artifact(&artifact, &trusted_key, &signer).unwrap();
+        let other = verify_migration_artifact(&artifact, &other_key, &signer).unwrap();
+
+        assert_ne!(trusted.artifact_binding_hash, other.artifact_binding_hash);
     }
 
     // ── verify_trust_state ────────────────────────────────────────

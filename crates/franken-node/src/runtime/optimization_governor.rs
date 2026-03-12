@@ -1064,7 +1064,7 @@ mod tests {
             GovernorDecision::Rejected(RejectionReason::EnvelopeViolation(vs)) => {
                 assert!(!vs.is_empty(), "should have violation details");
             }
-            other => panic!("expected EnvelopeViolation rejection, got {other:?}"),
+            other => unreachable!("expected EnvelopeViolation rejection, got {other:?}"),
         }
         assert_eq!(gov.decision_log()[0].event_code, event_codes::GOV_004);
         assert_eq!(gov.applied_count(), 0);
@@ -1101,7 +1101,7 @@ mod tests {
         let decision = gov.submit(p);
         match &decision {
             GovernorDecision::Rejected(RejectionReason::InvalidProposal(_)) => {}
-            other => panic!("expected InvalidProposal rejection, got {other:?}"),
+            other => unreachable!("expected InvalidProposal rejection, got {other:?}"),
         }
     }
 
@@ -1116,7 +1116,7 @@ mod tests {
             GovernorDecision::Rejected(RejectionReason::InvalidProposal(msg)) => {
                 assert!(msg.contains("not configured"));
             }
-            other => panic!("expected InvalidProposal rejection, got {other:?}"),
+            other => unreachable!("expected InvalidProposal rejection, got {other:?}"),
         }
         assert_eq!(gov.applied_count(), 0);
         assert_eq!(gov.decision_log()[0].event_code, event_codes::GOV_004);
@@ -1133,7 +1133,7 @@ mod tests {
             GovernorDecision::Rejected(RejectionReason::InvalidProposal(msg)) => {
                 assert!(msg.contains("stale old_value"));
             }
-            other => panic!("expected InvalidProposal rejection, got {other:?}"),
+            other => unreachable!("expected InvalidProposal rejection, got {other:?}"),
         }
         assert_eq!(gov.applied_count(), 0);
         assert_eq!(gov.knob_value(&RuntimeKnob::ConcurrencyLimit), Some(64));

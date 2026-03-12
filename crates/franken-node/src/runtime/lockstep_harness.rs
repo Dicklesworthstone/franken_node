@@ -16,6 +16,8 @@ pub struct LockstepHarness {
 }
 
 impl LockstepHarness {
+    const DIRECTORY_ENTRY_CANDIDATES: [&'static str; 3] = ["index.js", "index.mjs", "index.cjs"];
+
     pub fn new(runtimes: Vec<String>) -> Self {
         Self {
             runtimes: Self::normalize_runtimes(runtimes),
@@ -59,6 +61,10 @@ impl LockstepHarness {
         )
     }
 
+    fn runtime_uses_js_entrypoints(runtime: &str) -> bool {
+        matches!(runtime, "node" | "bun")
+    }
+
     fn resolve_runtime_binary(runtime: &str) -> String {
         match runtime {
             "node" => "node".to_string(),
@@ -68,6 +74,104 @@ impl LockstepHarness {
             }
             _ => runtime.to_string(),
         }
+    }
+
+    fn resolve_runtime_target(runtime: &str, app_path: &Path) -> Result<PathBuf> {
+        if !Self::runtime_uses_js_entrypoints(runtime) || app_path.is_file() || !app_path.is_dir() {
+            return Ok(app_path.to_path_buf());
+        }
+
+        Self::resolve_directory_entrypoint(app_path).with_context(|| {
+            format!(
+                "lockstep input `{}` is not directly executable for runtime `{runtime}`",
+                app_path.display()
+            )
+        })
+    }
+
+    fn resolve_directory_entrypoint(project_dir: &Path) -> Result<PathBuf> {
+        let package_json_path = project_dir.join("package.json");
+        let mut unresolved_main: Option<String> = None;
+        if package_json_path.exists() {
+            let package_json = std::fs::read(&package_json_path).with_context(|| {
+                format!(
+                    "failed reading package manifest {}",
+                    package_json_path.display()
+                )
+            })?;
+            let manifest: serde_json::Value =
+                serde_json::from_slice(&package_json).with_context(|| {
+                    format!(
+                        "invalid package manifest JSON while resolving lockstep entrypoint: {}",
+                        package_json_path.display()
+                    )
+                })?;
+
+            if let Some(main) = manifest
+                .get("main")
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                if let Some(resolved) = Self::resolve_entry_candidate(project_dir, main) {
+                    return Ok(resolved);
+                }
+                unresolved_main = Some(main.to_string());
+            }
+        }
+
+        for candidate in Self::DIRECTORY_ENTRY_CANDIDATES {
+            let path = project_dir.join(candidate);
+            if path.is_file() {
+                return Ok(path);
+            }
+        }
+
+        if let Some(main) = unresolved_main {
+            anyhow::bail!(
+                "package.json main `{main}` did not resolve under {} and no fallback entrypoint was found ({})",
+                project_dir.display(),
+                Self::DIRECTORY_ENTRY_CANDIDATES.join(", ")
+            );
+        }
+
+        anyhow::bail!(
+            "no executable JS entrypoint found under {} (checked package.json main and {})",
+            project_dir.display(),
+            Self::DIRECTORY_ENTRY_CANDIDATES.join(", ")
+        );
+    }
+
+    fn resolve_entry_candidate(project_dir: &Path, raw_target: &str) -> Option<PathBuf> {
+        let normalized = raw_target.trim().trim_start_matches("./");
+        if normalized.is_empty() {
+            return None;
+        }
+
+        let candidate = project_dir.join(normalized);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+
+        if candidate.extension().is_none() {
+            for extension in ["js", "mjs", "cjs"] {
+                let with_extension = candidate.with_extension(extension);
+                if with_extension.is_file() {
+                    return Some(with_extension);
+                }
+            }
+        }
+
+        if candidate.is_dir() {
+            for entry in Self::DIRECTORY_ENTRY_CANDIDATES {
+                let nested = candidate.join(entry);
+                if nested.is_file() {
+                    return Some(nested);
+                }
+            }
+        }
+
+        None
     }
 
     /// Spawns the specified runtimes concurrently, intercepts their outputs,
@@ -302,6 +406,7 @@ impl LockstepHarness {
 
     fn execute_runtime(runtime: &str, app_path: &Path) -> Result<Vec<u8>> {
         let bin_path = Self::resolve_runtime_binary(runtime);
+        let runtime_target = Self::resolve_runtime_target(runtime, app_path)?;
 
         let mut cmd = Command::new("strace");
 
@@ -325,7 +430,7 @@ impl LockstepHarness {
         if Self::is_franken_runtime(runtime) {
             cmd.arg("run").arg(app_path);
         } else {
-            cmd.arg(app_path);
+            cmd.arg(&runtime_target);
         }
 
         let mut child = cmd
@@ -655,6 +760,118 @@ mod tests {
             .expect_err("missing strace file must fail");
         let message = format!("{err:#}");
         assert!(message.contains("strace output missing or unreadable for runtime node"));
+    }
+
+    #[test]
+    fn resolve_runtime_target_keeps_file_inputs_unchanged() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let app_path = temp_dir.path().join("demo.js");
+        std::fs::write(&app_path, "console.log('demo');").expect("write demo");
+
+        let resolved =
+            LockstepHarness::resolve_runtime_target("node", &app_path).expect("resolve target");
+        assert_eq!(resolved, app_path);
+    }
+
+    #[test]
+    fn resolve_runtime_target_keeps_directory_for_franken_runtime() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"name":"demo","main":"dist/server.js"}"#,
+        )
+        .expect("write package");
+        std::fs::create_dir_all(temp_dir.path().join("dist")).expect("create dist");
+        std::fs::write(
+            temp_dir.path().join("dist/server.js"),
+            "console.log('server');",
+        )
+        .expect("write server");
+
+        let resolved = LockstepHarness::resolve_runtime_target("franken-node", temp_dir.path())
+            .expect("resolve franken target");
+        assert_eq!(resolved, temp_dir.path());
+    }
+
+    #[test]
+    fn resolve_runtime_target_uses_package_json_main_for_js_runtimes() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"name":"demo","main":"dist/server"}"#,
+        )
+        .expect("write package");
+        std::fs::create_dir_all(temp_dir.path().join("dist")).expect("create dist");
+        let expected = temp_dir.path().join("dist/server.js");
+        std::fs::write(&expected, "console.log('server');").expect("write server");
+
+        let resolved =
+            LockstepHarness::resolve_runtime_target("node", temp_dir.path()).expect("resolve");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_runtime_target_falls_back_to_directory_index() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let expected = temp_dir.path().join("index.mjs");
+        std::fs::write(&expected, "console.log('entry');").expect("write entry");
+
+        let resolved =
+            LockstepHarness::resolve_runtime_target("bun", temp_dir.path()).expect("resolve");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_runtime_target_keeps_directory_for_custom_runtime() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(temp_dir.path().join("index.js"), "console.log('entry');")
+            .expect("write entry");
+
+        let resolved = LockstepHarness::resolve_runtime_target("custom-runtime", temp_dir.path())
+            .expect("resolve custom runtime target");
+        assert_eq!(resolved, temp_dir.path());
+    }
+
+    #[test]
+    fn resolve_runtime_target_falls_back_to_index_when_package_main_is_missing() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"name":"demo","main":"dist/missing.js"}"#,
+        )
+        .expect("write package");
+        let expected = temp_dir.path().join("index.js");
+        std::fs::write(&expected, "console.log('fallback');").expect("write fallback");
+
+        let resolved =
+            LockstepHarness::resolve_runtime_target("node", temp_dir.path()).expect("resolve");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
+    fn resolve_runtime_target_fails_when_package_main_and_fallbacks_are_missing() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(
+            temp_dir.path().join("package.json"),
+            r#"{"name":"demo","main":"dist/missing.js"}"#,
+        )
+        .expect("write package");
+
+        let err = LockstepHarness::resolve_runtime_target("node", temp_dir.path())
+            .expect_err("missing package main without fallback must fail");
+        let message = format!("{err:#}");
+        assert!(message.contains("package.json main `dist/missing.js` did not resolve"));
+        assert!(message.contains("no fallback entrypoint was found"));
+    }
+
+    #[test]
+    fn resolve_runtime_target_fails_when_directory_has_no_usable_entrypoint() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+
+        let err = LockstepHarness::resolve_runtime_target("node", temp_dir.path())
+            .expect_err("missing directory entrypoint must fail");
+        let message = format!("{err:#}");
+        assert!(message.contains("no executable JS entrypoint found"));
     }
 
     // ── sanitize_strace_output ───────────────────────────────────────

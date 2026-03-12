@@ -9,7 +9,7 @@
 
 use crate::control_plane::control_epoch::ControlEpoch;
 use crate::security::constant_time::ct_eq_bytes;
-use crate::security::epoch_scoped_keys::{derive_epoch_key, RootSecret, SIGNATURE_LEN};
+use crate::security::epoch_scoped_keys::{RootSecret, SIGNATURE_LEN, derive_epoch_key};
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::collections::BTreeSet;
@@ -274,7 +274,11 @@ fn build_transcript_preimage(fields: &TranscriptFields<'_>) -> Vec<u8> {
 }
 
 /// Compute the HMAC over a transcript preimage using the epoch-scoped key.
-fn compute_transcript_mac(preimage: &[u8], epoch: ControlEpoch, root_secret: &RootSecret) -> [u8; SIGNATURE_LEN] {
+fn compute_transcript_mac(
+    preimage: &[u8],
+    epoch: ControlEpoch,
+    root_secret: &RootSecret,
+) -> [u8; SIGNATURE_LEN] {
     let derived_key = derive_epoch_key(root_secret, epoch, CONTROL_CHANNEL_DOMAIN);
     let mut hmac =
         HmacSha256::new_from_slice(derived_key.as_bytes()).expect("HMAC key length is constant");
@@ -362,10 +366,7 @@ impl ControlChannel {
     /// Recomputes the HMAC from the message fields and the channel's root
     /// secret, then compares in constant time.  Returns an error string on
     /// failure for structured logging.
-    fn verify_credential(
-        &self,
-        msg: &ChannelMessage,
-    ) -> Result<(), String> {
+    fn verify_credential(&self, msg: &ChannelMessage) -> Result<(), String> {
         if !self.config.require_auth {
             return Ok(());
         }
@@ -490,7 +491,13 @@ impl ControlChannel {
         // Step 1: Transcript-bound authentication (INV-ACC-AUTHENTICATED)
         if let Err(reason) = self.verify_credential(msg) {
             let audit = Self::make_audit(
-                msg, timestamp, false, false, false, "REJECT_AUTH", Some(&reason),
+                msg,
+                timestamp,
+                false,
+                false,
+                false,
+                "REJECT_AUTH",
+                Some(&reason),
             );
             self.push_audit_entry(audit.clone());
             return Err(ChannelError::AuthFailed {
@@ -504,9 +511,7 @@ impl ControlChannel {
             .replay_window(msg.direction)
             .contains(&msg.sequence_number);
         if !replay_clean {
-            let audit = Self::make_audit(
-                msg, timestamp, true, false, false, "REJECT_REPLAY", None,
-            );
+            let audit = Self::make_audit(msg, timestamp, true, false, false, "REJECT_REPLAY", None);
             self.push_audit_entry(audit);
             return Err(ChannelError::ReplayDetected {
                 message_id: msg.message_id.clone(),
@@ -521,9 +526,8 @@ impl ControlChannel {
         };
         if !sequence_valid {
             let expected_min = self.last_seq(msg.direction).unwrap_or(0).saturating_add(1);
-            let audit = Self::make_audit(
-                msg, timestamp, true, false, true, "REJECT_SEQUENCE", None,
-            );
+            let audit =
+                Self::make_audit(msg, timestamp, true, false, true, "REJECT_SEQUENCE", None);
             self.push_audit_entry(audit);
             return Err(ChannelError::SequenceRegress {
                 message_id: msg.message_id.clone(),
@@ -537,12 +541,12 @@ impl ControlChannel {
         self.record_nonce(msg.credential.nonce);
 
         let window_size = self.config.replay_window_size;
+        let min_retained_seq = msg
+            .sequence_number
+            .saturating_sub(window_size.saturating_sub(1));
         let window = self.replay_window_mut(msg.direction);
         window.insert(msg.sequence_number);
-        if window.len() as u64 >= window_size {
-            let min_seq = msg.sequence_number.saturating_sub(window_size);
-            window.retain(|&s| s > min_seq);
-        }
+        window.retain(|&s| s >= min_retained_seq);
 
         let result = AuthCheckResult {
             message_id: msg.message_id.clone(),
@@ -552,9 +556,7 @@ impl ControlChannel {
             verdict: "ACCEPT".into(),
             reason_code: None,
         };
-        let audit = Self::make_audit(
-            msg, timestamp, true, true, true, "ACCEPT", None,
-        );
+        let audit = Self::make_audit(msg, timestamp, true, true, true, "ACCEPT", None);
         self.push_audit_entry(audit.clone());
 
         Ok((result, audit))
@@ -617,8 +619,14 @@ mod tests {
         let epoch = ControlEpoch::new(1);
         let cfg = config();
         let credential = sign_channel_message(
-            &cfg, "test-subject", dir, seq, payload_hash,
-            epoch, nonce, &test_secret(),
+            &cfg,
+            "test-subject",
+            dir,
+            seq,
+            payload_hash,
+            epoch,
+            nonce,
+            &test_secret(),
         );
         ChannelMessage {
             message_id: id.into(),
@@ -696,9 +704,28 @@ mod tests {
         let err = ch
             .process_message(&signed_msg("m3", Direction::Send, 1), "ts")
             .unwrap_err();
-        assert!(
-            err.code() == "ACC_SEQUENCE_REGRESS" || err.code() == "ACC_REPLAY_DETECTED"
-        );
+        assert!(err.code() == "ACC_SEQUENCE_REGRESS" || err.code() == "ACC_REPLAY_DETECTED");
+    }
+
+    #[test]
+    fn replay_window_keeps_zero_based_sequences_until_the_window_moves_past_them() {
+        let mut cfg = config();
+        cfg.replay_window_size = 2;
+        let mut ch = ControlChannel::new(cfg, test_secret()).unwrap();
+
+        ch.process_message(&signed_msg("m0", Direction::Send, 0), "ts")
+            .unwrap();
+        ch.process_message(&signed_msg("m1", Direction::Send, 1), "ts")
+            .unwrap();
+
+        let err = ch
+            .process_message(&signed_msg("m0-replay", Direction::Send, 0), "ts")
+            .unwrap_err();
+
+        match err {
+            ChannelError::ReplayDetected { sequence, .. } => assert_eq!(sequence, 0),
+            other => panic!("expected replay detection, got {other:?}"),
+        }
     }
 
     #[test]
@@ -833,17 +860,21 @@ mod tests {
 
     #[test]
     fn error_retryable() {
-        assert!(ChannelError::AuthFailed {
-            message_id: "".into(),
-            reason: "".into(),
-        }
-        .retryable());
-        assert!(!ChannelError::SequenceRegress {
-            message_id: "".into(),
-            expected_min: 0,
-            got: 0,
-        }
-        .retryable());
+        assert!(
+            ChannelError::AuthFailed {
+                message_id: "".into(),
+                reason: "".into(),
+            }
+            .retryable()
+        );
+        assert!(
+            !ChannelError::SequenceRegress {
+                message_id: "".into(),
+                expected_min: 0,
+                got: 0,
+            }
+            .retryable()
+        );
         assert!(!ChannelError::ChannelClosed.retryable());
     }
 
@@ -964,8 +995,14 @@ mod tests {
         let mut ch = ControlChannel::new(cfg.clone(), test_secret()).unwrap();
         let nonce = [0x01; 16];
         let cred = sign_channel_message(
-            &cfg, "test-subject", Direction::Send, 1, "payload-A",
-            ControlEpoch::new(1), nonce, &test_secret(),
+            &cfg,
+            "test-subject",
+            Direction::Send,
+            1,
+            "payload-A",
+            ControlEpoch::new(1),
+            nonce,
+            &test_secret(),
         );
         let m = ChannelMessage {
             message_id: "swap".into(),
@@ -989,8 +1026,14 @@ mod tests {
         };
         let nonce = [0x02; 16];
         let cred = sign_channel_message(
-            &cfg_a, "test-subject", Direction::Send, 1, "hash",
-            ControlEpoch::new(1), nonce, &test_secret(),
+            &cfg_a,
+            "test-subject",
+            Direction::Send,
+            1,
+            "hash",
+            ControlEpoch::new(1),
+            nonce,
+            &test_secret(),
         );
 
         let cfg_b = ChannelConfig {
@@ -1017,8 +1060,14 @@ mod tests {
         let cfg = config();
         let nonce = [0x03; 16];
         let stale_cred = sign_channel_message(
-            &cfg, "test-subject", Direction::Send, 1, "hash",
-            ControlEpoch::new(1), nonce, &test_secret(),
+            &cfg,
+            "test-subject",
+            Direction::Send,
+            1,
+            "hash",
+            ControlEpoch::new(1),
+            nonce,
+            &test_secret(),
         );
 
         // Tamper the credential's epoch to claim epoch 2 but keep the
@@ -1045,8 +1094,14 @@ mod tests {
         let cfg = config();
         let nonce = [0x04; 16];
         let cred = sign_channel_message(
-            &cfg, "test-subject", Direction::Send, 1, "hash",
-            ControlEpoch::new(1), nonce, &test_secret(),
+            &cfg,
+            "test-subject",
+            Direction::Send,
+            1,
+            "hash",
+            ControlEpoch::new(1),
+            nonce,
+            &test_secret(),
         );
 
         let mut ch = ControlChannel::new(cfg, test_secret()).unwrap();
@@ -1067,8 +1122,14 @@ mod tests {
         let other_secret = RootSecret::from_bytes([0xCD; SIGNATURE_LEN]);
         let nonce = [0x05; 16];
         let cred = sign_channel_message(
-            &cfg, "test-subject", Direction::Send, 1, "hash",
-            ControlEpoch::new(1), nonce, &other_secret,
+            &cfg,
+            "test-subject",
+            Direction::Send,
+            1,
+            "hash",
+            ControlEpoch::new(1),
+            nonce,
+            &other_secret,
         );
 
         let mut ch = ControlChannel::new(cfg, test_secret()).unwrap();
@@ -1088,8 +1149,14 @@ mod tests {
         let cfg = config();
         let nonce = [0x06; 16];
         let cred = sign_channel_message(
-            &cfg, "test-subject", Direction::Send, 1, "hash",
-            ControlEpoch::new(1), nonce, &test_secret(),
+            &cfg,
+            "test-subject",
+            Direction::Send,
+            1,
+            "hash",
+            ControlEpoch::new(1),
+            nonce,
+            &test_secret(),
         );
 
         let mut ch = ControlChannel::new(cfg, test_secret()).unwrap();
@@ -1111,8 +1178,14 @@ mod tests {
         let nonce = [0x07; 16];
 
         let cred1 = sign_channel_message(
-            &cfg, "test-subject", Direction::Send, 1, "hash",
-            ControlEpoch::new(1), nonce, &test_secret(),
+            &cfg,
+            "test-subject",
+            Direction::Send,
+            1,
+            "hash",
+            ControlEpoch::new(1),
+            nonce,
+            &test_secret(),
         );
         let m1 = ChannelMessage {
             message_id: "nonce1".into(),
@@ -1124,8 +1197,13 @@ mod tests {
         ch.process_message(&m1, "ts").unwrap();
 
         let cred2 = sign_channel_message(
-            &cfg, "test-subject", Direction::Send, 2, "hash2",
-            ControlEpoch::new(1), nonce, // same nonce!
+            &cfg,
+            "test-subject",
+            Direction::Send,
+            2,
+            "hash2",
+            ControlEpoch::new(1),
+            nonce, // same nonce!
             &test_secret(),
         );
         let m2 = ChannelMessage {
@@ -1152,8 +1230,14 @@ mod tests {
                 n
             };
             let cred = sign_channel_message(
-                &cfg, "alice", Direction::Send, seq, "payload",
-                ControlEpoch::new(1), nonce, &secret,
+                &cfg,
+                "alice",
+                Direction::Send,
+                seq,
+                "payload",
+                ControlEpoch::new(1),
+                nonce,
+                &secret,
             );
             let m = ChannelMessage {
                 message_id: format!("rt-{seq}"),

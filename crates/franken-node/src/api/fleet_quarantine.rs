@@ -1725,7 +1725,7 @@ mod tests {
         let err = handle_status(&admin_identity(), &test_trace(), "").expect_err("empty zone");
         let detail = match err {
             ApiError::BadRequest { detail, .. } => detail,
-            other => panic!("unexpected error: {other:?}"),
+            other => unreachable!("unexpected error: {other:?}"),
         };
         assert!(detail.contains(FLEET_SCOPE_INVALID));
     }
@@ -1754,7 +1754,7 @@ mod tests {
         let err = handle_release(&identity, &trace, &request).expect_err("nonexistent incident");
         let detail = match err {
             ApiError::BadRequest { detail, .. } => detail,
-            other => panic!("unexpected error: {other:?}"),
+            other => unreachable!("unexpected error: {other:?}"),
         };
         assert!(detail.contains(FLEET_ROLLBACK_FAILED));
     }
@@ -1770,7 +1770,7 @@ mod tests {
         let err = handle_release(&identity, &trace, &request).expect_err("empty incident");
         let detail = match err {
             ApiError::BadRequest { detail, .. } => detail,
-            other => panic!("unexpected error: {other:?}"),
+            other => unreachable!("unexpected error: {other:?}"),
         };
         assert!(detail.contains(FLEET_SCOPE_INVALID));
     }
