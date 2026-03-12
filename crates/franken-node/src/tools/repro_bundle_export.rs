@@ -988,7 +988,7 @@ mod tests {
         assert!(json.contains("epoch_transition"));
         assert!(json.contains("epoch_transition_timeout"));
         // Verify it's valid JSON
-        let _: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let _: serde_json::Value = serde_json::from_str(&json).expect("valid json expected");
     }
 
     #[test]
@@ -1001,7 +1001,7 @@ mod tests {
 
         let bundle = generate_repro_bundle(&ctx);
         let json = bundle.to_json();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json expected");
 
         assert_eq!(
             parsed["event_trace"][0]["payload"].as_str(),
@@ -1282,7 +1282,7 @@ mod tests {
         let ctx = make_context();
         let bundle = generate_repro_bundle(&ctx);
         let json = bundle.to_json();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json expected");
 
         assert_eq!(parsed["bundle_id"].as_str().unwrap(), bundle.bundle_id);
         assert_eq!(

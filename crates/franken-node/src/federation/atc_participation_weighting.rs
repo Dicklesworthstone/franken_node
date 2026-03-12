@@ -953,8 +953,8 @@ mod tests {
         let participants = vec![make_established_participant("json-1")];
         let record = engine.compute_weights(&participants, "json-batch", "2026-02-20T00:00:00Z");
 
-        let json = serde_json::to_string(&record).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&record).expect("serialization fails");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("serialization fails");
         assert_eq!(parsed["batch_id"], "json-batch");
     }
 
@@ -964,8 +964,8 @@ mod tests {
         let participants = vec![make_established_participant("export-1")];
         engine.compute_weights(&participants, "export-batch", "2026-02-20T00:00:00Z");
 
-        let json = engine.export_audit_json().unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let json = engine.export_audit_json().expect("audit json fails");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("audit json fails");
         assert!(parsed.is_array());
     }
 

@@ -833,10 +833,10 @@ mod tests {
         let metrics = make_high_contributor("jsonl-1");
         engine.evaluate_access(&metrics, "2026-02-20T00:00:00Z");
 
-        let jsonl = engine.export_audit_jsonl().unwrap();
+        let jsonl = engine.export_audit_jsonl().expect("jsonl export fails");
         let lines: Vec<&str> = jsonl.lines().collect();
         assert_eq!(lines.len(), 1);
-        let parsed: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(lines[0]).expect("json parsing fails");
         assert!(parsed["event_code"].is_string());
     }
 

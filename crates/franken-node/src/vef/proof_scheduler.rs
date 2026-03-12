@@ -614,7 +614,7 @@ mod tests {
                     1_701_000_010_000 + idx as u64,
                     "trace-stream",
                 )
-                .unwrap();
+                .expect("chain append should succeed");
         }
         (chain.entries().to_vec(), chain.checkpoints().to_vec())
     }
@@ -631,10 +631,10 @@ mod tests {
 
         let w1 = a
             .select_windows(&entries, &checkpoints, 1_701_100_000_000, "trace-a")
-            .unwrap();
+            .expect("should select windows");
         let w2 = b
             .select_windows(&entries, &checkpoints, 1_701_100_000_000, "trace-b")
-            .unwrap();
+            .expect("should select windows");
 
         assert_eq!(w1.len(), w2.len());
         let bounds_1 = w1
@@ -653,7 +653,7 @@ mod tests {
         let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
         let windows = scheduler
             .select_windows(&[], &[], 1_701_100_001_000, "trace-empty")
-            .unwrap();
+            .expect("should select windows");
         assert!(windows.is_empty());
     }
 
@@ -668,10 +668,10 @@ mod tests {
         let mut scheduler = VefProofScheduler::new(policy);
         let windows = scheduler
             .select_windows(&entries, &checkpoints, 1_701_100_002_000, "trace-dispatch")
-            .unwrap();
+            .expect("should select windows");
         scheduler
             .enqueue_windows(&windows, 1_701_100_002_010)
-            .unwrap();
+            .expect("should select windows");
         let dispatched = scheduler.dispatch_jobs(1_701_100_002_020).unwrap();
         assert_eq!(dispatched.len(), 2);
         assert!(
@@ -692,10 +692,10 @@ mod tests {
         let mut scheduler = VefProofScheduler::new(policy);
         let windows = scheduler
             .select_windows(&entries, &checkpoints, 1_701_100_003_000, "trace-priority")
-            .unwrap();
+            .expect("should select windows");
         scheduler
             .enqueue_windows(&windows, 1_701_100_003_010)
-            .unwrap();
+            .expect("should select windows");
         let dispatched = scheduler.dispatch_jobs(1_701_100_003_020).unwrap();
         assert_eq!(dispatched.len(), 1);
         assert_eq!(dispatched[0].tier, WorkloadTier::Critical);
@@ -715,10 +715,10 @@ mod tests {
         let mut scheduler = VefProofScheduler::new(policy);
         let windows = scheduler
             .select_windows(&entries, &checkpoints, 1_701_100_004_000, "trace-deadline")
-            .unwrap();
+            .expect("should select windows");
         scheduler
             .enqueue_windows(&windows, 1_701_100_004_000)
-            .unwrap();
+            .expect("should select windows");
         scheduler.dispatch_jobs(1_701_100_004_000).unwrap();
         let exceeded = scheduler.enforce_deadlines(1_701_100_005_000);
         assert!(!exceeded.is_empty());
@@ -741,10 +741,10 @@ mod tests {
         let mut scheduler = VefProofScheduler::new(policy);
         let windows = scheduler
             .select_windows(&entries, &checkpoints, 1_701_100_006_000, "trace-metrics")
-            .unwrap();
+            .expect("should select windows");
         scheduler
             .enqueue_windows(&windows, 1_701_100_006_000)
-            .unwrap();
+            .expect("should select windows");
         let metrics = scheduler.backlog_metrics(1_701_100_007_000, "trace-metrics");
         assert!(metrics.pending_jobs >= 1);
         assert!(metrics.oldest_pending_age_millis >= 1_000);
@@ -761,10 +761,10 @@ mod tests {
         let mut scheduler = VefProofScheduler::new(policy);
         let windows = scheduler
             .select_windows(&entries, &checkpoints, 1_701_100_008_000, "trace-complete")
-            .unwrap();
+            .expect("should select windows");
         scheduler
             .enqueue_windows(&windows, 1_701_100_008_010)
-            .unwrap();
+            .expect("should select windows");
         let dispatched = scheduler.dispatch_jobs(1_701_100_008_020).unwrap();
         let job_id = &dispatched[0].job_id;
         scheduler.mark_completed(job_id, 1_701_100_008_030).unwrap();
