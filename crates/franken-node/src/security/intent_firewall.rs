@@ -335,7 +335,7 @@ impl TrafficPolicy {
                     rationale: format!("risky category {} denied by default", intent),
                 },
             );
-            priority += 1;
+            priority = priority.saturating_add(1);
         }
 
         // Non-risky categories: allow by default.
@@ -358,7 +358,7 @@ impl TrafficPolicy {
                     rationale: format!("non-risky category {} allowed by default", intent),
                 },
             );
-            priority += 1;
+            priority = priority.saturating_add(1);
         }
 
         Self {
