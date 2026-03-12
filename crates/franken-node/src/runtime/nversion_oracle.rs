@@ -1209,7 +1209,7 @@ mod tests {
             } => {
                 assert!(pending_divergence_ids.contains(&"div-low".to_string()));
             }
-            _ => panic!("expected RequiresReceipt"),
+            _ => unreachable!("expected RequiresReceipt"),
         }
     }
 
