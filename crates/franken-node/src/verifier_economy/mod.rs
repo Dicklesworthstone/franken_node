@@ -151,6 +151,106 @@ pub const ERR_VEP_UNREGISTERED_VERIFIER: &str = "ERR-VEP-UNREGISTERED-VERIFIER";
 pub const ERR_VEP_INCOMPLETE_PAYLOAD: &str = "ERR-VEP-INCOMPLETE-PAYLOAD";
 pub const ERR_VEP_ANTI_GAMING: &str = "ERR-VEP-ANTI-GAMING";
 
+// Stable replay-capsule verification reason codes (bd-1h2w4)
+pub const ERR_VEP_CAPSULE_SCHEMA: &str = "ERR-VEP-CAPSULE-SCHEMA";
+pub const ERR_VEP_CAPSULE_FRESHNESS: &str = "ERR-VEP-CAPSULE-FRESHNESS";
+pub const ERR_VEP_CAPSULE_ATTESTATION_BINDING: &str = "ERR-VEP-CAPSULE-ATTESTATION-BINDING";
+pub const ERR_VEP_CAPSULE_TRACE_COMMITMENT: &str = "ERR-VEP-CAPSULE-TRACE-COMMITMENT";
+pub const ERR_VEP_CAPSULE_INTEGRITY_HASH: &str = "ERR-VEP-CAPSULE-INTEGRITY-HASH";
+pub const ERR_VEP_CAPSULE_SIGNATURE: &str = "ERR-VEP-CAPSULE-SIGNATURE";
+pub const ERR_VEP_CAPSULE_MISSING_FIELDS: &str = "ERR-VEP-CAPSULE-MISSING-FIELDS";
+pub const ERR_VEP_CAPSULE_HASH_FORMAT: &str = "ERR-VEP-CAPSULE-HASH-FORMAT";
+pub const ERR_VEP_CAPSULE_VERIFIER_MISMATCH: &str = "ERR-VEP-CAPSULE-VERIFIER-MISMATCH";
+pub const ERR_VEP_CAPSULE_CLAIM_MISMATCH: &str = "ERR-VEP-CAPSULE-CLAIM-MISMATCH";
+
+/// Stable failure reasons for replay-capsule verification (bd-1h2w4).
+///
+/// Each variant maps to a deterministic reason code so operators can
+/// diagnose capsule rejection without replaying verification logic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapsuleVerificationFailure {
+    /// Required fields are empty (capsule_id, schema_version, attestation_id, etc.).
+    MissingFields(&'static str),
+    /// Schema version does not match the expected version.
+    SchemaVersionMismatch,
+    /// Freshness window is invalid or expired.
+    FreshnessWindowInvalid,
+    /// Trace chunk hashes are empty or contain non-SHA256 values.
+    TraceChunkInvalid,
+    /// Component hash is not valid SHA-256 hex.
+    HashFormatInvalid(&'static str),
+    /// Trace commitment root does not match recomputed Merkle root.
+    TraceCommitmentMismatch,
+    /// Integrity hash does not match recomputed integrity digest.
+    IntegrityHashMismatch,
+    /// Verifier is not registered.
+    VerifierNotRegistered,
+    /// Capsule verifier_id does not match attestation verifier_id.
+    VerifierMismatch,
+    /// Claim metadata hash does not match attestation claim.
+    ClaimMetadataMismatch,
+    /// Attestation not found for the given attestation_id.
+    AttestationNotFound,
+    /// Capsule signature failed verification.
+    SignatureFailed,
+}
+
+impl CapsuleVerificationFailure {
+    /// Stable error code for this failure reason.
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::MissingFields(_) => ERR_VEP_CAPSULE_MISSING_FIELDS,
+            Self::SchemaVersionMismatch => ERR_VEP_CAPSULE_SCHEMA,
+            Self::FreshnessWindowInvalid => ERR_VEP_CAPSULE_FRESHNESS,
+            Self::TraceChunkInvalid => ERR_VEP_CAPSULE_HASH_FORMAT,
+            Self::HashFormatInvalid(_) => ERR_VEP_CAPSULE_HASH_FORMAT,
+            Self::TraceCommitmentMismatch => ERR_VEP_CAPSULE_TRACE_COMMITMENT,
+            Self::IntegrityHashMismatch => ERR_VEP_CAPSULE_INTEGRITY_HASH,
+            Self::VerifierNotRegistered => ERR_VEP_UNREGISTERED_VERIFIER,
+            Self::VerifierMismatch => ERR_VEP_CAPSULE_VERIFIER_MISMATCH,
+            Self::ClaimMetadataMismatch => ERR_VEP_CAPSULE_CLAIM_MISMATCH,
+            Self::AttestationNotFound => ERR_VEP_CAPSULE_ATTESTATION_BINDING,
+            Self::SignatureFailed => ERR_VEP_CAPSULE_SIGNATURE,
+        }
+    }
+
+    /// Human-readable detail for structured logging.
+    pub fn detail(&self) -> String {
+        match self {
+            Self::MissingFields(field) => format!("required field empty: {field}"),
+            Self::SchemaVersionMismatch => {
+                format!("schema version mismatch: expected {REPLAY_CAPSULE_SCHEMA_VERSION}")
+            }
+            Self::FreshnessWindowInvalid => "freshness window invalid or expired".to_string(),
+            Self::TraceChunkInvalid => "trace chunk hashes empty or invalid format".to_string(),
+            Self::HashFormatInvalid(field) => {
+                format!("hash field not valid SHA-256 hex: {field}")
+            }
+            Self::TraceCommitmentMismatch => {
+                "trace commitment root does not match recomputed Merkle root".to_string()
+            }
+            Self::IntegrityHashMismatch => {
+                "integrity hash does not match recomputed digest".to_string()
+            }
+            Self::VerifierNotRegistered => "verifier not registered".to_string(),
+            Self::VerifierMismatch => {
+                "capsule verifier_id does not match attestation verifier_id".to_string()
+            }
+            Self::ClaimMetadataMismatch => {
+                "claim metadata hash does not match attestation claim".to_string()
+            }
+            Self::AttestationNotFound => "attestation not found".to_string(),
+            Self::SignatureFailed => "capsule signature verification failed".to_string(),
+        }
+    }
+}
+
+impl fmt::Display for CapsuleVerificationFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code(), self.detail())
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Domain types
 // ---------------------------------------------------------------------------
@@ -958,15 +1058,27 @@ impl VerifierEconomyRegistry {
 
     // -- Replay capsules ------------------------------------------------------
 
+    fn replay_capsule_rejection_error(
+        capsule_id: &str,
+        failure: &CapsuleVerificationFailure,
+    ) -> VepError {
+        VepError {
+            code: failure.code().to_string(),
+            message: format!(
+                "Replay capsule {} rejected: reason_code={}; {}",
+                capsule_id,
+                failure.code(),
+                failure.detail()
+            ),
+        }
+    }
+
     pub fn register_replay_capsule(&mut self, capsule: ReplayCapsule) -> VepResult<()> {
-        if !self.verify_replay_capsule(&capsule) {
-            return Err(VepError {
-                code: ERR_VEP_INVALID_CAPSULE.to_string(),
-                message: format!(
-                    "Replay capsule {} failed integrity verification",
-                    capsule.capsule_id
-                ),
-            });
+        if let Err(failure) = self.verify_replay_capsule(&capsule) {
+            return Err(Self::replay_capsule_rejection_error(
+                &capsule.capsule_id,
+                &failure,
+            ));
         }
         let capsule_id = capsule.capsule_id.clone();
         if self.replay_capsules.len() >= MAX_REPLAY_CAPSULES
@@ -989,14 +1101,8 @@ impl VerifierEconomyRegistry {
                 message: format!("Replay capsule {} not found", capsule_id),
             })?;
 
-        if !self.verify_replay_capsule(&capsule) {
-            return Err(VepError {
-                code: ERR_VEP_INVALID_CAPSULE.to_string(),
-                message: format!(
-                    "Replay capsule {} failed integrity verification",
-                    capsule_id
-                ),
-            });
+        if let Err(failure) = self.verify_replay_capsule(&capsule) {
+            return Err(Self::replay_capsule_rejection_error(capsule_id, &failure));
         }
 
         self.emit(VEP_007, &format!("Replay capsule accessed: {}", capsule_id));
@@ -1005,53 +1111,74 @@ impl VerifierEconomyRegistry {
     }
 
     /// Verify replay capsule integrity by checking hash consistency.
-    pub fn verify_capsule_integrity(capsule: &ReplayCapsule) -> bool {
-        if capsule.capsule_id.is_empty()
-            || capsule.schema_version.is_empty()
-            || capsule.attestation_id.is_empty()
-            || capsule.verifier_id.is_empty()
-            || capsule.issued_at.is_empty()
-            || capsule.expires_at.is_empty()
-        {
-            return false;
+    ///
+    /// Returns `Ok(())` if the capsule passes all structural and
+    /// cryptographic integrity checks, or a specific
+    /// [`CapsuleVerificationFailure`] identifying the first failing check.
+    pub fn verify_capsule_integrity(
+        capsule: &ReplayCapsule,
+    ) -> Result<(), CapsuleVerificationFailure> {
+        if capsule.capsule_id.is_empty() {
+            return Err(CapsuleVerificationFailure::MissingFields("capsule_id"));
+        }
+        if capsule.schema_version.is_empty() {
+            return Err(CapsuleVerificationFailure::MissingFields("schema_version"));
+        }
+        if capsule.attestation_id.is_empty() {
+            return Err(CapsuleVerificationFailure::MissingFields("attestation_id"));
+        }
+        if capsule.verifier_id.is_empty() {
+            return Err(CapsuleVerificationFailure::MissingFields("verifier_id"));
+        }
+        if capsule.issued_at.is_empty() {
+            return Err(CapsuleVerificationFailure::MissingFields("issued_at"));
+        }
+        if capsule.expires_at.is_empty() {
+            return Err(CapsuleVerificationFailure::MissingFields("expires_at"));
         }
         if capsule.schema_version != REPLAY_CAPSULE_SCHEMA_VERSION {
-            return false;
+            return Err(CapsuleVerificationFailure::SchemaVersionMismatch);
         }
         if !replay_capsule_freshness_window_valid(&capsule.issued_at, &capsule.expires_at) {
-            return false;
+            return Err(CapsuleVerificationFailure::FreshnessWindowInvalid);
         }
         if capsule.trace_chunk_hashes.is_empty() {
-            return false;
+            return Err(CapsuleVerificationFailure::TraceChunkInvalid);
         }
 
-        let component_hashes = [
-            &capsule.claim_metadata_hash,
-            &capsule.input_state_hash,
-            &capsule.trace_commitment_root,
-            &capsule.output_state_hash,
-            &capsule.expected_result_hash,
-            &capsule.integrity_hash,
+        let hash_fields: &[(&str, &str)] = &[
+            ("claim_metadata_hash", &capsule.claim_metadata_hash),
+            ("input_state_hash", &capsule.input_state_hash),
+            ("trace_commitment_root", &capsule.trace_commitment_root),
+            ("output_state_hash", &capsule.output_state_hash),
+            ("expected_result_hash", &capsule.expected_result_hash),
+            ("integrity_hash", &capsule.integrity_hash),
         ];
-        if component_hashes
-            .iter()
-            .any(|hash| !is_sha256_prefixed_hex(hash))
-        {
-            return false;
+        for &(name, value) in hash_fields {
+            if !is_sha256_prefixed_hex(value) {
+                // Use a static label for the first invalid field.
+                return Err(CapsuleVerificationFailure::HashFormatInvalid(match name {
+                    "claim_metadata_hash" => "claim_metadata_hash",
+                    "input_state_hash" => "input_state_hash",
+                    "trace_commitment_root" => "trace_commitment_root",
+                    "output_state_hash" => "output_state_hash",
+                    "expected_result_hash" => "expected_result_hash",
+                    "integrity_hash" => "integrity_hash",
+                    _ => "unknown",
+                }));
+            }
         }
         if capsule
             .trace_chunk_hashes
             .iter()
             .any(|hash| !is_sha256_prefixed_hex(hash))
         {
-            return false;
+            return Err(CapsuleVerificationFailure::TraceChunkInvalid);
         }
-        let Some(expected_trace_root) = compute_trace_commitment_root(&capsule.trace_chunk_hashes)
-        else {
-            return false;
-        };
+        let expected_trace_root = compute_trace_commitment_root(&capsule.trace_chunk_hashes)
+            .ok_or(CapsuleVerificationFailure::TraceCommitmentMismatch)?;
         if !ct_eq(&capsule.trace_commitment_root, &expected_trace_root) {
-            return false;
+            return Err(CapsuleVerificationFailure::TraceCommitmentMismatch);
         }
 
         let expected_integrity = compute_capsule_integrity_hash(
@@ -1068,17 +1195,26 @@ impl VerifierEconomyRegistry {
             &capsule.expected_result_hash,
         );
 
-        ct_eq(&capsule.integrity_hash, &expected_integrity)
+        if !ct_eq(&capsule.integrity_hash, &expected_integrity) {
+            return Err(CapsuleVerificationFailure::IntegrityHashMismatch);
+        }
+        Ok(())
     }
 
-    fn verify_replay_capsule(&mut self, capsule: &ReplayCapsule) -> bool {
-        if !Self::verify_capsule_integrity(capsule) {
-            return false;
-        }
+    /// Legacy bool wrapper — returns `true` if capsule passes integrity.
+    pub fn verify_capsule_integrity_bool(capsule: &ReplayCapsule) -> bool {
+        Self::verify_capsule_integrity(capsule).is_ok()
+    }
+
+    fn verify_replay_capsule(
+        &mut self,
+        capsule: &ReplayCapsule,
+    ) -> Result<(), CapsuleVerificationFailure> {
+        Self::verify_capsule_integrity(capsule)?;
 
         let verifier_public_key = match self.verifiers.get(&capsule.verifier_id) {
             Some(verifier) => verifier.public_key.clone(),
-            None => return false,
+            None => return Err(CapsuleVerificationFailure::VerifierNotRegistered),
         };
 
         let (attestation_verifier_id, expected_claim_metadata_hash) =
@@ -1092,13 +1228,13 @@ impl VerifierEconomyRegistry {
                         &attestation.evidence.suite_id,
                     ),
                 ),
-                None => return false,
+                None => return Err(CapsuleVerificationFailure::AttestationNotFound),
             };
         if attestation_verifier_id != capsule.verifier_id {
-            return false;
+            return Err(CapsuleVerificationFailure::VerifierMismatch);
         }
         if !ct_eq(&capsule.claim_metadata_hash, &expected_claim_metadata_hash) {
-            return false;
+            return Err(CapsuleVerificationFailure::ClaimMetadataMismatch);
         }
 
         let signature_payload = replay_capsule_signature_payload(
@@ -1116,12 +1252,15 @@ impl VerifierEconomyRegistry {
             &capsule.expected_result_hash,
             &capsule.integrity_hash,
         );
-        self.verify_signature_with_cached_key(
+        if !self.verify_signature_with_cached_key(
             &capsule.signature,
             &capsule.verifier_id,
             &verifier_public_key,
             &signature_payload,
-        )
+        ) {
+            return Err(CapsuleVerificationFailure::SignatureFailed);
+        }
+        Ok(())
     }
 
     // -- Trust scoreboard -----------------------------------------------------
@@ -1186,9 +1325,7 @@ impl VerifierEconomyRegistry {
         let dims: std::collections::BTreeSet<_> = self
             .attestations
             .values()
-            .filter(|a| {
-                a.verifier_id == verifier_id && a.state == AttestationState::Published
-            })
+            .filter(|a| a.verifier_id == verifier_id && a.state == AttestationState::Published)
             .map(|a| a.claim.dimension.clone())
             .collect();
 
@@ -1833,7 +1970,7 @@ mod tests {
             &registration_signing_key(),
             "capsule-003",
         );
-        assert!(VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
+        assert!(VerifierEconomyRegistry::verify_capsule_integrity(&capsule).is_ok());
     }
 
     #[test]
@@ -1848,7 +1985,7 @@ mod tests {
             "capsule-004",
         );
         capsule.input_state_hash = String::new();
-        assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
+        assert!(VerifierEconomyRegistry::verify_capsule_integrity(&capsule).is_err());
     }
 
     #[test]
@@ -1864,7 +2001,7 @@ mod tests {
         );
         capsule.integrity_hash = sample_sha256("tampered-integrity");
         let error = reg.register_replay_capsule(capsule).unwrap_err();
-        assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
+        assert_eq!(error.code, ERR_VEP_CAPSULE_INTEGRITY_HASH);
     }
 
     #[test]
@@ -1879,7 +2016,7 @@ mod tests {
             "capsule-006",
         );
         capsule.verifier_id = "verifier-tampered".to_string();
-        assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
+        assert!(VerifierEconomyRegistry::verify_capsule_integrity(&capsule).is_err());
     }
 
     #[test]
@@ -1894,7 +2031,7 @@ mod tests {
             "capsule-007",
         );
         capsule.expires_at = "2026-03-10T03:30:00Z".to_string();
-        assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
+        assert!(VerifierEconomyRegistry::verify_capsule_integrity(&capsule).is_err());
     }
 
     #[test]
@@ -1909,7 +2046,7 @@ mod tests {
             "capsule-008",
         );
         capsule.trace_chunk_hashes[1] = sample_sha256("tampered-trace-chunk");
-        assert!(!VerifierEconomyRegistry::verify_capsule_integrity(&capsule));
+        assert!(VerifierEconomyRegistry::verify_capsule_integrity(&capsule).is_err());
     }
 
     #[test]
@@ -1957,7 +2094,7 @@ mod tests {
         );
         capsule.signature.value = "00".repeat(64);
         let error = reg.register_replay_capsule(capsule).unwrap_err();
-        assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
+        assert_eq!(error.code, ERR_VEP_CAPSULE_SIGNATURE);
     }
 
     #[test]
@@ -1987,7 +2124,7 @@ mod tests {
         );
         sign_capsule(&mut capsule, &registration_signing_key());
         let error = reg.register_replay_capsule(capsule).unwrap_err();
-        assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
+        assert_eq!(error.code, ERR_VEP_CAPSULE_CLAIM_MISMATCH);
     }
 
     #[test]
@@ -2003,7 +2140,7 @@ mod tests {
         );
         sign_capsule(&mut capsule, &test_signing_key(7));
         let error = reg.register_replay_capsule(capsule).unwrap_err();
-        assert_eq!(error.code, ERR_VEP_INVALID_CAPSULE);
+        assert_eq!(error.code, ERR_VEP_CAPSULE_SIGNATURE);
     }
 
     // -- Scoreboard tests -----------------------------------------------------
@@ -2467,6 +2604,368 @@ mod tests {
     }
 
     #[test]
+    fn test_capsule_reason_code_constants() {
+        assert_eq!(ERR_VEP_CAPSULE_SCHEMA, "ERR-VEP-CAPSULE-SCHEMA");
+        assert_eq!(ERR_VEP_CAPSULE_FRESHNESS, "ERR-VEP-CAPSULE-FRESHNESS");
+        assert_eq!(
+            ERR_VEP_CAPSULE_ATTESTATION_BINDING,
+            "ERR-VEP-CAPSULE-ATTESTATION-BINDING"
+        );
+        assert_eq!(
+            ERR_VEP_CAPSULE_TRACE_COMMITMENT,
+            "ERR-VEP-CAPSULE-TRACE-COMMITMENT"
+        );
+        assert_eq!(
+            ERR_VEP_CAPSULE_INTEGRITY_HASH,
+            "ERR-VEP-CAPSULE-INTEGRITY-HASH"
+        );
+        assert_eq!(ERR_VEP_CAPSULE_SIGNATURE, "ERR-VEP-CAPSULE-SIGNATURE");
+        assert_eq!(
+            ERR_VEP_CAPSULE_MISSING_FIELDS,
+            "ERR-VEP-CAPSULE-MISSING-FIELDS"
+        );
+        assert_eq!(ERR_VEP_CAPSULE_HASH_FORMAT, "ERR-VEP-CAPSULE-HASH-FORMAT");
+        assert_eq!(
+            ERR_VEP_CAPSULE_VERIFIER_MISMATCH,
+            "ERR-VEP-CAPSULE-VERIFIER-MISMATCH"
+        );
+        assert_eq!(
+            ERR_VEP_CAPSULE_CLAIM_MISMATCH,
+            "ERR-VEP-CAPSULE-CLAIM-MISMATCH"
+        );
+    }
+
+    // -- bd-1h2w4: Capsule reason code regression tests -----------------------
+
+    #[test]
+    fn test_capsule_rejection_missing_capsule_id() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-01",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-01",
+        );
+        capsule.capsule_id = String::new();
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_MISSING_FIELDS);
+        assert!(
+            error
+                .message
+                .contains("reason_code=ERR-VEP-CAPSULE-MISSING-FIELDS")
+        );
+        assert!(error.message.contains("capsule_id"));
+    }
+
+    #[test]
+    fn test_capsule_rejection_schema_mismatch() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-02",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-02",
+        );
+        capsule.schema_version = "wrong-schema-v99".to_string();
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_SCHEMA);
+    }
+
+    #[test]
+    fn test_capsule_rejection_freshness_expired() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-03",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-03",
+        );
+        let past = chrono::Utc::now() - chrono::Duration::hours(5);
+        capsule.issued_at = past.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        capsule.expires_at =
+            (past + chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_FRESHNESS);
+    }
+
+    #[test]
+    fn test_capsule_rejection_hash_format_invalid() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-04",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-04",
+        );
+        capsule.input_state_hash = "not-a-valid-hash".to_string();
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_HASH_FORMAT);
+        assert!(
+            error
+                .message
+                .contains("reason_code=ERR-VEP-CAPSULE-HASH-FORMAT")
+        );
+        assert!(error.message.contains("input_state_hash"));
+    }
+
+    #[test]
+    fn test_capsule_rejection_trace_commitment_mismatch() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-05",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-05",
+        );
+        capsule.trace_commitment_root = sample_sha256("wrong-trace-root");
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_TRACE_COMMITMENT);
+    }
+
+    #[test]
+    fn test_capsule_rejection_integrity_hash_mismatch() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-06",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-06",
+        );
+        capsule.integrity_hash = sample_sha256("wrong-integrity");
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_INTEGRITY_HASH);
+    }
+
+    #[test]
+    fn test_capsule_rejection_signature_failed() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-07",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-07",
+        );
+        capsule.signature.value = "00".repeat(64);
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_SIGNATURE);
+    }
+
+    #[test]
+    fn test_capsule_rejection_claim_metadata_mismatch() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-08",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-08",
+        );
+        capsule.claim_metadata_hash = sample_sha256("wrong-claim");
+        // Recompute integrity so integrity check passes but claim binding fails
+        capsule.integrity_hash = compute_capsule_integrity_hash(
+            &capsule.capsule_id,
+            &capsule.schema_version,
+            &capsule.attestation_id,
+            &capsule.verifier_id,
+            &capsule.claim_metadata_hash,
+            &capsule.issued_at,
+            &capsule.expires_at,
+            &capsule.input_state_hash,
+            &capsule.trace_commitment_root,
+            &capsule.output_state_hash,
+            &capsule.expected_result_hash,
+        );
+        sign_capsule(&mut capsule, &registration_signing_key());
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_CLAIM_MISMATCH);
+    }
+
+    #[test]
+    fn test_capsule_rejection_attestation_not_found() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-rc-09",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-09",
+        );
+        capsule.attestation_id = "nonexistent-attestation-id".to_string();
+        // Recompute integrity with the new attestation_id
+        capsule.integrity_hash = compute_capsule_integrity_hash(
+            &capsule.capsule_id,
+            &capsule.schema_version,
+            &capsule.attestation_id,
+            &capsule.verifier_id,
+            &capsule.claim_metadata_hash,
+            &capsule.issued_at,
+            &capsule.expires_at,
+            &capsule.input_state_hash,
+            &capsule.trace_commitment_root,
+            &capsule.output_state_hash,
+            &capsule.expected_result_hash,
+        );
+        sign_capsule(&mut capsule, &registration_signing_key());
+        let error = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_ATTESTATION_BINDING);
+    }
+
+    #[test]
+    fn test_access_capsule_rejection_freshness_reason_code() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let capsule = make_capsule(
+            "cap-rc-10",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-10",
+        );
+        reg.register_replay_capsule(capsule).unwrap();
+
+        {
+            let stored = reg.replay_capsules.get_mut("cap-rc-10").unwrap();
+            let past = chrono::Utc::now() - chrono::Duration::hours(5);
+            stored.issued_at = past.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            stored.expires_at = (past + chrono::Duration::hours(1))
+                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        }
+
+        let error = reg.access_replay_capsule("cap-rc-10").unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_FRESHNESS);
+        assert!(
+            error
+                .message
+                .contains("reason_code=ERR-VEP-CAPSULE-FRESHNESS")
+        );
+    }
+
+    #[test]
+    fn test_access_capsule_rejection_attestation_binding_reason_code() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let capsule = make_capsule(
+            "cap-rc-11",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "reason-11",
+        );
+        reg.register_replay_capsule(capsule).unwrap();
+
+        {
+            let stored = reg.replay_capsules.get_mut("cap-rc-11").unwrap();
+            stored.attestation_id = "nonexistent-attestation-id".to_string();
+            stored.integrity_hash = compute_capsule_integrity_hash(
+                &stored.capsule_id,
+                &stored.schema_version,
+                &stored.attestation_id,
+                &stored.verifier_id,
+                &stored.claim_metadata_hash,
+                &stored.issued_at,
+                &stored.expires_at,
+                &stored.input_state_hash,
+                &stored.trace_commitment_root,
+                &stored.output_state_hash,
+                &stored.expected_result_hash,
+            );
+            sign_capsule(stored, &registration_signing_key());
+        }
+
+        let error = reg.access_replay_capsule("cap-rc-11").unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPSULE_ATTESTATION_BINDING);
+        assert!(
+            error
+                .message
+                .contains("reason_code=ERR-VEP-CAPSULE-ATTESTATION-BINDING")
+        );
+        assert!(error.message.contains("attestation not found"));
+    }
+
+    #[test]
+    fn test_capsule_verification_failure_display() {
+        let f = CapsuleVerificationFailure::SchemaVersionMismatch;
+        let s = format!("{f}");
+        assert!(s.contains(ERR_VEP_CAPSULE_SCHEMA));
+        assert!(s.contains("schema version mismatch"));
+    }
+
+    #[test]
+    fn test_capsule_verification_failure_codes_deterministic() {
+        // Verify every variant maps to a stable code.
+        let cases: Vec<(CapsuleVerificationFailure, &str)> = vec![
+            (
+                CapsuleVerificationFailure::MissingFields("test"),
+                ERR_VEP_CAPSULE_MISSING_FIELDS,
+            ),
+            (
+                CapsuleVerificationFailure::SchemaVersionMismatch,
+                ERR_VEP_CAPSULE_SCHEMA,
+            ),
+            (
+                CapsuleVerificationFailure::FreshnessWindowInvalid,
+                ERR_VEP_CAPSULE_FRESHNESS,
+            ),
+            (
+                CapsuleVerificationFailure::TraceChunkInvalid,
+                ERR_VEP_CAPSULE_HASH_FORMAT,
+            ),
+            (
+                CapsuleVerificationFailure::HashFormatInvalid("x"),
+                ERR_VEP_CAPSULE_HASH_FORMAT,
+            ),
+            (
+                CapsuleVerificationFailure::TraceCommitmentMismatch,
+                ERR_VEP_CAPSULE_TRACE_COMMITMENT,
+            ),
+            (
+                CapsuleVerificationFailure::IntegrityHashMismatch,
+                ERR_VEP_CAPSULE_INTEGRITY_HASH,
+            ),
+            (
+                CapsuleVerificationFailure::VerifierNotRegistered,
+                ERR_VEP_UNREGISTERED_VERIFIER,
+            ),
+            (
+                CapsuleVerificationFailure::VerifierMismatch,
+                ERR_VEP_CAPSULE_VERIFIER_MISMATCH,
+            ),
+            (
+                CapsuleVerificationFailure::ClaimMetadataMismatch,
+                ERR_VEP_CAPSULE_CLAIM_MISMATCH,
+            ),
+            (
+                CapsuleVerificationFailure::AttestationNotFound,
+                ERR_VEP_CAPSULE_ATTESTATION_BINDING,
+            ),
+            (
+                CapsuleVerificationFailure::SignatureFailed,
+                ERR_VEP_CAPSULE_SIGNATURE,
+            ),
+        ];
+        for (failure, expected_code) in cases {
+            assert_eq!(failure.code(), expected_code, "mismatch for {failure:?}");
+            assert!(!failure.detail().is_empty(), "empty detail for {failure:?}");
+        }
+    }
+
+    #[test]
     fn test_compute_reputation_nan_returns_zero() {
         let dims = ReputationDimensions {
             consistency: f64::NAN,
@@ -2493,9 +2992,12 @@ mod tests {
         // A capsule with a valid 1-hour window but already past its deadline.
         let past = chrono::Utc::now() - chrono::Duration::hours(2);
         let issued_at = past.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        let expires_at = (past + chrono::Duration::hours(1))
-            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        assert!(!replay_capsule_freshness_window_valid(&issued_at, &expires_at));
+        let expires_at =
+            (past + chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(!replay_capsule_freshness_window_valid(
+            &issued_at,
+            &expires_at
+        ));
     }
 
     #[test]
@@ -2504,6 +3006,9 @@ mod tests {
         let issued_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let expires_at = (now + chrono::Duration::seconds(3600))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
-        assert!(replay_capsule_freshness_window_valid(&issued_at, &expires_at));
+        assert!(replay_capsule_freshness_window_valid(
+            &issued_at,
+            &expires_at
+        ));
     }
 }
