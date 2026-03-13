@@ -80,20 +80,22 @@ fn compute_claim_metadata_hash(
 
 fn replay_capsule_freshness_window_valid(issued_at: &str, expires_at: &str) -> bool {
     let issued_at = match chrono::DateTime::parse_from_rfc3339(issued_at) {
-        Ok(ts) => ts,
+        Ok(ts) => ts.with_timezone(&chrono::Utc),
         Err(_) => return false,
     };
     let expires_at = match chrono::DateTime::parse_from_rfc3339(expires_at) {
-        Ok(ts) => ts,
+        Ok(ts) => ts.with_timezone(&chrono::Utc),
         Err(_) => return false,
     };
-    let window = expires_at.signed_duration_since(issued_at).num_seconds();
-    if !(0..=MAX_REPLAY_CAPSULE_FRESHNESS_SECS).contains(&window) {
+    let window = expires_at.signed_duration_since(issued_at);
+    if window <= chrono::Duration::zero()
+        || window > chrono::Duration::seconds(MAX_REPLAY_CAPSULE_FRESHNESS_SECS)
+    {
         return false;
     }
-    // Fail-closed: reject capsules whose expiry deadline has passed.
+    // Fail-closed: reject capsules outside their validity interval.
     let now = chrono::Utc::now();
-    now < expires_at
+    issued_at <= now && now < expires_at
 }
 
 pub(crate) fn attestation_signature_payload(submission: &AttestationSubmission) -> Vec<u8> {
@@ -2035,6 +2037,49 @@ mod tests {
     }
 
     #[test]
+    fn test_capsule_integrity_rejects_zero_length_freshness_window() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-007b",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-007b",
+        );
+        let shared_timestamp = (chrono::Utc::now() + chrono::Duration::minutes(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        capsule.issued_at = shared_timestamp.clone();
+        capsule.expires_at = shared_timestamp;
+        assert_eq!(
+            VerifierEconomyRegistry::verify_capsule_integrity(&capsule),
+            Err(CapsuleVerificationFailure::FreshnessWindowInvalid)
+        );
+    }
+
+    #[test]
+    fn test_capsule_integrity_rejects_future_issued_freshness_window() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let mut capsule = make_capsule(
+            "cap-007c",
+            &verifier.verifier_id,
+            &attestation,
+            &registration_signing_key(),
+            "capsule-007c",
+        );
+        let now = chrono::Utc::now();
+        capsule.issued_at =
+            (now + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        capsule.expires_at = (now + chrono::Duration::minutes(65))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert_eq!(
+            VerifierEconomyRegistry::verify_capsule_integrity(&capsule),
+            Err(CapsuleVerificationFailure::FreshnessWindowInvalid)
+        );
+    }
+
+    #[test]
     fn test_capsule_integrity_rejects_tampered_trace_chunk_hash() {
         let mut reg = make_registry();
         let (verifier, attestation) = register_and_submit(&mut reg);
@@ -3001,12 +3046,49 @@ mod tests {
     }
 
     #[test]
-    fn future_capsule_accepted_by_freshness_check() {
+    fn current_capsule_with_future_expiry_accepted_by_freshness_check() {
         let now = chrono::Utc::now();
         let issued_at = now.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         let expires_at = (now + chrono::Duration::seconds(3600))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         assert!(replay_capsule_freshness_window_valid(
+            &issued_at,
+            &expires_at
+        ));
+    }
+
+    #[test]
+    fn zero_length_capsule_rejected_by_freshness_check() {
+        let shared_timestamp = (chrono::Utc::now() + chrono::Duration::minutes(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(!replay_capsule_freshness_window_valid(
+            &shared_timestamp,
+            &shared_timestamp
+        ));
+    }
+
+    #[test]
+    fn future_issued_capsule_rejected_by_freshness_check() {
+        let now = chrono::Utc::now();
+        let issued_at =
+            (now + chrono::Duration::minutes(5)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let expires_at = (now + chrono::Duration::minutes(65))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        assert!(!replay_capsule_freshness_window_valid(
+            &issued_at,
+            &expires_at
+        ));
+    }
+
+    #[test]
+    fn overlong_subsecond_capsule_rejected_by_freshness_check() {
+        let now = chrono::Utc::now();
+        let issued_at = now.to_rfc3339();
+        let expires_at = (now
+            + chrono::Duration::seconds(MAX_REPLAY_CAPSULE_FRESHNESS_SECS)
+            + chrono::Duration::milliseconds(1))
+        .to_rfc3339();
+        assert!(!replay_capsule_freshness_window_valid(
             &issued_at,
             &expires_at
         ));
