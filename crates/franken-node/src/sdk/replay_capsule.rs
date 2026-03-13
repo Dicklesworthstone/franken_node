@@ -40,8 +40,7 @@ pub const CAPSULE_SCHEMA_ID: &str = "replay-capsule-v1";
 ///
 /// Replacement-critical signed capsule verification must use the stronger
 /// connector/verifier-economy paths until the canonical shared kernel lands.
-pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str =
-    "structural_only_not_replacement_critical";
+pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";
 
 /// Stable rule id used by shortcut-regression guardrails.
 pub const STRUCTURAL_ONLY_RULE_ID: &str = "VERIFIER_SHORTCUT_GUARD::SDK_REPLAY_CAPSULE";
@@ -188,6 +187,11 @@ fn validate_environment_snapshot(environment: &EnvironmentSnapshot) -> Result<()
     if environment.platform.is_empty() {
         return Err(CapsuleError::IncompleteEnvironment(
             "platform is empty".to_string(),
+        ));
+    }
+    if environment.config_hash.is_empty() {
+        return Err(CapsuleError::IncompleteEnvironment(
+            "config_hash is empty".to_string(),
         ));
     }
     Ok(())
@@ -433,6 +437,14 @@ mod tests {
         assert!(matches!(err, CapsuleError::IncompleteEnvironment(_)));
     }
 
+    #[test]
+    fn test_create_capsule_empty_config_hash() {
+        let mut env = test_env();
+        env.config_hash = String::new();
+        let err = create_capsule("cap", test_inputs(), env).unwrap_err();
+        assert!(matches!(err, CapsuleError::IncompleteEnvironment(_)));
+    }
+
     // ── validate_capsule ────────────────────────────────────────────
 
     #[test]
@@ -496,6 +508,16 @@ mod tests {
     fn test_validate_capsule_empty_platform() {
         let mut cap = test_capsule();
         cap.environment.platform = String::new();
+        assert!(matches!(
+            validate_capsule(&cap).unwrap_err(),
+            CapsuleError::IncompleteEnvironment(_)
+        ));
+    }
+
+    #[test]
+    fn test_validate_capsule_empty_config_hash() {
+        let mut cap = test_capsule();
+        cap.environment.config_hash = String::new();
         assert!(matches!(
             validate_capsule(&cap).unwrap_err(),
             CapsuleError::IncompleteEnvironment(_)

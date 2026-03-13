@@ -34,7 +34,7 @@
 use ed25519_dalek::{Signer, SigningKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// Maximum number of verification steps per session.
 const MAX_SESSION_STEPS: usize = 4096;
@@ -485,6 +485,35 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), VsdkError> {
     Ok(())
 }
 
+fn validate_manifest_input_refs(
+    manifest: &CapsuleManifest,
+    inputs: &BTreeMap<String, String>,
+) -> Result<(), VsdkError> {
+    let mut declared_refs = BTreeSet::new();
+    for input_ref in &manifest.input_refs {
+        if !declared_refs.insert(input_ref.as_str()) {
+            return Err(VsdkError::ManifestIncomplete(format!(
+                "input_refs contains duplicate entry: {input_ref}"
+            )));
+        }
+    }
+
+    let provided_refs: BTreeSet<&str> = inputs.keys().map(String::as_str).collect();
+    if declared_refs != provided_refs {
+        let declared = manifest.input_refs.join(", ");
+        let provided = inputs
+            .keys()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(VsdkError::ManifestIncomplete(format!(
+            "input_refs must exactly match provided inputs keys: declared=[{declared}] provided=[{provided}]"
+        )));
+    }
+
+    Ok(())
+}
+
 /// Verify a capsule's signature.
 ///
 /// Recomputes the canonical payload and verifies the detached Ed25519 signature
@@ -545,6 +574,7 @@ pub fn replay_capsule(
 ) -> Result<ReplayResult, VsdkError> {
     // Step 1: Validate manifest
     validate_manifest(&capsule.manifest)?;
+    validate_manifest_input_refs(&capsule.manifest, &capsule.inputs)?;
 
     // Step 2: Verify signature
     verify_capsule_signature(capsule)?;
@@ -983,6 +1013,25 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_validate_manifest_input_refs_rejects_duplicates() {
+        let manifest = build_reference_manifest();
+        let inputs = BTreeMap::from([
+            ("artifact_a".to_string(), "content_of_a".to_string()),
+            ("artifact_b".to_string(), "content_of_b".to_string()),
+        ]);
+        let mut duplicate_manifest = manifest.clone();
+        duplicate_manifest.input_refs.push("artifact_a".to_string());
+
+        match validate_manifest_input_refs(&duplicate_manifest, &inputs) {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("duplicate"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
     // ── ReplayCapsule ──────────────────────────────────────────────
 
     #[test]
@@ -1158,6 +1207,53 @@ mod tests {
         match replay_capsule(&capsule, "v1") {
             Err(VsdkError::SignatureMismatch { .. }) => {}
             other => panic!("expected SignatureMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_capsule_rejects_missing_input_ref() {
+        let mut capsule = build_reference_capsule();
+        capsule.inputs.remove("artifact_b");
+        sign_capsule(&mut capsule, &reference_signing_key());
+
+        match replay_capsule(&capsule, "v1") {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("provided"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_capsule_rejects_undeclared_extra_input() {
+        let mut capsule = build_reference_capsule();
+        capsule
+            .inputs
+            .insert("artifact_c".to_string(), "content_of_c".to_string());
+        sign_capsule(&mut capsule, &reference_signing_key());
+
+        match replay_capsule(&capsule, "v1") {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("provided"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_capsule_rejects_duplicate_declared_input_refs() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.input_refs.push("artifact_a".to_string());
+        sign_capsule(&mut capsule, &reference_signing_key());
+
+        match replay_capsule(&capsule, "v1") {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("duplicate"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 

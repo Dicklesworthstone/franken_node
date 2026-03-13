@@ -439,13 +439,16 @@ impl VerifierSdk {
 
         // environment present
         let env_ok = !capsule.environment.runtime_version.is_empty()
-            && !capsule.environment.platform.is_empty();
+            && !capsule.environment.platform.is_empty()
+            && !capsule.environment.config_hash.is_empty();
         evidence.push(EvidenceEntry {
             check_name: "environment_present".to_string(),
             passed: env_ok,
             detail: format!(
-                "runtime_version={}, platform={}",
-                capsule.environment.runtime_version, capsule.environment.platform
+                "runtime_version={}, platform={}, config_hash_present={}",
+                capsule.environment.runtime_version,
+                capsule.environment.platform,
+                !capsule.environment.config_hash.is_empty()
             ),
         });
 
@@ -1011,6 +1014,21 @@ mod tests {
         let sdk = test_sdk();
         let mut cap = valid_capsule();
         cap.environment.platform = String::new();
+        let report = sdk.verify_capsule(&cap).unwrap();
+        assert!(matches!(report.verdict, VerifyVerdict::Fail(_)));
+        assert!(
+            report
+                .evidence
+                .iter()
+                .any(|entry| entry.check_name == "environment_present" && !entry.passed)
+        );
+    }
+
+    #[test]
+    fn test_verify_capsule_empty_config_hash_fails() {
+        let sdk = test_sdk();
+        let mut cap = valid_capsule();
+        cap.environment.config_hash = String::new();
         let report = sdk.verify_capsule(&cap).unwrap();
         assert!(matches!(report.verdict, VerifyVerdict::Fail(_)));
         assert!(
