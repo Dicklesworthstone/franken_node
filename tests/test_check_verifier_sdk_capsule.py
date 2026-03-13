@@ -75,6 +75,7 @@ class TestCapsuleContract(unittest.TestCase):
         self.assertTrue(contract["signature_bound"])
         self.assertTrue(contract["workspace_sdk_structural_only_posture_explicit"])
         self.assertTrue(contract["connector_signature_authority_explicit"])
+        self.assertTrue(contract["workspace_manifest_binding_explicit"])
 
     def test_doc_and_metadata_checks_present(self):
         result = mod.run_all()
@@ -86,6 +87,16 @@ class TestCapsuleContract(unittest.TestCase):
         )
         self.assertIn("SDK package metadata marks structural-only posture", check_names)
         self.assertIn("SDK package metadata avoids signed-capsule overclaim", check_names)
+        self.assertIn("Public docs pin sha256-shaped expected_output_hash", check_names)
+        self.assertIn("Public docs pin exact input_refs to inputs binding", check_names)
+        self.assertIn(
+            "Workspace replay capsule rejects malformed expected_output_hash",
+            check_names,
+        )
+        self.assertIn(
+            "Workspace replay capsule binds declared input_refs to inputs",
+            check_names,
+        )
 
     def test_structural_only_contract_fails_closed_when_required_check_missing(self):
         baseline = mod.run_all_checks()
@@ -113,6 +124,20 @@ class TestCapsuleContract(unittest.TestCase):
             contract = mod.run_all()["capsule_contract"]
 
         self.assertFalse(contract["connector_signature_authority_explicit"])
+
+    def test_manifest_binding_contract_fails_closed_when_required_check_missing(self):
+        baseline = mod.run_all_checks()
+        mutated_checks = [
+            check
+            for check in baseline
+            if check["check"]
+            != "Workspace replay capsule binds declared input_refs to inputs"
+        ]
+
+        with mock.patch.object(mod, "run_all_checks", return_value=mutated_checks):
+            contract = mod.run_all()["capsule_contract"]
+
+        self.assertFalse(contract["workspace_manifest_binding_explicit"])
 
 
 class TestEvents(unittest.TestCase):

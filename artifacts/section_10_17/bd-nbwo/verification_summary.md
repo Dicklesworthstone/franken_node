@@ -16,6 +16,11 @@ over a canonical signing payload. The standalone workspace crate
 `sdk/verifier` remains structural-only and is documented as a companion
 tooling surface rather than detached cryptographic authority.
 
+The workspace replay-capsule companion contract now explicitly requires
+sha256-shaped `expected_output_hash` values and exact `manifest.input_refs`
+to replayed `inputs` binding, with duplicate declared refs rejected before
+verdict evaluation.
+
 ## Deliverables
 
 | Deliverable                | Path                                                               | Status |
@@ -49,10 +54,10 @@ tooling surface rather than detached cryptographic authority.
 
 ### Core Operations (8)
 
-- `validate_manifest` -- Validate capsule manifest completeness and schema version
+- `validate_manifest` -- Validate capsule manifest completeness, schema version, and sha256-shaped `expected_output_hash`
 - `verify_capsule_signature` -- Verify the detached Ed25519 capsule signature
 - `sign_capsule` -- Compute and set the detached Ed25519 capsule signature
-- `replay_capsule` -- Replay capsule and produce verdict
+- `replay_capsule` -- Replay capsule, reject duplicate or mismatched declared `input_refs`, and produce verdict
 - `create_session` -- Create new verification session
 - `record_session_step` -- Append replay result to session
 - `seal_session` -- Seal session and compute final verdict
@@ -107,12 +112,19 @@ workspace, with `sha2`, `hex`, and `subtle` dependencies. 6 adversarial regressi
 cover: XOR collision resistance, delimiter collision, payload-input confusion, forged
 same-length signatures, payload swap under reused signature, and cross-claim replay.
 
+The public certification surface was also tightened so `bd-nbwo` fails closed
+if docs/code/conformance drift away from these workspace manifest-binding
+invariants:
+
+- `expected_output_hash` must be a 64-character hex sha256 digest
+- declared `manifest.input_refs` must be unique and exactly match replayed `inputs`
+
 ## Verification
 
-- Check script: `scripts/check_verifier_sdk_capsule.py` -- 78/78 checks PASS
+- Check script: `scripts/check_verifier_sdk_capsule.py` -- 82/82 checks PASS
 - Self-test: 15/15 checks PASS
-- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 14/14 tests PASS
-- Rust unit tests: 54 inline tests in implementation, 37 in SDK facade crate
+- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 17/17 tests PASS
+- Rust unit tests: 54 inline tests in implementation, 49 across the SDK facade crate
 - Clippy: 0 warnings with `-D warnings`
 - All types are Send + Sync, serde-serializable, BTreeMap for determinism
 

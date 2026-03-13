@@ -4,8 +4,8 @@
   "title": "Universal Verifier SDK and Replay Capsule Format",
   "section": "10.17",
   "verdict": "PASS",
-  "total": 78,
-  "passed": 78,
+  "total": 82,
+  "passed": 82,
   "failed": 0,
   "checks": [
     {
@@ -149,6 +149,16 @@
       "detail": "replay capsule spec and bd-nbwo contract describe detached Ed25519 signatures over the canonical signing payload"
     },
     {
+      "check": "Public docs pin sha256-shaped expected_output_hash",
+      "passed": true,
+      "detail": "spec + bd-nbwo contract require 64-character hex sha256 expected_output_hash values"
+    },
+    {
+      "check": "Public docs pin exact input_refs to inputs binding",
+      "passed": true,
+      "detail": "spec + bd-nbwo contract require unique declared input_refs to exactly match replayed inputs"
+    },
+    {
       "check": "SDK package metadata marks structural-only posture",
       "passed": true,
       "detail": "sdk/verifier/Cargo.toml description aligns with structural-only posture"
@@ -157,6 +167,16 @@
       "check": "SDK package metadata avoids signed-capsule overclaim",
       "passed": true,
       "detail": "sdk/verifier/Cargo.toml avoids signed-capsule or authority overclaim wording"
+    },
+    {
+      "check": "Workspace replay capsule rejects malformed expected_output_hash",
+      "passed": true,
+      "detail": "sdk/verifier/src/capsule.rs fail-closes on malformed expected_output_hash before replay verdict evaluation"
+    },
+    {
+      "check": "Workspace replay capsule binds declared input_refs to inputs",
+      "passed": true,
+      "detail": "sdk/verifier/src/capsule.rs enforces unique input_refs that exactly match replayed inputs"
     },
     {
       "check": "Impl event code VSDK_001",
@@ -356,12 +376,12 @@
     {
       "check": "Rust unit tests >= 20",
       "passed": true,
-      "detail": "found 58"
+      "detail": "found 63"
     },
     {
       "check": "SDK facade tests >= 8",
       "passed": true,
-      "detail": "found 39"
+      "detail": "found 49"
     },
     {
       "check": "ReplayCapsule has signature field",
@@ -426,7 +446,8 @@
     "schema_versioned": true,
     "signature_bound": true,
     "workspace_sdk_structural_only_posture_explicit": true,
-    "connector_signature_authority_explicit": true
+    "connector_signature_authority_explicit": true,
+    "workspace_manifest_binding_explicit": true
   },
   "events": [
     {
@@ -450,6 +471,6 @@
       "status": "defined"
     }
   ],
-  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 78/78 passing\nVerdict: PASS",
-  "timestamp": "2026-03-11T10:15:57.705820+00:00"
+  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 82/82 passing\nVerdict: PASS",
+  "timestamp": "2026-03-13T06:30:07.755889+00:00"
 }

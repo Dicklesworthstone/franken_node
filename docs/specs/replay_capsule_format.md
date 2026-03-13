@@ -40,6 +40,13 @@ A replay capsule is a self-contained, structurally bound unit consisting of:
 All capsules carry `schema_version = "vsdk-v1.0"`. The version is checked
 during manifest validation; unsupported versions are rejected.
 
+### Manifest Binding Requirements
+
+`expected_output_hash` must be a 64-character hex sha256 digest.
+
+Declared `input_refs` must be unique and exactly match the replayed `inputs`
+keys.
+
 ### Detached Signature Coverage
 
 The detached Ed25519 signature is computed over a canonical signing payload
@@ -59,13 +66,16 @@ that binds the following material:
 
 ## Replay Protocol
 
-1. Validate the capsule manifest (schema version, required fields).
+1. Validate the capsule manifest (schema version, required fields, and
+   `expected_output_hash` shape).
 2. Verify the capsule detached Ed25519 signature against the canonical signing
    payload using the signer public key embedded in manifest metadata.
-3. Verify the payload is non-empty.
-4. Compute the deterministic output hash from payload and inputs.
-5. Compare the actual output hash against `expected_output_hash`.
-6. Emit verdict: PASS if hashes match, FAIL otherwise.
+3. Verify the declared `input_refs` are unique and exactly match the replayed
+   `inputs` set.
+4. Verify the payload is non-empty.
+5. Compute the deterministic output hash from payload and inputs.
+6. Compare the actual output hash against `expected_output_hash`.
+7. Emit verdict: PASS if hashes match, FAIL otherwise.
 
 ## Verification Sessions
 

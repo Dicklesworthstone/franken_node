@@ -22,7 +22,7 @@
     "command": "python3 scripts/check_verifier_sdk_capsule.py --build-report --json",
     "exit_code": 0,
     "report_path": "artifacts/10.17/verifier_sdk_certification_report.json",
-    "passed_checks": 78,
+    "passed_checks": 82,
     "failed_checks": 0
   },
   "self_test": {
@@ -39,7 +39,8 @@
     "schema_versioned": true,
     "signature_bound": true,
     "workspace_sdk_structural_only_posture_explicit": true,
-    "connector_signature_authority_explicit": true
+    "connector_signature_authority_explicit": true,
+    "workspace_manifest_binding_explicit": true
   },
   "event_codes": {
     "public_facing": [
@@ -95,7 +96,7 @@
   },
   "rust_tests": {
     "universal_verifier_sdk": 54,
-    "sdk_verifier_facade": 37
+    "sdk_verifier_facade": 49
   },
   "security_hardening": {
     "xor_hash_replaced_with_sha256": true,
@@ -108,8 +109,10 @@
     "The connector universal_verifier_sdk module is the replacement-critical implementation and uses detached Ed25519 signatures over a canonical signing payload.",
     "The sdk/verifier crate is a structural-only companion surface for external tooling and does not claim detached cryptographic verification authority.",
     "External verifiers can replay signed capsules without privileged access through connector::universal_verifier_sdk.",
+    "The workspace replay-capsule contract now explicitly requires sha256-shaped expected_output_hash values and exact manifest.input_refs to replayed inputs binding.",
+    "The bd-nbwo certification gate now fail-closes on those manifest-binding invariants in docs, code, and conformance artifacts.",
     "Schema version vsdk-v1.0 is stable and versioned.",
-    "54 inline Rust tests in the implementation, 39 in the SDK facade crate.",
+    "54 inline Rust tests in the implementation, 49 across the SDK facade crate.",
     "SDK facade hardened: XOR hash -> SHA-256, pipe-delimited -> length-prefixed, != -> ct_eq.",
     "6 adversarial regression tests: collision resistance, cross-claim replay, payload swap, forged sig."
   ]

@@ -131,6 +131,10 @@ def _read(path: Path) -> str:
     return ""
 
 
+def _compact_whitespace(text: str) -> str:
+    return " ".join(text.split())
+
+
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "passed": ok, "detail": detail or ("ok" if ok else "FAIL")}
 
@@ -157,6 +161,8 @@ def run_all_checks() -> list[dict]:
     mod_src = _read(MOD_FILE)
     spec_src = _read(SPEC_FILE)
     contract_src = _read(CONTRACT_FILE)
+    spec_doc = _compact_whitespace(spec_src)
+    contract_doc = _compact_whitespace(contract_src)
     sdk_cargo_src = _read(SDK_CARGO_FILE)
     sdk_mod_src = _read(SDK_MOD_FILE)
     sdk_capsule_src = _read(SDK_CAPSULE_FILE)
@@ -191,6 +197,19 @@ def run_all_checks() -> list[dict]:
             "detached Ed25519 signature",
             "canonical signing payload",
         )
+    )
+    workspace_docs_expected_hash_shape = (
+        "`expected_output_hash` must be a 64-character hex sha256 digest." in spec_doc
+        and "`expected_output_hash` must be a 64-character hex sha256 digest." in contract_doc
+        and "required fields, and `expected_output_hash` shape" in spec_doc
+    )
+    workspace_docs_input_ref_binding = (
+        "Declared `input_refs` must be unique and exactly match the replayed `inputs`"
+        in spec_doc
+        and "Declared `input_refs` must be unique and exactly match the replayed `inputs`"
+        in contract_doc
+        and "Verify the declared `input_refs` are unique and exactly match the replayed `inputs` set."
+        in spec_doc
     )
     workspace_metadata_structural_only = (
         'description = "Structural-only verifier SDK for replaying structurally bound capsules and reproducing claim verdicts"'
@@ -259,7 +278,19 @@ def run_all_checks() -> list[dict]:
     checks.append(_check(
         "Public docs describe connector detached Ed25519 signature authority",
         connector_docs_detached_signature_authority,
-        "replay capsule spec and bd-nbwo contract describe detached Ed25519 signatures over the canonical signing payload",
+            "replay capsule spec and bd-nbwo contract describe detached Ed25519 signatures over the canonical signing payload",
+    ))
+
+    checks.append(_check(
+        "Public docs pin sha256-shaped expected_output_hash",
+        workspace_docs_expected_hash_shape,
+        "spec + bd-nbwo contract require 64-character hex sha256 expected_output_hash values",
+    ))
+
+    checks.append(_check(
+        "Public docs pin exact input_refs to inputs binding",
+        workspace_docs_input_ref_binding,
+        "spec + bd-nbwo contract require unique declared input_refs to exactly match replayed inputs",
     ))
 
     checks.append(_check(
@@ -272,6 +303,38 @@ def run_all_checks() -> list[dict]:
         "SDK package metadata avoids signed-capsule overclaim",
         workspace_metadata_avoid_overclaim,
         "sdk/verifier/Cargo.toml avoids signed-capsule or authority overclaim wording",
+    ))
+
+    checks.append(_check(
+        "Workspace replay capsule rejects malformed expected_output_hash",
+        all(
+            marker in sdk_capsule_src
+            for marker in (
+                "fn is_sha256_hex",
+                "!is_sha256_hex(&manifest.expected_output_hash)",
+                "expected_output_hash must be a 64-character hex sha256 digest",
+                "test_validate_manifest_malformed_expected_hash",
+                "test_replay_rejects_malformed_expected_hash",
+            )
+        ),
+        "sdk/verifier/src/capsule.rs fail-closes on malformed expected_output_hash before replay verdict evaluation",
+    ))
+
+    checks.append(_check(
+        "Workspace replay capsule binds declared input_refs to inputs",
+        all(
+            marker in sdk_capsule_src
+            for marker in (
+                "fn validate_declared_input_refs",
+                "input_refs contains duplicate entries",
+                "input_refs do not match inputs",
+                "validate_declared_input_refs(capsule)?",
+                "test_replay_rejects_missing_declared_input",
+                "test_replay_rejects_extra_undeclared_input",
+                "test_replay_rejects_duplicate_declared_input_refs",
+            )
+        ),
+        "sdk/verifier/src/capsule.rs enforces unique input_refs that exactly match replayed inputs",
     ))
 
     # -- Implementation event codes ------------------------------------------
@@ -440,6 +503,15 @@ def run_all() -> dict:
             "connector_signature_authority_explicit": _required_checks_pass(
                 checks,
                 {"Public docs describe connector detached Ed25519 signature authority"},
+            ),
+            "workspace_manifest_binding_explicit": _required_checks_pass(
+                checks,
+                {
+                    "Public docs pin sha256-shaped expected_output_hash",
+                    "Public docs pin exact input_refs to inputs binding",
+                    "Workspace replay capsule rejects malformed expected_output_hash",
+                    "Workspace replay capsule binds declared input_refs to inputs",
+                },
             ),
         },
         "events": events,

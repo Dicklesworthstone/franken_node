@@ -22,18 +22,26 @@ The replacement-critical implementation surface is
 with detached Ed25519 signatures over a canonical signing payload that binds
 manifest fields, signer metadata, payload, and ordered inputs.
 
+The workspace replay-capsule companion surface still enforces concrete manifest
+binding rules. `expected_output_hash` must be a 64-character hex sha256
+digest. Declared `input_refs` must be unique and exactly match the replayed
+`inputs` keys.
+
 ## Acceptance Criteria
 
 1. External verifiers can replay detached-signature-bound capsules and reproduce claim verdicts
    without privileged internal access.
 2. Capsule schema and verification APIs are stable and versioned
    (`VSDK_SCHEMA_VERSION = "vsdk-v1.0"`).
-3. All types are `Send + Sync`, serializable via serde, and use `BTreeMap` for
+3. `expected_output_hash` must be a 64-character hex sha256 digest, and
+   declared `input_refs` must be unique and exactly match the replayed
+   `inputs` keys.
+4. All types are `Send + Sync`, serializable via serde, and use `BTreeMap` for
    deterministic ordering.
-4. Event codes VSDK_001..VSDK_007 are defined for audit telemetry.
-5. Error codes ERR_VSDK_* (7 codes) cover all failure modes.
-6. Five invariants (INV-VSDK-*) are documented and enforced in code.
-7. Minimum 20 inline `#[cfg(test)]` unit tests.
+5. Event codes VSDK_001..VSDK_007 are defined for audit telemetry.
+6. Error codes ERR_VSDK_* (7 codes) cover all failure modes.
+7. Five invariants (INV-VSDK-*) are documented and enforced in code.
+8. Minimum 20 inline `#[cfg(test)]` unit tests.
 
 ## Module: `connector::universal_verifier_sdk`
 
@@ -87,10 +95,12 @@ manifest fields, signer metadata, payload, and ordered inputs.
 
 ### Core Operations
 
-- `validate_manifest(manifest)` -- validate capsule manifest completeness
+- `validate_manifest(manifest)` -- validate capsule manifest completeness and
+  sha256-shaped `expected_output_hash`
 - `verify_capsule_signature(capsule)` -- verify the detached Ed25519 capsule signature
 - `sign_capsule(capsule)` -- compute and set the detached Ed25519 capsule signature
-- `replay_capsule(capsule, verifier_identity)` -- replay and produce verdict
+- `replay_capsule(capsule, verifier_identity)` -- replay, reject duplicate or
+  mismatched declared `input_refs`, and produce verdict
 - `create_session(id, verifier)` -- create new verification session
 - `record_session_step(session, result)` -- append replay result to session
 - `seal_session(session)` -- seal session and compute final verdict

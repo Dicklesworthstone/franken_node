@@ -35,3 +35,7 @@ tempfile = "3.15"
 [dev-dependencies]
 syn = { version = "2.0", features = ["full"] }
 tracing-subscriber = { workspace = true }
+
+[[test]]
+name = "verifier_sdk_capsule_replay"
+path = "../../tests/conformance/verifier_sdk_capsule_replay.rs"
