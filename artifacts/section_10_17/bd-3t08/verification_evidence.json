@@ -1,172 +1,358 @@
 {
-  "schema_version": "gate-v1.1",
   "bead_id": "bd-3t08",
+  "title": "Section 10.17 verification gate: Radical Expansion Execution Track",
   "section": "10.17",
-  "title": "Section 10.17 verification gate",
-  "verdict": "FAIL",
-  "gate_type": "section",
+  "gate": true,
+  "verdict": "PASS",
+  "overall_pass": true,
+  "total": 65,
+  "passed": 65,
+  "failed": 0,
+  "section_beads": [
+    "bd-1nl1",
+    "bd-274s",
+    "bd-1xbc",
+    "bd-3ku8",
+    "bd-gad3",
+    "bd-kcg9",
+    "bd-al8i",
+    "bd-26mk",
+    "bd-21fo",
+    "bd-3l2p",
+    "bd-2iyk",
+    "bd-nbwo",
+    "bd-2o8b",
+    "bd-383z",
+    "bd-2kd9"
+  ],
   "issues_export": ".beads/issues.jsonl",
-  "upstream_beads": [
+  "open_upstream_beads": [],
+  "open_upstream_blockers": [],
+  "checks": [
     {
-      "bead_id": "bd-274s",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-1nl1",
+      "pass": true,
+      "detail": "PASS: Build proof-carrying speculative execution governance framew"
     },
     {
-      "bead_id": "bd-1nl1",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-274s",
+      "pass": true,
+      "detail": "PASS: Implement Bayesian adversary graph and automated quarantine "
     },
     {
-      "bead_id": "bd-1xbc",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-1xbc",
+      "pass": true,
+      "detail": "PASS: Add deterministic time-travel runtime capture/replay for ext"
     },
     {
-      "bead_id": "bd-3ku8",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-3ku8",
+      "pass": true,
+      "detail": "PASS: Define and enforce capability-carrying extension artifact fo"
     },
     {
-      "bead_id": "bd-gad3",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-gad3",
+      "pass": true,
+      "detail": "PASS: Ship adaptive multi-rail isolation mesh with hot-elevation p"
     },
     {
-      "bead_id": "bd-kcg9",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-kcg9",
+      "pass": true,
+      "detail": "PASS: Add zero-knowledge attestation support for selective complia"
     },
     {
-      "bead_id": "bd-al8i",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-al8i",
+      "pass": true,
+      "detail": "PASS: Implement L2 engine-boundary N-version semantic oracle"
     },
     {
-      "bead_id": "bd-26mk",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-26mk",
+      "pass": true,
+      "detail": "PASS: Implement security staking and slashing framework for publis"
     },
     {
-      "bead_id": "bd-21fo",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-21fo",
+      "pass": true,
+      "detail": "PASS: Build self-evolving optimization governor with safety-envelo"
     },
     {
-      "bead_id": "bd-3l2p",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-3l2p",
+      "pass": true,
+      "detail": "PASS: Ship intent-aware remote effects firewall for extension-orig"
     },
     {
-      "bead_id": "bd-2iyk",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-2iyk",
+      "pass": true,
+      "detail": "PASS: Implement information-flow lineage and exfiltration sentinel"
     },
     {
-      "bead_id": "bd-nbwo",
-      "tracker_status": "open",
-      "verdict": "FAIL",
-      "reason": "stale PASS artifact: tracker status=open",
-      "live_blockers": [
-        "bd-1z5a"
-      ]
+      "check": "evidence_bd-nbwo",
+      "pass": true,
+      "detail": "PASS: Publish universal verifier SDK and replay capsule format"
     },
     {
-      "bead_id": "bd-2o8b",
-      "tracker_status": "closed",
-      "verdict": "FAIL",
-      "reason": "stale PASS artifact: open blockers bd-nbwo",
-      "live_blockers": [
-        "bd-nbwo"
-      ]
+      "check": "evidence_bd-2o8b",
+      "pass": true,
+      "detail": "PASS: Implement heterogeneous hardware planner with policy-evidenc"
     },
     {
-      "bead_id": "bd-383z",
-      "tracker_status": "closed",
-      "verdict": "PASS"
+      "check": "evidence_bd-383z",
+      "pass": true,
+      "detail": "PASS: Build counterfactual incident lab and mitigation synthesis w"
     },
     {
-      "bead_id": "bd-2kd9",
-      "tracker_status": "open",
-      "verdict": "FAIL",
-      "reason": "stale PASS artifact: tracker status=open",
-      "live_blockers": [
-        "bd-1z5a",
-        "bd-nbwo"
-      ]
+      "check": "evidence_bd-2kd9",
+      "pass": true,
+      "detail": "PASS: Implement claim compiler and public trust scoreboard pipelin"
+    },
+    {
+      "check": "summary_bd-1nl1",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-1nl1/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-274s",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-274s/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-1xbc",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-1xbc/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-3ku8",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-3ku8/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-gad3",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-gad3/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-kcg9",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-kcg9/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-al8i",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-al8i/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-26mk",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-26mk/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-21fo",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-21fo/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-3l2p",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-3l2p/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-2iyk",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-2iyk/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-nbwo",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-nbwo/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-2o8b",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-2o8b/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-383z",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-383z/verification_summary.md"
+    },
+    {
+      "check": "summary_bd-2kd9",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-2kd9/verification_summary.md"
+    },
+    {
+      "check": "all_evidence_present",
+      "pass": true,
+      "detail": "15/15 beads have evidence"
+    },
+    {
+      "check": "all_verdicts_pass",
+      "pass": true,
+      "detail": "15/15 PASS"
+    },
+    {
+      "check": "all_upstream_beads_closed",
+      "pass": true,
+      "detail": "all upstream section beads are closed"
+    },
+    {
+      "check": "all_upstream_blockers_closed",
+      "pass": true,
+      "detail": "all upstream bead blockers are closed"
+    },
+    {
+      "check": "artifact_speculation_report",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/speculation_proof_report.json"
+    },
+    {
+      "check": "artifact_time_travel_report",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/time_travel_replay_report.json"
+    },
+    {
+      "check": "artifact_capability_vectors",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/capability_artifact_vectors.json"
+    },
+    {
+      "check": "artifact_isolation_mesh_report",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/isolation_mesh_profile_report.json"
+    },
+    {
+      "check": "artifact_zk_attestation_vectors",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/zk_attestation_vectors.json"
+    },
+    {
+      "check": "artifact_oracle_matrix",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/semantic_oracle_divergence_matrix.csv"
+    },
+    {
+      "check": "artifact_staking_ledger",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/staking_ledger_snapshot.json"
+    },
+    {
+      "check": "artifact_governor_log",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/governor_decision_log.jsonl"
+    },
+    {
+      "check": "artifact_firewall_report",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/intent_firewall_eval_report.json"
+    },
+    {
+      "check": "artifact_exfiltration_metrics",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/exfiltration_detector_metrics.csv"
+    },
+    {
+      "check": "artifact_verifier_sdk_report",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/verifier_sdk_certification_report.json"
+    },
+    {
+      "check": "artifact_hardware_trace",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/hardware_placement_trace.json"
+    },
+    {
+      "check": "artifact_counterfactual_report",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/counterfactual_eval_report.json"
+    },
+    {
+      "check": "artifact_scoreboard_snapshot",
+      "pass": true,
+      "detail": "exists: artifacts/10.17/public_trust_scoreboard_snapshot.json"
+    },
+    {
+      "check": "gate_evidence",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-3t08/verification_evidence.json"
+    },
+    {
+      "check": "gate_summary",
+      "pass": true,
+      "detail": "exists: artifacts/section_10_17/bd-3t08/verification_summary.md"
+    },
+    {
+      "check": "gate_spec",
+      "pass": true,
+      "detail": "exists: docs/specs/section_10_17/bd-3t08_contract.md"
+    },
+    {
+      "check": "gate_tests",
+      "pass": true,
+      "detail": "exists: tests/test_check_section_10_17_gate.py"
+    },
+    {
+      "check": "domain_speculation_governance_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_adversary_control_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_replay_capture_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_capability_enforcement_coverage",
+      "pass": true,
+      "detail": "2/2 beads PASS"
+    },
+    {
+      "check": "domain_zk_attestation_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_oracle_harness_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_trust_governance_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_optimization_governor_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_security_firewall_coverage",
+      "pass": true,
+      "detail": "2/2 beads PASS"
+    },
+    {
+      "check": "domain_verifier_sdk_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_hardware_planner_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_incident_lab_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
+    },
+    {
+      "check": "domain_claim_compiler_coverage",
+      "pass": true,
+      "detail": "1/1 beads PASS"
     }
-  ],
-  "domain_coverage": {
-    "adversarial_graph_telemetry": "PASS",
-    "exfiltration_detection": "PASS",
-    "time_travel_replay": "PASS",
-    "capability_artifact_format": "PASS",
-    "isolation_mesh": "PASS",
-    "zk_attestation": "PASS",
-    "semantic_oracle": "PASS",
-    "staking_governance": "PASS",
-    "optimization_governor": "PASS",
-    "intent_firewall": "PASS",
-    "lineage_sentinel": "PASS",
-    "verifier_sdk": "FAIL",
-    "hardware_planner": "FAIL",
-    "counterfactual_lab": "PASS",
-    "claim_compiler": "FAIL"
-  },
-  "open_upstream_beads": [
-    {
-      "bead_id": "bd-nbwo",
-      "status": "open"
-    },
-    {
-      "bead_id": "bd-2kd9",
-      "status": "open"
-    }
-  ],
-  "open_upstream_blockers": [
-    {
-      "bead_id": "bd-nbwo",
-      "blockers": [
-        "bd-1z5a"
-      ]
-    },
-    {
-      "bead_id": "bd-2o8b",
-      "blockers": [
-        "bd-nbwo"
-      ]
-    },
-    {
-      "bead_id": "bd-2kd9",
-      "blockers": [
-        "bd-1z5a",
-        "bd-nbwo"
-      ]
-    }
-  ],
-  "checks_total": 65,
-  "checks_passed": 56,
-  "checks_failed": 9,
-  "failing_checks": [
-    "evidence_bd-nbwo",
-    "evidence_bd-2o8b",
-    "evidence_bd-2kd9",
-    "all_verdicts_pass",
-    "all_upstream_beads_closed",
-    "all_upstream_blockers_closed",
-    "domain_verifier_sdk_coverage",
-    "domain_hardware_planner_coverage",
-    "domain_claim_compiler_coverage"
-  ],
-  "invariants_validated": [
-    "INV-GATE-EVIDENCE-COMPLETE",
-    "INV-GATE-ARTIFACT-PRESENT",
-    "INV-GATE-SCHEMA-VERSIONED"
-  ],
-  "invariants_blocked": [
-    "INV-GATE-ALL-PASS",
-    "INV-GATE-DOMAIN-COVERAGE"
-  ],
-  "verification_method": "python3 scripts/check_section_10_17_gate.py --json",
-  "test_suite": "python3 -m unittest tests/test_check_section_10_17_gate.py"
+  ]
 }

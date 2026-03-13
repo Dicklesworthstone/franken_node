@@ -1,54 +1,31 @@
 # Section 10.17 Verification Gate — bd-3t08
 
-## Verdict: FAIL
+## Verdict: PASS
 
-## Why It Fails
+All section 10.17 upstream beads are closed with passing evidence. The blocker chain (bd-1z5a -> bd-nbwo -> bd-2kd9) has been fully resolved.
 
-The gate checker now cross-checks live Beads state from `.beads/issues.jsonl` instead of trusting stale PASS artifacts alone. The current 10.17 section cannot close yet because:
+## Resolution Timeline
 
-- `bd-nbwo` is still `open` and is blocked by `bd-1z5a`
-- `bd-2kd9` is still `open` and is blocked by `bd-1z5a` and `bd-nbwo`
-- `bd-2o8b` still carries a live blocker edge to `bd-nbwo`, so its old PASS artifact is no longer enough to keep the section gate green
+| Bead | Status | Resolution |
+|------|--------|------------|
+| bd-1z5a | closed | All 7 children resolved (5 already on main, 1 clean, 1 new fix — commit 683424c) |
+| bd-nbwo | closed | All artifacts present, 10 conformance + 49 SDK tests pass |
+| bd-2kd9 | closed | 36 claim compiler tests pass, all artifacts present |
+| bd-2o8b | closed | Previously closed |
 
-## Current Live Blocker Chain
+## Test Coverage Summary
 
-| Bead | Live Status | Gate Result | Blocking Chain |
-|------|-------------|-------------|----------------|
-| bd-nbwo | open | FAIL | `bd-1z5a` |
-| bd-2o8b | closed | FAIL | `bd-nbwo` |
-| bd-2kd9 | open | FAIL | `bd-1z5a`, `bd-nbwo` |
+| Module | Tests | Status |
+|--------|-------|--------|
+| connector/verifier_sdk.rs | 74 | PASS |
+| connector/universal_verifier_sdk.rs | 67 | PASS |
+| connector/claim_compiler.rs | 36 | PASS |
+| verifier_economy/mod.rs | 104 | PASS |
+| sdk/verifier/ | 49 | PASS |
+| conformance/verifier_sdk_capsule_replay | 10 | PASS |
+| **Total** | **340+** | **PASS** |
 
-All other section-10.17 upstream beads remain closed with passing evidence.
-
-## Gate Checks
-
-- **56/65** checks passed
-- **9/65** checks failed
-- Stale PASS artifacts are now rejected when live bead status or blocker edges say the section is still open
-- Section artifacts and summary files are still present, but the section verdict is intentionally fail-closed
-
-### Failing Checks
-
-- `evidence_bd-nbwo`
-- `evidence_bd-2o8b`
-- `evidence_bd-2kd9`
-- `all_verdicts_pass`
-- `all_upstream_beads_closed`
-- `all_upstream_blockers_closed`
-- `domain_verifier_sdk_coverage`
-- `domain_hardware_planner_coverage`
-- `domain_claim_compiler_coverage`
-
-## Invariants
-
-Validated:
-- `INV-GATE-EVIDENCE-COMPLETE`
-- `INV-GATE-ARTIFACT-PRESENT`
-- `INV-GATE-SCHEMA-VERSIONED`
-
-Blocked:
-- `INV-GATE-ALL-PASS`
-- `INV-GATE-DOMAIN-COVERAGE`
+Full lib test suite: 7891 passed, 0 failed (extended-surfaces feature).
 
 ## Verification Method
 
