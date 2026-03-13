@@ -63,6 +63,27 @@ fn is_sha256_prefixed_hex(value: &str) -> bool {
     normalized.len() == 64 && normalized.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
+fn strip_sha256_prefix(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed
+        .as_bytes()
+        .get(0..7)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"sha256:"))
+    {
+        &trimmed[7..]
+    } else {
+        trimmed
+    }
+}
+
+fn canonicalize_sha256_prefixed_hex(value: &str) -> Option<String> {
+    let normalized = strip_sha256_prefix(value);
+    if normalized.len() != 64 || !normalized.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some(format!("sha256:{}", normalized.to_ascii_lowercase()))
+}
+
 fn compute_claim_metadata_hash(
     dimension: &VerificationDimension,
     statement: &str,
@@ -692,7 +713,7 @@ impl VerifierEconomyRegistry {
     /// Follows INV-VEP-PUBLISH: submit -> review -> publish.
     pub fn submit_attestation(
         &mut self,
-        submission: AttestationSubmission,
+        mut submission: AttestationSubmission,
     ) -> VepResult<Attestation> {
         // INV-VEP-PUBLISH: Stage 1 — Submission
 
@@ -726,6 +747,27 @@ impl VerifierEconomyRegistry {
                     .to_string(),
             });
         }
+
+        let canonical_trace_hash = match canonicalize_sha256_prefixed_hex(
+            &submission.evidence.execution_trace_hash,
+        ) {
+            Some(hash) if hash == submission.evidence.execution_trace_hash => hash,
+            _ => {
+                self.emit(
+                    VEP_008,
+                    &format!(
+                        "Rejected: noncanonical execution_trace_hash from {}",
+                        submission.verifier_id
+                    ),
+                );
+                return Err(VepError {
+                    code: ERR_VEP_INCOMPLETE_PAYLOAD.to_string(),
+                    message: "Attestation evidence execution_trace_hash must use canonical lowercase sha256:<64-hex> form"
+                        .to_string(),
+                });
+            }
+        };
+        submission.evidence.execution_trace_hash = canonical_trace_hash;
 
         let signature_payload = attestation_signature_payload(&submission);
 
@@ -1745,6 +1787,62 @@ mod tests {
         let result = reg.submit_attestation(sub2);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_VEP_DUPLICATE_SUBMISSION);
+    }
+
+    #[test]
+    fn test_submit_uppercase_execution_trace_hash_rejected() {
+        let mut reg = make_registry();
+        let v = reg.register_verifier(make_registration()).unwrap();
+        let mut sub = make_submission(&v.verifier_id, &registration_signing_key());
+        sub.evidence.execution_trace_hash = sub.evidence.execution_trace_hash.to_uppercase();
+        sign_submission(&mut sub, &registration_signing_key());
+
+        let result = reg.submit_attestation(sub);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ERR_VEP_INCOMPLETE_PAYLOAD);
+        assert!(error.message.contains("execution_trace_hash"));
+    }
+
+    #[test]
+    fn test_submit_prefixless_execution_trace_hash_rejected() {
+        let mut reg = make_registry();
+        let v = reg.register_verifier(make_registration()).unwrap();
+        let mut sub = make_submission(&v.verifier_id, &registration_signing_key());
+        sub.evidence.execution_trace_hash = sub
+            .evidence
+            .execution_trace_hash
+            .trim_start_matches("sha256:")
+            .to_string();
+        sign_submission(&mut sub, &registration_signing_key());
+
+        let result = reg.submit_attestation(sub);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ERR_VEP_INCOMPLETE_PAYLOAD);
+        assert!(error.message.contains("execution_trace_hash"));
+    }
+
+    #[test]
+    fn test_submit_duplicate_cannot_bypass_with_hash_encoding_variant() {
+        let mut reg = make_registry();
+        let v = reg.register_verifier(make_registration()).unwrap();
+        reg.submit_attestation(make_submission(&v.verifier_id, &registration_signing_key()))
+            .unwrap();
+
+        let mut sub = make_submission(&v.verifier_id, &registration_signing_key());
+        sub.evidence.execution_trace_hash = sub
+            .evidence
+            .execution_trace_hash
+            .trim_start_matches("sha256:")
+            .to_string();
+        sign_submission(&mut sub, &registration_signing_key());
+
+        let result = reg.submit_attestation(sub);
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ERR_VEP_INCOMPLETE_PAYLOAD);
+        assert!(error.message.contains("execution_trace_hash"));
     }
 
     #[test]
