@@ -319,6 +319,10 @@ fn deterministic_hash(data: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Compute the deterministic replay hash for a capsule's payload and inputs.
 ///
 /// Uses length-prefixed encoding to prevent payload-input delimiter collision:
@@ -430,6 +434,11 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), VsdkError> {
     if manifest.expected_output_hash.is_empty() {
         return Err(VsdkError::ManifestIncomplete(
             "expected_output_hash is empty".to_string(),
+        ));
+    }
+    if !is_sha256_hex(&manifest.expected_output_hash) {
+        return Err(VsdkError::ManifestIncomplete(
+            "expected_output_hash must be a 64-character hex sha256 digest".to_string(),
         ));
     }
     if manifest.creator_identity.is_empty() {
@@ -894,6 +903,19 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_manifest_malformed_expected_hash() {
+        let mut manifest = build_reference_manifest();
+        manifest.expected_output_hash = "wrong_hash".to_string();
+        match validate_manifest(&manifest) {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("expected_output_hash"));
+                assert!(msg.contains("sha256"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_validate_manifest_empty_creator() {
         let mut manifest = build_reference_manifest();
         manifest.creator_identity = String::new();
@@ -1040,12 +1062,25 @@ mod tests {
     #[test]
     fn test_replay_capsule_diverged() {
         let mut capsule = build_reference_capsule();
-        capsule.manifest.expected_output_hash = "wrong_hash".to_string();
+        capsule.manifest.expected_output_hash = "f".repeat(64);
         // Re-sign after changing manifest
         sign_capsule(&mut capsule, &reference_signing_key());
         let result = replay_capsule(&capsule, "v1").unwrap();
         assert_eq!(result.verdict, CapsuleVerdict::Fail);
         assert_ne!(result.actual_output_hash, result.expected_output_hash);
+    }
+
+    #[test]
+    fn test_replay_capsule_rejects_malformed_expected_hash() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.expected_output_hash = "wrong_hash".to_string();
+        sign_capsule(&mut capsule, &reference_signing_key());
+        match replay_capsule(&capsule, "v1") {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("expected_output_hash"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1157,7 +1192,7 @@ mod tests {
     #[test]
     fn test_seal_session_with_failure() {
         let mut capsule = build_reference_capsule();
-        capsule.manifest.expected_output_hash = "wrong".to_string();
+        capsule.manifest.expected_output_hash = "f".repeat(64);
         sign_capsule(&mut capsule, &reference_signing_key());
         let result = replay_capsule(&capsule, "v1").unwrap();
         let mut session = create_session("s1", "v1");
