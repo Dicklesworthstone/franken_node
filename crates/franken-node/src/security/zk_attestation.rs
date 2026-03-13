@@ -591,6 +591,29 @@ impl AttestationLedger {
             "Proof submitted for verification".to_string(),
         );
 
+        // Ledger binding: verify the attestation was legitimately created via
+        // generate_proof() by looking it up in the internal store.  Without
+        // this check, a caller could construct a fabricated ZkAttestation
+        // struct that passes all structural checks but was never generated.
+        if !self.attestations.contains_key(&aid) {
+            self.record_audit(
+                format!("audit-{}-unknown", aid),
+                event_codes::FN_ZK_004.to_string(),
+                Some(aid.clone()),
+                Some(pid.clone()),
+                trace_id.clone(),
+                now_ms,
+                "Attestation not found in ledger".to_string(),
+            );
+            return ZkVerificationResult::Rejected {
+                attestation_id: aid,
+                policy_id: pid,
+                trace_id,
+                reason: "Attestation not found in ledger — may be forged".to_string(),
+                error_code: error_codes::ERR_ZKA_INVALID_PROOF.to_string(),
+            };
+        }
+
         // INV-ZKA-POLICY-BOUND: check policy match
         if !invariants::check_policy_bound(attestation, policy) {
             self.record_audit(
@@ -1691,5 +1714,49 @@ mod tests {
         );
         // Even if "expired" by clock, invariant does not apply for Fail outcome
         assert!(invariants::check_completeness(&att, att.expires_at_ms + 1));
+    }
+
+    #[test]
+    fn verify_proof_rejects_forged_attestation_not_in_ledger() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        // Construct a fabricated attestation that was never generated via generate_proof()
+        let forged = ZkAttestation {
+            attestation_id: "forged-1".to_string(),
+            policy_id: policy.policy_id.clone(),
+            payload: ZkProofPayload {
+                schema_version: SCHEMA_VERSION.to_string(),
+                proof_bytes_hex: "deadbeef".to_string(),
+                metadata_commitment: "commit-forged".to_string(),
+            },
+            outcome: PredicateOutcome::Pass,
+            status: AttestationStatus::Active,
+            generated_at_ms: 1_000_000,
+            expires_at_ms: 1_000_000 + DEFAULT_VALIDITY_MS,
+            trace_id: "forged-trace".to_string(),
+        };
+        let result = ledger.verify_proof(&forged, &policy, 1_000_000, "trace-vf".to_string());
+        assert!(
+            matches!(result, ZkVerificationResult::Rejected { ref reason, .. } if reason.contains("not found in ledger")),
+            "forged attestation should be rejected: {result:?}"
+        );
+    }
+
+    #[test]
+    fn verify_proof_accepts_legitimate_attestation() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let att = generate_test_attestation(
+            &mut ledger,
+            "att-legit",
+            &policy,
+            PredicateOutcome::Pass,
+            1_000_000,
+        );
+        let result = ledger.verify_proof(&att, &policy, 1_000_000, "trace-legit".to_string());
+        assert!(
+            matches!(result, ZkVerificationResult::Verified { .. }),
+            "legitimate attestation should verify: {result:?}"
+        );
     }
 }

@@ -263,6 +263,10 @@ pub fn validate_signed_manifest(
     validate_engine_manifest(&engine_manifest)
         .map_err(ManifestSchemaError::EngineManifestRejected)?;
 
+    // Path-traversal guard: runs after engine validation so that empty
+    // entrypoints are caught by the engine first (EMS_ENGINE_REJECTED).
+    validate_entrypoint_path(&manifest.entrypoint)?;
+
     Ok(())
 }
 
@@ -281,6 +285,30 @@ fn ensure_capabilities_unique(capabilities: &[Capability]) -> Result<(), Manifes
         if !seen.insert(*capability) {
             return Err(ManifestSchemaError::DuplicateCapability(*capability));
         }
+    }
+    Ok(())
+}
+
+fn validate_entrypoint_path(entrypoint: &str) -> Result<(), ManifestSchemaError> {
+    // Empty entrypoint is already caught by engine validation; only guard
+    // against path-traversal on non-empty values.
+    if entrypoint.trim().is_empty() {
+        return Ok(());
+    }
+    if entrypoint.starts_with('/') {
+        return Err(ManifestSchemaError::EntrypointPathTraversal {
+            reason: "entrypoint must be a relative path, not absolute".to_string(),
+        });
+    }
+    if entrypoint.contains('\\') {
+        return Err(ManifestSchemaError::EntrypointPathTraversal {
+            reason: "entrypoint must not contain backslash characters".to_string(),
+        });
+    }
+    if entrypoint.split('/').any(|seg| seg == "..") {
+        return Err(ManifestSchemaError::EntrypointPathTraversal {
+            reason: "entrypoint must not contain '..' path segments".to_string(),
+        });
     }
     Ok(())
 }
@@ -358,6 +386,7 @@ pub enum ManifestSchemaError {
     MissingAttestationChain,
     SignatureMalformed { reason: String },
     InvalidThresholdConfiguration { reason: String },
+    EntrypointPathTraversal { reason: String },
     EngineManifestProjection { reason: String },
     EngineManifestRejected(ManifestValidationError),
 }
@@ -372,6 +401,7 @@ impl ManifestSchemaError {
             Self::DuplicateCapability(_) => "EMS_DUPLICATE_CAPABILITY",
             Self::MissingAttestationChain => "EMS_MISSING_ATTESTATION_CHAIN",
             Self::SignatureMalformed { .. } => "EMS_SIGNATURE_MALFORMED",
+            Self::EntrypointPathTraversal { .. } => "EMS_ENTRYPOINT_PATH_TRAVERSAL",
             Self::InvalidThresholdConfiguration { .. } => "EMS_THRESHOLD_INVALID",
             Self::EngineManifestProjection { .. } => "EMS_ENGINE_PROJECTION",
             Self::EngineManifestRejected(_) => "EMS_ENGINE_REJECTED",
@@ -412,6 +442,9 @@ impl fmt::Display for ManifestSchemaError {
             }
             Self::SignatureMalformed { reason } => {
                 write!(f, "EMS_SIGNATURE_MALFORMED: {reason}")
+            }
+            Self::EntrypointPathTraversal { reason } => {
+                write!(f, "EMS_ENTRYPOINT_PATH_TRAVERSAL: {reason}")
             }
             Self::InvalidThresholdConfiguration { reason } => {
                 write!(f, "EMS_THRESHOLD_INVALID: {reason}")
@@ -639,5 +672,46 @@ mod tests {
         let error = validate_signed_manifest(&manifest).expect_err("should fail");
         assert_eq!(error.code(), "EMS_THRESHOLD_INVALID");
         assert!(error.to_string().contains("duplicates"));
+    }
+
+    // ---- Path traversal tests ----
+
+    #[test]
+    fn entrypoint_rejects_dotdot_traversal() {
+        let mut manifest = valid_manifest();
+        manifest.entrypoint = "../../etc/passwd".to_string();
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+        assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+    }
+
+    #[test]
+    fn entrypoint_rejects_absolute_path() {
+        let mut manifest = valid_manifest();
+        manifest.entrypoint = "/etc/malicious.js".to_string();
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+        assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+    }
+
+    #[test]
+    fn entrypoint_rejects_backslash() {
+        let mut manifest = valid_manifest();
+        manifest.entrypoint = "dist\\main.js".to_string();
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+        assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+    }
+
+    #[test]
+    fn entrypoint_accepts_valid_relative_path() {
+        let manifest = valid_manifest();
+        // "dist/main.js" is the default; validate should pass (or fail on
+        // other checks but not entrypoint)
+        let result = validate_signed_manifest(&manifest);
+        if let Err(ref e) = result {
+            assert_ne!(
+                e.code(),
+                "EMS_ENTRYPOINT_PATH_TRAVERSAL",
+                "valid relative entrypoint should not trigger path traversal"
+            );
+        }
     }
 }

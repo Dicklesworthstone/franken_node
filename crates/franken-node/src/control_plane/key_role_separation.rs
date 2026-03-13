@@ -12,6 +12,7 @@
 //! - INV-KRS-ROLE-GUARD: Using a key outside its registered role is rejected.
 //! - INV-KRS-ROTATION-ATOMIC: Key rotation atomically revokes old and binds new.
 
+use crate::security::constant_time::ct_eq_bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -151,6 +152,8 @@ pub enum KeyRoleSeparationError {
     /// key_id and role. Fail closed: the caller must revoke the old binding
     /// and bind a new key, or use rotate().
     KeyMaterialMismatch { key_id: String, role: KeyRole },
+    /// Key binding has exceeded its max_validity_seconds window.
+    KeyExpired { key_id: String, role: KeyRole },
 }
 
 impl KeyRoleSeparationError {
@@ -162,6 +165,7 @@ impl KeyRoleSeparationError {
             Self::KeyNotFound { .. } => "KRS_KEY_NOT_FOUND",
             Self::RotationFailed { .. } => "KRS_ROTATION_FAILED",
             Self::KeyMaterialMismatch { .. } => "KRS_KEY_MATERIAL_MISMATCH",
+            Self::KeyExpired { .. } => "KRS_KEY_EXPIRED",
         }
     }
 }
@@ -201,6 +205,13 @@ impl fmt::Display for KeyRoleSeparationError {
                     f,
                     "KRS_KEY_MATERIAL_MISMATCH: key {key_id} already bound to \
                      {role} with different public key material"
+                )
+            }
+            Self::KeyExpired { key_id, role } => {
+                write!(
+                    f,
+                    "KRS_KEY_EXPIRED: key {key_id} bound to {role} has exceeded \
+                     its max_validity_seconds window"
                 )
             }
         }
@@ -354,7 +365,7 @@ impl KeyRoleRegistry {
         if let Some((existing_role, material_matches)) = self
             .active
             .get(key_id)
-            .map(|b| (b.role, b.public_key_bytes == public_key_bytes))
+            .map(|b| (b.role, ct_eq_bytes(&b.public_key_bytes, &public_key_bytes)))
         {
             if existing_role != role {
                 self.push_event(KeyRoleEvent::violation(
@@ -520,20 +531,22 @@ impl KeyRoleRegistry {
             })
     }
 
-    /// Verify that a key is bound to the expected role.
+    /// Verify that a key is bound to the expected role and has not expired.
     ///
-    /// INV-KRS-ROLE-GUARD: returns Ok if the key exists and is bound to
-    /// expected_role; otherwise returns KeyRoleMismatch or KeyNotFound.
+    /// INV-KRS-ROLE-GUARD: returns Ok if the key exists, is bound to
+    /// expected_role, and is within its max_validity_seconds window;
+    /// otherwise returns KeyRoleMismatch, KeyExpired, or KeyNotFound.
     pub fn verify_role(
         &mut self,
         key_id: &str,
         expected_role: KeyRole,
+        now: u64,
         trace_id: &str,
     ) -> Result<&KeyRoleBinding, KeyRoleSeparationError> {
-        let actual_role = self
+        let (actual_role, bound_at, max_validity) = self
             .active
             .get(key_id)
-            .map(|binding| binding.role)
+            .map(|binding| (binding.role, binding.bound_at, binding.max_validity_seconds))
             .ok_or_else(|| KeyRoleSeparationError::KeyNotFound {
                 key_id: key_id.to_string(),
             })?;
@@ -549,6 +562,15 @@ impl KeyRoleRegistry {
                 key_id: key_id.to_string(),
                 expected_role,
                 actual_role,
+            });
+        }
+
+        // Fail-closed: key is expired if now >= bound_at + max_validity_seconds.
+        let expires_at = bound_at.saturating_add(max_validity);
+        if now >= expires_at {
+            return Err(KeyRoleSeparationError::KeyExpired {
+                key_id: key_id.to_string(),
+                role: actual_role,
             });
         }
 
@@ -1261,7 +1283,7 @@ mod tests {
             &tid(1),
         )
         .unwrap();
-        let result = reg.verify_role("k-vr", KeyRole::Issuance, &tid(2));
+        let result = reg.verify_role("k-vr", KeyRole::Issuance, 200, &tid(2));
         assert!(result.is_ok());
     }
 
@@ -1279,7 +1301,7 @@ mod tests {
         )
         .unwrap();
         let err = reg
-            .verify_role("k-mm", KeyRole::Encryption, &tid(2))
+            .verify_role("k-mm", KeyRole::Encryption, 200, &tid(2))
             .unwrap_err();
         assert_eq!(err.code(), "KRS_KEY_ROLE_MISMATCH");
         assert!(matches!(
@@ -1296,7 +1318,7 @@ mod tests {
     fn verify_role_not_found() {
         let mut reg = KeyRoleRegistry::new();
         let err = reg
-            .verify_role("no-key", KeyRole::Signing, &tid(1))
+            .verify_role("no-key", KeyRole::Signing, 200, &tid(1))
             .unwrap_err();
         assert_eq!(err.code(), "KRS_KEY_NOT_FOUND");
     }
@@ -1319,7 +1341,7 @@ mod tests {
         }
         for (i, role) in KeyRole::all().iter().enumerate() {
             let kid = format!("k-vr-{i}");
-            assert!(reg.verify_role(&kid, *role, &tid(100)).is_ok());
+            assert!(reg.verify_role(&kid, *role, 200, &tid(100)).is_ok());
         }
     }
 
@@ -1337,9 +1359,68 @@ mod tests {
         )
         .unwrap();
         for role in [KeyRole::Encryption, KeyRole::Issuance, KeyRole::Attestation] {
-            let err = reg.verify_role("k-cross", role, &tid(2)).unwrap_err();
+            let err = reg.verify_role("k-cross", role, 200, &tid(2)).unwrap_err();
             assert_eq!(err.code(), "KRS_KEY_ROLE_MISMATCH");
         }
+    }
+
+    // ---- Expiry enforcement tests ----
+
+    #[test]
+    fn verify_role_rejects_expired_key() {
+        let mut reg = KeyRoleRegistry::new();
+        reg.bind(
+            "k-exp",
+            KeyRole::Signing,
+            pub_key(1),
+            "auth",
+            100,   // bound_at
+            3600,  // max_validity_seconds
+            &tid(1),
+        )
+        .unwrap();
+        // now=3700 >= 100+3600=3700 → expired (fail-closed at boundary)
+        let err = reg
+            .verify_role("k-exp", KeyRole::Signing, 3700, &tid(2))
+            .unwrap_err();
+        assert_eq!(err.code(), "KRS_KEY_EXPIRED");
+    }
+
+    #[test]
+    fn verify_role_accepts_key_just_before_expiry() {
+        let mut reg = KeyRoleRegistry::new();
+        reg.bind(
+            "k-pre",
+            KeyRole::Encryption,
+            pub_key(2),
+            "auth",
+            100,
+            3600,
+            &tid(1),
+        )
+        .unwrap();
+        // now=3699 < 100+3600=3700 → still valid
+        assert!(reg.verify_role("k-pre", KeyRole::Encryption, 3699, &tid(2)).is_ok());
+    }
+
+    #[test]
+    fn verify_role_expired_after_max_validity() {
+        let mut reg = KeyRoleRegistry::new();
+        reg.bind(
+            "k-late",
+            KeyRole::Issuance,
+            pub_key(3),
+            "auth",
+            1000,
+            7200,
+            &tid(1),
+        )
+        .unwrap();
+        // now=10000 >> 1000+7200=8200 → expired
+        let err = reg
+            .verify_role("k-late", KeyRole::Issuance, 10000, &tid(2))
+            .unwrap_err();
+        assert_eq!(err.code(), "KRS_KEY_EXPIRED");
     }
 
     // ---- Event log tests ----
@@ -1430,7 +1511,7 @@ mod tests {
             &tid(1),
         )
         .unwrap();
-        let _ = reg.verify_role("k-viol", KeyRole::Encryption, &tid(2));
+        let _ = reg.verify_role("k-viol", KeyRole::Encryption, 200, &tid(2));
         let violation_events: Vec<_> = reg
             .events()
             .iter()
@@ -1596,12 +1677,12 @@ mod tests {
         assert_eq!(reg.active_count(), 4);
 
         // Verify roles.
-        assert!(reg.verify_role("k-s", KeyRole::Signing, &tid(5)).is_ok());
-        assert!(reg.verify_role("k-e", KeyRole::Encryption, &tid(6)).is_ok());
+        assert!(reg.verify_role("k-s", KeyRole::Signing, 150, &tid(5)).is_ok());
+        assert!(reg.verify_role("k-e", KeyRole::Encryption, 150, &tid(6)).is_ok());
 
         // Cross-role is rejected.
         assert!(
-            reg.verify_role("k-s", KeyRole::Encryption, &tid(7))
+            reg.verify_role("k-s", KeyRole::Encryption, 150, &tid(7))
                 .is_err()
         );
 
