@@ -237,19 +237,20 @@ impl PolicyCheckpoint {
         let mut hasher = Sha256::new();
         // Domain separation tag for policy checkpoints
         hasher.update(b"policy_checkpoint_hash_v1:");
-        hasher.update([0x00]);
         hasher.update(sequence.to_be_bytes());
-        hasher.update([0x00]);
         hasher.update(epoch_id.to_be_bytes());
-        hasher.update([0x00]);
-        hasher.update(channel.label().as_bytes());
-        hasher.update([0x00]);
+        // Length-prefixed variable-length fields prevent collision via
+        // embedded null bytes or field-boundary ambiguity.
+        let channel_label = channel.label();
+        hasher.update((channel_label.len() as u64).to_le_bytes());
+        hasher.update(channel_label.as_bytes());
+        hasher.update((policy_hash.len() as u64).to_le_bytes());
         hasher.update(policy_hash.as_bytes());
-        hasher.update([0x00]);
-        hasher.update(parent_hash.unwrap_or("GENESIS").as_bytes());
-        hasher.update([0x00]);
+        let parent = parent_hash.unwrap_or("GENESIS");
+        hasher.update((parent.len() as u64).to_le_bytes());
+        hasher.update(parent.as_bytes());
         hasher.update(timestamp.to_be_bytes());
-        hasher.update([0x00]);
+        hasher.update((signer.len() as u64).to_le_bytes());
         hasher.update(signer.as_bytes());
         hex::encode(hasher.finalize())
     }
@@ -1526,5 +1527,57 @@ mod tests {
     #[test]
     fn test_sha256_hex_different_inputs() {
         assert_ne!(sha256_hex(b"a"), sha256_hex(b"b"));
+    }
+
+    /// Regression: null-byte delimiter hash collision.
+    /// Two inputs that would collide under null-byte separation must produce
+    /// distinct hashes with length-prefixed encoding.
+    #[test]
+    fn test_compute_hash_resists_null_byte_collision() {
+        // policy_hash="abc\x00GENESIS" with no parent vs policy_hash="abc" with parent="GENESIS"
+        let h1 = PolicyCheckpoint::compute_hash(
+            1,
+            1,
+            &ReleaseChannel::Stable,
+            "abc\x00GENESIS",
+            None,
+            1000,
+            "signer",
+        );
+        let h2 = PolicyCheckpoint::compute_hash(
+            1,
+            1,
+            &ReleaseChannel::Stable,
+            "abc",
+            Some("GENESIS"),
+            1000,
+            "signer",
+        );
+        assert_ne!(h1, h2, "length-prefixed encoding must prevent null-byte boundary collision");
+    }
+
+    /// Regression: field boundary collision.
+    /// policy_hash="ab" + signer="cdef" must differ from policy_hash="abcd" + signer="ef".
+    #[test]
+    fn test_compute_hash_resists_field_boundary_collision() {
+        let h1 = PolicyCheckpoint::compute_hash(
+            1,
+            1,
+            &ReleaseChannel::Stable,
+            "ab",
+            Some("parent"),
+            1000,
+            "cdef",
+        );
+        let h2 = PolicyCheckpoint::compute_hash(
+            1,
+            1,
+            &ReleaseChannel::Stable,
+            "abcd",
+            Some("parent"),
+            1000,
+            "ef",
+        );
+        assert_ne!(h1, h2, "length-prefixed encoding must prevent field boundary collision");
     }
 }
