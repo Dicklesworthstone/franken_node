@@ -1241,18 +1241,14 @@ fn run_analysis(state: &PipelineState) -> CompatibilityReport {
                 spec.evidence.required_capabilities.join(", ")
             ));
         }
-        if !spec.evidence.known_divergences.is_empty() {
+        for (i, divergence) in spec.evidence.known_divergences.iter().enumerate() {
             explanation_trace.push(format!(
-                "known_divergences={}",
-                spec.evidence
-                    .known_divergences
-                    .iter()
-                    .map(|divergence| format!(
-                        "{}:{}:{}",
-                        divergence.scope, divergence.risk_tier, divergence.detail
-                    ))
-                    .collect::<Vec<_>>()
-                    .join(" | ")
+                "known_divergence[{}]:scope={},risk_tier={},detail_len={},detail={}",
+                i,
+                divergence.scope,
+                divergence.risk_tier,
+                divergence.detail.len(),
+                divergence.detail,
             ));
         }
 
