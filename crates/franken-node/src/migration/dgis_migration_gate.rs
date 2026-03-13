@@ -5,8 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 
-const MAX_EVENTS: usize = 4096;
-
 /// Stable event codes for gate telemetry.
 pub mod event_codes {
     pub const BASELINE_CAPTURED: &str = "DGIS-MIGRATE-001";

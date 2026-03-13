@@ -681,7 +681,7 @@ mod tests {
     #[test]
     fn test_content_hash_from_hex() {
         let hex_str = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f";
-        let ch = ContentHash::from_hex(hex_str).unwrap();
+        let ch = ContentHash::from_hex(hex_str).expect("from_hex should succeed");
         assert_eq!(ch.to_hex(), hex_str);
     }
 
@@ -747,8 +747,8 @@ mod tests {
             &test_content_hash(),
             &test_config_v1(),
         );
-        let json = serde_json::to_string(&s).unwrap();
-        let s2: DeterministicSeed = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&s).expect("to_string should succeed");
+        let s2: DeterministicSeed = serde_json::from_str(&json).expect("from_str should succeed");
         assert_eq!(s.bytes, s2.bytes);
         assert_eq!(s.domain, s2.domain);
         assert_eq!(s.config_version, s2.config_version);
@@ -757,16 +757,16 @@ mod tests {
     #[test]
     fn test_content_hash_serialization_roundtrip() {
         let ch = test_content_hash();
-        let json = serde_json::to_string(&ch).unwrap();
-        let ch2: ContentHash = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&ch).expect("to_string should succeed");
+        let ch2: ContentHash = serde_json::from_str(&json).expect("from_str should succeed");
         assert_eq!(ch.0, ch2.0);
     }
 
     #[test]
     fn test_config_serialization_roundtrip() {
         let cfg = test_config_v1();
-        let json = serde_json::to_string(&cfg).unwrap();
-        let cfg2: ScheduleConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&cfg).expect("to_string should succeed");
+        let cfg2: ScheduleConfig = serde_json::from_str(&json).expect("from_str should succeed");
         assert_eq!(cfg, cfg2);
     }
 
@@ -784,8 +784,8 @@ mod tests {
             bump_reason: "test".to_string(),
             timestamp: "2026-02-20T12:00:00Z".to_string(),
         };
-        let json = serde_json::to_string(&record).unwrap();
-        let record2: VersionBumpRecord = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&record).expect("to_string should succeed");
+        let record2: VersionBumpRecord = serde_json::from_str(&json).expect("from_str should succeed");
         assert_eq!(record.domain, record2.domain);
         assert_eq!(record.old_version, record2.old_version);
     }
@@ -829,7 +829,7 @@ mod tests {
         d.derive_seed(&DomainTag::Encoding, &ch, &test_config_v1());
         let (_, bump) = d.derive_seed(&DomainTag::Encoding, &ch, &test_config_v2());
         assert!(bump.is_some(), "config change must trigger a version bump");
-        let bump = bump.unwrap();
+        let bump = bump.expect("bump should succeed");
         assert_eq!(bump.domain, DomainTag::Encoding);
         assert_eq!(bump.new_version, 2);
         assert_ne!(bump.old_config_hash, bump.new_config_hash);
