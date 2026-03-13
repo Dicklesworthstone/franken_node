@@ -19,7 +19,7 @@
 //! - INV-CAPSULE-NO-PRIVILEGED-ACCESS: Replay is entirely local and offline.
 //! - INV-CAPSULE-VERDICT-REPRODUCIBLE: Same capsule always yields same verdict.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -152,6 +152,10 @@ fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     a.ct_eq(b).into()
 }
 
+fn is_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 /// Compute a deterministic hash (SHA-256, hex-encoded) with domain separator.
 ///
 /// External verifiers may use this for ad-hoc hashing of capsule-related data.
@@ -262,11 +266,40 @@ pub fn validate_manifest(manifest: &CapsuleManifest) -> Result<(), CapsuleError>
             "expected_output_hash is empty".into(),
         ));
     }
+    if !is_sha256_hex(&manifest.expected_output_hash) {
+        return Err(CapsuleError::ManifestIncomplete(
+            "expected_output_hash must be a 64-character hex sha256 digest".into(),
+        ));
+    }
     if manifest.creator_identity.is_empty() {
         return Err(CapsuleError::ManifestIncomplete(
             "creator_identity is empty".into(),
         ));
     }
+    Ok(())
+}
+
+fn validate_declared_input_refs(capsule: &ReplayCapsule) -> Result<(), CapsuleError> {
+    let mut declared = BTreeSet::new();
+    for input_ref in &capsule.manifest.input_refs {
+        if !declared.insert(input_ref.as_str()) {
+            return Err(CapsuleError::ManifestIncomplete(
+                "input_refs contains duplicate entries".into(),
+            ));
+        }
+    }
+
+    let actual: BTreeSet<&str> = capsule.inputs.keys().map(String::as_str).collect();
+    if declared != actual {
+        let missing: Vec<&str> = declared.difference(&actual).copied().collect();
+        let extra: Vec<&str> = actual.difference(&declared).copied().collect();
+        return Err(CapsuleError::ManifestIncomplete(format!(
+            "input_refs do not match inputs: missing=[{}], extra=[{}]",
+            missing.join(","),
+            extra.join(",")
+        )));
+    }
+
     Ok(())
 }
 
@@ -306,15 +339,18 @@ pub fn replay(
     // Step 2: Verify signature
     verify_signature(capsule)?;
 
-    // Step 3: Check non-empty payload
+    // Step 3: Bind the declared input inventory to the replayed inputs.
+    validate_declared_input_refs(capsule)?;
+
+    // Step 4: Check non-empty payload
     if capsule.payload.is_empty() {
         return Err(CapsuleError::EmptyPayload("payload is empty".into()));
     }
 
-    // Step 4: Compute actual output hash using length-prefixed encoding
+    // Step 5: Compute actual output hash using length-prefixed encoding
     let actual_hash = compute_replay_hash(&capsule.payload, &capsule.inputs);
 
-    // Step 5: Compare
+    // Step 6: Compare
     let verdict = if actual_hash == capsule.manifest.expected_output_hash {
         CapsuleVerdict::Pass
     } else {
@@ -437,6 +473,19 @@ mod tests {
     }
 
     #[test]
+    fn test_validate_manifest_malformed_expected_hash() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.expected_output_hash = "wrong_hash".to_string();
+        match validate_manifest(&capsule.manifest) {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("expected_output_hash"));
+                assert!(msg.contains("sha256"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn test_verify_signature_pass() {
         let capsule = build_reference_capsule();
         assert!(verify_signature(&capsule).is_ok());
@@ -473,10 +522,24 @@ mod tests {
     #[test]
     fn test_replay_diverged() {
         let mut capsule = build_reference_capsule();
-        capsule.manifest.expected_output_hash = "wrong_hash".to_string();
+        capsule.manifest.expected_output_hash = "f".repeat(64);
         sign_capsule(&mut capsule);
         let result = replay(&capsule, "v1").unwrap();
         assert_eq!(result.verdict, CapsuleVerdict::Fail);
+    }
+
+    #[test]
+    fn test_replay_rejects_malformed_expected_hash() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.expected_output_hash = "wrong_hash".to_string();
+        sign_capsule(&mut capsule);
+        match replay(&capsule, "v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("expected_output_hash"));
+                assert!(msg.contains("sha256"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
     }
 
     #[test]
@@ -497,6 +560,50 @@ mod tests {
         match replay(&capsule, "v1") {
             Err(CapsuleError::SignatureInvalid(_)) => {}
             other => panic!("expected SignatureInvalid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_rejects_missing_declared_input() {
+        let mut capsule = build_reference_capsule();
+        capsule.inputs.remove("artifact_b");
+        sign_capsule(&mut capsule);
+        match replay(&capsule, "v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("missing=[artifact_b]"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_rejects_extra_undeclared_input() {
+        let mut capsule = build_reference_capsule();
+        capsule
+            .inputs
+            .insert("artifact_c".to_string(), "content_of_c".to_string());
+        sign_capsule(&mut capsule);
+        match replay(&capsule, "v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("extra=[artifact_c]"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_replay_rejects_duplicate_declared_input_refs() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.input_refs.push("artifact_a".to_string());
+        sign_capsule(&mut capsule);
+        match replay(&capsule, "v1") {
+            Err(CapsuleError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("duplicate"));
+            }
+            other => panic!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
