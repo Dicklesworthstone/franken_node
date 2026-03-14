@@ -376,7 +376,7 @@
     {
       "check": "Rust unit tests >= 20",
       "passed": true,
-      "detail": "found 63"
+      "detail": "found 67"
     },
     {
       "check": "SDK facade tests >= 8",
@@ -472,5 +472,5 @@
     }
   ],
   "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 82/82 passing\nVerdict: PASS",
-  "timestamp": "2026-03-13T06:30:07.755889+00:00"
+  "timestamp": "2026-03-13T07:27:16.957924+00:00"
 }
