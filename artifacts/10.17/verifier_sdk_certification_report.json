@@ -4,8 +4,8 @@
   "title": "Universal Verifier SDK and Replay Capsule Format",
   "section": "10.17",
   "verdict": "PASS",
-  "total": 82,
-  "passed": 82,
+  "total": 83,
+  "passed": 83,
   "failed": 0,
   "checks": [
     {
@@ -172,6 +172,11 @@
       "check": "Workspace replay capsule rejects malformed expected_output_hash",
       "passed": true,
       "detail": "sdk/verifier/src/capsule.rs fail-closes on malformed expected_output_hash before replay verdict evaluation"
+    },
+    {
+      "check": "Workspace replay capsule uses constant-time expected_output_hash comparison",
+      "passed": true,
+      "detail": "sdk/verifier/src/capsule.rs uses ct_eq for replay-hash vs expected_output_hash comparison"
     },
     {
       "check": "Workspace replay capsule binds declared input_refs to inputs",
@@ -471,6 +476,6 @@
       "status": "defined"
     }
   ],
-  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 82/82 passing\nVerdict: PASS",
-  "timestamp": "2026-03-13T07:27:16.957924+00:00"
+  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 83/83 passing\nVerdict: PASS",
+  "timestamp": "2026-03-14T20:53:05.617415+00:00"
 }
