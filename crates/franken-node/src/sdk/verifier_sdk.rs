@@ -937,6 +937,20 @@ mod tests {
         assert!(names.contains(&"environment_present"));
         assert!(names.contains(&"input_sequence_monotonic"));
         assert!(names.contains(&"replay_deterministic_match"));
+
+        let mut replay_entries = report
+            .evidence
+            .iter()
+            .filter(|entry| entry.check_name == "replay_deterministic_match");
+        let replay_entry = replay_entries
+            .next()
+            .expect("replay evidence entry present");
+        assert!(
+            replay_entries.next().is_none(),
+            "replay evidence entry should be unique"
+        );
+        assert!(replay_entry.passed);
+        assert_eq!(replay_entry.detail, "replay hash matches expected output");
     }
 
     // ── verify_capsule: error paths ─────────────────────────────────
