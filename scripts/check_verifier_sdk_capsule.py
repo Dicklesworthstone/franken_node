@@ -120,6 +120,12 @@ REQUIRED_TYPES = [
     "VsdkError",
 ]
 
+ARTIFACT_CONSISTENCY_CHECK_NAMES = (
+    "Verification evidence checker counts match live checker results",
+    "Verification evidence unit test counts match live checker results",
+    "Verification summary counts match live checker results",
+)
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -149,6 +155,79 @@ def _required_checks_pass(checks: list[dict], required_names: set[str]) -> bool:
     return all(passed_by_name.get(name) is True for name in required_names)
 
 
+def _parse_json_document(raw: str) -> dict:
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _count_unittest_cases(unit_test_src: str) -> int:
+    return sum(1 for line in unit_test_src.splitlines() if line.lstrip().startswith("def test_"))
+
+
+def _artifact_consistency_checks(
+    base_checks: list[dict],
+    evidence_doc: dict,
+    summary_src: str,
+    unit_test_src: str,
+) -> list[dict]:
+    pending_artifact_checks = len(ARTIFACT_CONSISTENCY_CHECK_NAMES)
+    expected_total = len(base_checks) + pending_artifact_checks
+    expected_passed = (
+        sum(1 for check in base_checks if bool(check.get("passed"))) + pending_artifact_checks
+    )
+    expected_failed = expected_total - expected_passed
+
+    checker_summary_line = (
+        f"- Check script: `scripts/check_verifier_sdk_capsule.py` -- "
+        f"{expected_passed}/{expected_total} checks PASS"
+    )
+    unit_test_count = _count_unittest_cases(unit_test_src)
+    unit_test_summary_line = (
+        f"- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- "
+        f"{unit_test_count}/{unit_test_count} tests PASS"
+    )
+
+    evidence_checker = evidence_doc.get("checker", {}) if isinstance(evidence_doc, dict) else {}
+    evidence_unit_tests = (
+        evidence_doc.get("unit_tests", {}) if isinstance(evidence_doc, dict) else {}
+    )
+
+    return [
+        _check(
+            ARTIFACT_CONSISTENCY_CHECK_NAMES[0],
+            evidence_checker.get("passed_checks") == expected_passed
+            and evidence_checker.get("failed_checks") == expected_failed,
+            (
+                "artifacts/section_10_17/bd-nbwo/verification_evidence.json checker counts must "
+                f"match live checker state: expected passed={expected_passed}, "
+                f"failed={expected_failed}"
+            ),
+        ),
+        _check(
+            ARTIFACT_CONSISTENCY_CHECK_NAMES[1],
+            evidence_unit_tests.get("passed_tests") == unit_test_count
+            and evidence_unit_tests.get("failed_tests") == 0,
+            (
+                "artifacts/section_10_17/bd-nbwo/verification_evidence.json unit test counts "
+                f"must match live checker state: expected passed={unit_test_count}, failed=0"
+            ),
+        ),
+        _check(
+            ARTIFACT_CONSISTENCY_CHECK_NAMES[2],
+            checker_summary_line in summary_src and unit_test_summary_line in summary_src,
+            (
+                "artifacts/section_10_17/bd-nbwo/verification_summary.md must include: "
+                f"{checker_summary_line} | {unit_test_summary_line}"
+            ),
+        ),
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Checks
 # ---------------------------------------------------------------------------
@@ -167,6 +246,9 @@ def run_all_checks() -> list[dict]:
     sdk_mod_src = _read(SDK_MOD_FILE)
     sdk_capsule_src = _read(SDK_CAPSULE_FILE)
     sdk_doc_src = "\n".join((spec_src, contract_src))
+    unit_test_src = _read(UNIT_TEST_FILE)
+    evidence_doc = _parse_json_document(_read(EVIDENCE_FILE))
+    summary_src = _read(SUMMARY_FILE)
 
     workspace_sdk_posture_explicit = (
         'pub const STRUCTURAL_ONLY_SECURITY_POSTURE: &str = "structural_only_not_replacement_critical";'
@@ -460,6 +542,15 @@ def run_all_checks() -> list[dict]:
         SUMMARY_FILE.exists(),
         str(SUMMARY_FILE),
     ))
+
+    checks.extend(
+        _artifact_consistency_checks(
+            checks,
+            evidence_doc,
+            summary_src,
+            unit_test_src,
+        )
+    )
 
     return checks
 

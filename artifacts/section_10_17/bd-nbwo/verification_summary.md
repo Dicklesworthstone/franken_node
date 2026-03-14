@@ -121,9 +121,9 @@ invariants:
 
 ## Verification
 
-- Check script: `scripts/check_verifier_sdk_capsule.py` -- 82/82 checks PASS
+- Check script: `scripts/check_verifier_sdk_capsule.py` -- 86/86 checks PASS
 - Self-test: 15/15 checks PASS
-- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 17/17 tests PASS
+- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 20/20 tests PASS
 - Rust unit tests: 54 inline tests in implementation, 49 across the SDK facade crate
 - Clippy: 0 warnings with `-D warnings`
 - All types are Send + Sync, serde-serializable, BTreeMap for determinism

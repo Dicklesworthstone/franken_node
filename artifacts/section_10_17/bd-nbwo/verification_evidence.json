@@ -22,7 +22,7 @@
     "command": "python3 scripts/check_verifier_sdk_capsule.py --build-report --json",
     "exit_code": 0,
     "report_path": "artifacts/10.17/verifier_sdk_certification_report.json",
-    "passed_checks": 82,
+    "passed_checks": 86,
     "failed_checks": 0
   },
   "self_test": {
@@ -31,7 +31,9 @@
   },
   "unit_tests": {
     "command": "python3 -m unittest tests/test_check_verifier_sdk_capsule.py",
-    "exit_code": 0
+    "exit_code": 0,
+    "passed_tests": 20,
+    "failed_tests": 0
   },
   "capsule_contract": {
     "capsule_replay_deterministic": true,

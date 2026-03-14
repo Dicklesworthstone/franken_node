@@ -65,6 +65,65 @@ class TestChecks(unittest.TestCase):
                          "\n".join(f"FAIL: {c['check']}: {c['detail']}" for c in failures[:10]))
 
 
+class TestArtifactConsistencyGuards(unittest.TestCase):
+    def test_artifact_consistency_checks_pass_with_matching_live_counts(self):
+        base_checks = [
+            {"check": "alpha", "passed": True, "detail": "ok"},
+            {"check": "beta", "passed": True, "detail": "ok"},
+        ]
+        evidence_doc = {
+            "checker": {"passed_checks": 5, "failed_checks": 0},
+            "unit_tests": {"passed_tests": 2, "failed_tests": 0},
+        }
+        summary_src = (
+            "- Check script: `scripts/check_verifier_sdk_capsule.py` -- 5/5 checks PASS\n"
+            "- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 2/2 tests PASS\n"
+        )
+        unit_test_src = "    def test_one(self): pass\n    def test_two(self): pass\n"
+
+        checks = mod._artifact_consistency_checks(
+            base_checks,
+            evidence_doc,
+            summary_src,
+            unit_test_src,
+        )
+
+        self.assertTrue(all(check["passed"] for check in checks))
+
+    def test_artifact_consistency_checks_fail_closed_on_stale_counts(self):
+        base_checks = [
+            {"check": "alpha", "passed": True, "detail": "ok"},
+            {"check": "beta", "passed": True, "detail": "ok"},
+        ]
+        evidence_doc = {
+            "checker": {"passed_checks": 4, "failed_checks": 0},
+            "unit_tests": {"passed_tests": 1, "failed_tests": 0},
+        }
+        summary_src = (
+            "- Check script: `scripts/check_verifier_sdk_capsule.py` -- 4/5 checks PASS\n"
+            "- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 1/1 tests PASS\n"
+        )
+        unit_test_src = "    def test_one(self): pass\n    def test_two(self): pass\n"
+
+        checks = mod._artifact_consistency_checks(
+            base_checks,
+            evidence_doc,
+            summary_src,
+            unit_test_src,
+        )
+        by_name = {check["check"]: check for check in checks}
+
+        self.assertFalse(
+            by_name["Verification evidence checker counts match live checker results"]["passed"]
+        )
+        self.assertFalse(
+            by_name["Verification evidence unit test counts match live checker results"]["passed"]
+        )
+        self.assertFalse(
+            by_name["Verification summary counts match live checker results"]["passed"]
+        )
+
+
 class TestCapsuleContract(unittest.TestCase):
     def test_contract_present(self):
         result = mod.run_all()

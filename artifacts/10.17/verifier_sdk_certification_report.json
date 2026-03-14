@@ -4,8 +4,8 @@
   "title": "Universal Verifier SDK and Replay Capsule Format",
   "section": "10.17",
   "verdict": "PASS",
-  "total": 83,
-  "passed": 83,
+  "total": 86,
+  "passed": 86,
   "failed": 0,
   "checks": [
     {
@@ -381,7 +381,7 @@
     {
       "check": "Rust unit tests >= 20",
       "passed": true,
-      "detail": "found 67"
+      "detail": "found 71"
     },
     {
       "check": "SDK facade tests >= 8",
@@ -422,6 +422,21 @@
       "check": "Verification summary exists",
       "passed": true,
       "detail": "/data/projects/franken_node/artifacts/section_10_17/bd-nbwo/verification_summary.md"
+    },
+    {
+      "check": "Verification evidence checker counts match live checker results",
+      "passed": true,
+      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json checker counts must match live checker state: expected passed=86, failed=0"
+    },
+    {
+      "check": "Verification evidence unit test counts match live checker results",
+      "passed": true,
+      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json unit test counts must match live checker state: expected passed=20, failed=0"
+    },
+    {
+      "check": "Verification summary counts match live checker results",
+      "passed": true,
+      "detail": "artifacts/section_10_17/bd-nbwo/verification_summary.md must include: - Check script: `scripts/check_verifier_sdk_capsule.py` -- 86/86 checks PASS | - Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 20/20 tests PASS"
     }
   ],
   "event_codes": [
@@ -476,6 +491,6 @@
       "status": "defined"
     }
   ],
-  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 83/83 passing\nVerdict: PASS",
-  "timestamp": "2026-03-14T20:53:05.617415+00:00"
+  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 86/86 passing\nVerdict: PASS",
+  "timestamp": "2026-03-14T21:41:13.323548+00:00"
 }
