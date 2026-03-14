@@ -351,7 +351,7 @@ pub fn replay(
     let actual_hash = compute_replay_hash(&capsule.payload, &capsule.inputs);
 
     // Step 6: Compare
-    let verdict = if actual_hash == capsule.manifest.expected_output_hash {
+    let verdict = if ct_eq(&actual_hash, &capsule.manifest.expected_output_hash) {
         CapsuleVerdict::Pass
     } else {
         CapsuleVerdict::Fail

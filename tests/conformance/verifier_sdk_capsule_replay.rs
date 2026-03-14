@@ -39,10 +39,11 @@ const EXPECTED_INVARIANTS: [&str; 4] = [
     "INV-CAPSULE-VERDICT-REPRODUCIBLE",
 ];
 
-const EXPECTED_MANIFEST_BINDING_CHECKS: [&str; 4] = [
+const EXPECTED_MANIFEST_BINDING_CHECKS: [&str; 5] = [
     "Public docs pin sha256-shaped expected_output_hash",
     "Public docs pin exact input_refs to inputs binding",
     "Workspace replay capsule rejects malformed expected_output_hash",
+    "Workspace replay capsule uses constant-time expected_output_hash comparison",
     "Workspace replay capsule binds declared input_refs to inputs",
 ];
 

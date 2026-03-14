@@ -321,6 +321,19 @@ def run_all_checks() -> list[dict]:
     ))
 
     checks.append(_check(
+        "Workspace replay capsule uses constant-time expected_output_hash comparison",
+        all(
+            marker in sdk_capsule_src
+            for marker in (
+                "fn ct_eq(a: &str, b: &str) -> bool",
+                "let verdict = if ct_eq(",
+                "&capsule.manifest.expected_output_hash",
+            )
+        ),
+        "sdk/verifier/src/capsule.rs uses ct_eq for replay-hash vs expected_output_hash comparison",
+    ))
+
+    checks.append(_check(
         "Workspace replay capsule binds declared input_refs to inputs",
         all(
             marker in sdk_capsule_src
@@ -510,6 +523,7 @@ def run_all() -> dict:
                     "Public docs pin sha256-shaped expected_output_hash",
                     "Public docs pin exact input_refs to inputs binding",
                     "Workspace replay capsule rejects malformed expected_output_hash",
+                    "Workspace replay capsule uses constant-time expected_output_hash comparison",
                     "Workspace replay capsule binds declared input_refs to inputs",
                 },
             ),
