@@ -593,8 +593,8 @@ mod tests {
     #[test]
     fn verdict_serde_roundtrip() {
         let v = GateVerdict::Block;
-        let json = serde_json::to_string(&v).unwrap();
-        let parsed: GateVerdict = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&v).expect("serialize");
+        let parsed: GateVerdict = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, v);
     }
 

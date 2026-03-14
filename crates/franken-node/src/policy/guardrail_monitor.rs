@@ -1036,7 +1036,7 @@ mod tests {
         state.memory_used_bytes = 850_000_000; // 85% > warn(80%) < block(95%)
         match guard.check(&state) {
             GuardrailVerdict::Warn { .. } => {}
-            other => panic!("expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
     }
 
@@ -1049,7 +1049,7 @@ mod tests {
             GuardrailVerdict::Block { budget_id, .. } => {
                 assert_eq!(budget_id.as_str(), "memory_budget");
             }
-            other => panic!("expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -1104,7 +1104,7 @@ mod tests {
         state.memory_tail_risk = Some(tail_telemetry(128, 0.80, 0.01, 0.82));
         match guard.check(&state) {
             GuardrailVerdict::Warn { .. } => {}
-            other => panic!("expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
     }
 
@@ -1117,7 +1117,7 @@ mod tests {
             GuardrailVerdict::Block { budget_id, .. } => {
                 assert_eq!(budget_id.as_str(), "memory_tail_risk");
             }
-            other => panic!("expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -1138,7 +1138,7 @@ mod tests {
             GuardrailVerdict::Block { budget_id, .. } => {
                 assert_eq!(budget_id.as_str(), "memory_tail_risk");
             }
-            other => panic!("expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -1166,7 +1166,7 @@ mod tests {
         state.reliability_telemetry = Some(reliability_telemetry(5000, 275));
         match guard.check(&state) {
             GuardrailVerdict::Warn { .. } => {}
-            other => panic!("expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
     }
 
@@ -1179,7 +1179,7 @@ mod tests {
             GuardrailVerdict::Block { budget_id, .. } => {
                 assert_eq!(budget_id.as_str(), "conformal_risk");
             }
-            other => panic!("expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -1192,7 +1192,7 @@ mod tests {
             GuardrailVerdict::Block { budget_id, .. } => {
                 assert_eq!(budget_id.as_str(), "conformal_risk");
             }
-            other => panic!("expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -1220,7 +1220,7 @@ mod tests {
         state.durability_level = 0.92; // Above 0.9 min, within 0.05 margin
         match guard.check(&state) {
             GuardrailVerdict::Warn { .. } => {}
-            other => panic!("expected Warn, got {other:?}"),
+            other => unreachable!("expected Warn, got {other:?}"),
         }
     }
 
@@ -1233,7 +1233,7 @@ mod tests {
             GuardrailVerdict::Block { budget_id, .. } => {
                 assert_eq!(budget_id.as_str(), "durability_budget");
             }
-            other => panic!("expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -1277,7 +1277,7 @@ mod tests {
                 assert!(reason.contains("INV-001"));
                 assert_eq!(budget_id.as_str(), "hardening_regression");
             }
-            other => panic!("expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 
@@ -1315,7 +1315,7 @@ mod tests {
                 assert!(reason.contains("INV-002"));
                 assert_eq!(budget_id.as_str(), "evidence_emission");
             }
-            other => panic!("expected Block, got {other:?}"),
+            other => unreachable!("expected Block, got {other:?}"),
         }
     }
 

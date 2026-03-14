@@ -607,7 +607,7 @@ mod tests {
         );
         assert_eq!(decision.verdict, GateVerdict::StagedRolloutRequired);
         assert!(decision.staged_rollout.is_some());
-        let plan = decision.staged_rollout.unwrap();
+        let plan = decision.staged_rollout.expect("should have rollout");
         assert!(!plan.steps.is_empty());
     }
 
@@ -658,8 +658,8 @@ mod tests {
     #[test]
     fn gate_verdict_serde_roundtrip() {
         let v = GateVerdict::RequireAdditionalEvidence;
-        let json = serde_json::to_string(&v).unwrap();
-        let parsed: GateVerdict = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&v).expect("serialize");
+        let parsed: GateVerdict = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, v);
     }
 

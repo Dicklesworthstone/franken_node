@@ -596,8 +596,8 @@ mod tests {
     #[test]
     fn test_config_serde_roundtrip() {
         let cfg = AdapterConfig::default();
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: AdapterConfig = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&cfg).expect("serialize");
+        let back: AdapterConfig = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back.pool_size, cfg.pool_size);
     }
 

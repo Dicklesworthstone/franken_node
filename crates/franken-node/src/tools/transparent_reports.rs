@@ -637,8 +637,8 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
-        let stored = engine.reports().get("r-1").unwrap();
+            .expect("should succeed");
+        let stored = engine.reports().get("r-1").expect("should exist");
         assert_eq!(stored.content_hash.len(), 64);
         assert_eq!(stored.report_version, REPORT_VERSION);
     }
@@ -651,7 +651,7 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         assert!(
             engine
                 .add_corrective_action("r-1", sample_action("a-1"), &trace())
@@ -677,10 +677,10 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         engine
             .add_corrective_action("r-1", sample_action("a-1"), &trace())
-            .unwrap();
+            .expect("should succeed");
         assert!(
             engine
                 .update_action_status("r-1", "a-1", ActionStatus::Planned, &trace())
@@ -696,10 +696,10 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         engine
             .add_corrective_action("r-1", sample_action("a-1"), &trace())
-            .unwrap();
+            .expect("should succeed");
         assert!(
             engine
                 .update_action_status("r-1", "a-1", ActionStatus::Verified, &trace())
@@ -715,20 +715,20 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         engine
             .add_corrective_action("r-1", sample_action("a-1"), &trace())
-            .unwrap();
+            .expect("should succeed");
         engine
             .update_action_status("r-1", "a-1", ActionStatus::Planned, &trace())
-            .unwrap();
+            .expect("should succeed");
         engine
             .update_action_status("r-1", "a-1", ActionStatus::Implemented, &trace())
-            .unwrap();
+            .expect("should succeed");
         engine
             .update_action_status("r-1", "a-1", ActionStatus::Verified, &trace())
-            .unwrap();
-        let r = engine.reports().get("r-1").unwrap();
+            .expect("should succeed");
+        let r = engine.reports().get("r-1").expect("should exist");
         assert_eq!(r.corrective_actions[0].status, ActionStatus::Verified);
     }
 
@@ -747,13 +747,13 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         engine
             .create_report(
                 sample_report("r-2", ReportCategory::ServiceOutage),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         let catalog = engine.generate_catalog(&trace());
         assert_eq!(catalog.total_reports, 2);
     }
@@ -766,10 +766,10 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         engine
             .add_corrective_action("r-1", sample_action("a-1"), &trace())
-            .unwrap();
+            .expect("should succeed");
         let catalog = engine.generate_catalog(&trace());
         assert_eq!(catalog.open_actions, 1);
     }
@@ -798,7 +798,7 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         let catalog = engine.generate_catalog(&trace());
         assert!(catalog.by_category.contains_key("security_incident"));
     }
@@ -811,7 +811,7 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         let catalog = engine.generate_catalog(&trace());
         assert!(catalog.by_severity.contains_key("high"));
     }
@@ -830,7 +830,7 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
+            .expect("should succeed");
         assert_eq!(engine.audit_log().len(), 7);
     }
 
@@ -842,9 +842,9 @@ mod tests {
                 sample_report("r-1", ReportCategory::SecurityIncident),
                 &trace(),
             )
-            .unwrap();
-        let jsonl = engine.export_audit_log_jsonl().unwrap();
-        let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+            .expect("should succeed");
+        let jsonl = engine.export_audit_log_jsonl().expect("jsonl export should succeed");
+        let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().expect("should have line")).expect("parse should succeed");
         assert!(first["event_code"].is_string());
     }
 }

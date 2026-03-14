@@ -1205,8 +1205,8 @@ mod tests {
             expires_at: "2026-01-01T01:00:00Z".into(),
             fence_version: 1,
         };
-        let json = serde_json::to_string(&record).unwrap();
-        let parsed: FencingLeaseRecord = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&record).expect("serialize");
+        let parsed: FencingLeaseRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, record);
     }
 
@@ -1222,8 +1222,8 @@ mod tests {
             persisted_at: "2026-01-01T00:01:00Z".into(),
             version: 3,
         };
-        let json = serde_json::to_string(&record).unwrap();
-        let parsed: RolloutStateRecord = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&record).expect("serialize");
+        let parsed: RolloutStateRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, record);
     }
 
@@ -1237,8 +1237,8 @@ mod tests {
             checksum: "sha256:abc123".into(),
             reversible: true,
         };
-        let json = serde_json::to_string(&record).unwrap();
-        let parsed: SchemaMigrationRecord = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&record).expect("serialize");
+        let parsed: SchemaMigrationRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, record);
     }
 
@@ -1253,8 +1253,8 @@ mod tests {
             quarantined_by: "system".into(),
             released: false,
         };
-        let json = serde_json::to_string(&record).unwrap();
-        let parsed: QuarantineEntryRecord = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&record).expect("serialize");
+        let parsed: QuarantineEntryRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, record);
     }
 
@@ -1268,8 +1268,8 @@ mod tests {
             triggered_by: "health_gate_pass".into(),
             transitioned_at: "2026-02-10T08:00:00Z".into(),
         };
-        let json = serde_json::to_string(&record).unwrap();
-        let parsed: LifecycleTransitionCacheRecord = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&record).expect("serialize");
+        let parsed: LifecycleTransitionCacheRecord = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(parsed, record);
     }
 

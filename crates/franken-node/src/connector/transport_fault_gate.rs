@@ -955,7 +955,7 @@ mod tests {
             ],
             fault_modes: vec![FaultMode::None, FaultMode::Drop],
         };
-        let mut gate = TransportFaultGate::with_config(config).unwrap();
+        let mut gate = TransportFaultGate::with_config(config).expect("should succeed");
         // full gate with default should pass (all outcomes are acceptable)
         let verdict = gate.run_full_gate();
         // The gate will return Ok since all outcomes are acceptable
@@ -966,9 +966,9 @@ mod tests {
             }
             Err(TransportFaultGateError::GateFailed { failures, total }) => {
                 // This should not happen with our evaluate_outcome logic
-                panic!("Gate failed: {failures}/{total}");
+                unreachable!("Gate failed: {failures}/{total}");
             }
-            Err(e) => panic!("Unexpected error: {e}"),
+            Err(e) => unreachable!("Unexpected error: {e}"),
         }
     }
 
@@ -1121,13 +1121,13 @@ mod tests {
             protocols: vec![ControlProtocol::HealthCheck],
             fault_modes: vec![FaultMode::None],
         };
-        let mut gate = TransportFaultGate::with_config(config).unwrap();
-        let verdict = gate.run_full_gate().unwrap();
-        let json = serde_json::to_string(&verdict).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let mut gate = TransportFaultGate::with_config(config).expect("should succeed");
+        let verdict = gate.run_full_gate().expect("should succeed");
+        let json = serde_json::to_string(&verdict).expect("serialize should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(parsed["schema_version"], "tfg-v1.0");
         assert_eq!(parsed["bead_id"], "bd-3u6o");
         assert_eq!(parsed["section"], "10.15");
-        assert!(parsed["passed"].as_bool().unwrap());
+        assert!(parsed["passed"].as_bool().expect("boolean field expected"));
     }
 }
