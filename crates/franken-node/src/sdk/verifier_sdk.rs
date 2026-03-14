@@ -481,9 +481,7 @@ impl VerifierSdk {
             check_name: "replay_deterministic_match".to_string(),
             passed: replay_match,
             detail: match replay_result {
-                Ok(replay_hash) if replay_match => {
-                    "replay hash matches expected output".to_string()
-                }
+                Ok(_) if replay_match => "replay hash matches expected output".to_string(),
                 Ok(replay_hash) => format!("replay_hash={replay_hash}"),
                 Err(err) => err.to_string(),
             },
@@ -721,29 +719,17 @@ mod tests {
             },
         ];
 
-        let input_data: String = inputs
-            .iter()
-            .map(|inp| format!("{}:{}", inp.seq, hex::encode(&inp.data)))
-            .collect::<Vec<_>>()
-            .join("|");
-        let expected_hash = deterministic_hash(&input_data);
-
-        ReplayCapsule {
-            capsule_id: "capsule-001".to_string(),
-            format_version: 1,
+        create_capsule(
+            "capsule-001",
             inputs,
-            expected_outputs: vec![CapsuleOutput {
-                seq: 0,
-                data: b"output-0".to_vec(),
-                output_hash: expected_hash,
-            }],
-            environment: EnvironmentSnapshot {
+            EnvironmentSnapshot {
                 runtime_version: "1.0.0".to_string(),
                 platform: "linux-x86_64".to_string(),
                 config_hash: "aabb".repeat(8),
                 properties: BTreeMap::new(),
             },
-        }
+        )
+        .expect("valid test capsule")
     }
 
     // ── VerifierSdk construction ────────────────────────────────────

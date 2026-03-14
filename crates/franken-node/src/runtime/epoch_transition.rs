@@ -618,7 +618,7 @@ mod tests {
 
         let proposal = coordinator
             .propose_transition("operator-1", "rotation", 1_000, "trace-propose")
-            .unwrap();
+            .expect("should succeed");
         assert_eq!(proposal.pre_epoch, 10);
         assert_eq!(proposal.target_epoch, 11);
 
@@ -629,13 +629,13 @@ mod tests {
 
         coordinator
             .ack_drain("svc-a", 4, 25, "trace-ack-a")
-            .unwrap();
+            .expect("should succeed");
         coordinator
             .ack_drain("svc-b", 2, 30, "trace-ack-b")
-            .unwrap();
+            .expect("should succeed");
         let committed = coordinator
             .commit_transition(1_050, "trace-commit")
-            .unwrap();
+            .expect("should succeed");
         assert_eq!(committed, 11);
         assert_eq!(coordinator.current_epoch(), 11);
     }
@@ -648,14 +648,14 @@ mod tests {
         coordinator.register_service("svc-c");
         coordinator
             .propose_transition("operator-1", "key-rotation", 1_000, "trace-propose")
-            .unwrap();
+            .expect("should succeed");
         coordinator
             .ack_drain("svc-a", 3, 10, "trace-ack-a")
-            .unwrap();
+            .expect("should succeed");
 
         let epoch_after_abort = coordinator
             .abort_transition_timeout(40_000, "trace-timeout")
-            .unwrap();
+            .expect("should succeed");
         assert_eq!(epoch_after_abort, 3);
         assert_eq!(coordinator.current_epoch(), 3);
         assert_eq!(coordinator.abort_manager().abort_count(), 1);
@@ -670,7 +670,7 @@ mod tests {
         coordinator.register_service("svc-b");
         coordinator
             .propose_transition("operator-1", "rotation-a", 1_000, "trace-a")
-            .unwrap();
+            .expect("should succeed");
         let err = coordinator
             .propose_transition("operator-2", "rotation-b", 1_001, "trace-b")
             .expect_err("concurrent proposal must fail");
@@ -683,7 +683,7 @@ mod tests {
         // lag=1, max_epoch_lag=2 → 1 < 2 → OK
         coordinator
             .validate_replica_lag("svc-a", 19, "trace-lag-ok")
-            .unwrap();
+            .expect("should succeed");
         // lag=2, max_epoch_lag=2 → 2 >= 2 → fail-closed at boundary
         let err = coordinator
             .validate_replica_lag("svc-a", 18, "trace-lag-bad")

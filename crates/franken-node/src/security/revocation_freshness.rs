@@ -258,7 +258,7 @@ mod tests {
     #[test]
     fn standard_always_passes() {
         let d = evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 999999), None)
-            .unwrap();
+            .expect("should succeed");
         assert!(d.allowed);
         assert!(d.max_age_secs.is_none());
     }
@@ -266,7 +266,7 @@ mod tests {
     #[test]
     fn risky_fresh_passes() {
         let d =
-            evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 1000), None).unwrap();
+            evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 1000), None).expect("should succeed");
         assert!(d.allowed);
         assert_eq!(d.max_age_secs, Some(3600));
     }
@@ -274,14 +274,14 @@ mod tests {
     #[test]
     fn risky_stale_denied() {
         let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 5000), None)
-            .unwrap_err();
+            .expect_err("should fail");
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 
     #[test]
     fn dangerous_fresh_passes() {
         let d =
-            evaluate_freshness(&policy(), &check_action(SafetyTier::Dangerous, 100), None).unwrap();
+            evaluate_freshness(&policy(), &check_action(SafetyTier::Dangerous, 100), None).expect("should succeed");
         assert!(d.allowed);
         assert_eq!(d.max_age_secs, Some(300));
     }
@@ -289,7 +289,7 @@ mod tests {
     #[test]
     fn dangerous_stale_denied() {
         let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Dangerous, 500), None)
-            .unwrap_err();
+            .expect_err("should fail");
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 
@@ -300,7 +300,7 @@ mod tests {
             &check_action(SafetyTier::Risky, 5000),
             Some(&override_receipt()),
         )
-        .unwrap();
+        .expect("should succeed");
         assert!(d.allowed);
         assert!(d.override_receipt.is_some());
     }
@@ -312,7 +312,7 @@ mod tests {
             &check_action(SafetyTier::Dangerous, 500),
             Some(&override_receipt()),
         )
-        .unwrap();
+        .expect("should succeed");
         assert!(d.allowed);
         assert!(d.override_receipt.is_some());
         assert!(d.reason.contains("override accepted"));
@@ -325,22 +325,22 @@ mod tests {
             &check_action(SafetyTier::Risky, 5000),
             Some(&override_receipt()),
         )
-        .unwrap();
-        assert_eq!(d.override_receipt.as_ref().unwrap().actor, "admin");
+        .expect("should succeed");
+        assert_eq!(d.override_receipt.as_ref().expect("should have receipt").actor, "admin");
     }
 
     #[test]
     fn at_boundary_denied() {
         // Fail-closed: age exactly at max_age is stale
         let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3600), None)
-            .unwrap_err();
+            .expect_err("should fail");
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 
     #[test]
     fn just_over_boundary_denied() {
         let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3601), None)
-            .unwrap_err();
+            .expect_err("should fail");
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
     }
 
@@ -362,7 +362,7 @@ mod tests {
             risky_max_age_secs: 100,
             dangerous_max_age_secs: 200,
         };
-        assert_eq!(p.validate().unwrap_err().code(), "RF_POLICY_INVALID");
+        assert_eq!(p.validate().expect_err("should fail").code(), "RF_POLICY_INVALID");
     }
 
     #[test]
@@ -371,13 +371,13 @@ mod tests {
             risky_max_age_secs: 0,
             dangerous_max_age_secs: 0,
         };
-        assert_eq!(p.validate().unwrap_err().code(), "RF_POLICY_INVALID");
+        assert_eq!(p.validate().expect_err("should fail").code(), "RF_POLICY_INVALID");
     }
 
     #[test]
     fn decision_has_trace_id() {
         let d =
-            evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 0), None).unwrap();
+            evaluate_freshness(&policy(), &check_action(SafetyTier::Standard, 0), None).expect("should succeed");
         assert_eq!(d.trace_id, "tr-1");
     }
 
