@@ -406,6 +406,29 @@ def run_all_checks() -> list[dict]:
     ))
 
     checks.append(_check(
+        "Replay capsule validators reject empty created_at",
+        all(
+            marker in sdk_capsule_src
+            for marker in (
+                "manifest.created_at.is_empty()",
+                "created_at is empty",
+                "test_validate_manifest_empty_created_at",
+                "test_replay_rejects_empty_created_at",
+            )
+        )
+        and all(
+            marker in impl_src
+            for marker in (
+                "manifest.created_at.is_empty()",
+                "created_at is empty",
+                "test_validate_manifest_empty_created_at",
+                "test_replay_capsule_rejects_empty_created_at",
+            )
+        ),
+        "workspace and canonical replay capsule validators fail-close on empty created_at before replay verdict evaluation",
+    ))
+
+    checks.append(_check(
         "Workspace replay capsule uses constant-time expected_output_hash comparison",
         all(
             marker in sdk_capsule_src
@@ -617,6 +640,7 @@ def run_all() -> dict:
                     "Public docs pin sha256-shaped expected_output_hash",
                     "Public docs pin exact input_refs to inputs binding",
                     "Workspace replay capsule rejects malformed expected_output_hash",
+                    "Replay capsule validators reject empty created_at",
                     "Workspace replay capsule uses constant-time expected_output_hash comparison",
                     "Workspace replay capsule binds declared input_refs to inputs",
                 },

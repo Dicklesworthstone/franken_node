@@ -152,6 +152,7 @@ class TestCapsuleContract(unittest.TestCase):
             "Workspace replay capsule rejects malformed expected_output_hash",
             check_names,
         )
+        self.assertIn("Replay capsule validators reject empty created_at", check_names)
         self.assertIn(
             "Workspace replay capsule uses constant-time expected_output_hash comparison",
             check_names,
@@ -209,6 +210,19 @@ class TestCapsuleContract(unittest.TestCase):
             for check in baseline
             if check["check"]
             != "Workspace replay capsule uses constant-time expected_output_hash comparison"
+        ]
+
+        with mock.patch.object(mod, "run_all_checks", return_value=mutated_checks):
+            contract = mod.run_all()["capsule_contract"]
+
+        self.assertFalse(contract["workspace_manifest_binding_explicit"])
+
+    def test_manifest_binding_contract_fails_closed_when_created_at_check_missing(self):
+        baseline = mod.run_all_checks()
+        mutated_checks = [
+            check
+            for check in baseline
+            if check["check"] != "Replay capsule validators reject empty created_at"
         ]
 
         with mock.patch.object(mod, "run_all_checks", return_value=mutated_checks):

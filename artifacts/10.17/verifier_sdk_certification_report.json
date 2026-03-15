@@ -4,8 +4,8 @@
   "title": "Universal Verifier SDK and Replay Capsule Format",
   "section": "10.17",
   "verdict": "PASS",
-  "total": 86,
-  "passed": 86,
+  "total": 87,
+  "passed": 87,
   "failed": 0,
   "checks": [
     {
@@ -172,6 +172,11 @@
       "check": "Workspace replay capsule rejects malformed expected_output_hash",
       "passed": true,
       "detail": "sdk/verifier/src/capsule.rs fail-closes on malformed expected_output_hash before replay verdict evaluation"
+    },
+    {
+      "check": "Replay capsule validators reject empty created_at",
+      "passed": true,
+      "detail": "workspace and canonical replay capsule validators fail-close on empty created_at before replay verdict evaluation"
     },
     {
       "check": "Workspace replay capsule uses constant-time expected_output_hash comparison",
@@ -381,12 +386,12 @@
     {
       "check": "Rust unit tests >= 20",
       "passed": true,
-      "detail": "found 71"
+      "detail": "found 73"
     },
     {
       "check": "SDK facade tests >= 8",
       "passed": true,
-      "detail": "found 49"
+      "detail": "found 51"
     },
     {
       "check": "ReplayCapsule has signature field",
@@ -426,17 +431,17 @@
     {
       "check": "Verification evidence checker counts match live checker results",
       "passed": true,
-      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json checker counts must match live checker state: expected exit_code=0, passed=86, failed=0"
+      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json checker counts must match live checker state: expected exit_code=0, passed=87, failed=0"
     },
     {
       "check": "Verification evidence unit test counts match live checker results",
       "passed": true,
-      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json unit test counts must match live checker state: expected exit_code=0, passed=20, failed=0"
+      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json unit test counts must match live checker state: expected exit_code=0, passed=21, failed=0"
     },
     {
       "check": "Verification summary counts match live checker results",
       "passed": true,
-      "detail": "artifacts/section_10_17/bd-nbwo/verification_summary.md must include: - Check script: `scripts/check_verifier_sdk_capsule.py` -- 86/86 checks PASS | - Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 20/20 tests PASS"
+      "detail": "artifacts/section_10_17/bd-nbwo/verification_summary.md must include: - Check script: `scripts/check_verifier_sdk_capsule.py` -- 87/87 checks PASS | - Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 21/21 tests PASS"
     }
   ],
   "event_codes": [
@@ -491,6 +496,6 @@
       "status": "defined"
     }
   ],
-  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 86/86 passing\nVerdict: PASS",
-  "timestamp": "2026-03-15T01:37:02.642261+00:00"
+  "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 87/87 passing\nVerdict: PASS",
+  "timestamp": "2026-03-15T06:12:01.033253+00:00"
 }

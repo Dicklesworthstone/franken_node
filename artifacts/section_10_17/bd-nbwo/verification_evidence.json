@@ -22,7 +22,7 @@
     "command": "python3 scripts/check_verifier_sdk_capsule.py --build-report --json",
     "exit_code": 0,
     "report_path": "artifacts/10.17/verifier_sdk_certification_report.json",
-    "passed_checks": 86,
+    "passed_checks": 87,
     "failed_checks": 0
   },
   "self_test": {
@@ -32,7 +32,7 @@
   "unit_tests": {
     "command": "python3 -m unittest tests/test_check_verifier_sdk_capsule.py",
     "exit_code": 0,
-    "passed_tests": 20,
+    "passed_tests": 21,
     "failed_tests": 0
   },
   "capsule_contract": {
@@ -111,7 +111,7 @@
     "The connector universal_verifier_sdk module is the replacement-critical implementation and uses detached Ed25519 signatures over a canonical signing payload.",
     "The sdk/verifier crate is a structural-only companion surface for external tooling and does not claim detached cryptographic verification authority.",
     "External verifiers can replay signed capsules without privileged access through connector::universal_verifier_sdk.",
-    "The workspace replay-capsule contract now explicitly requires sha256-shaped expected_output_hash values and exact manifest.input_refs to replayed inputs binding.",
+    "The workspace replay-capsule contract now explicitly requires sha256-shaped expected_output_hash values, exact manifest.input_refs to replayed inputs binding, and non-empty created_at metadata.",
     "The bd-nbwo certification gate now fail-closes on those manifest-binding invariants in docs, code, and conformance artifacts.",
     "Schema version vsdk-v1.0 is stable and versioned.",
     "54 inline Rust tests in the implementation, 49 across the SDK facade crate.",

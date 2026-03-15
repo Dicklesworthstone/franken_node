@@ -118,12 +118,13 @@ invariants:
 
 - `expected_output_hash` must be a 64-character hex sha256 digest
 - declared `manifest.input_refs` must be unique and exactly match replayed `inputs`
+- `created_at` must be present before replay or verdict evaluation
 
 ## Verification
 
-- Check script: `scripts/check_verifier_sdk_capsule.py` -- 86/86 checks PASS
+- Check script: `scripts/check_verifier_sdk_capsule.py` -- 87/87 checks PASS
 - Self-test: 15/15 checks PASS
-- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 20/20 tests PASS
+- Unit tests: `tests/test_check_verifier_sdk_capsule.py` -- 21/21 tests PASS
 - Rust unit tests: 54 inline tests in implementation, 49 across the SDK facade crate
 - Clippy: 0 warnings with `-D warnings`
 - All types are Send + Sync, serde-serializable, BTreeMap for determinism
