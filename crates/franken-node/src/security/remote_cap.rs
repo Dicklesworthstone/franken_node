@@ -735,29 +735,28 @@ fn canonical_payload(
     scope: &RemoteScope,
     single_use: bool,
 ) -> String {
-    let operations = scope
-        .operations
-        .iter()
-        .map(|entry| entry.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    let endpoints = scope.endpoint_prefixes.join(",");
+    let operations = encode_scope_entries(scope.operations.iter().map(|entry| entry.as_str()));
+    let endpoints = encode_scope_entries(scope.endpoint_prefixes.iter().map(String::as_str));
     format!(
         "v1|token={token_id}|issuer={issuer_identity}|issued={issued_at_epoch_secs}|expires={expires_at_epoch_secs}|ops={operations}|endpoints={endpoints}|single_use={single_use}"
     )
 }
 
 fn scope_fingerprint(scope: &RemoteScope) -> String {
-    let operations = scope
-        .operations
-        .iter()
-        .map(|entry| entry.as_str())
-        .collect::<Vec<_>>()
-        .join(",");
-    format!(
-        "ops={operations};endpoints={}",
-        scope.endpoint_prefixes.join(",")
-    )
+    let operations = encode_scope_entries(scope.operations.iter().map(|entry| entry.as_str()));
+    let endpoints = encode_scope_entries(scope.endpoint_prefixes.iter().map(String::as_str));
+    format!("ops={operations};endpoints={endpoints}")
+}
+
+fn encode_scope_entries<'a>(entries: impl IntoIterator<Item = &'a str>) -> String {
+    let mut encoded = String::new();
+    for entry in entries {
+        encoded.push_str(&entry.len().to_string());
+        encoded.push(':');
+        encoded.push_str(entry);
+        encoded.push('|');
+    }
+    encoded
 }
 
 fn keyed_digest(secret: &str, payload: &str) -> Result<String, RemoteCapError> {
@@ -792,6 +791,16 @@ mod tests {
                 "https://telemetry.example.com".to_string(),
                 "https://federation.example.com".to_string(),
             ],
+        )
+    }
+
+    fn scope_with_endpoint_prefixes(endpoint_prefixes: &[&str]) -> RemoteScope {
+        RemoteScope::new(
+            vec![RemoteOperation::TelemetryExport],
+            endpoint_prefixes
+                .iter()
+                .map(|entry| (*entry).to_string())
+                .collect(),
         )
     }
 
@@ -1199,5 +1208,73 @@ mod tests {
         let legacy_digest = hex::encode(legacy_hasher.finalize());
 
         assert_ne!(hmac_digest, legacy_digest);
+    }
+
+    #[test]
+    fn issued_caps_preserve_endpoint_prefix_boundaries() {
+        let provider = CapabilityProvider::new("secret-a");
+        let lhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
+        let rhs_scope = scope_with_endpoint_prefixes(&["alpha", "beta,gamma"]);
+
+        assert_ne!(scope_fingerprint(&lhs_scope), scope_fingerprint(&rhs_scope));
+
+        let (lhs, _) = provider
+            .issue(
+                "operator",
+                lhs_scope,
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-boundary",
+            )
+            .expect("left issue should succeed");
+        let (rhs, _) = provider
+            .issue(
+                "operator",
+                rhs_scope,
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-boundary",
+            )
+            .expect("right issue should succeed");
+
+        assert_ne!(lhs.token_id(), rhs.token_id());
+        assert_ne!(lhs.signature(), rhs.signature());
+    }
+
+    #[test]
+    fn issuing_identical_endpoint_prefix_scopes_is_deterministic() {
+        let provider = CapabilityProvider::new("secret-a");
+        let lhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
+        let rhs_scope = scope_with_endpoint_prefixes(&["alpha,beta", "gamma"]);
+
+        let (lhs, _) = provider
+            .issue(
+                "operator",
+                lhs_scope,
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-deterministic",
+            )
+            .expect("left issue should succeed");
+        let (rhs, _) = provider
+            .issue(
+                "operator",
+                rhs_scope,
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-deterministic",
+            )
+            .expect("right issue should succeed");
+
+        assert_eq!(lhs.token_id(), rhs.token_id());
+        assert_eq!(lhs.signature(), rhs.signature());
     }
 }

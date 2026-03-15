@@ -328,6 +328,9 @@ pub fn compute_integrity_hash(bundle: &IncidentBundle) -> String {
     hasher.update(bundle.metric_snapshot_count.to_le_bytes());
     hasher.update(bundle.evidence_ref_count.to_le_bytes());
     hasher.update(bundle.export_format_version.to_le_bytes());
+    hasher.update(bundle.size_bytes.to_le_bytes());
+    hasher.update(bundle.created_at_epoch.to_le_bytes());
+    hasher.update(bundle.last_tier_change_epoch.to_le_bytes());
 
     let digest = hasher.finalize();
     format!(
@@ -624,6 +627,7 @@ impl IncidentBundleStore {
                 };
                 bundle.retention_tier = tier;
                 bundle.last_tier_change_epoch = now;
+                bundle.integrity_hash = compute_integrity_hash(bundle);
                 push_bounded(&mut self.decisions, decision.clone(), MAX_DECISIONS);
                 transitions.push(decision);
             }
@@ -893,6 +897,48 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_integrity_hash_covers_size_bytes() {
+        let mut bundle = sample_bundle(
+            "ibr-001",
+            "INC-001",
+            Severity::Critical,
+            RetentionTier::Hot,
+            1000,
+        );
+        let original_hash = bundle.integrity_hash.clone();
+        bundle.size_bytes += 1;
+        assert_ne!(compute_integrity_hash(&bundle), original_hash);
+    }
+
+    #[test]
+    fn test_compute_integrity_hash_covers_created_at_epoch() {
+        let mut bundle = sample_bundle(
+            "ibr-001",
+            "INC-001",
+            Severity::Critical,
+            RetentionTier::Hot,
+            1000,
+        );
+        let original_hash = bundle.integrity_hash.clone();
+        bundle.created_at_epoch += 1;
+        assert_ne!(compute_integrity_hash(&bundle), original_hash);
+    }
+
+    #[test]
+    fn test_compute_integrity_hash_covers_last_tier_change_epoch() {
+        let mut bundle = sample_bundle(
+            "ibr-001",
+            "INC-001",
+            Severity::Critical,
+            RetentionTier::Hot,
+            1000,
+        );
+        let original_hash = bundle.integrity_hash.clone();
+        bundle.last_tier_change_epoch += 1;
+        assert_ne!(compute_integrity_hash(&bundle), original_hash);
+    }
+
+    #[test]
     fn test_validate_complete_bundle() {
         let bundle = sample_bundle(
             "ibr-001",
@@ -1083,6 +1129,11 @@ mod tests {
             store.get("ibr-001").unwrap().retention_tier,
             RetentionTier::Cold
         );
+        let bundle = store.get("ibr-001").unwrap();
+        assert_eq!(
+            bundle.integrity_hash.as_str(),
+            compute_integrity_hash(bundle)
+        );
     }
 
     #[test]
@@ -1107,6 +1158,32 @@ mod tests {
             store.get("ibr-001").unwrap().retention_tier,
             RetentionTier::Archive
         );
+        let bundle = store.get("ibr-001").unwrap();
+        assert_eq!(
+            bundle.integrity_hash.as_str(),
+            compute_integrity_hash(bundle)
+        );
+    }
+
+    #[test]
+    fn test_export_succeeds_after_tier_rotation() {
+        let mut store = default_store();
+        let bundle = sample_bundle(
+            "ibr-001",
+            "INC-001",
+            Severity::High,
+            RetentionTier::Hot,
+            1000,
+        );
+        store.store(bundle, 1000).unwrap();
+
+        let hot_seconds = 90 * 86400;
+        store.rotate_tiers(1000 + hot_seconds + 1);
+
+        let output = store
+            .export("ibr-001", ExportFormat::Json, "test-user", 1002)
+            .unwrap();
+        assert!(output.contains("\"retention_tier\":\"cold\""));
     }
 
     #[test]

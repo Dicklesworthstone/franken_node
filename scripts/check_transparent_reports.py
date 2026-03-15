@@ -40,6 +40,17 @@ def _checks():
         results.append({"check": name, "passed": passed, "detail": detail})
 
     src = _read(IMPL)
+    production_src = src.split("#[cfg(test)]", 1)[0]
+    report_hash_region = ""
+    if "fn compute_report_content_hash" in production_src and "fn compute_catalog_content_hash" in production_src:
+        report_hash_region = production_src.split("fn compute_report_content_hash", 1)[1].split(
+            "fn compute_catalog_content_hash", 1
+        )[0]
+    catalog_hash_region = ""
+    if "fn compute_catalog_content_hash" in production_src and "// ---------------------------------------------------------------------------\n// Engine" in production_src:
+        catalog_hash_region = production_src.split("fn compute_catalog_content_hash", 1)[1].split(
+            "// ---------------------------------------------------------------------------\n// Engine", 1
+        )[0]
 
     ok("source_exists", os.path.isfile(IMPL), IMPL)
     ok("module_wiring", "pub mod transparent_reports;" in _read(MOD_RS), "tools/mod.rs")
@@ -62,7 +73,21 @@ def _checks():
     ok("timeline_validation", "TimelineEntry" in src and "timeline" in src, "Timeline structure")
     ok("root_cause_analysis", "root_causes" in src, "Root cause tracking")
     ok("lessons_learned", "lessons_learned" in src, "Lessons learned section")
-    ok("content_hashing", "content_hash" in src and "Sha256" in src, "SHA-256 integrity")
+    report_hash_fields = [
+        "report_id", "severity", "timeline", "root_causes",
+        "corrective_actions", "lessons_learned", "report_version", "created_at",
+    ]
+    report_hash_refreshes = production_src.count("compute_report_content_hash(") >= 3
+    ok(
+        "content_hashing",
+        all(field in report_hash_region for field in report_hash_fields) and report_hash_refreshes,
+        "report hash covers mutable report content and refreshes on mutations",
+    )
+    ok(
+        "catalog_hashing",
+        all(field in catalog_hash_region for field in ["by_category", "by_severity", "open_actions", "report_version"]),
+        "catalog hash covers category, severity, and open action state",
+    )
     ok("catalog_generation", "generate_catalog" in src and "ReportCatalog" in src, "Catalog with open_actions")
 
     found_codes = [c for c in REQUIRED_CODES if c in src]

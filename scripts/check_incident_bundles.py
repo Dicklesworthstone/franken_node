@@ -405,6 +405,23 @@ def check_impl_integrity_verification() -> dict[str, Any]:
     return _check("impl_integrity_verification", passed, detail)
 
 
+def check_impl_integrity_hash_covers_retention_fields() -> dict[str, Any]:
+    """C35: Integrity hash covers storage and retention timing fields."""
+    if not IMPL.is_file():
+        return _check("impl_integrity_hash_covers_retention_fields", False, "impl file missing")
+    content = IMPL.read_text(encoding="utf-8")
+    required_lines = [
+        "hasher.update(bundle.size_bytes.to_le_bytes());",
+        "hasher.update(bundle.created_at_epoch.to_le_bytes());",
+        "hasher.update(bundle.last_tier_change_epoch.to_le_bytes());",
+        "bundle.integrity_hash = compute_integrity_hash(bundle);",
+    ]
+    missing = [line for line in required_lines if line not in content]
+    passed = len(missing) == 0
+    detail = "retention-affecting fields covered" if passed else f"missing: {missing}"
+    return _check("impl_integrity_hash_covers_retention_fields", passed, detail)
+
+
 # ---------------------------------------------------------------------------
 # Validation helpers (exported for test use)
 # ---------------------------------------------------------------------------
@@ -510,6 +527,7 @@ ALL_CHECKS = [
     check_impl_export_formats,
     check_impl_archive_protection,
     check_impl_integrity_verification,
+    check_impl_integrity_hash_covers_retention_fields,
 ]
 
 

@@ -221,6 +221,10 @@ class TestIndividualChecks(unittest.TestCase):
         result = self._run_check(mod.check_impl_integrity_verification)
         self.assertTrue(result["pass"])
 
+    def test_check_impl_integrity_hash_covers_retention_fields(self):
+        result = self._run_check(mod.check_impl_integrity_hash_covers_retention_fields)
+        self.assertTrue(result["pass"])
+
 
 # ---------------------------------------------------------------------------
 # Test: missing file detection
@@ -441,7 +445,7 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(len(mod.REQUIRED_IMPL_FUNCTIONS), 5)
 
     def test_all_checks_count(self):
-        self.assertEqual(len(mod.ALL_CHECKS), 34)
+        self.assertEqual(len(mod.ALL_CHECKS), 35)
 
 
 # ---------------------------------------------------------------------------

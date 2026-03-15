@@ -49,6 +49,7 @@ class TestIndividualChecks:
     def test_root_cause(self, results): assert results["root_cause_analysis"]["passed"]
     def test_lessons(self, results): assert results["lessons_learned"]["passed"]
     def test_hashing(self, results): assert results["content_hashing"]["passed"]
+    def test_catalog_hashing(self, results): assert results["catalog_hashing"]["passed"]
     def test_catalog(self, results): assert results["catalog_generation"]["passed"]
     def test_event_codes(self, results): assert results["event_codes"]["passed"]
     def test_invariants(self, results): assert results["invariants"]["passed"]

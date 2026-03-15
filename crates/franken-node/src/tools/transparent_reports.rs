@@ -220,6 +220,70 @@ pub struct TrAuditRecord {
     pub details: serde_json::Value,
 }
 
+#[derive(Serialize)]
+struct ReportContentHashView<'a> {
+    report_id: &'a str,
+    title: &'a str,
+    category: &'static str,
+    severity: &'static str,
+    sections: &'a BTreeMap<String, String>,
+    timeline: &'a [TimelineEntry],
+    root_causes: &'a [String],
+    corrective_actions: &'a [CorrectiveAction],
+    lessons_learned: &'a [String],
+    report_version: &'a str,
+    created_at: &'a str,
+}
+
+fn compute_report_content_hash(report: &TransparentReport) -> Result<String, serde_json::Error> {
+    let view = ReportContentHashView {
+        report_id: &report.report_id,
+        title: &report.title,
+        category: report.category.label(),
+        severity: report.severity.label(),
+        sections: &report.sections,
+        timeline: &report.timeline,
+        root_causes: &report.root_causes,
+        corrective_actions: &report.corrective_actions,
+        lessons_learned: &report.lessons_learned,
+        report_version: &report.report_version,
+        created_at: &report.created_at,
+    };
+    let payload = serde_json::to_vec(&view)?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"transparent_reports_hash_v1:");
+    hasher.update(&payload);
+    Ok(hex::encode(hasher.finalize()))
+}
+
+fn compute_catalog_content_hash(
+    report_version: &str,
+    total_reports: usize,
+    by_category: &BTreeMap<String, usize>,
+    by_severity: &BTreeMap<String, usize>,
+    open_actions: usize,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"transparent_reports_hash_v1:");
+    hasher.update((report_version.len() as u64).to_le_bytes());
+    hasher.update(report_version.as_bytes());
+    hasher.update((total_reports as u64).to_le_bytes());
+    hasher.update((open_actions as u64).to_le_bytes());
+    hasher.update((by_category.len() as u64).to_le_bytes());
+    for (category, count) in by_category {
+        hasher.update((category.len() as u64).to_le_bytes());
+        hasher.update(category.as_bytes());
+        hasher.update((*count as u64).to_le_bytes());
+    }
+    hasher.update((by_severity.len() as u64).to_le_bytes());
+    for (severity, count) in by_severity {
+        hasher.update((severity.len() as u64).to_le_bytes());
+        hasher.update(severity.as_bytes());
+        hasher.update((*count as u64).to_le_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
 // ---------------------------------------------------------------------------
 // Engine
 // ---------------------------------------------------------------------------
@@ -309,22 +373,10 @@ impl TransparentReports {
             );
         }
 
-        // Compute hash
-        let hash_input = serde_json::json!({
-            "title": &report.title,
-            "category": report.category.label(),
-            "sections": &report.sections,
-        })
-        .to_string();
-        report.content_hash = hex::encode(Sha256::digest(
-            [
-                b"transparent_reports_hash_v1:" as &[u8],
-                hash_input.as_bytes(),
-            ]
-            .concat(),
-        ));
         report.report_version = self.report_version.clone();
         report.created_at = Utc::now().to_rfc3339();
+        report.content_hash =
+            compute_report_content_hash(&report).map_err(|err| err.to_string())?;
 
         let rid = report.report_id.clone();
 
@@ -369,7 +421,22 @@ impl TransparentReports {
             return Err(format!("Report {} not found", report_id));
         }
 
+        let mut report = self
+            .reports
+            .get(report_id)
+            .cloned()
+            .ok_or_else(|| format!("Report {report_id} not found"))?;
         let action_id = action.action_id.clone();
+        push_bounded(
+            &mut report.corrective_actions,
+            action,
+            MAX_CORRECTIVE_ACTIONS,
+        );
+        report.content_hash =
+            compute_report_content_hash(&report).map_err(|err| err.to_string())?;
+        let content_hash = report.content_hash.clone();
+        self.reports.insert(report_id.to_string(), report);
+
         self.log(
             event_codes::TR_CORRECTIVE_ACTION_ADDED,
             trace_id,
@@ -378,15 +445,13 @@ impl TransparentReports {
                 "action_id": &action_id,
             }),
         );
-
-        let report = self
-            .reports
-            .get_mut(report_id)
-            .ok_or_else(|| format!("Report {report_id} not found"))?;
-        push_bounded(
-            &mut report.corrective_actions,
-            action,
-            MAX_CORRECTIVE_ACTIONS,
+        self.log(
+            event_codes::TR_INTEGRITY_VERIFIED,
+            trace_id,
+            serde_json::json!({
+                "report_id": report_id,
+                "content_hash": &content_hash,
+            }),
         );
         Ok(())
     }
@@ -427,16 +492,17 @@ impl TransparentReports {
             ));
         }
 
-        let report_mut = self
-            .reports
-            .get_mut(report_id)
-            .ok_or_else(|| format!("Report {report_id} not found"))?;
-        let action_mut = report_mut
+        let mut updated_report = report.clone();
+        let action_mut = updated_report
             .corrective_actions
             .iter_mut()
             .find(|a| a.action_id == action_id)
             .ok_or_else(|| format!("Action {action_id} not found"))?;
         action_mut.status = new_status;
+        updated_report.content_hash =
+            compute_report_content_hash(&updated_report).map_err(|err| err.to_string())?;
+        let content_hash = updated_report.content_hash.clone();
+        self.reports.insert(report_id.to_string(), updated_report);
 
         self.log(
             event_codes::TR_ACTION_STATUS_UPDATED,
@@ -444,6 +510,14 @@ impl TransparentReports {
             serde_json::json!({
                 "action_id": action_id,
                 "new_status": new_status.label(),
+            }),
+        );
+        self.log(
+            event_codes::TR_INTEGRITY_VERIFIED,
+            trace_id,
+            serde_json::json!({
+                "report_id": report_id,
+                "content_hash": &content_hash,
             }),
         );
 
@@ -472,19 +546,13 @@ impl TransparentReports {
             }
         }
 
-        let hash_input = serde_json::json!({
-            "total_reports": self.reports.len(),
-            "by_category": &by_category,
-            "report_version": &self.report_version,
-        })
-        .to_string();
-        let content_hash = hex::encode(Sha256::digest(
-            [
-                b"transparent_reports_hash_v1:" as &[u8],
-                hash_input.as_bytes(),
-            ]
-            .concat(),
-        ));
+        let content_hash = compute_catalog_content_hash(
+            &self.report_version,
+            self.reports.len(),
+            &by_category,
+            &by_severity,
+            open_actions,
+        );
 
         self.log(
             event_codes::TR_CATALOG_GENERATED,
@@ -644,6 +712,36 @@ mod tests {
     }
 
     #[test]
+    fn report_hash_changes_when_severity_changes() {
+        let mut base = sample_report("r-1", ReportCategory::SecurityIncident);
+        base.report_version = REPORT_VERSION.to_string();
+        base.created_at = "2026-02-01T10:00:00Z".to_string();
+
+        let mut changed = base.clone();
+        changed.severity = Severity::Low;
+
+        assert_ne!(
+            compute_report_content_hash(&base).unwrap(),
+            compute_report_content_hash(&changed).unwrap()
+        );
+    }
+
+    #[test]
+    fn report_hash_changes_when_timeline_changes() {
+        let mut base = sample_report("r-1", ReportCategory::SecurityIncident);
+        base.report_version = REPORT_VERSION.to_string();
+        base.created_at = "2026-02-01T10:00:00Z".to_string();
+
+        let mut changed = base.clone();
+        changed.timeline[0].event = "Operator escalated incident".to_string();
+
+        assert_ne!(
+            compute_report_content_hash(&base).unwrap(),
+            compute_report_content_hash(&changed).unwrap()
+        );
+    }
+
+    #[test]
     fn add_corrective_action() {
         let mut engine = TransparentReports::default();
         engine
@@ -656,6 +754,34 @@ mod tests {
             engine
                 .add_corrective_action("r-1", sample_action("a-1"), &trace())
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn add_corrective_action_refreshes_content_hash() {
+        let mut engine = TransparentReports::default();
+        engine
+            .create_report(
+                sample_report("r-1", ReportCategory::SecurityIncident),
+                &trace(),
+            )
+            .expect("should succeed");
+        let initial_hash = engine
+            .reports()
+            .get("r-1")
+            .expect("report should exist")
+            .content_hash
+            .clone();
+
+        engine
+            .add_corrective_action("r-1", sample_action("a-1"), &trace())
+            .expect("should succeed");
+
+        let stored = engine.reports().get("r-1").expect("report should exist");
+        assert_ne!(stored.content_hash, initial_hash);
+        assert_eq!(
+            stored.content_hash,
+            compute_report_content_hash(stored).unwrap()
         );
     }
 
@@ -685,6 +811,37 @@ mod tests {
             engine
                 .update_action_status("r-1", "a-1", ActionStatus::Planned, &trace())
                 .is_ok()
+        );
+    }
+
+    #[test]
+    fn update_action_status_refreshes_content_hash() {
+        let mut engine = TransparentReports::default();
+        engine
+            .create_report(
+                sample_report("r-1", ReportCategory::SecurityIncident),
+                &trace(),
+            )
+            .expect("should succeed");
+        engine
+            .add_corrective_action("r-1", sample_action("a-1"), &trace())
+            .expect("should succeed");
+        let hash_after_add = engine
+            .reports()
+            .get("r-1")
+            .expect("report should exist")
+            .content_hash
+            .clone();
+
+        engine
+            .update_action_status("r-1", "a-1", ActionStatus::Planned, &trace())
+            .expect("should succeed");
+
+        let stored = engine.reports().get("r-1").expect("report should exist");
+        assert_ne!(stored.content_hash, hash_after_add);
+        assert_eq!(
+            stored.content_hash,
+            compute_report_content_hash(stored).unwrap()
         );
     }
 
@@ -782,6 +939,32 @@ mod tests {
     }
 
     #[test]
+    fn catalog_hash_changes_when_open_actions_change() {
+        let mut without_open_actions = TransparentReports::default();
+        let mut with_open_actions = TransparentReports::default();
+        without_open_actions
+            .create_report(
+                sample_report("r-1", ReportCategory::SecurityIncident),
+                &trace(),
+            )
+            .expect("should succeed");
+        with_open_actions
+            .create_report(
+                sample_report("r-1", ReportCategory::SecurityIncident),
+                &trace(),
+            )
+            .expect("should succeed");
+        with_open_actions
+            .add_corrective_action("r-1", sample_action("a-1"), &trace())
+            .expect("should succeed");
+
+        let first = without_open_actions.generate_catalog(&trace());
+        let second = with_open_actions.generate_catalog(&trace());
+
+        assert_ne!(first.content_hash, second.content_hash);
+    }
+
+    #[test]
     fn catalog_deterministic() {
         let mut e1 = TransparentReports::default();
         let mut e2 = TransparentReports::default();
@@ -843,8 +1026,12 @@ mod tests {
                 &trace(),
             )
             .expect("should succeed");
-        let jsonl = engine.export_audit_log_jsonl().expect("jsonl export should succeed");
-        let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().expect("should have line")).expect("parse should succeed");
+        let jsonl = engine
+            .export_audit_log_jsonl()
+            .expect("jsonl export should succeed");
+        let first: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().expect("should have line"))
+                .expect("parse should succeed");
         assert!(first["event_code"].is_string());
     }
 }
