@@ -426,12 +426,12 @@
     {
       "check": "Verification evidence checker counts match live checker results",
       "passed": true,
-      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json checker counts must match live checker state: expected passed=86, failed=0"
+      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json checker counts must match live checker state: expected exit_code=0, passed=86, failed=0"
     },
     {
       "check": "Verification evidence unit test counts match live checker results",
       "passed": true,
-      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json unit test counts must match live checker state: expected passed=20, failed=0"
+      "detail": "artifacts/section_10_17/bd-nbwo/verification_evidence.json unit test counts must match live checker state: expected exit_code=0, passed=20, failed=0"
     },
     {
       "check": "Verification summary counts match live checker results",
@@ -492,5 +492,5 @@
     }
   ],
   "summary": "bd-nbwo: Universal Verifier SDK and Replay Capsule Format\nChecks: 86/86 passing\nVerdict: PASS",
-  "timestamp": "2026-03-14T21:41:13.323548+00:00"
+  "timestamp": "2026-03-15T01:37:02.642261+00:00"
 }

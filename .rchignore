@@ -1,2 +1,14 @@
 target_crimson/
 target_crimson/**
+.rch_tmp/
+.rch_tmp/**
+.rch-tmp/
+.rch-tmp/**
+target_*/
+target_*/**
+target-*/
+target-*/**
+.beads/recovery_*/
+.beads/recovery_*/**
+.beads_recovery_*/
+.beads_recovery_*/**

@@ -201,20 +201,23 @@ def _artifact_consistency_checks(
         _check(
             ARTIFACT_CONSISTENCY_CHECK_NAMES[0],
             evidence_checker.get("passed_checks") == expected_passed
-            and evidence_checker.get("failed_checks") == expected_failed,
+            and evidence_checker.get("failed_checks") == expected_failed
+            and evidence_checker.get("exit_code") == 0,
             (
                 "artifacts/section_10_17/bd-nbwo/verification_evidence.json checker counts must "
-                f"match live checker state: expected passed={expected_passed}, "
-                f"failed={expected_failed}"
+                "match live checker state: "
+                f"expected exit_code=0, passed={expected_passed}, failed={expected_failed}"
             ),
         ),
         _check(
             ARTIFACT_CONSISTENCY_CHECK_NAMES[1],
             evidence_unit_tests.get("passed_tests") == unit_test_count
-            and evidence_unit_tests.get("failed_tests") == 0,
+            and evidence_unit_tests.get("failed_tests") == 0
+            and evidence_unit_tests.get("exit_code") == 0,
             (
                 "artifacts/section_10_17/bd-nbwo/verification_evidence.json unit test counts "
-                f"must match live checker state: expected passed={unit_test_count}, failed=0"
+                "must match live checker state: "
+                f"expected exit_code=0, passed={unit_test_count}, failed=0"
             ),
         ),
         _check(

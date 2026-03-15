@@ -72,8 +72,8 @@ class TestArtifactConsistencyGuards(unittest.TestCase):
             {"check": "beta", "passed": True, "detail": "ok"},
         ]
         evidence_doc = {
-            "checker": {"passed_checks": 5, "failed_checks": 0},
-            "unit_tests": {"passed_tests": 2, "failed_tests": 0},
+            "checker": {"passed_checks": 5, "failed_checks": 0, "exit_code": 0},
+            "unit_tests": {"passed_tests": 2, "failed_tests": 0, "exit_code": 0},
         }
         summary_src = (
             "- Check script: `scripts/check_verifier_sdk_capsule.py` -- 5/5 checks PASS\n"
@@ -96,8 +96,8 @@ class TestArtifactConsistencyGuards(unittest.TestCase):
             {"check": "beta", "passed": True, "detail": "ok"},
         ]
         evidence_doc = {
-            "checker": {"passed_checks": 4, "failed_checks": 0},
-            "unit_tests": {"passed_tests": 1, "failed_tests": 0},
+            "checker": {"passed_checks": 4, "failed_checks": 0, "exit_code": 1},
+            "unit_tests": {"passed_tests": 1, "failed_tests": 0, "exit_code": 1},
         }
         summary_src = (
             "- Check script: `scripts/check_verifier_sdk_capsule.py` -- 4/5 checks PASS\n"
