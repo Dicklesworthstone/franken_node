@@ -440,7 +440,7 @@ pub(crate) fn build_trace_commitment_proof(
     let mut index = leaf_index;
 
     while level.len() > 1 {
-        let sibling_index = if index % 2 == 0 {
+        let sibling_index = if index.is_multiple_of(2) {
             (index + 1).min(level.len() - 1)
         } else {
             index - 1
@@ -495,6 +495,7 @@ pub(crate) fn verify_trace_commitment_proof(
     crate::security::constant_time::ct_eq(&current, &expected_root)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn compute_capsule_integrity_hash(
     capsule_id: &str,
     schema_version: &str,
@@ -529,6 +530,7 @@ pub(crate) fn compute_capsule_integrity_hash(
     format!("sha256:{}", hex::encode(Sha256::digest(payload)))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn replay_capsule_signature_payload(
     capsule_id: &str,
     schema_version: &str,
@@ -851,9 +853,7 @@ pub fn verify_claim(
             detail: if refs_bound {
                 "all evidence_refs match provided evidence_ids".to_string()
             } else {
-                format!(
-                    "evidence_refs mismatch: undeclared={undeclared:?}, missing={missing:?}"
-                )
+                format!("evidence_refs mismatch: undeclared={undeclared:?}, missing={missing:?}")
             },
         });
 
@@ -1621,10 +1621,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.verdict, Verdict::Fail);
-        assert!(result
-            .checked_assertions
-            .iter()
-            .any(|assertion| assertion.assertion == "signature_valid" && !assertion.passed));
+        assert!(
+            result
+                .checked_assertions
+                .iter()
+                .any(|assertion| assertion.assertion == "signature_valid" && !assertion.passed)
+        );
     }
 
     #[test]
@@ -2407,7 +2409,10 @@ mod tests {
         claim.evidence_refs.push("ev-phantom".to_string());
         let signer = test_verifier_signer("v1", 1);
         let err = verify_claim(&claim, &evidence, &signer);
-        assert!(err.is_err(), "should reject missing evidence for declared ref");
+        assert!(
+            err.is_err(),
+            "should reject missing evidence for declared ref"
+        );
     }
 
     /// verify_claim rejects when evidence item is not declared in evidence_refs.
@@ -2434,6 +2439,9 @@ mod tests {
         bundle.claim.evidence_refs = vec!["ev-ref-001".to_string()];
         // Bundle still has 2 evidence items but claim only declares 1 ref.
         let err = validate_bundle(&bundle);
-        assert!(err.is_err(), "should reject when evidence_refs subset of evidence items");
+        assert!(
+            err.is_err(),
+            "should reject when evidence_refs subset of evidence items"
+        );
     }
 }

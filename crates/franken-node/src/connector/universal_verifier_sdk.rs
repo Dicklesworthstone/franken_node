@@ -312,6 +312,7 @@ impl std::error::Error for VsdkError {}
 
 /// Compute a deterministic hash over a string (hex-encoded SHA-256).
 /// INV-VSDK-CAPSULE-DETERMINISTIC: same inputs always produce same output.
+#[cfg(test)]
 fn deterministic_hash(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"universal_verifier_sdk_v1:");
@@ -1173,7 +1174,9 @@ mod tests {
             .manifest
             .metadata
             .remove(CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY);
-        sign_capsule(&mut capsule, &reference_signing_key());
+        let signature =
+            reference_signing_key().sign(&canonical_capsule_signature_payload(&capsule));
+        capsule.signature = hex::encode(signature.to_bytes());
 
         match verify_capsule_signature(&capsule) {
             Err(VsdkError::ManifestIncomplete(msg)) => {

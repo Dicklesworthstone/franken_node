@@ -694,14 +694,47 @@ impl TelemetryBridge {
         state: Arc<Mutex<TelemetryBridgeState>>,
         stop_flag: Arc<AtomicBool>,
     ) {
-        let reader = BufReader::new(stream);
-        for line in reader.lines() {
+        if let Err(err) =
+            stream.set_read_timeout(Some(Duration::from_millis(ACCEPT_POLL_INTERVAL_MS)))
+        {
+            Self::with_state(&state, |metrics| {
+                metrics.record_event(
+                    event_codes::CONNECTION_READ_FAILED,
+                    Some(connection_id),
+                    None,
+                    Some(reason_codes::READ_FAILED),
+                    format!("failed to configure connection read timeout: {err}"),
+                );
+                metrics.active_connections = metrics.active_connections.saturating_sub(1);
+                metrics.record_event(
+                    event_codes::CONNECTION_CLOSED,
+                    Some(connection_id),
+                    None,
+                    Some(reason_codes::READ_FAILED),
+                    "connection closed after read-timeout setup failure",
+                );
+            });
+            return;
+        }
+        let mut reader = BufReader::new(stream);
+        let mut event_json = String::new();
+
+        loop {
             // Stop flag check: refuse new events during drain
             if stop_flag.load(Ordering::SeqCst) {
                 break;
             }
-            match line {
-                Ok(event_json) => {
+
+            match reader.read_line(&mut event_json) {
+                Ok(0) => break,
+                Ok(_) => {
+                    if event_json.ends_with('\n') {
+                        event_json.pop();
+                        if event_json.ends_with('\r') {
+                            event_json.pop();
+                        }
+                    }
+
                     if event_json.len() > MAX_EVENT_BYTES {
                         Self::with_state(&state, |metrics| {
                             metrics.shed_total = metrics.shed_total.saturating_add(1);
@@ -713,6 +746,7 @@ impl TelemetryBridge {
                                 format!("event exceeded {} bytes", MAX_EVENT_BYTES),
                             );
                         });
+                        event_json.clear();
                         continue;
                     }
 
@@ -722,8 +756,10 @@ impl TelemetryBridge {
                     let envelope = PersistEnvelope {
                         connection_id,
                         bridge_seq,
-                        payload: event_json.into_bytes(),
+                        payload: event_json.as_bytes().to_vec(),
                     };
+
+                    event_json.clear();
 
                     let admitted = Self::enqueue_with_timeout(
                         &sender,
@@ -734,6 +770,9 @@ impl TelemetryBridge {
                     if !admitted {
                         continue;
                     }
+                }
+                Err(err) if matches!(err.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {
+                    continue;
                 }
                 Err(err) => {
                     Self::with_state(&state, |metrics| {
@@ -940,7 +979,10 @@ mod tests {
         drop(receiver);
 
         assert!(!admitted);
-        let snapshot = state.lock().map(|s| s.snapshot()).unwrap_or_else(|_| unreachable!("state lock poisoned"));
+        let snapshot = state
+            .lock()
+            .map(|s| s.snapshot())
+            .unwrap_or_else(|_| unreachable!("state lock poisoned"));
         assert_eq!(snapshot.accepted_total, 0);
         assert_eq!(snapshot.shed_total, 1);
         assert_eq!(
@@ -978,14 +1020,19 @@ mod tests {
             .join()
             .expect("persistence worker should exit cleanly");
 
-        let snapshot = state.lock().map(|s| s.snapshot()).unwrap_or_else(|_| unreachable!("state lock poisoned"));
+        let snapshot = state
+            .lock()
+            .map(|s| s.snapshot())
+            .unwrap_or_else(|_| unreachable!("state lock poisoned"));
         assert_eq!(snapshot.accepted_total, 1);
         assert_eq!(snapshot.persisted_total, 1);
         assert_eq!(snapshot.queue_depth, 0);
-        assert!(snapshot
-            .recent_events
-            .iter()
-            .any(|event| event.code == event_codes::PERSIST_SUCCESS));
+        assert!(
+            snapshot
+                .recent_events
+                .iter()
+                .any(|event| event.code == event_codes::PERSIST_SUCCESS)
+        );
     }
 
     #[test]
@@ -1006,7 +1053,10 @@ mod tests {
         );
 
         assert!(!admitted);
-        let snapshot = state.lock().map(|s| s.snapshot()).unwrap_or_else(|_| unreachable!("state lock poisoned"));
+        let snapshot = state
+            .lock()
+            .map(|s| s.snapshot())
+            .unwrap_or_else(|_| unreachable!("state lock poisoned"));
         assert_eq!(snapshot.dropped_total, 1);
         assert_eq!(
             snapshot
@@ -1099,10 +1149,12 @@ mod tests {
         );
         let report = handle.join(Duration::from_secs(5)).expect("join");
         assert!(report.drain_completed);
-        assert!(report
-            .recent_events
-            .iter()
-            .any(|e| e.code == event_codes::DRAIN_STARTED),);
+        assert!(
+            report
+                .recent_events
+                .iter()
+                .any(|e| e.code == event_codes::DRAIN_STARTED),
+        );
     }
 
     #[test]
@@ -1128,8 +1180,14 @@ mod tests {
         // verify the state tracking logic: if active_connections >= MAX_ACTIVE_CONNECTIONS,
         // the loop rejects.
         let state = test_state(2);
-        state.lock().unwrap_or_else(|_| unreachable!("state lock poisoned")).active_connections = MAX_ACTIVE_CONNECTIONS;
-        let snap = state.lock().unwrap_or_else(|_| unreachable!("state lock poisoned")).snapshot();
+        state
+            .lock()
+            .unwrap_or_else(|_| unreachable!("state lock poisoned"))
+            .active_connections = MAX_ACTIVE_CONNECTIONS;
+        let snap = state
+            .lock()
+            .unwrap_or_else(|_| unreachable!("state lock poisoned"))
+            .snapshot();
         assert_eq!(snap.active_connections, MAX_ACTIVE_CONNECTIONS);
     }
 
@@ -1203,10 +1261,12 @@ mod tests {
         assert!(report.drain_completed);
         assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
         // Engine exit with non-zero code should still drain cleanly
-        assert!(report
-            .recent_events
-            .iter()
-            .any(|e| e.code == event_codes::DRAIN_COMPLETE));
+        assert!(
+            report
+                .recent_events
+                .iter()
+                .any(|e| e.code == event_codes::DRAIN_COMPLETE)
+        );
     }
 
     #[test]
@@ -1255,10 +1315,7 @@ mod tests {
 
         // Verify the adapter received the data
         let mut db = adapter_ref.lock().expect("adapter lock");
-        let result = db.read(
-            PersistenceClass::AuditLog,
-            "telemetry_00000000000000000001",
-        );
+        let result = db.read(PersistenceClass::AuditLog, "telemetry_00000000000000000001");
         assert!(result.found, "event should be persisted in adapter store");
         let payload = result.value.expect("payload");
         assert!(
@@ -1267,6 +1324,42 @@ mod tests {
                 .contains("test_event"),
             "payload should contain the event data"
         );
+    }
+
+    #[test]
+    fn stop_and_join_completes_with_idle_open_client() {
+        use std::os::unix::net::UnixStream;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("test_idle_open_client.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
+        let handle = bridge.start().expect("start");
+
+        let stream = UnixStream::connect(&sock).expect("connect");
+
+        let wait_start = Instant::now();
+        while handle.snapshot().active_connections == 0 {
+            assert!(
+                wait_start.elapsed() < Duration::from_secs(2),
+                "bridge never observed the idle connection",
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        let report = handle
+            .stop_and_join(ShutdownReason::Requested)
+            .expect("stop_and_join");
+        assert!(report.drain_completed);
+        assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+        assert!(
+            report
+                .recent_events
+                .iter()
+                .any(|event| event.code == event_codes::CONNECTION_CLOSED)
+        );
+
+        drop(stream);
     }
 
     #[test]
@@ -1381,11 +1474,13 @@ mod tests {
             report.accepted_total, 1,
             "normal event should still be accepted"
         );
-        assert!(report
-            .recent_events
-            .iter()
-            .any(|e| e.code == event_codes::ADMISSION_SHED
-                && e.reason_code.as_deref() == Some(reason_codes::EVENT_TOO_LARGE)));
+        assert!(
+            report
+                .recent_events
+                .iter()
+                .any(|e| e.code == event_codes::ADMISSION_SHED
+                    && e.reason_code.as_deref() == Some(reason_codes::EVENT_TOO_LARGE))
+        );
     }
 
     #[test]
@@ -1421,11 +1516,13 @@ mod tests {
             })
             .expect("stop_and_join");
         assert!(report.drain_completed);
-        assert!(report
-            .recent_events
-            .iter()
-            .any(|e| e.code == event_codes::DRAIN_STARTED
-                && e.reason_code.as_deref() == Some(reason_codes::ENGINE_EXIT)));
+        assert!(
+            report
+                .recent_events
+                .iter()
+                .any(|e| e.code == event_codes::DRAIN_STARTED
+                    && e.reason_code.as_deref() == Some(reason_codes::ENGINE_EXIT))
+        );
     }
 
     #[test]
@@ -1714,9 +1811,7 @@ mod tests {
 
     #[test]
     fn shutdown_reason_variants_are_distinct() {
-        let engine_zero = ShutdownReason::EngineExit {
-            exit_code: Some(0),
-        };
+        let engine_zero = ShutdownReason::EngineExit { exit_code: Some(0) };
         let engine_sigkill = ShutdownReason::EngineExit {
             exit_code: Some(137),
         };
@@ -1770,7 +1865,9 @@ mod tests {
         let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
         let bridge = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter);
         // start() should clean up the stale socket and bind successfully
-        let handle = bridge.start().expect("start should succeed despite stale socket");
+        let handle = bridge
+            .start()
+            .expect("start should succeed despite stale socket");
         assert_eq!(handle.lifecycle_state(), BridgeLifecycleState::Running);
         let report = handle
             .stop_and_join(ShutdownReason::Requested)

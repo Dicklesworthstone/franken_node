@@ -171,6 +171,7 @@ impl std::error::Error for CapsuleError {}
 
 /// Deterministic SHA-256 hash (hex-encoded, 64 chars).
 /// INV-VSK-DETERMINISTIC-VERIFY: same input always produces same output.
+#[cfg(test)]
 fn deterministic_hash(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"replay_capsule_v1:");

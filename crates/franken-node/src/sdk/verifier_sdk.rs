@@ -1017,12 +1017,11 @@ mod tests {
     fn test_verify_capsule_extra_mismatched_expected_output_fails() {
         let sdk = test_sdk();
         let mut cap = valid_capsule();
-        cap.expected_outputs
-            .push(super::replay_capsule::CapsuleOutput {
-                seq: 1,
-                data: b"tampered".to_vec(),
-                output_hash: "wrong_hash".to_string(),
-            });
+        cap.expected_outputs.push(CapsuleOutput {
+            seq: 1,
+            data: b"tampered".to_vec(),
+            output_hash: "wrong_hash".to_string(),
+        });
         let report = sdk.verify_capsule(&cap).unwrap();
         assert!(matches!(report.verdict, VerifyVerdict::Fail(_)));
         assert!(

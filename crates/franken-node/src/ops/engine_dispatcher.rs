@@ -1,14 +1,36 @@
 use crate::config::Config;
-use crate::ops::telemetry_bridge::{ShutdownReason, TelemetryBridge};
+use crate::ops::telemetry_bridge::{
+    ShutdownReason, TelemetryBridge, TelemetryRuntimeHandle, TelemetryRuntimeReport,
+};
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
 
 pub struct EngineDispatcher {
     engine_bin_path: String,
 }
+
+#[derive(Debug)]
+enum EngineProcessError {
+    Spawn {
+        message: String,
+        #[cfg_attr(not(test), allow(dead_code))]
+        telemetry_report: Option<Box<TelemetryRuntimeReport>>,
+    },
+    TelemetryDrain(String),
+}
+
+impl std::fmt::Display for EngineProcessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Spawn { message, .. } | Self::TelemetryDrain(message) => f.write_str(message),
+        }
+    }
+}
+
+impl std::error::Error for EngineProcessError {}
 
 fn default_engine_binary_candidates() -> Vec<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -149,18 +171,9 @@ impl EngineDispatcher {
                 telemetry_handle.socket_path().to_string_lossy().as_ref(),
             );
 
-        let status = cmd
-            .status()
-            .context("Failed to spawn franken_engine process")?;
-
-        // Determine shutdown reason from engine exit status
-        let exit_code = status.code();
-        let reason = ShutdownReason::EngineExit { exit_code };
-
-        // Stop and drain telemetry before any exit
-        let report = telemetry_handle
-            .stop_and_join(reason)
+        let (status, report) = Self::run_engine_process(&mut cmd, telemetry_handle)
             .map_err(|err| anyhow::anyhow!("{err}"))?;
+        let exit_code = status.code();
 
         if !report.drain_completed {
             eprintln!(
@@ -185,12 +198,56 @@ impl EngineDispatcher {
 
         Ok(())
     }
+
+    fn run_engine_process(
+        cmd: &mut Command,
+        telemetry_handle: TelemetryRuntimeHandle,
+    ) -> std::result::Result<(ExitStatus, TelemetryRuntimeReport), EngineProcessError> {
+        match cmd.status() {
+            Ok(status) => {
+                let report = telemetry_handle
+                    .stop_and_join(ShutdownReason::EngineExit {
+                        exit_code: status.code(),
+                    })
+                    .map_err(|err| {
+                        EngineProcessError::TelemetryDrain(format!(
+                            "telemetry drain failed after engine exit: {err}"
+                        ))
+                    })?;
+                Ok((status, report))
+            }
+            Err(spawn_err) => match telemetry_handle.stop_and_join(ShutdownReason::Requested) {
+                Ok(report) if report.drain_completed => Err(EngineProcessError::Spawn {
+                    message: format!(
+                        "Failed to spawn franken_engine process: {spawn_err}. telemetry bridge stopped after launch failure in {}ms",
+                        report.drain_duration_ms
+                    ),
+                    telemetry_report: Some(Box::new(report)),
+                }),
+                Ok(report) => Err(EngineProcessError::Spawn {
+                    message: format!(
+                        "Failed to spawn franken_engine process: {spawn_err}. telemetry bridge drain timed out after launch failure in {}ms",
+                        report.drain_duration_ms
+                    ),
+                    telemetry_report: Some(Box::new(report)),
+                }),
+                Err(cleanup_err) => Err(EngineProcessError::Spawn {
+                    message: format!(
+                        "Failed to spawn franken_engine process: {spawn_err}. additionally failed to stop telemetry bridge: {cleanup_err}"
+                    ),
+                    telemetry_report: None,
+                }),
+            },
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::telemetry_bridge::{BridgeLifecycleState, event_codes, reason_codes};
     use std::collections::BTreeSet;
+    use std::sync::{Arc, Mutex};
 
     #[test]
     fn resolver_prefers_env_override() {
@@ -247,5 +304,49 @@ mod tests {
         let resolved =
             resolve_engine_binary_path_with("/missing/configured", None, &candidates, &|_| false);
         assert_eq!(resolved, "franken-engine");
+    }
+
+    #[test]
+    fn spawn_failure_stops_telemetry_bridge_before_returning_error() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let sock = tmp.path().join("spawn_failure_cleanup.sock");
+        let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
+        let handle = TelemetryBridge::new(sock.to_str().expect("utf8"), adapter)
+            .start()
+            .expect("start");
+
+        let missing_bin = tmp.path().join("missing-franken-engine");
+        let mut cmd = Command::new(&missing_bin);
+        let err = EngineDispatcher::run_engine_process(&mut cmd, handle).expect_err("spawn fails");
+
+        match err {
+            EngineProcessError::Spawn {
+                message,
+                telemetry_report: Some(report),
+            } => {
+                assert!(message.contains("Failed to spawn franken_engine process"));
+                assert!(message.contains("telemetry bridge stopped after launch failure"));
+                assert!(report.drain_completed);
+                assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+                assert!(
+                    report.recent_events.iter().any(|event| event.code
+                        == event_codes::DRAIN_STARTED
+                        && event.reason_code.as_deref() == Some(reason_codes::SHUTDOWN_REQUESTED))
+                );
+                assert!(
+                    report
+                        .recent_events
+                        .iter()
+                        .any(|event| event.code == event_codes::DRAIN_COMPLETE)
+                );
+                assert!(
+                    !report
+                        .recent_events
+                        .iter()
+                        .any(|event| event.code == event_codes::DRAIN_TIMEOUT)
+                );
+            }
+            other => panic!("expected spawn error with cleanup report, got {other:?}"),
+        }
     }
 }

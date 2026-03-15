@@ -323,6 +323,31 @@ impl ComputationRegistry {
         trace_id: &str,
     ) -> Result<ComputationEntry, ComputationRegistryError> {
         let entry = self.validate_computation_name(name, trace_id)?;
+        for capability in entry
+            .required_capabilities
+            .iter()
+            .copied()
+            .filter(|op| *op != RemoteOperation::RemoteComputation)
+        {
+            capability_gate
+                .recheck_network(remote_cap, capability, endpoint, now_epoch_secs, trace_id)
+                .map_err(|err| {
+                    self.record_event(
+                        CR_DISPATCH_GATED,
+                        trace_id,
+                        Some(name.to_string()),
+                        format!(
+                            "dispatch denied endpoint={endpoint} operation={capability} reason={}",
+                            err.code()
+                        ),
+                    );
+                    ComputationRegistryError::DispatchDenied {
+                        code: err.code().to_string(),
+                        compatibility_code: err.compatibility_code().map(ToString::to_string),
+                        detail: err.to_string(),
+                    }
+                })?;
+        }
         match capability_gate.authorize_network(
             remote_cap,
             RemoteOperation::RemoteComputation,
@@ -566,6 +591,117 @@ mod tests {
             )
             .expect("dispatch should be authorized");
         assert_eq!(entry.name, "trust.verify_manifest.v1");
+    }
+
+    #[test]
+    fn dispatch_gate_rejects_missing_additional_required_capability() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        registry
+            .register_computation(
+                ComputationEntry {
+                    name: "trust.telemetry_bridge.v1".to_string(),
+                    description: "Forward remote telemetry for manifest verification".to_string(),
+                    required_capabilities: vec![
+                        RemoteOperation::RemoteComputation,
+                        RemoteOperation::TelemetryExport,
+                    ],
+                    input_schema: "schemas/telemetry_bridge_input.json".to_string(),
+                    output_schema: "schemas/telemetry_bridge_output.json".to_string(),
+                },
+                "trace-register",
+            )
+            .expect("register");
+
+        let provider = CapabilityProvider::new("registry-secret");
+        let (cap, _) = provider
+            .issue(
+                "ops-control-plane",
+                RemoteScope::new(
+                    vec![RemoteOperation::RemoteComputation],
+                    vec!["https://compute.example.com".to_string()],
+                ),
+                1_700_000_000,
+                3_600,
+                true,
+                true,
+                "trace-issue",
+            )
+            .expect("issue capability");
+        let mut gate = CapabilityGate::new("registry-secret");
+
+        let err = registry
+            .authorize_dispatch(
+                "trust.telemetry_bridge.v1",
+                "https://compute.example.com/verify",
+                Some(&cap),
+                &mut gate,
+                1_700_000_050,
+                "trace-dispatch-missing-telemetry-export",
+            )
+            .expect_err("missing extra capability must fail");
+        assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
+
+        gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::RemoteComputation,
+            "https://compute.example.com/verify",
+            1_700_000_051,
+            "trace-token-still-usable",
+        )
+        .expect("failed precheck must not consume single-use capability");
+    }
+
+    #[test]
+    fn dispatch_gate_accepts_full_required_capability_set() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        registry
+            .register_computation(
+                ComputationEntry {
+                    name: "trust.telemetry_bridge.v1".to_string(),
+                    description: "Forward remote telemetry for manifest verification".to_string(),
+                    required_capabilities: vec![
+                        RemoteOperation::TelemetryExport,
+                        RemoteOperation::RemoteComputation,
+                    ],
+                    input_schema: "schemas/telemetry_bridge_input.json".to_string(),
+                    output_schema: "schemas/telemetry_bridge_output.json".to_string(),
+                },
+                "trace-register",
+            )
+            .expect("register");
+
+        let provider = CapabilityProvider::new("registry-secret");
+        let (cap, _) = provider
+            .issue(
+                "ops-control-plane",
+                RemoteScope::new(
+                    vec![
+                        RemoteOperation::RemoteComputation,
+                        RemoteOperation::TelemetryExport,
+                    ],
+                    vec!["https://compute.example.com".to_string()],
+                ),
+                1_700_000_000,
+                3_600,
+                true,
+                false,
+                "trace-issue",
+            )
+            .expect("issue capability");
+        let mut gate = CapabilityGate::new("registry-secret");
+
+        let entry = registry
+            .authorize_dispatch(
+                "trust.telemetry_bridge.v1",
+                "https://compute.example.com/verify",
+                Some(&cap),
+                &mut gate,
+                1_700_000_050,
+                "trace-dispatch-ok",
+            )
+            .expect("dispatch should be authorized");
+        assert_eq!(entry.required_capabilities.len(), 2);
+        assert_eq!(entry.name, "trust.telemetry_bridge.v1");
     }
 
     #[test]
