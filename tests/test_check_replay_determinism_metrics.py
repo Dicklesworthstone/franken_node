@@ -77,6 +77,9 @@ class TestIndividualChecks:
     def test_report_generation(self, results):
         assert results["report_generation"]["passed"]
 
+    def test_artifact_completeness_hash_surface(self, results):
+        assert results["artifact_completeness_hash_surface"]["passed"]
+
     def test_metric_versioning(self, results):
         assert results["metric_versioning"]["passed"]
 

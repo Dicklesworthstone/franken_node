@@ -65,6 +65,14 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 }
 
+fn hash_f64(hasher: &mut Sha256, value: f64) {
+    if value.is_finite() {
+        hasher.update(value.to_le_bytes());
+    } else {
+        hasher.update(f64::NAN.to_le_bytes());
+    }
+}
+
 /// Migration phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -389,22 +397,31 @@ impl MigrationSpeedFailureMetrics {
             h.update((total as u64).to_le_bytes());
             h.update((success as u64).to_le_bytes());
             h.update((failure as u64).to_le_bytes());
-            if failure_rate.is_finite() {
-                h.update(failure_rate.to_le_bytes());
-            } else {
-                h.update(f64::NAN.to_le_bytes());
-            }
-            if avg_total.is_finite() {
-                h.update(avg_total.to_le_bytes());
-            } else {
-                h.update(f64::NAN.to_le_bytes());
-            }
+            hash_f64(&mut h, failure_rate);
+            hash_f64(&mut h, avg_total);
             h.update(&[u8::from(exceeds)]);
+            h.update((phase_stats.len() as u64).to_le_bytes());
+            for phase_stat in &phase_stats {
+                let label = phase_stat.phase.label();
+                h.update((label.len() as u64).to_le_bytes());
+                h.update(label.as_bytes());
+                h.update((phase_stat.count as u64).to_le_bytes());
+                hash_f64(&mut h, phase_stat.avg_duration_ms);
+                h.update(phase_stat.p90_duration_ms.to_le_bytes());
+            }
             h.update((flagged_phases.len() as u64).to_le_bytes());
             for phase in &flagged_phases {
                 let label = phase.label();
                 h.update((label.len() as u64).to_le_bytes());
                 h.update(label.as_bytes());
+            }
+            h.update((failure_stats.len() as u64).to_le_bytes());
+            for failure_stat in &failure_stats {
+                let label = failure_stat.failure_type.label();
+                h.update((label.len() as u64).to_le_bytes());
+                h.update(label.as_bytes());
+                h.update((failure_stat.count as u64).to_le_bytes());
+                hash_f64(&mut h, failure_stat.rate);
             }
             hex::encode(h.finalize())
         };
@@ -485,26 +502,40 @@ mod tests {
             .collect()
     }
 
-    fn sample_record(id: &str, succeeded: bool) -> MigrationRecord {
+    fn record_with_durations_and_failure(
+        id: &str,
+        durations: [u64; 5],
+        failure_type: Option<FailureType>,
+    ) -> MigrationRecord {
+        let succeeded = failure_type.is_none();
         MigrationRecord {
             record_id: id.to_string(),
             project_id: "proj-1".to_string(),
-            phase_durations: sample_phases(),
+            phase_durations: MigrationPhase::all()
+                .iter()
+                .copied()
+                .zip(durations)
+                .map(|(phase, duration_ms)| PhaseDuration { phase, duration_ms })
+                .collect(),
             total_duration_ms: 0,
             succeeded,
-            failure_type: if succeeded {
+            failure_type,
+            failure_phase: (!succeeded).then_some(MigrationPhase::TestValidation),
+            window_id: "w1".to_string(),
+            timestamp: String::new(),
+        }
+    }
+
+    fn sample_record(id: &str, succeeded: bool) -> MigrationRecord {
+        record_with_durations_and_failure(
+            id,
+            [1000, 1000, 1000, 1000, 1000],
+            if succeeded {
                 None
             } else {
                 Some(FailureType::RuntimeError)
             },
-            failure_phase: if succeeded {
-                None
-            } else {
-                Some(MigrationPhase::TestValidation)
-            },
-            window_id: "w1".to_string(),
-            timestamp: String::new(),
-        }
+        )
     }
 
     #[test]
@@ -650,6 +681,91 @@ mod tests {
             e1.generate_report("t").content_hash,
             e2.generate_report("t").content_hash
         );
+    }
+
+    #[test]
+    fn phase_stats_change_hash_when_distribution_changes() {
+        let mut e1 = MigrationSpeedFailureMetrics::default();
+        let mut e2 = MigrationSpeedFailureMetrics::default();
+
+        e1.record_migration(
+            record_with_durations_and_failure("r1", [1000, 1000, 1000, 1000, 1000], None),
+            &trace(),
+        )
+        .unwrap();
+        e2.record_migration(
+            record_with_durations_and_failure("r1", [2000, 1000, 1000, 500, 500], None),
+            &trace(),
+        )
+        .unwrap();
+
+        let r1 = e1.generate_report("t");
+        let r2 = e2.generate_report("t");
+
+        assert_eq!(r1.total_migrations, r2.total_migrations);
+        assert_eq!(r1.success_count, r2.success_count);
+        assert_eq!(r1.failure_count, r2.failure_count);
+        assert_eq!(r1.avg_total_duration_ms, r2.avg_total_duration_ms);
+        assert_eq!(r1.flagged_phases, r2.flagged_phases);
+        assert_ne!(r1.phase_stats, r2.phase_stats);
+        assert_ne!(r1.content_hash, r2.content_hash);
+    }
+
+    #[test]
+    fn failure_stats_change_hash_when_distribution_changes() {
+        let mut e1 = MigrationSpeedFailureMetrics::default();
+        let mut e2 = MigrationSpeedFailureMetrics::default();
+
+        e1.record_migration(
+            record_with_durations_and_failure(
+                "r1",
+                [1000, 1000, 1000, 1000, 1000],
+                Some(FailureType::RuntimeError),
+            ),
+            &trace(),
+        )
+        .unwrap();
+        e1.record_migration(
+            record_with_durations_and_failure(
+                "r2",
+                [1000, 1000, 1000, 1000, 1000],
+                Some(FailureType::RuntimeError),
+            ),
+            &trace(),
+        )
+        .unwrap();
+
+        e2.record_migration(
+            record_with_durations_and_failure(
+                "r1",
+                [1000, 1000, 1000, 1000, 1000],
+                Some(FailureType::RuntimeError),
+            ),
+            &trace(),
+        )
+        .unwrap();
+        e2.record_migration(
+            record_with_durations_and_failure(
+                "r2",
+                [1000, 1000, 1000, 1000, 1000],
+                Some(FailureType::ApiIncompatibility),
+            ),
+            &trace(),
+        )
+        .unwrap();
+
+        let r1 = e1.generate_report("t");
+        let r2 = e2.generate_report("t");
+
+        assert_eq!(r1.total_migrations, r2.total_migrations);
+        assert_eq!(r1.success_count, r2.success_count);
+        assert_eq!(r1.failure_count, r2.failure_count);
+        assert_eq!(r1.failure_rate, r2.failure_rate);
+        assert_eq!(r1.avg_total_duration_ms, r2.avg_total_duration_ms);
+        assert_eq!(r1.phase_stats, r2.phase_stats);
+        assert_eq!(r1.flagged_phases, r2.flagged_phases);
+        assert_ne!(r1.failure_stats, r2.failure_stats);
+        assert_ne!(r1.content_hash, r2.content_hash);
     }
 
     #[test]

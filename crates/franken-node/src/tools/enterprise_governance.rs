@@ -40,6 +40,51 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 }
 
+fn hash_f64(hasher: &mut Sha256, value: f64) {
+    if value.is_finite() {
+        hasher.update(value.to_le_bytes());
+    } else {
+        hasher.update(f64::NAN.to_le_bytes());
+    }
+}
+
+fn compute_report_content_hash(
+    schema_version: &str,
+    total_rules: usize,
+    total_assessments: usize,
+    categories: &[CategoryCompliance],
+    gate_action: GateAction,
+    blocked_rules: &[String],
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"enterprise_governance_hash_v1:");
+    hasher.update((schema_version.len() as u64).to_le_bytes());
+    hasher.update(schema_version.as_bytes());
+    hasher.update((total_rules as u64).to_le_bytes());
+    hasher.update((total_assessments as u64).to_le_bytes());
+    hasher.update((categories.len() as u64).to_le_bytes());
+    for category in categories {
+        let category_label = category.category.label();
+        hasher.update((category_label.len() as u64).to_le_bytes());
+        hasher.update(category_label.as_bytes());
+        hasher.update((category.total_rules as u64).to_le_bytes());
+        hasher.update((category.compliant as u64).to_le_bytes());
+        hasher.update((category.non_compliant as u64).to_le_bytes());
+        hasher.update((category.partially_compliant as u64).to_le_bytes());
+        hasher.update((category.not_assessed as u64).to_le_bytes());
+        hash_f64(&mut hasher, category.compliance_rate);
+    }
+    let gate_label = format!("{gate_action:?}");
+    hasher.update((gate_label.len() as u64).to_le_bytes());
+    hasher.update(gate_label.as_bytes());
+    hasher.update((blocked_rules.len() as u64).to_le_bytes());
+    for rule_id in blocked_rules {
+        hasher.update((rule_id.len() as u64).to_le_bytes());
+        hasher.update(rule_id.as_bytes());
+    }
+    hex::encode(hasher.finalize())
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -433,24 +478,16 @@ impl EnterpriseGovernance {
             }),
         );
 
-        let content_hash = {
-            let mut h = Sha256::new();
-            h.update(b"enterprise_governance_hash_v1:");
-            h.update((self.schema_version.len() as u64).to_le_bytes());
-            h.update(self.schema_version.as_bytes());
-            h.update((self.rules.len() as u64).to_le_bytes());
-            h.update((self.assessments.len() as u64).to_le_bytes());
-            h.update((categories.len() as u64).to_le_bytes());
-            let gate_label = format!("{gate_action:?}");
-            h.update((gate_label.len() as u64).to_le_bytes());
-            h.update(gate_label.as_bytes());
-            h.update((blocked_rules.len() as u64).to_le_bytes());
-            for rule_id in &blocked_rules {
-                h.update((rule_id.len() as u64).to_le_bytes());
-                h.update(rule_id.as_bytes());
-            }
-            hex::encode(h.finalize())
-        };
+        let total_rules = self.rules.len();
+        let total_assessments = self.assessments.len();
+        let content_hash = compute_report_content_hash(
+            &self.schema_version,
+            total_rules,
+            total_assessments,
+            &categories,
+            gate_action,
+            &blocked_rules,
+        );
 
         self.log(
             event_codes::EGI_REPORT_GENERATED,
@@ -473,8 +510,8 @@ impl EnterpriseGovernance {
             report_id: Uuid::now_v7().to_string(),
             timestamp: Utc::now().to_rfc3339(),
             schema_version: self.schema_version.clone(),
-            total_rules: self.rules.len(),
-            total_assessments: self.assessments.len(),
+            total_rules,
+            total_assessments,
             categories,
             gate_action,
             blocked_rules,
@@ -834,6 +871,145 @@ mod tests {
         let r1 = e1.generate_report("trace-det");
         let r2 = e2.generate_report("trace-det");
         assert_eq!(r1.content_hash, r2.content_hash);
+    }
+
+    #[test]
+    fn report_hash_changes_when_category_breakdown_changes_with_same_coarse_counts() {
+        let mut first = EnterpriseGovernance::default();
+        first
+            .register_rule(
+                sample_rule(
+                    "r-1",
+                    RuleCategory::AccessControl,
+                    EnforcementLevel::Advisory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        first
+            .register_rule(
+                sample_rule(
+                    "r-2",
+                    RuleCategory::DataRetention,
+                    EnforcementLevel::Advisory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        first
+            .record_assessment(
+                sample_assessment("a-1", "r-1", ComplianceStatus::Compliant),
+                &trace(),
+            )
+            .unwrap();
+        first
+            .record_assessment(
+                sample_assessment("a-2", "r-2", ComplianceStatus::NonCompliant),
+                &trace(),
+            )
+            .unwrap();
+
+        let mut second = EnterpriseGovernance::default();
+        second
+            .register_rule(
+                sample_rule(
+                    "r-1",
+                    RuleCategory::AccessControl,
+                    EnforcementLevel::Advisory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        second
+            .register_rule(
+                sample_rule(
+                    "r-2",
+                    RuleCategory::DataRetention,
+                    EnforcementLevel::Advisory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        second
+            .record_assessment(
+                sample_assessment("a-1", "r-1", ComplianceStatus::NonCompliant),
+                &trace(),
+            )
+            .unwrap();
+        second
+            .record_assessment(
+                sample_assessment("a-2", "r-2", ComplianceStatus::Compliant),
+                &trace(),
+            )
+            .unwrap();
+
+        let first_report = first.generate_report("trace-same-counts-a");
+        let second_report = second.generate_report("trace-same-counts-b");
+
+        assert_eq!(first_report.total_rules, second_report.total_rules);
+        assert_eq!(
+            first_report.total_assessments,
+            second_report.total_assessments
+        );
+        assert_eq!(first_report.gate_action, second_report.gate_action);
+        assert_eq!(first_report.blocked_rules, second_report.blocked_rules);
+        assert_eq!(
+            first_report.categories.len(),
+            second_report.categories.len()
+        );
+        assert_ne!(first_report.categories, second_report.categories);
+        assert_ne!(first_report.content_hash, second_report.content_hash);
+    }
+
+    #[test]
+    fn report_hash_matches_reported_category_surface() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-1",
+                    RuleCategory::AccessControl,
+                    EnforcementLevel::Mandatory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-2",
+                    RuleCategory::DataRetention,
+                    EnforcementLevel::Recommended,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .record_assessment(
+                sample_assessment("a-1", "r-1", ComplianceStatus::Compliant),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .record_assessment(
+                sample_assessment("a-2", "r-2", ComplianceStatus::PartiallyCompliant),
+                &trace(),
+            )
+            .unwrap();
+
+        let report = engine.generate_report("trace-hash-surface");
+
+        assert_eq!(
+            report.content_hash,
+            compute_report_content_hash(
+                &report.schema_version,
+                report.total_rules,
+                report.total_assessments,
+                &report.categories,
+                report.gate_action,
+                &report.blocked_rules,
+            )
+        );
     }
 
     #[test]

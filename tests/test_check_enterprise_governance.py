@@ -46,6 +46,7 @@ class TestIndividualChecks:
     def test_struct_engine(self, results): assert results["struct_EnterpriseGovernance"]["passed"]
     def test_gate_actions(self, results): assert results["gate_actions"]["passed"]
     def test_compliance_rate(self, results): assert results["compliance_rate"]["passed"]
+    def test_hash_surface(self, results): assert results["hash_surface"]["passed"]
     def test_evidence_capture(self, results): assert results["evidence_capture"]["passed"]
     def test_blocked_rules(self, results): assert results["blocked_rules"]["passed"]
     def test_event_codes(self, results): assert results["event_codes"]["passed"]

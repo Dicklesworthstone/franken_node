@@ -63,6 +63,20 @@ def _checks():
     ok("gate_actions", all(a in src for a in ["Allow", "Warn", "Block"]),
        "Policy enforcement gating")
     ok("compliance_rate", "compliance_rate" in src, "Per-category compliance rate")
+    ok(
+        "hash_surface",
+        all(token in src for token in [
+            "compute_report_content_hash",
+            "category.total_rules",
+            "category.compliant",
+            "category.non_compliant",
+            "category.partially_compliant",
+            "category.not_assessed",
+            "category.compliance_rate",
+            "blocked_rules",
+        ]),
+        "ComplianceReport hash covers category payload",
+    )
     ok("evidence_capture", "evidence" in src and "assessor" in src, "Evidence-based assessments")
     ok("blocked_rules", "blocked_rules" in src, "Blocked rules tracking")
 

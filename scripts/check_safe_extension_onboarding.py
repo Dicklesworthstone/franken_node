@@ -31,6 +31,11 @@ def _checks():
     ok("gate_result", "GateResult" in src, "Gate result tracking")
     ok("report_generation", "generate_report" in src and "OnboardingReport" in src, "Report generation")
     ok("content_hash", "content_hash" in src and "Sha256" in src, "SHA-256 hashing")
+    ok(
+        "phase_stats_hash_surface",
+        "ps.avg_duration_seconds" in src and "ps.gate_pass_rate" in src,
+        "phase stats hash covers avg_duration_seconds + gate_pass_rate",
+    )
     ok("event_codes", sum(1 for c in CODES if c in src) >= 12, f"{sum(1 for c in CODES if c in src)}/12")
     ok("invariants", sum(1 for i in INVS if i in src) >= 6, f"{sum(1 for i in INVS if i in src)}/6")
     ok("audit_log", "SeoAuditRecord" in src and "export_audit_log_jsonl" in src, "JSONL export")

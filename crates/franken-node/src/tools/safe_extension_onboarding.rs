@@ -66,6 +66,14 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 }
 
+fn hash_f64(hasher: &mut Sha256, value: f64) {
+    if value.is_finite() {
+        hasher.update(value.to_le_bytes());
+    } else {
+        hasher.update(f64::NAN.to_le_bytes());
+    }
+}
+
 /// Onboarding phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum OnboardingPhase {
@@ -356,43 +364,21 @@ impl SafeExtensionOnboarding {
             h.update(SCHEMA_VERSION.as_bytes());
             h.update((total_sessions as u64).to_le_bytes());
             h.update((completed as u64).to_le_bytes());
-            if completion_rate.is_finite() {
-                h.update(completion_rate.to_le_bytes());
-            } else {
-                h.update(f64::NAN.to_le_bytes());
-            }
-            if mean_ttfe.is_finite() {
-                h.update(mean_ttfe.to_le_bytes());
-            } else {
-                h.update(f64::NAN.to_le_bytes());
-            }
+            hash_f64(&mut h, completion_rate);
+            hash_f64(&mut h, mean_ttfe);
             h.update(&[u8::from(meets_ttfe)]);
-            if overall_auto.is_finite() {
-                h.update(overall_auto.to_le_bytes());
-            } else {
-                h.update(f64::NAN.to_le_bytes());
-            }
-            if overall_friction.is_finite() {
-                h.update(overall_friction.to_le_bytes());
-            } else {
-                h.update(f64::NAN.to_le_bytes());
-            }
+            hash_f64(&mut h, overall_auto);
+            hash_f64(&mut h, overall_friction);
             h.update((phase_stats.len() as u64).to_le_bytes());
             for ps in &phase_stats {
                 let label = ps.phase.label();
                 h.update((label.len() as u64).to_le_bytes());
                 h.update(label.as_bytes());
                 h.update((ps.total_sessions as u64).to_le_bytes());
-                if ps.automation_rate.is_finite() {
-                    h.update(ps.automation_rate.to_le_bytes());
-                } else {
-                    h.update(f64::NAN.to_le_bytes());
-                }
-                if ps.friction_score.is_finite() {
-                    h.update(ps.friction_score.to_le_bytes());
-                } else {
-                    h.update(f64::NAN.to_le_bytes());
-                }
+                hash_f64(&mut h, ps.avg_duration_seconds);
+                hash_f64(&mut h, ps.automation_rate);
+                hash_f64(&mut h, ps.gate_pass_rate);
+                hash_f64(&mut h, ps.friction_score);
             }
             h.update((bottleneck_phases.len() as u64).to_le_bytes());
             for bp in &bottleneck_phases {
@@ -707,6 +693,79 @@ mod tests {
         assert_ne!(
             r1.content_hash, r2.content_hash,
             "Different automation rates must produce different report hash"
+        );
+    }
+
+    #[test]
+    fn report_hash_changes_with_different_phase_average_duration() {
+        let mut e1 = SafeExtensionOnboarding::new();
+        let mut e2 = SafeExtensionOnboarding::new();
+
+        let mut e1_install = sample_step("s1", "sess1", OnboardingPhase::Install);
+        e1_install.duration_seconds = 30;
+        let mut e1_configure = sample_step("s2", "sess1", OnboardingPhase::Configure);
+        e1_configure.duration_seconds = 60;
+        e1.record_step(e1_install);
+        e1.record_step(e1_configure);
+
+        let mut e2_install = sample_step("s1", "sess1", OnboardingPhase::Install);
+        e2_install.duration_seconds = 60;
+        let mut e2_configure = sample_step("s2", "sess1", OnboardingPhase::Configure);
+        e2_configure.duration_seconds = 30;
+        e2.record_step(e2_install);
+        e2.record_step(e2_configure);
+
+        let r1 = e1.generate_report();
+        let r2 = e2.generate_report();
+        assert!((r1.mean_ttfe_seconds - r2.mean_ttfe_seconds).abs() < f64::EPSILON);
+        assert_ne!(
+            r1.phase_stats[0].avg_duration_seconds, r2.phase_stats[0].avg_duration_seconds,
+            "Install phase average duration should differ"
+        );
+        assert_ne!(
+            r1.content_hash, r2.content_hash,
+            "Different per-phase average durations must produce different report hash"
+        );
+    }
+
+    #[test]
+    fn report_hash_changes_with_different_phase_gate_pass_rate() {
+        let mut e1 = SafeExtensionOnboarding::new();
+        let mut e2 = SafeExtensionOnboarding::new();
+
+        let passed_auto = sample_step("s1", "sess1", OnboardingPhase::Validate);
+        let mut passed_manual = sample_step("s2", "sess2", OnboardingPhase::Validate);
+        passed_manual.automated = false;
+        passed_manual.manual_interventions = 4;
+        e1.record_step(passed_auto);
+        e1.record_step(passed_manual);
+
+        let passed_auto = sample_step("s1", "sess1", OnboardingPhase::Validate);
+        let mut failed_manual = sample_step("s2", "sess2", OnboardingPhase::Validate);
+        failed_manual.automated = false;
+        failed_manual.gate_result = GateResult::Failed;
+        failed_manual.manual_interventions = 0;
+        e2.record_step(passed_auto);
+        e2.record_step(failed_manual);
+
+        let r1 = e1.generate_report();
+        let r2 = e2.generate_report();
+        assert!((r1.mean_ttfe_seconds - r2.mean_ttfe_seconds).abs() < f64::EPSILON);
+        assert!(
+            (r1.phase_stats[0].automation_rate - r2.phase_stats[0].automation_rate).abs()
+                < f64::EPSILON
+        );
+        assert!(
+            (r1.phase_stats[0].friction_score - r2.phase_stats[0].friction_score).abs()
+                < f64::EPSILON
+        );
+        assert_ne!(
+            r1.phase_stats[0].gate_pass_rate, r2.phase_stats[0].gate_pass_rate,
+            "Validate phase gate pass rate should differ"
+        );
+        assert_ne!(
+            r1.content_hash, r2.content_hash,
+            "Different per-phase gate pass rates must produce different report hash"
         );
     }
 }

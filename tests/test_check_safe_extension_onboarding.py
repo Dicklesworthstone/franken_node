@@ -60,6 +60,7 @@ class TestIndividualChecks:
     def test_gate_result(self, results): assert results["gate_result"]["passed"]
     def test_report_generation(self, results): assert results["report_generation"]["passed"]
     def test_content_hash(self, results): assert results["content_hash"]["passed"]
+    def test_phase_stats_hash_surface(self, results): assert results["phase_stats_hash_surface"]["passed"]
     def test_event_codes(self, results): assert results["event_codes"]["passed"]
     def test_invariants(self, results): assert results["invariants"]["passed"]
     def test_audit_log(self, results): assert results["audit_log"]["passed"]

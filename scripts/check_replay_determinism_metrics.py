@@ -80,6 +80,17 @@ def _checks():
        "generate_report" in src and "DeterminismReport" in src,
        "Report with determinism rate and completeness")
 
+    ok("artifact_completeness_hash_surface",
+       all(snippet in src for snippet in [
+           "h.update((completeness.len() as u64).to_le_bytes())",
+           "for entry in &completeness",
+           "entry.category.label()",
+           "entry.expected",
+           "entry.found",
+           "u8::from(entry.complete)",
+       ]),
+       "content_hash binds per-category completeness payload")
+
     ok("metric_versioning",
        "METRIC_VERSION" in src and "rdm-v1.0" in src,
        "rdm-v1.0")
@@ -102,8 +113,8 @@ def _checks():
 
     test_count = len(re.findall(r"#\[test\]", src))
     ok("test_coverage",
-       test_count >= 23,
-       f"{test_count} tests (>=23)")
+       test_count >= 24,
+       f"{test_count} tests (>=24)")
 
     return results
 

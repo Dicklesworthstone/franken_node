@@ -43,6 +43,14 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 }
 
+fn hash_f64(hasher: &mut Sha256, value: f64) {
+    if value.is_finite() {
+        hasher.update(value.to_le_bytes());
+    } else {
+        hasher.update(f64::NAN.to_le_bytes());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -444,15 +452,16 @@ impl ReplayDeterminismMetrics {
             h.update((total as u64).to_le_bytes());
             h.update((matches as u64).to_le_bytes());
             h.update((divergences as u64).to_le_bytes());
-            if determinism_rate.is_finite() {
-                h.update(determinism_rate.to_le_bytes());
-            } else {
-                h.update(f64::NAN.to_le_bytes());
-            }
-            if completeness_pct.is_finite() {
-                h.update(completeness_pct.to_le_bytes());
-            } else {
-                h.update(f64::NAN.to_le_bytes());
+            hash_f64(&mut h, determinism_rate);
+            hash_f64(&mut h, completeness_pct);
+            h.update((completeness.len() as u64).to_le_bytes());
+            for entry in &completeness {
+                let category_label = entry.category.label();
+                h.update((category_label.len() as u64).to_le_bytes());
+                h.update(category_label.as_bytes());
+                h.update((entry.expected as u64).to_le_bytes());
+                h.update((entry.found as u64).to_le_bytes());
+                h.update([u8::from(entry.complete)]);
             }
             let verdict_label = format!("{gate_verdict:?}");
             h.update((verdict_label.len() as u64).to_le_bytes());
@@ -710,6 +719,27 @@ mod tests {
         engine.track_artifact(ArtifactCategory::SpecContract, 10, 10, &trace());
         let report = engine.generate_report(&trace());
         assert!((report.overall_completeness_pct - 90.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn artifact_completeness_distribution_changes_hash() {
+        let mut first = ReplayDeterminismMetrics::default();
+        first.track_artifact(ArtifactCategory::VerificationEvidence, 5, 5, &trace());
+        first.track_artifact(ArtifactCategory::SpecContract, 5, 3, &trace());
+
+        let mut second = ReplayDeterminismMetrics::default();
+        second.track_artifact(ArtifactCategory::VerificationEvidence, 5, 4, &trace());
+        second.track_artifact(ArtifactCategory::SpecContract, 5, 4, &trace());
+
+        let first_report = first.generate_report(&trace());
+        let second_report = second.generate_report(&trace());
+
+        assert!(
+            (first_report.overall_completeness_pct - second_report.overall_completeness_pct).abs()
+                < f64::EPSILON
+        );
+        assert_eq!(first_report.gate_verdict, second_report.gate_verdict);
+        assert_ne!(first_report.content_hash, second_report.content_hash);
     }
 
     // === Config ===
