@@ -40,6 +40,7 @@ pub mod event_codes {
 pub mod error_codes {
     pub const ERR_CLAIM_UNVERIFIABLE: &str = "ERR_CLAIM_UNVERIFIABLE";
     pub const ERR_CLAIM_SYNTAX_INVALID: &str = "ERR_CLAIM_SYNTAX_INVALID";
+    pub const ERR_CLAIM_SOURCE_INVALID: &str = "ERR_CLAIM_SOURCE_INVALID";
     pub const ERR_CLAIM_EVIDENCE_MISSING: &str = "ERR_CLAIM_EVIDENCE_MISSING";
     pub const ERR_CLAIM_BLOCKED: &str = "ERR_CLAIM_BLOCKED";
     pub const ERR_SCOREBOARD_SIGNATURE_INVALID: &str = "ERR_SCOREBOARD_SIGNATURE_INVALID";
@@ -66,6 +67,7 @@ pub mod invariants {
 #[serde(rename_all = "snake_case")]
 pub enum ClaimRejectionReason {
     SyntaxInvalid,
+    InvalidSource,
     EvidenceMissing,
     Unverifiable,
     Blocked,
@@ -75,6 +77,7 @@ impl ClaimRejectionReason {
     pub fn code(&self) -> &'static str {
         match self {
             Self::SyntaxInvalid => error_codes::ERR_CLAIM_SYNTAX_INVALID,
+            Self::InvalidSource => error_codes::ERR_CLAIM_SOURCE_INVALID,
             Self::EvidenceMissing => error_codes::ERR_CLAIM_EVIDENCE_MISSING,
             Self::Unverifiable => error_codes::ERR_CLAIM_UNVERIFIABLE,
             Self::Blocked => error_codes::ERR_CLAIM_BLOCKED,
@@ -148,11 +151,14 @@ impl CompilerConfig {
     }
 
     pub fn with_blocked_source(mut self, source_id: impl Into<String>) -> Self {
-        push_bounded(
-            &mut self.blocked_sources,
-            source_id.into(),
-            MAX_BLOCKED_SOURCES,
-        );
+        let source_id = source_id.into();
+        if let Some(source_id) = normalize_source_id(&source_id) {
+            push_bounded(
+                &mut self.blocked_sources,
+                source_id.to_string(),
+                MAX_BLOCKED_SOURCES,
+            );
+        }
         self
     }
 }
@@ -175,9 +181,23 @@ impl ClaimCompiler {
     /// Returns `CompilationResult::Rejected` if the claim is unverifiable,
     /// has invalid syntax, missing evidence, or is from a blocked source.
     pub fn compile(&self, claim: &ExternalClaim) -> CompilationResult {
+        let Some(source_id) = normalize_source_id(&claim.source_id) else {
+            return CompilationResult::Rejected {
+                claim_id: claim.claim_id.clone(),
+                reason: ClaimRejectionReason::InvalidSource,
+                error_code: error_codes::ERR_CLAIM_SOURCE_INVALID.to_string(),
+            };
+        };
+
         // Check blocked source
         // INV-CLAIM-BLOCK-UNVERIFIABLE
-        if self.config.blocked_sources.contains(&claim.source_id) {
+        if self
+            .config
+            .blocked_sources
+            .iter()
+            .filter_map(|blocked_source| normalize_source_id(blocked_source))
+            .any(|blocked_source| blocked_source == source_id)
+        {
             return CompilationResult::Rejected {
                 claim_id: claim.claim_id.clone(),
                 reason: ClaimRejectionReason::Blocked,
@@ -219,7 +239,7 @@ impl ClaimCompiler {
             &claim.claim_id,
             &claim.claim_text,
             &claim.evidence_uris,
-            &claim.source_id,
+            source_id,
         );
         let signature = sign_contract(
             &contract_digest,
@@ -231,7 +251,7 @@ impl ClaimCompiler {
             claim_id: claim.claim_id.clone(),
             claim_text: claim.claim_text.clone(),
             evidence_uris: claim.evidence_uris.clone(),
-            source_id: claim.source_id.clone(),
+            source_id: source_id.to_string(),
             compiled_at_epoch_ms: self.config.now_epoch_ms,
             contract_digest,
             signer_id: self.config.signer_id.clone(),
@@ -244,6 +264,11 @@ impl ClaimCompiler {
             event_code: event_codes::CLAIM_CONTRACT_GENERATED.to_string(),
         }
     }
+}
+
+fn normalize_source_id(source_id: &str) -> Option<&str> {
+    let trimmed = source_id.trim();
+    (!trimmed.is_empty()).then_some(trimmed)
 }
 
 fn is_valid_evidence_uri(uri: &str) -> bool {
@@ -627,6 +652,25 @@ mod tests {
     }
 
     #[test]
+    fn compile_rejects_whitespace_only_source_id() {
+        let cc = compiler(10_000);
+        let claim = ExternalClaim {
+            claim_id: "c2b".to_string(),
+            claim_text: "Valid text".to_string(),
+            evidence_uris: vec!["https://e.com/c2b".to_string()],
+            source_id: " \t ".to_string(),
+        };
+        let result = cc.compile(&claim);
+        assert!(matches!(
+            result,
+            CompilationResult::Rejected {
+                reason: ClaimRejectionReason::InvalidSource,
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn compile_rejects_missing_evidence() {
         let cc = compiler(10_000);
         let claim = ExternalClaim {
@@ -678,6 +722,35 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn compile_rejects_blocked_source_with_padded_claim_source_id() {
+        let cfg = CompilerConfig::new("signer-A", "key-secret", 10_000)
+            .with_blocked_source(" blocked-src ");
+        let cc = ClaimCompiler::new(cfg);
+        let claim = make_test_claim("c5b", "  blocked-src\t");
+        let result = cc.compile(&claim);
+        assert!(matches!(
+            result,
+            CompilationResult::Rejected {
+                reason: ClaimRejectionReason::Blocked,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn compile_normalizes_source_id_in_compiled_contract() {
+        let cc = compiler(10_000);
+        let claim = make_test_claim("c5c", "  src-1\t");
+        let result = cc.compile(&claim);
+        match result {
+            CompilationResult::Compiled { contract, .. } => {
+                assert_eq!(contract.source_id, "src-1");
+            }
+            CompilationResult::Rejected { .. } => unreachable!("expected compiled"),
+        }
     }
 
     #[test]
@@ -880,6 +953,10 @@ mod tests {
         assert_eq!(
             ClaimRejectionReason::SyntaxInvalid.code(),
             error_codes::ERR_CLAIM_SYNTAX_INVALID
+        );
+        assert_eq!(
+            ClaimRejectionReason::InvalidSource.code(),
+            error_codes::ERR_CLAIM_SOURCE_INVALID
         );
         assert_eq!(
             ClaimRejectionReason::EvidenceMissing.code(),

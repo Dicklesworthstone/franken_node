@@ -69,6 +69,9 @@ pub enum CoverageError {
     ScopeUnknown {
         scope: String,
     },
+    UnknownMetric {
+        metric_name: String,
+    },
 }
 
 impl CoverageError {
@@ -78,6 +81,7 @@ impl CoverageError {
             Self::InvalidEvent { .. } => "OCT_INVALID_EVENT",
             Self::NoEvents { .. } => "OCT_NO_EVENTS",
             Self::ScopeUnknown { .. } => "OCT_SCOPE_UNKNOWN",
+            Self::UnknownMetric { .. } => "OCT_UNKNOWN_METRIC",
         }
     }
 }
@@ -95,6 +99,9 @@ impl std::fmt::Display for CoverageError {
             Self::InvalidEvent { reason } => write!(f, "OCT_INVALID_EVENT: {reason}"),
             Self::NoEvents { scope } => write!(f, "OCT_NO_EVENTS: {scope}"),
             Self::ScopeUnknown { scope } => write!(f, "OCT_SCOPE_UNKNOWN: {scope}"),
+            Self::UnknownMetric { metric_name } => {
+                write!(f, "OCT_UNKNOWN_METRIC: {metric_name}")
+            }
         }
     }
 }
@@ -237,7 +244,11 @@ impl OfflineCoverageTracker {
                 "coverage" => metrics.coverage_ratio,
                 "availability" => metrics.availability_ratio,
                 "repair_debt" => metrics.repair_debt_count as f64,
-                _ => continue,
+                _ => {
+                    return Err(CoverageError::UnknownMetric {
+                        metric_name: target.metric_name.clone(),
+                    });
+                }
             };
 
             // For repair_debt, breach = actual > threshold (debt too high)
@@ -486,6 +497,13 @@ mod tests {
             CoverageError::ScopeUnknown { scope: "x".into() }.code(),
             "OCT_SCOPE_UNKNOWN"
         );
+        assert_eq!(
+            CoverageError::UnknownMetric {
+                metric_name: "x".into()
+            }
+            .code(),
+            "OCT_UNKNOWN_METRIC"
+        );
     }
 
     #[test]
@@ -552,6 +570,21 @@ mod tests {
             1,
             "Inf threshold must trigger SLO breach (fail-closed)"
         );
+    }
+
+    #[test]
+    fn unknown_slo_metric_rejected() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+        let err = t
+            .check_slos(
+                &[slo("availability_pct_typo", 0.9)],
+                "prod",
+                200,
+                "trace-typo",
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), "OCT_UNKNOWN_METRIC");
     }
 
     #[test]
