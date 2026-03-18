@@ -863,7 +863,7 @@ mod tests {
 
     fn make_runner_with_builtins() -> ConformanceSuiteRunner {
         let mut runner = ConformanceSuiteRunner::new();
-        runner.register_builtin_fixtures().unwrap();
+        runner.register_builtin_fixtures().expect("should register");
         runner
     }
 
@@ -970,7 +970,7 @@ mod tests {
             input: serde_json::json!({}),
             expected: serde_json::json!({}),
         };
-        runner.register_fixture(f1.clone()).unwrap();
+        runner.register_fixture(f1.clone()).expect("should register");
         let err = runner.register_fixture(f1).unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_CONF_DUPLICATE_ID);
     }
@@ -997,7 +997,7 @@ mod tests {
                 input: serde_json::json!({}),
                 expected: serde_json::json!({}),
             })
-            .unwrap();
+            .expect("should register");
         let report = runner.run_all(1000, "t1", |_| ConformanceTestResult::Fail {
             expected: "x".to_string(),
             actual: "y".to_string(),
@@ -1026,7 +1026,7 @@ mod tests {
                 input: serde_json::json!({}),
                 expected: serde_json::json!({}),
             })
-            .unwrap();
+            .expect("should register");
         runner.run_all(1000, "t1", |_| ConformanceTestResult::Fail {
             expected: "a".to_string(),
             actual: "b".to_string(),
@@ -1064,7 +1064,7 @@ mod tests {
                 input: serde_json::json!({}),
                 expected: serde_json::json!({}),
             })
-            .unwrap();
+            .expect("should register");
         let err = runner.verify_domain_coverage().unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_CONF_MISSING_DOMAIN);
     }
@@ -1076,10 +1076,10 @@ mod tests {
         let mut runner = make_runner_with_builtins();
         let report = runner.run_all(1000, "t1", |_| ConformanceTestResult::Pass);
         let json = runner.export_report_json(&report);
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(parsed["suite_version"], SUITE_VERSION);
         assert_eq!(parsed["schema_version"], SCHEMA_VERSION);
-        assert!(parsed["release_eligible"].as_bool().unwrap());
+        assert!(parsed["release_eligible"].as_bool().expect("boolean expected"));
     }
 
     // ---- Audit log ----
@@ -1093,7 +1093,7 @@ mod tests {
         assert!(!log.is_empty());
         assert_eq!(log[0].event_code, event_codes::CONFORMANCE_SUITE_START);
         assert_eq!(
-            log.last().unwrap().event_code,
+            log.last().expect("should exist").event_code,
             event_codes::CONFORMANCE_SUITE_COMPLETE
         );
     }
@@ -1104,7 +1104,7 @@ mod tests {
         runner.run_all(1000, "t1", |_| ConformanceTestResult::Pass);
         let jsonl = runner.export_audit_log_jsonl();
         assert!(!jsonl.is_empty());
-        let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
+        let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().expect("should have lines")).expect("deserialize should succeed");
         assert_eq!(first["schema_version"], SCHEMA_VERSION);
     }
 
@@ -1165,7 +1165,7 @@ mod tests {
     #[test]
     fn test_result_pass_serializes() {
         let r = ConformanceTestResult::Pass;
-        let json = serde_json::to_string(&r).unwrap();
+        let json = serde_json::to_string(&r).expect("serialize should succeed");
         assert!(json.contains("Pass"));
     }
 
@@ -1175,7 +1175,7 @@ mod tests {
             expected: "x".to_string(),
             actual: "y".to_string(),
         };
-        let json = serde_json::to_string(&r).unwrap();
+        let json = serde_json::to_string(&r).expect("serialize should succeed");
         assert!(json.contains("Fail"));
     }
 

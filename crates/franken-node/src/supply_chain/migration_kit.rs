@@ -279,6 +279,25 @@ impl MigrationKitEcosystem {
         steps: Vec<MigrationStep>,
         trace_id: &str,
     ) -> Result<String, String> {
+        // Gate: reject non-finite coverage values — NaN/Inf serialize to null in JSON,
+        // causing materially different kits to alias to the same content_hash.
+        if !compatibility.api_coverage_pct.is_finite() {
+            self.log(
+                event_codes::MKE_ERR_COMPAT,
+                "",
+                trace_id,
+                serde_json::json!({
+                    "archetype": archetype.label(),
+                    "coverage": format!("{}", compatibility.api_coverage_pct),
+                    "reason": "non-finite api_coverage_pct",
+                }),
+            );
+            return Err(format!(
+                "API coverage {} is not a finite number",
+                compatibility.api_coverage_pct
+            ));
+        }
+
         // Gate: compatibility check
         if self.config.require_compatibility_check
             && compatibility.api_coverage_pct < self.config.min_api_coverage_pct
@@ -1215,6 +1234,36 @@ mod tests {
             e1.kits().get(&k1).unwrap().content_hash,
             e2.kits().get(&k2).unwrap().content_hash,
             "different known_incompatibilities must produce different kit content_hash"
+        );
+    }
+
+    #[test]
+    fn kit_rejects_nan_api_coverage() {
+        let mut eco = MigrationKitEcosystem::default();
+        let mut compat = sample_compat(Archetype::Express);
+        compat.api_coverage_pct = f64::NAN;
+        let result = eco.load_kit(Archetype::Express, compat, sample_steps(), &make_trace());
+        assert!(result.is_err(), "NaN api_coverage_pct must be rejected");
+    }
+
+    #[test]
+    fn kit_rejects_inf_api_coverage() {
+        let mut eco = MigrationKitEcosystem::default();
+        let mut compat = sample_compat(Archetype::Express);
+        compat.api_coverage_pct = f64::INFINITY;
+        let result = eco.load_kit(Archetype::Express, compat, sample_steps(), &make_trace());
+        assert!(result.is_err(), "Inf api_coverage_pct must be rejected");
+    }
+
+    #[test]
+    fn kit_rejects_neg_inf_api_coverage() {
+        let mut eco = MigrationKitEcosystem::default();
+        let mut compat = sample_compat(Archetype::Express);
+        compat.api_coverage_pct = f64::NEG_INFINITY;
+        let result = eco.load_kit(Archetype::Express, compat, sample_steps(), &make_trace());
+        assert!(
+            result.is_err(),
+            "NEG_INFINITY api_coverage_pct must be rejected"
         );
     }
 

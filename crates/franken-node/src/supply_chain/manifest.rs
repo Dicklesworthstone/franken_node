@@ -471,7 +471,7 @@ mod tests {
     use super::*;
 
     fn cap(name: &str) -> frankenengine_extension_host::Capability {
-        serde_json::from_value(serde_json::json!(name)).unwrap()
+        serde_json::from_value(serde_json::json!(name)).expect("should succeed")
     }
 
     fn valid_manifest() -> SignedExtensionManifest {

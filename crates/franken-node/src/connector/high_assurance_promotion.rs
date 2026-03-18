@@ -688,9 +688,9 @@ mod tests {
         let bundle = ProofBundle::full();
 
         gate.evaluate("a1", ObjectClass::CriticalMarker, Some(&bundle))
-            .unwrap();
+            .expect("should evaluate");
         gate.evaluate("a2", ObjectClass::CriticalMarker, Some(&bundle))
-            .unwrap();
+            .expect("should evaluate");
         let _ = gate.evaluate("a3", ObjectClass::CriticalMarker, None);
 
         assert_eq!(gate.approvals(), 2);
@@ -729,7 +729,7 @@ mod tests {
         let critical = matrix
             .iter()
             .find(|e| e.object_class == ObjectClass::CriticalMarker)
-            .unwrap();
+            .expect("should evaluate");
         assert_eq!(
             critical.proof_requirement,
             Some(ProofRequirement::FullProofChain)
@@ -738,7 +738,7 @@ mod tests {
         let state = matrix
             .iter()
             .find(|e| e.object_class == ObjectClass::StateObject)
-            .unwrap();
+            .expect("should evaluate");
         assert_eq!(
             state.proof_requirement,
             Some(ProofRequirement::IntegrityProof)
@@ -747,7 +747,7 @@ mod tests {
         let telemetry = matrix
             .iter()
             .find(|e| e.object_class == ObjectClass::TelemetryArtifact)
-            .unwrap();
+            .expect("should evaluate");
         assert_eq!(
             telemetry.proof_requirement,
             Some(ProofRequirement::IntegrityHash)
@@ -756,7 +756,7 @@ mod tests {
         let config = matrix
             .iter()
             .find(|e| e.object_class == ObjectClass::ConfigObject)
-            .unwrap();
+            .expect("should evaluate");
         assert_eq!(
             config.proof_requirement,
             Some(ProofRequirement::SchemaProof)

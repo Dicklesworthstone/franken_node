@@ -1170,7 +1170,7 @@ mod tests {
     fn test_initiate_soft_quarantine() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Soft);
-        let record = reg.initiate_quarantine(order).unwrap();
+        let record = reg.initiate_quarantine(order).expect("should succeed");
         assert_eq!(record.state, QuarantineState::Initiated);
         assert!(reg.is_quarantined("ext-test"));
         assert_eq!(reg.total_quarantines(), 1);
@@ -1180,7 +1180,7 @@ mod tests {
     fn test_initiate_hard_quarantine() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::Medium, QuarantineMode::Hard);
-        let record = reg.initiate_quarantine(order).unwrap();
+        let record = reg.initiate_quarantine(order).expect("should succeed");
         assert_eq!(record.state, QuarantineState::Initiated);
     }
 
@@ -1188,7 +1188,7 @@ mod tests {
     fn test_critical_fast_path_enforcement() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-crit", QuarantineSeverity::Critical, QuarantineMode::Hard);
-        let record = reg.initiate_quarantine(order).unwrap();
+        let record = reg.initiate_quarantine(order).expect("should succeed");
         // Critical severity triggers immediate enforcement.
         assert_eq!(record.state, QuarantineState::Enforced);
     }
@@ -1197,7 +1197,7 @@ mod tests {
     fn test_duplicate_quarantine_rejected() {
         let mut reg = QuarantineRegistry::new();
         let order1 = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Soft);
-        reg.initiate_quarantine(order1).unwrap();
+        reg.initiate_quarantine(order1).expect("should succeed");
 
         let order2 = make_order("q-002", QuarantineSeverity::Medium, QuarantineMode::Hard);
         let err = reg.initiate_quarantine(order2).unwrap_err();
@@ -1208,11 +1208,11 @@ mod tests {
     fn test_propagation_transitions_state() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Soft);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         reg.record_propagation("q-001", "node-1", "2026-01-15T00:01:00Z")
-            .unwrap();
+            .expect("should succeed");
 
-        let record = reg.get_record("q-001").unwrap();
+        let record = reg.get_record("q-001").expect("should succeed");
         assert_eq!(record.state, QuarantineState::Propagated);
     }
 
@@ -1220,24 +1220,24 @@ mod tests {
     fn test_enforcement_and_drain_lifecycle() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
 
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .unwrap();
+            .expect("should succeed");
         assert_eq!(
-            reg.get_record("q-001").unwrap().state,
+            reg.get_record("q-001").expect("should succeed").state,
             QuarantineState::Enforced
         );
 
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").expect("should succeed");
         assert_eq!(
-            reg.get_record("q-001").unwrap().state,
+            reg.get_record("q-001").expect("should succeed").state,
             QuarantineState::Draining
         );
 
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").expect("should succeed");
         assert_eq!(
-            reg.get_record("q-001").unwrap().state,
+            reg.get_record("q-001").expect("should succeed").state,
             QuarantineState::Isolated
         );
     }
@@ -1246,19 +1246,19 @@ mod tests {
     fn test_lift_quarantine_with_clearance() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::Medium, QuarantineMode::Soft);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         assert!(reg.is_quarantined("ext-test"));
 
         // Advance through the required state machine: Enforced → Draining → Isolated
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .unwrap();
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").expect("should succeed");
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").expect("should succeed");
 
-        reg.lift_quarantine(make_clearance("q-001")).unwrap();
+        reg.lift_quarantine(make_clearance("q-001")).expect("should succeed");
         assert!(!reg.is_quarantined("ext-test"));
 
-        let record = reg.get_record("q-001").unwrap();
+        let record = reg.get_record("q-001").expect("should succeed");
         assert_eq!(record.state, QuarantineState::Lifted);
         assert!(record.clearance.is_some());
     }
@@ -1267,7 +1267,7 @@ mod tests {
     fn test_lift_without_justification_fails() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::Low, QuarantineMode::Soft);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
 
         let mut clearance = make_clearance("q-001");
         clearance.justification = String::new();
@@ -1279,16 +1279,16 @@ mod tests {
     fn test_recall_lifecycle() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .unwrap();
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").expect("should succeed");
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").expect("should succeed");
 
         // Trigger recall (requires Isolated state).
-        reg.trigger_recall(make_recall("q-001")).unwrap();
+        reg.trigger_recall(make_recall("q-001")).expect("should succeed");
         assert_eq!(
-            reg.get_record("q-001").unwrap().state,
+            reg.get_record("q-001").expect("should succeed").state,
             QuarantineState::RecallTriggered
         );
 
@@ -1301,13 +1301,13 @@ mod tests {
             removed_at: "2026-01-16T13:00:00Z".to_owned(),
             artifact_hash: "abc123".to_owned(),
         };
-        reg.record_recall_receipt("q-001", receipt).unwrap();
+        reg.record_recall_receipt("q-001", receipt).expect("should succeed");
 
         // Complete recall.
         reg.complete_recall("q-001", "2026-01-16T14:00:00Z")
-            .unwrap();
+            .expect("should succeed");
         assert_eq!(
-            reg.get_record("q-001").unwrap().state,
+            reg.get_record("q-001").expect("should succeed").state,
             QuarantineState::RecallCompleted
         );
         assert_eq!(reg.total_recalls(), 1);
@@ -1326,7 +1326,7 @@ mod tests {
     fn test_impact_report() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
 
         let report = reg
             .generate_impact_report(
@@ -1338,7 +1338,7 @@ mod tests {
                 vec!["Export user data before hard quarantine takes effect".to_owned()],
                 "2026-01-15T01:00:00Z",
             )
-            .unwrap();
+            .expect("should succeed");
 
         assert_eq!(report.installations_affected, 150);
         assert_eq!(report.active_sessions, 5);
@@ -1348,12 +1348,12 @@ mod tests {
     fn test_recall_completion_percentage() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .unwrap();
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
-        reg.trigger_recall(make_recall("q-001")).unwrap();
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").expect("should succeed");
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").expect("should succeed");
+        reg.trigger_recall(make_recall("q-001")).expect("should succeed");
 
         // 1 of 3 nodes confirmed.
         let receipt = RecallReceipt {
@@ -1364,7 +1364,7 @@ mod tests {
             removed_at: "2026-01-16T13:00:00Z".to_owned(),
             artifact_hash: "abc".to_owned(),
         };
-        reg.record_recall_receipt("q-001", receipt).unwrap();
+        reg.record_recall_receipt("q-001", receipt).expect("should succeed");
 
         let pct = reg.recall_completion_pct("q-001", 3);
         assert!((pct - 33.333).abs() < 1.0);
@@ -1374,12 +1374,12 @@ mod tests {
     fn test_audit_trail_integrity() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .unwrap();
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").expect("should succeed");
 
-        assert!(reg.verify_audit_integrity().unwrap());
+        assert!(reg.verify_audit_integrity().expect("should succeed"));
         assert_eq!(reg.audit_trail().len(), 3);
     }
 
@@ -1387,7 +1387,7 @@ mod tests {
     fn test_audit_trail_tamper_detection() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
 
         // Tamper with the audit trail.
         if let Some(entry) = reg.audit_trail.first_mut() {
@@ -1402,7 +1402,7 @@ mod tests {
     fn test_query_audit_by_extension() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Soft);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
 
         let entries = reg.query_audit_by_extension("ext-test");
         assert!(!entries.is_empty());
@@ -1416,7 +1416,7 @@ mod tests {
         order.scope = QuarantineScope::Publisher {
             publisher_id: "bad-publisher".to_owned(),
         };
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         assert!(reg.is_quarantined("publisher:bad-publisher"));
     }
 
@@ -1427,7 +1427,7 @@ mod tests {
         order.scope = QuarantineScope::AllVersions {
             extension_id: "ext-evil".to_owned(),
         };
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         assert!(reg.is_quarantined("ext-evil"));
     }
 
@@ -1435,13 +1435,13 @@ mod tests {
     fn test_state_history_tracked() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .unwrap();
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").expect("should succeed");
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").expect("should succeed");
 
-        let record = reg.get_record("q-001").unwrap();
+        let record = reg.get_record("q-001").expect("should succeed");
         assert_eq!(record.state_history.len(), 4);
         assert_eq!(record.state_history[0].0, QuarantineState::Initiated);
         assert_eq!(record.state_history[1].0, QuarantineState::Enforced);
@@ -1495,22 +1495,22 @@ mod tests {
         assert!(reg.audit_trail().len() <= MAX_AUDIT_TRAIL);
 
         // First entry's sequence > 0 means entries were evicted.
-        assert!(reg.audit_trail().first().unwrap().sequence > 0);
+        assert!(reg.audit_trail().first().expect("should succeed").sequence > 0);
 
         // Integrity check must still pass despite eviction.
-        assert!(reg.verify_audit_integrity().unwrap());
+        assert!(reg.verify_audit_integrity().expect("should succeed"));
     }
 
     #[test]
     fn test_recall_receipts_bounded() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .unwrap();
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
-        reg.trigger_recall(make_recall("q-001")).unwrap();
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").expect("should succeed");
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").expect("should succeed");
+        reg.trigger_recall(make_recall("q-001")).expect("should succeed");
 
         // Push more receipts than the cap.
         for i in 0..(MAX_RECALL_RECEIPTS + 10) {
@@ -1522,10 +1522,10 @@ mod tests {
                 removed_at: "2026-01-16T13:00:00Z".to_owned(),
                 artifact_hash: format!("hash-{i}"),
             };
-            reg.record_recall_receipt("q-001", receipt).unwrap();
+            reg.record_recall_receipt("q-001", receipt).expect("should succeed");
         }
 
-        let record = reg.get_record("q-001").unwrap();
+        let record = reg.get_record("q-001").expect("should succeed");
         assert!(record.recall_receipts.len() <= MAX_RECALL_RECEIPTS);
     }
 
@@ -1533,11 +1533,11 @@ mod tests {
     fn test_complete_recall_requires_recall_triggered_state() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).unwrap();
+        reg.initiate_quarantine(order).expect("should succeed");
         reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .unwrap();
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z").unwrap();
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").unwrap();
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z").expect("should succeed");
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z").expect("should succeed");
 
         // Attempt to complete recall without triggering it first (state = Isolated).
         let err = reg

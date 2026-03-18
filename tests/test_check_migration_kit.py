@@ -102,6 +102,12 @@ class TestIndividualChecks:
     def test_test_coverage(self, results):
         assert results["test_coverage"]["passed"]
 
+    def test_content_hash_surface(self, results):
+        assert results["content_hash_surface"]["passed"]
+
+    def test_nan_inf_guard(self, results):
+        assert results["nan_inf_guard"]["passed"]
+
 
 class TestOverall:
     def test_all_checks_pass(self):

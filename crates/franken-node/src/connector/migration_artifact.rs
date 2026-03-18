@@ -374,7 +374,25 @@ pub fn validate_artifact(artifact: &MigrationArtifact) -> ValidationResult {
 ///
 /// # INV-MA-DETERMINISTIC
 /// Uses BTreeMap-based serialization for deterministic output.
+///
+/// # Panics
+/// None — non-finite f64 values produce a sentinel error hash rather than
+/// silently collapsing to `null` in JSON (which causes hash collisions).
 pub fn compute_content_hash(artifact: &MigrationArtifact) -> String {
+    // Guard: reject NaN/Inf in confidence_interval f64 fields.
+    // JSON serializes non-finite f64 as null, causing materially different
+    // artifacts to alias to the same content_hash.
+    let ci = &artifact.confidence_interval;
+    if !ci.probability.is_finite()
+        || !ci.dry_run_success_rate.is_finite()
+        || !ci.historical_similarity.is_finite()
+        || !ci.precondition_coverage.is_finite()
+    {
+        return hex::encode(Sha256::digest(
+            b"migration_artifact_hash_v1:__non_finite_confidence_interval__",
+        ));
+    }
+
     let canonical = serde_json::json!({
         "schema_version": artifact.schema_version,
         "plan_id": artifact.plan_id,
@@ -753,6 +771,42 @@ mod tests {
         a2.plan_id = "plan-ref-002".to_string();
         a2.content_hash = compute_content_hash(&a2);
         assert_ne!(a1.content_hash, a2.content_hash);
+    }
+
+    // bd-i8z4r: NaN/Inf in confidence_interval must not cause hash collisions
+    #[test]
+    fn test_content_hash_nan_probability_produces_sentinel() {
+        let mut a = generate_reference_artifact();
+        a.confidence_interval.probability = f64::NAN;
+        let hash = compute_content_hash(&a);
+        // Must produce a deterministic sentinel hash, not collide with valid artifacts
+        assert_ne!(hash, generate_reference_artifact().content_hash);
+    }
+
+    #[test]
+    fn test_content_hash_inf_dry_run_produces_sentinel() {
+        let mut a = generate_reference_artifact();
+        a.confidence_interval.dry_run_success_rate = f64::INFINITY;
+        let hash = compute_content_hash(&a);
+        assert_ne!(hash, generate_reference_artifact().content_hash);
+    }
+
+    #[test]
+    fn test_content_hash_nan_sentinel_is_deterministic() {
+        let mut a1 = generate_reference_artifact();
+        let mut a2 = generate_reference_artifact();
+        a1.confidence_interval.probability = f64::NAN;
+        a2.confidence_interval.probability = f64::NAN;
+        // All non-finite artifacts map to the same sentinel
+        assert_eq!(compute_content_hash(&a1), compute_content_hash(&a2));
+    }
+
+    #[test]
+    fn test_content_hash_neg_inf_precondition_produces_sentinel() {
+        let mut a = generate_reference_artifact();
+        a.confidence_interval.precondition_coverage = f64::NEG_INFINITY;
+        let hash = compute_content_hash(&a);
+        assert_ne!(hash, generate_reference_artifact().content_hash);
     }
 
     #[test]

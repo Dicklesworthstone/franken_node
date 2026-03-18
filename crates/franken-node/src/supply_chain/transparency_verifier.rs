@@ -661,16 +661,16 @@ mod tests {
             trace_id: "t1".into(),
             timestamp: "ts".into(),
         };
-        let json = serde_json::to_string(&receipt).unwrap();
-        let parsed: ProofReceipt = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&receipt).expect("should succeed");
+        let parsed: ProofReceipt = serde_json::from_str(&json).expect("should succeed");
         assert_eq!(receipt, parsed);
     }
 
     #[test]
     fn serde_roundtrip_proof() {
         let (_, proofs) = build_test_tree(&["a", "b"]);
-        let json = serde_json::to_string(&proofs[0]).unwrap();
-        let parsed: InclusionProof = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&proofs[0]).expect("should succeed");
+        let parsed: InclusionProof = serde_json::from_str(&json).expect("should succeed");
         assert_eq!(proofs[0], parsed);
     }
 

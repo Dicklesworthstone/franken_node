@@ -1034,7 +1034,7 @@ mod tests {
                 now,
                 "trace",
             )
-            .unwrap();
+            .expect("should succeed");
         assert_eq!(pipeline.dimensions.len(), 1);
     }
 
@@ -1051,8 +1051,8 @@ mod tests {
                 now,
                 "trace",
             )
-            .unwrap();
-        let dim = pipeline.dimensions.values().next().unwrap();
+            .expect("should succeed");
+        let dim = pipeline.dimensions.values().next().expect("should succeed");
         assert_eq!(dim.claims[0].claim_id, "CSR-CLAIM-001");
         assert_eq!(dim.claims[1].claim_id, "CSR-CLAIM-002");
     }
@@ -1113,8 +1113,8 @@ mod tests {
                 now,
                 "trace",
             )
-            .unwrap();
-        let dim = pipeline.dimensions.values().next().unwrap();
+            .expect("should succeed");
+        let dim = pipeline.dimensions.values().next().expect("should succeed");
         assert_eq!(dim.claims[0].evidence.freshness, FreshnessStatus::Stale);
         assert_eq!(dim.claims[0].outcome, ClaimOutcome::Stale);
     }
@@ -1133,7 +1133,7 @@ mod tests {
     #[test]
     fn generate_report_produces_valid_structure() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         assert_eq!(report.version, 1);
         assert!(!report.claims.is_empty());
         assert!(!report.manifest.is_empty());
@@ -1144,15 +1144,15 @@ mod tests {
     #[test]
     fn report_has_five_dimensions() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         assert_eq!(report.dimensions.len(), 5);
     }
 
     #[test]
     fn report_is_idempotent() {
         let now = 1_000_000;
-        let (_, report1) = demo_pipeline(now).unwrap();
-        let (_, report2) = demo_pipeline(now).unwrap();
+        let (_, report1) = demo_pipeline(now).expect("should succeed");
+        let (_, report2) = demo_pipeline(now).expect("should succeed");
         assert_eq!(report1.report_hash, report2.report_hash);
         assert_eq!(report1.claims.len(), report2.claims.len());
     }
@@ -1160,12 +1160,12 @@ mod tests {
     #[test]
     fn threshold_compatibility_exceeded() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         let compat = report
             .thresholds
             .iter()
             .find(|t| t.name == "compatibility")
-            .unwrap();
+            .expect("should succeed");
         assert_eq!(compat.status, ThresholdStatus::Met);
         assert!(compat.actual >= THRESHOLD_COMPAT_PERCENT);
     }
@@ -1173,31 +1173,31 @@ mod tests {
     #[test]
     fn threshold_migration_velocity_exceeded() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         let migration = report
             .thresholds
             .iter()
             .find(|t| t.name == "migration_velocity")
-            .unwrap();
+            .expect("should succeed");
         assert!(migration.actual >= THRESHOLD_MIGRATION_VELOCITY);
     }
 
     #[test]
     fn threshold_compromise_reduction_exceeded() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         let compromise = report
             .thresholds
             .iter()
             .find(|t| t.name == "compromise_reduction")
-            .unwrap();
+            .expect("should succeed");
         assert!(compromise.actual >= THRESHOLD_COMPROMISE_REDUCTION);
     }
 
     #[test]
     fn bet_status_entries_present() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         assert_eq!(report.bet_status.len(), 3);
         let completed = report
             .bet_status
@@ -1209,7 +1209,7 @@ mod tests {
     #[test]
     fn manifest_contains_all_artifacts() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         assert_eq!(report.manifest.len(), report.claims.len());
         for entry in &report.manifest {
             assert!(!entry.sha256_hash.is_empty());
@@ -1220,7 +1220,7 @@ mod tests {
     #[test]
     fn claims_have_reproduce_scripts() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         for claim in &report.claims {
             assert!(claim.reproduce_script.contains("sha256sum"));
             assert!(claim.reproduce_script.contains(&claim.claim_id));
@@ -1230,7 +1230,7 @@ mod tests {
     #[test]
     fn render_markdown_contains_dashboard() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         let md = ReportingPipeline::render_markdown(&report);
         assert!(md.contains("# Category-Shift Report"));
         assert!(md.contains("## Dashboard"));
@@ -1242,9 +1242,9 @@ mod tests {
     #[test]
     fn render_json_is_valid() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
-        let json_str = ReportingPipeline::render_json(&report).unwrap();
-        let parsed: serde_json::Value = serde_json::from_str(&json_str).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
+        let json_str = ReportingPipeline::render_json(&report).expect("should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json_str).expect("should succeed");
         assert!(parsed.is_object());
         assert!(parsed["version"].is_number());
         assert!(parsed["claims"].is_array());
@@ -1253,16 +1253,16 @@ mod tests {
     #[test]
     fn render_json_is_deterministic() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
-        let json1 = ReportingPipeline::render_json(&report).unwrap();
-        let json2 = ReportingPipeline::render_json(&report).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
+        let json1 = ReportingPipeline::render_json(&report).expect("should succeed");
+        let json2 = ReportingPipeline::render_json(&report).expect("should succeed");
         assert_eq!(json1, json2);
     }
 
     #[test]
     fn diff_reports_detects_changes() {
         let now = 1_000_000;
-        let (_, report1) = demo_pipeline(now).unwrap();
+        let (_, report1) = demo_pipeline(now).expect("should succeed");
 
         // Create a second report with different values
         let mut pipeline2 = ReportingPipeline::default();
@@ -1286,8 +1286,8 @@ mod tests {
                 now + 100,
                 "trace",
             )
-            .unwrap();
-        let report2 = pipeline2.generate_report(now + 100, "trace").unwrap();
+            .expect("should succeed");
+        let report2 = pipeline2.generate_report(now + 100, "trace").expect("should succeed");
 
         let diffs = ReportingPipeline::diff_reports(&report1, &report2);
         assert!(!diffs.is_empty());
@@ -1296,7 +1296,7 @@ mod tests {
     #[test]
     fn diff_identical_reports_is_empty() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         let diffs = ReportingPipeline::diff_reports(&report, &report);
         assert!(diffs.is_empty());
     }
@@ -1373,14 +1373,14 @@ mod tests {
     #[test]
     fn history_accumulates_reports() {
         let now = 1_000_000;
-        let (pipeline, _) = demo_pipeline(now).unwrap();
+        let (pipeline, _) = demo_pipeline(now).expect("should succeed");
         assert_eq!(pipeline.history().len(), 1);
     }
 
     #[test]
     fn telemetry_records_all_events() {
         let now = 1_000_000;
-        let (pipeline, _) = demo_pipeline(now).unwrap();
+        let (pipeline, _) = demo_pipeline(now).expect("should succeed");
         let codes: Vec<&str> = pipeline
             .telemetry()
             .iter()
@@ -1416,13 +1416,13 @@ mod tests {
                 now,
                 "trace",
             )
-            .unwrap();
+            .expect("should succeed");
     }
 
     #[test]
     fn report_generated_at_iso_format() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         assert!(
             chrono::DateTime::parse_from_rfc3339(&report.generated_at_iso).is_ok(),
             "expected RFC3339 timestamp, got {}",
@@ -1447,9 +1447,9 @@ mod tests {
     fn canonicalize_sorts_keys() {
         let input = serde_json::json!({"z": 1, "a": 2, "m": {"b": 3, "a": 4}});
         let canonical = canonicalize_value(input);
-        let keys: Vec<&String> = canonical.as_object().unwrap().keys().collect();
+        let keys: Vec<&String> = canonical.as_object().expect("should succeed").keys().collect();
         assert_eq!(keys, vec!["a", "m", "z"]);
-        let nested_keys: Vec<&String> = canonical["m"].as_object().unwrap().keys().collect();
+        let nested_keys: Vec<&String> = canonical["m"].as_object().expect("should succeed").keys().collect();
         assert_eq!(nested_keys, vec!["a", "b"]);
     }
 
@@ -1471,7 +1471,7 @@ mod tests {
     #[test]
     fn markdown_includes_bet_status_table() {
         let now = 1_000_000;
-        let (_, report) = demo_pipeline(now).unwrap();
+        let (_, report) = demo_pipeline(now).expect("should succeed");
         let md = ReportingPipeline::render_markdown(&report);
         assert!(md.contains("## Moonshot Bet Status"));
         assert!(md.contains("95% API Compatibility"));
@@ -1514,7 +1514,7 @@ mod tests {
             generated_at_secs: now - DEFAULT_FRESHNESS_WINDOW_SECS,
             content: Some(content.to_string()),
         };
-        let result = pipeline.verify_evidence(&evidence, now).unwrap();
+        let result = pipeline.verify_evidence(&evidence, now).expect("should succeed");
         assert_eq!(result.freshness, FreshnessStatus::Stale);
 
         // One second past boundary should be stale
@@ -1524,7 +1524,7 @@ mod tests {
             generated_at_secs: now - DEFAULT_FRESHNESS_WINDOW_SECS - 1,
             content: Some(content.to_string()),
         };
-        let result2 = pipeline.verify_evidence(&evidence2, now).unwrap();
+        let result2 = pipeline.verify_evidence(&evidence2, now).expect("should succeed");
         assert_eq!(result2.freshness, FreshnessStatus::Stale);
     }
 

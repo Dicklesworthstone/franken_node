@@ -90,6 +90,28 @@ def _checks():
        "content_hash" in src and "Sha256" in src,
        "SHA-256 content hashing")
 
+    # 8b. content_hash covers compatibility mapping surface (bd-fd5ox)
+    compat_hash_fields = [
+        "supported_versions", "api_coverage_pct",
+        "known_incompatibilities", "migration_complexity",
+    ]
+    # Extract the first hash_input block (kit hash in load_kit)
+    hash_start = src.find("let hash_input = serde_json")
+    if hash_start >= 0:
+        hash_end = src.find(".to_string();", hash_start)
+        hash_section = src[hash_start:hash_end] if hash_end > hash_start else ""
+    else:
+        hash_section = ""
+    found_hash_fields = [f for f in compat_hash_fields if f in hash_section]
+    ok("content_hash_surface",
+       len(found_hash_fields) == len(compat_hash_fields),
+       f"{len(found_hash_fields)}/{len(compat_hash_fields)} compat fields in kit hash")
+
+    # 8c. NaN/Inf guard on api_coverage_pct (bd-fd5ox)
+    ok("nan_inf_guard",
+       "is_finite()" in src and "api_coverage_pct" in src,
+       "Non-finite api_coverage_pct rejection")
+
     # 9. Kit versioning
     ok("kit_versioning",
        "KIT_VERSION" in src and "mke-v1.0" in src,
@@ -123,8 +145,8 @@ def _checks():
     # 15. Test coverage (count #[test])
     test_count = len(re.findall(r"#\[test\]", src))
     ok("test_coverage",
-       test_count >= 26,
-       f"{test_count} tests (>=26)")
+       test_count >= 29,
+       f"{test_count} tests (>=29)")
 
     return results
 
@@ -132,7 +154,7 @@ def _checks():
 def self_test():
     """Smoke-test that all checks produce output."""
     results = _checks()
-    assert len(results) >= 15, f"Expected >=15 checks, got {len(results)}"
+    assert len(results) >= 17, f"Expected >=17 checks, got {len(results)}"
     for r in results:
         assert "check" in r and "passed" in r
     print(f"self_test: {len(results)} checks OK", file=sys.stderr)

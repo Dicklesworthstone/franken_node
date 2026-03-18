@@ -577,7 +577,7 @@ mod tests {
     #[test]
     fn test_replay_and_verify_match() {
         let cap = test_capsule();
-        assert!(replay_and_verify(&cap).unwrap());
+        assert!(replay_and_verify(&cap).expect("replay should succeed"));
     }
 
     #[test]
@@ -610,16 +610,16 @@ mod tests {
     #[test]
     fn test_capsule_serde_roundtrip() {
         let cap = test_capsule();
-        let json = serde_json::to_string(&cap).unwrap();
-        let parsed: ReplayCapsule = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&cap).expect("serialize should succeed");
+        let parsed: ReplayCapsule = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(cap, parsed);
     }
 
     #[test]
     fn test_capsule_input_serde_roundtrip() {
         let input = &test_inputs()[0];
-        let json = serde_json::to_string(input).unwrap();
-        let parsed: CapsuleInput = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(input).expect("serialize should succeed");
+        let parsed: CapsuleInput = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(*input, parsed);
     }
 
@@ -627,16 +627,16 @@ mod tests {
     fn test_capsule_output_serde_roundtrip() {
         let cap = test_capsule();
         let output = &cap.expected_outputs[0];
-        let json = serde_json::to_string(output).unwrap();
-        let parsed: CapsuleOutput = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(output).expect("serialize should succeed");
+        let parsed: CapsuleOutput = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(*output, parsed);
     }
 
     #[test]
     fn test_environment_serde_roundtrip() {
         let env = test_env();
-        let json = serde_json::to_string(&env).unwrap();
-        let parsed: EnvironmentSnapshot = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&env).expect("serialize should succeed");
+        let parsed: EnvironmentSnapshot = serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(env, parsed);
     }
 
@@ -645,8 +645,8 @@ mod tests {
     #[test]
     fn test_canonical_json_roundtrip() {
         let cap = test_capsule();
-        let json = to_canonical_json(&cap).unwrap();
-        let parsed = from_json(&json).unwrap();
+        let json = to_canonical_json(&cap).expect("serialize should succeed");
+        let parsed = from_json(&json).expect("deserialize should succeed");
         assert_eq!(cap, parsed);
     }
 
@@ -766,9 +766,9 @@ mod tests {
             data: b"data".to_vec(),
             metadata: meta.clone(),
         }];
-        let cap = create_capsule("cap-meta", inputs, test_env()).unwrap();
+        let cap = create_capsule("cap-meta", inputs, test_env()).expect("create should succeed");
         assert_eq!(cap.inputs[0].metadata.len(), 2);
-        assert_eq!(cap.inputs[0].metadata.get("source").unwrap(), "test");
+        assert_eq!(cap.inputs[0].metadata.get("source").expect("should exist"), "test");
     }
 
     // ── Environment properties ──────────────────────────────────────
@@ -778,10 +778,10 @@ mod tests {
         let mut env = test_env();
         env.properties
             .insert("feature_flag".to_string(), "enabled".to_string());
-        let cap = create_capsule("cap-env", test_inputs(), env).unwrap();
+        let cap = create_capsule("cap-env", test_inputs(), env).expect("create should succeed");
         assert_eq!(
-            cap.environment.properties.get("feature_flag").unwrap(),
-            "enabled"
+            cap.environment.properties.get("feature_flag").expect("should exist"),
+            "true"
         );
     }
 
@@ -794,9 +794,9 @@ mod tests {
             data: b"only".to_vec(),
             metadata: BTreeMap::new(),
         }];
-        let cap = create_capsule("cap-single", inputs, test_env()).unwrap();
+        let cap = create_capsule("cap-single", inputs, test_env()).expect("create should succeed");
         assert!(validate_capsule(&cap).is_ok());
-        assert!(replay_and_verify(&cap).unwrap());
+        assert!(replay_and_verify(&cap).expect("replay should succeed"));
     }
 
     // ── Hash collision regression (bd-18qn3) ───────────────────────
