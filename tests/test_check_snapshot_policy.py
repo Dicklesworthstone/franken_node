@@ -118,6 +118,14 @@ class TestSnapshotImplementation(unittest.TestCase):
     def test_has_check_replay_bound(self):
         self.assertIn("fn check_replay_bound", self.content)
 
+    def test_tracks_replay_bytes_and_max_bytes(self):
+        self.assertIn("pub max_replay_bytes: u64", self.content)
+        self.assertIn("pub replay_bytes: u64", self.content)
+        self.assertIn("self.replay_bytes < self.max_replay_bytes", self.content)
+
+    def test_tracker_construction_validates_policy(self):
+        self.assertIn("policy.validate()?;", self.content)
+
     def test_has_update_policy(self):
         self.assertIn("fn update_policy", self.content)
 
@@ -141,6 +149,9 @@ class TestSnapshotConformance(unittest.TestCase):
     def test_covers_replay_bounds(self):
         self.assertIn("replay", self.content.lower())
 
+    def test_covers_byte_boundary_fail_closed(self):
+        self.assertIn("replay_byte_boundary_fails_closed", self.content)
+
     def test_covers_hash_validation(self):
         self.assertIn("hash", self.content.lower())
 
@@ -151,6 +162,32 @@ class TestSnapshotConformance(unittest.TestCase):
 
     def test_covers_audit(self):
         self.assertIn("audit", self.content.lower())
+
+    def test_covers_invalid_policy_construction(self):
+        self.assertIn("tracker_construction_rejects_invalid_policy", self.content)
+
+
+class TestSnapshotChecker(unittest.TestCase):
+    """Test checker script structure stays aligned to the fail-closed surface."""
+
+    def setUp(self):
+        self.check_path = os.path.join(ROOT, "scripts/check_snapshot_policy.py")
+        self.assertTrue(os.path.isfile(self.check_path))
+        with open(self.check_path) as f:
+            self.content = f.read()
+
+    def test_checker_tracks_replay_byte_surface(self):
+        self.assertIn("SNAP-REPLAY-BYTES", self.content)
+        self.assertIn("self.replay_bytes < self.max_replay_bytes", self.content)
+
+    def test_checker_tracks_fail_closed_surface(self):
+        self.assertIn("SNAP-FAIL-CLOSED", self.content)
+        self.assertIn("tracker_construction_rejects_invalid_policy", self.content)
+        self.assertIn("replay_byte_boundary_fails_closed", self.content)
+
+    def test_checker_no_longer_runs_local_cargo(self):
+        self.assertNotIn("subprocess.run", self.content)
+        self.assertNotIn('["~/.cargo/bin/cargo"', self.content)
 
 
 class TestSnapshotSpec(unittest.TestCase):

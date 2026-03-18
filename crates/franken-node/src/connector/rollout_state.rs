@@ -530,7 +530,7 @@ mod tests {
             PersistError::ReplayMismatch { field, .. } => {
                 assert_eq!(field, "lifecycle_state");
             }
-            _ => panic!("expected ReplayMismatch"),
+            _ => unreachable!("expected ReplayMismatch"),
         }
     }
 
@@ -544,7 +544,7 @@ mod tests {
             PersistError::ReplayMismatch { field, .. } => {
                 assert_eq!(field, "rollout_phase");
             }
-            _ => panic!("expected ReplayMismatch"),
+            _ => unreachable!("expected ReplayMismatch"),
         }
     }
 
@@ -558,7 +558,7 @@ mod tests {
             PersistError::ReplayMismatch { field, .. } => {
                 assert_eq!(field, "rollout_epoch");
             }
-            _ => panic!("expected ReplayMismatch"),
+            _ => unreachable!("expected ReplayMismatch"),
         }
     }
 
@@ -572,7 +572,7 @@ mod tests {
             PersistError::ReplayMismatch { field, .. } => {
                 assert_eq!(field, "health");
             }
-            _ => panic!("expected ReplayMismatch"),
+            _ => unreachable!("expected ReplayMismatch"),
         }
     }
 
@@ -586,7 +586,7 @@ mod tests {
             PersistError::ReplayMismatch { field, .. } => {
                 assert_eq!(field, "activated_at");
             }
-            _ => panic!("expected ReplayMismatch"),
+            _ => unreachable!("expected ReplayMismatch"),
         }
     }
 
@@ -600,7 +600,7 @@ mod tests {
             PersistError::ReplayMismatch { field, .. } => {
                 assert_eq!(field, "persisted_at");
             }
-            _ => panic!("expected ReplayMismatch"),
+            _ => unreachable!("expected ReplayMismatch"),
         }
     }
 
@@ -614,7 +614,7 @@ mod tests {
             PersistError::ReplayMismatch { field, .. } => {
                 assert_eq!(field, "cancel_phase");
             }
-            _ => panic!("expected ReplayMismatch"),
+            _ => unreachable!("expected ReplayMismatch"),
         }
     }
 

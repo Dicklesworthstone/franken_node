@@ -685,7 +685,7 @@ mod tests {
                 assert_eq!(host, "127.0.0.1");
                 assert!(cidr.contains("127.0.0.0/8"));
             }
-            other => panic!("expected SsrfDenied, got {:?}", other),
+            other => unreachable!("expected SsrfDenied, got {:?}", other),
         }
     }
 
@@ -727,7 +727,7 @@ mod tests {
                 assert_eq!(host, "LOCALHOST.");
                 assert_eq!(cidr, "localhost");
             }
-            other => panic!("expected SsrfDenied, got {:?}", other),
+            other => unreachable!("expected SsrfDenied, got {:?}", other),
         }
     }
 

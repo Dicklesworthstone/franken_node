@@ -1112,7 +1112,7 @@ mod tests {
                 assert_eq!(expected, "1.4.2");
                 assert_eq!(actual, "2.0.0");
             }
-            _ => panic!("expected VersionMismatch"),
+            _ => unreachable!("expected VersionMismatch"),
         }
     }
 

@@ -870,7 +870,7 @@ mod tests {
         if let FreshnessError::ProofTampered { detail } = err {
             assert!(detail.contains("in the future"));
         } else {
-            panic!("Expected ProofTampered error");
+            unreachable!("Expected ProofTampered error");
         }
     }
 }

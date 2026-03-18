@@ -222,7 +222,7 @@ mod tests {
                 assert!(permitted.contains(&ConnectorState::Verified));
                 assert!(permitted.contains(&ConnectorState::Failed));
             }
-            _ => panic!("expected IllegalTransition"),
+            _ => unreachable!("expected IllegalTransition"),
         }
     }
 

@@ -136,6 +136,7 @@ impl fmt::Display for FailureReason {
 
 // ── Signature verification ──────────────────────────────────────────
 
+#[allow(dead_code)]
 fn digest_prefix_u64(digest: &[u8]) -> u64 {
     let mut prefix = [0u8; 8];
     if let Some(first_eight) = digest.get(..8) {
@@ -149,11 +150,12 @@ fn digest_prefix_u64(digest: &[u8]) -> u64 {
 fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature) -> bool {
     let mut h = Sha256::new();
     h.update(b"threshold_sig_verify_v1:");
+    h.update((key.public_key_hex.len() as u64).to_le_bytes());
     h.update(key.public_key_hex.as_bytes());
-    h.update(b":");
+    h.update((content_hash.len() as u64).to_le_bytes());
     h.update(content_hash.as_bytes());
     let digest = h.finalize();
-    let expected = format!("{:016x}", digest_prefix_u64(&digest));
+    let expected = hex::encode(digest);
     crate::security::constant_time::ct_eq(&sig.signature_hex, &expected)
 }
 
@@ -161,14 +163,15 @@ fn verify_signature(key: &SignerKey, content_hash: &str, sig: &PartialSignature)
 pub fn sign(key: &SignerKey, content_hash: &str) -> PartialSignature {
     let mut h = Sha256::new();
     h.update(b"threshold_sig_verify_v1:");
+    h.update((key.public_key_hex.len() as u64).to_le_bytes());
     h.update(key.public_key_hex.as_bytes());
-    h.update(b":");
+    h.update((content_hash.len() as u64).to_le_bytes());
     h.update(content_hash.as_bytes());
     let digest = h.finalize();
     PartialSignature {
         signer_id: key.key_id.clone(),
         key_id: key.key_id.clone(),
-        signature_hex: format!("{:016x}", digest_prefix_u64(&digest)),
+        signature_hex: hex::encode(digest),
     }
 }
 

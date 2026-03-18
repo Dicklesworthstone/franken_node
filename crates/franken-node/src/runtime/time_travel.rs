@@ -892,7 +892,7 @@ mod tests {
     fn capture_session_records_frames() {
         let mut session = CaptureSession::start("snap-1", 42);
         let d = make_decision("d1", b"p1");
-        session.capture_frame(1, b"input1", d).unwrap();
+        session.capture_frame(1, b"input1", d).expect("capture should succeed");
         assert_eq!(session.frame_count(), 1);
     }
 
@@ -900,7 +900,7 @@ mod tests {
     fn capture_session_rejects_clock_regression() {
         let mut session = CaptureSession::start("snap-1", 42);
         let d1 = make_decision("d1", b"p1");
-        session.capture_frame(10, b"i1", d1).unwrap();
+        session.capture_frame(10, b"i1", d1).expect("capture should succeed");
         let d2 = make_decision("d2", b"p2");
         let err = session.capture_frame(5, b"i2", d2).unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_TTR_CLOCK_REGRESSION);
@@ -920,7 +920,7 @@ mod tests {
         let mut session = CaptureSession::start("snap-1", 42);
         assert_eq!(session.events(), &[event_codes::TTR_001]);
         let d = make_decision("d1", b"p1");
-        session.capture_frame(1, b"i", d).unwrap();
+        session.capture_frame(1, b"i", d).expect("capture should succeed");
         assert_eq!(session.events().len(), 2);
         assert_eq!(session.events()[1], event_codes::TTR_002);
     }
@@ -952,8 +952,8 @@ mod tests {
     #[test]
     fn snapshot_round_trip_json() {
         let snap = simple_capture(42, &[b"a", b"b"]);
-        let bytes = snap.to_json_bytes().unwrap();
-        let restored = WorkflowSnapshot::from_json_bytes(&bytes).unwrap();
+        let bytes = snap.to_json_bytes().expect("serialize should succeed");
+        let restored = WorkflowSnapshot::from_json_bytes(&bytes).expect("deserialize should succeed");
         assert_eq!(snap, restored);
     }
 
@@ -990,10 +990,10 @@ mod tests {
     #[test]
     fn snapshot_from_json_rejects_frame_count_mismatch() {
         let snap = simple_capture(42, &[b"a", b"b"]);
-        let bytes = snap.to_json_bytes().unwrap();
-        let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let bytes = snap.to_json_bytes().expect("serialize should succeed");
+        let mut json: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize should succeed");
         json["frame_count"] = serde_json::json!(999_u64);
-        let tampered = serde_json::to_vec(&json).unwrap();
+        let tampered = serde_json::to_vec(&json).expect("serialize should succeed");
 
         let err = WorkflowSnapshot::from_json_bytes(&tampered).unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_TTR_SNAPSHOT_CORRUPT);
@@ -1002,10 +1002,10 @@ mod tests {
     #[test]
     fn snapshot_from_json_rejects_schema_mismatch() {
         let snap = simple_capture(42, &[b"a"]);
-        let bytes = snap.to_json_bytes().unwrap();
-        let mut json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let bytes = snap.to_json_bytes().expect("serialize should succeed");
+        let mut json: serde_json::Value = serde_json::from_slice(&bytes).expect("deserialize should succeed");
         json["schema_version"] = serde_json::json!("ttr-v9.9");
-        let tampered = serde_json::to_vec(&json).unwrap();
+        let tampered = serde_json::to_vec(&json).expect("serialize should succeed");
 
         let err = WorkflowSnapshot::from_json_bytes(&tampered).unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_TTR_SNAPSHOT_CORRUPT);
@@ -1038,9 +1038,9 @@ mod tests {
     #[test]
     fn replay_step_forward() {
         let snap = simple_capture(42, &[b"a", b"b", b"c"]);
-        let mut session = ReplaySession::start(snap, 42).unwrap();
+        let mut session = ReplaySession::start(snap, 42).expect("start should succeed");
         assert_eq!(session.cursor(), 0);
-        let frame = session.step_forward().unwrap();
+        let frame = session.step_forward().expect("step should succeed");
         assert_eq!(frame.frame_index, 1);
         assert_eq!(session.cursor(), 1);
     }
@@ -1048,35 +1048,35 @@ mod tests {
     #[test]
     fn replay_step_backward() {
         let snap = simple_capture(42, &[b"a", b"b", b"c"]);
-        let mut session = ReplaySession::start(snap, 42).unwrap();
-        session.step_forward().unwrap();
-        session.step_forward().unwrap();
+        let mut session = ReplaySession::start(snap, 42).expect("start should succeed");
+        session.step_forward().expect("step should succeed");
+        session.step_forward().expect("step should succeed");
         assert_eq!(session.cursor(), 2);
-        let frame = session.step_backward().unwrap();
+        let frame = session.step_backward().expect("step should succeed");
         assert_eq!(frame.frame_index, 1);
     }
 
     #[test]
     fn replay_step_forward_out_of_bounds() {
         let snap = simple_capture(42, &[b"a"]);
-        let mut session = ReplaySession::start(snap, 42).unwrap();
-        let err = session.step_forward().unwrap_err();
+        let mut session = ReplaySession::start(snap, 42).expect("start should succeed");
+        let err = session.step_forward().expect_err("should fail");
         assert_eq!(err.code(), error_codes::ERR_TTR_STEP_OUT_OF_BOUNDS);
     }
 
     #[test]
     fn replay_step_backward_at_zero() {
         let snap = simple_capture(42, &[b"a"]);
-        let mut session = ReplaySession::start(snap, 42).unwrap();
-        let err = session.step_backward().unwrap_err();
+        let mut session = ReplaySession::start(snap, 42).expect("start should succeed");
+        let err = session.step_backward().expect_err("should fail");
         assert_eq!(err.code(), error_codes::ERR_TTR_STEP_OUT_OF_BOUNDS);
     }
 
     #[test]
     fn replay_jump_to() {
         let snap = simple_capture(42, &[b"a", b"b", b"c"]);
-        let mut session = ReplaySession::start(snap, 42).unwrap();
-        let frame = session.jump_to(2).unwrap();
+        let mut session = ReplaySession::start(snap, 42).expect("start should succeed");
+        let frame = session.jump_to(2).expect("jump should succeed");
         assert_eq!(frame.frame_index, 2);
         assert_eq!(session.cursor(), 2);
     }
@@ -1084,8 +1084,8 @@ mod tests {
     #[test]
     fn replay_jump_to_out_of_bounds() {
         let snap = simple_capture(42, &[b"a"]);
-        let mut session = ReplaySession::start(snap, 42).unwrap();
-        let err = session.jump_to(5).unwrap_err();
+        let mut session = ReplaySession::start(snap, 42).expect("start should succeed");
+        let err = session.jump_to(5).expect_err("should fail");
         assert_eq!(err.code(), error_codes::ERR_TTR_STEP_OUT_OF_BOUNDS);
     }
 
@@ -1094,9 +1094,9 @@ mod tests {
     #[test]
     fn verify_decision_detects_divergence() {
         let snap = simple_capture(42, &[b"a"]);
-        let mut session = ReplaySession::start(snap, 42).unwrap();
+        let mut session = ReplaySession::start(snap, 42).expect("start should succeed");
         let bad_decision = make_decision("wrong", b"wrong-payload");
-        let err = session.verify_decision(&bad_decision).unwrap_err();
+        let err = session.verify_decision(&bad_decision).expect_err("should fail");
         assert_eq!(err.code(), error_codes::ERR_TTR_DIVERGENCE);
     }
 
@@ -1104,7 +1104,7 @@ mod tests {
     fn verify_decision_accepts_matching() {
         let snap = simple_capture(42, &[b"a"]);
         let expected_decision = deterministic_decision(42, 1, b"a");
-        let mut session = ReplaySession::start(snap, 42).unwrap();
+        let mut session = ReplaySession::start(snap, 42).expect("start should succeed");
         assert!(session.verify_decision(&expected_decision).is_ok());
     }
 
@@ -1124,7 +1124,7 @@ mod tests {
         let mut rt = TimeTravelRuntime::new();
         let snap = simple_capture(42, &[b"a"]);
         rt.store_snapshot(snap);
-        let session = rt.begin_replay("snap-test", 42).unwrap();
+        let session = rt.begin_replay("snap-test", 42).expect("begin should succeed");
         assert_eq!(session.total_frames(), 1);
     }
 
@@ -1133,9 +1133,9 @@ mod tests {
         let mut rt = TimeTravelRuntime::new();
         let snap = simple_capture(42, &[b"a", b"b"]);
         rt.store_snapshot(snap);
-        let bytes = rt.serialize_snapshot("snap-test").unwrap();
+        let bytes = rt.serialize_snapshot("snap-test").expect("serialize should succeed");
         let mut rt2 = TimeTravelRuntime::new();
-        let id = rt2.load_snapshot(&bytes).unwrap();
+        let id = rt2.load_snapshot(&bytes).expect("load should succeed");
         assert_eq!(id, "snap-test");
         assert!(rt2.get_snapshot("snap-test").is_some());
     }
@@ -1163,13 +1163,13 @@ mod tests {
         }
 
         // Replay against captured snapshot must verify all frames
-        let mut session = ReplaySession::start(snap1.clone(), seed).unwrap();
+        let mut session = ReplaySession::start(snap1.clone(), seed).expect("start should succeed");
         for input in &inputs {
             let tick = session.cursor() as u64 + 1;
             let replayed = deterministic_decision(seed, tick, input);
-            session.verify_decision(&replayed).unwrap();
+            session.verify_decision(&replayed).expect("verify should succeed");
             if session.cursor() + 1 < session.total_frames() {
-                session.step_forward().unwrap();
+                session.step_forward().expect("step should succeed");
             }
         }
     }
@@ -1231,7 +1231,7 @@ mod tests {
     #[test]
     fn replay_complete_emits_event() {
         let snap = simple_capture(42, &[b"a"]);
-        let session = ReplaySession::start(snap, 42).unwrap();
+        let session = ReplaySession::start(snap, 42).expect("start should succeed");
         let events = session.complete();
         assert!(events.contains(&event_codes::TTR_010.to_string()));
     }

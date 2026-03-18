@@ -803,11 +803,11 @@ mod tests {
         last.entry_hash = tamper_same_length(&last.entry_hash);
 
         match reg.verify_audit_integrity() {
-            Ok(()) => panic!("tampered audit hash should fail integrity verification"),
+            Ok(()) => unreachable!("tampered audit hash should fail integrity verification"),
             Err(RegistryError::AuthFailure(msg)) => {
                 assert!(msg.contains("hash mismatch"));
             }
-            Err(other) => panic!("unexpected error variant: {other:?}"),
+            Err(other) => unreachable!("unexpected error variant: {other:?}"),
         }
     }
 

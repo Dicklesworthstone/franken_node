@@ -538,8 +538,8 @@ mod tests {
     #[test]
     fn test_tier_serde_roundtrip() {
         for t in DurabilityTier::all() {
-            let json = serde_json::to_string(t).unwrap();
-            let back: DurabilityTier = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(t).expect("should succeed");
+            let back: DurabilityTier = serde_json::from_str(&json).expect("should succeed");
             assert_eq!(*t, back);
         }
     }
@@ -578,8 +578,8 @@ mod tests {
     #[test]
     fn test_class_serde_roundtrip() {
         for c in PersistenceClass::all() {
-            let json = serde_json::to_string(c).unwrap();
-            let back: PersistenceClass = serde_json::from_str(&json).unwrap();
+            let json = serde_json::to_string(c).expect("should succeed");
+            let back: PersistenceClass = serde_json::from_str(&json).expect("should succeed");
             assert_eq!(*c, back);
         }
     }
@@ -610,8 +610,8 @@ mod tests {
             applied_at: "2026-02-20".into(),
             description: "init".into(),
         };
-        let json = serde_json::to_string(&sv).unwrap();
-        let back: SchemaVersion = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&sv).expect("should succeed");
+        let back: SchemaVersion = serde_json::from_str(&json).expect("should succeed");
         assert_eq!(back.version, 1);
     }
 
@@ -626,8 +626,8 @@ mod tests {
             tier: DurabilityTier::Tier1,
             latency_us: 42,
         };
-        let json = serde_json::to_string(&wr).unwrap();
-        let back: WriteResult = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&wr).expect("should succeed");
+        let back: WriteResult = serde_json::from_str(&json).expect("should succeed");
         assert!(back.success);
     }
 
@@ -641,8 +641,8 @@ mod tests {
             tier: DurabilityTier::Tier3,
             cache_hit: true,
         };
-        let json = serde_json::to_string(&rr).unwrap();
-        let back: ReadResult = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&rr).expect("should succeed");
+        let back: ReadResult = serde_json::from_str(&json).expect("should succeed");
         assert!(back.found);
     }
 
@@ -660,8 +660,8 @@ mod tests {
     #[test]
     fn test_error_serde_roundtrip() {
         let e = AdapterError::PoolExhausted;
-        let json = serde_json::to_string(&e).unwrap();
-        let back: AdapterError = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&e).expect("should succeed");
+        let back: AdapterError = serde_json::from_str(&json).expect("should succeed");
         assert_eq!(back, AdapterError::PoolExhausted);
     }
 
@@ -672,10 +672,10 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::ControlState, "fence_1", b"token_abc")
-            .unwrap();
+            .expect("should succeed");
         let result = adapter.read(PersistenceClass::ControlState, "fence_1");
         assert!(result.found);
-        assert_eq!(result.value.unwrap(), b"token_abc");
+        assert_eq!(result.value.expect("should succeed"), b"token_abc");
         assert_eq!(result.tier, DurabilityTier::Tier1);
     }
 
@@ -684,7 +684,7 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::AuditLog, "entry_1", b"audit_data")
-            .unwrap();
+            .expect("should succeed");
         let result = adapter.read(PersistenceClass::AuditLog, "entry_1");
         assert!(result.found);
     }
@@ -694,7 +694,7 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::Snapshot, "snap_1", b"state")
-            .unwrap();
+            .expect("should succeed");
         let result = adapter.read(PersistenceClass::Snapshot, "snap_1");
         assert!(result.found);
         assert_eq!(result.tier, DurabilityTier::Tier2);
@@ -705,7 +705,7 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::Cache, "cached_1", b"val")
-            .unwrap();
+            .expect("should succeed");
         let result = adapter.read(PersistenceClass::Cache, "cached_1");
         assert!(result.found);
         assert!(result.cache_hit);
@@ -725,12 +725,12 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::ControlState, "k", b"v1")
-            .unwrap();
+            .expect("should succeed");
         adapter
             .write(PersistenceClass::ControlState, "k", b"v2")
-            .unwrap();
+            .expect("should succeed");
         let result = adapter.read(PersistenceClass::ControlState, "k");
-        assert_eq!(result.value.unwrap(), b"v2");
+        assert_eq!(result.value.expect("should succeed"), b"v2");
     }
 
     // -- Replay tests --
@@ -740,10 +740,10 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::AuditLog, "e1", b"data1")
-            .unwrap();
+            .expect("should succeed");
         adapter
             .write(PersistenceClass::AuditLog, "e2", b"data2")
-            .unwrap();
+            .expect("should succeed");
         let results = adapter.replay();
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|(_, ok)| *ok));
@@ -754,7 +754,7 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::AuditLog, "e1", b"data")
-            .unwrap();
+            .expect("should succeed");
         let _ = adapter.take_events(); // clear init + write events
         adapter.replay();
         assert!(
@@ -772,13 +772,13 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::ControlState, "f1", b"fence")
-            .unwrap();
+            .expect("should succeed");
         adapter
             .write(PersistenceClass::AuditLog, "a1", b"audit")
-            .unwrap();
+            .expect("should succeed");
         adapter
             .write(PersistenceClass::Cache, "c1", b"cache")
-            .unwrap();
+            .expect("should succeed");
         let recovered = adapter.crash_recovery();
         assert!(recovered >= 2); // at least the two Tier 1 entries
     }
@@ -807,7 +807,7 @@ mod tests {
     #[test]
     fn test_migrate_increments_version() {
         let mut adapter = FrankensqliteAdapter::default();
-        adapter.migrate(2, "Add index").unwrap();
+        adapter.migrate(2, "Add index").expect("should succeed");
         assert_eq!(adapter.schema_version(), 2);
     }
 
@@ -830,7 +830,7 @@ mod tests {
     fn test_gate_pass_after_writes() {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
-            adapter.write(*class, "test_key", b"test").unwrap();
+            adapter.write(*class, "test_key", b"test").expect("should succeed");
         }
         assert!(adapter.gate_pass());
     }
@@ -842,8 +842,8 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::ControlState, "k1", b"v")
-            .unwrap();
-        adapter.write(PersistenceClass::Cache, "k2", b"v").unwrap();
+            .expect("should succeed");
+        adapter.write(PersistenceClass::Cache, "k2", b"v").expect("should succeed");
         adapter.read(PersistenceClass::ControlState, "k1");
         let summary = adapter.summary();
         assert_eq!(summary.total_writes, 2);
@@ -856,8 +856,8 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::ControlState, "k", b"v")
-            .unwrap();
-        adapter.write(PersistenceClass::Cache, "k", b"v").unwrap();
+            .expect("should succeed");
+        adapter.write(PersistenceClass::Cache, "k", b"v").expect("should succeed");
         let summary = adapter.summary();
         assert!(summary.writes_by_tier.contains_key("tier1_wal_crash_safe"));
         assert!(summary.writes_by_tier.contains_key("tier3_ephemeral"));
@@ -882,7 +882,7 @@ mod tests {
         let _ = adapter.take_events();
         adapter
             .write(PersistenceClass::ControlState, "k", b"v")
-            .unwrap();
+            .expect("should succeed");
         assert!(
             adapter
                 .events()
@@ -905,7 +905,7 @@ mod tests {
     fn test_report_structure() {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
-            adapter.write(*class, "test", b"val").unwrap();
+            adapter.write(*class, "test", b"val").expect("should succeed");
         }
         let report = adapter.to_report();
         assert_eq!(report["bead_id"], "bd-2tua");
@@ -924,7 +924,7 @@ mod tests {
     fn test_report_persistence_classes() {
         let adapter = FrankensqliteAdapter::default();
         let report = adapter.to_report();
-        assert_eq!(report["persistence_classes"].as_array().unwrap().len(), 4);
+        assert_eq!(report["persistence_classes"].as_array().expect("should succeed").len(), 4);
     }
 
     // -- Concurrent access simulation --
@@ -939,18 +939,18 @@ mod tests {
                     "shared_key",
                     format!("value_{i}").as_bytes(),
                 )
-                .unwrap();
+                .expect("should succeed");
         }
         let result = adapter.read(PersistenceClass::ControlState, "shared_key");
         assert!(result.found);
-        assert_eq!(result.value.unwrap(), b"value_9");
+        assert_eq!(result.value.expect("should succeed"), b"value_9");
     }
 
     #[test]
     fn test_concurrent_different_classes() {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
-            adapter.write(*class, "same_key", b"class_data").unwrap();
+            adapter.write(*class, "same_key", b"class_data").expect("should succeed");
         }
         for class in PersistenceClass::all() {
             let result = adapter.read(*class, "same_key");
@@ -998,8 +998,8 @@ mod tests {
             persistence_class: "control_state".into(),
             detail: "test detail".into(),
         };
-        let json = serde_json::to_string(&evt).unwrap();
-        let back: AdapterEvent = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&evt).expect("should succeed");
+        let back: AdapterEvent = serde_json::from_str(&json).expect("should succeed");
         assert_eq!(back.code, "TEST");
     }
 
@@ -1010,8 +1010,8 @@ mod tests {
         let mut a1 = FrankensqliteAdapter::default();
         let mut a2 = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
-            a1.write(*class, "k", b"v").unwrap();
-            a2.write(*class, "k", b"v").unwrap();
+            a1.write(*class, "k", b"v").expect("should succeed");
+            a2.write(*class, "k", b"v").expect("should succeed");
         }
         let r1 = a1.read(PersistenceClass::ControlState, "k");
         let r2 = a2.read(PersistenceClass::ControlState, "k");
@@ -1025,10 +1025,10 @@ mod tests {
         let mut adapter = FrankensqliteAdapter::default();
         adapter
             .write(PersistenceClass::ControlState, "k", b"v")
-            .unwrap();
+            .expect("should succeed");
         let summary = adapter.summary();
-        let json = serde_json::to_string(&summary).unwrap();
-        let back: AdapterSummary = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string(&summary).expect("should succeed");
+        let back: AdapterSummary = serde_json::from_str(&json).expect("should succeed");
         assert_eq!(back.total_writes, summary.total_writes);
     }
 }

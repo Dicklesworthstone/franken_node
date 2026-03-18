@@ -597,7 +597,7 @@ mod tests {
             } => {
                 assert_eq!(*effective_level, HardeningLevel::Enhanced);
             }
-            other => panic!("expected Clamped, got {other:?}"),
+            other => unreachable!("expected Clamped, got {other:?}"),
         }
         assert_eq!(event.effective_level, HardeningLevel::Enhanced);
     }
@@ -633,7 +633,7 @@ mod tests {
             } => {
                 assert_eq!(*effective_level, HardeningLevel::Enhanced);
             }
-            other => panic!("expected Clamped, got {other:?}"),
+            other => unreachable!("expected Clamped, got {other:?}"),
         }
     }
 
@@ -755,7 +755,7 @@ mod tests {
             } => {
                 assert_eq!(*effective_level, HardeningLevel::Enhanced);
             }
-            other => panic!("expected Clamped, got {other:?}"),
+            other => unreachable!("expected Clamped, got {other:?}"),
         }
         assert_eq!(policy.history().len(), 1);
         assert_eq!(policy.history()[0].to_level, HardeningLevel::Enhanced);
@@ -911,7 +911,7 @@ mod tests {
             } => {
                 assert_eq!(*effective_level, HardeningLevel::Enhanced);
             }
-            other => panic!("expected Clamped, got {other:?}"),
+            other => unreachable!("expected Clamped, got {other:?}"),
         }
     }
 

@@ -464,7 +464,7 @@ impl RuntimeOracle {
             });
         }
 
-        if self.active_checks.contains_key(check_id) {
+        if self.active_checks.get(check_id).copied().unwrap_or(false) {
             return Err(OracleError {
                 code: error_codes::ERR_NVO_CHECK_ALREADY_RUNNING,
                 message: format!("check '{check_id}' already in progress"),
@@ -953,7 +953,7 @@ mod tests {
             CheckOutcome::Agree { canonical_output } => {
                 assert_eq!(canonical_output, vec![1, 2, 3]);
             }
-            CheckOutcome::Diverge { .. } => panic!("expected agreement"),
+            CheckOutcome::Diverge { .. } => unreachable!("expected agreement"),
         }
     }
 
@@ -976,7 +976,7 @@ mod tests {
             CheckOutcome::Diverge { outputs } => {
                 assert_eq!(outputs.len(), 2);
             }
-            CheckOutcome::Agree { .. } => panic!("expected divergence"),
+            CheckOutcome::Agree { .. } => unreachable!("expected divergence"),
         }
     }
 
@@ -1169,7 +1169,7 @@ mod tests {
             } => {
                 assert!(blocking_divergence_ids.contains(&"div-crit".to_string()));
             }
-            _ => panic!("expected BlockRelease"),
+            _ => unreachable!("expected BlockRelease"),
         }
     }
 
@@ -1187,7 +1187,7 @@ mod tests {
         let verdict = oracle.check_release_gate(0);
         match verdict {
             OracleVerdict::BlockRelease { .. } => {}
-            _ => panic!("expected BlockRelease for High risk"),
+            _ => unreachable!("expected BlockRelease for High risk"),
         }
     }
 
@@ -1418,5 +1418,19 @@ mod tests {
         let mut oracle = RuntimeOracle::new("trace-035", 66);
         let err = oracle.tally_votes("nonexistent").unwrap_err();
         assert_eq!(err.code, error_codes::ERR_NVO_CHECK_NOT_FOUND);
+    }
+
+    // === bd-CrimsonCrane: BTreeMap<String, bool> regression ===
+
+    #[test]
+    fn disabled_active_check_allows_rerun() {
+        // An active_check entry with value=false should NOT block a new check.
+        let mut oracle = RuntimeOracle::new("trace-disabled", 66);
+        oracle.register_runtime(sample_runtime("a")).expect("register should succeed");
+        // Manually insert a "disabled" check flag
+        oracle.active_checks.insert("chk-1".to_string(), false);
+        let outputs = BTreeMap::new();
+        let result = oracle.run_cross_check("chk-1", BoundaryScope::IO, b"in", &outputs);
+        assert!(result.is_ok(), "disabled (false) active check should allow re-run");
     }
 }

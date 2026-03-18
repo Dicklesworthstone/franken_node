@@ -428,7 +428,7 @@ mod tests {
                 assert_eq!(from, HardeningLevel::Baseline);
                 assert_eq!(to, HardeningLevel::Standard);
             }
-            other => panic!("expected Escalated, got {other:?}"),
+            other => unreachable!("expected Escalated, got {other:?}"),
         }
         assert_eq!(sm.current_level(), HardeningLevel::Standard);
     }
@@ -583,7 +583,7 @@ mod tests {
                 TriggerResult::Escalated { .. } => escalation_count += 1,
                 TriggerResult::AlreadyAtMax => at_max_count += 1,
                 TriggerResult::Suppressed { .. } => {
-                    panic!("unexpected Suppressed at iteration {i}: {r:?}")
+                    unreachable!("unexpected Suppressed at iteration {i}: {r:?}")
                 }
             }
         }
@@ -687,7 +687,7 @@ mod tests {
                 assert_eq!(latency_ms, 0);
                 assert!(latency_ms <= trigger.config().max_trigger_latency_ms);
             }
-            other => panic!("expected Escalated, got {other:?}"),
+            other => unreachable!("expected Escalated, got {other:?}"),
         }
     }
 

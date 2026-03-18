@@ -327,7 +327,7 @@ impl ConformanceSuiteRunner {
         fixture: ConformanceFixture,
     ) -> Result<(), ConformanceError> {
         let id_str = fixture.conformance_id.as_str().to_string();
-        if self.id_registry.contains_key(&id_str) {
+        if self.id_registry.get(&id_str).copied().unwrap_or(false) {
             return Err(ConformanceError::DuplicateId { id: id_str });
         }
         self.id_registry.insert(id_str, true);
@@ -1189,5 +1189,24 @@ mod tests {
     #[test]
     fn suite_version_constant() {
         assert_eq!(SUITE_VERSION, "1.0.0");
+    }
+
+    // === bd-CrimsonCrane: BTreeMap<String, bool> regression ===
+
+    #[test]
+    fn disabled_id_allows_reregistration() {
+        // An id_registry entry with value=false should NOT block re-registration.
+        let mut runner = ConformanceSuiteRunner::new();
+        // Manually insert a "disabled" fixture ID
+        runner.id_registry.insert("disabled-fixture".to_string(), false);
+        let fixture = ConformanceFixture {
+            conformance_id: ConformanceId("disabled-fixture".to_string()),
+            domain: "determinism".to_string(),
+            description: "re-register test".to_string(),
+            input: serde_json::json!({}),
+            expected: serde_json::json!({}),
+        };
+        let result = runner.register_fixture(fixture);
+        assert!(result.is_ok(), "disabled (false) fixture ID should allow re-registration");
     }
 }

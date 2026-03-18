@@ -902,7 +902,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("schema_version"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -914,7 +914,7 @@ mod tests {
             Err(VsdkError::SchemaUnsupported(msg)) => {
                 assert!(msg.contains("vsdk-v99.0"));
             }
-            other => panic!("expected SchemaUnsupported, got {other:?}"),
+            other => unreachable!("expected SchemaUnsupported, got {other:?}"),
         }
     }
 
@@ -926,7 +926,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("capsule_id"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -938,7 +938,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("claim_type"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -950,7 +950,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("expected_output_hash"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -963,7 +963,7 @@ mod tests {
                 assert!(msg.contains("expected_output_hash"));
                 assert!(msg.contains("sha256"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -975,7 +975,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("created_at"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -987,7 +987,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("creator_identity"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1001,7 +1001,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1017,7 +1017,7 @@ mod tests {
                 assert!(msg.contains(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY));
                 assert!(msg.contains("ed25519"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1032,7 +1032,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("unsupported signature algorithm"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1046,7 +1046,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains(CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1065,7 +1065,7 @@ mod tests {
                 assert!(msg.contains("input_refs"));
                 assert!(msg.contains("duplicate"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1124,7 +1124,7 @@ mod tests {
         capsule.signature = "tampered_signature".to_string();
         match verify_capsule_signature(&capsule) {
             Err(VsdkError::SignatureMismatch { .. }) => {}
-            other => panic!("expected SignatureMismatch, got {other:?}"),
+            other => unreachable!("expected SignatureMismatch, got {other:?}"),
         }
     }
 
@@ -1134,7 +1134,7 @@ mod tests {
         capsule.manifest.description = "tampered description".to_string();
         match verify_capsule_signature(&capsule) {
             Err(VsdkError::SignatureMismatch { .. }) => {}
-            other => panic!("expected SignatureMismatch, got {other:?}"),
+            other => unreachable!("expected SignatureMismatch, got {other:?}"),
         }
     }
 
@@ -1146,7 +1146,7 @@ mod tests {
         )));
         match verify_capsule_signature(&capsule) {
             Err(VsdkError::SignatureMismatch { .. }) => {}
-            other => panic!("expected SignatureMismatch, got {other:?}"),
+            other => unreachable!("expected SignatureMismatch, got {other:?}"),
         }
     }
 
@@ -1161,7 +1161,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1180,7 +1180,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("unsupported signature algorithm"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1199,7 +1199,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains(CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1245,7 +1245,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("expected_output_hash"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1258,7 +1258,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("created_at"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1273,7 +1273,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1284,7 +1284,7 @@ mod tests {
         sign_capsule(&mut capsule, &reference_signing_key());
         match replay_capsule(&capsule, "v1") {
             Err(VsdkError::EmptyPayload(_)) => {}
-            other => panic!("expected EmptyPayload, got {other:?}"),
+            other => unreachable!("expected EmptyPayload, got {other:?}"),
         }
     }
 
@@ -1294,7 +1294,7 @@ mod tests {
         capsule.signature = "tampered".to_string();
         match replay_capsule(&capsule, "v1") {
             Err(VsdkError::SignatureMismatch { .. }) => {}
-            other => panic!("expected SignatureMismatch, got {other:?}"),
+            other => unreachable!("expected SignatureMismatch, got {other:?}"),
         }
     }
 
@@ -1313,7 +1313,7 @@ mod tests {
             Err(VsdkError::ManifestIncomplete(msg)) => {
                 assert!(msg.contains("unsupported signature algorithm"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1328,7 +1328,7 @@ mod tests {
                 assert!(msg.contains("input_refs"));
                 assert!(msg.contains("provided"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1345,7 +1345,7 @@ mod tests {
                 assert!(msg.contains("input_refs"));
                 assert!(msg.contains("provided"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1360,7 +1360,7 @@ mod tests {
                 assert!(msg.contains("input_refs"));
                 assert!(msg.contains("duplicate"));
             }
-            other => panic!("expected ManifestIncomplete, got {other:?}"),
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
         }
     }
 
@@ -1371,7 +1371,7 @@ mod tests {
         sign_capsule(&mut capsule, &reference_signing_key());
         match replay_capsule(&capsule, "v1") {
             Err(VsdkError::SchemaUnsupported(_)) => {}
-            other => panic!("expected SchemaUnsupported, got {other:?}"),
+            other => unreachable!("expected SchemaUnsupported, got {other:?}"),
         }
     }
 
@@ -1433,7 +1433,7 @@ mod tests {
         seal_session(&mut session).unwrap();
         match record_session_step(&mut session, &result) {
             Err(VsdkError::SessionSealed(_)) => {}
-            other => panic!("expected SessionSealed, got {other:?}"),
+            other => unreachable!("expected SessionSealed, got {other:?}"),
         }
     }
 
@@ -1474,7 +1474,7 @@ mod tests {
         seal_session(&mut session).unwrap();
         match seal_session(&mut session) {
             Err(VsdkError::SessionSealed(_)) => {}
-            other => panic!("expected SessionSealed, got {other:?}"),
+            other => unreachable!("expected SessionSealed, got {other:?}"),
         }
     }
 

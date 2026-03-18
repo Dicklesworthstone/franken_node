@@ -333,10 +333,7 @@ pub fn compute_integrity_hash(bundle: &IncidentBundle) -> String {
     hasher.update(bundle.last_tier_change_epoch.to_le_bytes());
 
     let digest = hasher.finalize();
-    format!(
-        "{:016x}",
-        u64::from_le_bytes(digest[..8].try_into().unwrap_or([0u8; 8]))
-    )
+    hex::encode(digest)
 }
 
 // ── Validate completeness ──────────────────────────────────────────
@@ -1461,5 +1458,16 @@ mod tests {
         };
         let err = IncidentBundleStore::new(cfg, 10000).unwrap_err();
         assert_eq!(err.code(), "IBR_INVALID_CONFIG");
+    }
+
+    // === bd-CrimsonCrane: SHA-256 full digest regression ===
+
+    #[test]
+    fn integrity_hash_is_full_sha256() {
+        let bundle = sample_bundle("hash-test", "inc-1", Severity::High, RetentionTier::Hot, 100);
+        let hash = compute_integrity_hash(&bundle);
+        // Full SHA-256 hex is 64 chars (32 bytes), not 16 chars (8 bytes)
+        assert_eq!(hash.len(), 64, "integrity hash must be full SHA-256 (64 hex chars)");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()), "hash must be hex");
     }
 }

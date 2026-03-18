@@ -515,7 +515,7 @@ mod tests {
         let ev = crash("conn-1", "t1", "oom");
         det.record_crash(&ev, 100);
         let result = det.evaluate("conn-1", &[ev], Some(&trusted_pin()), 100, "tr1", "ts1");
-        let decision = result.unwrap();
+        let decision = result.expect("should evaluate");
         assert!(!decision.triggered);
         assert_eq!(decision.crash_count, 1);
     }
@@ -529,7 +529,7 @@ mod tests {
         }
         let events: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom")).collect();
         let result = det.evaluate("conn-1", &events, Some(&trusted_pin()), 102, "tr1", "ts1");
-        let decision = result.unwrap();
+        let decision = result.expect("should evaluate");
         assert!(decision.triggered);
         assert!(decision.rollback_allowed);
         assert_eq!(decision.crash_count, 3);
@@ -602,7 +602,7 @@ mod tests {
         }
         let events2: Vec<_> = (0..3).map(|_| crash("conn-1", "t", "oom again")).collect();
         let result = det.evaluate("conn-1", &events2, Some(&trusted_pin()), 202, "tr2", "ts2");
-        let decision = result.unwrap();
+        let decision = result.expect("should evaluate");
         assert!(decision.triggered);
         assert!(decision.rollback_allowed);
     }

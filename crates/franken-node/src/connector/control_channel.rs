@@ -724,7 +724,7 @@ mod tests {
 
         match err {
             ChannelError::ReplayDetected { sequence, .. } => assert_eq!(sequence, 0),
-            other => panic!("expected replay detection, got {other:?}"),
+            other => unreachable!("expected replay detection, got {other:?}"),
         }
     }
 
@@ -918,7 +918,7 @@ mod tests {
                 assert_eq!(expected_min, u64::MAX);
                 assert_eq!(got, u64::MAX - 1);
             }
-            other => panic!("expected sequence regress, got {other:?}"),
+            other => unreachable!("expected sequence regress, got {other:?}"),
         }
     }
 

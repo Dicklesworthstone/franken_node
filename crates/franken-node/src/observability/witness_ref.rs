@@ -908,8 +908,8 @@ mod tests {
         let entries = vec![(make_entry(DecisionKind::Escalate), set)];
 
         let audit = WitnessValidator::coverage_audit(&entries);
-        assert_eq!(*audit.witness_kind_counts.get("telemetry").unwrap(), 2);
-        assert_eq!(*audit.witness_kind_counts.get("proof_artifact").unwrap(), 1);
+        assert_eq!(*audit.witness_kind_counts.get("telemetry").expect("should succeed"), 2);
+        assert_eq!(*audit.witness_kind_counts.get("proof_artifact").expect("should succeed"), 1);
     }
 
     // ── All three high-impact kinds require witnesses ──
@@ -955,7 +955,7 @@ mod tests {
         let entry1 = make_entry(DecisionKind::Quarantine);
         let mut set1 = WitnessSet::new();
         set1.add(make_witness("WIT-001", WitnessKind::Telemetry));
-        validator.validate(&entry1, &set1).unwrap();
+        validator.validate(&entry1, &set1).expect("should succeed");
 
         // Fail
         let entry2 = make_entry(DecisionKind::Release);

@@ -1205,7 +1205,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             FirewallError::InvalidEffect(_) => {}
-            other => panic!("expected InvalidEffect, got {:?}", other),
+            other => unreachable!("expected InvalidEffect, got {:?}", other),
         }
     }
 

@@ -642,6 +642,16 @@ impl CertificationRegistry {
                 to: new_level,
             });
         }
+        // Fail-closed: cannot promote above evidence-derived max_achievable.
+        // Without this guard, repeated adjacent promote() calls could
+        // escalate a Basic-evidence extension to Audited, granting
+        // SystemConfiguration capability access beyond what evidence supports.
+        if new_level.rank() > record.evaluation.max_achievable.rank() {
+            return Err(CertificationError::InvalidPromotion {
+                from: old_level,
+                to: new_level,
+            });
+        }
 
         record.level = new_level;
         record.evaluated_at = timestamp.to_owned();
@@ -1727,5 +1737,41 @@ mod tests {
             after_demote.evaluation.evidence_derived_level,
             CertificationLevel::Standard
         );
+    }
+
+    // === bd-CrimsonCrane: promote() must not exceed max_achievable ===
+
+    #[test]
+    fn promote_above_max_achievable_rejected() {
+        // Register an extension that evaluates to Basic (max_achievable = Basic).
+        let mut reg = CertificationRegistry::new();
+        let input = make_input(
+            "ext-escalation",
+            ProvenanceLevel::None,
+            ReputationTier::Untrusted,
+            10.0,
+        );
+        let result = reg.evaluate_and_register(&input, &ts(1));
+        assert_eq!(result.level, CertificationLevel::Basic);
+        assert_eq!(result.max_achievable, CertificationLevel::Basic);
+
+        // Promoting from Basic → Standard must fail because max_achievable is Basic.
+        let err = reg
+            .promote(
+                "ext-escalation",
+                "1.0.0",
+                CertificationLevel::Standard,
+                "fake-evidence",
+                &ts(2),
+            )
+            .unwrap_err();
+        assert!(
+            matches!(err, CertificationError::InvalidPromotion { .. }),
+            "promote above max_achievable must be rejected"
+        );
+
+        // Level must remain at Basic.
+        let record = reg.get_record("ext-escalation", "1.0.0").unwrap();
+        assert_eq!(record.level, CertificationLevel::Basic);
     }
 }

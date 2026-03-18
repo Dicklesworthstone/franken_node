@@ -748,7 +748,7 @@ mod tests {
         assert!(json.contains("guardrail_rejection"));
         assert!(json.contains("objects/abc123"));
         // Verify it's valid JSON
-        let _: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let _: serde_json::Value = serde_json::from_str(&json).expect("should succeed");
     }
 
     #[test]
@@ -761,7 +761,7 @@ mod tests {
 
         let bundle = generate_bundle(&ctx);
         let json = bundle.to_json();
-        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("should succeed");
 
         assert_eq!(
             parsed["causal_events"][0]["description"].as_str(),

@@ -1073,7 +1073,7 @@ mod tests {
                 assert_eq!(current, u64::MAX - 5);
                 assert_eq!(delta, 10);
             }
-            other => panic!("unexpected error: {other}"),
+            other => unreachable!("unexpected error: {other}"),
         }
     }
 
@@ -1250,7 +1250,7 @@ mod tests {
         let outcome = rt.send_message(0, "hello").unwrap();
         match outcome {
             MessageOutcome::Delivered { delay_ticks } => assert_eq!(delay_ticks, 5),
-            other => panic!("expected Delivered, got {other:?}"),
+            other => unreachable!("expected Delivered, got {other:?}"),
         }
     }
 
@@ -1529,7 +1529,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             LabError::ReplayDivergence { .. } => {}
-            other => panic!("expected ReplayDivergence, got {other}"),
+            other => unreachable!("expected ReplayDivergence, got {other}"),
         }
     }
 

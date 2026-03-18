@@ -189,10 +189,7 @@ pub fn verify_quorum(
         h.update((expected_content_hash.len() as u64).to_le_bytes());
         h.update(expected_content_hash.as_bytes());
         let digest = h.finalize();
-        let expected_sig = format!(
-            "{:016x}",
-            u64::from_le_bytes(digest[..8].try_into().unwrap_or([0u8; 8]))
-        );
+        let expected_sig = hex::encode(digest);
 
         if crate::security::constant_time::ct_eq(&sig.signature, &expected_sig) {
             signer_validity.insert(sig.signer_id.clone(), true);
@@ -259,10 +256,7 @@ pub fn compute_test_signature(signer_id: &str, content_hash: &str) -> String {
     h.update((content_hash.len() as u64).to_le_bytes());
     h.update(content_hash.as_bytes());
     let digest = h.finalize();
-    format!(
-        "{:016x}",
-        u64::from_le_bytes(digest[..8].try_into().unwrap_or([0u8; 8]))
-    )
+    hex::encode(digest)
 }
 
 #[cfg(test)]

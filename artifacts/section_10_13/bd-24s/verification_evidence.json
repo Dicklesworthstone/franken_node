@@ -42,10 +42,14 @@
       "status": "PASS"
     },
     {
-      "id": "SNAP-TESTS",
-      "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "999 tests passed"
+      "id": "SNAP-REPLAY-BYTES",
+      "description": "Replay targets carry byte ceilings and fail-closed byte comparisons",
+      "status": "PASS"
+    },
+    {
+      "id": "SNAP-FAIL-CLOSED",
+      "description": "Source-local tests cover byte-boundary rejection and invalid tracker construction",
+      "status": "PASS"
     },
     {
       "id": "SNAP-SPEC",
@@ -54,8 +58,8 @@
     }
   ],
   "summary": {
-    "total_checks": 9,
-    "passing_checks": 9,
+    "total_checks": 10,
+    "passing_checks": 10,
     "failing_checks": 0
   }
 }

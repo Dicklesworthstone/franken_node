@@ -346,7 +346,7 @@ mod tests {
                         .any(|event| event.code == event_codes::DRAIN_TIMEOUT)
                 );
             }
-            other => panic!("expected spawn error with cleanup report, got {other:?}"),
+            other => unreachable!("expected spawn error with cleanup report, got {other:?}"),
         }
     }
 }

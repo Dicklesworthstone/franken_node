@@ -755,7 +755,7 @@ mod tests {
         assert!(result.is_err());
         match result.unwrap_err() {
             IdError::InvalidPrefix { .. } => {}
-            other => panic!("expected InvalidPrefix, got {other}"),
+            other => unreachable!("expected InvalidPrefix, got {other}"),
         }
     }
 
@@ -767,7 +767,7 @@ mod tests {
             IdError::MalformedDigest { reason, .. } => {
                 assert!(reason.contains("64"));
             }
-            other => panic!("expected MalformedDigest, got {other}"),
+            other => unreachable!("expected MalformedDigest, got {other}"),
         }
     }
 
@@ -780,7 +780,7 @@ mod tests {
             IdError::MalformedDigest { reason, .. } => {
                 assert!(reason.contains("non-hex"));
             }
-            other => panic!("expected MalformedDigest, got {other}"),
+            other => unreachable!("expected MalformedDigest, got {other}"),
         }
     }
 

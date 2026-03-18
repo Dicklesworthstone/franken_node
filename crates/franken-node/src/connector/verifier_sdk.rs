@@ -1445,7 +1445,7 @@ mod tests {
         assert!(err.is_err());
         match err.unwrap_err() {
             VerifierSdkError::InvalidClaim(_) => {}
-            other => panic!("expected InvalidClaim, got {other:?}"),
+            other => unreachable!("expected InvalidClaim, got {other:?}"),
         }
     }
 
@@ -1477,7 +1477,7 @@ mod tests {
         assert!(err.is_err());
         match err.unwrap_err() {
             VerifierSdkError::EvidenceMissing(_) => {}
-            other => panic!("expected EvidenceMissing, got {other:?}"),
+            other => unreachable!("expected EvidenceMissing, got {other:?}"),
         }
     }
 
@@ -1812,7 +1812,7 @@ mod tests {
         assert!(err.is_err());
         match err.unwrap_err() {
             VerifierSdkError::AnchorUnknown(_) => {}
-            other => panic!("expected AnchorUnknown, got {other:?}"),
+            other => unreachable!("expected AnchorUnknown, got {other:?}"),
         }
     }
 

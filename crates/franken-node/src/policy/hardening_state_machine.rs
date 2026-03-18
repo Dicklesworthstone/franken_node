@@ -763,7 +763,7 @@ mod tests {
                 assert_eq!(artifact_id, "GOV-2026-001");
                 assert_eq!(approver_id, "admin@franken.io");
             }
-            _ => panic!("Expected GovernanceRollback trigger"),
+            _ => unreachable!("Expected GovernanceRollback trigger"),
         }
     }
 
