@@ -19,6 +19,17 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+/// Maximum receipt chain length before oldest entries are evicted.
+const MAX_RECEIPT_CHAIN: usize = 8192;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 pub type Ed25519PrivateKey = SigningKey;
 pub type Ed25519PublicKey = VerifyingKey;
 
@@ -251,7 +262,7 @@ pub fn append_signed_receipt(
 ) -> Result<SignedReceipt, ReceiptError> {
     let previous = chain.last().map(|r| r.chain_hash.clone());
     let signed = sign_receipt(&receipt.with_previous_hash(previous), signing_key)?;
-    chain.push(signed.clone());
+    push_bounded(chain, signed.clone(), MAX_RECEIPT_CHAIN);
     Ok(signed)
 }
 

@@ -801,7 +801,9 @@ exit 0
 
 /// Format a Unix timestamp as ISO 8601.
 fn format_iso_timestamp(secs: u64) -> String {
-    chrono::DateTime::from_timestamp(secs as i64, 0)
+    i64::try_from(secs)
+        .ok()
+        .and_then(|s| chrono::DateTime::from_timestamp(s, 0))
         .map(|dt| dt.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
         .unwrap_or_else(|| "1970-01-01T00:00:00Z".to_string())
 }

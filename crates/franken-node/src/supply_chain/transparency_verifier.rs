@@ -30,6 +30,7 @@ fn hash_pair(left: &str, right: &str) -> String {
 pub fn leaf_hash(data: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"transparency_verifier_leaf_v1:");
+    h.update((data.len() as u64).to_le_bytes());
     h.update(data.as_bytes());
     let digest = h.finalize();
     format!("{:x}", digest)

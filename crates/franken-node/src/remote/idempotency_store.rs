@@ -758,7 +758,9 @@ mod tests {
         let key = test_key(6);
 
         store.check_or_insert(key, b"ttl-payload", 1000, "t6");
-        store.complete(key, b"res".to_vec(), 1001, "t6").expect("should succeed");
+        store
+            .complete(key, b"res".to_vec(), 1001, "t6")
+            .expect("should succeed");
 
         // Within TTL -> Duplicate.
         let r1 = store.check_or_insert(key, b"ttl-payload", 1050, "t6");
@@ -970,7 +972,9 @@ mod tests {
         let key = test_key(60);
 
         store.check_or_insert(key, b"s1", 1000, "ts");
-        store.complete(key, b"sr".to_vec(), 1001, "ts").expect("should succeed");
+        store
+            .complete(key, b"sr".to_vec(), 1001, "ts")
+            .expect("should succeed");
 
         // Duplicate.
         store.check_or_insert(key, b"s1", 1002, "ts");
@@ -1026,7 +1030,9 @@ mod tests {
         let mut store = IdempotencyDedupeStore::new(3600);
         let key = test_key(80);
         store.check_or_insert(key, b"ac", 1000, "tac");
-        store.complete(key, b"r1".to_vec(), 1001, "tac").expect("should succeed");
+        store
+            .complete(key, b"r1".to_vec(), 1001, "tac")
+            .expect("should succeed");
         let err = store
             .complete(key, b"r2".to_vec(), 1002, "tac")
             .unwrap_err();

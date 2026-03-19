@@ -244,10 +244,17 @@ impl HardeningClampPolicy {
     }
 
     /// Find the highest level whose overhead is within budget.
+    /// Uses fail-closed is_finite guard on max_overhead_pct to prevent
+    /// NaN/Inf from silently bypassing the overhead ceiling.
     fn highest_level_within_overhead(&self) -> HardeningLevel {
+        let max_overhead = if self.budget.max_overhead_pct.is_finite() {
+            self.budget.max_overhead_pct
+        } else {
+            0.0
+        };
         let mut best = HardeningLevel::Baseline;
         for level in HardeningLevel::all() {
-            if estimated_overhead_pct(*level) <= self.budget.max_overhead_pct
+            if estimated_overhead_pct(*level) <= max_overhead
                 && *level <= self.budget.max_level
                 && *level >= self.budget.min_level
             {
@@ -267,6 +274,14 @@ impl HardeningClampPolicy {
         current: HardeningLevel,
         now_ms: u64,
     ) -> (ClampResult, ClampEvent) {
+        // Fail-closed: non-finite max_overhead_pct (NaN, Inf) treated as zero budget
+        // to prevent silent bypass of the overhead ceiling check.
+        let effective_max_overhead = if self.budget.max_overhead_pct.is_finite() {
+            self.budget.max_overhead_pct
+        } else {
+            0.0
+        };
+
         let rate_count = self.count_in_window(now_ms);
         let max = self.budget.max_escalations_per_window;
         let utilization = if max > 0 {
@@ -342,15 +357,15 @@ impl HardeningClampPolicy {
             });
         }
 
-        // Apply overhead limit
+        // Apply overhead limit (uses effective_max_overhead for NaN/Inf safety)
         let overhead = estimated_overhead_pct(effective);
-        if overhead > self.budget.max_overhead_pct {
+        if overhead > effective_max_overhead {
             let best = self.highest_level_within_overhead();
             if best <= current {
                 let reason = format!(
                     "overhead limit: {} overhead {overhead:.1}% exceeds budget {:.1}%; best within budget ({}) not above current ({})",
                     effective.label(),
-                    self.budget.max_overhead_pct,
+                    effective_max_overhead,
                     best.label(),
                     current.label(),
                 );
@@ -970,6 +985,54 @@ mod tests {
         assert!(
             matches!(result, ClampResult::Denied { .. }),
             "boundary event must count toward rate limit (fail-closed)"
+        );
+    }
+
+    // === bd-20ir2 CrimsonCrane: NaN/Inf fail-closed guard on max_overhead_pct ===
+
+    #[test]
+    fn nan_overhead_pct_denies_escalation_above_baseline() {
+        let budget = EscalationBudget {
+            max_overhead_pct: f64::NAN,
+            ..default_budget()
+        };
+        let policy = HardeningClampPolicy::new(budget);
+        // Standard has 5% overhead. With NaN budget, should be denied (fail-closed).
+        let (result, _) =
+            policy.check_escalation(HardeningLevel::Standard, HardeningLevel::Baseline, 1000);
+        assert!(
+            matches!(result, ClampResult::Denied { .. }),
+            "NaN max_overhead_pct must deny all escalations above Baseline (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn infinity_overhead_pct_denies_escalation_above_baseline() {
+        let budget = EscalationBudget {
+            max_overhead_pct: f64::INFINITY,
+            ..default_budget()
+        };
+        let policy = HardeningClampPolicy::new(budget);
+        let (result, _) =
+            policy.check_escalation(HardeningLevel::Critical, HardeningLevel::Baseline, 1000);
+        assert!(
+            matches!(result, ClampResult::Denied { .. }),
+            "Inf max_overhead_pct must deny all escalations above Baseline (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn neg_infinity_overhead_pct_denies_escalation() {
+        let budget = EscalationBudget {
+            max_overhead_pct: f64::NEG_INFINITY,
+            ..default_budget()
+        };
+        let policy = HardeningClampPolicy::new(budget);
+        let (result, _) =
+            policy.check_escalation(HardeningLevel::Standard, HardeningLevel::Baseline, 1000);
+        assert!(
+            matches!(result, ClampResult::Denied { .. }),
+            "NEG_INFINITY max_overhead_pct must deny escalation (fail-closed)"
         );
     }
 }
