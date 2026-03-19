@@ -332,7 +332,7 @@ impl FrankensqliteAdapter {
             );
         }
 
-        let latency = start.elapsed().as_micros() as u64;
+        let latency = u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX);
 
         self.emit_event(
             event_codes::FRANKENSQLITE_WRITE_SUCCESS,

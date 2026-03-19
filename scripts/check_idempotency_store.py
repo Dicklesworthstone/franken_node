@@ -12,10 +12,10 @@ import json
 import re
 import sys
 from pathlib import Path
+
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
 
 
 # ── File paths ─────────────────────────────────────────────────────────────
@@ -79,6 +79,11 @@ def _read(path: Path) -> str:
 
 def _check(name: str, ok: bool, detail: str = "") -> dict:
     return {"check": name, "pass": ok, "detail": detail or ("ok" if ok else "FAIL")}
+
+
+def _is_expired(now_secs: int, created_at_secs: int, ttl_secs: int) -> bool:
+    """Mirror DedupeEntry::is_expired(): now >= created_at + ttl."""
+    return now_secs >= (created_at_secs + ttl_secs)
 
 
 def _content_hash_block() -> str:
@@ -271,14 +276,16 @@ def simulate_dedupe_store() -> dict:
     h3 = _sha256_hex(b"payload-b")
     results["hash_differs"] = h1 != h3
 
-    # TTL expiry logic: created_at=1000, ttl=100, now=1101 -> expired
+    # TTL expiry logic mirrors DedupeEntry::is_expired(): now >= created_at + ttl
     created_at = 1000
     ttl = 100
+    expiry_cutoff = created_at + ttl
     now = 1101
-    results["ttl_expired"] = now > (created_at + ttl)
+    results["ttl_boundary_expired"] = _is_expired(expiry_cutoff, created_at, ttl)
+    results["ttl_expired"] = _is_expired(now, created_at, ttl)
 
-    # TTL not expired: now=1050
-    results["ttl_not_expired"] = not (1050 > (created_at + ttl))
+    # Strictly before the cutoff should remain live.
+    results["ttl_not_expired"] = not _is_expired(expiry_cutoff - 1, created_at, ttl)
 
     # 7 event codes
     results["event_code_count"] = len(REQUIRED_EVENT_CODES)
@@ -316,6 +323,7 @@ def _checks() -> list:
     sim = simulate_dedupe_store()
     checks.append(_check("sim: hash deterministic", sim["hash_deterministic"]))
     checks.append(_check("sim: hash differs for different payloads", sim["hash_differs"]))
+    checks.append(_check("sim: TTL boundary expires correctly", sim["ttl_boundary_expired"]))
     checks.append(_check("sim: TTL expired correctly", sim["ttl_expired"]))
     checks.append(_check("sim: TTL not expired within window", sim["ttl_not_expired"]))
     checks.append(_check("sim: 7 event codes", sim["event_code_count"] == 7))
@@ -356,6 +364,7 @@ def self_test() -> tuple:
     sim = simulate_dedupe_store()
     checks.append(_check("simulation returns dict", isinstance(sim, dict)))
     checks.append(_check("simulation hash_deterministic", sim["hash_deterministic"]))
+    checks.append(_check("simulation ttl_boundary_expired", sim["ttl_boundary_expired"]))
     checks.append(_check("simulation ttl_expired", sim["ttl_expired"]))
 
     result = run_checks()

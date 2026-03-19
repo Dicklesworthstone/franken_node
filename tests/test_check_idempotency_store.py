@@ -38,6 +38,10 @@ class TestSimulation(unittest.TestCase):
         result = mod.simulate_dedupe_store()
         self.assertTrue(result["ttl_expired"])
 
+    def test_ttl_boundary_expired(self):
+        result = mod.simulate_dedupe_store()
+        self.assertTrue(result["ttl_boundary_expired"])
+
     def test_ttl_not_expired(self):
         result = mod.simulate_dedupe_store()
         self.assertTrue(result["ttl_not_expired"])

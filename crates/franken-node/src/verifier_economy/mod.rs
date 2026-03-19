@@ -1345,18 +1345,18 @@ impl VerifierEconomyRegistry {
     /// Build the public trust scoreboard.
     pub fn build_scoreboard(&self) -> TrustScoreboard {
         let mut published_stats = BTreeMap::<String, PublishedVerifierStats>::new();
-        let mut total_attestations = 0;
+        let mut total_attestations: usize = 0;
 
         // Single-pass accumulation keeps scoreboard construction O(V + A).
         for attestation in self.attestations.values() {
             if attestation.state != AttestationState::Published {
                 continue;
             }
-            total_attestations += 1;
+            total_attestations = total_attestations.saturating_add(1);
             let stats = published_stats
                 .entry(attestation.verifier_id.clone())
                 .or_default();
-            stats.attestation_count += 1;
+            stats.attestation_count = stats.attestation_count.saturating_add(1);
             stats.dimensions.insert(attestation.claim.dimension.clone());
         }
 

@@ -28,6 +28,17 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+/// Maximum transparency log entries before oldest are evicted.
+const MAX_TRANSPARENCY_LOG_ENTRIES: usize = 8192;
+
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -1270,7 +1281,7 @@ pub fn append_transparency_log(
         verifier_id: result.verifier_identity.clone(),
         merkle_proof,
     };
-    log.push(entry.clone());
+    push_bounded(log, entry.clone(), MAX_TRANSPARENCY_LOG_ENTRIES);
     Ok(entry)
 }
 

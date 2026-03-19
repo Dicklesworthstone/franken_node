@@ -385,9 +385,9 @@ impl ConformanceSuiteRunner {
             let passed = matches!(result, ConformanceTestResult::Pass);
 
             if passed {
-                pass_count += 1;
+                pass_count = pass_count.saturating_add(1);
             } else {
-                fail_count += 1;
+                fail_count = fail_count.saturating_add(1);
             }
 
             let event_code = if passed {
@@ -460,7 +460,8 @@ impl ConformanceSuiteRunner {
     pub fn domain_coverage(&self) -> BTreeMap<String, usize> {
         let mut coverage = BTreeMap::new();
         for f in &self.fixtures {
-            *coverage.entry(f.domain.to_string()).or_insert(0) += 1;
+            let entry = coverage.entry(f.domain.to_string()).or_insert(0_usize);
+            *entry = (*entry).saturating_add(1);
         }
         coverage
     }
@@ -1206,21 +1207,26 @@ mod tests {
     fn disabled_id_allows_reregistration() {
         // An id_registry entry with value=false should NOT block re-registration.
         let mut runner = ConformanceSuiteRunner::new();
-        // Manually insert a "disabled" fixture ID
+        let fixture_id = ConformanceId::new(ConformanceDomain::Determinism, 999);
+        // Manually insert a "disabled" fixture ID using a normal determinism-shaped ID.
         runner
             .id_registry
-            .insert("disabled-fixture".to_string(), false);
+            .insert(fixture_id.as_str().to_string(), false);
         let fixture = ConformanceFixture {
-            conformance_id: ConformanceId("disabled-fixture".to_string()),
+            conformance_id: fixture_id.clone(),
             domain: ConformanceDomain::Determinism,
             description: "re-register test".to_string(),
             input: serde_json::json!({}),
             expected: serde_json::json!({}),
         };
-        let result = runner.register_fixture(fixture);
-        assert!(
-            result.is_ok(),
-            "disabled (false) fixture ID should allow re-registration"
+        runner
+            .register_fixture(fixture)
+            .expect("disabled (false) fixture ID should allow re-registration");
+        assert_eq!(runner.fixture_count(), 1);
+        assert_eq!(
+            runner.id_registry.get(fixture_id.as_str()),
+            Some(&true),
+            "successful re-registration should reactivate the ID"
         );
     }
 }
