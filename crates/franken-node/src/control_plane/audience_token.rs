@@ -486,12 +486,30 @@ impl TokenChain {
 /// Maximum events before oldest-first eviction.
 const MAX_EVENTS: usize = 4096;
 const MAX_TOKENS: usize = 4096;
+/// Maximum nonces tracked per epoch before oldest-first eviction.
+/// Without this cap, an adversary controlling token creation could exhaust
+/// memory by verifying many unique-nonce tokens over a long epoch.
+const MAX_NONCES: usize = 65_536;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
     if items.len() > cap {
         let overflow = items.len() - cap;
         items.drain(0..overflow);
+    }
+}
+
+/// Insert a nonce into a bounded BTreeSet, evicting the lexicographically
+/// smallest entry when at capacity. This prevents unbounded memory growth
+/// from an adversary replaying many unique-nonce tokens.
+fn insert_nonce_bounded(set: &mut BTreeSet<String>, nonce: String, cap: usize) {
+    set.insert(nonce);
+    while set.len() > cap {
+        if let Some(oldest) = set.iter().next().cloned() {
+            set.remove(&oldest);
+        } else {
+            break;
+        }
     }
 }
 
@@ -527,7 +545,7 @@ impl TokenValidator {
     /// Record a root token issuance.
     pub fn record_issuance(&mut self, token: &AudienceBoundToken, trace_id: &str, now_ms: u64) {
         self.tokens_issued = self.tokens_issued.saturating_add(1);
-        self.seen_nonces.insert(token.nonce.clone());
+        insert_nonce_bounded(&mut self.seen_nonces, token.nonce.clone(), MAX_NONCES);
         push_bounded(
             &mut self.events,
             TokenEvent {
@@ -556,7 +574,7 @@ impl TokenValidator {
         now_ms: u64,
     ) {
         self.tokens_delegated = self.tokens_delegated.saturating_add(1);
-        self.seen_nonces.insert(token.nonce.clone());
+        insert_nonce_bounded(&mut self.seen_nonces, token.nonce.clone(), MAX_NONCES);
         push_bounded(
             &mut self.events,
             TokenEvent {
@@ -719,7 +737,7 @@ impl TokenValidator {
 
         // All checks passed: record all token nonces and emit success event.
         for token in tokens.iter() {
-            self.seen_nonces.insert(token.nonce.clone());
+            insert_nonce_bounded(&mut self.seen_nonces, token.nonce.clone(), MAX_NONCES);
         }
         self.tokens_verified = self.tokens_verified.saturating_add(1);
         push_bounded(

@@ -30,6 +30,7 @@ pub enum GateErrorCode {
     PublicationBlocked,
     OverrideExpired,
     OverrideScopeMismatch,
+    ConnectorIdMismatch,
 }
 
 impl fmt::Display for GateErrorCode {
@@ -38,6 +39,7 @@ impl fmt::Display for GateErrorCode {
             Self::PublicationBlocked => write!(f, "PUBLICATION_BLOCKED"),
             Self::OverrideExpired => write!(f, "OVERRIDE_EXPIRED"),
             Self::OverrideScopeMismatch => write!(f, "OVERRIDE_SCOPE_MISMATCH"),
+            Self::ConnectorIdMismatch => write!(f, "CONNECTOR_ID_MISMATCH"),
         }
     }
 }
@@ -139,6 +141,23 @@ fn apply_override(
     current_time: &str,
 ) -> PublicationGateResult {
     let mut errors = Vec::new();
+
+    // Check connector match
+    if connector_id != policy.connector_id {
+        warn!(
+            override_id = %policy.override_id,
+            expected_connector = %policy.connector_id,
+            actual_connector = connector_id,
+            "override connector ID mismatch"
+        );
+        errors.push(GateError {
+            code: GateErrorCode::ConnectorIdMismatch,
+            message: format!(
+                "Override '{}' is for connector '{}', but was applied to '{}'",
+                policy.override_id, policy.connector_id, connector_id
+            ),
+        });
+    }
 
     // Check expiry
     if current_time >= policy.expires_at.as_str() {
@@ -378,6 +397,24 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| e.code == GateErrorCode::OverrideScopeMismatch)
+        );
+    }
+
+    #[test]
+    fn connector_id_mismatch_blocks() {
+        let policy = valid_override(); // connector_id is "test-conn"
+        let result = check_publication(
+            "wrong-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::ConnectorIdMismatch)
         );
     }
 

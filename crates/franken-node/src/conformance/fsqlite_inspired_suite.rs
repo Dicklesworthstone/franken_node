@@ -970,7 +970,9 @@ mod tests {
             input: serde_json::json!({}),
             expected: serde_json::json!({}),
         };
-        runner.register_fixture(f1.clone()).expect("should register");
+        runner
+            .register_fixture(f1.clone())
+            .expect("should register");
         let err = runner.register_fixture(f1).unwrap_err();
         assert_eq!(err.code(), error_codes::ERR_CONF_DUPLICATE_ID);
     }
@@ -1076,10 +1078,15 @@ mod tests {
         let mut runner = make_runner_with_builtins();
         let report = runner.run_all(1000, "t1", |_| ConformanceTestResult::Pass);
         let json = runner.export_report_json(&report);
-        let parsed: serde_json::Value = serde_json::from_str(&json).expect("deserialize should succeed");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&json).expect("deserialize should succeed");
         assert_eq!(parsed["suite_version"], SUITE_VERSION);
         assert_eq!(parsed["schema_version"], SCHEMA_VERSION);
-        assert!(parsed["release_eligible"].as_bool().expect("boolean expected"));
+        assert!(
+            parsed["release_eligible"]
+                .as_bool()
+                .expect("boolean expected")
+        );
     }
 
     // ---- Audit log ----
@@ -1104,7 +1111,9 @@ mod tests {
         runner.run_all(1000, "t1", |_| ConformanceTestResult::Pass);
         let jsonl = runner.export_audit_log_jsonl();
         assert!(!jsonl.is_empty());
-        let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().expect("should have lines")).expect("deserialize should succeed");
+        let first: serde_json::Value =
+            serde_json::from_str(jsonl.lines().next().expect("should have lines"))
+                .expect("deserialize should succeed");
         assert_eq!(first["schema_version"], SCHEMA_VERSION);
     }
 
@@ -1198,15 +1207,20 @@ mod tests {
         // An id_registry entry with value=false should NOT block re-registration.
         let mut runner = ConformanceSuiteRunner::new();
         // Manually insert a "disabled" fixture ID
-        runner.id_registry.insert("disabled-fixture".to_string(), false);
+        runner
+            .id_registry
+            .insert("disabled-fixture".to_string(), false);
         let fixture = ConformanceFixture {
             conformance_id: ConformanceId("disabled-fixture".to_string()),
-            domain: "determinism".to_string(),
+            domain: ConformanceDomain::Determinism,
             description: "re-register test".to_string(),
             input: serde_json::json!({}),
             expected: serde_json::json!({}),
         };
         let result = runner.register_fixture(fixture);
-        assert!(result.is_ok(), "disabled (false) fixture ID should allow re-registration");
+        assert!(
+            result.is_ok(),
+            "disabled (false) fixture ID should allow re-registration"
+        );
     }
 }

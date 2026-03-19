@@ -210,7 +210,7 @@ impl ForceTransitionPolicy {
             sha2::Digest::update(&mut hasher, (field.len() as u64).to_le_bytes());
             sha2::Digest::update(&mut hasher, field.as_bytes());
         }
-        sha2::Digest::update(&mut hasher, self.max_skippable.to_le_bytes());
+        sha2::Digest::update(&mut hasher, (self.max_skippable as u64).to_le_bytes());
         format!("policy:{:x}", sha2::Digest::finalize(hasher))
     }
 }
