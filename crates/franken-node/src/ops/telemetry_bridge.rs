@@ -282,6 +282,7 @@ pub struct TelemetryRuntimeHandle {
     state: Arc<Mutex<TelemetryBridgeState>>,
     lifecycle: Arc<AtomicU8>,
     stop_flag: Arc<AtomicBool>,
+    persistence_abort: Arc<AtomicBool>,
     listener_handle: Option<JoinHandle<()>>,
     persistence_handle: Option<JoinHandle<()>>,
 }
@@ -346,8 +347,9 @@ impl TelemetryRuntimeHandle {
 
     /// Wait for all workers to finish and return the final report.
     ///
-    /// Must be called after `stop()`. Blocks until drain completes or
-    /// `deadline` expires.
+    /// Must be called after `stop()`. If the drain deadline expires, the
+    /// persistence worker is explicitly aborted and still joined before return
+    /// so no background work silently survives the join boundary.
     pub fn join(
         mut self,
         deadline: Duration,
@@ -363,25 +365,26 @@ impl TelemetryRuntimeHandle {
         if let Some(handle) = self.persistence_handle.take() {
             // Wait up to deadline for persistence to finish
             let remaining = deadline.saturating_sub(drain_start.elapsed());
-            let join_result = if remaining.is_zero() {
-                // Already past deadline
-                Err(())
+            let timed_out = if handle.is_finished() {
+                false
+            } else if remaining.is_zero() {
+                true
             } else {
-                // Park and wait, checking periodically
                 let park_start = Instant::now();
                 loop {
                     if handle.is_finished() {
-                        break handle.join().map_err(|_| ());
+                        break false;
                     }
                     if park_start.elapsed() >= remaining {
-                        break Err(());
+                        break true;
                     }
                     thread::sleep(Duration::from_millis(10));
                 }
             };
 
-            if join_result.is_err() {
+            if timed_out {
                 self.transition_state(BridgeLifecycleState::Failed);
+                self.persistence_abort.store(true, Ordering::SeqCst);
                 TelemetryBridge::with_state(&self.state, |metrics| {
                     metrics.record_event(
                         event_codes::DRAIN_TIMEOUT,
@@ -392,6 +395,12 @@ impl TelemetryRuntimeHandle {
                     );
                 });
             }
+
+            handle.join().map_err(|_| {
+                TelemetryJoinError(
+                    "telemetry persistence worker panicked while joining runtime".to_string(),
+                )
+            })?;
         }
 
         let drain_duration = drain_start.elapsed();
@@ -514,12 +523,8 @@ impl TelemetryBridge {
                 anyhow::anyhow!("telemetry adapter already claimed by persistence owner")
             })?
         };
+        let persistence_abort = Arc::new(AtomicBool::new(false));
         let (sender, receiver) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
-
-        // Persistence owner thread (single writer)
-        let persistence_state = Arc::clone(&state);
-        let persistence_handle =
-            thread::spawn(move || Self::run_persistence_loop(receiver, adapter, persistence_state));
 
         // Clean up stale socket
         match std::fs::remove_file(&socket_path) {
@@ -543,6 +548,19 @@ impl TelemetryBridge {
         listener.set_nonblocking(true).inspect_err(|_| {
             lifecycle.store(BridgeLifecycleState::Failed as u8, Ordering::SeqCst);
         })?;
+
+        // Only spawn the persistence owner after listener setup succeeds so a
+        // failed start path cannot briefly detach a worker without a handle.
+        let persistence_state = Arc::clone(&state);
+        let persistence_abort_for_worker = Arc::clone(&persistence_abort);
+        let persistence_handle = thread::spawn(move || {
+            Self::run_persistence_loop(
+                receiver,
+                adapter,
+                persistence_state,
+                persistence_abort_for_worker,
+            );
+        });
 
         Self::with_state(&state, |metrics| {
             metrics.record_event(
@@ -575,6 +593,7 @@ impl TelemetryBridge {
             state,
             lifecycle,
             stop_flag,
+            persistence_abort,
             listener_handle: Some(listener_handle),
             persistence_handle: Some(persistence_handle),
         })
@@ -875,8 +894,27 @@ impl TelemetryBridge {
         receiver: Receiver<PersistEnvelope>,
         adapter: Arc<Mutex<FrankensqliteAdapter>>,
         state: Arc<Mutex<TelemetryBridgeState>>,
+        abort_flag: Arc<AtomicBool>,
     ) {
-        while let Ok(envelope) = receiver.recv() {
+        loop {
+            if abort_flag.load(Ordering::SeqCst) {
+                Self::abort_pending_persistence(None, &receiver, &state);
+                break;
+            }
+
+            // This can block without polling because join() waits for the
+            // listener owner first, and that owner joins all connection
+            // workers before dropping the last sender.
+            let envelope = match receiver.recv() {
+                Ok(envelope) => envelope,
+                Err(_) => break,
+            };
+
+            if abort_flag.load(Ordering::SeqCst) {
+                Self::abort_pending_persistence(Some(envelope), &receiver, &state);
+                break;
+            }
+
             Self::with_state(&state, |metrics| {
                 metrics.queue_depth = metrics.queue_depth.saturating_sub(1);
             });
@@ -922,6 +960,33 @@ impl TelemetryBridge {
                 }),
             };
         }
+    }
+
+    fn abort_pending_persistence(
+        first: Option<PersistEnvelope>,
+        receiver: &Receiver<PersistEnvelope>,
+        state: &Arc<Mutex<TelemetryBridgeState>>,
+    ) {
+        let dropped = first
+            .into_iter()
+            .chain(receiver.try_iter())
+            .fold(0usize, |count, _| count.saturating_add(1));
+
+        if dropped == 0 {
+            return;
+        }
+
+        Self::with_state(state, |metrics| {
+            metrics.queue_depth = metrics.queue_depth.saturating_sub(dropped);
+            metrics.dropped_total = metrics.dropped_total.saturating_add(dropped as u64);
+            metrics.record_event(
+                event_codes::PERSIST_FAILURE,
+                None,
+                None,
+                Some(reason_codes::DRAIN_TIMEOUT),
+                format!("aborted {dropped} queued telemetry envelopes after drain timeout"),
+            );
+        });
     }
 
     fn with_state<R>(
@@ -1000,8 +1065,15 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(2);
         let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
         let state_for_worker = Arc::clone(&state);
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let abort_for_worker = Arc::clone(&abort_flag);
         let worker = thread::spawn(move || {
-            TelemetryBridge::run_persistence_loop(receiver, adapter, state_for_worker);
+            TelemetryBridge::run_persistence_loop(
+                receiver,
+                adapter,
+                state_for_worker,
+                abort_for_worker,
+            );
         });
 
         let admitted = TelemetryBridge::enqueue_with_timeout(
@@ -1227,6 +1299,102 @@ mod tests {
         let report = handle.join(Duration::from_secs(5)).expect("join");
         assert!(report.drain_completed);
         assert!(report.drain_duration_ms < 5000);
+    }
+
+    #[test]
+    fn join_timeout_aborts_persistence_worker_before_returning() {
+        let state = test_state(PERSIST_QUEUE_CAPACITY);
+        let lifecycle = Arc::new(AtomicU8::new(BridgeLifecycleState::Draining as u8));
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let persistence_abort = Arc::new(AtomicBool::new(false));
+
+        let state_for_worker = Arc::clone(&state);
+        let abort_for_worker = Arc::clone(&persistence_abort);
+        let worker = thread::spawn(move || {
+            while !abort_for_worker.load(Ordering::SeqCst) {
+                thread::sleep(Duration::from_millis(1));
+            }
+            drop(state_for_worker);
+        });
+
+        let handle = TelemetryRuntimeHandle {
+            socket_path: PathBuf::from("/tmp/telemetry-timeout-test.sock"),
+            state: Arc::clone(&state),
+            lifecycle,
+            stop_flag,
+            persistence_abort,
+            listener_handle: None,
+            persistence_handle: Some(worker),
+        };
+
+        let report = handle
+            .join(Duration::ZERO)
+            .expect("join should return report");
+
+        assert!(!report.drain_completed);
+        assert_eq!(report.final_state, BridgeLifecycleState::Failed);
+        assert!(
+            report
+                .recent_events
+                .iter()
+                .any(|event| event.code == event_codes::DRAIN_TIMEOUT),
+            "timeout path should emit DRAIN_TIMEOUT"
+        );
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "persistence worker should be joined before join() returns"
+        );
+    }
+
+    #[test]
+    fn zero_deadline_does_not_timeout_an_already_finished_worker() {
+        let state = test_state(PERSIST_QUEUE_CAPACITY);
+        let lifecycle = Arc::new(AtomicU8::new(BridgeLifecycleState::Draining as u8));
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let persistence_abort = Arc::new(AtomicBool::new(false));
+
+        let state_for_worker = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            drop(state_for_worker);
+        });
+
+        let mut handle = TelemetryRuntimeHandle {
+            socket_path: PathBuf::from("/tmp/telemetry-zero-deadline-finished.sock"),
+            state: Arc::clone(&state),
+            lifecycle,
+            stop_flag,
+            persistence_abort,
+            listener_handle: None,
+            persistence_handle: Some(worker),
+        };
+
+        while !handle
+            .persistence_handle
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let report = handle
+            .join(Duration::ZERO)
+            .expect("already-finished workers should not trip timeout handling");
+
+        assert!(report.drain_completed);
+        assert_eq!(report.final_state, BridgeLifecycleState::Stopped);
+        assert!(
+            report
+                .recent_events
+                .iter()
+                .all(|event| event.code != event_codes::DRAIN_TIMEOUT),
+            "already-finished workers should not emit DRAIN_TIMEOUT"
+        );
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "join() should still consume the finished worker handle"
+        );
     }
 
     // ---- bd-1now.4.5: Deterministic telemetry regression suite ----
@@ -2101,8 +2269,15 @@ mod tests {
         let (sender, receiver) = mpsc::sync_channel(PERSIST_QUEUE_CAPACITY);
         let adapter = Arc::new(Mutex::new(FrankensqliteAdapter::default()));
         let state_for_worker = Arc::clone(&state);
+        let abort_flag = Arc::new(AtomicBool::new(false));
+        let abort_for_worker = Arc::clone(&abort_flag);
         let worker = thread::spawn(move || {
-            TelemetryBridge::run_persistence_loop(receiver, adapter, state_for_worker);
+            TelemetryBridge::run_persistence_loop(
+                receiver,
+                adapter,
+                state_for_worker,
+                abort_for_worker,
+            );
         });
 
         let iterations = 100;
