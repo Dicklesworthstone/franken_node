@@ -959,6 +959,27 @@ mod tests {
         }
     }
 
+    /// Build an input whose evidence evaluates to Verified
+    /// (max_achievable = Verified). Requires Standard criteria plus
+    /// reproducible build evidence and test coverage above 80%.
+    fn make_verified_input(ext_id: &str) -> CertificationInput {
+        CertificationInput {
+            extension_id: ext_id.to_owned(),
+            version: "1.0.0".to_owned(),
+            publisher_id: "pub-test".to_owned(),
+            provenance_level: ProvenanceLevel::PublisherSigned,
+            reputation_tier: ReputationTier::Established,
+            reputation_score: 60.0,
+            capabilities: BTreeSet::from(["file_read".to_owned()]),
+            has_test_coverage_evidence: true,
+            test_coverage_pct: Some(90.0),
+            has_reproducible_build_evidence: true,
+            has_audit_attestation: false,
+            audit_attestation: None,
+            evidence_refs: sample_evidence_refs(),
+        }
+    }
+
     fn tamper_same_length(hash: &str) -> String {
         assert!(!hash.is_empty(), "hash cannot be empty");
         let mut bytes = hash.as_bytes().to_vec();
@@ -1188,41 +1209,7 @@ mod tests {
     #[test]
     fn test_promotion_adjacent_only() {
         let mut reg = CertificationRegistry::new();
-        let input = make_input(
-            "ext-1",
-            ProvenanceLevel::None,
-            ReputationTier::Untrusted,
-            5.0,
-        );
-        reg.evaluate_and_register(&input, &ts(1));
-
-        // Skip from Basic to Verified should fail.
-        let result = reg.promote(
-            "ext-1",
-            "1.0.0",
-            CertificationLevel::Verified,
-            "evidence-ref",
-            &ts(2),
-        );
-        assert!(matches!(
-            result,
-            Err(CertificationError::InvalidPromotion { .. })
-        ));
-
-        // Adjacent promotion Basic -> Standard should succeed.
-        let result = reg.promote(
-            "ext-1",
-            "1.0.0",
-            CertificationLevel::Standard,
-            "evidence-ref",
-            &ts(3),
-        );
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn test_promotion_refreshes_embedded_evaluation_snapshot() {
-        let mut reg = CertificationRegistry::new();
+        // Use Standard-level evidence so max_achievable = Standard.
         let input = make_input(
             "ext-1",
             ProvenanceLevel::PublisherSigned,
@@ -1230,6 +1217,60 @@ mod tests {
             60.0,
         );
         reg.evaluate_and_register(&input, &ts(1));
+        assert_eq!(
+            reg.get_record("ext-1", "1.0.0").unwrap().level,
+            CertificationLevel::Standard
+        );
+
+        // Demote Standard -> Basic so we can test adjacent promotion.
+        reg.demote(
+            "ext-1",
+            "1.0.0",
+            CertificationLevel::Basic,
+            "setup demotion for promotion test",
+            &ts(2),
+        )
+        .unwrap();
+
+        // Skip from Basic to Verified should fail (non-adjacent + above max_achievable).
+        let result = reg.promote(
+            "ext-1",
+            "1.0.0",
+            CertificationLevel::Verified,
+            "evidence-ref",
+            &ts(3),
+        );
+        assert!(matches!(
+            result,
+            Err(CertificationError::InvalidPromotion { .. })
+        ));
+
+        // Adjacent promotion Basic -> Standard should succeed (within max_achievable).
+        let result = reg.promote(
+            "ext-1",
+            "1.0.0",
+            CertificationLevel::Standard,
+            "evidence-ref",
+            &ts(4),
+        );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_promotion_refreshes_embedded_evaluation_snapshot() {
+        let mut reg = CertificationRegistry::new();
+        // Use Verified-level evidence so max_achievable = Verified.
+        let input = make_verified_input("ext-1");
+        reg.evaluate_and_register(&input, &ts(1));
+        // Demote to Standard so we can test Standard → Verified promotion.
+        reg.demote(
+            "ext-1",
+            "1.0.0",
+            CertificationLevel::Standard,
+            "setup for promotion test",
+            &ts(2),
+        )
+        .unwrap();
         let before = reg.get_record("ext-1", "1.0.0").unwrap().evaluation.clone();
 
         reg.promote(
@@ -1237,7 +1278,7 @@ mod tests {
             "1.0.0",
             CertificationLevel::Verified,
             "ev-ref",
-            &ts(2),
+            &ts(3),
         )
         .unwrap();
 
@@ -1261,8 +1302,9 @@ mod tests {
         // bd-1wpq: manually_adjusted flag and evidence_derived_level
         assert!(record.evaluation.manually_adjusted);
         assert_eq!(
-            record.evaluation.evidence_derived_level, before.level,
-            "evidence_derived_level must preserve the original evidence-backed level"
+            record.evaluation.evidence_derived_level,
+            before.evidence_derived_level,
+            "evidence_derived_level must be preserved across manual adjustments"
         );
     }
 
@@ -1404,42 +1446,52 @@ mod tests {
     #[test]
     fn test_audit_trail_integrity() {
         let mut reg = CertificationRegistry::new();
-        let input = make_input(
-            "ext-1",
-            ProvenanceLevel::PublisherSigned,
-            ReputationTier::Provisional,
-            30.0,
-        );
+        // Use Verified-level evidence so max_achievable = Verified.
+        let input = make_verified_input("ext-1");
         reg.evaluate_and_register(&input, &ts(1));
+        // Demote to Standard so we can test Standard → Verified promotion.
+        reg.demote(
+            "ext-1",
+            "1.0.0",
+            CertificationLevel::Standard,
+            "setup for audit trail test",
+            &ts(2),
+        )
+        .unwrap();
         reg.promote(
             "ext-1",
             "1.0.0",
             CertificationLevel::Verified,
             "ev-ref",
-            &ts(2),
+            &ts(3),
         )
         .unwrap();
 
         reg.verify_audit_integrity().unwrap();
-        assert_eq!(reg.audit_trail_len(), 2);
+        assert_eq!(reg.audit_trail_len(), 3);
     }
 
     #[test]
     fn test_audit_trail_integrity_detects_same_length_hash_tamper() {
         let mut reg = CertificationRegistry::new();
-        let input = make_input(
-            "ext-1",
-            ProvenanceLevel::PublisherSigned,
-            ReputationTier::Provisional,
-            30.0,
-        );
+        // Use Verified-level evidence so max_achievable = Verified.
+        let input = make_verified_input("ext-1");
         reg.evaluate_and_register(&input, &ts(1));
+        // Demote to Standard so we can test Standard → Verified promotion.
+        reg.demote(
+            "ext-1",
+            "1.0.0",
+            CertificationLevel::Standard,
+            "setup for tamper test",
+            &ts(2),
+        )
+        .unwrap();
         reg.promote(
             "ext-1",
             "1.0.0",
             CertificationLevel::Verified,
             "ev-ref",
-            &ts(2),
+            &ts(3),
         )
         .unwrap();
 
@@ -1587,19 +1639,29 @@ mod tests {
 
     #[test]
     fn promotion_preserves_evidence_criteria_while_updating_effective_level() {
-        // Start at Basic (publisher+manifest only), promote to Standard.
+        // Use Standard-level evidence (max_achievable = Standard), demote to Basic,
+        // then promote back to Standard to verify evidence criteria are preserved.
         let mut reg = CertificationRegistry::new();
         let input = make_input(
             "ext-p",
-            ProvenanceLevel::None,
-            ReputationTier::Untrusted,
-            5.0,
+            ProvenanceLevel::PublisherSigned,
+            ReputationTier::Established,
+            60.0,
         );
         reg.evaluate_and_register(&input, &ts(1));
         assert_eq!(
             reg.get_record("ext-p", "1.0.0").unwrap().level,
-            CertificationLevel::Basic
+            CertificationLevel::Standard
         );
+        // Demote to Basic for the promotion test.
+        reg.demote(
+            "ext-p",
+            "1.0.0",
+            CertificationLevel::Basic,
+            "setup demotion for evidence-preservation test",
+            &ts(2),
+        )
+        .unwrap();
         let before = reg.get_record("ext-p", "1.0.0").unwrap().evaluation.clone();
 
         reg.promote(
@@ -1607,7 +1669,7 @@ mod tests {
             "1.0.0",
             CertificationLevel::Standard,
             "manual-ev",
-            &ts(2),
+            &ts(3),
         )
         .unwrap();
 
@@ -1625,7 +1687,11 @@ mod tests {
         assert_eq!(after.evaluation.max_achievable, before.max_achievable);
         assert_eq!(after.evaluation.derivation, before.derivation);
         assert!(after.evaluation.manually_adjusted);
-        assert_eq!(after.evaluation.evidence_derived_level, before.level);
+        assert_eq!(
+            after.evaluation.evidence_derived_level,
+            before.evidence_derived_level,
+            "evidence_derived_level must be preserved across manual adjustments"
+        );
     }
 
     #[test]
@@ -1693,23 +1759,29 @@ mod tests {
         // Promote then demote: evidence_derived_level stays at the original
         // evidence-backed level throughout.
         let mut reg = CertificationRegistry::new();
-        let input = make_input(
-            "ext-pd",
-            ProvenanceLevel::PublisherSigned,
-            ReputationTier::Established,
-            60.0,
-        );
+        // Use Verified-level evidence so max_achievable = Verified.
+        let input = make_verified_input("ext-pd");
         reg.evaluate_and_register(&input, &ts(1));
         let original_level = reg.get_record("ext-pd", "1.0.0").unwrap().evaluation.level;
-        assert_eq!(original_level, CertificationLevel::Standard);
+        assert_eq!(original_level, CertificationLevel::Verified);
 
-        // Promote Standard -> Verified
+        // Demote Verified -> Standard (setup for promote/demote cycle).
+        reg.demote(
+            "ext-pd",
+            "1.0.0",
+            CertificationLevel::Standard,
+            "setup demotion",
+            &ts(2),
+        )
+        .unwrap();
+
+        // Promote Standard -> Verified (within max_achievable).
         reg.promote(
             "ext-pd",
             "1.0.0",
             CertificationLevel::Verified,
             "ev1",
-            &ts(2),
+            &ts(3),
         )
         .unwrap();
         let after_promote = reg.get_record("ext-pd", "1.0.0").unwrap();
@@ -1717,7 +1789,7 @@ mod tests {
         assert!(after_promote.evaluation.manually_adjusted);
         assert_eq!(
             after_promote.evaluation.evidence_derived_level,
-            CertificationLevel::Standard
+            CertificationLevel::Verified
         );
 
         // Demote Verified -> Standard
@@ -1726,7 +1798,7 @@ mod tests {
             "1.0.0",
             CertificationLevel::Standard,
             "reason",
-            &ts(3),
+            &ts(4),
         )
         .unwrap();
         let after_demote = reg.get_record("ext-pd", "1.0.0").unwrap();
@@ -1735,7 +1807,7 @@ mod tests {
         // evidence_derived_level remains at the original evidence-backed level
         assert_eq!(
             after_demote.evaluation.evidence_derived_level,
-            CertificationLevel::Standard
+            CertificationLevel::Verified
         );
     }
 
