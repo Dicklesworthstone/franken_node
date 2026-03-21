@@ -2,7 +2,7 @@
   "gate": "retention_policy_verification",
   "bead": "bd-1p2b",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "CPR-IMPL",
@@ -28,8 +28,8 @@
     {
       "id": "CPR-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "Tests verified via section gate (1978 connector tests pass)"
+      "status": "FAIL",
+      "details": "Command '['/home/ubuntu/.cargo/bin/cargo', 'test', '--', 'connector::retention_policy']' timed out after 120 seconds"
     },
     {
       "id": "CPR-SPEC",
