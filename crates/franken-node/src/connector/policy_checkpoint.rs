@@ -405,7 +405,8 @@ impl PolicyCheckpointChain {
     /// # Errors
     ///
     /// Returns `SequenceViolation` if the sequence is wrong, or
-    /// `ParentMismatch` if the parent_hash is wrong.
+    /// `ParentMismatch` if the parent_hash is wrong, or `HashChainBreak`
+    /// if the checkpoint hash does not match canonical serialization.
     pub fn append_checkpoint(
         &mut self,
         checkpoint: PolicyCheckpoint,
@@ -461,6 +462,26 @@ impl PolicyCheckpointChain {
             return Err(CheckpointChainError::ParentMismatch {
                 expected: self.head_hash.clone(),
                 actual: checkpoint.parent_hash,
+            });
+        }
+
+        if !checkpoint.verify_hash() {
+            push_bounded(
+                &mut self.events,
+                CheckpointChainEvent {
+                    event_code: event_codes::PCK_003_CHECKPOINT_REJECTED.to_string(),
+                    event_name: event_names::CHECKPOINT_REJECTED.to_string(),
+                    trace_id: trace_id.to_string(),
+                    epoch_id: checkpoint.epoch_id,
+                    sequence: checkpoint.sequence,
+                    channel: checkpoint.channel.label(),
+                    detail: "CHECKPOINT_HASH_CHAIN_BREAK: checkpoint_hash does not match canonical serialization".to_string(),
+                },
+                MAX_EVENTS,
+            );
+            return Err(CheckpointChainError::HashChainBreak {
+                index: checkpoint.sequence as usize,
+                reason: "checkpoint_hash does not match canonical serialization".to_string(),
             });
         }
 
@@ -1081,6 +1102,43 @@ mod tests {
         assert_eq!(err.code(), "CHECKPOINT_PARENT_MISMATCH");
     }
 
+    #[test]
+    fn test_append_rejects_invalid_checkpoint_hash() {
+        let mut chain = PolicyCheckpointChain::new();
+        let head = chain
+            .create_checkpoint(1, ReleaseChannel::Stable, "h0", "a", "t")
+            .unwrap()
+            .checkpoint_hash
+            .clone();
+
+        let bad_cp = PolicyCheckpoint {
+            sequence: 1,
+            epoch_id: 1,
+            channel: ReleaseChannel::Beta,
+            policy_hash: "h1".to_string(),
+            parent_hash: Some(head.clone()),
+            timestamp: 1000,
+            signer: "a".to_string(),
+            checkpoint_hash: "f".repeat(64),
+        };
+
+        let err = chain.append_checkpoint(bad_cp, "t").unwrap_err();
+        assert_eq!(err.code(), "CHECKPOINT_HASH_CHAIN_BREAK");
+        match err {
+            CheckpointChainError::HashChainBreak { index, reason } => {
+                assert_eq!(index, 1);
+                assert_eq!(
+                    reason,
+                    "checkpoint_hash does not match canonical serialization"
+                );
+            }
+            _ => unreachable!("wrong error variant"),
+        }
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain.next_seq(), 1);
+        assert_eq!(chain.head_hash(), Some(head.as_str()));
+    }
+
     // ── verify_chain ─────────────────────────────────────────────────
 
     #[test]
@@ -1553,7 +1611,10 @@ mod tests {
             1000,
             "signer",
         );
-        assert_ne!(h1, h2, "length-prefixed encoding must prevent null-byte boundary collision");
+        assert_ne!(
+            h1, h2,
+            "length-prefixed encoding must prevent null-byte boundary collision"
+        );
     }
 
     /// Regression: field boundary collision.
@@ -1578,6 +1639,9 @@ mod tests {
             1000,
             "ef",
         );
-        assert_ne!(h1, h2, "length-prefixed encoding must prevent field boundary collision");
+        assert_ne!(
+            h1, h2,
+            "length-prefixed encoding must prevent field boundary collision"
+        );
     }
 }

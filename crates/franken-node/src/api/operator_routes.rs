@@ -49,7 +49,11 @@ fn process_start_state() -> ProcessStartState {
         return override_state;
     }
 
-    PROCESS_START.get_or_init(ProcessStartState::now).clone()
+    // Reads before service bootstrap must not pin the shared baseline.
+    PROCESS_START
+        .get()
+        .cloned()
+        .unwrap_or_else(ProcessStartState::now)
 }
 
 pub(crate) fn init_process_start() {
