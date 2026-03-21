@@ -196,12 +196,16 @@ fn parse_ipv4_lax(ip: &str) -> Option<[u8; 4]> {
 
 /// Reserved hostname aliases that resolve to loopback without touching the public DNS.
 fn blocked_hostname_label(host: &str) -> Option<&'static str> {
-    let normalized = host.trim_end_matches('.').to_ascii_lowercase();
+    let normalized = host.trim().trim_end_matches('.').to_ascii_lowercase();
     if normalized == "localhost" || normalized.ends_with(".localhost") {
         Some("localhost")
     } else {
         None
     }
+}
+
+fn normalize_host_for_allowlist_match(host: &str) -> String {
+    host.trim().trim_end_matches('.').to_ascii_lowercase()
 }
 
 impl SsrfPolicyTemplate {
@@ -217,6 +221,7 @@ impl SsrfPolicyTemplate {
 
     /// Check whether an endpoint string should be treated as internal/private.
     pub fn is_private_ip(ip: &str) -> bool {
+        let ip = ip.trim();
         // Handle IPv6 loopback
         if ip == "::1" || ip == "[::1]" {
             return true;
@@ -243,9 +248,11 @@ impl SsrfPolicyTemplate {
 
     /// Check if a host is in the allowlist.
     fn find_allowlist(&self, host: &str, port: u16) -> Option<&AllowlistEntry> {
-        self.allowlist
-            .iter()
-            .find(|e| e.host.eq_ignore_ascii_case(host) && e.port.is_none_or(|p| p == port))
+        let normalized_host = normalize_host_for_allowlist_match(host);
+        self.allowlist.iter().find(|e| {
+            normalize_host_for_allowlist_match(&e.host) == normalized_host
+                && e.port.is_none_or(|p| p == port)
+        })
     }
 
     /// Evaluate a request against the SSRF policy.
@@ -257,6 +264,7 @@ impl SsrfPolicyTemplate {
         trace_id: &str,
         timestamp: &str,
     ) -> Result<Action, SsrfError> {
+        let host = host.trim();
         // Handle IPv6 loopback
         if host == "::1" || host == "[::1]" {
             if let Some(_entry) = self.find_allowlist(host, port) {
@@ -739,6 +747,15 @@ mod tests {
     }
 
     #[test]
+    fn check_ssrf_blocks_with_whitespace() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf(" 127.0.0.1  ", 80, Protocol::Http, "tw", "ts");
+        assert!(result.is_err());
+        assert!(SsrfPolicyTemplate::is_private_ip(" 127.0.0.1 "));
+        assert!(SsrfPolicyTemplate::is_private_ip(" localhost \n"));
+    }
+
+    #[test]
     fn check_ssrf_emits_audit() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
         let _ = t.check_ssrf("127.0.0.1", 80, Protocol::Http, "t6", "ts");
@@ -754,6 +771,15 @@ mod tests {
         t.add_allowlist("localhost", Some(8080), "local proxy", "t7a", "ts")
             .unwrap();
         let result = t.check_ssrf("localhost", 8080, Protocol::Http, "t7b", "ts");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn allowlist_permits_trailing_dot_hostname_alias() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        t.add_allowlist("localhost", Some(8080), "local proxy", "t7c", "ts")
+            .unwrap();
+        let result = t.check_ssrf(" LOCALHOST. ", 8080, Protocol::Http, "t7d", "ts");
         assert!(result.is_ok());
     }
 
@@ -805,6 +831,16 @@ mod tests {
         let policy = t.to_egress_policy();
         assert_eq!(policy.default_action, Action::Deny);
         assert_eq!(policy.rules.len(), 2); // HTTP + TCP per allowlist entry
+    }
+
+    #[test]
+    fn to_egress_policy_matches_trailing_dot_hostname_variants() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let _ = t.add_allowlist("api.example.com", Some(443), "api", "t11b", "ts");
+        let policy = t.to_egress_policy();
+        let (action, rule_idx) = policy.evaluate(" API.EXAMPLE.COM. ", 443, Protocol::Http);
+        assert_eq!(action, Action::Allow);
+        assert_eq!(rule_idx, Some(0));
     }
 
     // === Validation ===
@@ -894,13 +930,43 @@ mod tests {
 
         // Mixed case → must still match
         let found_upper = policy.find_allowlist("API.EXAMPLE.COM", 443);
-        assert!(found_upper.is_some(), "uppercase host must match lowercase allowlist entry");
+        assert!(
+            found_upper.is_some(),
+            "uppercase host must match lowercase allowlist entry"
+        );
 
         let found_mixed = policy.find_allowlist("Api.Example.Com", 443);
-        assert!(found_mixed.is_some(), "mixed-case host must match lowercase allowlist entry");
+        assert!(
+            found_mixed.is_some(),
+            "mixed-case host must match lowercase allowlist entry"
+        );
 
         // Wrong port → no match regardless of case
         let wrong_port = policy.find_allowlist("API.EXAMPLE.COM", 80);
         assert!(wrong_port.is_none());
+    }
+
+    #[test]
+    fn test_find_allowlist_normalizes_trailing_dot_and_whitespace() {
+        let mut policy = SsrfPolicyTemplate::default_template("test-conn".into());
+        policy.allowlist.push(AllowlistEntry {
+            host: "api.example.com".into(),
+            port: Some(443),
+            reason: "test".into(),
+            receipt: PolicyReceipt {
+                receipt_id: "r2".into(),
+                connector_id: "test-conn".into(),
+                host: "api.example.com".into(),
+                issued_at: "2026-01-01T00:00:00Z".into(),
+                reason: "test".into(),
+                trace_id: "t2".into(),
+            },
+        });
+
+        let found = policy.find_allowlist(" API.EXAMPLE.COM. ", 443);
+        assert!(
+            found.is_some(),
+            "allowlist matching should normalize trailing dots and surrounding whitespace"
+        );
     }
 }

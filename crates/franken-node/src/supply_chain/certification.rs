@@ -1010,16 +1010,12 @@ mod tests {
         );
         let result = evaluate_certification(&input);
         assert_eq!(result.level, CertificationLevel::Basic);
-        assert!(
-            result
-                .satisfied_criteria
-                .contains(&"publisher_identity_verified".to_owned())
-        );
-        assert!(
-            result
-                .satisfied_criteria
-                .contains(&"manifest_declared".to_owned())
-        );
+        assert!(result
+            .satisfied_criteria
+            .contains(&"publisher_identity_verified".to_owned()));
+        assert!(result
+            .satisfied_criteria
+            .contains(&"manifest_declared".to_owned()));
     }
 
     #[test]
@@ -1066,7 +1062,8 @@ mod tests {
             audit_date: "2026-01-15".to_owned(),
             scope: "full security audit".to_owned(),
             findings_summary: "no critical findings".to_owned(),
-            attestation_hash: "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_owned(),
+            attestation_hash:
+                "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_owned(),
         });
         let result = evaluate_certification(&input);
         assert_eq!(result.level, CertificationLevel::Audited);
@@ -1114,7 +1111,8 @@ mod tests {
             audit_date: "2026-01-15".to_owned(),
             scope: "full security audit".to_owned(),
             findings_summary: "no critical findings".to_owned(),
-            attestation_hash: "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_owned(),
+            attestation_hash:
+                "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_owned(),
         });
         let result = evaluate_certification(&input);
         assert_ne!(result.level, CertificationLevel::Audited);
@@ -1183,10 +1181,9 @@ mod tests {
         );
         // Even uncertified (actually Basic since publisher is set)
         reg.evaluate_and_register(&input, &ts(1));
-        assert!(
-            reg.check_deployment_gate("ext-1", "1.0.0", DeploymentContext::Development)
-                .is_ok()
-        );
+        assert!(reg
+            .check_deployment_gate("ext-1", "1.0.0", DeploymentContext::Development)
+            .is_ok());
     }
 
     #[test]
@@ -1302,8 +1299,7 @@ mod tests {
         // bd-1wpq: manually_adjusted flag and evidence_derived_level
         assert!(record.evaluation.manually_adjusted);
         assert_eq!(
-            record.evaluation.evidence_derived_level,
-            before.evidence_derived_level,
+            record.evaluation.evidence_derived_level, before.evidence_derived_level,
             "evidence_derived_level must be preserved across manual adjustments"
         );
     }
@@ -1379,7 +1375,7 @@ mod tests {
         // bd-1wpq: manually_adjusted flag and evidence_derived_level
         assert!(record.evaluation.manually_adjusted);
         assert_eq!(
-            record.evaluation.evidence_derived_level, before.level,
+            record.evaluation.evidence_derived_level, before.evidence_derived_level,
             "evidence_derived_level must preserve the original evidence-backed level"
         );
     }
@@ -1570,11 +1566,9 @@ mod tests {
         let result = evaluate_certification(&input);
         assert_eq!(result.level, CertificationLevel::Uncertified);
         assert!(result.derivation.is_none());
-        assert!(
-            result
-                .unsatisfied_criteria
-                .contains(&"evidence_binding_present".to_owned())
-        );
+        assert!(result
+            .unsatisfied_criteria
+            .contains(&"evidence_binding_present".to_owned()));
     }
 
     #[test]
@@ -1688,8 +1682,7 @@ mod tests {
         assert_eq!(after.evaluation.derivation, before.derivation);
         assert!(after.evaluation.manually_adjusted);
         assert_eq!(
-            after.evaluation.evidence_derived_level,
-            before.evidence_derived_level,
+            after.evaluation.evidence_derived_level, before.evidence_derived_level,
             "evidence_derived_level must be preserved across manual adjustments"
         );
     }
@@ -1734,7 +1727,10 @@ mod tests {
         assert_eq!(after.evaluation.max_achievable, before.max_achievable);
         assert_eq!(after.evaluation.derivation, before.derivation);
         assert!(after.evaluation.manually_adjusted);
-        assert_eq!(after.evaluation.evidence_derived_level, before.level);
+        assert_eq!(
+            after.evaluation.evidence_derived_level,
+            before.evidence_derived_level
+        );
     }
 
     #[test]
