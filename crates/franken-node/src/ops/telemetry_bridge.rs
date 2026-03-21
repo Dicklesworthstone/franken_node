@@ -417,11 +417,12 @@ impl TelemetryRuntimeHandle {
                 });
             }
 
-            handle.join().map_err(|_| {
-                TelemetryJoinError(
-                    "telemetry persistence worker panicked while joining runtime".to_string(),
-                )
-            })?;
+            if handle.join().is_err() {
+                self.mark_join_failed(
+                    &mut join_error,
+                    "telemetry persistence worker panicked while joining runtime",
+                );
+            }
         }
 
         let drain_duration = drain_start.elapsed();
@@ -1578,6 +1579,66 @@ mod tests {
             Arc::strong_count(&state),
             1,
             "connection and persistence workers should still be joined before returning the listener error"
+        );
+    }
+
+    #[test]
+    fn persistence_join_panic_marks_failed_and_returns_error() {
+        let state = test_state(PERSIST_QUEUE_CAPACITY);
+        let lifecycle = Arc::new(AtomicU8::new(BridgeLifecycleState::Draining as u8));
+        let stop_flag = Arc::new(AtomicBool::new(true));
+        let persistence_abort = Arc::new(AtomicBool::new(false));
+
+        let state_for_worker = Arc::clone(&state);
+        let worker = thread::spawn(move || {
+            drop(state_for_worker);
+            panic!("persistence panic during join test");
+        });
+
+        while !worker.is_finished() {
+            thread::sleep(Duration::from_millis(1));
+        }
+
+        let handle = TelemetryRuntimeHandle {
+            socket_path: PathBuf::from("/tmp/telemetry-persistence-panic-test.sock"),
+            state: Arc::clone(&state),
+            lifecycle: Arc::clone(&lifecycle),
+            stop_flag,
+            persistence_abort,
+            connection_handles: Arc::new(Mutex::new(Vec::new())),
+            connection_worker_panicked: Arc::new(AtomicBool::new(false)),
+            listener_handle: None,
+            persistence_handle: Some(worker),
+        };
+
+        let err = handle
+            .join(Duration::from_secs(1))
+            .expect_err("persistence panic should fail join");
+
+        assert!(
+            err.0.contains("persistence worker panicked"),
+            "join error should report persistence panic"
+        );
+        assert_eq!(
+            BridgeLifecycleState::from_u8(lifecycle.load(Ordering::SeqCst)),
+            BridgeLifecycleState::Failed,
+            "persistence join panic must mark the runtime failed"
+        );
+        assert_eq!(
+            Arc::strong_count(&state),
+            1,
+            "persistence worker should still be joined before join() returns"
+        );
+        let recent_events = state
+            .lock()
+            .expect("telemetry state lock")
+            .snapshot()
+            .recent_events;
+        assert!(
+            recent_events
+                .iter()
+                .all(|event| event.code != event_codes::DRAIN_COMPLETE),
+            "failed joins must not emit DRAIN_COMPLETE"
         );
     }
 
