@@ -190,6 +190,7 @@ pub const ERR_VEP_DUPLICATE_SUBMISSION: &str = "ERR-VEP-DUPLICATE-SUBMISSION";
 pub const ERR_VEP_UNREGISTERED_VERIFIER: &str = "ERR-VEP-UNREGISTERED-VERIFIER";
 pub const ERR_VEP_INCOMPLETE_PAYLOAD: &str = "ERR-VEP-INCOMPLETE-PAYLOAD";
 pub const ERR_VEP_ANTI_GAMING: &str = "ERR-VEP-ANTI-GAMING";
+pub const ERR_VEP_CAPACITY_EXCEEDED: &str = "ERR-VEP-CAPACITY-EXCEEDED";
 
 // Stable replay-capsule verification reason codes (bd-1h2w4)
 pub const ERR_VEP_CAPSULE_SCHEMA: &str = "ERR-VEP-CAPSULE-SCHEMA";
@@ -638,6 +639,63 @@ impl VerifierEconomyRegistry {
         );
     }
 
+    fn evict_oldest_terminal_attestation(&mut self) -> bool {
+        let terminal_key = self
+            .attestations
+            .iter()
+            .find(|(_, attestation)| {
+                matches!(
+                    attestation.state,
+                    AttestationState::Published | AttestationState::Rejected
+                )
+            })
+            .map(|(id, _)| id.clone());
+
+        if let Some(id) = terminal_key
+            && let Some(evicted) = self.attestations.remove(&id)
+        {
+            self.attestation_fingerprints
+                .remove(&(evicted.verifier_id, evicted.evidence.execution_trace_hash));
+            return true;
+        }
+
+        false
+    }
+
+    fn ensure_attestation_capacity(&mut self) -> VepResult<()> {
+        if self.attestations.len() < MAX_ATTESTATIONS || self.evict_oldest_terminal_attestation() {
+            return Ok(());
+        }
+
+        Err(VepError {
+            code: ERR_VEP_CAPACITY_EXCEEDED.to_string(),
+            message: "Attestation registry is full of live entries; resolve published or rejected attestations before accepting more submissions".to_string(),
+        })
+    }
+
+    fn evict_oldest_resolved_dispute(&mut self) -> bool {
+        let resolved_key = self
+            .disputes
+            .iter()
+            .find(|(_, dispute)| dispute.outcome.is_some())
+            .map(|(id, _)| id.clone());
+
+        resolved_key
+            .and_then(|id| self.disputes.remove(&id))
+            .is_some()
+    }
+
+    fn ensure_dispute_capacity(&mut self) -> VepResult<()> {
+        if self.disputes.len() < MAX_DISPUTES || self.evict_oldest_resolved_dispute() {
+            return Ok(());
+        }
+
+        Err(VepError {
+            code: ERR_VEP_CAPACITY_EXCEEDED.to_string(),
+            message: "Dispute registry is full of unresolved entries; resolve existing disputes before filing more".to_string(),
+        })
+    }
+
     pub fn events(&self) -> &[VerifierEconomyEvent] {
         &self.events
     }
@@ -831,6 +889,17 @@ impl VerifierEconomyRegistry {
             });
         }
 
+        if let Err(error) = self.ensure_attestation_capacity() {
+            self.emit(
+                VEP_008,
+                &format!(
+                    "Rejected: attestation registry at capacity for {}",
+                    submission.verifier_id
+                ),
+            );
+            return Err(error);
+        }
+
         let attestation_id = format!("att-{:04}", self.next_attestation_id);
         self.next_attestation_id = self.next_attestation_id.saturating_add(1);
 
@@ -844,15 +913,6 @@ impl VerifierEconomyRegistry {
             immutable: false, // Not yet published
             state: AttestationState::Submitted,
         };
-
-        if self.attestations.len() >= MAX_ATTESTATIONS
-            && !self.attestations.contains_key(&attestation_id)
-            && let Some(oldest_key) = self.attestations.keys().next().cloned()
-            && let Some(evicted) = self.attestations.remove(&oldest_key)
-        {
-            self.attestation_fingerprints
-                .remove(&(evicted.verifier_id, evicted.evidence.execution_trace_hash));
-        }
         self.attestation_fingerprints.insert(fingerprint);
         self.attestations
             .insert(attestation_id.clone(), attestation.clone());
@@ -1059,8 +1119,8 @@ impl VerifierEconomyRegistry {
         justification: &str,
         supporting_evidence: Vec<String>,
     ) -> VepResult<Dispute> {
-        // Verify attestation exists and is published
-        let att = self.attestations.get_mut(attestation_id).ok_or(VepError {
+        // Verify attestation exists and is published before reserving dispute capacity.
+        let att = self.attestations.get(attestation_id).ok_or(VepError {
             code: ERR_VEP_INCOMPLETE_PAYLOAD.to_string(),
             message: format!("Attestation {} not found", attestation_id),
         })?;
@@ -1072,6 +1132,12 @@ impl VerifierEconomyRegistry {
             });
         }
 
+        self.ensure_dispute_capacity()?;
+
+        let att = self.attestations.get_mut(attestation_id).ok_or(VepError {
+            code: ERR_VEP_INCOMPLETE_PAYLOAD.to_string(),
+            message: format!("Attestation {} not found", attestation_id),
+        })?;
         att.state = AttestationState::Disputed;
 
         let dispute_id = format!("dsp-{:04}", self.next_dispute_id);
@@ -1088,12 +1154,6 @@ impl VerifierEconomyRegistry {
             resolved_at: None,
         };
 
-        if self.disputes.len() >= MAX_DISPUTES
-            && !self.disputes.contains_key(&dispute_id)
-            && let Some(oldest_key) = self.disputes.keys().next().cloned()
-        {
-            self.disputes.remove(&oldest_key);
-        }
         self.disputes.insert(dispute_id.clone(), dispute.clone());
         self.emit(
             VEP_003,
@@ -1912,6 +1972,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_submit_attestation_rejects_when_registry_full_of_live_entries() {
+        let mut reg = make_registry();
+        let verifier = reg
+            .register_verifier(make_registration())
+            .expect("should succeed");
+
+        for i in 0..MAX_ATTESTATIONS {
+            let attestation_id = format!("att-{:04}", i + 1);
+            let trace_hash = sample_sha256(&format!("live-attestation-{i}"));
+            reg.attestation_fingerprints
+                .insert((verifier.verifier_id.clone(), trace_hash.clone()));
+            reg.attestations.insert(
+                attestation_id.clone(),
+                Attestation {
+                    attestation_id,
+                    verifier_id: verifier.verifier_id.clone(),
+                    claim: AttestationClaim {
+                        dimension: VerificationDimension::Compatibility,
+                        statement: format!("live claim {i}"),
+                        score: 0.9,
+                    },
+                    evidence: AttestationEvidence {
+                        suite_id: format!("suite-{i}"),
+                        measurements: Vec::new(),
+                        execution_trace_hash: trace_hash,
+                        environment: BTreeMap::new(),
+                    },
+                    signature: AttestationSignature {
+                        algorithm: "ed25519".to_string(),
+                        public_key: verifier.public_key.clone(),
+                        value: format!("seed-signature-{i}"),
+                    },
+                    timestamp: format!("{i}"),
+                    immutable: false,
+                    state: AttestationState::Submitted,
+                },
+            );
+        }
+        reg.next_attestation_id = MAX_ATTESTATIONS as u64 + 1;
+
+        let result = reg.submit_attestation(make_submission(
+            &verifier.verifier_id,
+            &registration_signing_key(),
+        ));
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPACITY_EXCEEDED);
+        assert_eq!(reg.attestation_count(), MAX_ATTESTATIONS);
+        assert!(
+            reg.events()
+                .last()
+                .is_some_and(|event| event.code == VEP_008 && event.detail.contains("capacity"))
+        );
+    }
+
     // -- Publishing flow tests (INV-VEP-PUBLISH) ------------------------------
 
     #[test]
@@ -2156,6 +2273,51 @@ mod tests {
             .unwrap();
         let resolved = reg.get_dispute(&dispute.dispute_id).unwrap();
         assert_eq!(resolved.outcome, Some(DisputeOutcome::Rejected));
+    }
+
+    #[test]
+    fn test_file_dispute_rejects_when_registry_full_of_unresolved_entries() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        reg.review_attestation(&attestation.attestation_id).unwrap();
+        reg.publish_attestation(&attestation.attestation_id)
+            .unwrap();
+
+        for i in 0..MAX_DISPUTES {
+            let dispute_id = format!("dsp-{:04}", i + 1);
+            reg.disputes.insert(
+                dispute_id.clone(),
+                Dispute {
+                    dispute_id,
+                    attestation_id: attestation.attestation_id.clone(),
+                    filed_by: verifier.verifier_id.clone(),
+                    justification: format!("pending dispute {i}"),
+                    supporting_evidence: Vec::new(),
+                    outcome: None,
+                    filed_at: format!("{i}"),
+                    resolved_at: None,
+                },
+            );
+        }
+        reg.next_dispute_id = MAX_DISPUTES as u64 + 1;
+
+        let result = reg.file_dispute(
+            &attestation.attestation_id,
+            &verifier.verifier_id,
+            "overflow dispute",
+            vec![],
+        );
+
+        assert!(result.is_err());
+        let error = result.unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPACITY_EXCEEDED);
+        assert_eq!(reg.disputes.len(), MAX_DISPUTES);
+        assert_eq!(
+            reg.get_attestation(&attestation.attestation_id)
+                .expect("published attestation should remain present")
+                .state,
+            AttestationState::Published
+        );
     }
 
     // -- Replay capsule tests -------------------------------------------------
@@ -2911,6 +3073,7 @@ mod tests {
         );
         assert_eq!(ERR_VEP_INCOMPLETE_PAYLOAD, "ERR-VEP-INCOMPLETE-PAYLOAD");
         assert_eq!(ERR_VEP_ANTI_GAMING, "ERR-VEP-ANTI-GAMING");
+        assert_eq!(ERR_VEP_CAPACITY_EXCEEDED, "ERR-VEP-CAPACITY-EXCEEDED");
     }
 
     #[test]
