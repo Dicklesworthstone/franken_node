@@ -1035,8 +1035,10 @@ mod tests {
     #[test]
     fn test_append_accepts_valid_checkpoint_and_updates_chain_state() {
         let mut chain = PolicyCheckpointChain::new();
+        let create_trace_id = "trace-create";
+        let append_trace_id = "trace-append";
         let head = chain
-            .create_checkpoint(1, ReleaseChannel::Stable, "h0", "alice", "t")
+            .create_checkpoint(1, ReleaseChannel::Stable, "h0", "alice", create_trace_id)
             .unwrap()
             .checkpoint_hash
             .clone();
@@ -1061,7 +1063,7 @@ mod tests {
         };
         let expected_hash = appended.checkpoint_hash.clone();
 
-        let appended = chain.append_checkpoint(appended, "t").unwrap();
+        let appended = chain.append_checkpoint(appended, append_trace_id).unwrap();
         assert_eq!(appended.sequence, 1);
         assert_eq!(appended.parent_hash.as_deref(), Some(head.as_str()));
         assert_eq!(appended.checkpoint_hash, expected_hash);
@@ -1078,7 +1080,7 @@ mod tests {
             event_codes::PCK_001_CHECKPOINT_CREATED
         );
         assert_eq!(last_event.event_name, event_names::CHECKPOINT_CREATED);
-        assert_eq!(last_event.trace_id, "t");
+        assert_eq!(last_event.trace_id, append_trace_id);
         assert_eq!(last_event.epoch_id, 1);
         assert_eq!(last_event.sequence, 1);
         assert_eq!(last_event.channel, "beta");

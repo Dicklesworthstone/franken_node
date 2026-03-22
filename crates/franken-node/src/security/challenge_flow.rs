@@ -18,6 +18,10 @@ use std::collections::BTreeMap;
 
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
+/// Maximum challenge records retained.  When exceeded, the oldest
+/// terminal-state (Denied / Promoted) challenges are evicted first.
+const MAX_CHALLENGES: usize = 4096;
+
 // ---------------------------------------------------------------------------
 // Event codes
 // ---------------------------------------------------------------------------
@@ -398,6 +402,7 @@ impl ChallengeFlowController {
         };
 
         self.challenges.insert(challenge_id.clone(), challenge);
+        self.evict_terminal_challenges();
         self.metrics.challenges_issued_total =
             self.metrics.challenges_issued_total.saturating_add(1);
 
@@ -662,6 +667,26 @@ impl ChallengeFlowController {
     }
 
     // -- Internal -----------------------------------------------------------
+
+    /// Evict oldest terminal-state challenges when the map exceeds capacity.
+    fn evict_terminal_challenges(&mut self) {
+        while self.challenges.len() > MAX_CHALLENGES {
+            // Find the first terminal challenge (BTreeMap iterates in key order,
+            // and keys are sequential "ch-N" so the first terminal entry is the
+            // oldest completed challenge).
+            let evict_key = self
+                .challenges
+                .iter()
+                .find(|(_, ch)| ch.state.is_terminal())
+                .map(|(k, _)| k.clone());
+            match evict_key {
+                Some(key) => {
+                    self.challenges.remove(&key);
+                }
+                None => break, // no terminal challenges to evict
+            }
+        }
+    }
 
     #[allow(clippy::too_many_arguments)]
     fn log_transition(

@@ -866,6 +866,30 @@ mod tests {
     }
 
     #[test]
+    fn check_ssrf_rejects_trailing_dot_hex_numeric_alias() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf("0x7f000001.", 80, Protocol::Http, "td2h", "ts");
+        assert!(matches!(result, Err(SsrfError::SsrfInvalidIp { .. })));
+        assert!(SsrfPolicyTemplate::is_private_ip("0x7f000001."));
+    }
+
+    #[test]
+    fn check_ssrf_rejects_trailing_dot_octal_numeric_alias() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf("0177.0.0.1.", 80, Protocol::Http, "td2o", "ts");
+        assert!(matches!(result, Err(SsrfError::SsrfInvalidIp { .. })));
+        assert!(SsrfPolicyTemplate::is_private_ip("0177.0.0.1."));
+    }
+
+    #[test]
+    fn check_ssrf_rejects_trailing_dot_shorthand_numeric_alias() {
+        let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
+        let result = t.check_ssrf("127.1.", 80, Protocol::Http, "td2s", "ts");
+        assert!(matches!(result, Err(SsrfError::SsrfInvalidIp { .. })));
+        assert!(SsrfPolicyTemplate::is_private_ip("127.1."));
+    }
+
+    #[test]
     fn check_ssrf_rejects_bracketed_ipv4_as_invalid_format() {
         let mut t = SsrfPolicyTemplate::default_template("conn-1".into());
         let result = t.check_ssrf("[127.0.0.1]", 80, Protocol::Http, "td3", "ts");

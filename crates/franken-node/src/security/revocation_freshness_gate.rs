@@ -11,8 +11,13 @@
 //! - Advisory (Tier-3): proceed-with-warning
 
 use sha2::{Digest, Sha256};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
+
+/// Maximum consumed nonces retained for replay detection before oldest-first
+/// eviction.  Without this cap an adversary controlling token creation could
+/// exhaust memory by verifying many unique-nonce proofs over a long epoch.
+const MAX_CONSUMED_NONCES: usize = 65_536;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -223,6 +228,10 @@ pub struct GateDecision {
 pub struct RevocationFreshnessGate {
     /// Consumed nonces for replay detection.
     consumed_nonces: BTreeSet<String>,
+    /// Insertion-order queue for FIFO eviction when `consumed_nonces` exceeds
+    /// `MAX_CONSUMED_NONCES`.  BTreeSet alone evicts by lexicographic order,
+    /// which lets an adversary craft nonces that push out recent entries.
+    consumed_nonces_queue: VecDeque<String>,
     /// Expected signature for verification (simplified: real systems use HMAC).
     expected_signature_fn: Box<dyn Fn(&FreshnessProof) -> String + Send + Sync>,
     /// Action-to-tier classification table.
@@ -237,6 +246,7 @@ impl RevocationFreshnessGate {
     ) -> Self {
         Self {
             consumed_nonces: BTreeSet::new(),
+            consumed_nonces_queue: VecDeque::new(),
             expected_signature_fn: signature_fn,
             tier_table,
         }
@@ -273,8 +283,15 @@ impl RevocationFreshnessGate {
             });
         }
 
-        // Consume nonce
-        self.consumed_nonces.insert(proof.nonce.clone());
+        // Consume nonce with bounded eviction to prevent unbounded memory growth.
+        if self.consumed_nonces.insert(proof.nonce.clone()) {
+            self.consumed_nonces_queue.push_back(proof.nonce.clone());
+            while self.consumed_nonces_queue.len() > MAX_CONSUMED_NONCES {
+                if let Some(oldest) = self.consumed_nonces_queue.pop_front() {
+                    self.consumed_nonces.remove(&oldest);
+                }
+            }
+        }
         Ok(())
     }
 
@@ -872,5 +889,38 @@ mod tests {
         } else {
             unreachable!("Expected ProofTampered error");
         }
+    }
+
+    // --- Bounded nonce eviction ---
+
+    #[test]
+    fn consumed_nonces_bounded_at_max_capacity() {
+        let mut g = gate();
+        // Insert MAX_CONSUMED_NONCES + 10 nonces and verify the set never
+        // exceeds the configured cap.
+        for i in 0..MAX_CONSUMED_NONCES + 10 {
+            let nonce = format!("bounded-nonce-{i}");
+            let p = proof(SafetyTier::Advisory, 100, &nonce);
+            g.check(&p, 100, true, false, "act", "tr").unwrap();
+        }
+        assert!(g.consumed_nonce_count() <= MAX_CONSUMED_NONCES);
+        // The oldest nonces should have been evicted.
+        assert!(!g.is_nonce_consumed("bounded-nonce-0"));
+        // Recent nonces should still be present.
+        let last = format!("bounded-nonce-{}", MAX_CONSUMED_NONCES + 9);
+        assert!(g.is_nonce_consumed(&last));
+    }
+
+    #[test]
+    fn duplicate_nonce_does_not_grow_queue() {
+        let mut g = gate();
+        let p1 = proof(SafetyTier::Advisory, 100, "dup-n");
+        g.check(&p1, 100, true, false, "act", "tr").unwrap();
+        assert_eq!(g.consumed_nonce_count(), 1);
+        // Attempting to re-use the same nonce should be rejected, not grow the queue.
+        let p2 = proof(SafetyTier::Advisory, 100, "dup-n");
+        let err = g.check(&p2, 100, true, false, "act", "tr");
+        assert!(err.is_err());
+        assert_eq!(g.consumed_nonce_count(), 1);
     }
 }
