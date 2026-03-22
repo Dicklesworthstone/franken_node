@@ -61,6 +61,7 @@ pub mod error_codes {
     pub const ERR_OBL_LEAK_TIMEOUT: &str = "ERR_OBL_LEAK_TIMEOUT";
     pub const ERR_OBL_DUPLICATE_RESERVE: &str = "ERR_OBL_DUPLICATE_RESERVE";
     pub const ERR_OBL_BUDGET_EXCEEDED: &str = "ERR_OBL_BUDGET_EXCEEDED";
+    pub const ERR_OBL_CAPACITY_EXCEEDED: &str = "ERR_OBL_CAPACITY_EXCEEDED";
 }
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -281,6 +282,92 @@ impl ObligationTracker {
             .count()
     }
 
+    fn evict_oldest_terminal_obligation(&mut self) -> bool {
+        let terminal_key = self
+            .obligations
+            .iter()
+            .filter(|(_, obligation)| {
+                matches!(
+                    obligation.state,
+                    ObligationState::Committed
+                        | ObligationState::RolledBack
+                        | ObligationState::Leaked
+                )
+            })
+            .min_by_key(|(id, obligation)| {
+                (
+                    obligation
+                        .resolved_at_ms
+                        .unwrap_or(obligation.reserved_at_ms),
+                    obligation.reserved_at_ms,
+                    id.as_str(),
+                )
+            })
+            .map(|(id, _)| id.clone());
+
+        terminal_key
+            .and_then(|id| self.obligations.remove(&id))
+            .is_some()
+    }
+
+    fn mark_expired_reserved_as_leaked(&mut self, now_ms: u64, trace_id: &str) -> Vec<String> {
+        let timeout_ms = self.leak_timeout_secs.saturating_mul(1000);
+        let leaked_ids: Vec<String> = self
+            .obligations
+            .iter()
+            .filter(|(_, obligation)| {
+                obligation.state == ObligationState::Reserved
+                    && now_ms.saturating_sub(obligation.reserved_at_ms) >= timeout_ms
+            })
+            .map(|(id, _)| id.clone())
+            .collect();
+
+        for id in &leaked_ids {
+            let flow = if let Some(obligation) = self.obligations.get_mut(id) {
+                obligation.state = ObligationState::Leaked;
+                obligation.resolved_at_ms = Some(now_ms);
+                obligation.flow.as_str().to_string()
+            } else {
+                continue;
+            };
+
+            self.push_audit(ObligationAuditRecord {
+                event_code: event_codes::OBL_LEAK_DETECTED.to_string(),
+                obligation_id: id.clone(),
+                flow,
+                state: "Leaked".to_string(),
+                trace_id: trace_id.to_string(),
+                schema_version: SCHEMA_VERSION.to_string(),
+                detail: format!(
+                    "leak detected: obligation exceeded {}s timeout",
+                    self.leak_timeout_secs
+                ),
+            });
+        }
+
+        leaked_ids
+    }
+
+    fn ensure_capacity_for_reserve(&mut self, now_ms: u64, trace_id: &str) -> Result<(), String> {
+        if self.obligations.len() < MAX_OBLIGATIONS {
+            return Ok(());
+        }
+
+        if self.evict_oldest_terminal_obligation() {
+            return Ok(());
+        }
+
+        if !self
+            .mark_expired_reserved_as_leaked(now_ms, trace_id)
+            .is_empty()
+            && self.evict_oldest_terminal_obligation()
+        {
+            return Ok(());
+        }
+
+        Err(error_codes::ERR_OBL_CAPACITY_EXCEEDED.to_string())
+    }
+
     /// Reserve an obligation slot (phase 1). INV-OBL-AUDIT-COMPLETE
     ///
     /// Returns the `ObligationId` for subsequent commit/rollback.
@@ -290,7 +377,9 @@ impl ObligationTracker {
         payload: Vec<u8>,
         now_ms: u64,
         trace_id: &str,
-    ) -> ObligationId {
+    ) -> Result<ObligationId, String> {
+        self.ensure_capacity_for_reserve(now_ms, trace_id)?;
+
         let id = ObligationId(format!("obl-{}", self.next_id));
         self.next_id = self.next_id.saturating_add(1);
 
@@ -303,13 +392,6 @@ impl ObligationTracker {
             resolved_at_ms: None,
             trace_id: trace_id.to_string(),
         };
-
-        if self.obligations.len() >= MAX_OBLIGATIONS
-            && !self.obligations.contains_key(&id.0)
-            && let Some(oldest_key) = self.obligations.keys().next().cloned()
-        {
-            self.obligations.remove(&oldest_key);
-        }
         self.obligations.insert(id.0.clone(), obligation);
 
         self.push_audit(ObligationAuditRecord {
@@ -322,7 +404,7 @@ impl ObligationTracker {
             detail: "obligation reserved".to_string(),
         });
 
-        id
+        Ok(id)
     }
 
     /// Reserve with budget enforcement. INV-OBL-BUDGET-BOUND
@@ -338,7 +420,7 @@ impl ObligationTracker {
         if self.reserved_count_for_flow(&flow) >= self.flow_budget {
             return Err(error_codes::ERR_OBL_BUDGET_EXCEEDED.to_string());
         }
-        Ok(self.reserve(flow, payload, now_ms, trace_id))
+        self.reserve(flow, payload, now_ms, trace_id)
     }
 
     /// Commit an obligation (phase 2a). INV-OBL-ATOMIC-COMMIT
@@ -433,42 +515,7 @@ impl ObligationTracker {
     /// Detects obligations that have remained in `Reserved` state longer than
     /// `leak_timeout_secs` and force-rolls them back.
     pub fn run_leak_scan(&mut self, now_ms: u64, trace_id: &str) -> LeakScanResult {
-        let timeout_ms = self.leak_timeout_secs.saturating_mul(1000);
-        let mut leaked_ids = Vec::new();
-
-        // Collect leaked obligation keys
-        let keys: Vec<String> = self
-            .obligations
-            .iter()
-            .filter(|(_, o)| {
-                o.state == ObligationState::Reserved
-                    && now_ms.saturating_sub(o.reserved_at_ms) >= timeout_ms
-            })
-            .map(|(k, _)| k.clone())
-            .collect();
-
-        for key in &keys {
-            if let Some(obligation) = self.obligations.get_mut(key) {
-                obligation.state = ObligationState::Leaked;
-                obligation.resolved_at_ms = Some(now_ms);
-                leaked_ids.push(key.clone());
-
-                let flow_str = obligation.flow.as_str().to_string();
-
-                self.push_audit(ObligationAuditRecord {
-                    event_code: event_codes::OBL_LEAK_DETECTED.to_string(),
-                    obligation_id: key.clone(),
-                    flow: flow_str,
-                    state: "Leaked".to_string(),
-                    trace_id: trace_id.to_string(),
-                    schema_version: SCHEMA_VERSION.to_string(),
-                    detail: format!(
-                        "leak detected: obligation exceeded {}s timeout",
-                        self.leak_timeout_secs
-                    ),
-                });
-            }
-        }
+        let leaked_ids = self.mark_expired_reserved_as_leaked(now_ms, trace_id);
 
         let scanned = self.obligations.len();
         let leaked = leaked_ids.len();
@@ -687,6 +734,18 @@ mod tests {
         ObligationTracker::with_leak_timeout(5)
     }
 
+    fn reserve_ok(
+        tracker: &mut ObligationTracker,
+        flow: ObligationFlow,
+        payload: Vec<u8>,
+        now_ms: u64,
+        trace_id: &str,
+    ) -> ObligationId {
+        tracker
+            .reserve(flow, payload, now_ms, trace_id)
+            .expect("reserve should succeed")
+    }
+
     // 1. default creates empty tracker
     #[test]
     fn test_default_creates_empty() {
@@ -700,8 +759,8 @@ mod tests {
     #[test]
     fn test_reserve_returns_unique_id() {
         let mut t = make_tracker();
-        let id1 = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
-        let id2 = t.reserve(ObligationFlow::Revoke, vec![], 1001, "t2");
+        let id1 = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
+        let id2 = reserve_ok(&mut t, ObligationFlow::Revoke, vec![], 1001, "t2");
         assert_ne!(id1, id2);
         assert_eq!(t.total_obligations(), 2);
     }
@@ -710,7 +769,7 @@ mod tests {
     #[test]
     fn test_reserve_state() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Publish, vec![1, 2, 3], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Publish, vec![1, 2, 3], 1000, "t1");
         let o = t.get_obligation(&id).unwrap();
         assert_eq!(o.state, ObligationState::Reserved);
         assert_eq!(o.payload, vec![1, 2, 3]);
@@ -722,7 +781,7 @@ mod tests {
     #[test]
     fn test_commit_transitions() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         t.commit(&id, 1050, "t2").unwrap();
         let o = t.get_obligation(&id).unwrap();
         assert_eq!(o.state, ObligationState::Committed);
@@ -733,7 +792,7 @@ mod tests {
     #[test]
     fn test_rollback_transitions() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Revoke, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Revoke, vec![], 1000, "t1");
         t.rollback(&id, 1050, "t2").unwrap();
         let o = t.get_obligation(&id).unwrap();
         assert_eq!(o.state, ObligationState::RolledBack);
@@ -744,7 +803,7 @@ mod tests {
     #[test]
     fn test_commit_already_committed() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         t.commit(&id, 1050, "t2").unwrap();
         let err = t.commit(&id, 1100, "t3").unwrap_err();
         assert_eq!(err, error_codes::ERR_OBL_ALREADY_COMMITTED);
@@ -754,7 +813,7 @@ mod tests {
     #[test]
     fn test_rollback_already_committed() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         t.commit(&id, 1050, "t2").unwrap();
         let err = t.rollback(&id, 1100, "t3").unwrap_err();
         assert_eq!(err, error_codes::ERR_OBL_ALREADY_COMMITTED);
@@ -764,7 +823,7 @@ mod tests {
     #[test]
     fn test_commit_already_rolled_back() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Migration, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Migration, vec![], 1000, "t1");
         t.rollback(&id, 1050, "t2").unwrap();
         let err = t.commit(&id, 1100, "t3").unwrap_err();
         assert_eq!(err, error_codes::ERR_OBL_ALREADY_ROLLED_BACK);
@@ -774,7 +833,7 @@ mod tests {
     #[test]
     fn test_rollback_idempotent() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Quarantine, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Quarantine, vec![], 1000, "t1");
         t.rollback(&id, 1050, "t2").unwrap();
         // Second rollback is a no-op
         t.rollback(&id, 1100, "t3").unwrap();
@@ -801,7 +860,7 @@ mod tests {
     #[test]
     fn test_leak_scan_detects_stale() {
         let mut t = ObligationTracker::with_leak_timeout(2); // 2 second timeout
-        let id = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         // Advance time past timeout (2s = 2000ms)
         let result = t.run_leak_scan(4000, "scan1");
         assert_eq!(result.leaked, 1);
@@ -815,8 +874,8 @@ mod tests {
     #[test]
     fn test_leak_scan_ignores_resolved() {
         let mut t = ObligationTracker::with_leak_timeout(1);
-        let id1 = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
-        let id2 = t.reserve(ObligationFlow::Revoke, vec![], 1000, "t2");
+        let id1 = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
+        let id2 = reserve_ok(&mut t, ObligationFlow::Revoke, vec![], 1000, "t2");
         t.commit(&id1, 1050, "t3").unwrap();
         t.rollback(&id2, 1050, "t4").unwrap();
         // Scan well past timeout -- nothing should be detected
@@ -828,9 +887,9 @@ mod tests {
     #[test]
     fn test_count_in_state() {
         let mut t = make_tracker();
-        let id1 = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
-        let id2 = t.reserve(ObligationFlow::Revoke, vec![], 1001, "t2");
-        let _id3 = t.reserve(ObligationFlow::Quarantine, vec![], 1002, "t3");
+        let id1 = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
+        let id2 = reserve_ok(&mut t, ObligationFlow::Revoke, vec![], 1001, "t2");
+        let _id3 = reserve_ok(&mut t, ObligationFlow::Quarantine, vec![], 1002, "t3");
 
         t.commit(&id1, 1050, "t4").unwrap();
         t.rollback(&id2, 1050, "t5").unwrap();
@@ -875,7 +934,7 @@ mod tests {
     #[test]
     fn test_audit_log_reserve() {
         let mut t = make_tracker();
-        t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         assert_eq!(t.audit_log_count(), 1);
         let jsonl = t.export_audit_log_jsonl();
         assert!(jsonl.contains(event_codes::OBL_RESERVED));
@@ -885,7 +944,7 @@ mod tests {
     #[test]
     fn test_audit_log_commit() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Revoke, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Revoke, vec![], 1000, "t1");
         t.commit(&id, 1050, "t2").unwrap();
         assert_eq!(t.audit_log_count(), 2);
         let jsonl = t.export_audit_log_jsonl();
@@ -896,7 +955,7 @@ mod tests {
     #[test]
     fn test_audit_log_rollback() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Fencing, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Fencing, vec![], 1000, "t1");
         t.rollback(&id, 1050, "t2").unwrap();
         let jsonl = t.export_audit_log_jsonl();
         assert!(jsonl.contains(event_codes::OBL_ROLLED_BACK));
@@ -906,7 +965,7 @@ mod tests {
     #[test]
     fn test_audit_log_leak() {
         let mut t = ObligationTracker::with_leak_timeout(1);
-        t.reserve(ObligationFlow::Migration, vec![], 1000, "t1");
+        reserve_ok(&mut t, ObligationFlow::Migration, vec![], 1000, "t1");
         t.run_leak_scan(5000, "scan1");
         let jsonl = t.export_audit_log_jsonl();
         assert!(jsonl.contains(event_codes::OBL_LEAK_DETECTED));
@@ -917,7 +976,7 @@ mod tests {
     #[test]
     fn test_leak_oracle_report() {
         let mut t = make_tracker();
-        let _id = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        let _id = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         t.run_leak_scan(2000, "scan1"); // Not yet leaked (5s timeout)
         let report = t.generate_leak_oracle_report();
         assert_eq!(report.bead_id, "bd-1n5p");
@@ -931,7 +990,7 @@ mod tests {
     #[test]
     fn test_leak_oracle_report_with_leaks() {
         let mut t = ObligationTracker::with_leak_timeout(1);
-        t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         t.run_leak_scan(5000, "scan1");
         let report = t.generate_leak_oracle_report();
         assert_eq!(report.total_leaks, 1);
@@ -960,7 +1019,7 @@ mod tests {
     fn test_multiple_flows() {
         let mut t = make_tracker();
         for flow in ObligationFlow::all() {
-            let id = t.reserve(flow.clone(), vec![], 1000, "t1");
+            let id = reserve_ok(&mut t, flow.clone(), vec![], 1000, "t1");
             t.commit(&id, 1050, "t2").unwrap();
         }
         assert_eq!(t.total_obligations(), 5);
@@ -1006,13 +1065,14 @@ mod tests {
         assert!(!error_codes::ERR_OBL_NOT_FOUND.is_empty());
         assert!(!error_codes::ERR_OBL_LEAK_TIMEOUT.is_empty());
         assert!(!error_codes::ERR_OBL_DUPLICATE_RESERVE.is_empty());
+        assert!(!error_codes::ERR_OBL_CAPACITY_EXCEEDED.is_empty());
     }
 
     // 30. full two-phase lifecycle: reserve -> commit
     #[test]
     fn test_full_lifecycle_commit() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Publish, vec![42], 1000, "trace-1");
+        let id = reserve_ok(&mut t, ObligationFlow::Publish, vec![42], 1000, "trace-1");
         assert_eq!(t.count_in_state(ObligationState::Reserved), 1);
 
         t.commit(&id, 1050, "trace-1").unwrap();
@@ -1027,7 +1087,7 @@ mod tests {
     #[test]
     fn test_full_lifecycle_rollback() {
         let mut t = make_tracker();
-        let id = t.reserve(ObligationFlow::Quarantine, vec![], 1000, "trace-2");
+        let id = reserve_ok(&mut t, ObligationFlow::Quarantine, vec![], 1000, "trace-2");
         assert_eq!(t.count_in_state(ObligationState::Reserved), 1);
 
         t.rollback(&id, 1050, "trace-2").unwrap();
@@ -1041,9 +1101,9 @@ mod tests {
         let mut t = ObligationTracker::with_leak_timeout(2);
 
         // Create obligations at different times
-        let id1 = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
-        let id2 = t.reserve(ObligationFlow::Revoke, vec![], 2000, "t2");
-        let id3 = t.reserve(ObligationFlow::Quarantine, vec![], 3000, "t3");
+        let id1 = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
+        let id2 = reserve_ok(&mut t, ObligationFlow::Revoke, vec![], 2000, "t2");
+        let id3 = reserve_ok(&mut t, ObligationFlow::Quarantine, vec![], 3000, "t3");
 
         // Commit id2 so it's no longer reserved
         t.commit(&id2, 2050, "t4").unwrap();
@@ -1096,9 +1156,9 @@ mod tests {
     #[test]
     fn test_per_flow_counts() {
         let mut t = make_tracker();
-        let id1 = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
-        let _id2 = t.reserve(ObligationFlow::Publish, vec![], 1001, "t2");
-        let id3 = t.reserve(ObligationFlow::Revoke, vec![], 1002, "t3");
+        let id1 = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
+        let _id2 = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1001, "t2");
+        let id3 = reserve_ok(&mut t, ObligationFlow::Revoke, vec![], 1002, "t3");
         t.commit(&id1, 1050, "t4").unwrap();
         t.rollback(&id3, 1050, "t5").unwrap();
 
@@ -1117,7 +1177,7 @@ mod tests {
     #[test]
     fn test_leaked_state_count() {
         let mut t = ObligationTracker::with_leak_timeout(1);
-        t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         t.run_leak_scan(5000, "scan1");
         assert_eq!(t.count_in_state(ObligationState::Leaked), 1);
 
@@ -1161,7 +1221,7 @@ mod tests {
     #[test]
     fn test_leak_oracle_report_has_per_flow_counts() {
         let mut t = make_tracker();
-        t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         t.run_leak_scan(1500, "scan1");
         let report = t.generate_leak_oracle_report();
         assert_eq!(report.per_flow_counts.len(), 5);
@@ -1175,12 +1235,76 @@ mod tests {
         assert!(!error_codes::ERR_OBL_BUDGET_EXCEEDED.is_empty());
     }
 
+    #[test]
+    fn test_reserve_rejects_when_registry_full_of_live_entries() {
+        let mut t = make_tracker();
+        t.next_id = MAX_OBLIGATIONS as u64 + 1;
+
+        for i in 0..MAX_OBLIGATIONS {
+            let id = format!("obl-live-{i}");
+            t.obligations.insert(
+                id.clone(),
+                Obligation {
+                    id: ObligationId(id),
+                    flow: ObligationFlow::Publish,
+                    state: ObligationState::Reserved,
+                    payload: Vec::new(),
+                    reserved_at_ms: 10_000,
+                    resolved_at_ms: None,
+                    trace_id: "seed".to_string(),
+                },
+            );
+        }
+
+        let err = t
+            .reserve(ObligationFlow::Revoke, vec![], 12_000, "trace-cap")
+            .unwrap_err();
+
+        assert_eq!(err, error_codes::ERR_OBL_CAPACITY_EXCEEDED);
+        assert_eq!(t.total_obligations(), MAX_OBLIGATIONS);
+        assert_eq!(t.count_in_state(ObligationState::Reserved), MAX_OBLIGATIONS);
+    }
+
+    #[test]
+    fn test_reserve_reclaims_expired_obligations_before_inserting() {
+        let mut t = ObligationTracker::with_leak_timeout(1);
+        t.next_id = MAX_OBLIGATIONS as u64 + 1;
+
+        for i in 0..MAX_OBLIGATIONS {
+            let id = format!("obl-stale-{i}");
+            t.obligations.insert(
+                id.clone(),
+                Obligation {
+                    id: ObligationId(id),
+                    flow: ObligationFlow::Publish,
+                    state: ObligationState::Reserved,
+                    payload: Vec::new(),
+                    reserved_at_ms: 1_000,
+                    resolved_at_ms: None,
+                    trace_id: "seed".to_string(),
+                },
+            );
+        }
+
+        let inserted = t
+            .reserve(ObligationFlow::Revoke, vec![], 4_000, "trace-reclaim")
+            .expect("expired reservations should be reclaimed");
+
+        assert_eq!(t.total_obligations(), MAX_OBLIGATIONS);
+        assert!(t.get_obligation(&inserted).is_some());
+        assert_eq!(t.count_in_state(ObligationState::Reserved), 1);
+        assert_eq!(
+            t.count_in_state(ObligationState::Leaked),
+            MAX_OBLIGATIONS - 1
+        );
+    }
+
     // 43. Regression: obligation reserved exactly at timeout boundary must be detected as leaked.
     // Before fix: `>` missed the exact boundary, requiring timeout_ms + 1 to detect.
     #[test]
     fn test_leak_scan_exact_timeout_boundary() {
         let mut t = ObligationTracker::with_leak_timeout(2); // 2s = 2000ms timeout
-        let id = t.reserve(ObligationFlow::Publish, vec![], 1000, "t1");
+        let id = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1000, "t1");
         // Scan at exactly reserved_at + timeout = 1000 + 2000 = 3000
         let result = t.run_leak_scan(3000, "boundary-scan");
         assert_eq!(
