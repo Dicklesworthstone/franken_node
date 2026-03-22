@@ -40,12 +40,13 @@ impl QuorumConfig {
     }
 
     pub fn threshold_for_tier(&self, tier: &str) -> u32 {
-        match tier {
+        let configured = match tier {
             "Standard" => self.standard_threshold,
             "Risky" => self.risky_threshold,
             "Dangerous" => self.dangerous_threshold,
             _ => self.dangerous_threshold, // default to strictest
-        }
+        };
+        configured.max(1)
     }
 }
 
@@ -132,7 +133,7 @@ pub fn select_coordinator(
 
     // Deterministic: hash(lease_id || node_id) * weight → highest score wins
     let mut best_node = String::new();
-    let mut best_score: u64 = 0;
+    let mut best_score: u128 = 0;
 
     for candidate in candidates {
         let mut h = Sha256::new();
@@ -144,7 +145,7 @@ pub fn select_coordinator(
         let digest = h.finalize();
         let hash = u64::from_le_bytes(digest[..8].try_into().unwrap_or([0u8; 8]));
         // Multiply by weight to favor higher-weighted candidates
-        let score = hash.wrapping_mul(candidate.weight.max(1));
+        let score = u128::from(hash) * u128::from(candidate.weight.max(1));
         if best_node.is_empty() || score > best_score {
             best_score = score;
             best_node = candidate.node_id.clone();
@@ -593,6 +594,33 @@ mod tests {
     }
 
     #[test]
+    fn zero_threshold_configuration_fails_closed() {
+        let config = QuorumConfig {
+            standard_threshold: 0,
+            risky_threshold: 0,
+            dangerous_threshold: 0,
+        };
+        let known = vec!["s1".to_string()];
+        let sigs = Vec::<QuorumSignature>::new();
+
+        let v = verify_quorum(&config, "l1", "Standard", &sigs, &known, "h", "tr", "ts");
+
+        assert!(!v.passed, "zero threshold config must not disable quorum");
+        assert_eq!(
+            v.required, 1,
+            "threshold should clamp to at least one signer"
+        );
+        assert_eq!(v.received, 0);
+        assert!(v.failures.iter().any(|f| matches!(
+            f,
+            VerificationFailure::BelowQuorum {
+                required: 1,
+                received: 0
+            }
+        )));
+    }
+
+    #[test]
     fn verification_has_trace() {
         let known = vec!["s1".to_string()];
         let sigs = vec![valid_sig("s1", "h")];
@@ -642,5 +670,28 @@ mod tests {
         let r2 = select_coordinator(&c, "lease-replay", "tr").unwrap();
         assert_eq!(r1.selected, r2.selected);
         assert_eq!(r1.candidates, r2.candidates);
+    }
+
+    #[test]
+    fn higher_weight_beats_wraparound_artifact() {
+        let cands = vec![
+            CoordinatorCandidate {
+                node_id: "node-a".into(),
+                weight: 2,
+            },
+            CoordinatorCandidate {
+                node_id: "node-b".into(),
+                weight: 1,
+            },
+        ];
+
+        let selected = select_coordinator(&cands, "lease-wrap", "tr")
+            .expect("selection should succeed")
+            .selected;
+
+        assert_eq!(
+            selected, "node-a",
+            "weighting must not be distorted by u64 wraparound"
+        );
     }
 }
