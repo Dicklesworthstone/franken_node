@@ -25,6 +25,27 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 }
 
+fn checkpoint_progress_violation(
+    latest_epoch: u64,
+    latest_iteration_count: u64,
+    candidate_epoch: u64,
+    candidate_iteration_count: u64,
+) -> Option<&'static str> {
+    if candidate_epoch < latest_epoch {
+        Some("epoch_regressed")
+    } else if candidate_epoch == latest_epoch {
+        if candidate_iteration_count < latest_iteration_count {
+            Some("iteration_regressed")
+        } else if candidate_iteration_count == latest_iteration_count {
+            Some("duplicate_logical_position")
+        } else {
+            None
+        }
+    } else {
+        None
+    }
+}
+
 /// Event code: checkpoint write persisted.
 pub const FN_CK_001_CHECKPOINT_SAVE: &str = "FN-CK-001";
 /// Event code: checkpoint restore/read performed.
@@ -383,6 +404,16 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
         state: &T,
     ) -> Result<CheckpointId, CheckpointError> {
         let existing = self.read_latest_valid(trace_id, orchestration_id)?;
+        if let Some(violation) = first_hash_chain_failure(&existing.events) {
+            return Err(CheckpointError::HashChainViolation {
+                orchestration_id: orchestration_id.to_string(),
+                checkpoint_id: violation
+                    .checkpoint_hash
+                    .clone()
+                    .unwrap_or_else(|| "unknown-checkpoint".to_string()),
+                reason: "cannot_append_after_hash_chain_failure".to_string(),
+            });
+        }
         let progress_state_json = serde_json::to_string(state)
             .map_err(|err| CheckpointError::Serialization(err.to_string()))?;
         let progress_state_hash = hash_hex(progress_state_json.as_bytes());
@@ -433,7 +464,35 @@ impl<B: CheckpointBackend> CheckpointContract for CheckpointWriter<B> {
             return Ok(checkpoint_id);
         }
 
-        let previous_checkpoint_hash = existing.latest.map(|meta| meta.checkpoint_id);
+        let previous_checkpoint_hash = existing
+            .latest
+            .as_ref()
+            .map(|meta| meta.checkpoint_id.clone());
+        if let Some(latest) = existing.latest.as_ref()
+            && let Some(progress_violation) = checkpoint_progress_violation(
+                latest.epoch,
+                latest.iteration_count,
+                epoch,
+                iteration_count,
+            )
+        {
+            let attempted_checkpoint_id = derive_checkpoint_id(
+                orchestration_id,
+                iteration_count,
+                epoch,
+                &progress_state_hash,
+                previous_checkpoint_hash.as_deref(),
+            );
+            return Err(CheckpointError::HashChainViolation {
+                orchestration_id: orchestration_id.to_string(),
+                checkpoint_id: attempted_checkpoint_id,
+                reason: format!(
+                    "{progress_violation}: latest_epoch={} latest_iteration={} attempted_epoch={epoch} attempted_iteration={iteration_count}",
+                    latest.epoch, latest.iteration_count
+                ),
+            });
+        }
+
         let checkpoint_id = derive_checkpoint_id(
             orchestration_id,
             iteration_count,
@@ -551,6 +610,8 @@ fn verify_chain(
 ) -> (Option<CheckpointMeta>, Vec<CheckpointEvent>) {
     let mut latest_valid: Option<CheckpointMeta> = None;
     let mut last_valid_id: Option<String> = None;
+    let mut last_valid_progress: Option<(u64, u64)> = None;
+    let mut chain_failed = false;
     let mut events = Vec::new();
 
     for record in records {
@@ -570,15 +631,29 @@ fn verify_chain(
             (None, None) => true,
             _ => false,
         };
+        let progress_violation =
+            last_valid_progress.and_then(|(latest_epoch, latest_iteration_count)| {
+                checkpoint_progress_violation(
+                    latest_epoch,
+                    latest_iteration_count,
+                    record.epoch,
+                    record.iteration_count,
+                )
+            });
+        let valid_progress = progress_violation.is_none();
 
-        if valid_state_hash && valid_id && valid_prev {
+        if !chain_failed && valid_state_hash && valid_id && valid_prev && valid_progress {
             let meta = CheckpointMeta::from(record);
             last_valid_id = Some(meta.checkpoint_id.clone());
+            last_valid_progress = Some((meta.epoch, meta.iteration_count));
             latest_valid = Some(meta);
             continue;
         }
 
         let mut reason = String::new();
+        if chain_failed {
+            reason.push_str("prior_hash_chain_failure;");
+        }
         if !valid_state_hash {
             reason.push_str("progress_state_hash_mismatch;");
         }
@@ -588,6 +663,11 @@ fn verify_chain(
         if !valid_prev {
             reason.push_str("previous_checkpoint_hash_mismatch;");
         }
+        if let Some(progress_violation) = progress_violation {
+            reason.push_str(progress_violation);
+            reason.push(';');
+        }
+        chain_failed = true;
 
         events.push(CheckpointEvent {
             event_code: FN_CK_003_HASH_CHAIN_FAILURE.to_string(),
@@ -605,6 +685,12 @@ fn verify_chain(
     }
 
     (latest_valid, events)
+}
+
+fn first_hash_chain_failure(events: &[CheckpointEvent]) -> Option<&CheckpointEvent> {
+    events
+        .iter()
+        .find(|event| event.event_code == FN_CK_003_HASH_CHAIN_FAILURE)
 }
 
 fn derive_checkpoint_id(
@@ -822,12 +908,310 @@ mod tests {
     }
 
     #[test]
+    fn save_checkpoint_rejects_append_after_midstream_tamper() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-3c",
+                "orch-3c",
+                10,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "10".to_string())]),
+            )
+            .expect("checkpoint 10");
+        let second = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-3c",
+                "orch-3c",
+                20,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "20".to_string())]),
+            )
+            .expect("checkpoint 20");
+
+        writer
+            .backend_mut()
+            .tamper_progress_state("orch-3c", 1, "{\"cursor\":\"999\"}");
+
+        let decision_stream_len = writer.decision_stream().len();
+        let checkpoint_count = writer
+            .list_checkpoints("orch-3c")
+            .expect("list checkpoints before rejection")
+            .len();
+
+        let err = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-3c",
+                "orch-3c",
+                30,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "30".to_string())]),
+            )
+            .expect_err("tampered chain must reject append");
+
+        assert!(matches!(
+            err,
+            CheckpointError::HashChainViolation {
+                ref orchestration_id,
+                ref checkpoint_id,
+                ref reason,
+            } if orchestration_id == "orch-3c"
+                && checkpoint_id == &second
+                && reason == "cannot_append_after_hash_chain_failure"
+        ));
+        assert_eq!(writer.decision_stream().len(), decision_stream_len);
+        assert_eq!(
+            writer
+                .list_checkpoints("orch-3c")
+                .expect("list checkpoints after rejection")
+                .len(),
+            checkpoint_count
+        );
+
+        let restored = writer
+            .restore_checkpoint::<BTreeMap<String, String>>("trace-ck-3c", "orch-3c")
+            .expect("restore checkpoint after rejection")
+            .expect("latest valid checkpoint exists");
+        assert_eq!(restored.meta.iteration_count, 10);
+        assert_eq!(restored.state.get("cursor"), Some(&"10".to_string()));
+    }
+
+    #[test]
     fn restore_checkpoint_returns_none_when_absent() {
         let writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
         let restored = writer
             .restore_checkpoint::<BTreeMap<String, String>>("trace-ck-4", "missing")
             .expect("restore result");
         assert!(restored.is_none());
+    }
+
+    #[test]
+    fn save_checkpoint_rejects_iteration_regression_within_epoch() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-4a",
+                "orch-4a",
+                100,
+                7,
+                &BTreeMap::from([("cursor".to_string(), "100".to_string())]),
+            )
+            .expect("checkpoint 100");
+
+        let err = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-4a",
+                "orch-4a",
+                50,
+                7,
+                &BTreeMap::from([("cursor".to_string(), "050".to_string())]),
+            )
+            .expect_err("regressive iteration should fail");
+
+        assert!(matches!(
+            err,
+            CheckpointError::HashChainViolation { ref reason, .. }
+                if reason.contains("iteration_regressed")
+        ));
+        let restored = writer
+            .restore_checkpoint::<BTreeMap<String, String>>("trace-ck-4a", "orch-4a")
+            .expect("restore checkpoint")
+            .expect("checkpoint exists");
+        assert_eq!(restored.meta.iteration_count, 100);
+    }
+
+    #[test]
+    fn save_checkpoint_rejects_non_idempotent_duplicate_position() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-4b",
+                "orch-4b",
+                42,
+                7,
+                &BTreeMap::from([("cursor".to_string(), "042".to_string())]),
+            )
+            .expect("checkpoint 42");
+
+        let err = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-4b",
+                "orch-4b",
+                42,
+                7,
+                &BTreeMap::from([("cursor".to_string(), "changed".to_string())]),
+            )
+            .expect_err("duplicate logical position should fail");
+
+        assert!(matches!(
+            err,
+            CheckpointError::HashChainViolation { ref reason, .. }
+                if reason.contains("duplicate_logical_position")
+        ));
+        assert_eq!(
+            writer
+                .list_checkpoints("orch-4b")
+                .expect("list checkpoints")
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn read_latest_valid_rejects_regressive_checkpoint_progress() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+
+        let first = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-4c",
+                "orch-4c",
+                100,
+                7,
+                &BTreeMap::from([("cursor".to_string(), "100".to_string())]),
+            )
+            .expect("checkpoint 100");
+
+        let progress_state_json =
+            serde_json::to_string(&BTreeMap::from([("cursor".to_string(), "050".to_string())]))
+                .expect("serialize regressive state");
+        let progress_state_hash = hash_hex(progress_state_json.as_bytes());
+        let regressive = CheckpointRecord {
+            checkpoint_id: derive_checkpoint_id(
+                "orch-4c",
+                50,
+                7,
+                &progress_state_hash,
+                Some(&first),
+            ),
+            orchestration_id: "orch-4c".to_string(),
+            iteration_count: 50,
+            epoch: 7,
+            wall_clock_time: now_unix_ms(),
+            progress_state_json,
+            progress_state_hash,
+            previous_checkpoint_hash: Some(first),
+        };
+        writer
+            .backend_mut()
+            .save(regressive)
+            .expect("save regressive record");
+
+        let read = writer
+            .read_latest_valid("trace-ck-4c", "orch-4c")
+            .expect("read latest valid");
+
+        assert_eq!(read.latest.expect("latest").iteration_count, 100);
+        let violation = read
+            .events
+            .iter()
+            .find(|event| event.event_code == FN_CK_003_HASH_CHAIN_FAILURE)
+            .expect("regressive progress violation should be logged");
+        assert!(violation.contract_status.contains("iteration_regressed"));
+    }
+
+    #[test]
+    fn read_latest_valid_rejects_suffix_after_hash_chain_failure() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+
+        let first = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-4d",
+                "orch-4d",
+                10,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "10".to_string())]),
+            )
+            .expect("checkpoint 10");
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-ck-4d",
+                "orch-4d",
+                20,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "20".to_string())]),
+            )
+            .expect("checkpoint 20");
+
+        writer
+            .backend_mut()
+            .tamper_progress_state("orch-4d", 1, "{\"cursor\":\"999\"}");
+
+        let progress_state_json =
+            serde_json::to_string(&BTreeMap::from([("cursor".to_string(), "30".to_string())]))
+                .expect("serialize suffix state");
+        let progress_state_hash = hash_hex(progress_state_json.as_bytes());
+        let suffix_record = CheckpointRecord {
+            checkpoint_id: derive_checkpoint_id(
+                "orch-4d",
+                30,
+                1,
+                &progress_state_hash,
+                Some(&first),
+            ),
+            orchestration_id: "orch-4d".to_string(),
+            iteration_count: 30,
+            epoch: 1,
+            wall_clock_time: now_unix_ms(),
+            progress_state_json,
+            progress_state_hash,
+            previous_checkpoint_hash: Some(first),
+        };
+        writer
+            .backend_mut()
+            .save(suffix_record)
+            .expect("save suffix record");
+
+        let read = writer
+            .read_latest_valid("trace-ck-4d", "orch-4d")
+            .expect("read latest valid");
+
+        assert_eq!(read.latest.expect("latest").iteration_count, 10);
+        let violations = read
+            .events
+            .iter()
+            .filter(|event| event.event_code == FN_CK_003_HASH_CHAIN_FAILURE)
+            .collect::<Vec<_>>();
+        assert_eq!(violations.len(), 2);
+        assert!(
+            violations
+                .iter()
+                .any(|event| event.contract_status.contains("prior_hash_chain_failure"))
+        );
+
+        let restored = writer
+            .restore_checkpoint::<BTreeMap<String, String>>("trace-ck-4d", "orch-4d")
+            .expect("restore checkpoint")
+            .expect("latest valid checkpoint exists");
+        assert_eq!(restored.meta.iteration_count, 10);
+        assert_eq!(restored.state.get("cursor"), Some(&"10".to_string()));
     }
 
     #[test]
