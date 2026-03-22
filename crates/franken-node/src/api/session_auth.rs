@@ -273,14 +273,18 @@ impl AuthenticatedSession {
             self.state,
             SessionState::Active | SessionState::Terminating | SessionState::Expired
         ) {
-            return; // Guard: only Active/Terminating → Terminated
+            return; // Guard: only Active/Terminating/Expired → Terminated
         }
         self.state = SessionState::Terminated;
     }
 
     /// Transition to Expired state when idle timeout elapses.
+    /// Terminating sessions stay non-reusable until explicit teardown.
     pub fn expire(&mut self) {
-        if matches!(self.state, SessionState::Terminated | SessionState::Expired) {
+        if matches!(
+            self.state,
+            SessionState::Terminated | SessionState::Expired | SessionState::Terminating
+        ) {
             return;
         }
         self.state = SessionState::Expired;
@@ -738,9 +742,11 @@ impl SessionManager {
             .sessions
             .iter()
             .filter_map(|(session_id, session)| {
+                // Terminating sessions stay non-reusable until explicit teardown
+                // completes; timing them out would reopen duplicate-id reuse.
                 if matches!(
                     session.state,
-                    SessionState::Expired | SessionState::Terminated
+                    SessionState::Expired | SessionState::Terminated | SessionState::Terminating
                 ) {
                     return None;
                 }
@@ -1515,9 +1521,27 @@ mod tests {
         s.begin_termination();
         assert_eq!(s.state, SessionState::Terminating);
         s.expire();
-        assert_eq!(s.state, SessionState::Expired);
+        assert_eq!(s.state, SessionState::Terminating);
         s.terminate();
         assert_eq!(s.state, SessionState::Terminated);
+    }
+
+    #[test]
+    fn test_terminating_session_does_not_expire() {
+        let mut s = AuthenticatedSession::new(
+            "s1".into(),
+            "c".into(),
+            "sv".into(),
+            "e".into(),
+            "sg".into(),
+            0,
+            1,
+            [0u8; SIGNATURE_LEN],
+        );
+        s.activate(1);
+        s.begin_termination();
+        s.expire();
+        assert_eq!(s.state, SessionState::Terminating);
     }
 
     #[test]
@@ -1839,6 +1863,69 @@ mod tests {
             duplicate,
             Err(SessionError::DuplicateLiveSession { .. })
         ));
+    }
+
+    #[test]
+    fn test_timed_out_terminating_session_id_still_rejected_without_resetting_counters() {
+        let config = SessionConfig {
+            replay_window: 0,
+            max_sessions: 10,
+            session_timeout_ms: 10,
+        };
+        let rs = test_root_secret();
+        let epoch = test_epoch();
+        let mut mgr = SessionManager::new(config, rs.clone(), epoch);
+
+        let initial_mac = sign_handshake("s1", "c", "sv", "ek", "sk", epoch, 1_000, &rs);
+        mgr.establish_session(
+            "s1".into(),
+            "c".into(),
+            "sv".into(),
+            "ek".into(),
+            "sk".into(),
+            1_000,
+            "trace-initial".into(),
+            initial_mac,
+        )
+        .expect("initial session");
+
+        let message_mac = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "h0");
+        mgr.process_message(
+            "s1",
+            MessageDirection::Send,
+            0,
+            "h0",
+            &message_mac,
+            1_005,
+            "t",
+        )
+        .expect("message accepted");
+
+        mgr.sessions
+            .get_mut("s1")
+            .expect("session exists")
+            .begin_termination();
+
+        let duplicate_mac = sign_handshake("s1", "c", "sv", "ek", "sk", epoch, 1_020, &rs);
+        let duplicate = mgr.establish_session(
+            "s1".into(),
+            "c".into(),
+            "sv".into(),
+            "ek".into(),
+            "sk".into(),
+            1_020,
+            "trace-dup-term-timeout".into(),
+            duplicate_mac,
+        );
+
+        match duplicate.expect_err("timed-out terminating session must still block duplicate id") {
+            SessionError::DuplicateLiveSession { session_id } => assert_eq!(session_id, "s1"),
+            other => unreachable!("unexpected error: {other}"),
+        }
+
+        let original = mgr.get_session("s1").expect("original session preserved");
+        assert_eq!(original.state, SessionState::Terminating);
+        assert_eq!(original.send_seq, 1);
     }
 
     #[test]
