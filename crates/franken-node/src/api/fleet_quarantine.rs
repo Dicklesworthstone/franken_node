@@ -613,11 +613,7 @@ impl FleetControlManager {
         if !self.activated {
             return Err(FleetControlError::not_activated());
         }
-        if scope.zone_id.is_empty() {
-            return Err(FleetControlError::scope_invalid(
-                "zone_id must not be empty",
-            ));
-        }
+        let zone_id = Self::validated_zone_id(&scope.zone_id)?;
 
         let op_id = self.next_operation_id();
         let now = chrono::Utc::now().to_rfc3339();
@@ -627,7 +623,7 @@ impl FleetControlManager {
         let incident = IncidentHandle {
             incident_id: incident_id.clone(),
             extension_id: extension_id.to_string(),
-            zone_id: scope.zone_id.clone(),
+            zone_id: zone_id.to_string(),
             created_at: now.clone(),
             status: IncidentStatus::Active,
             action_type: "quarantine".to_string(),
@@ -642,16 +638,16 @@ impl FleetControlManager {
 
         // Update zone status (bounded by MAX_ZONE_STATUS)
         if self.zone_status.len() >= MAX_ZONE_STATUS
-            && !self.zone_status.contains_key(&scope.zone_id)
+            && !self.zone_status.contains_key(zone_id)
             && let Some(oldest_key) = self.zone_status.keys().next().cloned()
         {
             self.zone_status.remove(&oldest_key);
         }
         let zone = self
             .zone_status
-            .entry(scope.zone_id.clone())
+            .entry(zone_id.to_string())
             .or_insert_with(|| FleetStatus {
-                zone_id: scope.zone_id.clone(),
+                zone_id: zone_id.to_string(),
                 active_quarantines: 0,
                 active_revocations: 0,
                 healthy_nodes: scope.affected_nodes,
@@ -662,7 +658,7 @@ impl FleetControlManager {
         zone.active_quarantines = zone.active_quarantines.saturating_add(1);
 
         // Build receipt (INV-FLEET-RECEIPT)
-        let receipt = self.build_receipt(&op_id, &identity.principal, &scope.zone_id, &now);
+        let receipt = self.build_receipt(&op_id, &identity.principal, zone_id, &now);
 
         // Convergence state (INV-FLEET-CONVERGENCE)
         let convergence = ConvergenceState {
@@ -674,8 +670,7 @@ impl FleetControlManager {
         };
 
         // Emit event
-        let event =
-            FleetControlEvent::quarantine_initiated(&trace.trace_id, &scope.zone_id, extension_id);
+        let event = FleetControlEvent::quarantine_initiated(&trace.trace_id, zone_id, extension_id);
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
@@ -702,27 +697,23 @@ impl FleetControlManager {
         if !self.activated {
             return Err(FleetControlError::not_activated());
         }
-        if scope.zone_id.is_empty() {
-            return Err(FleetControlError::scope_invalid(
-                "zone_id must not be empty",
-            ));
-        }
+        let zone_id = Self::validated_zone_id(&scope.zone_id)?;
 
         let op_id = self.next_operation_id();
         let now = chrono::Utc::now().to_rfc3339();
 
         // Update zone status (bounded by MAX_ZONE_STATUS)
         if self.zone_status.len() >= MAX_ZONE_STATUS
-            && !self.zone_status.contains_key(&scope.zone_id)
+            && !self.zone_status.contains_key(zone_id)
             && let Some(oldest_key) = self.zone_status.keys().next().cloned()
         {
             self.zone_status.remove(&oldest_key);
         }
         let zone = self
             .zone_status
-            .entry(scope.zone_id.clone())
+            .entry(zone_id.to_string())
             .or_insert_with(|| FleetStatus {
-                zone_id: scope.zone_id.clone(),
+                zone_id: zone_id.to_string(),
                 active_quarantines: 0,
                 active_revocations: 0,
                 healthy_nodes: 0,
@@ -732,7 +723,7 @@ impl FleetControlManager {
             });
         zone.active_revocations = zone.active_revocations.saturating_add(1);
 
-        let receipt = self.build_receipt(&op_id, &identity.principal, &scope.zone_id, &now);
+        let receipt = self.build_receipt(&op_id, &identity.principal, zone_id, &now);
 
         // Emergency revocations create incidents
         if scope.severity == RevocationSeverity::Emergency {
@@ -740,7 +731,7 @@ impl FleetControlManager {
             let incident = IncidentHandle {
                 incident_id: incident_id.clone(),
                 extension_id: extension_id.to_string(),
-                zone_id: scope.zone_id.clone(),
+                zone_id: zone_id.to_string(),
                 created_at: now.clone(),
                 status: IncidentStatus::Active,
                 action_type: "revoke".to_string(),
@@ -754,8 +745,7 @@ impl FleetControlManager {
             self.incidents.insert(incident_id, incident);
         }
 
-        let event =
-            FleetControlEvent::revocation_issued(&trace.trace_id, &scope.zone_id, extension_id);
+        let event = FleetControlEvent::revocation_issued(&trace.trace_id, zone_id, extension_id);
         push_bounded(&mut self.events, event, MAX_FLEET_EVENTS);
 
         Ok(FleetActionResult {
@@ -828,11 +818,7 @@ impl FleetControlManager {
     /// Get fleet status for a zone.
     /// Does not require activation (read-only, safe in safe-start mode).
     pub fn status(&self, zone_id: &str) -> Result<FleetStatus, FleetControlError> {
-        if zone_id.is_empty() {
-            return Err(FleetControlError::scope_invalid(
-                "zone_id must not be empty",
-            ));
-        }
+        let zone_id = Self::validated_zone_id(zone_id)?;
 
         Ok(self
             .zone_status
@@ -939,6 +925,16 @@ impl FleetControlManager {
 
     fn next_operation_id(&mut self) -> String {
         self.allocate_operation_slot().operation_id()
+    }
+
+    fn validated_zone_id<'a>(zone_id: &'a str) -> Result<&'a str, FleetControlError> {
+        let zone_id = zone_id.trim();
+        if zone_id.is_empty() {
+            return Err(FleetControlError::scope_invalid(
+                "zone_id must not be empty",
+            ));
+        }
+        Ok(zone_id)
     }
 
     fn build_receipt(
@@ -1309,6 +1305,22 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_rejects_whitespace_only_zone() {
+        let mut mgr = FleetControlManager::new();
+        mgr.activate();
+        let scope = QuarantineScope {
+            zone_id: "   ".to_string(),
+            tenant_id: None,
+            affected_nodes: 1,
+            reason: "test".to_string(),
+        };
+        let err = mgr
+            .quarantine("ext-1", &scope, &admin_identity(), &test_trace())
+            .expect_err("should fail");
+        assert_eq!(err.error_code(), FLEET_SCOPE_INVALID);
+    }
+
+    #[test]
     fn revoke_rejects_empty_zone() {
         let mut mgr = FleetControlManager::new();
         mgr.activate();
@@ -1325,9 +1337,32 @@ mod tests {
     }
 
     #[test]
+    fn revoke_rejects_whitespace_only_zone() {
+        let mut mgr = FleetControlManager::new();
+        mgr.activate();
+        let scope = RevocationScope {
+            zone_id: " \t ".to_string(),
+            tenant_id: None,
+            severity: RevocationSeverity::Mandatory,
+            reason: "test".to_string(),
+        };
+        let err = mgr
+            .revoke("ext-1", &scope, &admin_identity(), &test_trace())
+            .expect_err("should fail");
+        assert_eq!(err.error_code(), FLEET_SCOPE_INVALID);
+    }
+
+    #[test]
     fn status_rejects_empty_zone() {
         let mgr = FleetControlManager::new();
         let err = mgr.status("").expect_err("should fail");
+        assert_eq!(err.error_code(), FLEET_SCOPE_INVALID);
+    }
+
+    #[test]
+    fn status_rejects_whitespace_only_zone() {
+        let mgr = FleetControlManager::new();
+        let err = mgr.status(" \n ").expect_err("should fail");
         assert_eq!(err.error_code(), FLEET_SCOPE_INVALID);
     }
 
@@ -1386,6 +1421,23 @@ mod tests {
     }
 
     #[test]
+    fn quarantine_normalizes_padded_zone_id() {
+        let mut mgr = FleetControlManager::new();
+        mgr.activate();
+        let mut scope = test_quarantine_scope();
+        scope.zone_id = " zone-us-east-1 ".to_string();
+        let result = mgr
+            .quarantine("ext-1", &scope, &admin_identity(), &test_trace())
+            .expect("quarantine");
+        assert_eq!(result.receipt.zone_id, "zone-us-east-1");
+        assert_eq!(mgr.events()[0].zone_id, "zone-us-east-1");
+        assert_eq!(mgr.active_incidents()[0].zone_id, "zone-us-east-1");
+        let status = mgr.status("zone-us-east-1").expect("status");
+        assert_eq!(status.zone_id, "zone-us-east-1");
+        assert_eq!(status.active_quarantines, 1);
+    }
+
+    #[test]
     fn quarantine_emits_event() {
         let mut mgr = FleetControlManager::new();
         mgr.activate();
@@ -1436,6 +1488,22 @@ mod tests {
         mgr.revoke("ext-1", &scope, &admin_identity(), &test_trace())
             .expect("revoke");
         let status = mgr.status("zone-eu-west-1").expect("status");
+        assert_eq!(status.active_revocations, 1);
+    }
+
+    #[test]
+    fn revoke_normalizes_padded_zone_id() {
+        let mut mgr = FleetControlManager::new();
+        mgr.activate();
+        let mut scope = test_revocation_scope();
+        scope.zone_id = " zone-eu-west-1\t".to_string();
+        let result = mgr
+            .revoke("ext-1", &scope, &admin_identity(), &test_trace())
+            .expect("revoke");
+        assert_eq!(result.receipt.zone_id, "zone-eu-west-1");
+        assert_eq!(mgr.events()[0].zone_id, "zone-eu-west-1");
+        let status = mgr.status("zone-eu-west-1").expect("status");
+        assert_eq!(status.zone_id, "zone-eu-west-1");
         assert_eq!(status.active_revocations, 1);
     }
 
@@ -1792,6 +1860,17 @@ mod tests {
     }
 
     #[test]
+    fn handle_status_rejects_whitespace_only_zone() {
+        let _guard = lock_handler_test_state();
+        let err = handle_status(&admin_identity(), &test_trace(), "   ").expect_err("blank zone");
+        let detail = match err {
+            ApiError::BadRequest { detail, .. } => detail,
+            other => unreachable!("unexpected error: {other:?}"),
+        };
+        assert!(detail.contains(FLEET_SCOPE_INVALID));
+    }
+
+    #[test]
     fn handle_reconcile_succeeds() {
         let _guard = lock_handler_test_state();
         activate_shared_fleet_control_manager_for_tests();
@@ -1852,6 +1931,25 @@ mod tests {
             .expect("handle status");
         assert_eq!(status.data.active_quarantines, 1);
         assert!(status.data.activated);
+    }
+
+    #[test]
+    fn handler_status_reflects_prior_padded_zone_quarantine_canonically() {
+        let _guard = lock_handler_test_state();
+        activate_shared_fleet_control_manager_for_tests();
+        let request = QuarantineRequest {
+            extension_id: "ext-1".to_string(),
+            scope: QuarantineScope {
+                zone_id: " zone-us-east-1 ".to_string(),
+                ..test_quarantine_scope()
+            },
+        };
+        handle_quarantine(&admin_identity(), &test_trace(), &request).expect("handle quarantine");
+
+        let status = handle_status(&admin_identity(), &test_trace(), "zone-us-east-1")
+            .expect("handle status");
+        assert_eq!(status.data.zone_id, "zone-us-east-1");
+        assert_eq!(status.data.active_quarantines, 1);
     }
 
     #[test]

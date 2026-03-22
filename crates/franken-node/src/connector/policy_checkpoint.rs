@@ -1192,6 +1192,24 @@ mod tests {
         assert_eq!(chain.len(), 1);
         assert_eq!(chain.next_seq(), 1);
         assert_eq!(chain.head_hash(), Some(head.as_str()));
+
+        let rejection = chain
+            .events()
+            .last()
+            .expect("invalid append should emit a rejection event");
+        assert_eq!(
+            rejection.event_code,
+            event_codes::PCK_003_CHECKPOINT_REJECTED
+        );
+        assert_eq!(rejection.event_name, event_names::CHECKPOINT_REJECTED);
+        assert_eq!(rejection.trace_id, "t");
+        assert_eq!(rejection.epoch_id, 1);
+        assert_eq!(rejection.sequence, 1);
+        assert_eq!(rejection.channel, "beta");
+        assert_eq!(
+            rejection.detail,
+            "CHECKPOINT_HASH_CHAIN_BREAK: checkpoint_hash does not match canonical serialization"
+        );
     }
 
     // ── verify_chain ─────────────────────────────────────────────────
@@ -1348,9 +1366,11 @@ mod tests {
         let latest_canary = chain.latest_for_channel(&ReleaseChannel::Canary).unwrap();
         assert_eq!(latest_canary.sequence, 3);
 
-        assert!(chain
-            .latest_for_channel(&ReleaseChannel::Custom("nightly".into()))
-            .is_none());
+        assert!(
+            chain
+                .latest_for_channel(&ReleaseChannel::Custom("nightly".into()))
+                .is_none()
+        );
     }
 
     // ── policy_frontier ──────────────────────────────────────────────

@@ -112,6 +112,11 @@ impl SessionState {
     pub fn is_active(&self) -> bool {
         matches!(self, Self::Active)
     }
+
+    /// Whether the session still occupies live-session capacity.
+    pub fn occupies_capacity(&self) -> bool {
+        matches!(self, Self::Establishing | Self::Active | Self::Terminating)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -705,11 +710,11 @@ impl SessionManager {
         push_bounded(&mut self.events, event, MAX_SESSION_EVENTS);
     }
 
-    /// Current number of active/establishing sessions.
+    /// Current number of sessions that still occupy live-session capacity.
     pub fn active_session_count(&self) -> usize {
         self.sessions
             .values()
-            .filter(|s| matches!(s.state, SessionState::Active | SessionState::Establishing))
+            .filter(|s| s.state.occupies_capacity())
             .count()
     }
 
@@ -825,12 +830,11 @@ impl SessionManager {
             });
         }
 
-        if self.sessions.get(&session_id).is_some_and(|session| {
-            matches!(
-                session.state,
-                SessionState::Establishing | SessionState::Active | SessionState::Terminating
-            )
-        }) {
+        if self
+            .sessions
+            .get(&session_id)
+            .is_some_and(|session| session.state.occupies_capacity())
+        {
             self.push_event(SessionEvent {
                 event_code: event_codes::SCC_MESSAGE_REJECTED.to_string(),
                 session_id: session_id.clone(),
@@ -841,7 +845,18 @@ impl SessionManager {
             return Err(SessionError::DuplicateLiveSession { session_id });
         }
 
-        if self.active_session_count() >= self.config.max_sessions {
+        let active_sessions = self.active_session_count();
+        if active_sessions >= self.config.max_sessions {
+            self.push_event(SessionEvent {
+                event_code: event_codes::SCC_MESSAGE_REJECTED.to_string(),
+                session_id: session_id.clone(),
+                trace_id,
+                detail: format!(
+                    "max sessions reached: active_sessions={active_sessions} limit={}",
+                    self.config.max_sessions
+                ),
+                timestamp,
+            });
             return Err(SessionError::MaxSessionsReached {
                 limit: self.config.max_sessions,
             });
@@ -1929,6 +1944,69 @@ mod tests {
     }
 
     #[test]
+    fn test_terminating_session_still_counts_toward_max_sessions() {
+        let config = SessionConfig {
+            replay_window: 0,
+            max_sessions: 1,
+            session_timeout_ms: 60_000,
+        };
+        let rs = test_root_secret();
+        let epoch = test_epoch();
+        let mut mgr = SessionManager::new(config, rs.clone(), epoch);
+
+        let initial_mac = sign_handshake("s1", "c", "sv", "ek", "sk", epoch, 1_000, &rs);
+        mgr.establish_session(
+            "s1".into(),
+            "c".into(),
+            "sv".into(),
+            "ek".into(),
+            "sk".into(),
+            1_000,
+            "trace-initial".into(),
+            initial_mac,
+        )
+        .expect("initial session");
+
+        mgr.sessions
+            .get_mut("s1")
+            .expect("session exists")
+            .begin_termination();
+
+        let second_mac = sign_handshake("s2", "c", "sv", "ek", "sk", epoch, 2_000, &rs);
+        let second = mgr.establish_session(
+            "s2".into(),
+            "c".into(),
+            "sv".into(),
+            "ek".into(),
+            "sk".into(),
+            2_000,
+            "trace-second".into(),
+            second_mac,
+        );
+
+        match second.expect_err("terminating session must still consume capacity") {
+            SessionError::MaxSessionsReached { limit } => assert_eq!(limit, 1),
+            other => unreachable!("unexpected error: {other}"),
+        }
+
+        assert!(mgr.get_session("s2").is_none());
+        assert_eq!(mgr.active_session_count(), 1);
+        assert_eq!(
+            mgr.get_session("s1").unwrap().state,
+            SessionState::Terminating
+        );
+        let rejection = mgr.events().last().expect("capacity rejection event");
+        assert_eq!(rejection.event_code, event_codes::SCC_MESSAGE_REJECTED);
+        assert_eq!(rejection.session_id, "s2");
+        assert_eq!(rejection.trace_id, "trace-second");
+        assert_eq!(rejection.timestamp, 2_000);
+        assert_eq!(
+            rejection.detail,
+            "max sessions reached: active_sessions=1 limit=1"
+        );
+    }
+
+    #[test]
     fn test_reestablish_same_session_id_after_termination_allowed() {
         let mut mgr = default_manager();
         establish_test_session(&mut mgr, "s1");
@@ -2308,6 +2386,11 @@ mod tests {
         establish_test_session(&mut mgr, "s1");
         assert_eq!(mgr.active_session_count(), 1);
         establish_test_session(&mut mgr, "s2");
+        assert_eq!(mgr.active_session_count(), 2);
+        mgr.sessions
+            .get_mut("s1")
+            .expect("session exists")
+            .begin_termination();
         assert_eq!(mgr.active_session_count(), 2);
         mgr.terminate_session("s1", 9999, "t")
             .expect("should succeed");
