@@ -19,6 +19,10 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// Maximum dedupe entries before new inserts trigger an automatic expired-entry
+/// sweep.  If still at capacity after sweeping, the insert is rejected.
+const MAX_DEDUPE_ENTRIES: usize = 65_536;
+
 use crate::security::constant_time::ct_eq;
 
 use serde::{Deserialize, Serialize};
@@ -395,6 +399,27 @@ impl IdempotencyDedupeStore {
             Action::InsertNew | Action::RetryAbandoned => {
                 // Fall through to insert as new
             }
+        }
+
+        // Capacity guard: sweep expired entries first, then reject if still full.
+        if self.entries.len() >= MAX_DEDUPE_ENTRIES {
+            self.sweep_expired(now_secs, trace_id);
+        }
+        if self.entries.len() >= MAX_DEDUPE_ENTRIES {
+            self.log(
+                event_codes::ID_ENTRY_CONFLICT,
+                trace_id,
+                serde_json::json!({
+                    "key_hex": &key_hex,
+                    "reason": "dedupe store at capacity",
+                    "capacity": MAX_DEDUPE_ENTRIES,
+                }),
+            );
+            return DedupeResult::Conflict {
+                key_hex: key_hex.clone(),
+                expected_hash: String::new(),
+                actual_hash: payload_hash.clone(),
+            };
         }
 
         let entry = DedupeEntry {

@@ -29,6 +29,8 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 const MAX_EVENTS: usize = 4096;
+/// Maximum evidence records in the verification endpoint store.
+const MAX_EVIDENCE_RECORDS: usize = 8192;
 
 // ── Schema version ──────────────────────────────────────────────────────────
 
@@ -558,6 +560,14 @@ impl ExternalVerificationEndpoint {
             return Err(VsiError::submission_rejected(format!(
                 "duplicate submission_id '{}'",
                 submission.submission_id
+            )));
+        }
+
+        // Capacity check: prevent unbounded store growth.
+        if self.store.len() >= MAX_EVIDENCE_RECORDS {
+            return Err(VsiError::submission_rejected(format!(
+                "evidence store at capacity ({} records, max {MAX_EVIDENCE_RECORDS})",
+                self.store.len()
             )));
         }
 

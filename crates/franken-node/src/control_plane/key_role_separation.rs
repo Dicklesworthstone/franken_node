@@ -154,6 +154,8 @@ pub enum KeyRoleSeparationError {
     KeyMaterialMismatch { key_id: String, role: KeyRole },
     /// Key binding has exceeded its max_validity_seconds window.
     KeyExpired { key_id: String, role: KeyRole },
+    /// Active binding registry is at capacity.
+    RegistryFull { capacity: usize },
 }
 
 impl KeyRoleSeparationError {
@@ -166,6 +168,7 @@ impl KeyRoleSeparationError {
             Self::RotationFailed { .. } => "KRS_ROTATION_FAILED",
             Self::KeyMaterialMismatch { .. } => "KRS_KEY_MATERIAL_MISMATCH",
             Self::KeyExpired { .. } => "KRS_KEY_EXPIRED",
+            Self::RegistryFull { .. } => "KRS_REGISTRY_FULL",
         }
     }
 }
@@ -212,6 +215,12 @@ impl fmt::Display for KeyRoleSeparationError {
                     f,
                     "KRS_KEY_EXPIRED: key {key_id} bound to {role} has exceeded \
                      its max_validity_seconds window"
+                )
+            }
+            Self::RegistryFull { capacity } => {
+                write!(
+                    f,
+                    "KRS_REGISTRY_FULL: active binding registry at capacity ({capacity})"
                 )
             }
         }
@@ -302,6 +311,8 @@ impl KeyRoleEvent {
 ///
 /// Maximum revoked bindings before oldest-first eviction.
 const MAX_REVOKED_ENTRIES: usize = 4096;
+/// Maximum active key-role bindings before new binds are rejected.
+const MAX_ACTIVE_BINDINGS: usize = 4096;
 /// Maximum events before oldest-first eviction.
 const MAX_KEY_ROLE_EVENTS: usize = 4096;
 
@@ -396,6 +407,13 @@ impl KeyRoleRegistry {
                 .ok_or_else(|| KeyRoleSeparationError::KeyNotFound {
                     key_id: key_id.to_string(),
                 });
+        }
+
+        // Capacity guard: prevent unbounded active-binding growth.
+        if self.active.len() >= MAX_ACTIVE_BINDINGS {
+            return Err(KeyRoleSeparationError::RegistryFull {
+                capacity: MAX_ACTIVE_BINDINGS,
+            });
         }
 
         let binding = KeyRoleBinding {
