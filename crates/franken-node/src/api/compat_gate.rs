@@ -44,6 +44,11 @@ pub mod event_codes {
 
 use event_codes::*;
 
+pub mod error_codes {
+    pub const ERR_COMPAT_SHIM_CAPACITY: &str = "ERR_COMPAT_SHIM_CAPACITY";
+    pub const ERR_COMPAT_PREDICATE_CAPACITY: &str = "ERR_COMPAT_PREDICATE_CAPACITY";
+}
+
 // ---------------------------------------------------------------------------
 // Invariant constants
 // ---------------------------------------------------------------------------
@@ -166,6 +171,39 @@ pub struct PolicyPredicate {
     pub attenuation: Vec<String>,
     pub activation_condition: String,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatGateRegistrationError {
+    ShimCapacityExceeded { capacity: usize },
+    PredicateCapacityExceeded { capacity: usize },
+}
+
+impl CompatGateRegistrationError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::ShimCapacityExceeded { .. } => error_codes::ERR_COMPAT_SHIM_CAPACITY,
+            Self::PredicateCapacityExceeded { .. } => error_codes::ERR_COMPAT_PREDICATE_CAPACITY,
+        }
+    }
+}
+
+impl fmt::Display for CompatGateRegistrationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ShimCapacityExceeded { capacity } => write!(
+                f,
+                "compatibility shim registry at capacity ({capacity}); refusing to evict existing active shim"
+            ),
+            Self::PredicateCapacityExceeded { capacity } => write!(
+                f,
+                "compatibility predicate registry at capacity ({capacity}); refusing to evict existing active predicate"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for CompatGateRegistrationError {}
 
 // ---------------------------------------------------------------------------
 // Gate check request/response
@@ -315,13 +353,32 @@ impl CompatGateService {
     }
 
     /// Register a compatibility shim.
-    pub fn register_shim(&mut self, shim: ShimMetadata) {
-        push_bounded(&mut self.shims, shim, MAX_SHIMS);
+    ///
+    /// Returns an error instead of evicting an active shim when the registry is full.
+    pub fn register_shim(&mut self, shim: ShimMetadata) -> Result<(), CompatGateRegistrationError> {
+        if self.shims.len() >= MAX_SHIMS {
+            return Err(CompatGateRegistrationError::ShimCapacityExceeded {
+                capacity: MAX_SHIMS,
+            });
+        }
+        self.shims.push(shim);
+        Ok(())
     }
 
     /// Register a policy predicate.
-    pub fn register_predicate(&mut self, predicate: PolicyPredicate) {
-        push_bounded(&mut self.predicates, predicate, MAX_PREDICATES);
+    ///
+    /// Returns an error instead of evicting an active predicate when the registry is full.
+    pub fn register_predicate(
+        &mut self,
+        predicate: PolicyPredicate,
+    ) -> Result<(), CompatGateRegistrationError> {
+        if self.predicates.len() >= MAX_PREDICATES {
+            return Err(CompatGateRegistrationError::PredicateCapacityExceeded {
+                capacity: MAX_PREDICATES,
+            });
+        }
+        self.predicates.push(predicate);
+        Ok(())
     }
 
     /// Set the current mode for a scope.
@@ -641,8 +698,31 @@ mod tests {
             activation_policy: "balanced".into(),
             divergence_rationale: "Buffer API differences".into(),
             scope: "project-1".into(),
-        });
+        })
+        .expect("baseline shim registration should succeed");
         svc
+    }
+
+    fn make_shim(shim_id: impl Into<String>) -> ShimMetadata {
+        let shim_id = shim_id.into();
+        ShimMetadata {
+            description: format!("compat shim {shim_id}"),
+            risk_category: "low".into(),
+            activation_policy: "balanced".into(),
+            divergence_rationale: "compatibility delta".into(),
+            scope: "project-1".into(),
+            shim_id,
+        }
+    }
+
+    fn make_predicate(predicate_id: impl Into<String>) -> PolicyPredicate {
+        let predicate_id = predicate_id.into();
+        PolicyPredicate {
+            predicate_id,
+            signature: "sig-policy".into(),
+            attenuation: vec!["scope:project-1".into()],
+            activation_condition: "mode == balanced".into(),
+        }
     }
 
     // ── Event codes ───────────────────────────────────────────────────────
@@ -1003,8 +1083,82 @@ mod tests {
             activation_policy: "any".into(),
             divergence_rationale: "bypasses auth".into(),
             scope: "*".into(),
-        });
+        })
+        .expect("weakening shim registration should succeed");
         assert!(!svc.check_monotonicity());
+    }
+
+    #[test]
+    fn register_shim_rejects_capacity_overflow_without_eviction() {
+        let mut svc = CompatGateService::new();
+        for idx in 0..MAX_SHIMS {
+            svc.register_shim(make_shim(format!("shim-{idx}")))
+                .expect("shim fill should succeed");
+        }
+
+        let err = svc
+            .register_shim(make_shim("shim-overflow"))
+            .expect_err("overflow shim must be rejected");
+
+        assert_eq!(
+            err,
+            CompatGateRegistrationError::ShimCapacityExceeded {
+                capacity: MAX_SHIMS
+            }
+        );
+        assert_eq!(err.code(), error_codes::ERR_COMPAT_SHIM_CAPACITY);
+        assert_eq!(svc.shims.len(), MAX_SHIMS);
+        assert_eq!(
+            svc.shims.first().map(|shim| shim.shim_id.as_str()),
+            Some("shim-0")
+        );
+        let expected_last = format!("shim-{}", MAX_SHIMS - 1);
+        assert_eq!(
+            svc.shims.last().map(|shim| shim.shim_id.as_str()),
+            Some(expected_last.as_str())
+        );
+        assert!(!svc.shims.iter().any(|shim| shim.shim_id == "shim-overflow"));
+    }
+
+    #[test]
+    fn register_predicate_rejects_capacity_overflow_without_eviction() {
+        let mut svc = CompatGateService::new();
+        svc.set_scope_mode("project-1", CompatMode::Balanced);
+        for idx in 0..MAX_PREDICATES {
+            svc.register_predicate(make_predicate(format!("predicate-{idx}")))
+                .expect("predicate fill should succeed");
+        }
+
+        let err = svc
+            .register_predicate(make_predicate("predicate-overflow"))
+            .expect_err("overflow predicate must be rejected");
+
+        assert_eq!(
+            err,
+            CompatGateRegistrationError::PredicateCapacityExceeded {
+                capacity: MAX_PREDICATES
+            }
+        );
+        assert_eq!(err.code(), error_codes::ERR_COMPAT_PREDICATE_CAPACITY);
+        assert_eq!(svc.predicates.len(), MAX_PREDICATES);
+        assert_eq!(
+            svc.predicates
+                .first()
+                .map(|predicate| predicate.predicate_id.as_str()),
+            Some("predicate-0")
+        );
+        let expected_last = format!("predicate-{}", MAX_PREDICATES - 1);
+        assert_eq!(
+            svc.predicates
+                .last()
+                .map(|predicate| predicate.predicate_id.as_str()),
+            Some(expected_last.as_str())
+        );
+        assert!(
+            !svc.predicates
+                .iter()
+                .any(|predicate| predicate.predicate_id == "predicate-overflow")
+        );
     }
 
     // ── Gate pass ─────────────────────────────────────────────────────────

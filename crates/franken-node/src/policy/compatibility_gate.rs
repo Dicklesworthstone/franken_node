@@ -156,6 +156,8 @@ pub struct ModeTransitionRequest {
 #[derive(Debug, Clone)]
 pub struct ShimEntry {
     pub shim_id: String,
+    /// Exact scope this shim applies to, or `*` for a global shim.
+    pub scope_id: String,
     pub description: String,
     pub risk_category: String,
     pub activation_policy: String,
@@ -418,8 +420,17 @@ impl GateEngine {
     }
 
     /// Query registered shims, optionally filtered by scope.
-    pub fn query_shims(&self, _scope: Option<&str>) -> Vec<&ShimEntry> {
-        self.shims.iter().collect()
+    ///
+    /// Scoped queries include exact-scope matches and global (`*`) shims.
+    pub fn query_shims(&self, scope: Option<&str>) -> Vec<&ShimEntry> {
+        self.shims
+            .iter()
+            .filter(|shim| {
+                scope.is_none_or(|scope_id| {
+                    shim.scope_id == scope_id || shim.scope_id.as_str() == "*"
+                })
+            })
+            .collect()
     }
 
     // ---- Gate check ----
@@ -1110,6 +1121,7 @@ mod tests {
         let mut engine = GateEngine::new(b"test-key-v1".to_vec());
         engine.register_shim(ShimEntry {
             shim_id: "shim-buffer-compat".into(),
+            scope_id: "tenant-1".into(),
             description: "Buffer constructor compatibility".into(),
             risk_category: "medium".into(),
             activation_policy: "mode >= balanced".into(),
@@ -1117,6 +1129,17 @@ mod tests {
         });
         engine.set_scope_mode("tenant-1", CompatMode::Balanced);
         engine
+    }
+
+    fn make_shim(shim_id: &str, scope_id: &str) -> ShimEntry {
+        ShimEntry {
+            shim_id: shim_id.into(),
+            scope_id: scope_id.into(),
+            description: format!("{shim_id} description"),
+            risk_category: "medium".into(),
+            activation_policy: "mode >= balanced".into(),
+            divergence_rationale: "compatibility rationale".into(),
+        }
     }
 
     fn future_window() -> (String, String) {
@@ -1403,6 +1426,31 @@ mod tests {
         let shims = engine.query_shims(None);
         assert_eq!(shims.len(), 1);
         assert_eq!(shims[0].shim_id, "shim-buffer-compat");
+    }
+
+    #[test]
+    fn test_shim_registry_query_filters_exact_scope() {
+        let mut engine = GateEngine::new(b"test-key-v1".to_vec());
+        engine.register_shim(make_shim("shim-tenant-1", "tenant-1"));
+        engine.register_shim(make_shim("shim-tenant-2", "tenant-2"));
+        engine.register_shim(make_shim("shim-global", "*"));
+
+        let shims = engine.query_shims(Some("tenant-1"));
+        let ids: Vec<_> = shims.iter().map(|shim| shim.shim_id.as_str()).collect();
+
+        assert_eq!(ids, vec!["shim-tenant-1", "shim-global"]);
+    }
+
+    #[test]
+    fn test_shim_registry_query_includes_global_shims_for_other_scope() {
+        let mut engine = GateEngine::new(b"test-key-v1".to_vec());
+        engine.register_shim(make_shim("shim-tenant-1", "tenant-1"));
+        engine.register_shim(make_shim("shim-global", "*"));
+
+        let shims = engine.query_shims(Some("tenant-2"));
+        let ids: Vec<_> = shims.iter().map(|shim| shim.shim_id.as_str()).collect();
+
+        assert_eq!(ids, vec!["shim-global"]);
     }
 
     #[test]

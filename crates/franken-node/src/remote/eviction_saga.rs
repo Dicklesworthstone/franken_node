@@ -24,6 +24,7 @@ pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
 pub const DEFAULT_MAX_TRANSITIONS_PER_SAGA: usize = 512;
 /// Maximum saga instances tracked before terminal-state entries are evicted.
 const MAX_SAGAS: usize = 4096;
+const ERR_SAGA_ID_REUSED: &str = "ERR_SAGA_ID_REUSED";
 
 fn default_audit_log_capacity() -> usize {
     DEFAULT_MAX_AUDIT_RECORDS
@@ -309,6 +310,13 @@ impl EvictionSagaManager {
             return Err("RemoteCap required for upload phase".to_string());
         }
 
+        let saga_id = format!("saga-{}", self.next_saga_id);
+        if self.sagas.contains_key(&saga_id) {
+            return Err(format!(
+                "{ERR_SAGA_ID_REUSED}: generated saga id already exists: {saga_id}"
+            ));
+        }
+
         if self.sagas.len() >= MAX_SAGAS {
             self.evict_terminal_sagas();
             if self.sagas.len() >= MAX_SAGAS {
@@ -318,7 +326,6 @@ impl EvictionSagaManager {
             }
         }
 
-        let saga_id = format!("saga-{}", self.next_saga_id);
         self.next_saga_id = self.next_saga_id.saturating_add(1);
 
         let mut saga = SagaInstance::new(&saga_id, artifact_id);
@@ -1090,6 +1097,35 @@ mod tests {
         assert!(!mgr.sagas.contains_key("saga-2"));
         assert!(mgr.sagas.contains_key("saga-10"));
         assert!(mgr.sagas.contains_key(&new_id));
+    }
+
+    #[test]
+    fn test_start_saga_rejects_generated_id_reuse_without_overwriting_existing_saga() {
+        let mut mgr = EvictionSagaManager::new();
+        let original_id = mgr
+            .start_saga("artifact-original", true, "t-original")
+            .expect("should succeed");
+        mgr.begin_upload(&original_id, "t-upload")
+            .expect("should succeed");
+        mgr.next_saga_id = 1;
+
+        let err = mgr
+            .start_saga("artifact-replacement", true, "t-reuse")
+            .expect_err("reused generated saga id must fail closed");
+
+        assert!(err.contains(ERR_SAGA_ID_REUSED));
+        assert_eq!(mgr.next_saga_id, 1);
+        assert_eq!(mgr.saga_count(), 1);
+        assert_eq!(mgr.audit_log.len(), 2);
+
+        let preserved = mgr
+            .get_saga(&original_id)
+            .expect("original saga should be preserved");
+        assert_eq!(preserved.artifact_id, "artifact-original");
+        assert_eq!(preserved.phase, SagaPhase::Uploading);
+        assert!(preserved.has_remote_cap);
+        assert_eq!(preserved.transitions.len(), 1);
+        assert_eq!(preserved.transitions[0].to_phase, SagaPhase::Uploading);
     }
 
     #[test]
