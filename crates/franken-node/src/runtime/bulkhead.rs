@@ -27,6 +27,7 @@ pub mod event_codes {
 pub mod error_codes {
     pub const BULKHEAD_OVERLOAD: &str = "BULKHEAD_OVERLOAD";
     pub const BULKHEAD_UNKNOWN_PERMIT: &str = "BULKHEAD_UNKNOWN_PERMIT";
+    pub const BULKHEAD_PERMIT_ID_REUSED: &str = "BULKHEAD_PERMIT_ID_REUSED";
     pub const BULKHEAD_PERMIT_OPERATION_MISMATCH: &str = "BULKHEAD_PERMIT_OPERATION_MISMATCH";
     pub const BULKHEAD_INVALID_CONFIG: &str = "BULKHEAD_INVALID_CONFIG";
 }
@@ -58,6 +59,11 @@ pub enum BulkheadError {
     UnknownPermit {
         permit_id: String,
     },
+    PermitIdReused {
+        permit_id: String,
+        existing_operation_id: String,
+        requested_operation_id: String,
+    },
     PermitOperationMismatch {
         permit_id: String,
         expected_operation_id: String,
@@ -74,6 +80,7 @@ impl BulkheadError {
         match self {
             Self::BulkheadOverload { .. } => error_codes::BULKHEAD_OVERLOAD,
             Self::UnknownPermit { .. } => error_codes::BULKHEAD_UNKNOWN_PERMIT,
+            Self::PermitIdReused { .. } => error_codes::BULKHEAD_PERMIT_ID_REUSED,
             Self::PermitOperationMismatch { .. } => error_codes::BULKHEAD_PERMIT_OPERATION_MISMATCH,
             Self::InvalidConfig { .. } => error_codes::BULKHEAD_INVALID_CONFIG,
         }
@@ -98,6 +105,18 @@ impl fmt::Display for BulkheadError {
             Self::UnknownPermit { permit_id } => {
                 write!(f, "{}: permit_id={permit_id}", self.code())
             }
+            Self::PermitIdReused {
+                permit_id,
+                existing_operation_id,
+                requested_operation_id,
+            } => write!(
+                f,
+                "{}: permit_id={} existing_operation_id={} requested_operation_id={}",
+                self.code(),
+                permit_id,
+                existing_operation_id,
+                requested_operation_id
+            ),
             Self::PermitOperationMismatch {
                 permit_id,
                 expected_operation_id,
@@ -207,9 +226,17 @@ impl GlobalBulkhead {
         }
 
         let permit_id = format!("permit-{:08}", self.next_permit_seq);
-        self.next_permit_seq = self.next_permit_seq.saturating_add(1);
+        if let Some(existing_operation_id) = self.active_permits.get(&permit_id) {
+            return Err(BulkheadError::PermitIdReused {
+                permit_id,
+                existing_operation_id: existing_operation_id.clone(),
+                requested_operation_id: operation_id.to_string(),
+            });
+        }
+
         self.active_permits
             .insert(permit_id.clone(), operation_id.to_string());
+        self.next_permit_seq = self.next_permit_seq.saturating_add(1);
         self.in_flight = self.in_flight.saturating_add(1);
 
         self.emit_event(BulkheadEvent {
@@ -347,6 +374,35 @@ mod tests {
 
         b.release(&permit.permit_id, "op-expected", 12)
             .expect("release with expected operation");
+        assert_eq!(b.in_flight(), 0);
+    }
+
+    #[test]
+    fn reused_generated_permit_id_is_rejected_without_overwriting_original_permit() {
+        let mut b = GlobalBulkhead::new(2, 10).expect("bulkhead");
+        let original = b.try_acquire("op-original", 10).expect("original permit");
+        b.next_permit_seq = 1;
+
+        let err = b
+            .try_acquire("op-reused", 11)
+            .expect_err("reused generated permit id must fail closed");
+        assert_eq!(err.code(), error_codes::BULKHEAD_PERMIT_ID_REUSED);
+        assert!(matches!(
+            err,
+            BulkheadError::PermitIdReused {
+                ref permit_id,
+                ref existing_operation_id,
+                ref requested_operation_id,
+            } if permit_id == "permit-00000001"
+                && existing_operation_id == "op-original"
+                && requested_operation_id == "op-reused"
+        ));
+        assert_eq!(b.next_permit_seq, 1);
+        assert_eq!(b.in_flight(), 1);
+        assert_eq!(b.events().len(), 1);
+
+        b.release(&original.permit_id, "op-original", 12)
+            .expect("original permit must remain releasable");
         assert_eq!(b.in_flight(), 0);
     }
 

@@ -43,6 +43,7 @@ pub mod error_codes {
     #[allow(dead_code)]
     pub const ERR_VEF_SCHED_DEADLINE: &str = "ERR-VEF-SCHED-DEADLINE";
     pub const ERR_VEF_SCHED_BUDGET: &str = "ERR-VEF-SCHED-BUDGET";
+    pub const ERR_VEF_SCHED_DUPLICATE_JOB_ID: &str = "ERR-VEF-SCHED-DUPLICATE-JOB-ID";
     pub const ERR_VEF_SCHED_WINDOW: &str = "ERR-VEF-SCHED-WINDOW";
     pub const ERR_VEF_SCHED_INTERNAL: &str = "ERR-VEF-SCHED-INTERNAL";
 }
@@ -193,6 +194,14 @@ impl SchedulerError {
         }
     }
 
+    fn duplicate_job_id(job_id: &str) -> Self {
+        Self {
+            code: error_codes::ERR_VEF_SCHED_DUPLICATE_JOB_ID.to_string(),
+            event_code: event_codes::VEF_SCHED_ERR_004_INTERNAL.to_string(),
+            message: format!("generated job_id already exists: {job_id}"),
+        }
+    }
+
     fn window(message: impl Into<String>) -> Self {
         Self {
             code: error_codes::ERR_VEF_SCHED_WINDOW.to_string(),
@@ -267,7 +276,11 @@ impl VefProofScheduler {
     }
 
     fn prepare_job_slot(&self, job_id: &str) -> Result<Option<String>, SchedulerError> {
-        if self.jobs.len() < MAX_JOBS || self.jobs.contains_key(job_id) {
+        if self.jobs.contains_key(job_id) {
+            return Err(SchedulerError::duplicate_job_id(job_id));
+        }
+
+        if self.jobs.len() < MAX_JOBS {
             return Ok(None);
         }
 
@@ -375,10 +388,11 @@ impl VefProofScheduler {
             }
 
             let job_id = format!("job-{:08}", self.next_job_seq);
-            self.next_job_seq = self
+            let next_job_seq = self
                 .next_job_seq
                 .checked_add(1)
                 .ok_or_else(|| SchedulerError::internal("job sequence overflow"))?;
+            let reclaimed_job_id = self.prepare_job_slot(&job_id)?;
 
             let job = ProofJob {
                 job_id: job_id.clone(),
@@ -394,10 +408,11 @@ impl VefProofScheduler {
                 completed_at_millis: None,
                 trace_id: window.trace_id.clone(),
             };
-            if let Some(reclaimed_job_id) = self.prepare_job_slot(&job_id)? {
+            if let Some(reclaimed_job_id) = reclaimed_job_id {
                 self.jobs.remove(&reclaimed_job_id);
             }
             self.jobs.insert(job_id.clone(), job);
+            self.next_job_seq = next_job_seq;
             if self.windows_seen.len() >= MAX_WINDOWS_SEEN
                 && let Some(oldest) = self.windows_seen.iter().next().cloned()
             {
@@ -973,6 +988,55 @@ mod tests {
                 .expect("live job should still exist")
                 .status,
             ProofJobStatus::Completed
+        );
+    }
+
+    #[test]
+    fn enqueue_windows_rejects_reused_generated_job_id_without_overwriting_existing_job() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+        let original = make_job(
+            "job-00000000",
+            ProofJobStatus::Dispatched,
+            1_701_350_000_000,
+            "trace-original",
+        );
+        scheduler
+            .jobs
+            .insert(original.job_id.clone(), original.clone());
+        scheduler.next_job_seq = 0;
+
+        let err = scheduler
+            .enqueue_windows(
+                &[make_window(
+                    "win-reused-id",
+                    WorkloadTier::Standard,
+                    1_701_350_100_000,
+                    "trace-reused-id",
+                )],
+                1_701_350_100_000,
+            )
+            .expect_err("reused generated job id must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_SCHED_DUPLICATE_JOB_ID);
+        assert!(
+            err.message.contains("job-00000000"),
+            "unexpected error message: {}",
+            err.message
+        );
+        assert_eq!(scheduler.next_job_seq, 0);
+        assert_eq!(scheduler.jobs.len(), 1);
+        assert!(!scheduler.windows_seen.contains("win-reused-id"));
+
+        let preserved = scheduler
+            .jobs()
+            .get("job-00000000")
+            .expect("original job should be preserved");
+        assert_eq!(preserved.status, ProofJobStatus::Dispatched);
+        assert_eq!(preserved.window_id, original.window_id);
+        assert_eq!(preserved.trace_id, "trace-original");
+        assert_eq!(
+            preserved.dispatched_at_millis,
+            original.dispatched_at_millis
         );
     }
 }

@@ -621,7 +621,7 @@ impl LaneRouter {
         now_ms: u64,
         _canceled: bool,
     ) -> Result<(), LaneRouterError> {
-        let Some(active) = self.active.remove(operation_id) else {
+        let Some(active) = self.active.get(operation_id).cloned() else {
             return Err(LaneRouterError::OperationUnknown {
                 operation_id: operation_id.to_string(),
             });
@@ -630,6 +630,7 @@ impl LaneRouter {
         self.bulkhead
             .release(&active.permit_id, operation_id, now_ms)
             .map_err(map_bulkhead_err)?;
+        self.active.remove(operation_id);
 
         let lane_state = self.lane_state_mut(active.lane)?;
         lane_state.metrics.in_flight = lane_state.metrics.in_flight.saturating_sub(1);
@@ -952,8 +953,18 @@ fn map_bulkhead_err(err: BulkheadError) -> LaneRouterError {
             current_in_flight,
             retry_after_ms,
         },
-        BulkheadError::UnknownPermit { permit_id } => LaneRouterError::OperationUnknown {
-            operation_id: permit_id,
+        BulkheadError::UnknownPermit { permit_id } => LaneRouterError::InvalidConfig {
+            detail: format!("bulkhead permit missing permit_id={permit_id}"),
+        },
+        BulkheadError::PermitIdReused {
+            permit_id,
+            existing_operation_id,
+            requested_operation_id,
+        } => LaneRouterError::InvalidConfig {
+            detail: format!(
+                "bulkhead permit id reused permit_id={} existing_operation_id={} requested_operation_id={}",
+                permit_id, existing_operation_id, requested_operation_id
+            ),
         },
         BulkheadError::PermitOperationMismatch {
             permit_id,
@@ -1367,6 +1378,69 @@ mod tests {
             .find(|m| m.lane == ProductLane::Realtime)
             .expect("lane present");
         assert_eq!(lane.in_flight, 0);
+    }
+
+    #[test]
+    fn completion_failure_preserves_active_operation_until_bulkhead_state_is_repaired() {
+        let mut router = LaneRouter::from_runtime_config(&runtime_config()).expect("router");
+        let cx = cx_with_scope("lane.realtime");
+        let _ = router
+            .assign_operation(&cx, "rt-1", None, 10)
+            .expect("assign");
+
+        let original_permit_id = router
+            .active
+            .get("rt-1")
+            .expect("active entry")
+            .permit_id
+            .clone();
+        router
+            .active
+            .get_mut("rt-1")
+            .expect("active entry")
+            .permit_id = "permit-missing".to_string();
+
+        let err = router
+            .complete_operation("rt-1", 11, false)
+            .expect_err("missing bulkhead permit must fail closed");
+        assert_eq!(err.code(), error_codes::CONFIG_INVALID);
+        assert!(
+            err.to_string().contains("permit-missing"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            router.active.contains_key("rt-1"),
+            "active operation must remain tracked after failed release"
+        );
+
+        let snapshot = router.metrics_snapshot();
+        assert_eq!(snapshot.total_in_flight, 1);
+        let lane = snapshot
+            .lanes
+            .iter()
+            .find(|m| m.lane == ProductLane::Realtime)
+            .expect("lane present");
+        assert_eq!(lane.in_flight, 1);
+        assert_eq!(lane.completed, 0);
+
+        router
+            .active
+            .get_mut("rt-1")
+            .expect("active entry")
+            .permit_id = original_permit_id;
+        router
+            .complete_operation("rt-1", 12, false)
+            .expect("completion should succeed after repairing active permit id");
+
+        let snapshot = router.metrics_snapshot();
+        assert_eq!(snapshot.total_in_flight, 0);
+        let lane = snapshot
+            .lanes
+            .iter()
+            .find(|m| m.lane == ProductLane::Realtime)
+            .expect("lane present");
+        assert_eq!(lane.in_flight, 0);
+        assert_eq!(lane.completed, 1);
     }
 
     #[test]

@@ -17,7 +17,7 @@ pub const SCHEMA_VERSION: &str = "saga-v1.0";
 /// Maximum audit log entries before oldest are evicted.
 const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
 
-/// Maximum concurrent sagas before oldest are evicted.
+/// Maximum retained sagas before terminal-only reclamation or fail-closed rejection.
 const MAX_SAGAS: usize = 2048;
 
 /// Maximum step records per saga before oldest are evicted.
@@ -252,6 +252,7 @@ impl SagaExecutor {
     /// Returns the saga ID. The saga starts in `Pending` state.
     ///
     /// # Errors
+    /// - The generated saga ID already exists and would overwrite an existing saga
     /// - The saga registry is at capacity and contains no terminal saga that can be reclaimed
     pub fn create_saga(
         &mut self,
