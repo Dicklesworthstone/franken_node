@@ -55,7 +55,7 @@ If any later section mentions legacy `dcg` paths like `src/main.rs` at repo root
   git push origin main:master
   ```
 
-**Why this matters:** The `dcg update` command and install URLs historically referenced `master`. If `master` falls behind `main`, users get stale code. We had a bug where `master` was **497 commits behind**, causing users to see old installer behavior.
+**Why this matters:** Historical installer/docs links and raw GitHub URLs can still point at `master`. If `master` falls behind `main`, users get stale `franken_node` code or stale setup instructions.
 
 **If you see `master` referenced anywhere:**
 1. Update it to `main`
@@ -76,47 +76,31 @@ We only use **Cargo** in this project, NEVER any other package manager.
 
 | Crate | Purpose |
 |-------|---------|
-| `serde` + `serde_json` | JSON parsing for Claude Code hook protocol |
-| `serde_yaml` | External pack YAML parsing |
-| `toml` + `toml_edit` | TOML config parsing with formatting preservation |
-| `fancy-regex` | Advanced regex with lookahead/lookbehind |
-| `regex` | `RegexSet` for heredoc detection |
-| `memchr` | SIMD-accelerated substring search |
-| `aho-corasick` | Multi-pattern string matching for keyword quick-reject |
-| `colored` | Terminal colors with TTY detection |
-| `clap` + `clap_complete` | CLI argument parsing with shell completions |
+| `serde` + `serde_json` | Structured config, reports, bundle payloads, and CLI/API JSON |
+| `toml` | Loading `franken_node.toml` and merge-layer configuration data |
+| `clap` | CLI argument parsing for `init`, `run`, `migrate`, `verify`, `trust`, `fleet`, `incident`, `bench`, and `doctor` |
 | `chrono` | RFC 3339 timestamps |
-| `ast-grep-core` + `ast-grep-language` | AST-based pattern matching for heredoc/inline-script content |
-| `rusqlite` | Telemetry database (bundled SQLite) |
-| `rust-mcp-sdk` | MCP server integration (stdio transport) |
+| `uuid` | Stable identifiers for bundles, operations, incidents, and receipts |
+| `sha2` + `hmac` + `hkdf` | Hashing, signing helpers, and derivation material across trust/replay/capability surfaces |
+| `ed25519-dalek` + `zeroize` + `serde_cbor` | Key material handling and signed/canonical payload support |
+| `base64` + `hex` | Binary/text encoding for signatures, digests, and artifacts |
+| `flate2` | Gzip compression for replay bundle chunking/export |
 | `tokio` | Async runtime for MCP server mode |
-| `ratatui` + `comfy-table` + `indicatif` + `console` | TUI/CLI visual polish |
-| `self_update` | Binary self-update from GitHub Releases |
-| `vergen-gix` | Build metadata embedding (build.rs) |
 | `tracing` + `tracing-subscriber` | Structured logging and diagnostics |
-| `sha2` + `hmac` | Hashing and HMAC for allow-once short codes |
-| `flate2` | Gzip compression for history export |
+| `subtle` | Constant-time comparisons in security-sensitive paths |
+| `tempfile` | Temp artifact handling in tests and validation paths |
+| `frankenengine-engine` + `frankenengine-extension-host` | Sibling engine/runtime crates from `../franken_engine` |
 
 ### Release Profile
 
-The release build optimizes for binary size:
-
-```toml
-[profile.release]
-opt-level = "z"     # Optimize for size (lean binary for distribution)
-lto = true          # Link-time optimization
-codegen-units = 1   # Single codegen unit for better optimization
-panic = "abort"     # Smaller binary, no unwinding overhead
-strip = true        # Remove debug symbols
-```
+The current checked-in workspace manifest does **not** define a custom `[profile.release]`. Inspect the on-disk `Cargo.toml` files before making release-profile changes instead of assuming historical settings still apply.
 
 ### Feature Flags
 
 ```toml
 [features]
-rayon = ["dep:rayon"]           # Rayon data parallelism (optional)
-rich-output = ["dep:rich_rust"] # Enable rich_rust for premium terminal output
-legacy-output = []              # Keep old rendering (placeholder for gradual migration)
+extended-surfaces = [] # Expose broader product/API surfaces from the library build
+test-support = []      # Enable testing-only helpers and modules
 ```
 
 ---
@@ -160,13 +144,13 @@ We do not care about backwards compatibility—we're in early development with n
 
 ```bash
 # Check for compiler errors and warnings
-cargo check --all-targets
+rch exec -- cargo check --all-targets
 
 # Check for clippy lints (pedantic + nursery are enabled)
-cargo clippy --all-targets -- -D warnings
+rch exec -- cargo clippy --all-targets -- -D warnings
 
 # Verify formatting
-cargo fmt --check
+rch exec -- cargo fmt --check
 ```
 
 If you see errors, **carefully understand and resolve each issue**. Read sufficient context to fix them the RIGHT way.
@@ -182,55 +166,46 @@ Every module includes inline `#[cfg(test)]` unit tests alongside the implementat
 - Edge cases (empty input, max values, boundary conditions)
 - Error conditions
 
-End-to-end tests live in `tests/e2e/*.sh` and `scripts/program_e2e_orchestrator.py`.
+The checked-in integration and end-to-end style coverage lives primarily in `crates/franken-node/tests/*.rs`, with additional Python/report gate tooling under `scripts/` and contract artifacts under `artifacts/` / `docs/`.
 
 ### Unit Tests
 
-The test suite includes 80+ tests covering all functionality:
+This repository is extremely test-heavy. There are thousands of Rust `#[test]` cases across inline module tests plus the standalone integration/conformance suite under `crates/franken-node/tests/`.
 
 ```bash
 # Run all tests
-cargo test
+rch exec -- cargo test -p frankenengine-node
 
 # Run with output
-cargo test -- --nocapture
+rch exec -- cargo test -p frankenengine-node -- --nocapture
 
-# Run specific test module
-cargo test normalize_command_tests
-cargo test safe_pattern_tests
-cargo test destructive_pattern_tests
+# Run representative focused suites
+rch exec -- cargo test -p frankenengine-node doctor_policy_activation_e2e
+rch exec -- cargo test -p frankenengine-node fleet_cli_e2e
+rch exec -- cargo test -p frankenengine-node verify_release_cli_e2e
 ```
 
 ### End-to-End Testing
 
 ```bash
-# Run shell E2E suites
-./tests/e2e/foundation_bootstrap_suite.sh
-
-# Or run the program-level E2E orchestrator
-python3 scripts/program_e2e_orchestrator.py --json
-
-# Or test manually
-echo '{"tool_name":"Bash","tool_input":{"command":"git reset --hard"}}' | cargo run --release
-# Should output JSON denial
-
-echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | cargo run --release
-# Should output nothing (allowed)
+# Representative CLI/integration surfaces
+rch exec -- cargo test -p frankenengine-node migrate_cli_e2e
+rch exec -- cargo test -p frankenengine-node trust_cli_e2e
+rch exec -- cargo test -p frankenengine-node fleet_cli_e2e
+rch exec -- cargo test -p frankenengine-node verify_release_cli_e2e
 ```
 
 ### Test Categories
 
 | Module | Tests | Purpose |
 |--------|-------|---------|
-| `normalize_command_tests` | 8 | Path stripping for git/rm binaries |
-| `quick_reject_tests` | 5 | Fast-path filtering for non-git/rm commands |
-| `safe_pattern_tests` | 16 | Whitelist accuracy |
-| `destructive_pattern_tests` | 20 | Blacklist coverage |
-| `input_parsing_tests` | 8 | JSON parsing robustness |
-| `deny_output_tests` | 2 | Output format validation |
-| `integration_tests` | 4 | End-to-end pipeline |
-| `optimization_tests` | 9 | Performance paths |
-| `edge_case_tests` | 24 | Real-world edge cases |
+| `doctor_policy_activation_e2e` | CLI/integration | Doctor output contract and policy-activation telemetry |
+| `fleet_cli_e2e`, `trust_cli_e2e`, `migrate_cli_e2e`, `verify_release_cli_e2e` | CLI/integration | Product command surfaces and human/JSON output behavior |
+| `control_lane_policy`, `control_epoch_validity`, `epoch_key_derivation` | Runtime/control-plane | Scheduling, epoch safety, and deterministic control invariants |
+| `bayesian_risk_quarantine`, `ambient_authority_gate`, `adjacent_*_gate` | Policy/security | Risk gates, authority boundaries, and compatibility/policy contracts |
+| `vef_*` suites | Verifier/evidence | Proof scheduling, proof services, adversarial and receipt integrity surfaces |
+| `frankensqlite_adapter_conformance`, `frankentui_surface_migration` | Adapters/migration | Storage and surface migration conformance |
+| Inline `#[cfg(test)]` modules across `src/**` | Unit/property-style | Local invariants for the domain module being edited |
 
 ---
 
@@ -240,561 +215,149 @@ If you aren't 100% sure how to use a third-party library, **SEARCH ONLINE** to f
 
 ---
 
-## Legacy dcg Reference (Historical / Non-Authoritative Here)
+## franken_node Architecture Reference
 
-The following section documents the `dcg` protocol and implementation model for historical reference. In this repository, do **not** treat these `dcg`-specific root-level `src/*` paths as authoritative; use the workspace reality section above and the actual `crates/franken-node/` tree for code changes.
+This repository is `franken_node`, a product-layer Rust workspace over sibling `franken_engine`, not the older standalone tool previously described here.
 
 ### What It Does
 
-Guards AI coding agents from executing destructive commands by intercepting Claude Code's `PreToolUse` hook protocol, evaluating commands against safe/destructive pattern lists, and denying dangerous operations with structured JSON output including remediation suggestions.
+`franken-node` is a trust-native JavaScript/TypeScript runtime platform. The product surface combines migration workflows, runtime and control-plane primitives, trust and supply-chain policy, fleet quarantine/release controls, replay and incident tooling, remote capability issuance, and verifier-facing evidence generation around the sibling `franken_engine` substrate.
 
-### Architecture
+### Workspace Shape
 
-```
-JSON Input → Parse → Quick Reject (memchr) → Normalize → Safe Patterns → Destructive Patterns → Default Allow
-```
-
-### Key Files
-
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `src/main.rs` | Entry point, hook I/O, CLI dispatch |
-| `src/evaluator.rs` | Pattern matching engine (safe + destructive evaluation) |
-| `src/hook.rs` | Claude Code PreToolUse hook protocol handling |
-| `src/normalize.rs` | Command normalization (path stripping, alias expansion) |
-| `src/heredoc.rs` | Heredoc and inline script extraction |
-| `src/ast_matcher.rs` | AST-based pattern matching for embedded code |
-| `src/config.rs` | Configuration loading (TOML, allowlists, pack enable/disable) |
-| `src/allowlist.rs` | Allowlist management (project, user, system scopes) |
-| `src/cli.rs` | CLI commands (explain, scan, packs, allowlist, etc.) |
-| `src/scan.rs` | Codebase scanning for destructive patterns |
-| `src/context.rs` | Contextual analysis for pattern matching |
-| `src/confidence.rs` | Match confidence scoring |
-| `src/error_codes.rs` | Standardized DCG-XXXX error codes |
-| `src/exit_codes.rs` | Process exit code definitions |
-| `src/packs/` | Modular pattern pack system (core + extensions) |
-| `src/output/` | Output formatting (JSON, colorful stderr) |
-| `src/highlight.rs` | Syntax highlighting for command display |
-| `src/logging.rs` | Tracing/logging configuration |
-| `src/perf.rs` | Performance budgets and benchmarks |
-| `src/simulate.rs` | Command simulation and dry-run support |
-| `src/mcp.rs` | MCP server integration |
-| `src/agent.rs` | Agent detection and identification |
-| `src/interactive.rs` | Interactive mode |
-| `src/git.rs` | Git-specific command analysis |
-| `src/history/` | Decision history and telemetry |
-| `src/sarif.rs` | SARIF output format for scan results |
-| `src/pending_exceptions.rs` | Pending exception management |
-| `src/lib.rs` | Library re-exports |
-| `Cargo.toml` | Dependencies and release optimizations |
-| `build.rs` | Build script for version metadata (vergen) |
-| `rust-toolchain.toml` | Historical toolchain pin reference (not currently checked into this repo) |
-| `tests/e2e/*.sh` + `scripts/program_e2e_orchestrator.py` | End-to-end shell suites + program-level orchestrator |
+| `Cargo.toml` | Workspace manifest for `crates/franken-node` and `sdk/verifier` |
+| `crates/franken-node/src/main.rs` | Primary binary entrypoint and CLI dispatch |
+| `crates/franken-node/src/lib.rs` | Primary library exports and feature-gated module surface |
+| `crates/franken-node/src/cli.rs` | Command-line contract and subcommand definitions |
+| `crates/franken-node/src/config.rs` | Config discovery, profile selection, and CLI override resolution |
+| `sdk/verifier/src/lib.rs` | Small public verifier SDK crate |
+| `crates/franken-node/tests/` | Broad integration, conformance, and CLI/e2e-style coverage |
+| `docs/specs/`, `artifacts/`, `scripts/` | Product contracts, evidence, and gate/orchestration helpers |
 
-### Output Style
+### Architectural Shape
 
-This tool has two output modes:
-
-- **JSON to stdout:** For Claude Code hook protocol (`hookSpecificOutput` with `permissionDecision: "deny"`)
-- **Colorful warning to stderr:** For human visibility when commands are blocked
-
-Output behavior:
-- **Deny:** Colorful warning to stderr + JSON to stdout
-- **Allow:** No output (silent exit)
-- **--version/-V:** Version info with build metadata to stderr
-- **--help/-h:** Usage information to stderr
-
-Colors are automatically disabled when stderr is not a TTY (e.g., piped to file).
-
-### Pattern System
-
-- **34 safe patterns** (whitelist, checked first)
-- **16 destructive patterns** (blacklist, checked second)
-- **Default allow** for unmatched commands
-
-### Adding New Patterns
-
-1. Identify the command to block/allow
-2. Write a regex using `fancy-regex` syntax (supports lookahead/lookbehind)
-3. Add to `SAFE_PATTERNS` or `DESTRUCTIVE_PATTERNS` using the macros:
-
-```rust
-// Safe pattern (whitelist)
-pattern!("pattern-name", r"regex-here")
-
-// Destructive pattern (blacklist)
-destructive!(
-    r"regex-here",
-    "Human-readable reason for blocking"
-)
+```
+CLI / config / profiles
+    -> domain modules in crates/franken-node/src/**
+    -> runtime + control_plane + security + supply_chain + replay + remote
+    -> receipts, trust cards, replay bundles, conformance evidence, and operator-facing output
 ```
 
-4. Add tests for all variants
-5. Run `cargo test` and `python3 scripts/program_e2e_orchestrator.py --json`
-
-### Performance Requirements
-
-Every Bash command passes through this hook. Performance is critical:
-
-- Quick rejection filter eliminates 99%+ of commands before regex
-- Lazy-initialized static regex patterns (compiled once, reused)
-- Sub-millisecond execution for typical commands
-- Zero allocations on the hot path for safe commands
-
-### Heredoc Detection Notes
-
-- **Rule IDs**: Heredoc patterns use stable IDs like `heredoc.python.shutil_rmtree` for allowlisting.
-- **Fail-open**: In hook mode, heredoc parse errors/timeouts must allow (do not block).
-- **Tests**: Prefer targeted tests in `src/ast_matcher.rs` and `src/heredoc.rs`.
-  - `cargo test ast_matcher`
-  - `cargo test heredoc`
-  - Add positive and negative fixtures for each new pattern.
-
----
-
-<!-- dcg-machine-readable-v1 -->
-
-## DCG Hook Protocol (Machine-Readable Reference)
-
-> This section provides structured documentation for AI agents integrating with dcg.
-
-### JSON Input Format
-
-dcg reads from stdin in Claude Code's `PreToolUse` hook format:
-
-```json
-{
-  "tool_name": "Bash",
-  "tool_input": {
-    "command": "git reset --hard HEAD~5"
-  }
-}
-```
-
-**Required fields:**
-- `tool_name`: Must be `"Bash"` for dcg to process (other tools are ignored)
-- `tool_input.command`: The shell command string to evaluate
-
-### JSON Output Format (Denial)
-
-When a command is blocked, dcg outputs JSON to stdout:
-
-```json
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "permissionDecision": "deny",
-    "permissionDecisionReason": "BLOCKED by dcg\n\nTip: dcg explain \"git reset --hard HEAD~5\"\n\nReason: git reset --hard destroys uncommitted changes\n\nExplanation: Rewrites history and discards uncommitted changes.\n\nRule: core.git:reset-hard\n\nCommand: git reset --hard HEAD~5\n\nIf this operation is truly needed, ask the user for explicit permission and have them run the command manually.",
-    "ruleId": "core.git:reset-hard",
-    "packId": "core.git",
-    "severity": "critical",
-    "confidence": 0.95,
-    "allowOnceCode": "a1b2c3",
-    "allowOnceFullHash": "sha256:abc123...",
-    "remediation": {
-      "safeAlternative": "git stash",
-      "explanation": "Use git stash to save your changes first.",
-      "allowOnceCommand": "dcg allow-once a1b2c3"
-    }
-  }
-}
-```
-
-**Key fields for agent parsing:**
-| Field | Type | Description |
-|-------|------|-------------|
-| `permissionDecision` | `"allow"` \| `"deny"` | The decision |
-| `ruleId` | `string` | Stable pattern ID (e.g., `"core.git:reset-hard"`) for allowlisting |
-| `packId` | `string` | Pack that matched (e.g., `"core.git"`) |
-| `severity` | `string` | `"critical"`, `"high"`, `"medium"`, or `"low"` |
-| `confidence` | `number` | Match confidence 0.0-1.0 |
-| `allowOnceCode` | `string` | Short code for `dcg allow-once` |
-| `remediation.safeAlternative` | `string?` | Suggested safe command |
-
-### JSON Output Format (Allow)
-
-When a command is allowed: **no output** (silent exit 0).
-
----
-
-## Exit Codes Reference
-
-| Code | Meaning | Agent Action |
-|------|---------|--------------|
-| `0` | Command allowed OR denied (check stdout for JSON) | Parse stdout; if empty, command was allowed |
-| `1` | Parse error or invalid input | Retry with corrected input |
-| `2` | Configuration error | Check config file syntax |
-
-**Detection logic for agents:**
-```bash
-output=$(echo "$hook_input" | dcg 2>/dev/null)
-if [ -z "$output" ]; then
-  echo "ALLOWED"
-else
-  echo "DENIED: $output"
-fi
-```
-
----
-
-## Error Codes Reference
-
-DCG uses standardized error codes in the format `DCG-XXXX` for machine-parseable error handling.
-
-### Error Categories
-
-| Range | Category | Description |
-|-------|----------|-------------|
-| DCG-1xxx | `pattern_match` | Pattern matching and evaluation errors |
-| DCG-2xxx | `configuration` | Configuration loading and parsing errors |
-| DCG-3xxx | `runtime` | Runtime and execution errors |
-| DCG-4xxx | `external` | External integration errors |
-
-### Common Error Codes
-
-| Code | Description | Typical Cause |
-|------|-------------|---------------|
-| `DCG-1001` | Pattern compilation failed | Invalid regex syntax in pattern |
-| `DCG-1002` | Pattern match timeout | Complex pattern taking too long |
-| `DCG-2001` | Config file not found | Missing configuration file |
-| `DCG-2002` | Config parse error | Invalid TOML/JSON syntax |
-| `DCG-2004` | Allowlist load error | Invalid allowlist file |
-| `DCG-3001` | JSON parse error | Malformed JSON input |
-| `DCG-3002` | IO error | File read/write failure |
-| `DCG-4001` | External pack load failed | Invalid external pack YAML |
-
-### Error JSON Structure
-
-When errors are returned in JSON format, they follow this structure:
-
-```json
-{
-  "error": {
-    "code": "DCG-3001",
-    "category": "runtime",
-    "message": "JSON parse error: unexpected token at position 15",
-    "context": {
-      "position": 15,
-      "input_preview": "{ \"tool_name\": ..."
-    }
-  }
-}
-```
-
-**Fields:**
-- `code`: Stable error code for programmatic handling
-- `category`: Error category (`pattern_match`, `configuration`, `runtime`, `external`)
-- `message`: Human-readable error description
-- `context`: Additional details (optional, varies by error type)
-
----
-
-## Allowlist & Bypass Instructions
-
-### Temporary Bypass (24-hour allow-once)
-
-When a command is blocked, the output includes an `allowOnceCode`. Use it:
-
-```bash
-dcg allow-once <code>
-```
-
-This allows the specific command for 24 hours in the current directory scope.
-
-### Permanent Allowlist (by rule ID)
-
-Add a rule to the project allowlist:
-
-```bash
-dcg allowlist add <ruleId> --project
-# Example: dcg allowlist add core.git:reset-hard --project
-```
-
-Allowlist files (in priority order):
-1. `.dcg/allowlist.toml` (project)
-2. `~/.config/dcg/allowlist.toml` (user)
-3. `/etc/dcg/allowlist.toml` (system)
-
-### Bypass Environment Variable
-
-For emergency bypass (use sparingly):
-
-```bash
-DCG_BYPASS=1 <command>
-```
-
-**Warning:** This disables all protection. Log and justify any usage.
-
----
-
-## Pattern Quick Reference
-
-### Core Git Patterns (Always Enabled)
-
-| Pattern ID | Blocks | Severity |
-|------------|--------|----------|
-| `core.git:reset-hard` | `git reset --hard` | Critical |
-| `core.git:reset-merge` | `git reset --merge` | High |
-| `core.git:checkout-discard` | `git checkout -- <file>` | High |
-| `core.git:restore-discard` | `git restore <file>` (without `--staged`) | High |
-| `core.git:clean-force` | `git clean -f`, `git clean -fd` | High |
-| `core.git:force-push` | `git push --force`, `git push -f` | High |
-| `core.git:branch-force-delete` | `git branch -D` | High |
-| `core.git:stash-drop` | `git stash drop`, `git stash clear` | High |
-
-### Core Filesystem Patterns (Always Enabled)
-
-| Pattern ID | Blocks | Severity |
-|------------|--------|----------|
-| `core.filesystem:rm-rf-root` | `rm -rf /`, `rm -rf ~` | Critical |
-| `core.filesystem:rm-rf-general` | `rm -rf` outside temp dirs | High |
-
-### Safe Patterns (Whitelist - Always Allowed)
-
-| Pattern | Command | Why Safe |
-|---------|---------|----------|
-| `git-checkout-branch` | `git checkout -b <branch>` | Creates new branch |
-| `git-checkout-orphan` | `git checkout --orphan <branch>` | Creates orphan branch |
-| `git-restore-staged` | `git restore --staged <file>` | Only unstages, doesn't discard |
-| `git-clean-dry-run` | `git clean -n`, `git clean --dry-run` | Preview only |
-| `rm-tmp` | `rm -rf /tmp/*`, `/var/tmp/*` | Temp directory cleanup |
-
-### Pack Enable/Disable Examples
-
-```toml
-# ~/.config/dcg/config.toml
-[packs]
-enabled = [
-    "database.postgresql",    # Blocks DROP TABLE, TRUNCATE
-    "kubernetes.kubectl",     # Blocks kubectl delete namespace
-    "cloud.aws",              # Blocks aws ec2 terminate-instances
-]
-
-disabled = [
-    "containers.docker",      # Disable Docker protection
-]
-```
-
-List all packs: `dcg packs --verbose`
-
----
-
-## CLI Quick Reference for Agents
-
-| Command | Purpose |
-|---------|---------|
-| `dcg explain "<command>"` | Detailed trace of why command is blocked/allowed |
-| `dcg allow-once <code>` | Allow a blocked command for 24 hours |
-| `dcg allowlist add <ruleId> --project` | Permanently allow a rule |
-| `dcg packs` | List enabled packs |
-| `dcg packs --verbose` | List all packs with pattern counts |
-| `dcg scan .` | Scan codebase for destructive patterns |
-| `dcg --version` | Show version and build info |
-
----
-
-## Agent Integration Checklist
-
-When integrating with dcg, ensure your agent:
-
-- [ ] Parses stdout for JSON denial responses
-- [ ] Handles empty stdout as "command allowed"
-- [ ] Uses `ruleId` for stable allowlisting (not pattern text)
-- [ ] Displays `remediation.safeAlternative` to users when available
-- [ ] Respects `severity` for prioritization (critical > high > medium > low)
-- [ ] Uses `dcg explain` before asking users to bypass
-
----
-
-## JSON Schema Reference
-
-Formal JSON Schema definitions (Draft 2020-12) for all dcg output formats are available in `docs/json-schema/`:
-
-| Schema | Purpose |
-|--------|---------|
-| [`hook-output.json`](docs/json-schema/hook-output.json) | PreToolUse hook denial response format |
-| [`scan-results.json`](docs/json-schema/scan-results.json) | `dcg scan` command output format |
-| [`stats-output.json`](docs/json-schema/stats-output.json) | `dcg stats` command output format |
-| [`error.json`](docs/json-schema/error.json) | Error response formats for various commands |
-
-Use these schemas for:
-- Validating dcg output in automated pipelines
-- Generating type-safe client code
-- Understanding the complete output contract
-
-<!-- end-dcg-machine-readable -->
+### Key Entry Surfaces
+
+| Surface | What Lives There |
+|---------|------------------|
+| `main.rs` | Top-level command execution for `init`, `run`, `migrate`, `verify`, `trust`, `remotecap`, `trust-card`, `fleet`, `incident`, `registry`, `bench`, and `doctor` |
+| `lib.rs` | Domain exports such as `connector`, `control_plane`, `remote`, `runtime`, `security`, `supply_chain`, `storage`, `tools`, `replay`, and feature-gated API/policy/conformance surfaces |
+| `cli.rs` | Stable CLI argument shapes and JSON/human output contracts that downstream tests assert |
+| `config.rs` | Runtime profile and config loading, including local/dev/enterprise profile behavior |
+| `sdk/verifier/src/lib.rs` | Public verifier-facing API kept smaller and more stable than the main product crate |
+
+### Main Product Domains
+
+| Domain | Representative Modules / Surfaces |
+|--------|-----------------------------------|
+| Migration | `migration`, `verify migration`, rewrite/rollback validation flows |
+| Trust and supply chain | `supply_chain`, trust-card routes and registries, decision receipts, extension registry admission |
+| Fleet control | `api/fleet_quarantine.rs`, `control_plane`, `runtime`, fleet status/reconcile/release commands |
+| Replay and incidents | `replay`, `tools/replay_bundle.rs`, incident bundle generation and integrity validation |
+| Runtime/control-plane primitives | `runtime`, `control_plane`, lane scheduling, epoch validity, profile-governed execution |
+| Remote execution surfaces | `remote`, `security::remote_cap`, connector-facing capability and scope controls |
+| Verifier/evidence surfaces | `verify` commands, `sdk/verifier`, conformance modules, receipts, artifacts, and specs |
+| Observability and operations | `observability`, `ops`, `doctor`, benchmark and diagnostic tooling |
+
+### Feature Flags and Packaging Reality
+
+- `extended-surfaces` enables heavier product surfaces such as `api`, `claims`, `conformance`, `extensions`, `federation`, `policy`, `registry`, `sdk`, and `verifier_economy`.
+- `test-support` enables shared testing helpers and harness-facing modules.
+- Deployment/profile defaults live in `packaging/profiles.toml`, which currently defines `local`, `dev`, and `enterprise` profiles selected by `--profile <name>` or `FRANKEN_NODE_PROFILE`.
+
+### Working Assumptions for Agents
+
+- Treat `docs/specs/**`, `artifacts/**`, and `crates/franken-node/tests/**` as part of the product contract, not as optional documentation.
+- When command output changes, update both human-readable and JSON-facing expectations in the relevant tests.
+- Many flows depend on sibling `franken_engine` code and checked-in spec artifacts; inspect those inputs before assuming a bug is isolated to `franken_node`.
+- Prefer editing the authoritative product module directly instead of building compatibility shims or wrapper layers.
 
 ---
 
 ## CI/CD Pipeline
 
-### Jobs Overview
+The checked-in CI for this repository is gate-oriented and path-scoped. Do **not** assume an old monolithic `check` / `coverage` / `dist` pipeline exists here; the authoritative source is the live set of workflow files under `.github/workflows/`.
 
-| Job | Trigger | Purpose | Blocking |
-|-----|---------|---------|----------|
-| `check` | PR, push | Format, clippy, UBS, tests | Yes |
-| `coverage` | PR, push | Coverage thresholds | Yes |
-| `memory-tests` | PR, push | Memory leak detection | Yes |
-| `benchmarks` | push to main | Performance budgets | Warn only |
-| `e2e` | PR, push | End-to-end shell tests | Yes |
-| `scan-regression` | PR, push | Scan output stability | Yes |
-| `perf-regression` | PR, push | Process-per-invocation perf | Yes |
+### Workflow Families
 
-### Check Job
+| Workflow family | Examples in this repo | Purpose |
+|----------------|-----------------------|---------|
+| Contract/change-summary gates | `no-contract-no-merge-gate.yml`, `change-summary-contract-gate.yml` | Ensure product changes carry the required contract/evidence narrative |
+| Claim/evidence gates | `atc-claim-gate.yml`, `bpet-claim-gate.yml`, `dgis-claim-gate.yml`, `vef-claim-gate.yml` | Validate claim-specific artifacts and proofs |
+| Replay/benchmark/vector gates | `replay-coverage-gate.yml`, `benchmark-correctness-artifacts-gate.yml`, `benchmark-specs-package-gate.yml`, `canonical-vector-gate.yml` | Check replay evidence, benchmark packages, and canonical vectors |
+| Risk/reduction gates | `compatibility-threat-evidence-gate.yml`, `compromise-reduction-gate.yml`, `migration-velocity-gate.yml`, `rollback-command-gate.yml` | Enforce operational, compatibility, migration, and rollback safety contracts |
+| Cross-substrate/conformance gates | `adjacent-substrate-gate.yml`, `asupersync-integration-gate.yml`, `connector-conformance.yml`, `independent-replication-gate.yml`, `proof-carrying-execution-ledger-gate.yml` | Validate connector behavior, replication, substrate compatibility, and ledger evidence |
 
-Runs format, clippy, UBS static analysis, and unit tests. Includes:
-- `cargo fmt --check` - Code formatting
-- `cargo clippy --all-targets -- -D warnings` - Lints (pedantic + nursery enabled)
-- UBS analysis on changed Rust files (warning-only, non-blocking)
-- `cargo nextest run` - Full test suite with JUnit XML report
+### Representative Workflow Behavior
 
-### Coverage Job
+- `connector-conformance.yml` runs targeted Rust tests for `conformance::` and `connector::` plus Python gate scripts such as `check_connector_lifecycle.py` and `check_conformance_harness.py`.
+- `replay-coverage-gate.yml` validates replay coverage artifacts and uploads the resulting JSON evidence.
+- `no-contract-no-merge-gate.yml` diffs changed files, inspects labels, and enforces contract coverage via `scripts/check_no_contract_no_merge.py`.
 
-Runs `cargo llvm-cov` and enforces thresholds:
-- **Overall:** >= 70%
-- **src/evaluator.rs:** >= 80%
-- **src/hook.rs:** >= 80%
+### Local Verification Expectations
 
-Coverage is uploaded to Codecov for trend tracking. Dashboard: https://codecov.io/gh/Dicklesworthstone/destructive_command_guard
+- Run formatting, `check`, `clippy`, and targeted Rust tests against touched surfaces.
+- Per repository practice, send cargo-heavy work through `rch` rather than running local cargo directly.
+- Reproduce any triggered Python gate script under `scripts/` and its companion tests under `tests/` when a workflow failure references artifacts or contract JSON.
+- If you touched `docs/specs/**` or `artifacts/**`, verify the corresponding gate because these files are part of the product contract.
 
-### Memory Tests Job
+### Recommended Local Command Pattern
 
-Runs dedicated memory leak tests with:
-- `--test-threads=1` for accurate measurements
-- Release mode for realistic performance
-- 1-2MB growth budgets per test
-
-Tests include: hook input parsing, pattern evaluation, heredoc extraction, file extractors, full pipeline, and a self-test that verifies the framework catches leaks.
-
-### Benchmarks Job
-
-Runs on push to main only (benchmarks are noisy on PRs). Checks performance budgets from `src/perf.rs`:
-- Quick reject: < 50us panic
-- Fast path: < 500us panic
-- Pattern match: < 1ms panic
-- Heredoc extract: < 2ms panic
-- Full pipeline: < 50ms panic
-
-### UBS Static Analysis
-
-Ultimate Bug Scanner runs on changed Rust files. Currently warning-only (non-blocking) to tune for false positives. Configuration in `.ubsignore` excludes test/bench/fuzz directories.
-
-### Dependabot
-
-Automated dependency updates configured in `.github/dependabot.yml`:
-- **Cargo dependencies:** Weekly (Monday 9am EST), 5 PR limit
-- **GitHub Actions:** Weekly (Monday 9am EST), 3 PR limit
-- **Grouping:** Minor/patch updates grouped; serde updates separate (more careful review)
+```bash
+rch exec -- cargo fmt --check
+rch exec -- cargo check --all-targets
+rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- cargo test -p frankenengine-node <targeted-test-or-suite>
+python3 scripts/<relevant-gate>.py --json
+```
 
 ### Debugging CI Failures
 
-#### Coverage Threshold Failure
-1. Check which file(s) dropped below threshold in CI output
-2. Run `cargo llvm-cov --html` locally to see uncovered lines
-3. Add tests for uncovered code paths
-4. Download `coverage-report` artifact for full details
-
-#### Memory Test Failure
-1. Download `memory-test-output` artifact
-2. Check which test failed and growth amount
-3. Run locally: `cargo test --test memory_tests --release -- --nocapture --test-threads=1`
-4. Profile with valgrind if needed
-
-#### UBS Warnings
-1. Check ubs-output.log in CI summary
-2. Review flagged issues - may be false positives
-3. If valid issues, fix them; if false positives, add to `.ubsignore`
-
-#### E2E Test Failure
-1. Download `e2e-artifacts` artifact
-2. Check `e2e_output.json` for failing test details
-3. Run locally: `./tests/e2e/foundation_bootstrap_suite.sh` and `python3 scripts/program_e2e_orchestrator.py --json`
-4. The step summary shows the first failure with output
-
-#### Benchmark Regression
-1. Download `benchmark-results` artifact
-2. Compare against budgets in `src/perf.rs`
-3. Profile locally with `cargo bench --bench heredoc_perf`
-4. Check for algorithmic regressions in hot path
+1. Identify which workflow file in `.github/workflows/` fired for the changed paths.
+2. Reproduce the exact Rust test target or Python gate script locally.
+3. If the failure is artifact- or spec-driven, inspect `docs/specs/**`, `artifacts/**`, and sibling-repo inputs before patching code blindly.
+4. If `rch` offload is part of the reproduction path, use `rch diagnose` and inspect sync roots, worker selection, and remote execution logs before assuming the product code is broken.
 
 ---
 
 ## Release Process
 
-When fixes are ready for release, follow this process:
+Do **not** assume historical release automation details still apply here. This checkout currently exposes product packaging and release-adjacent surfaces through:
 
-### 1. Verify CI Passes Locally
+- `Cargo.toml` versioning for the Rust workspace
+- `packaging/profiles.toml` for `local`, `dev`, and `enterprise` packaging defaults
+- README install channels such as the one-line installer URL and Homebrew tap
+- `franken-node verify release` for release-directory checksum/signature verification
 
-```bash
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-cargo test --lib
-```
+### Release Reality Check
 
-### 2. Commit Changes
+- Before editing release docs or automation, inspect the live `.github/workflows/` directory and current tags rather than assuming a `release-automation.yml` or `dist.yml` pipeline exists.
+- Before changing installer or packaging behavior, reconcile the README, `packaging/profiles.toml`, CLI flags, and any release verification tests.
+- If a task requires publishing, keep `main` authoritative and sync `main:master` only because this repository still preserves `master` for legacy URL compatibility.
 
-```bash
-git add -A
-git commit -m "fix: description of fixes
-
-- List specific fixes
-- Include any breaking changes
-
-Co-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"
-```
-
-### 3. Bump Version (if needed)
-
-The version in `Cargo.toml` determines the release tag. If the current version already has a failed release, you can reuse it. Otherwise bump appropriately:
-
-- **Patch** (0.2.10 -> 0.2.11): Bug fixes, no new features
-- **Minor** (0.2.x -> 0.3.0): New features, backward compatible
-- **Major** (0.x -> 1.0): Breaking changes
-
-### 4. Push and Trigger Release
+### Minimum Release Verification
 
 ```bash
-git push origin main
-git push origin main:master  # Keep master in sync
+rch exec -- cargo fmt --check
+rch exec -- cargo clippy --all-targets -- -D warnings
+rch exec -- cargo test -p frankenengine-node <relevant-release-tests>
+franken-node verify release <release-dir> --json
 ```
 
-The `release-automation.yml` workflow will:
-1. Detect version change in `Cargo.toml`
-2. Create an annotated git tag (e.g., `v0.2.13`)
-3. Push the tag, which triggers `dist.yml`
+### Common Release Pitfalls
 
-The `dist.yml` workflow will:
-1. Run tests and clippy
-2. Build binaries for all platforms (Linux x86/ARM, macOS Intel/Apple Silicon, Windows)
-3. Create `.tar.xz` archives with SHA256 checksums
-4. Sign artifacts with Sigstore (cosign) - creates `.sigstore.json` bundles
-5. Upload everything to GitHub Releases
-
-### 5. Verify Release
-
-```bash
-gh release list --limit 5
-gh release view v0.2.13  # Check assets were uploaded
-```
-
-Expected assets per release:
-- `dcg-{target}.tar.xz` - Binary archive
-- `dcg-{target}.tar.xz.sha256` - Checksum
-- `dcg-{target}.tar.xz.sigstore.json` - Sigstore signature bundle
-- `install.sh`, `install.ps1` - Install scripts
-
-### Troubleshooting Failed Releases
-
-If CI fails:
-1. Check workflow run: `gh run list --workflow=dist.yml --limit=5`
-2. View failed job: `gh run view <run-id>`
-3. Fix issues locally, commit, and push again
-4. The same version tag will be updated on successful build
-
-Common failures:
-- **Clippy errors**: Fix lints, ensure `cargo clippy -- -D warnings` passes
-- **Test failures**: Run `cargo test --lib` to reproduce
-- **Format errors**: Run `cargo fmt` to fix
+- README/install instructions drifting away from actual packaged profiles or artifact layout
+- Verifier/release checksums or signature expectations changing without corresponding test updates
+- Assuming release asset names from another repository instead of checking the current `franken_node` contract
 
 ---
 
@@ -1033,9 +596,9 @@ Parse: `file:line:col` -> location | fix hint -> how to fix | Exit 0/1 -> pass/f
 
 ## RCH — Remote Compilation Helper
 
-RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation commands to a fleet of 8 remote Contabo VPS workers instead of building locally. This prevents compilation storms from overwhelming csd when many agents run simultaneously.
+RCH offloads `cargo build`, `cargo test`, `cargo clippy`, and other compilation commands to a fleet of remote workers instead of building locally. This prevents compilation storms from overwhelming the shared machine when many agents run simultaneously.
 
-**RCH is installed at `~/.local/bin/rch` and is hooked into Claude Code's PreToolUse automatically.** Most of the time you don't need to do anything if you are Claude Code — builds are intercepted and offloaded transparently.
+**Use `rch exec -- ...` explicitly for cargo-heavy work in this repository.** Do not rely on implicit interception when the instruction is "all cargo builds/tests must go through `rch`."
 
 To manually offload a build:
 ```bash
@@ -1107,8 +670,8 @@ rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 
 | Scenario | Tool | Why |
 |----------|------|-----|
-| "How is pattern matching implemented?" | `warp_grep` | Exploratory; don't know where to start |
-| "Where is the quick reject filter?" | `warp_grep` | Need to understand architecture |
+| "How does fleet quarantine reconciliation work?" | `warp_grep` | Exploratory; need the cross-module flow before reading files manually |
+| "Where is trust-card comparison implemented?" | `warp_grep` | Need to discover the authoritative module and call sites |
 | "Find all uses of `Regex::new`" | `ripgrep` | Targeted literal search |
 | "Find files with `println!`" | `ripgrep` | Simple pattern |
 | "Replace all `unwrap()` with `expect()`" | `ast-grep` | Structural refactor |
@@ -1117,8 +680,8 @@ rg -l -t rust 'unwrap\(' | xargs ast-grep run -l Rust -p '$X.unwrap()' --json
 
 ```
 mcp__morph-mcp__warp_grep(
-  repoPath: "/dp/destructive_command_guard",
-  query: "How does the safe pattern whitelist work?"
+  repoPath: "/data/projects/franken_node",
+  query: "How do replay bundle generation and incident export fit together?"
 )
 ```
 
@@ -1223,7 +786,7 @@ Next steps (pick one)
 
 1. Decide how to handle the unrelated modified files above so we can resume cleanly.
 2. Triage beads_rust-orko (clippy/cargo warnings) and beads_rust-ydqr (rustfmt failures).
-3. If you want a full suite run later, fix conformance/clippy blockers and re-run cargo test --all.
+3. If you want a full suite run later, fix conformance/clippy blockers and re-run `rch exec -- cargo test --all`.
 ```
 
 NEVER EVER DO THAT AGAIN. The answer is literally ALWAYS the same: those are changes created by the potentially dozen of other agents working on the project at the same time. This is not only a common occurrence, it happens multiple times PER MINUTE. The way to deal with it is simple: you NEVER, under ANY CIRCUMSTANCE, stash, revert, overwrite, or otherwise disturb in ANY way the work of other agents. Just treat those changes identically to changes that you yourself made. Just fool yourself into thinking YOU made the changes and simply don't recall it for some reason.
