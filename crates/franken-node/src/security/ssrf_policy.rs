@@ -555,13 +555,13 @@ impl SsrfPolicyTemplate {
 
         // Add allowlist entries first (higher priority)
         for entry in &self.allowlist {
-            policy.add_rule(EgressRule {
+            let _ = policy.add_rule(EgressRule {
                 host: entry.host.clone(),
                 port: entry.port,
                 action: Action::Allow,
                 protocol: Protocol::Http,
             });
-            policy.add_rule(EgressRule {
+            let _ = policy.add_rule(EgressRule {
                 host: entry.host.clone(),
                 port: entry.port,
                 action: Action::Allow,

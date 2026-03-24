@@ -1173,6 +1173,18 @@ impl CompatGateEvaluator {
             },
         )?;
 
+        let Some(scope) = self.scopes.get(scope_id) else {
+            return Err(CompatGateError::ScopeNotFound {
+                scope_id: scope_id.to_string(),
+            });
+        };
+        if scope.policy_predicates.len() >= MAX_ENTRIES {
+            return Err(CompatGateError::InvalidPredicate {
+                predicate_id: predicate.predicate_id.clone(),
+                reason: format!("scope policy predicate set at capacity ({MAX_ENTRIES} entries)"),
+            });
+        }
+
         let compiled = predicate.compile();
         self.compiled_predicates
             .insert(predicate.predicate_id.clone(), compiled);
@@ -1187,13 +1199,12 @@ impl CompatGateEvaluator {
             reason: format!("failed to canonicalize predicate cache key: {reason}"),
         })?;
 
-        let Some(scope) = self.scopes.get_mut(scope_id) else {
-            return Err(CompatGateError::ScopeNotFound {
-                scope_id: scope_id.to_string(),
-            });
-        };
+        let scope = self
+            .scopes
+            .get_mut(scope_id)
+            .expect("scope existence was checked before predicate compilation");
         let predicate_id = predicate.predicate_id.clone();
-        push_bounded(&mut scope.policy_predicates, predicate, MAX_ENTRIES);
+        scope.policy_predicates.push(predicate);
         self.validated_predicates
             .insert(predicate_id, predicate_cache_key);
         tracing::info!(
@@ -1928,7 +1939,10 @@ mod tests {
         (issued_at, expires_at)
     }
 
-    fn signed_test_predicate(attenuation: Vec<AttenuationConstraint>) -> PolicyPredicate {
+    fn signed_test_predicate_with_id(
+        predicate_id: &str,
+        attenuation: Vec<AttenuationConstraint>,
+    ) -> PolicyPredicate {
         let (issued_at, expires_at) = future_window();
         let proof = build_proof_metadata(
             CompatibilitySignatureAlgorithm::Ed25519,
@@ -1942,7 +1956,7 @@ mod tests {
             vec!["re-sign the predicate if the signature changes".to_string()],
         );
         let mut predicate = PolicyPredicate {
-            predicate_id: "pred-1".to_string(),
+            predicate_id: predicate_id.to_string(),
             signature: String::new(),
             attenuation,
             activation_condition: "mode == balanced".to_string(),
@@ -1956,6 +1970,10 @@ mod tests {
         )
         .unwrap();
         predicate
+    }
+
+    fn signed_test_predicate(attenuation: Vec<AttenuationConstraint>) -> PolicyPredicate {
+        signed_test_predicate_with_id("pred-1", attenuation)
     }
 
     fn signed_test_receipt() -> ModeSelectionReceipt {
@@ -2377,6 +2395,68 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, CompatGateError::InvalidPredicate { .. }));
+    }
+
+    #[test]
+    fn add_policy_predicate_rejects_overflow_without_eviction() {
+        let mut eval = evaluator_with_scope();
+        for idx in 0..MAX_ENTRIES {
+            let predicate_id = format!("pred-{idx:04}");
+            eval.add_policy_predicate(
+                "project-1",
+                signed_test_predicate_with_id(
+                    &predicate_id,
+                    vec![AttenuationConstraint {
+                        scope_type: "scope".to_string(),
+                        scope_value: "project-1".to_string(),
+                    }],
+                ),
+            )
+            .expect("filling scope predicates to the cap should succeed");
+        }
+
+        let err = eval
+            .add_policy_predicate(
+                "project-1",
+                signed_test_predicate_with_id(
+                    "pred-overflow",
+                    vec![AttenuationConstraint {
+                        scope_type: "scope".to_string(),
+                        scope_value: "project-1".to_string(),
+                    }],
+                ),
+            )
+            .expect_err("overflow must fail closed instead of evicting scope predicates");
+
+        assert!(matches!(err, CompatGateError::InvalidPredicate { .. }));
+        assert_eq!(
+            eval.get_scope("project-1")
+                .expect("scope should exist")
+                .policy_predicates
+                .len(),
+            MAX_ENTRIES
+        );
+        assert_eq!(
+            eval.get_scope("project-1")
+                .expect("scope should exist")
+                .policy_predicates
+                .first()
+                .expect("oldest predicate should remain")
+                .predicate_id,
+            "pred-0000"
+        );
+        assert!(
+            !eval
+                .get_scope("project-1")
+                .expect("scope should exist")
+                .policy_predicates
+                .iter()
+                .any(|predicate| predicate.predicate_id == "pred-overflow")
+        );
+        assert_eq!(eval.compiled_predicates.len(), MAX_ENTRIES);
+        assert_eq!(eval.validated_predicates.len(), MAX_ENTRIES);
+        assert!(!eval.compiled_predicates.contains_key("pred-overflow"));
+        assert!(!eval.validated_predicates.contains_key("pred-overflow"));
     }
 
     // ── Gate Evaluation ──

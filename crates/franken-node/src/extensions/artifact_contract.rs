@@ -11,14 +11,6 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const MAX_TRUSTED_SIGNERS: usize = 4096;
 
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
-        items.drain(0..overflow);
-    }
-}
-
 /// Report schema version for capability artifact vectors.
 pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";
 
@@ -43,6 +35,7 @@ pub mod error_codes {
     pub const ERR_ARTIFACT_SCHEMA_MISMATCH: &str = "ERR_ARTIFACT_SCHEMA_MISMATCH";
     pub const ERR_ARTIFACT_ENFORCEMENT_DRIFT: &str = "ERR_ARTIFACT_ENFORCEMENT_DRIFT";
     pub const ERR_ARTIFACT_ADMISSION_DENIED: &str = "ERR_ARTIFACT_ADMISSION_DENIED";
+    pub const ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY: &str = "ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY";
 }
 
 // ---------------------------------------------------------------------------
@@ -139,6 +132,37 @@ pub struct AdmissionConfig {
     pub trusted_signers: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdmissionConfigError {
+    TrustedSignerCapacityExceeded { capacity: usize },
+}
+
+impl AdmissionConfigError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TrustedSignerCapacityExceeded { .. } => {
+                error_codes::ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for AdmissionConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TrustedSignerCapacityExceeded { capacity } => {
+                write!(
+                    f,
+                    "trusted signer registry at capacity ({capacity}); refusing to evict existing trusted signer"
+                )
+            }
+        }
+    }
+}
+
+impl std::error::Error for AdmissionConfigError {}
+
 impl AdmissionConfig {
     pub fn new(expected_schema_version: impl Into<String>) -> Self {
         Self {
@@ -147,13 +171,17 @@ impl AdmissionConfig {
         }
     }
 
-    pub fn with_signer(mut self, signer_id: impl Into<String>) -> Self {
-        push_bounded(
-            &mut self.trusted_signers,
-            signer_id.into(),
-            MAX_TRUSTED_SIGNERS,
-        );
-        self
+    pub fn with_signer(
+        &mut self,
+        signer_id: impl Into<String>,
+    ) -> Result<(), AdmissionConfigError> {
+        if self.trusted_signers.len() >= MAX_TRUSTED_SIGNERS {
+            return Err(AdmissionConfigError::TrustedSignerCapacityExceeded {
+                capacity: MAX_TRUSTED_SIGNERS,
+            });
+        }
+        self.trusted_signers.push(signer_id.into());
+        Ok(())
     }
 }
 
@@ -481,8 +509,80 @@ mod tests {
     }
 
     fn test_gate() -> AdmissionGate {
-        let cfg = AdmissionConfig::new(SCHEMA_VERSION).with_signer("signer-A");
+        let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+        cfg.with_signer("signer-A")
+            .expect("trusted signer registration should succeed");
         AdmissionGate::new(cfg)
+    }
+
+    #[test]
+    fn trusted_signer_registration_rejects_capacity_overflow_without_eviction() {
+        let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+        for idx in 0..MAX_TRUSTED_SIGNERS {
+            cfg.with_signer(format!("signer-{idx}"))
+                .expect("signer fill should succeed");
+        }
+
+        let err = cfg
+            .with_signer("overflow-signer")
+            .expect_err("overflow signer must be rejected");
+        assert_eq!(
+            err,
+            AdmissionConfigError::TrustedSignerCapacityExceeded {
+                capacity: MAX_TRUSTED_SIGNERS
+            }
+        );
+        assert_eq!(
+            err.code(),
+            error_codes::ERR_ARTIFACT_TRUSTED_SIGNER_CAPACITY
+        );
+        assert_eq!(cfg.trusted_signers.len(), MAX_TRUSTED_SIGNERS);
+        assert_eq!(
+            cfg.trusted_signers.first().map(String::as_str),
+            Some("signer-0")
+        );
+        let expected_last = format!("signer-{}", MAX_TRUSTED_SIGNERS - 1);
+        assert_eq!(
+            cfg.trusted_signers.last().map(String::as_str),
+            Some(expected_last.as_str())
+        );
+        assert!(!cfg.trusted_signers.iter().any(|s| s == "overflow-signer"));
+    }
+
+    #[test]
+    fn trusted_signer_overflow_preserves_existing_admission_roots() {
+        let mut cfg = AdmissionConfig::new(SCHEMA_VERSION);
+        cfg.with_signer("signer-A")
+            .expect("initial signer registration should succeed");
+        for idx in 1..MAX_TRUSTED_SIGNERS {
+            cfg.with_signer(format!("signer-{idx}"))
+                .expect("signer fill should succeed");
+        }
+        cfg.with_signer("signer-overflow")
+            .expect_err("overflow signer must be rejected");
+
+        let gate = AdmissionGate::new(cfg);
+        let trusted_artifact = make_artifact("a-trusted", "ext-alpha", test_contract());
+        let trusted_outcome = gate.evaluate(&trusted_artifact);
+        assert!(matches!(trusted_outcome, AdmissionOutcome::Accepted { .. }));
+
+        let overflow_contract = make_contract(
+            "contract-overflow",
+            "ext-alpha",
+            test_capabilities(),
+            "signer-overflow",
+            SCHEMA_VERSION,
+            20_000,
+        );
+        let overflow_artifact = make_artifact("a-overflow", "ext-alpha", overflow_contract);
+        let overflow_outcome = gate.evaluate(&overflow_artifact);
+        assert!(matches!(
+            overflow_outcome,
+            AdmissionOutcome::Denied {
+                reason: AdmissionDenialReason::SignatureInvalid,
+                ..
+            }
+        ));
     }
 
     #[test]

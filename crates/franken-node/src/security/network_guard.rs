@@ -125,8 +125,19 @@ impl EgressPolicy {
         }
     }
 
-    pub fn add_rule(&mut self, rule: EgressRule) {
-        push_bounded(&mut self.rules, rule, MAX_RULES);
+    /// Add a rule to the policy.
+    ///
+    /// Returns `Err` if the policy is at capacity.  Rules are NEVER evicted
+    /// because `push_bounded` would silently drop the oldest deny rules,
+    /// allowing previously-blocked traffic to pass.
+    pub fn add_rule(&mut self, rule: EgressRule) -> Result<(), GuardError> {
+        if self.rules.len() >= MAX_RULES {
+            return Err(GuardError::PolicyInvalid {
+                reason: format!("egress policy at capacity ({MAX_RULES} rules)"),
+            });
+        }
+        self.rules.push(rule);
+        Ok(())
     }
 
     /// Evaluate a request against the policy. Returns the action and
@@ -321,24 +332,30 @@ mod tests {
 
     fn sample_policy() -> EgressPolicy {
         let mut policy = EgressPolicy::new("conn-1".into(), Action::Deny);
-        policy.add_rule(EgressRule {
-            host: "api.example.com".into(),
-            port: Some(443),
-            action: Action::Allow,
-            protocol: Protocol::Http,
-        });
-        policy.add_rule(EgressRule {
-            host: "*.trusted.com".into(),
-            port: None,
-            action: Action::Allow,
-            protocol: Protocol::Http,
-        });
-        policy.add_rule(EgressRule {
-            host: "evil.com".into(),
-            port: None,
-            action: Action::Deny,
-            protocol: Protocol::Http,
-        });
+        policy
+            .add_rule(EgressRule {
+                host: "api.example.com".into(),
+                port: Some(443),
+                action: Action::Allow,
+                protocol: Protocol::Http,
+            })
+            .expect("sample allow rule should fit");
+        policy
+            .add_rule(EgressRule {
+                host: "*.trusted.com".into(),
+                port: None,
+                action: Action::Allow,
+                protocol: Protocol::Http,
+            })
+            .expect("sample wildcard rule should fit");
+        policy
+            .add_rule(EgressRule {
+                host: "evil.com".into(),
+                port: None,
+                action: Action::Deny,
+                protocol: Protocol::Http,
+            })
+            .expect("sample deny rule should fit");
         policy
     }
 
@@ -486,18 +503,22 @@ mod tests {
     #[test]
     fn first_match_wins() {
         let mut policy = EgressPolicy::new("conn-1".into(), Action::Deny);
-        policy.add_rule(EgressRule {
-            host: "*.example.com".into(),
-            port: None,
-            action: Action::Allow,
-            protocol: Protocol::Http,
-        });
-        policy.add_rule(EgressRule {
-            host: "bad.example.com".into(),
-            port: None,
-            action: Action::Deny,
-            protocol: Protocol::Http,
-        });
+        policy
+            .add_rule(EgressRule {
+                host: "*.example.com".into(),
+                port: None,
+                action: Action::Allow,
+                protocol: Protocol::Http,
+            })
+            .expect("wildcard rule should fit");
+        policy
+            .add_rule(EgressRule {
+                host: "bad.example.com".into(),
+                port: None,
+                action: Action::Deny,
+                protocol: Protocol::Http,
+            })
+            .expect("specific rule should fit");
         let (action, idx) = policy.evaluate("bad.example.com", 443, Protocol::Http);
         assert_eq!(action, Action::Allow); // first wildcard match wins
         assert_eq!(idx, Some(0));
@@ -633,6 +654,48 @@ mod tests {
         let policy = EgressPolicy::new("conn-1".into(), Action::Allow);
         let err = policy.validate().unwrap_err();
         assert!(matches!(err, GuardError::PolicyInvalid { .. }));
+    }
+
+    #[test]
+    fn add_rule_rejects_overflow_without_eviction() {
+        let mut policy = EgressPolicy::new("conn-1".into(), Action::Allow);
+        policy
+            .add_rule(EgressRule {
+                host: "blocked.example.com".into(),
+                port: None,
+                action: Action::Deny,
+                protocol: Protocol::Http,
+            })
+            .expect("initial deny rule should fit");
+        for seq in 1..MAX_RULES {
+            policy
+                .add_rule(EgressRule {
+                    host: format!("allow-{seq:04}.example.com"),
+                    port: None,
+                    action: Action::Allow,
+                    protocol: Protocol::Http,
+                })
+                .expect("filling rules up to the cap should succeed");
+        }
+
+        let err = policy
+            .add_rule(EgressRule {
+                host: "overflow.example.com".into(),
+                port: None,
+                action: Action::Allow,
+                protocol: Protocol::Http,
+            })
+            .expect_err("overflow must fail closed instead of evicting existing rules");
+
+        assert!(matches!(err, GuardError::PolicyInvalid { .. }));
+        assert_eq!(policy.rules.len(), MAX_RULES);
+        let (action, idx) = policy.evaluate("blocked.example.com", 443, Protocol::Http);
+        assert_eq!(action, Action::Deny);
+        assert_eq!(idx, Some(0));
+        let (overflow_action, overflow_idx) =
+            policy.evaluate("overflow.example.com", 443, Protocol::Http);
+        assert_eq!(overflow_action, Action::Allow);
+        assert_eq!(overflow_idx, None);
     }
 
     // === Serde ===
