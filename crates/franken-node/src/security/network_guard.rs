@@ -74,7 +74,13 @@ impl EgressRule {
 /// Match host patterns: exact match or wildcard prefix (*.example.com).
 /// DNS hostnames are case-insensitive (RFC 4343); comparisons are normalized
 /// to prevent deny-rule bypass via casing tricks like "EVIL.COM" vs "evil.com".
+/// Null bytes in hostnames are rejected to prevent C-string truncation bypass
+/// where the policy sees "evil.com\0.safe.com" but DNS resolves "evil.com".
 fn host_matches(pattern: &str, host: &str) -> bool {
+    // Reject null bytes in the host to prevent truncation-based bypass.
+    if host.contains('\0') {
+        return false;
+    }
     let p = normalize_host_for_match(pattern);
     if p == "*" {
         return true;

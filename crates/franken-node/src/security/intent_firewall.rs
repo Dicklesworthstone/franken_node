@@ -237,6 +237,10 @@ pub struct RemoteEffect {
 
 impl RemoteEffect {
     /// Validate that the effect descriptor is well-formed.
+    ///
+    /// Rejects null bytes in host/path/method to prevent C-string truncation
+    /// attacks where the firewall sees "evil.com\0.safe.com" but downstream
+    /// resolvers see "evil.com".
     pub fn validate(&self) -> Result<(), FirewallError> {
         if self.effect_id.is_empty() {
             return Err(FirewallError::InvalidEffect("empty effect_id".into()));
@@ -246,6 +250,21 @@ impl RemoteEffect {
         }
         if self.method.is_empty() {
             return Err(FirewallError::InvalidEffect("empty method".into()));
+        }
+        if self.target_host.contains('\0') {
+            return Err(FirewallError::InvalidEffect(
+                "target_host contains null byte".into(),
+            ));
+        }
+        if self.path.contains('\0') {
+            return Err(FirewallError::InvalidEffect(
+                "path contains null byte".into(),
+            ));
+        }
+        if self.method.contains('\0') {
+            return Err(FirewallError::InvalidEffect(
+                "method contains null byte".into(),
+            ));
         }
         Ok(())
     }
