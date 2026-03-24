@@ -1851,6 +1851,69 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_establishing_session_id_rejected() {
+        let mut mgr = default_manager();
+        let rs = test_root_secret();
+        let epoch = test_epoch();
+
+        let handshake_mac = sign_handshake(
+            "s1", "client-a", "server-1", "enc-key", "sign-key", epoch, 2_000, &rs,
+        );
+        let mut establishing = AuthenticatedSession::new(
+            "s1".into(),
+            "client-a".into(),
+            "server-1".into(),
+            "enc-key".into(),
+            "sign-key".into(),
+            mgr.config().replay_window,
+            epoch.value(),
+            handshake_mac,
+        );
+        establishing.last_activity_at = 2_000;
+        mgr.sessions.insert("s1".into(), establishing);
+
+        assert_eq!(mgr.active_session_count(), 1);
+
+        let duplicate_mac = sign_handshake(
+            "s1", "client-a", "server-1", "enc-key", "sign-key", epoch, 3_000, &rs,
+        );
+        let duplicate = mgr.establish_session(
+            "s1".into(),
+            "client-a".into(),
+            "server-1".into(),
+            "enc-key".into(),
+            "sign-key".into(),
+            3_000,
+            "trace-dup-establishing".into(),
+            duplicate_mac,
+        );
+        match duplicate.expect_err("establishing session id must stay reserved") {
+            SessionError::DuplicateLiveSession { session_id } => assert_eq!(session_id, "s1"),
+            other => unreachable!("unexpected error: {other}"),
+        }
+
+        let preserved = mgr
+            .get_session("s1")
+            .expect("establishing session preserved after rejection");
+        assert_eq!(preserved.state, SessionState::Establishing);
+        assert_eq!(preserved.established_at, 0);
+        assert_eq!(preserved.last_activity_at, 2_000);
+        assert_eq!(preserved.send_seq, 0);
+        assert_eq!(preserved.recv_seq, 0);
+        assert_eq!(mgr.active_session_count(), 1);
+
+        let rejection = mgr
+            .events()
+            .last()
+            .expect("duplicate establishing rejection event recorded");
+        assert_eq!(rejection.event_code, event_codes::SCC_MESSAGE_REJECTED);
+        assert_eq!(rejection.session_id, "s1");
+        assert_eq!(rejection.trace_id, "trace-dup-establishing");
+        assert_eq!(rejection.detail, "duplicate live session id");
+        assert_eq!(rejection.timestamp, 3_000);
+    }
+
+    #[test]
     fn test_duplicate_terminating_session_id_rejected() {
         let mut mgr = default_manager();
         establish_test_session(&mut mgr, "s1");

@@ -25,6 +25,8 @@ const MAX_RECORDS_PER_SAGA: usize = 4096;
 
 /// Stable error when the saga registry is full of non-reclaimable live instances.
 const ERR_SAGA_CAPACITY_EXCEEDED: &str = "ERR_SAGA_CAPACITY_EXCEEDED";
+/// Stable error when a generated saga id would overwrite an existing saga.
+const ERR_SAGA_ID_REUSED: &str = "ERR_SAGA_ID_REUSED";
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -258,7 +260,13 @@ impl SagaExecutor {
     ) -> Result<String, String> {
         let saga_id = format!("saga-{}", self.next_saga_id);
 
-        if self.sagas.len() >= MAX_SAGAS && !self.sagas.contains_key(&saga_id) {
+        if self.sagas.contains_key(&saga_id) {
+            return Err(format!(
+                "{ERR_SAGA_ID_REUSED}: generated saga id already exists: {saga_id}"
+            ));
+        }
+
+        if self.sagas.len() >= MAX_SAGAS {
             let Some(oldest_key) = self.oldest_reclaimable_saga_id() else {
                 return Err(format!(
                     "{ERR_SAGA_CAPACITY_EXCEEDED}: saga registry full of live instances"
@@ -1265,6 +1273,40 @@ mod tests {
             "issuance order must beat lexicographic ordering among terminals"
         );
         assert!(exec.get_saga(&new_id).is_some());
+    }
+
+    #[test]
+    fn test_create_saga_rejects_generated_id_reuse_without_overwriting_existing_saga() {
+        let mut exec = SagaExecutor::new();
+        let original_id = exec
+            .create_saga(make_steps(&["original", "persisted"]), "t")
+            .unwrap();
+        exec.execute_step(&original_id, success_outcome(), 7, "t")
+            .unwrap();
+        exec.next_saga_id = 1;
+
+        let err = exec
+            .create_saga(make_steps(&["replacement"]), "t2")
+            .expect_err("reused generated saga id must fail closed");
+        assert!(err.contains(ERR_SAGA_ID_REUSED));
+        assert_eq!(exec.next_saga_id, 1);
+        assert_eq!(exec.saga_count(), 1);
+        assert_eq!(exec.audit_log.len(), 2);
+
+        let preserved = exec
+            .get_saga(&original_id)
+            .expect("original saga preserved");
+        assert_eq!(preserved.state, SagaState::Running);
+        assert_eq!(preserved.completed_steps, 1);
+        assert_eq!(preserved.records.len(), 1);
+        assert_eq!(
+            preserved
+                .steps
+                .iter()
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["original", "persisted"]
+        );
     }
 
     // 19. test_default_executor

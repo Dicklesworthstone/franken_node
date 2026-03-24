@@ -127,6 +127,12 @@ pub enum ProofJobStatus {
     DeadlineExceeded,
 }
 
+impl ProofJobStatus {
+    fn is_terminal(self) -> bool {
+        matches!(self, Self::Completed | Self::DeadlineExceeded)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProofJob {
     pub job_id: String,
@@ -247,6 +253,31 @@ impl VefProofScheduler {
         &self.events
     }
 
+    fn reclaimable_job_id(&self) -> Option<String> {
+        self.jobs
+            .iter()
+            .filter(|(_, job)| job.status.is_terminal())
+            .min_by(|(left_id, left_job), (right_id, right_job)| {
+                left_job
+                    .created_at_millis
+                    .cmp(&right_job.created_at_millis)
+                    .then_with(|| left_id.cmp(right_id))
+            })
+            .map(|(job_id, _)| job_id.clone())
+    }
+
+    fn prepare_job_slot(&self, job_id: &str) -> Result<Option<String>, SchedulerError> {
+        if self.jobs.len() < MAX_JOBS || self.jobs.contains_key(job_id) {
+            return Ok(None);
+        }
+
+        self.reclaimable_job_id().map(Some).ok_or_else(|| {
+            SchedulerError::budget(format!(
+                "proof job registry is full of live jobs (capacity {MAX_JOBS})"
+            ))
+        })
+    }
+
     pub fn select_windows(
         &mut self,
         entries: &[ReceiptChainEntry],
@@ -363,11 +394,8 @@ impl VefProofScheduler {
                 completed_at_millis: None,
                 trace_id: window.trace_id.clone(),
             };
-            if self.jobs.len() >= MAX_JOBS
-                && !self.jobs.contains_key(&job_id)
-                && let Some(oldest_key) = self.jobs.keys().next().cloned()
-            {
-                self.jobs.remove(&oldest_key);
+            if let Some(reclaimed_job_id) = self.prepare_job_slot(&job_id)? {
+                self.jobs.remove(&reclaimed_job_id);
             }
             self.jobs.insert(job_id.clone(), job);
             if self.windows_seen.len() >= MAX_WINDOWS_SEEN
@@ -619,6 +647,49 @@ mod tests {
         (chain.entries().to_vec(), chain.checkpoints().to_vec())
     }
 
+    fn make_window(
+        window_id: &str,
+        tier: WorkloadTier,
+        created_at_millis: u64,
+        trace_id: &str,
+    ) -> ProofWindow {
+        ProofWindow {
+            window_id: window_id.to_string(),
+            start_index: 1,
+            end_index: 1,
+            entry_count: 1,
+            aligned_checkpoint_id: None,
+            tier,
+            created_at_millis,
+            trace_id: trace_id.to_string(),
+        }
+    }
+
+    fn make_job(
+        job_id: &str,
+        status: ProofJobStatus,
+        created_at_millis: u64,
+        trace_id: &str,
+    ) -> ProofJob {
+        ProofJob {
+            job_id: job_id.to_string(),
+            window_id: format!("window-for-{job_id}"),
+            tier: WorkloadTier::Standard,
+            priority_score: WorkloadTier::Standard.priority_score(),
+            deadline_millis: created_at_millis.saturating_add(10_000),
+            estimated_compute_millis: 100,
+            estimated_memory_mib: 8,
+            status,
+            created_at_millis,
+            dispatched_at_millis: (status == ProofJobStatus::Dispatched)
+                .then_some(created_at_millis.saturating_add(1)),
+            completed_at_millis: status
+                .is_terminal()
+                .then_some(created_at_millis.saturating_add(2)),
+            trace_id: trace_id.to_string(),
+        }
+    }
+
     #[test]
     fn deterministic_window_partition_for_same_inputs() {
         let (entries, checkpoints) = sample_stream();
@@ -672,7 +743,9 @@ mod tests {
         scheduler
             .enqueue_windows(&windows, 1_701_100_002_010)
             .expect("should select windows");
-        let dispatched = scheduler.dispatch_jobs(1_701_100_002_020).expect("should dispatch");
+        let dispatched = scheduler
+            .dispatch_jobs(1_701_100_002_020)
+            .expect("should dispatch");
         assert_eq!(dispatched.len(), 2);
         assert!(
             dispatched
@@ -696,7 +769,9 @@ mod tests {
         scheduler
             .enqueue_windows(&windows, 1_701_100_003_010)
             .expect("should select windows");
-        let dispatched = scheduler.dispatch_jobs(1_701_100_003_020).expect("should dispatch");
+        let dispatched = scheduler
+            .dispatch_jobs(1_701_100_003_020)
+            .expect("should dispatch");
         assert_eq!(dispatched.len(), 1);
         assert_eq!(dispatched[0].tier, WorkloadTier::Critical);
     }
@@ -719,7 +794,9 @@ mod tests {
         scheduler
             .enqueue_windows(&windows, 1_701_100_004_000)
             .expect("should select windows");
-        scheduler.dispatch_jobs(1_701_100_004_000).expect("should dispatch");
+        scheduler
+            .dispatch_jobs(1_701_100_004_000)
+            .expect("should dispatch");
         let exceeded = scheduler.enforce_deadlines(1_701_100_005_000);
         assert!(!exceeded.is_empty());
         assert!(
@@ -765,11 +842,136 @@ mod tests {
         scheduler
             .enqueue_windows(&windows, 1_701_100_008_010)
             .expect("should select windows");
-        let dispatched = scheduler.dispatch_jobs(1_701_100_008_020).expect("should dispatch");
+        let dispatched = scheduler
+            .dispatch_jobs(1_701_100_008_020)
+            .expect("should dispatch");
         let job_id = &dispatched[0].job_id;
-        scheduler.mark_completed(job_id, 1_701_100_008_030).expect("should complete");
+        scheduler
+            .mark_completed(job_id, 1_701_100_008_030)
+            .expect("should complete");
         assert_eq!(
             scheduler.jobs().get(job_id).expect("should exist").status,
+            ProofJobStatus::Completed
+        );
+    }
+
+    #[test]
+    fn enqueue_windows_rejects_when_job_registry_is_full_of_live_jobs() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+        for seq in 0..MAX_JOBS {
+            let job_id = format!("job-{seq:08}");
+            let status = if seq == 0 {
+                ProofJobStatus::Dispatched
+            } else {
+                ProofJobStatus::Pending
+            };
+            scheduler.jobs.insert(
+                job_id.clone(),
+                make_job(
+                    &job_id,
+                    status,
+                    1_701_200_000_000 + seq as u64,
+                    "trace-live-capacity",
+                ),
+            );
+        }
+        scheduler.next_job_seq = MAX_JOBS as u64;
+
+        let err = scheduler
+            .enqueue_windows(
+                &[make_window(
+                    "win-extra",
+                    WorkloadTier::Standard,
+                    1_701_200_100_000,
+                    "trace-live-capacity",
+                )],
+                1_701_200_100_000,
+            )
+            .expect_err("full live registry must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_SCHED_BUDGET);
+        assert!(
+            err.message.contains("full of live jobs"),
+            "unexpected error message: {}",
+            err.message
+        );
+        assert_eq!(scheduler.jobs.len(), MAX_JOBS);
+        assert!(scheduler.jobs.contains_key("job-00000000"));
+        assert!(!scheduler.jobs.contains_key("job-00002048"));
+    }
+
+    #[test]
+    fn enqueue_windows_reclaims_oldest_terminal_job_before_live_job() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+        scheduler.jobs.insert(
+            "aaa-live-dispatched".to_string(),
+            make_job(
+                "aaa-live-dispatched",
+                ProofJobStatus::Dispatched,
+                1_701_300_000_000,
+                "trace-terminal-reclaim",
+            ),
+        );
+        scheduler.jobs.insert(
+            "mmm-terminal-newer".to_string(),
+            make_job(
+                "mmm-terminal-newer",
+                ProofJobStatus::Completed,
+                1_701_300_000_030,
+                "trace-terminal-reclaim",
+            ),
+        );
+        scheduler.jobs.insert(
+            "zzz-terminal-oldest".to_string(),
+            make_job(
+                "zzz-terminal-oldest",
+                ProofJobStatus::DeadlineExceeded,
+                1_701_300_000_010,
+                "trace-terminal-reclaim",
+            ),
+        );
+        for seq in 0..(MAX_JOBS - 3) {
+            let job_id = format!("live-{seq:08}");
+            scheduler.jobs.insert(
+                job_id.clone(),
+                make_job(
+                    &job_id,
+                    ProofJobStatus::Pending,
+                    1_701_300_001_000 + seq as u64,
+                    "trace-terminal-reclaim",
+                ),
+            );
+        }
+        scheduler.next_job_seq = MAX_JOBS as u64;
+
+        let queued = scheduler
+            .enqueue_windows(
+                &[make_window(
+                    "win-new",
+                    WorkloadTier::High,
+                    1_701_300_100_000,
+                    "trace-terminal-reclaim",
+                )],
+                1_701_300_100_000,
+            )
+            .expect("terminal job should be reclaimed");
+
+        assert_eq!(queued, vec!["job-00002048".to_string()]);
+        assert_eq!(scheduler.jobs.len(), MAX_JOBS);
+        assert!(!scheduler.jobs.contains_key("zzz-terminal-oldest"));
+        assert!(scheduler.jobs.contains_key("mmm-terminal-newer"));
+        assert!(scheduler.jobs.contains_key("aaa-live-dispatched"));
+        assert!(scheduler.jobs.contains_key("job-00002048"));
+
+        scheduler
+            .mark_completed("aaa-live-dispatched", 1_701_300_100_010)
+            .expect("live dispatched job must remain completable");
+        assert_eq!(
+            scheduler
+                .jobs()
+                .get("aaa-live-dispatched")
+                .expect("live job should still exist")
+                .status,
             ProofJobStatus::Completed
         );
     }
