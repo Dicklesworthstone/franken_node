@@ -1036,6 +1036,8 @@ pub struct CompatGateEvaluator {
     compiled_predicates: BTreeMap<String, CompiledPolicyPredicate>,
     validated_receipts: BTreeMap<String, String>,
     validated_predicates: BTreeMap<String, String>,
+    next_receipt_seq: u64,
+    next_audit_seq: u64,
 }
 
 impl CompatGateEvaluator {
@@ -1048,6 +1050,8 @@ impl CompatGateEvaluator {
             compiled_predicates: BTreeMap::new(),
             validated_receipts: BTreeMap::new(),
             validated_predicates: BTreeMap::new(),
+            next_receipt_seq: 0,
+            next_audit_seq: 0,
         }
     }
 
@@ -1097,8 +1101,10 @@ impl CompatGateEvaluator {
             vec![reason_codes::POLICY_COMPAT_MODE_RECEIPT_SIGNED.to_string()],
             vec!["request explicit approval before risk escalation".to_string()],
         );
+        let seq = self.next_receipt_seq;
+        self.next_receipt_seq = self.next_receipt_seq.wrapping_add(1);
         let mut receipt = ModeSelectionReceipt {
-            receipt_id: format!("rcpt-{}-{}", scope_id, self.receipts.len()),
+            receipt_id: format!("rcpt-{}-{}", scope_id, seq),
             scope_id: scope_id.to_string(),
             mode,
             previous_mode,
@@ -1238,6 +1244,8 @@ impl CompatGateEvaluator {
         scope_id: &str,
         trace_id: &str,
     ) -> Result<GateCheckResult, CompatGateError> {
+        let audit_seq = self.next_audit_seq;
+        self.next_audit_seq = self.next_audit_seq.wrapping_add(1);
         let (mode, scope_receipt, scope_predicates) = {
             let scope =
                 self.scopes
@@ -1388,7 +1396,7 @@ impl CompatGateEvaluator {
                     decision: GateDecision::Deny,
                     rationale,
                     trace_id: trace_id.to_string(),
-                    receipt_id: Some(format!("gate-rcpt-{}-{}", scope_id, self.audit_log.len())),
+                    receipt_id: Some(format!("gate-rcpt-{}-{}", scope_id, audit_seq)),
                     package_id: package_id.to_string(),
                     mode,
                     scope_id: scope_id.to_string(),
@@ -1451,7 +1459,7 @@ impl CompatGateEvaluator {
                     decision: GateDecision::Deny,
                     rationale,
                     trace_id: trace_id.to_string(),
-                    receipt_id: Some(format!("gate-rcpt-{}-{}", scope_id, self.audit_log.len())),
+                    receipt_id: Some(format!("gate-rcpt-{}-{}", scope_id, audit_seq)),
                     package_id: package_id.to_string(),
                     mode,
                     scope_id: scope_id.to_string(),
@@ -1501,7 +1509,7 @@ impl CompatGateEvaluator {
                     decision: GateDecision::Deny,
                     rationale,
                     trace_id: trace_id.to_string(),
-                    receipt_id: Some(format!("gate-rcpt-{}-{}", scope_id, self.audit_log.len())),
+                    receipt_id: Some(format!("gate-rcpt-{}-{}", scope_id, audit_seq)),
                     package_id: package_id.to_string(),
                     mode,
                     scope_id: scope_id.to_string(),
@@ -1636,7 +1644,7 @@ impl CompatGateEvaluator {
         };
 
         let receipt_id = if decision != GateDecision::Allow {
-            Some(format!("gate-rcpt-{}-{}", scope_id, self.audit_log.len()))
+            Some(format!("gate-rcpt-{}-{}", scope_id, audit_seq))
         } else {
             None
         };
