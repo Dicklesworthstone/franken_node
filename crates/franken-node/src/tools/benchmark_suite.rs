@@ -19,7 +19,7 @@ use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_SCENARIOS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {

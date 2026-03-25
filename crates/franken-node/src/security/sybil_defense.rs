@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 /// Sandbox profile tiers, ordered from most to least restrictive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -81,8 +81,7 @@ pub mod invariants {
 /// Scoring formula version for reproducibility.
 pub const SCORING_FORMULA_VERSION: &str = "secm-v1";
 
-/// Maximum number of reports before oldest-first eviction.
-const MAX_REPORTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_REPORTS;
 
 // ---------------------------------------------------------------------------
 // Security co-metric categories

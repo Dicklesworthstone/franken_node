@@ -8,8 +8,7 @@ use std::collections::BTreeMap;
 /// Maximum number of lease decisions before oldest-first eviction.
 const MAX_DECISIONS: usize = 4096;
 
-/// Maximum lease records before expired/revoked leases are swept.
-const MAX_LEASES: usize = 8192;
+use crate::capacity_defaults::aliases::MAX_LEASES;
 
 /// Purpose for which a lease is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

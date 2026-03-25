@@ -24,7 +24,7 @@
 //!   strictly monotonically increasing.
 
 const MAX_EVIDENCE_LOG_ENTRIES: usize = 4096;
-const MAX_ACTION_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_ACTION_LOG_ENTRIES;
 
 use crate::security::adversary_graph::{
     ADV_005_ACTION_TRIGGERED, ADV_008_SIGNED_EVIDENCE, AdversaryGraph, EntityId, EntityType,

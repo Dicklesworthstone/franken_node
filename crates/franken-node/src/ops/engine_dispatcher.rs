@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 pub struct EngineDispatcher {
     engine_bin_path: String,
+    configured_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -32,6 +33,7 @@ impl std::fmt::Display for EngineProcessError {
 
 impl std::error::Error for EngineProcessError {}
 
+/// Returns the list of candidate paths to search for the franken-engine binary.
 fn default_engine_binary_candidates() -> Vec<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace_root = manifest_dir
@@ -49,12 +51,6 @@ fn default_engine_binary_candidates() -> Vec<PathBuf> {
 
     candidates.push(workspace_root.join("target/release/franken-engine"));
     candidates.push(workspace_root.join("target/debug/franken-engine"));
-    candidates.push(PathBuf::from(
-        "/data/projects/franken_engine/target/release/franken-engine",
-    ));
-    candidates.push(PathBuf::from(
-        "/dp/franken_engine/target/release/franken-engine",
-    ));
     candidates
 }
 
@@ -65,9 +61,17 @@ fn has_path_separator(raw: &str) -> bool {
 fn resolve_engine_binary_path_with(
     configured_hint: &str,
     env_override: Option<&str>,
+    cli_path: Option<&Path>,
+    config_path: Option<&Path>,
     candidates: &[PathBuf],
     path_exists: &impl Fn(&Path) -> bool,
 ) -> String {
+    // 1. CLI --engine-bin flag -- highest precedence.
+    if let Some(path) = cli_path {
+        return path.to_string_lossy().into_owned();
+    }
+
+    // 2. FRANKEN_ENGINE_BIN environment variable.
     if let Some(raw) = env_override {
         let override_bin = raw.trim();
         if !override_bin.is_empty() {
@@ -75,11 +79,18 @@ fn resolve_engine_binary_path_with(
         }
     }
 
+    // 3. Config file / FRANKEN_NODE_ENGINE_BINARY_PATH -- config-level path.
+    if let Some(path) = config_path {
+        return path.to_string_lossy().into_owned();
+    }
+
+    // 4. Configured hint from default candidates (if file exists on disk).
     let configured = configured_hint.trim();
     if !configured.is_empty() && path_exists(Path::new(configured)) {
         return configured.to_string();
     }
 
+    // 5. Search candidate locations.
     for candidate in candidates {
         if path_exists(candidate) {
             return candidate.to_string_lossy().into_owned();
@@ -93,11 +104,28 @@ fn resolve_engine_binary_path_with(
     "franken-engine".to_string()
 }
 
-pub(crate) fn resolve_engine_binary_path(configured_hint: &str) -> String {
-    let env_override = std::env::var("FRANKEN_ENGINE_BIN").ok();
+fn resolve_engine_binary_path_with_env_lookup(
+    configured_hint: &str,
+    env_lookup: &impl Fn(&str) -> Option<String>,
+    candidates: &[PathBuf],
+    path_exists: &impl Fn(&Path) -> bool,
+) -> String {
+    let env_override = env_lookup("FRANKEN_ENGINE_BIN");
+    let config_path = env_lookup("FRANKEN_NODE_ENGINE_BINARY_PATH").map(PathBuf::from);
     resolve_engine_binary_path_with(
         configured_hint,
         env_override.as_deref(),
+        None,
+        config_path.as_deref(),
+        candidates,
+        path_exists,
+    )
+}
+
+pub(crate) fn resolve_engine_binary_path(configured_hint: &str) -> String {
+    resolve_engine_binary_path_with_env_lookup(
+        configured_hint,
+        &|key| std::env::var(key).ok(),
         &default_engine_binary_candidates(),
         &|path| path.exists(),
     )
@@ -111,14 +139,20 @@ impl Default for EngineDispatcher {
             .unwrap_or_else(|| "franken-engine".to_string());
         Self {
             engine_bin_path: default_hint,
+            configured_path: None,
         }
     }
 }
 
 impl EngineDispatcher {
-    pub fn new(engine_bin_path: &str) -> Self {
+    /// Create a dispatcher with an optional pre-configured engine binary path.
+    ///
+    /// When `path` is `Some`, it takes the highest precedence (above env var
+    /// and config file) when resolving the engine binary.
+    pub fn new(path: Option<PathBuf>) -> Self {
         Self {
-            engine_bin_path: engine_bin_path.to_string(),
+            configured_path: path,
+            ..Self::default()
         }
     }
 
@@ -134,11 +168,24 @@ impl EngineDispatcher {
     /// 5. Join telemetry workers (drain remaining events)
     /// 6. Clean up temp directory
     pub fn dispatch_run(&self, app_path: &Path, config: &Config, policy_mode: &str) -> Result<()> {
-        let bin_path = resolve_engine_binary_path(&self.engine_bin_path);
-        if bin_path == "franken-engine" && !Path::new(&self.engine_bin_path).exists() {
+        // Precedence: CLI --engine-bin > FRANKEN_ENGINE_BIN env > config [engine].binary_path > candidates.
+        let env_override = std::env::var("FRANKEN_ENGINE_BIN").ok();
+        let config_path = config.engine.binary_path.as_deref();
+        let bin_path = resolve_engine_binary_path_with(
+            &self.engine_bin_path,
+            env_override.as_deref(),
+            self.configured_path.as_deref(),
+            config_path,
+            &default_engine_binary_candidates(),
+            &|path| path.exists(),
+        );
+        if bin_path == "franken-engine"
+            && self.configured_path.is_none()
+            && config.engine.binary_path.is_none()
+            && !Path::new(&self.engine_bin_path).exists()
+        {
             eprintln!(
-                "Warning: Engine binary not found at `{}` and no sibling build was discovered; attempting `franken-engine` from PATH (override with FRANKEN_ENGINE_BIN).",
-                self.engine_bin_path,
+                "Warning: Engine binary not found via configured override or sibling build; attempting `franken-engine` from PATH (override with --engine-bin, FRANKEN_ENGINE_BIN, FRANKEN_NODE_ENGINE_BINARY_PATH, or [engine].binary_path in config).",
             );
         }
 
@@ -255,6 +302,8 @@ mod tests {
         let resolved = resolve_engine_binary_path_with(
             "/missing/configured",
             Some("custom-franken-engine"),
+            None,
+            None,
             &candidates,
             &|_| false,
         );
@@ -265,9 +314,10 @@ mod tests {
     fn resolver_uses_existing_configured_hint() {
         let hint = "/opt/tools/franken-engine";
         let candidates = vec![PathBuf::from("/missing/auto")];
-        let resolved = resolve_engine_binary_path_with(hint, None, &candidates, &|path| {
-            path == Path::new(hint)
-        });
+        let resolved =
+            resolve_engine_binary_path_with(hint, None, None, None, &candidates, &|path| {
+                path == Path::new(hint)
+            });
         assert_eq!(resolved, hint);
     }
 
@@ -283,27 +333,132 @@ mod tests {
             .into_iter()
             .map(std::string::ToString::to_string)
             .collect::<BTreeSet<_>>();
-        let resolved =
-            resolve_engine_binary_path_with("/missing/configured", None, &candidates, &|path| {
-                lookup.contains(&path.to_string_lossy().to_string())
-            });
+        let resolved = resolve_engine_binary_path_with(
+            "/missing/configured",
+            None,
+            None,
+            None,
+            &candidates,
+            &|path| lookup.contains(&path.to_string_lossy().to_string()),
+        );
         assert_eq!(resolved, existing);
     }
 
     #[test]
     fn resolver_keeps_command_style_configured_hint() {
         let candidates = vec![PathBuf::from("/missing/auto")];
-        let resolved =
-            resolve_engine_binary_path_with("franken-engine", None, &candidates, &|_| false);
+        let resolved = resolve_engine_binary_path_with(
+            "franken-engine",
+            None,
+            None,
+            None,
+            &candidates,
+            &|_| false,
+        );
         assert_eq!(resolved, "franken-engine");
     }
 
     #[test]
     fn resolver_falls_back_to_default_command_for_missing_absolute_hint() {
         let candidates = vec![PathBuf::from("/missing/auto")];
-        let resolved =
-            resolve_engine_binary_path_with("/missing/configured", None, &candidates, &|_| false);
+        let resolved = resolve_engine_binary_path_with(
+            "/missing/configured",
+            None,
+            None,
+            None,
+            &candidates,
+            &|_| false,
+        );
         assert_eq!(resolved, "franken-engine");
+    }
+
+    #[test]
+    fn resolver_cli_path_beats_env_override() {
+        let cli = PathBuf::from("/cli/franken-engine");
+        let candidates = vec![PathBuf::from("/missing/auto")];
+        let resolved = resolve_engine_binary_path_with(
+            "/missing/configured",
+            Some("env-franken-engine"),
+            Some(&cli),
+            None,
+            &candidates,
+            &|_| false,
+        );
+        assert_eq!(resolved, "/cli/franken-engine");
+    }
+
+    #[test]
+    fn resolver_env_override_beats_config_path() {
+        let config = PathBuf::from("/config/franken-engine");
+        let candidates = vec![PathBuf::from("/missing/auto")];
+        let resolved = resolve_engine_binary_path_with(
+            "/missing/configured",
+            Some("env-franken-engine"),
+            None,
+            Some(&config),
+            &candidates,
+            &|_| false,
+        );
+        assert_eq!(resolved, "env-franken-engine");
+    }
+
+    #[test]
+    fn resolver_config_path_beats_candidates() {
+        let config = PathBuf::from("/config/franken-engine");
+        let candidates = vec![PathBuf::from("/existing/auto")];
+        let resolved = resolve_engine_binary_path_with(
+            "/missing/configured",
+            None,
+            None,
+            Some(&config),
+            &candidates,
+            &|path| path == Path::new("/existing/auto"),
+        );
+        assert_eq!(resolved, "/config/franken-engine");
+    }
+
+    #[test]
+    fn resolver_cli_beats_config_path() {
+        let cli = PathBuf::from("/cli/franken-engine");
+        let config = PathBuf::from("/config/franken-engine");
+        let candidates = vec![PathBuf::from("/missing/auto")];
+        let resolved = resolve_engine_binary_path_with(
+            "/missing/configured",
+            None,
+            Some(&cli),
+            Some(&config),
+            &candidates,
+            &|_| false,
+        );
+        assert_eq!(resolved, "/cli/franken-engine");
+    }
+
+    #[test]
+    fn resolver_env_lookup_uses_franken_node_engine_binary_path() {
+        let candidates = vec![PathBuf::from("/missing/auto")];
+        let resolved = resolve_engine_binary_path_with_env_lookup(
+            "/missing/configured",
+            &|key| match key {
+                "FRANKEN_ENGINE_BIN" => None,
+                "FRANKEN_NODE_ENGINE_BINARY_PATH" => Some("/env-config/franken-engine".into()),
+                _ => None,
+            },
+            &candidates,
+            &|_| false,
+        );
+        assert_eq!(resolved, "/env-config/franken-engine");
+    }
+
+    #[test]
+    fn default_candidates_do_not_include_machine_specific_fallbacks() {
+        let candidates = default_engine_binary_candidates();
+        assert!(!candidates.iter().any(|candidate| {
+            matches!(
+                candidate.to_string_lossy().as_ref(),
+                "/data/projects/franken_engine/target/release/franken-engine"
+                    | "/dp/franken_engine/target/release/franken-engine"
+            )
+        }));
     }
 
     #[test]

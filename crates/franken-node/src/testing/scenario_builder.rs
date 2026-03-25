@@ -77,9 +77,7 @@ pub const MIN_NODES: usize = 2;
 pub const MAX_NODES: usize = 10;
 /// Memory-safety capacity for the nodes Vec (must be > MAX_NODES to allow
 /// the `build()` validation to detect over-limit and return TooManyNodes).
-const MAX_NODES_CAP: usize = 4096;
-const MAX_ASSERTIONS: usize = 4096;
-const MAX_LINKS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_ASSERTIONS, MAX_LINKS, MAX_NODES_CAP};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

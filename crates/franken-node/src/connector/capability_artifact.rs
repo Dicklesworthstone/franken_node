@@ -39,7 +39,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 // ---------------------------------------------------------------------------
 // Schema version

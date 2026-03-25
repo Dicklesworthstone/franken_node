@@ -14,7 +14,7 @@ use std::fmt;
 
 use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry, EvidenceLedger};
 
-const MAX_ACTION_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_ACTION_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

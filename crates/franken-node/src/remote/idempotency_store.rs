@@ -23,7 +23,7 @@ use std::fmt;
 /// sweep.  If still at capacity after sweeping, the insert is rejected.
 const MAX_DEDUPE_ENTRIES: usize = 65_536;
 
-use crate::security::constant_time::ct_eq;
+use crate::{config::RemoteConfig, security::constant_time::ct_eq};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -220,6 +220,18 @@ impl IdempotencyDedupeStore {
     #[must_use]
     pub fn new(ttl_secs: u64) -> Self {
         Self::with_audit_log_capacity(ttl_secs, DEFAULT_MAX_AUDIT_RECORDS)
+    }
+
+    /// Create a new store using the resolved remote configuration.
+    #[must_use]
+    pub fn from_remote_config(config: &RemoteConfig) -> Self {
+        Self::new(config.idempotency_ttl_secs)
+    }
+
+    /// Return the configured entry TTL in seconds.
+    #[must_use]
+    pub fn ttl_secs(&self) -> u64 {
+        self.ttl_secs
     }
 
     /// Create a new store with explicit audit log capacity.
@@ -1019,6 +1031,15 @@ mod tests {
         assert_eq!(store.ttl_secs, DEFAULT_TTL_SECS);
         assert_eq!(DEFAULT_TTL_SECS, 604_800); // 7 days
         assert_eq!(store.audit_log_capacity(), DEFAULT_MAX_AUDIT_RECORDS);
+    }
+
+    #[test]
+    fn test_from_remote_config_uses_configured_ttl() {
+        let config = RemoteConfig {
+            idempotency_ttl_secs: 1_234,
+        };
+        let store = IdempotencyDedupeStore::from_remote_config(&config);
+        assert_eq!(store.ttl_secs, 1_234);
     }
 
     #[test]

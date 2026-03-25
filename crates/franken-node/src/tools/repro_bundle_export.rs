@@ -18,8 +18,7 @@ use sha2::{Digest, Sha256};
 
 use crate::security::constant_time::ct_eq;
 
-/// Maximum number of config entries before oldest-first eviction.
-const MAX_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_ENTRIES;
 /// Maximum number of exported bundles before oldest-first eviction.
 const MAX_BUNDLES: usize = 4096;
 

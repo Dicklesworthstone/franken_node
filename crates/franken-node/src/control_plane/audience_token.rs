@@ -483,8 +483,7 @@ impl TokenChain {
 // TokenValidator
 // ---------------------------------------------------------------------------
 
-/// Maximum events before oldest-first eviction.
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_TOKENS: usize = 4096;
 /// Maximum nonces tracked per epoch before oldest-first eviction.
 /// Without this cap, an adversary controlling token creation could exhaust

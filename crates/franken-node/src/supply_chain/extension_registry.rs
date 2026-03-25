@@ -44,7 +44,7 @@ use crate::supply_chain::artifact_signing::{self, KeyId, KeyRing};
 use crate::supply_chain::provenance as prov;
 use crate::supply_chain::transparency_verifier as tv;
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_REVOCATIONS: usize = 4096;
 const MAX_ADMISSION_RECEIPTS: usize = 4096;
 const MAX_VERSIONS_PER_EXTENSION: usize = 1024;
@@ -80,6 +80,7 @@ pub mod event_codes {
     pub const SER_ERR_KEY_NOT_FOUND: &str = "SER-ERR-005";
     pub const SER_ERR_PROVENANCE_CHAIN_INVALID: &str = "SER-ERR-006";
     pub const SER_ERR_TRANSPARENCY_FAILED: &str = "SER-ERR-007";
+    pub const SER_ERR_INTERNAL: &str = "SER-ERR-008";
 }
 
 pub mod invariants {
@@ -562,22 +563,31 @@ impl SignedExtensionRegistry {
         );
 
         if !receipt.admitted {
-            let witness = receipt.witness.as_ref().unwrap();
+            let (rejection_code, rejection_reason, remediation) = if let Some(witness) = receipt.witness.as_ref() {
+                (witness.rejection_code.clone(), witness.rejection_reason.clone(), witness.remediation.clone())
+            } else {
+                (
+                    event_codes::SER_ERR_INTERNAL.to_string(),
+                    "Admission rejected without a witness record".to_string(),
+                    "Check system logs for missing witness payload".to_string()
+                )
+            };
+
             self.log(
-                &witness.rejection_code,
+                &rejection_code,
                 "",
                 trace_id,
                 serde_json::json!({
                     "name": &request.name,
-                    "reason": &witness.rejection_reason,
-                    "remediation": &witness.remediation,
+                    "reason": &rejection_reason,
+                    "remediation": &remediation,
                 }),
             );
             return RegistryResult {
                 success: false,
                 extension_id: None,
-                error_code: Some(witness.rejection_code.clone()),
-                detail: witness.rejection_reason.clone(),
+                error_code: Some(rejection_code.to_string()),
+                detail: rejection_reason,
             };
         }
 

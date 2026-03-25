@@ -3,6 +3,7 @@ extern crate self as frankenengine_node;
 
 #[cfg(feature = "extended-surfaces")]
 pub mod api;
+pub mod capacity_defaults;
 #[cfg(feature = "extended-surfaces")]
 pub mod claims;
 pub mod config;
@@ -34,6 +35,7 @@ pub mod replay;
 #[path = "control_plane/root_pointer.rs"]
 pub mod root_pointer;
 pub mod runtime;
+pub mod schema_versions;
 #[cfg(feature = "extended-surfaces")]
 pub mod sdk;
 pub mod security;

@@ -523,7 +523,8 @@ def main() -> None:
     waivers = load_waivers(waiver_path)
     waiver_rules = {(w["file"], w["rule_id"]) for w in waivers}
 
-    rust_files = sorted(ROOT.rglob("crates/*/src/**/*.rs"))
+    crates_dir = ROOT / "crates"
+    rust_files = sorted(crates_dir.rglob("*/src/**/*.rs")) if crates_dir.exists() else []
 
     contract_violations = _waive(check_contract_alignment(contract_text), waiver_rules)
     registry_violations: list[dict[str, Any]] = []

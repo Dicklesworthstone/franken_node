@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_CHECKPOINTS: usize = 4096;
 
 // ---------------------------------------------------------------------------

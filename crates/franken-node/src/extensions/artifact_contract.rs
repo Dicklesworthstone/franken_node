@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
-const MAX_TRUSTED_SIGNERS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_TRUSTED_SIGNERS;
 
 /// Report schema version for capability artifact vectors.
 pub const SCHEMA_VERSION: &str = "capability-artifact-v1.0";

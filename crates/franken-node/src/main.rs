@@ -121,8 +121,6 @@ mod migration;
 
 const PROFILE_EXAMPLES_TEMPLATE: &str =
     include_str!("../../../config/franken_node.profile_examples.toml");
-const VERIFY_CLI_CONTRACT_VERSION: &str = "3.0.0";
-const VERIFY_CLI_CONTRACT_MAJOR: u16 = 3;
 const VERIFY_MODULE_IDS: &[&str] = &[
     "api",
     "claims",
@@ -3459,7 +3457,7 @@ fn build_verify_output(
 ) -> VerifyContractOutput {
     VerifyContractOutput {
         command: command.to_string(),
-        contract_version: VERIFY_CLI_CONTRACT_VERSION.to_string(),
+        contract_version: frankenengine_node::schema_versions::VERIFY_CLI_CONTRACT.to_string(),
         schema_version: "verifier-cli-contract-v1".to_string(),
         compat_version,
         verdict: verdict.to_string(),
@@ -3491,6 +3489,7 @@ fn emit_verify_output(command: &str, payload: &VerifyContractOutput, json: bool)
 }
 
 fn verify_compat_error(command: &str, compat_version: u16) -> VerifyContractOutput {
+    let current_major = verify_cli_contract_major();
     build_verify_output(
         command,
         Some(compat_version),
@@ -3499,10 +3498,18 @@ fn verify_compat_error(command: &str, compat_version: u16) -> VerifyContractOutp
         2,
         format!(
             "unsupported --compat-version={compat_version}; supported versions: {} or {}",
-            VERIFY_CLI_CONTRACT_MAJOR,
-            VERIFY_CLI_CONTRACT_MAJOR.saturating_sub(1)
+            current_major,
+            current_major.saturating_sub(1)
         ),
     )
+}
+
+fn verify_cli_contract_major() -> u16 {
+    frankenengine_node::schema_versions::VERIFY_CLI_CONTRACT
+        .split('.')
+        .next()
+        .and_then(|major| major.parse::<u16>().ok())
+        .expect("VERIFY_CLI_CONTRACT must start with a u16 major version")
 }
 
 fn validate_verify_compat(
@@ -3510,13 +3517,43 @@ fn validate_verify_compat(
     compat_version: Option<u16>,
 ) -> Option<VerifyContractOutput> {
     compat_version.and_then(|version| {
-        let previous_major = VERIFY_CLI_CONTRACT_MAJOR.saturating_sub(1);
-        if version > VERIFY_CLI_CONTRACT_MAJOR || version < previous_major {
+        let current_major = verify_cli_contract_major();
+        let previous_major = current_major.saturating_sub(1);
+        if version > current_major || version < previous_major {
             Some(verify_compat_error(command, version))
         } else {
             None
         }
     })
+}
+
+#[cfg(test)]
+mod verify_contract_tests {
+    use super::*;
+
+    #[test]
+    fn build_verify_output_uses_schema_registry_contract_version() {
+        let payload = build_verify_output("verify module", Some(3), "PASS", "pass", 0, "ok");
+
+        assert_eq!(
+            payload.contract_version,
+            frankenengine_node::schema_versions::VERIFY_CLI_CONTRACT
+        );
+    }
+
+    #[test]
+    fn verify_cli_contract_major_tracks_schema_registry() {
+        assert_eq!(verify_cli_contract_major(), 3);
+        assert_eq!(
+            verify_cli_contract_major(),
+            frankenengine_node::schema_versions::VERIFY_CLI_CONTRACT
+                .split('.')
+                .next()
+                .expect("major segment")
+                .parse::<u16>()
+                .expect("major parse")
+        );
+    }
 }
 
 fn summarize_expected_ids(values: &[&str], preview_count: usize) -> String {
@@ -3981,7 +4018,7 @@ fn main() -> Result<()> {
             )
             .context("failed resolving configuration for run")?;
 
-            let dispatcher = ops::engine_dispatcher::EngineDispatcher::default();
+            let dispatcher = ops::engine_dispatcher::EngineDispatcher::new(args.engine_bin);
             eprintln!(
                 "Dispatching to franken_engine for {}",
                 args.app_path.display()

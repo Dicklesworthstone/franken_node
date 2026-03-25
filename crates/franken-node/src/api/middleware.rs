@@ -321,7 +321,7 @@ impl RateLimiter {
     /// `Err(retry_after_ms)` if rate limited.
     pub fn check(&mut self) -> Result<(), u64> {
         let now = Instant::now();
-        let elapsed = now.duration_since(self.last_check).as_secs_f64();
+        let elapsed = now.saturating_duration_since(self.last_check).as_secs_f64();
         self.last_check = now;
 
         // Refill tokens

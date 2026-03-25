@@ -12,8 +12,8 @@ use super::compat_gates::{
     COMPAT_DIVERGENCE_RECEIPT_DOMAIN, COMPAT_POLICY_PREDICATE_DOMAIN,
     COMPAT_TRANSITION_RECEIPT_DOMAIN, CompatibilityFreshnessState, CompatibilityProofMetadata,
     CompatibilitySignatureAlgorithm, CompiledPolicyPredicate, build_proof_metadata,
-    compile_policy_predicate, compute_freshness_state, default_receipt_expiry, explanation_digest,
-    reason_codes, sign_ed25519_canonical, sign_hmac_canonical,
+    compile_policy_predicate, compute_freshness_state, default_receipt_expiry_with_ttl,
+    explanation_digest, reason_codes, sign_ed25519_canonical, sign_hmac_canonical,
     validate_scope_attenuation_for_scope, verify_ed25519_canonical, verify_hmac_canonical,
 };
 
@@ -303,9 +303,7 @@ fn predicate_scope_delta(
     validate_scope_attenuation_for_scope(scope_id, &attenuation)
 }
 
-const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
-const MAX_RECEIPTS: usize = 4096;
-const MAX_SHIMS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_TRAIL_ENTRIES, MAX_RECEIPTS, MAX_SHIMS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -329,6 +327,7 @@ pub struct GateEngine {
     pub divergence_receipts: Vec<DivergenceReceipt>,
     pub audit_trail: Vec<GateAuditEvent>,
     pub transition_receipts: Vec<ModeTransitionReceipt>,
+    receipt_ttl_secs: u64,
     _signing_key: Vec<u8>,
     compiled_predicates: BTreeMap<String, CompiledPolicyPredicate>,
     next_trace: u64,
@@ -358,17 +357,29 @@ impl TraceSlot {
 impl GateEngine {
     /// Create a new gate engine with a signing key.
     pub fn new(signing_key: Vec<u8>) -> Self {
+        Self::with_receipt_ttl(signing_key, 3_600)
+    }
+
+    pub fn with_receipt_ttl(signing_key: Vec<u8>, receipt_ttl_secs: u64) -> Self {
         Self {
             shims: Vec::new(),
             scope_modes: BTreeMap::new(),
             divergence_receipts: Vec::new(),
             audit_trail: Vec::new(),
             transition_receipts: Vec::new(),
+            receipt_ttl_secs: receipt_ttl_secs.max(1),
             _signing_key: signing_key,
             compiled_predicates: BTreeMap::new(),
             next_trace: 1,
             trace_epoch: 0,
         }
+    }
+
+    pub fn from_compatibility_config(
+        signing_key: Vec<u8>,
+        config: &crate::config::CompatibilityConfig,
+    ) -> Self {
+        Self::with_receipt_ttl(signing_key, config.default_receipt_ttl_secs)
     }
 
     fn allocate_trace_slot(&mut self) -> TraceSlot {
@@ -741,7 +752,7 @@ impl GateEngine {
     /// Set the initial mode for a scope (no transition workflow).
     pub fn set_scope_mode(&mut self, scope_id: &str, mode: CompatMode) {
         let activated_at = self.now_iso();
-        let expires_at = default_receipt_expiry(&activated_at);
+        let expires_at = default_receipt_expiry_with_ttl(&activated_at, self.receipt_ttl_secs);
         let proof = build_proof_metadata(
             CompatibilitySignatureAlgorithm::HmacSha256,
             None,
@@ -878,7 +889,7 @@ impl GateEngine {
         let slot = self.allocate_trace_slot();
         let trace_id = slot.trace_id();
         let issued_at = self.now_iso();
-        let expires_at = default_receipt_expiry(&issued_at);
+        let expires_at = default_receipt_expiry_with_ttl(&issued_at, self.receipt_ttl_secs);
 
         if approved {
             self.set_scope_mode(&req.scope_id, req.to_mode);
@@ -961,7 +972,7 @@ impl GateEngine {
         let trace_id = slot.trace_id();
         let receipt_id = slot.receipt_id();
         let timestamp = self.now_iso();
-        let expires_at = default_receipt_expiry(&timestamp);
+        let expires_at = default_receipt_expiry_with_ttl(&timestamp, self.receipt_ttl_secs);
         let proof = build_proof_metadata(
             CompatibilitySignatureAlgorithm::Ed25519,
             None,
@@ -1129,6 +1140,25 @@ mod tests {
         });
         engine.set_scope_mode("tenant-1", CompatMode::Balanced);
         engine
+    }
+
+    #[test]
+    fn gate_engine_uses_configured_receipt_ttl_secs() {
+        let config = crate::config::CompatibilityConfig {
+            mode: crate::config::CompatibilityMode::Balanced,
+            emit_divergence_receipts: true,
+            default_receipt_ttl_secs: 45,
+            gate_ttl_secs: None,
+        };
+        let mut engine = GateEngine::from_compatibility_config(b"test-key-v1".to_vec(), &config);
+        engine.set_scope_mode("tenant-ttl", CompatMode::Balanced);
+        let scope_mode = engine.query_mode("tenant-ttl").unwrap();
+        let activated_at = chrono::DateTime::parse_from_rfc3339(&scope_mode.activated_at).unwrap();
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&scope_mode.expires_at).unwrap();
+        assert_eq!(
+            expires_at.signed_duration_since(activated_at).num_seconds(),
+            45
+        );
     }
 
     fn make_shim(shim_id: &str, scope_id: &str) -> ShimEntry {

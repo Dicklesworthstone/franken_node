@@ -522,7 +522,15 @@ fn publish_root_internal(
                 }
             };
             
-            let root_bytes = fs::read(root_pointer_path(dir)).unwrap(); // Just succeeded in read_root
+            let root_bytes = match fs::read(root_pointer_path(dir)) {
+                Ok(b) => b,
+                Err(e) => {
+                    return Err(RootPointerError::MissingRoot {
+                        path: root_pointer_path(dir).display().to_string(),
+                        source: e,
+                    });
+                }
+            };
             let root_hash = hash_hex(&root_bytes);
             
             let expected_mac = sign_payload(&root_hash, signing_key).map_err(|source| {

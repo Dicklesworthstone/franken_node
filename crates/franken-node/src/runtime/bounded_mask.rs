@@ -12,8 +12,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-/// Maximum number of events retained in a bounded-mask event buffer before oldest entries are drained.
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 /// Compile-time budget threshold for mask duration warnings (1 microsecond).
 pub const MAX_MASK_DURATION_NS: u64 = 1_000;

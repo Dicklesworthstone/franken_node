@@ -498,8 +498,7 @@ pub struct WorkflowRegistration {
     pub description: String,
 }
 
-/// Maximum audit log entries before oldest-first eviction.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 /// Maximum cancel matrix entries before oldest-first eviction.
 const MAX_MATRIX_ENTRIES: usize = 4096;
 /// Maximum workflows tested entries before oldest-first eviction.

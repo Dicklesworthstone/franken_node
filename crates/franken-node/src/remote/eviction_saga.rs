@@ -22,8 +22,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 pub const SCHEMA_VERSION: &str = "es-v1.0";
 pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
 pub const DEFAULT_MAX_TRANSITIONS_PER_SAGA: usize = 512;
-/// Maximum saga instances tracked before terminal-state entries are evicted.
-const MAX_SAGAS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_SAGAS;
 const ERR_SAGA_ID_REUSED: &str = "ERR_SAGA_ID_REUSED";
 
 fn default_audit_log_capacity() -> usize {

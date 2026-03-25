@@ -14,11 +14,7 @@ pub const SCHEDULER_SCHEMA_VERSION: &str = "vef-proof-scheduler-v1";
 /// Maximum scheduler events before oldest are evicted.
 const MAX_SCHEDULER_EVENTS: usize = 4096;
 
-/// Maximum tracked windows before oldest are evicted.
-const MAX_WINDOWS_SEEN: usize = 4096;
-
-/// Maximum tracked jobs before oldest are evicted.
-const MAX_JOBS: usize = 2048;
+use frankenengine_node::capacity_defaults::aliases::{MAX_JOBS, MAX_WINDOWS_SEEN};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

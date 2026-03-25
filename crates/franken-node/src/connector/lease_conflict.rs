@@ -236,8 +236,8 @@ pub fn resolve_conflict(
         } else {
             (&b.lease_id, &a.lease_id, "purpose_priority")
         }
-    } else if policy.prefer_earliest {
-        if a.granted_at <= b.granted_at {
+    } else if policy.prefer_earliest && a.granted_at != b.granted_at {
+        if a.granted_at < b.granted_at {
             (&a.lease_id, &b.lease_id, "earliest_grant")
         } else {
             (&b.lease_id, &a.lease_id, "earliest_grant")

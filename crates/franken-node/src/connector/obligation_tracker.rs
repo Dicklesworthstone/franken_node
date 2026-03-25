@@ -28,11 +28,7 @@ pub const DEFAULT_LEAK_TIMEOUT_SECS: u64 = 30;
 /// Default per-flow budget for concurrent reservations. INV-OBL-BUDGET-BOUND
 pub const DEFAULT_FLOW_BUDGET: usize = 256;
 
-/// Maximum audit log entries before oldest are evicted.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-
-/// Maximum obligations before oldest are evicted from the map.
-const MAX_OBLIGATIONS: usize = 8192;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_OBLIGATIONS};
 
 /// Maximum scan results before oldest are evicted.
 const MAX_SCAN_RESULTS: usize = 1024;

@@ -15,7 +15,7 @@
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_REPORTS: usize = 2048;
 
 use crate::security::constant_time::ct_eq;

@@ -460,7 +460,7 @@ impl fmt::Display for StakingError {
 // TrustGovernanceState
 // ---------------------------------------------------------------------------
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_SLASH_EVENTS_PER_STAKE: usize = 256;
 const MAX_EVIDENCE_HASHES_PER_STAKE: usize = 256;
 

@@ -42,14 +42,9 @@ use crate::security::constant_time::ct_eq;
 /// Schema version for time-travel replay records.
 pub const SCHEMA_VERSION: &str = "ttr-v1.0";
 
-/// Maximum audit log entries before oldest are evicted.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-
-/// Maximum registered traces in a single ReplayEngine.
-const MAX_REGISTERED_TRACES: usize = 1024;
-
-/// Maximum steps in a single TraceBuilder.
-const MAX_TRACE_STEPS: usize = 8192;
+use crate::capacity_defaults::aliases::{
+    MAX_AUDIT_LOG_ENTRIES, MAX_REGISTERED_TRACES, MAX_TRACE_STEPS,
+};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

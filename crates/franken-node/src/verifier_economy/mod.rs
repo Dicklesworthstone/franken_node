@@ -20,6 +20,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::VerifyingKey;
 use sha2::{Digest, Sha256};
 
+use crate::capacity_defaults::aliases::{
+    MAX_ATTESTATIONS, MAX_DISPUTES, MAX_EVENTS, MAX_REPLAY_CAPSULES, MAX_VERIFIERS,
+};
 use crate::connector::verifier_sdk::{
     compute_capsule_integrity_hash, compute_trace_commitment_root, parse_ed25519_verifying_key_hex,
     replay_capsule_signature_payload, verify_ed25519_signature_hex,
@@ -27,23 +30,8 @@ use crate::connector::verifier_sdk::{
 };
 use crate::security::constant_time::ct_eq;
 
-/// Maximum events before oldest are evicted.
-const MAX_EVENTS: usize = 4096;
-
-/// Maximum verifiers before oldest are evicted.
-const MAX_VERIFIERS: usize = 4096;
-
-/// Maximum attestations before oldest are evicted.
-const MAX_ATTESTATIONS: usize = 8192;
-
-/// Maximum disputes before oldest are evicted.
-const MAX_DISPUTES: usize = 2048;
-
-/// Maximum replay capsules before oldest are evicted.
-const MAX_REPLAY_CAPSULES: usize = 2048;
-
 const REPLAY_CAPSULE_SCHEMA_VERSION: &str = "vep-replay-capsule-v2";
-const MAX_REPLAY_CAPSULE_FRESHNESS_SECS: i64 = 3600;
+const DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS: i64 = 3600;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -115,7 +103,11 @@ fn canonicalized_ed25519_public_keys_match(expected_key: &str, actual_key: &str)
     }
 }
 
-fn replay_capsule_freshness_window_valid(issued_at: &str, expires_at: &str) -> bool {
+fn replay_capsule_freshness_window_valid(
+    issued_at: &str,
+    expires_at: &str,
+    freshness_secs: i64,
+) -> bool {
     let issued_at = match chrono::DateTime::parse_from_rfc3339(issued_at) {
         Ok(ts) => ts.with_timezone(&chrono::Utc),
         Err(_) => return false,
@@ -124,10 +116,11 @@ fn replay_capsule_freshness_window_valid(issued_at: &str, expires_at: &str) -> b
         Ok(ts) => ts.with_timezone(&chrono::Utc),
         Err(_) => return false,
     };
+    if freshness_secs <= 0 {
+        return false;
+    }
     let window = expires_at.signed_duration_since(issued_at);
-    if window <= chrono::Duration::zero()
-        || window > chrono::Duration::seconds(MAX_REPLAY_CAPSULE_FRESHNESS_SECS)
-    {
+    if window <= chrono::Duration::zero() || window > chrono::Duration::seconds(freshness_secs) {
         return false;
     }
     // Fail-closed: reject capsules outside their validity interval.
@@ -598,6 +591,8 @@ pub struct VerifierEconomyRegistry {
     submission_counts: BTreeMap<String, u32>,
     /// Maximum submissions per verifier per window.
     max_submissions_per_window: u32,
+    /// Maximum allowed freshness window for replay capsules.
+    replay_capsule_freshness_secs: i64,
 }
 
 impl Default for VerifierEconomyRegistry {
@@ -608,6 +603,12 @@ impl Default for VerifierEconomyRegistry {
 
 impl VerifierEconomyRegistry {
     pub fn new() -> Self {
+        Self::with_replay_capsule_freshness_secs(DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS as u64)
+    }
+
+    pub fn with_replay_capsule_freshness_secs(replay_capsule_freshness_secs: u64) -> Self {
+        let replay_capsule_freshness_secs =
+            i64::try_from(replay_capsule_freshness_secs.max(1)).unwrap_or(i64::MAX);
         Self {
             verifiers: BTreeMap::new(),
             registered_public_keys: BTreeSet::new(),
@@ -622,7 +623,17 @@ impl VerifierEconomyRegistry {
             next_dispute_id: 1,
             submission_counts: BTreeMap::new(),
             max_submissions_per_window: 100,
+            replay_capsule_freshness_secs,
         }
+    }
+
+    pub fn from_replay_config(config: &crate::config::ReplayConfig) -> Self {
+        Self::with_replay_capsule_freshness_secs(config.max_replay_capsule_freshness_secs)
+    }
+
+    #[must_use]
+    pub fn replay_capsule_freshness_secs(&self) -> i64 {
+        self.replay_capsule_freshness_secs
     }
 
     fn now_epoch(&self) -> u64 {
@@ -649,12 +660,13 @@ impl VerifierEconomyRegistry {
         let terminal_key = self
             .attestations
             .iter()
-            .find(|(_, attestation)| {
+            .filter(|(_, attestation)| {
                 matches!(
                     attestation.state,
                     AttestationState::Published | AttestationState::Rejected
                 )
             })
+            .min_by_key(|(_, att)| att.timestamp.as_str())
             .map(|(id, _)| id.clone());
 
         if let Some(id) = terminal_key
@@ -683,7 +695,8 @@ impl VerifierEconomyRegistry {
         let resolved_key = self
             .disputes
             .iter()
-            .find(|(_, dispute)| dispute.outcome.is_some())
+            .filter(|(_, dispute)| dispute.outcome.is_some())
+            .min_by_key(|(_, dispute)| dispute.resolved_at.as_deref().unwrap_or(""))
             .map(|(id, _)| id.clone());
 
         resolved_key
@@ -728,7 +741,7 @@ impl VerifierEconomyRegistry {
         }
 
         let verifier_id = format!("ver-{:04}", self.next_verifier_id);
-        self.next_verifier_id = self.next_verifier_id.saturating_add(1);
+        self.next_verifier_id = self.next_verifier_id.wrapping_add(1);
 
         let verifier = Verifier {
             verifier_id: verifier_id.clone(),
@@ -860,7 +873,7 @@ impl VerifierEconomyRegistry {
             .submission_counts
             .entry(submission.verifier_id.clone())
             .or_insert(0);
-        *count = count.saturating_add(1);
+        *count = count.wrapping_add(1);
         if *count > self.max_submissions_per_window {
             self.emit(
                 VEP_006,
@@ -907,7 +920,7 @@ impl VerifierEconomyRegistry {
         }
 
         let attestation_id = format!("att-{:04}", self.next_attestation_id);
-        self.next_attestation_id = self.next_attestation_id.saturating_add(1);
+        self.next_attestation_id = self.next_attestation_id.wrapping_add(1);
 
         let attestation = Attestation {
             attestation_id: attestation_id.clone(),
@@ -1147,7 +1160,7 @@ impl VerifierEconomyRegistry {
         att.state = AttestationState::Disputed;
 
         let dispute_id = format!("dsp-{:04}", self.next_dispute_id);
-        self.next_dispute_id = self.next_dispute_id.saturating_add(1);
+        self.next_dispute_id = self.next_dispute_id.wrapping_add(1);
 
         let dispute = Dispute {
             dispute_id: dispute_id.clone(),
@@ -1272,6 +1285,16 @@ impl VerifierEconomyRegistry {
     pub fn verify_capsule_integrity(
         capsule: &ReplayCapsule,
     ) -> Result<(), CapsuleVerificationFailure> {
+        Self::verify_capsule_integrity_with_freshness(
+            capsule,
+            DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS,
+        )
+    }
+
+    fn verify_capsule_integrity_with_freshness(
+        capsule: &ReplayCapsule,
+        freshness_secs: i64,
+    ) -> Result<(), CapsuleVerificationFailure> {
         if capsule.capsule_id.is_empty() {
             return Err(CapsuleVerificationFailure::MissingFields("capsule_id"));
         }
@@ -1293,7 +1316,11 @@ impl VerifierEconomyRegistry {
         if capsule.schema_version != REPLAY_CAPSULE_SCHEMA_VERSION {
             return Err(CapsuleVerificationFailure::SchemaVersionMismatch);
         }
-        if !replay_capsule_freshness_window_valid(&capsule.issued_at, &capsule.expires_at) {
+        if !replay_capsule_freshness_window_valid(
+            &capsule.issued_at,
+            &capsule.expires_at,
+            freshness_secs,
+        ) {
             return Err(CapsuleVerificationFailure::FreshnessWindowInvalid);
         }
         if capsule.trace_chunk_hashes.is_empty() {
@@ -1364,7 +1391,7 @@ impl VerifierEconomyRegistry {
         &mut self,
         capsule: &ReplayCapsule,
     ) -> Result<(), CapsuleVerificationFailure> {
-        Self::verify_capsule_integrity(capsule)?;
+        Self::verify_capsule_integrity_with_freshness(capsule, self.replay_capsule_freshness_secs)?;
 
         let verifier_public_key = match self.verifiers.get(&capsule.verifier_id) {
             Some(verifier) => verifier.public_key.clone(),
@@ -1429,11 +1456,11 @@ impl VerifierEconomyRegistry {
             if attestation.state != AttestationState::Published {
                 continue;
             }
-            total_attestations = total_attestations.saturating_add(1);
+            total_attestations = total_attestations.wrapping_add(1);
             let stats = published_stats
                 .entry(attestation.verifier_id.clone())
                 .or_default();
-            stats.attestation_count = stats.attestation_count.saturating_add(1);
+            stats.attestation_count = stats.attestation_count.wrapping_add(1);
             stats.dimensions.insert(attestation.claim.dimension.clone());
         }
 
@@ -2413,7 +2440,7 @@ mod tests {
             |reg: &mut VerifierEconomyRegistry, capsule_id: &str, label: &str, offset_secs: i64| {
                 let issued_at = base + chrono::Duration::seconds(offset_secs);
                 let expires_at =
-                    issued_at + chrono::Duration::seconds(MAX_REPLAY_CAPSULE_FRESHNESS_SECS);
+                    issued_at + chrono::Duration::seconds(DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS);
                 register_capsule_with_times(
                     reg,
                     &verifier.verifier_id,
@@ -3128,6 +3155,46 @@ mod tests {
         assert_eq!(reg.attestation_count(), 0);
     }
 
+    #[test]
+    fn test_registry_uses_configured_replay_capsule_freshness() {
+        let config = crate::config::ReplayConfig {
+            persist_high_severity: true,
+            bundle_version: "v1".to_string(),
+            max_replay_capsule_freshness_secs: 30,
+            capsule_freshness_secs: None,
+        };
+        let mut reg = VerifierEconomyRegistry::from_replay_config(&config);
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        let signing_key = registration_signing_key();
+        let issued_at = chrono::Utc::now() - chrono::Duration::seconds(20);
+        let expires_at = issued_at + chrono::Duration::seconds(31);
+        let mut capsule = make_capsule(
+            "capsule-over-configured-window",
+            &verifier.verifier_id,
+            &attestation,
+            &signing_key,
+            "capsule-over-configured-window",
+        );
+        capsule.issued_at = issued_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        capsule.expires_at = expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        capsule.integrity_hash = compute_capsule_integrity_hash(
+            &capsule.capsule_id,
+            &capsule.schema_version,
+            &capsule.attestation_id,
+            &capsule.verifier_id,
+            &capsule.claim_metadata_hash,
+            &capsule.issued_at,
+            &capsule.expires_at,
+            &capsule.input_state_hash,
+            &capsule.trace_commitment_root,
+            &capsule.output_state_hash,
+            &capsule.expected_result_hash,
+        );
+        sign_capsule(&mut capsule, &signing_key);
+        let err = reg.register_replay_capsule(capsule).unwrap_err();
+        assert_eq!(err.code, ERR_VEP_CAPSULE_FRESHNESS);
+    }
+
     // -- Published attestations filter ----------------------------------------
 
     #[test]
@@ -3570,7 +3637,8 @@ mod tests {
             (past + chrono::Duration::hours(1)).to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         assert!(!replay_capsule_freshness_window_valid(
             &issued_at,
-            &expires_at
+            &expires_at,
+            DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS,
         ));
     }
 
@@ -3582,7 +3650,8 @@ mod tests {
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         assert!(replay_capsule_freshness_window_valid(
             &issued_at,
-            &expires_at
+            &expires_at,
+            DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS,
         ));
     }
 
@@ -3592,7 +3661,8 @@ mod tests {
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         assert!(!replay_capsule_freshness_window_valid(
             &shared_timestamp,
-            &shared_timestamp
+            &shared_timestamp,
+            DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS,
         ));
     }
 
@@ -3605,7 +3675,8 @@ mod tests {
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
         assert!(!replay_capsule_freshness_window_valid(
             &issued_at,
-            &expires_at
+            &expires_at,
+            DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS,
         ));
     }
 
@@ -3614,12 +3685,13 @@ mod tests {
         let now = chrono::Utc::now();
         let issued_at = now.to_rfc3339();
         let expires_at = (now
-            + chrono::Duration::seconds(MAX_REPLAY_CAPSULE_FRESHNESS_SECS)
+            + chrono::Duration::seconds(DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS)
             + chrono::Duration::milliseconds(1))
         .to_rfc3339();
         assert!(!replay_capsule_freshness_window_valid(
             &issued_at,
-            &expires_at
+            &expires_at,
+            DEFAULT_REPLAY_CAPSULE_FRESHNESS_SECS,
         ));
     }
 }

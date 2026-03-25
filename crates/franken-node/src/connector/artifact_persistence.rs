@@ -158,8 +158,7 @@ impl std::fmt::Display for PersistenceError {
     }
 }
 
-/// Maximum total artifacts across all types before oldest-first eviction.
-const MAX_TOTAL_ARTIFACTS: usize = 8192;
+use crate::capacity_defaults::aliases::MAX_TOTAL_ARTIFACTS;
 
 /// Artifact persistence store with replay hooks.
 #[derive(Debug)]

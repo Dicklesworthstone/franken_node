@@ -7,6 +7,7 @@ profile = "balanced"
 [compatibility]
 mode = "balanced"
 emit_divergence_receipts = true
+default_receipt_ttl_secs = 3600
 
 [migration]
 autofix = true
@@ -20,6 +21,7 @@ quarantine_on_high_risk = true
 [replay]
 persist_high_severity = true
 bundle_version = "v1"
+max_replay_capsule_freshness_secs = 3600
 
 [registry]
 require_signatures = true
@@ -32,6 +34,12 @@ convergence_timeout_seconds = 120
 [observability]
 namespace = "franken_node"
 emit_structured_audit_events = true
+
+[remote]
+idempotency_ttl_secs = 604800
+
+[security]
+max_degraded_duration_secs = 3600
 
 # Profile-specific overlays:
 # Use [profiles.strict], [profiles.balanced], or [profiles."legacy-risky"]

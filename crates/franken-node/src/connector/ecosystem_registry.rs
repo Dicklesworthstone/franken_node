@@ -11,8 +11,7 @@ use crate::security::constant_time::ct_eq;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS};
 const MAX_LINEAGE_ENTRIES: usize = 4096;
 const MAX_COMPATIBILITY_ENTRIES: usize = 4096;
 /// Maximum extensions retained in the registry before new registrations are

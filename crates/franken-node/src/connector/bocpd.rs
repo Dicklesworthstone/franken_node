@@ -9,7 +9,7 @@
 use std::collections::VecDeque;
 use std::f64::consts::PI;
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_RECENT_SHIFTS: usize = 4096;
 
 // ---------------------------------------------------------------------------

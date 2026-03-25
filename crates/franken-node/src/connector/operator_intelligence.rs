@@ -9,8 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::security::constant_time::ct_eq_bytes;
 
-const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_TRAIL_ENTRIES, MAX_EVENTS};
 const MAX_MISSING_SOURCES: usize = 256;
 
 // ---------------------------------------------------------------------------

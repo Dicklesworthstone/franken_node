@@ -10,7 +10,7 @@
 use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

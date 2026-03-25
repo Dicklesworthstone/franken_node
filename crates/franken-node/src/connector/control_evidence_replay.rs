@@ -16,7 +16,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_VERDICTS: usize = 4096;
 
 use crate::connector::control_evidence::{ControlEvidenceEntry, DecisionKind, DecisionType};

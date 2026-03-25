@@ -27,9 +27,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_RESULTS};
 const MAX_REGISTERED_PROGRAMS: usize = 4096;
-const MAX_RESULTS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

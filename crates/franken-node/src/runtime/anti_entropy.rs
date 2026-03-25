@@ -12,8 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::control_plane::mmr_proofs::{self, Hash, InclusionProof, MmrRoot};
 
-/// Maximum reconciliation events before oldest are evicted.
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 fn push_bounded_fn<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -231,21 +230,37 @@ impl TrustState {
         }
     }
 
-    /// Insert a record into the state and recompute root digest.
-    /// Evicts the lowest-precedence record when at capacity.
-    pub fn insert(&mut self, record: TrustRecord) {
-        if self.records.len() >= MAX_TRUST_RECORDS
-            && !self.records.contains_key(&record.id)
-            && let Some(oldest_key) = self
-                .records
-                .values()
-                .min_by(|a, b| a.precedence_cmp(b))
-                .map(|r| r.id.clone())
+    /// Insert or replace a record while retaining the highest-precedence set.
+    ///
+    /// Returns `true` when the record is present after the operation and `false`
+    /// when the incoming record loses to an existing higher-precedence record,
+    /// either because the ID already exists or because the retained set is full.
+    pub fn insert(&mut self, record: TrustRecord) -> bool {
+        self.insert_with_capacity(record, MAX_TRUST_RECORDS)
+    }
+
+    fn insert_with_capacity(&mut self, record: TrustRecord, capacity: usize) -> bool {
+        if let Some(existing) = self.records.get(&record.id)
+            && matches!(existing.precedence_cmp(&record), Ordering::Greater)
         {
-            self.records.remove(&oldest_key);
+            return false;
         }
+
+        if self.records.len() >= capacity
+            && !self.records.contains_key(&record.id)
+            && let Some(lowest_record) = self.records.values().min_by(|a, b| a.precedence_cmp(b))
+        {
+            if !matches!(lowest_record.precedence_cmp(&record), Ordering::Less) {
+                return false;
+            }
+
+            let lowest_key = lowest_record.id.clone();
+            self.records.remove(&lowest_key);
+        }
+
         self.records.insert(record.id.clone(), record);
         self.recompute_root_digest();
+        true
     }
 
     /// Recompute root digest as SHA-256 over all record digests in deterministic order.
@@ -490,7 +505,7 @@ impl AntiEntropyReconciler {
 
         // Two-phase reconciliation — INV-AE-ATOMIC.
         // Phase 1: validate all records.
-        let mut accepted = Vec::new();
+        let mut accepted: Vec<(TrustRecord, bool)> = Vec::new();
         let mut rejected = 0usize;
 
         for record in &delta {
@@ -572,21 +587,36 @@ impl AntiEntropyReconciler {
                 continue;
             }
 
-            accepted.push(record.clone());
+            accepted.push((record.clone(), replaced));
+        }
+
+        // Phase 2: apply all validated records atomically.
+        let mut applied = 0usize;
+        for (record, replaced) in &accepted {
+            if local.insert(record.clone()) {
+                applied += 1;
+                self.push_event(ReconciliationEvent {
+                    code: EVT_RECORD_ACCEPTED.to_string(),
+                    detail: format!(
+                        "record {} epoch={} replaced={}",
+                        record.id, record.epoch, replaced
+                    ),
+                    trace_id: trace_id.clone(),
+                    epoch: local.current_epoch(),
+                });
+                continue;
+            }
+
+            rejected = rejected.saturating_add(1);
             self.push_event(ReconciliationEvent {
-                code: EVT_RECORD_ACCEPTED.to_string(),
+                code: EVT_RECORD_REJECTED.to_string(),
                 detail: format!(
-                    "record {} epoch={} replaced={replaced}",
-                    record.id, record.epoch
+                    "capacity rejection: record {} lost to higher-precedence retained set",
+                    record.id
                 ),
                 trace_id: trace_id.clone(),
                 epoch: local.current_epoch(),
             });
-        }
-
-        // Phase 2: apply all validated records atomically.
-        for record in &accepted {
-            local.insert(record.clone());
         }
 
         let elapsed = start.elapsed();
@@ -595,7 +625,7 @@ impl AntiEntropyReconciler {
             code: EVT_CYCLE_COMPLETED.to_string(),
             detail: format!(
                 "accepted={},rejected={},elapsed_ms={}",
-                accepted.len(),
+                applied,
                 rejected,
                 elapsed.as_millis()
             ),
@@ -605,7 +635,7 @@ impl AntiEntropyReconciler {
 
         Ok(ReconciliationResult {
             delta_size,
-            records_accepted: accepted.len(),
+            records_accepted: applied,
             records_rejected: rejected,
             elapsed_ms: u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
             fork_detected: false,
@@ -743,7 +773,7 @@ mod tests {
     fn test_trust_state_insert() {
         let mut state = TrustState::new(1);
         let (rec, _) = make_record("r1", 1);
-        state.insert(rec);
+        assert!(state.insert(rec));
         assert_eq!(state.len(), 1);
         assert!(state.contains("r1"));
     }
@@ -752,7 +782,7 @@ mod tests {
     fn test_trust_state_get() {
         let mut state = TrustState::new(1);
         let (rec, _) = make_record("r1", 1);
-        state.insert(rec);
+        assert!(state.insert(rec));
         let r = state.get("r1").expect("should exist");
         assert_eq!(r.id, "r1");
     }
@@ -762,8 +792,8 @@ mod tests {
         let mut state = TrustState::new(1);
         let (r1, _) = make_record("r1", 1);
         let (r2, _) = make_record("r2", 1);
-        state.insert(r1);
-        state.insert(r2);
+        assert!(state.insert(r1));
+        assert!(state.insert(r2));
         let ids = state.record_ids();
         assert!(ids.contains("r1"));
         assert!(ids.contains("r2"));
@@ -774,8 +804,74 @@ mod tests {
         let mut state = TrustState::new(1);
         let d1 = *state.root_digest();
         let (rec, _) = make_record("r1", 1);
-        state.insert(rec);
+        assert!(state.insert(rec));
         assert_ne!(*state.root_digest(), d1);
+    }
+
+    #[test]
+    fn test_trust_state_at_capacity_drops_lower_precedence_candidate() {
+        let mut state = TrustState::new(2);
+        let (incumbent_a, _) = make_record_with_meta("a", 2, 2_000, "node-a");
+        let (incumbent_b, _) = make_record_with_meta("b", 2, 2_100, "node-b");
+        let (candidate, _) = make_record_with_meta("c", 1, 1_000, "node-z");
+
+        assert!(state.insert_with_capacity(incumbent_a, 2));
+        assert!(state.insert_with_capacity(incumbent_b, 2));
+
+        assert!(!state.insert_with_capacity(candidate, 2));
+        assert_eq!(state.len(), 2);
+        assert!(state.contains("a"));
+        assert!(state.contains("b"));
+        assert!(!state.contains("c"));
+    }
+
+    #[test]
+    fn test_trust_state_rejects_lower_precedence_same_id_update() {
+        let mut state = TrustState::new(2);
+        let (incumbent, _) = make_record_with_meta("same", 2, 2_000, "node-z");
+        let (candidate, _) = make_record_with_meta("same", 1, 1_000, "node-a");
+
+        assert!(state.insert(incumbent));
+        assert!(!state.insert(candidate));
+
+        let retained = state.get("same").expect("existing record should remain");
+        assert_eq!(retained.epoch, 2);
+        assert_eq!(retained.recorded_at_ms, 2_000);
+        assert_eq!(retained.origin_node_id, "node-z");
+    }
+
+    #[test]
+    fn test_trust_state_accepts_higher_precedence_same_id_update() {
+        let mut state = TrustState::new(2);
+        let (incumbent, _) = make_record_with_meta("same", 1, 1_000, "node-a");
+        let (candidate, _) = make_record_with_meta("same", 2, 900, "node-z");
+
+        assert!(state.insert(incumbent));
+        assert!(state.insert(candidate));
+
+        let retained = state
+            .get("same")
+            .expect("higher-precedence record should replace");
+        assert_eq!(retained.epoch, 2);
+        assert_eq!(retained.recorded_at_ms, 900);
+        assert_eq!(retained.origin_node_id, "node-z");
+    }
+
+    #[test]
+    fn test_trust_state_at_capacity_evicts_lower_precedence_incumbent() {
+        let mut state = TrustState::new(2);
+        let (incumbent_a, _) = make_record_with_meta("a", 1, 1_000, "node-a");
+        let (incumbent_b, _) = make_record_with_meta("b", 1, 1_100, "node-b");
+        let (candidate, _) = make_record_with_meta("c", 2, 900, "node-z");
+
+        assert!(state.insert_with_capacity(incumbent_a, 2));
+        assert!(state.insert_with_capacity(incumbent_b, 2));
+
+        assert!(state.insert_with_capacity(candidate, 2));
+        assert_eq!(state.len(), 2);
+        assert!(!state.contains("a"));
+        assert!(state.contains("b"));
+        assert!(state.contains("c"));
     }
 
     // -- Record digest --
@@ -1216,6 +1312,110 @@ mod tests {
             .expect("should succeed");
         assert_eq!(result.records_accepted, 1);
         assert_eq!(result.records_rejected, 2);
+    }
+
+    #[test]
+    fn test_reconcile_at_capacity_rejects_lower_precedence_new_record() {
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        })
+        .expect("should succeed");
+        let mut local = TrustState::new(2);
+        let mut remote = TrustState::new(2);
+
+        for i in 0..MAX_TRUST_RECORDS {
+            let (rec, _) =
+                make_record_with_meta(&format!("local-{i}"), 2, 10_000 + i as u64, "node-z");
+            assert!(local.insert(rec));
+        }
+
+        let (candidate, root) = make_record_with_meta("remote-low", 1, 1_000, "node-a");
+        remote.insert(candidate);
+
+        let cancel = no_cancel();
+        let result = reconciler
+            .reconcile(&mut local, &remote, &root, &cancel)
+            .expect("should succeed");
+
+        assert_eq!(result.delta_size, 1);
+        assert_eq!(result.records_accepted, 0);
+        assert_eq!(result.records_rejected, 1);
+        assert_eq!(local.len(), MAX_TRUST_RECORDS);
+        assert!(!local.contains("remote-low"));
+        assert!(local.contains("local-0"));
+    }
+
+    #[test]
+    fn test_reconcile_at_capacity_accepts_higher_precedence_new_record() {
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        })
+        .expect("should succeed");
+        let mut local = TrustState::new(2);
+        let mut remote = TrustState::new(2);
+
+        for i in 0..MAX_TRUST_RECORDS {
+            let (rec, _) =
+                make_record_with_meta(&format!("local-{i}"), 1, 1_000 + i as u64, "node-a");
+            assert!(local.insert(rec));
+        }
+
+        let (candidate, root) = make_record_with_meta("remote-high", 2, 500, "node-z");
+        remote.insert(candidate);
+
+        let cancel = no_cancel();
+        let result = reconciler
+            .reconcile(&mut local, &remote, &root, &cancel)
+            .expect("should succeed");
+
+        assert_eq!(result.delta_size, 1);
+        assert_eq!(result.records_accepted, 1);
+        assert_eq!(result.records_rejected, 0);
+        assert_eq!(local.len(), MAX_TRUST_RECORDS);
+        assert!(local.contains("remote-high"));
+        assert!(!local.contains("local-0"));
+    }
+
+    #[test]
+    fn test_reconcile_capacity_rejection_emits_rejected_not_accepted_event() {
+        let mut reconciler = AntiEntropyReconciler::new(ReconciliationConfig {
+            proof_required: false,
+            ..ReconciliationConfig::default()
+        })
+        .expect("should succeed");
+        let mut local = TrustState::new(2);
+        let mut remote = TrustState::new(2);
+
+        for i in 0..MAX_TRUST_RECORDS {
+            let (rec, _) =
+                make_record_with_meta(&format!("local-{i}"), 2, 10_000 + i as u64, "node-z");
+            assert!(local.insert(rec));
+        }
+
+        let (candidate, root) = make_record_with_meta("remote-low", 1, 1_000, "node-a");
+        remote.insert(candidate);
+
+        let cancel = no_cancel();
+        reconciler
+            .reconcile(&mut local, &remote, &root, &cancel)
+            .expect("should succeed");
+
+        let accepted_events: Vec<&ReconciliationEvent> = reconciler
+            .events()
+            .iter()
+            .filter(|event| event.code == EVT_RECORD_ACCEPTED)
+            .collect();
+        let rejected_events: Vec<&ReconciliationEvent> = reconciler
+            .events()
+            .iter()
+            .filter(|event| event.code == EVT_RECORD_REJECTED)
+            .collect();
+
+        assert!(accepted_events.is_empty());
+        assert_eq!(rejected_events.len(), 1);
+        assert!(rejected_events[0].detail.contains("capacity rejection"));
     }
 
     // -- Events --

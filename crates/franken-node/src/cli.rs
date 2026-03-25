@@ -116,6 +116,10 @@ pub struct RunArgs {
     /// Config file override.
     #[arg(long)]
     pub config: Option<PathBuf>,
+
+    /// Explicit franken_engine binary path or command name.
+    #[arg(long)]
+    pub engine_bin: Option<PathBuf>,
 }
 
 // -- migrate --

@@ -21,7 +21,7 @@ use std::fmt;
 /// Schema version for isolation mesh reports.
 pub const SCHEMA_VERSION: &str = "isolation-mesh-v1.0";
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_ELEVATION_HISTORY: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {

@@ -53,17 +53,7 @@ pub mod error_codes {
 // Invariant constants
 // ---------------------------------------------------------------------------
 
-/// Maximum number of events before oldest-first eviction.
-const MAX_EVENTS: usize = 4096;
-
-/// Maximum number of receipts before oldest-first eviction.
-const MAX_RECEIPTS: usize = 4096;
-
-/// Maximum number of shims before oldest-first eviction.
-const MAX_SHIMS: usize = 4096;
-
-/// Maximum number of predicates before oldest-first eviction.
-const MAX_PREDICATES: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_PREDICATES, MAX_RECEIPTS, MAX_SHIMS};
 
 pub const INV_PCG_VISIBLE: &str = "INV-PCG-VISIBLE";
 pub const INV_PCG_AUDITABLE: &str = "INV-PCG-AUDITABLE";

@@ -245,8 +245,7 @@ impl fmt::Display for PerfBudgetError {
 // PerformanceBudgetGuard
 // ---------------------------------------------------------------------------
 
-/// Maximum events before oldest-first eviction.
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 /// Maximum timing samples retained per hot path before oldest-first eviction.
 const MAX_TIMING_SAMPLES: usize = 8192;

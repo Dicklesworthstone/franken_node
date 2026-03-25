@@ -11,8 +11,7 @@ use std::collections::BTreeMap;
 
 use crate::security::constant_time::ct_eq;
 
-/// Maximum number of reference runtimes before oldest-first eviction.
-const MAX_REFERENCE_RUNTIMES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_REFERENCE_RUNTIMES;
 
 // ── Schema version ─────────────────────────────────────────────────────
 

@@ -32,7 +32,7 @@ pub(crate) const COMPAT_TRANSITION_RECEIPT_DOMAIN: &str =
     "franken_node.policy.compat.transition_receipt.v1";
 pub(crate) const COMPAT_DIVERGENCE_RECEIPT_DOMAIN: &str =
     "franken_node.policy.compat.divergence_receipt.v1";
-const COMPAT_DEFAULT_TTL_SECS: i64 = 3600;
+const DEFAULT_RECEIPT_TTL_SECS: u64 = 3600;
 
 pub mod reason_codes {
     pub const POLICY_COMPAT_ALLOW: &str = "POLICY_COMPAT_ALLOW";
@@ -206,10 +206,23 @@ pub(crate) fn explanation_digest(
     hex::encode(hasher.finalize())
 }
 
+pub(crate) fn default_receipt_expiry_with_ttl(issued_at: &str, ttl_secs: u64) -> String {
+    if ttl_secs == DEFAULT_RECEIPT_TTL_SECS {
+        return default_receipt_expiry(issued_at);
+    }
+    DateTime::parse_from_rfc3339(issued_at)
+        .map(|ts| {
+            let ttl_secs = i64::try_from(ttl_secs.max(1)).unwrap_or(i64::MAX);
+            (ts.with_timezone(&Utc) + Duration::seconds(ttl_secs)).to_rfc3339()
+        })
+        .unwrap_or_else(|_| issued_at.to_string())
+}
+
 pub(crate) fn default_receipt_expiry(issued_at: &str) -> String {
     DateTime::parse_from_rfc3339(issued_at)
         .map(|ts| {
-            (ts.with_timezone(&Utc) + Duration::seconds(COMPAT_DEFAULT_TTL_SECS)).to_rfc3339()
+            (ts.with_timezone(&Utc) + Duration::seconds(DEFAULT_RECEIPT_TTL_SECS as i64))
+                .to_rfc3339()
         })
         .unwrap_or_else(|_| issued_at.to_string())
 }
@@ -1011,11 +1024,7 @@ impl std::error::Error for CompatGateError {}
 
 // ── Gate Evaluator ───────────────────────────────────────────────────────────
 
-/// Maximum audit log entries before oldest-first eviction.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-/// Maximum receipts before oldest-first eviction.
-const MAX_RECEIPTS: usize = 4096;
-const MAX_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_ENTRIES, MAX_RECEIPTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -1033,6 +1042,7 @@ pub struct CompatGateEvaluator {
     scopes: BTreeMap<String, ScopeConfig>,
     audit_log: Vec<GateCheckResult>,
     receipts: Vec<ModeSelectionReceipt>,
+    receipt_ttl_secs: u64,
     compiled_predicates: BTreeMap<String, CompiledPolicyPredicate>,
     validated_receipts: BTreeMap<String, String>,
     validated_predicates: BTreeMap<String, String>,
@@ -1042,17 +1052,29 @@ pub struct CompatGateEvaluator {
 
 impl CompatGateEvaluator {
     pub fn new(registry: ShimRegistry) -> Self {
+        Self::with_receipt_ttl(registry, DEFAULT_RECEIPT_TTL_SECS)
+    }
+
+    pub fn with_receipt_ttl(registry: ShimRegistry, receipt_ttl_secs: u64) -> Self {
         Self {
             registry,
             scopes: BTreeMap::new(),
             audit_log: Vec::new(),
             receipts: Vec::new(),
+            receipt_ttl_secs: receipt_ttl_secs.max(1),
             compiled_predicates: BTreeMap::new(),
             validated_receipts: BTreeMap::new(),
             validated_predicates: BTreeMap::new(),
             next_receipt_seq: 0,
             next_audit_seq: 0,
         }
+    }
+
+    pub fn from_compatibility_config(
+        registry: ShimRegistry,
+        config: &crate::config::CompatibilityConfig,
+    ) -> Self {
+        Self::with_receipt_ttl(registry, config.default_receipt_ttl_secs)
     }
 
     /// Get a reference to the shim registry.
@@ -1087,7 +1109,7 @@ impl CompatGateEvaluator {
         }
 
         let activated_at = Utc::now().to_rfc3339();
-        let expires_at = default_receipt_expiry(&activated_at);
+        let expires_at = default_receipt_expiry_with_ttl(&activated_at, self.receipt_ttl_secs);
         let scope_delta = match previous_mode {
             Some(prev) if prev != mode => vec![format!("mode:{}->{}", prev.label(), mode.label())],
             Some(prev) => vec![format!("mode:{}->{}", prev.label(), mode.label())],
@@ -1933,6 +1955,32 @@ mod tests {
         )
         .unwrap();
         eval
+    }
+
+    #[test]
+    fn evaluator_uses_configured_receipt_ttl_secs() {
+        let config = crate::config::CompatibilityConfig {
+            mode: crate::config::CompatibilityMode::Balanced,
+            emit_divergence_receipts: true,
+            default_receipt_ttl_secs: 90,
+            gate_ttl_secs: None,
+        };
+        let mut eval = CompatGateEvaluator::from_compatibility_config(sample_registry(), &config);
+        let receipt = eval
+            .set_mode(
+                "project-ttl",
+                CompatibilityMode::Balanced,
+                "admin",
+                "configured ttl",
+                true,
+            )
+            .unwrap();
+        let activated_at = chrono::DateTime::parse_from_rfc3339(&receipt.activated_at).unwrap();
+        let expires_at = chrono::DateTime::parse_from_rfc3339(&receipt.expires_at).unwrap();
+        assert_eq!(
+            expires_at.signed_duration_since(activated_at).num_seconds(),
+            90
+        );
     }
 
     fn future_window() -> (String, String) {

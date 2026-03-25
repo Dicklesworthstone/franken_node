@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const MAX_EVENTS: usize = 4096;
+use frankenengine_node::capacity_defaults::aliases::MAX_EVENTS;
 
 /// Stable event codes for BPET migration stability gates.
 pub mod event_codes {

@@ -63,8 +63,7 @@ pub mod invariants {
 
 pub const MODEL_VERSION: &str = "ted-v1.0";
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-const MAX_REPORTS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_REPORTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

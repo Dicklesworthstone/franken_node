@@ -195,6 +195,8 @@ profile = "balanced"
 mode = "balanced"
 # Divergence receipts are always recorded in production profiles
 emit_divergence_receipts = true
+# TTL for signed compatibility receipts
+default_receipt_ttl_secs = 3600
 
 [migration]
 # Enable automatic rewrite suggestions
@@ -214,6 +216,8 @@ quarantine_on_high_risk = true
 persist_high_severity = true
 # Deterministic bundle export format version
 bundle_version = "v1"
+# Maximum permitted replay capsule freshness window
+max_replay_capsule_freshness_secs = 3600
 
 [registry]
 # Enforce signature and provenance gates
@@ -229,6 +233,14 @@ convergence_timeout_seconds = 120
 # Stable metrics namespace for automation
 namespace = "franken_node"
 emit_structured_audit_events = true
+
+[remote]
+# Default TTL for remote idempotency entries
+idempotency_ttl_secs = 604800
+
+[security]
+# Maximum degraded-mode duration before suspension
+max_degraded_duration_secs = 3600
 ```
 
 ## Architecture

@@ -55,7 +55,7 @@ pub mod invariants {
 pub const SCHEMA_VERSION: &str = "seo-v1.0";
 pub const MAX_FRICTION_SCORE: f64 = 3.0;
 pub const TARGET_TTFE_SECONDS: u64 = 300;
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_STEPS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {

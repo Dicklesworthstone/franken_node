@@ -244,8 +244,7 @@ pub fn default_tuning(class: &ObjectClass) -> Option<ClassTuning> {
 // ObjectClassTuningEngine
 // ---------------------------------------------------------------------------
 
-/// Maximum events before oldest-first eviction.
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

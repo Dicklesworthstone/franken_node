@@ -12,8 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS};
 
 // ---------------------------------------------------------------------------
 // Event codes

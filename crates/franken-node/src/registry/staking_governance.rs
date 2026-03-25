@@ -31,8 +31,7 @@ use std::fmt;
 // Capacity limits
 // ---------------------------------------------------------------------------
 
-/// Maximum number of audit log entries retained.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 /// Maximum slash events before oldest-first eviction.
 const MAX_SLASH_EVENTS: usize = 4096;
 /// Maximum appeal records before oldest-first eviction.

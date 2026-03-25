@@ -56,9 +56,9 @@ pub mod invariants {
 
 pub const SCHEMA_VERSION: &str = "mvc-v1.0";
 pub const MIN_DETERMINISM_RATE: f64 = 0.99;
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-const MAX_RUNS: usize = 4096;
-const MAX_PROJECTS_PER_COHORT: usize = 4096;
+use crate::capacity_defaults::aliases::{
+    MAX_AUDIT_LOG_ENTRIES, MAX_PROJECTS_PER_COHORT, MAX_RUNS,
+};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

@@ -14,8 +14,7 @@ use sha2::{Digest, Sha256};
 
 pub const SCHEMA_VERSION: &str = "saga-v1.0";
 
-/// Maximum audit log entries before oldest are evicted.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 /// Maximum retained sagas before terminal-only reclamation or fail-closed rejection.
 const MAX_SAGAS: usize = 2048;

@@ -30,8 +30,7 @@ use std::time::Duration;
 /// Schema version for the cancellation protocol.
 pub const SCHEMA_VERSION: &str = "cancel-v1.0";
 
-/// Maximum audit log entries before oldest-first eviction.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 /// Bead identifier.
 pub const BEAD_ID: &str = "bd-1cs7";

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 use crate::runtime::checkpoint::{
     CHECKPOINT_CONTRACT_VIOLATION, CHECKPOINT_MISSING, CHECKPOINT_SAVE, CHECKPOINT_WARNING,

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// Schema version for the obligation channel protocol.
 pub const SCHEMA_VERSION: &str = "och-v1.0";
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_QUEUE_ENTRIES: usize = 4096;
 const MAX_OBLIGATION_IDS: usize = 4096;
 

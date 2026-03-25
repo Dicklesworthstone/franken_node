@@ -22,8 +22,7 @@ pub const SCHEMA_VERSION: &str = "lab-v1.0";
 // Event codes
 // ---------------------------------------------------------------------------
 
-/// Maximum number of events before oldest-first eviction.
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_REORDER_BUFFERS: usize = 4096;
 const MAX_VIRTUAL_LINKS: usize = 4096;
 

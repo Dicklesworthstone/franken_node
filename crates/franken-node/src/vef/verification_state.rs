@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 // ── Schema ──────────────────────────────────────────────────────────
 pub const SCHEMA_VERSION: &str = "verification-state-v1.0";

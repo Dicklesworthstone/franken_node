@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_DECISIONS: usize = 4096;
 const MAX_REPLAY_RESULTS: usize = 4096;
 

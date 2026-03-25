@@ -22,8 +22,7 @@ use crate::security::constant_time::ct_eq;
 // Event codes (structured logging)
 // ---------------------------------------------------------------------------
 
-/// Maximum number of audit log entries before oldest-first eviction.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 /// Maximum number of barriers per node before oldest-first eviction.
 const MAX_BARRIERS_PER_NODE: usize = 256;

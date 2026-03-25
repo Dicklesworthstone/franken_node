@@ -28,11 +28,7 @@ pub const RG_EVICTION_BLOCKED: &str = "RG_EVICTION_BLOCKED";
 pub const RG_EVICTION_PERMITTED: &str = "RG_EVICTION_PERMITTED";
 pub const RG_GATE_INITIALIZED: &str = "RG_GATE_INITIALIZED";
 
-/// Maximum number of events before oldest-first eviction.
-const MAX_EVENTS: usize = 4096;
-
-/// Maximum number of proof receipts before oldest-first eviction.
-const MAX_RECEIPTS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_RECEIPTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

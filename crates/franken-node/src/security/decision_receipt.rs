@@ -19,8 +19,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-/// Maximum receipt chain length before oldest entries are evicted.
-const MAX_RECEIPT_CHAIN: usize = 8192;
+use crate::capacity_defaults::aliases::MAX_RECEIPT_CHAIN;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

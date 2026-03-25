@@ -14,8 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::runtime::bounded_mask::{CancellationState, CapabilityContext, MaskError, bounded_mask};
 use crate::security::constant_time::ct_eq;
 
-/// Maximum number of events retained in a decision stream before oldest entries are drained.
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -51,7 +50,11 @@ fn checkpoint_is_exact_replay(latest: &CheckpointMeta, record: &CheckpointRecord
         && latest.epoch == record.epoch
         && ct_eq(&latest.checkpoint_id, &record.checkpoint_id)
         && ct_eq(&latest.progress_state_hash, &record.progress_state_hash)
-        && latest.previous_checkpoint_hash == record.previous_checkpoint_hash
+        && match (&latest.previous_checkpoint_hash, &record.previous_checkpoint_hash) {
+            (Some(a), Some(b)) => ct_eq(a, b),
+            (None, None) => true,
+            _ => false,
+        }
 }
 
 /// Event code: checkpoint write persisted.

@@ -20,7 +20,7 @@
 //! - INV-DSG-DETERMINISTIC: same scenarios always produce same exploration order
 //! - INV-DSG-SAFETY: safety properties checked at every explored state
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_REGISTERED_SCENARIOS: usize = 4096;
 
 use crate::control_plane::dpor_exploration::{

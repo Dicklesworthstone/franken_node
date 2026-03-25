@@ -41,11 +41,7 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Maximum entries before the chain refuses new appends.
-const MAX_CHAIN_ENTRIES: usize = 16384;
-
-/// Maximum checkpoints before oldest are evicted.
-const MAX_CHECKPOINTS: usize = 1024;
+use frankenengine_node::capacity_defaults::aliases::{MAX_CHAIN_ENTRIES, MAX_CHECKPOINTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -207,6 +203,7 @@ pub struct ReceiptChain {
     entries: Vec<ReceiptChainEntry>,
     checkpoints: Vec<ReceiptCheckpoint>,
     last_checkpoint_entry: usize,
+    next_checkpoint_id: u64,
 }
 
 impl ReceiptChain {
@@ -217,6 +214,7 @@ impl ReceiptChain {
             entries: Vec::new(),
             checkpoints: Vec::new(),
             last_checkpoint_entry: 0,
+            next_checkpoint_id: 0,
         }
     }
 
@@ -430,12 +428,19 @@ impl ReceiptChain {
             .last()
             .map(|checkpoint| (checkpoint.end_index as usize).saturating_add(1))
             .unwrap_or(0);
+        let next_checkpoint_id = checkpoints
+            .iter()
+            .map(|c| c.checkpoint_id)
+            .max()
+            .map(|id| id.saturating_add(1))
+            .unwrap_or(0);
         Ok(Self {
             schema_version: RECEIPT_CHAIN_SCHEMA_VERSION.to_string(),
             config,
             entries,
             checkpoints,
             last_checkpoint_entry,
+            next_checkpoint_id,
         })
     }
 
@@ -482,7 +487,7 @@ impl ReceiptChain {
             compute_checkpoint_commitment(start_index, end_index, &chain_head_hash, &self.entries)?;
 
         let checkpoint = ReceiptCheckpoint {
-            checkpoint_id: self.checkpoints.len() as u64,
+            checkpoint_id: self.next_checkpoint_id,
             start_index,
             end_index,
             entry_count: end_index.saturating_sub(start_index).saturating_add(1),
@@ -491,6 +496,7 @@ impl ReceiptChain {
             created_at_millis: now_millis,
             trace_id,
         };
+        self.next_checkpoint_id = self.next_checkpoint_id.wrapping_add(1);
         push_bounded(&mut self.checkpoints, checkpoint.clone(), MAX_CHECKPOINTS);
         self.last_checkpoint_entry = self.entries.len();
         Ok(checkpoint)

@@ -54,7 +54,7 @@ pub mod invariants {
 
 pub const METRIC_VERSION: &str = "msf-v1.0";
 pub const MAX_FAILURE_RATE: f64 = 0.05;
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_RECORDS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {

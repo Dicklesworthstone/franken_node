@@ -39,7 +39,7 @@
 
 use serde::{Deserialize, Serialize};
 
-const MAX_AUDIT_TRAIL_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_TRAIL_ENTRIES;
 
 // Re-export the core governor and its types from the runtime module.
 pub use crate::runtime::optimization_governor::{

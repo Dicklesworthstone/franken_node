@@ -492,15 +492,13 @@ impl QuarantineRegistry {
 
         if self.propagation_status.len() >= MAX_PROPAGATION_STATUS
             && !self.propagation_status.contains_key(node_id)
-        {
-            if let Some(oldest_key) = self
+            && let Some(oldest_key) = self
                 .propagation_status
                 .iter()
                 .min_by_key(|(_, ts)| ts.as_str())
                 .map(|(k, _)| k.clone())
-            {
-                self.propagation_status.remove(&oldest_key);
-            }
+        {
+            self.propagation_status.remove(&oldest_key);
         }
         self.propagation_status
             .insert(node_id.to_owned(), timestamp.to_owned());

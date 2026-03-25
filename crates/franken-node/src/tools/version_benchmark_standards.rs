@@ -56,7 +56,7 @@ pub mod invariants {
     pub const INV_BSV_GATED: &str = "INV-BSV-GATED";
 }
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

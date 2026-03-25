@@ -66,11 +66,20 @@ impl LockstepHarness {
     }
 
     fn resolve_runtime_binary(runtime: &str) -> String {
+        Self::resolve_runtime_binary_with(runtime, &|configured_hint| {
+            crate::ops::engine_dispatcher::resolve_engine_binary_path(configured_hint)
+        })
+    }
+
+    fn resolve_runtime_binary_with(
+        runtime: &str,
+        franken_resolver: &impl Fn(&str) -> String,
+    ) -> String {
         match runtime {
             "node" => "node".to_string(),
             "bun" => "bun".to_string(),
             runtime_name if Self::is_franken_runtime(runtime_name) => {
-                crate::ops::engine_dispatcher::resolve_engine_binary_path("franken-engine")
+                franken_resolver("franken-engine")
             }
             _ => runtime.to_string(),
         }
@@ -738,6 +747,14 @@ mod tests {
             LockstepHarness::resolve_runtime_binary("custom-runtime"),
             "custom-runtime"
         );
+    }
+
+    #[test]
+    fn resolve_runtime_binary_uses_shared_franken_resolver() {
+        let resolved = LockstepHarness::resolve_runtime_binary_with("franken-node", &|_| {
+            "/configured/franken-engine".to_string()
+        });
+        assert_eq!(resolved, "/configured/franken-engine");
     }
 
     #[test]

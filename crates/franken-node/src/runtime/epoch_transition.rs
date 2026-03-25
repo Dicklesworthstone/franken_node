@@ -18,7 +18,7 @@ use crate::control_plane::transition_abort::{
     ParticipantAbortState, TransitionAbortManager, TransitionAbortReason,
 };
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_HISTORY_ENTRIES: usize = 4096;
 
 pub const EPOCH_PROPOSED: &str = "EPOCH_PROPOSED";

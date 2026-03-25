@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use uuid::Uuid;
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_DEPLOYMENTS: usize = 4096;
 const MAX_OUTCOMES: usize = 4096;
 

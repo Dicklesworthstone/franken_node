@@ -14,10 +14,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::fmt;
 
-/// Maximum consumed nonces retained for replay detection before oldest-first
-/// eviction.  Without this cap an adversary controlling token creation could
-/// exhaust memory by verifying many unique-nonce proofs over a long epoch.
-const MAX_CONSUMED_NONCES: usize = 65_536;
+use crate::capacity_defaults::aliases::MAX_CONSUMED_NONCES;
 
 // ---------------------------------------------------------------------------
 // Event codes

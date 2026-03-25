@@ -118,11 +118,7 @@ pub struct EphemeralSecretTracker {
 
 impl EphemeralSecretTracker {
     pub fn mount(&mut self, secret_ref: &str) {
-        push_bounded(
-            &mut self.mounted,
-            secret_ref.to_string(),
-            MAX_MOUNTED_SECRETS,
-        );
+        self.mounted.push(secret_ref.to_string());
     }
 
     /// Clean up all mounted secrets. Idempotent.
@@ -230,6 +226,24 @@ pub fn activate(input: &ActivationInput, executor: &dyn StageExecutor) -> Activa
     }
 
     // Stage 2: SecretMount
+    if input.secret_refs.len() > MAX_MOUNTED_SECRETS {
+        stages.push(StageResult {
+            stage: ActivationStage::SecretMount,
+            success: false,
+            error: Some(StageError::SecretMountFailed {
+                reason: format!("exceeded max secrets {}", MAX_MOUNTED_SECRETS),
+            }),
+            timestamp: input.timestamp.clone(),
+        });
+        tracker.cleanup();
+        return ActivationTranscript {
+            connector_id: input.connector_id.clone(),
+            stages,
+            completed: false,
+            trace_id: input.trace_id.clone(),
+        };
+    }
+
     match executor.mount_secrets(&input.secret_refs) {
         Ok(mounted) => {
             for m in &mounted {
@@ -347,19 +361,15 @@ pub fn transcripts_match(a: &ActivationTranscript, b: &ActivationTranscript) -> 
         return false;
     }
     for (sa, sb) in a.stages.iter().zip(b.stages.iter()) {
-        if sa.stage != sb.stage || sa.success != sb.success || sa.error != sb.error || sa.timestamp != sb.timestamp {
+        if sa.stage != sb.stage
+            || sa.success != sb.success
+            || sa.error != sb.error
+            || sa.timestamp != sb.timestamp
+        {
             return false;
         }
     }
     true
-}
-
-fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
-        items.drain(0..overflow);
-    }
 }
 
 #[cfg(test)]

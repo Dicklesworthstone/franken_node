@@ -71,11 +71,7 @@ pub const INV_SMO_FLAGPARSE: &str = "INV-SMO-FLAGPARSE";
 /// INV-SMO-RECOVERY
 pub const INV_SMO_RECOVERY: &str = "INV-SMO-RECOVERY";
 
-/// Maximum number of events retained in a `SafeModeController`.
-const MAX_EVENTS: usize = 4096;
-
-/// Maximum number of audit-log entries retained in a `SafeModeController`.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS};
 
 // ---------------------------------------------------------------------------
 // Types

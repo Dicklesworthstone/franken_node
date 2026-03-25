@@ -10,8 +10,7 @@ use std::fmt;
 
 use crate::security::remote_cap::{CapabilityGate, RemoteCap, RemoteOperation};
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-const MAX_RULES: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_RULES};
 
 /// Network protocol for egress rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

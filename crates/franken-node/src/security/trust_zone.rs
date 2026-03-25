@@ -24,7 +24,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_ALLOWED_CROSS_ZONE_TARGETS: usize = 4096;
 const MAX_KEY_ZONE_BINDINGS_PER_KEY: usize = 4096;
 

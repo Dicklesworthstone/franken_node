@@ -49,7 +49,7 @@ pub const MIN_CASE_STUDIES: usize = 3;
 pub const MIN_SECURITY_IMPROVEMENT_CASE_STUDIES: usize = 2;
 pub const MIN_INDUSTRY_SUBMISSIONS: usize = 1;
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

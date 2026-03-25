@@ -28,7 +28,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 /// Maximum evidence records in the verification endpoint store.
 const MAX_EVIDENCE_RECORDS: usize = 8192;
 

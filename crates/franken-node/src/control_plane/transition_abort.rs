@@ -20,12 +20,7 @@ use std::fmt;
 
 /// Schema version for abort event records.
 pub const SCHEMA_VERSION: &str = "ta-v1.0";
-/// Maximum in-memory abort events retained before oldest entries are evicted.
-pub const MAX_ABORT_EVENTS: usize = 4_096;
-/// Maximum in-memory force-transition events retained before oldest entries are evicted.
-pub const MAX_FORCE_EVENTS: usize = 4_096;
-/// Maximum in-memory audit records retained before oldest entries are evicted.
-pub const MAX_AUDIT_LOG_ENTRIES: usize = 4_096;
+pub use crate::capacity_defaults::aliases::{MAX_ABORT_EVENTS, MAX_AUDIT_LOG_ENTRIES, MAX_FORCE_EVENTS};
 
 // ---- Event codes ----
 

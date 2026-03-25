@@ -22,7 +22,7 @@
 //! - **INV-VTK-VERSIONED**: Toolkit version embedded in every report.
 //! - **INV-VTK-GATED**: Validation failures block claim publication.
 
-use chrono::{TimeZone, Utc};
+use chrono::{Datelike, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
@@ -57,9 +57,17 @@ pub mod invariants {
 
 pub const TOOLKIT_VERSION: &str = "vtk-v1.0";
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-const MAX_REPORTS: usize = 4096;
-const DETERMINISTIC_TIME_BASE_SECONDS: i64 = 1_735_689_600; // 2025-01-01T00:00:00Z
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_REPORTS};
+/// Compute the Unix epoch timestamp for January 1 of the current year.
+fn current_year_base() -> i64 {
+    let now = chrono::Utc::now();
+    let year = now.year();
+    chrono::NaiveDate::from_ymd_opt(year, 1, 1)
+        .and_then(|d| d.and_hms_opt(0, 0, 0))
+        .map(|dt| dt.and_utc().timestamp())
+        .unwrap_or(1_735_689_600) // fallback to 2025-01-01 if date math fails
+}
+
 const DETERMINISTIC_TIME_WINDOW_SECONDS: u64 = 365 * 24 * 60 * 60;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
@@ -95,8 +103,9 @@ fn deterministic_timestamp(domain: &[u8], fields: &[&str], ordinal: usize) -> St
     prefix.copy_from_slice(&digest[..8]);
     let offset = (u64::from_le_bytes(prefix) % DETERMINISTIC_TIME_WINDOW_SECONDS)
         .saturating_add(ordinal as u64);
+    let base = current_year_base();
     let timestamp = Utc
-        .timestamp_opt(DETERMINISTIC_TIME_BASE_SECONDS + offset as i64, 0)
+        .timestamp_opt(base.saturating_add(offset as i64), 0)
         .single()
         .expect("deterministic timestamp must be representable");
     timestamp.to_rfc3339()
@@ -504,12 +513,9 @@ impl VerifierToolkit {
             passed: metrics_ok,
             evidence_hash: metrics_hash.clone(),
             detail: if metrics_ok {
-                format!(
-                    "All {} metrics within thresholds",
-                    claim.metric_values.len()
-                )
+                "All required metrics within thresholds".to_string()
             } else {
-                "One or more metrics below threshold".to_string()
+                "One or more required metrics missing or below threshold".to_string()
             },
         });
 
@@ -612,6 +618,7 @@ impl VerifierToolkit {
             && !claim.description.is_empty()
             && !claim.source_bead.is_empty()
             && !claim.metric_values.is_empty()
+            && self.threshold_keys_have_matching_metrics(claim)
     }
 
     fn verify_evidence_hash(&self, claim: &VerifiableClaim) -> bool {
@@ -624,26 +631,43 @@ impl VerifierToolkit {
             && claim.evidence_hash.chars().all(|c| c.is_ascii_hexdigit())
     }
 
+    fn threshold_keys_have_matching_metrics(&self, claim: &VerifiableClaim) -> bool {
+        claim
+            .thresholds
+            .keys()
+            .all(|metric_key| claim.metric_values.contains_key(metric_key))
+    }
+
     fn check_metrics_thresholds(&self, claim: &VerifiableClaim) -> bool {
-        for (metric_key, value) in &claim.metric_values {
-            // NaN/Inf metric values are invalid — fail closed.
+        if !self.threshold_keys_have_matching_metrics(claim) {
+            return false;
+        }
+
+        for value in claim.metric_values.values() {
             if !value.is_finite() {
                 return false;
             }
-            if let Some(threshold) = claim.thresholds.get(metric_key) {
-                // NaN/Inf thresholds are invalid — fail closed.
-                if !threshold.is_finite() {
-                    return false;
-                }
-                if value < threshold {
-                    return false;
-                }
+        }
+
+        for (metric_key, threshold) in &claim.thresholds {
+            // NaN/Inf thresholds are invalid — fail closed.
+            if !threshold.is_finite() {
+                return false;
+            }
+            let Some(value) = claim.metric_values.get(metric_key) else {
+                return false;
+            };
+            if value < threshold {
+                return false;
             }
         }
         true
     }
 
     fn cross_check_claim(&self, claim: &VerifiableClaim) -> bool {
+        if !self.threshold_keys_have_matching_metrics(claim) {
+            return false;
+        }
         // Cross-check: all metrics must be finite and non-negative.
         for value in claim.metric_values.values() {
             if !value.is_finite() || *value < 0.0 {
@@ -768,6 +792,12 @@ mod tests {
         }
     }
 
+    fn claim_missing_threshold_metric(id: &str) -> VerifiableClaim {
+        let mut claim = sample_claim(id);
+        claim.metric_values.remove("latency");
+        claim
+    }
+
     // === Claim types ===
 
     #[test]
@@ -804,6 +834,13 @@ mod tests {
         let toolkit = VerifierToolkit::default();
         let mut claim = sample_claim("test-1");
         claim.metric_values.clear();
+        assert!(!toolkit.validate_schema(&claim));
+    }
+
+    #[test]
+    fn missing_threshold_metric_fails_schema() {
+        let toolkit = VerifierToolkit::default();
+        let claim = claim_missing_threshold_metric("test-missing-schema");
         assert!(!toolkit.validate_schema(&claim));
     }
 
@@ -848,6 +885,13 @@ mod tests {
         assert!(!toolkit.check_metrics_thresholds(&claim));
     }
 
+    #[test]
+    fn missing_threshold_metric_fails_threshold_check() {
+        let toolkit = VerifierToolkit::default();
+        let claim = claim_missing_threshold_metric("test-missing-threshold");
+        assert!(!toolkit.check_metrics_thresholds(&claim));
+    }
+
     // === Cross-check ===
 
     #[test]
@@ -862,6 +906,13 @@ mod tests {
         let toolkit = VerifierToolkit::default();
         let mut claim = sample_claim("test-1");
         claim.metric_values.insert("bad".to_string(), -1.0);
+        assert!(!toolkit.cross_check_claim(&claim));
+    }
+
+    #[test]
+    fn missing_threshold_metric_fails_crosscheck() {
+        let toolkit = VerifierToolkit::default();
+        let claim = claim_missing_threshold_metric("test-missing-crosscheck");
         assert!(!toolkit.cross_check_claim(&claim));
     }
 
@@ -1085,7 +1136,9 @@ mod tests {
     fn infinity_metric_value_fails_threshold_check() {
         let toolkit = VerifierToolkit::default();
         let mut claim = sample_claim("inf-val");
-        claim.metric_values.insert("score".to_string(), f64::INFINITY);
+        claim
+            .metric_values
+            .insert("score".to_string(), f64::INFINITY);
         assert!(!toolkit.check_metrics_thresholds(&claim));
     }
 
@@ -1120,5 +1173,17 @@ mod tests {
         claim.metric_values.insert("score".to_string(), f64::NAN);
         let report = toolkit.validate_claims(&[claim], &make_trace());
         assert_eq!(report.overall_verdict, ValidationVerdict::Fail);
+    }
+
+    #[test]
+    fn missing_threshold_metric_fails_full_validation() {
+        let mut toolkit = VerifierToolkit::default();
+        let claim = claim_missing_threshold_metric("missing-full");
+        let report = toolkit.validate_claims(&[claim], &make_trace());
+        assert_eq!(report.overall_verdict, ValidationVerdict::Fail);
+        assert!(!report.claim_results[0].schema_valid);
+        assert!(!report.claim_results[0].metrics_within_thresholds);
+        assert!(!report.claim_results[0].cross_check_passed);
+        assert!(!report.claim_results[0].overall_valid);
     }
 }

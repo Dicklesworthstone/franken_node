@@ -34,7 +34,7 @@ pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 30_000;
 /// Minimum drain timeout in milliseconds.
 pub const MIN_DRAIN_TIMEOUT_MS: u64 = 500;
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_CHILD_TASKS: usize = 1024;
 
 // ---------------------------------------------------------------------------

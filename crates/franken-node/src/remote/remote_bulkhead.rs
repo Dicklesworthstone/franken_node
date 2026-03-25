@@ -19,8 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
 
-const MAX_BULKHEAD_EVENTS: usize = 1024;
-const MAX_LATENCY_SAMPLES: usize = 1024;
+use crate::capacity_defaults::aliases::{MAX_BULKHEAD_EVENTS, MAX_LATENCY_SAMPLES};
 
 /// Stable event codes for bulkhead telemetry.
 pub mod event_codes {

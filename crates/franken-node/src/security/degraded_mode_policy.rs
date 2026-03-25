@@ -10,7 +10,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::config::SecurityConfig;
+
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_TRIGGER_CONDITIONS: usize = 4096;
 const MAX_MANDATORY_AUDIT_EVENTS: usize = 4096;
 const MAX_AUTO_RECOVERY_CRITERIA: usize = 4096;
@@ -63,6 +65,11 @@ impl DegradedModePolicy {
             stabilization_window_secs: DEFAULT_STABILIZATION_WINDOW_SECS,
             max_degraded_duration_secs: DEFAULT_MAX_DEGRADED_DURATION_SECS,
         }
+    }
+
+    #[must_use]
+    pub fn with_security_defaults(mode_name: impl Into<String>, config: &SecurityConfig) -> Self {
+        Self::new(mode_name).with_max_degraded_duration(config.max_degraded_duration_secs)
     }
 
     #[must_use]
@@ -683,6 +690,15 @@ mod tests {
             })
             .with_stabilization_window(300)
             .with_max_degraded_duration(120)
+    }
+
+    #[test]
+    fn policy_uses_security_config_defaults() {
+        let config = SecurityConfig {
+            max_degraded_duration_secs: 42,
+        };
+        let policy = DegradedModePolicy::with_security_defaults("trust-input-stale", &config);
+        assert_eq!(policy.max_degraded_duration_secs, 42);
     }
 
     #[test]

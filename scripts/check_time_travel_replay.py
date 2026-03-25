@@ -87,9 +87,12 @@ def _checks() -> list:
     results.append(_check("module wired in replay/mod.rs",
                           "pub mod time_travel_engine;" in mod_src,
                           "replay/mod.rs contains pub mod time_travel_engine"))
-    results.append(_check("replay module wired in main.rs",
-                          "pub mod replay;" in main_src,
-                          "main.rs contains pub mod replay"))
+    
+    lib_src = _read(ROOT / "crates" / "franken-node" / "src" / "lib.rs")
+    results.append(_check("replay module wired in lib.rs",
+                          "pub mod replay;" in lib_src,
+                          "lib.rs contains pub mod replay"))
+    
     results.append(_check("spec contract exists", SPEC.exists(), _safe_rel(SPEC)))
     results.append(_check("test suite exists", TEST_SUITE.exists(), _safe_rel(TEST_SUITE)))
     results.append(_check("verification evidence exists", EVIDENCE.exists(), _safe_rel(EVIDENCE)))

@@ -53,7 +53,7 @@ pub mod invariants {
 
 pub const SCHEMA_VERSION: &str = "vbr-v1.0";
 pub const MIN_QUALITY_SCORE: f64 = 0.8;
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_DOWNLOADS: usize = 4096;
 const MAX_ARTIFACTS_PER_RELEASE: usize = 256;
 

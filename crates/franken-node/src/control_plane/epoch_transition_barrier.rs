@@ -34,8 +34,7 @@ pub const DEFAULT_BARRIER_TIMEOUT_MS: u64 = 30_000;
 /// Default per-participant drain timeout in milliseconds.
 pub const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 10_000;
 
-/// Max number of retained barrier audit history entries.
-const MAX_BARRIER_HISTORY: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_BARRIER_HISTORY;
 
 /// Max number of transcript entries per barrier before oldest-first eviction.
 const MAX_TRANSCRIPT_ENTRIES: usize = 4096;

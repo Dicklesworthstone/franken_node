@@ -43,14 +43,7 @@ pub mod event_codes {
 // Invariant constants
 // ---------------------------------------------------------------------------
 
-/// Maximum number of events before oldest-first eviction.
-const MAX_EVENTS: usize = 4096;
-
-/// Maximum number of audit log entries before oldest-first eviction.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-
-/// Maximum number of schema version records retained.
-const MAX_SCHEMA_VERSIONS: usize = 1024;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS, MAX_SCHEMA_VERSIONS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

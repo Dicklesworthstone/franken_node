@@ -13,8 +13,7 @@ use uuid::Uuid;
 // Event codes
 // ---------------------------------------------------------------------------
 
-/// Maximum number of audit log entries before oldest-first eviction.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 pub mod event_codes {
     pub const BPET_RISK_PRICED: &str = "BPET-ECON-001";

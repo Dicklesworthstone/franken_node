@@ -58,7 +58,7 @@ pub mod invariants {
 
 pub const SCHEMA_VERSION: &str = "rte-v1.0";
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_FINDINGS_PER_ENGAGEMENT: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {

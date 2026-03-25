@@ -30,6 +30,7 @@ pub struct MmrRoot {
 /// Inclusion proof for one marker in a specific checkpoint.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InclusionProof {
+    /// Zero-based leaf position within the retained checkpoint window.
     pub leaf_index: u64,
     pub tree_size: u64,
     pub leaf_hash: Hash,
@@ -213,16 +214,12 @@ impl MmrCheckpoint {
             return Err(ProofError::MmrDisabled);
         }
 
-        self.leaf_hashes = stream
-            .range(0, stream.len() as u64)
-            .iter()
-            .map(|marker| marker_leaf_hash(&marker.marker_hash))
-            .collect();
+        self.leaf_hashes = retained_leaf_hashes(stream)?;
 
         let root_hash =
             merkle_root_from_leaf_hashes(&self.leaf_hashes).ok_or(ProofError::EmptyCheckpoint)?;
         let root = MmrRoot {
-            tree_size: self.tree_size(),
+            tree_size: stream.len() as u64,
             root_hash,
         };
         self.latest_root = Some(root.clone());
@@ -237,45 +234,11 @@ impl MmrCheckpoint {
         if !self.enabled {
             return Err(ProofError::MmrDisabled);
         }
-
-        let stream_size = stream.len();
-        if stream_size <= self.leaf_hashes.len() {
-            return self.rebuild_from_stream(stream);
-        }
-
-        // When stream is larger than capacity, only retain the most recent
-        // MAX_LEAF_HASHES entries to avoid an infinite loop where push_bounded
-        // evicts as fast as we push.
-        let start_idx = if stream_size > MAX_LEAF_HASHES {
-            self.leaf_hashes.clear();
-            (stream_size - MAX_LEAF_HASHES) as u64
-        } else {
-            self.leaf_hashes.len() as u64
-        };
-
-        for idx in start_idx..(stream_size as u64) {
-            let marker = stream.get(idx).ok_or(ProofError::InvalidProof {
-                reason: format!("marker missing at sequence {idx}"),
-            })?;
-            push_bounded(
-                &mut self.leaf_hashes,
-                marker_leaf_hash(&marker.marker_hash),
-                MAX_LEAF_HASHES,
-            );
-        }
-
-        let root_hash =
-            merkle_root_from_leaf_hashes(&self.leaf_hashes).ok_or(ProofError::EmptyCheckpoint)?;
-        let root = MmrRoot {
-            tree_size: self.tree_size(),
-            root_hash,
-        };
-        self.latest_root = Some(root.clone());
-        Ok(root)
+        self.rebuild_from_stream(stream)
     }
 }
 
-/// Build an inclusion proof for a marker sequence in the provided stream.
+/// Build an inclusion proof for an absolute marker sequence in the provided stream.
 pub fn mmr_inclusion_proof(
     stream: &MarkerStream,
     checkpoint: &MmrCheckpoint,
@@ -290,27 +253,29 @@ pub fn mmr_inclusion_proof(
         return Err(ProofError::EmptyCheckpoint);
     }
 
-    if checkpoint.tree_size() != stream_size {
+    let leaf_hashes = retained_leaf_hashes(stream)?;
+    let current_root_hash =
+        merkle_root_from_leaf_hashes(&leaf_hashes).ok_or(ProofError::EmptyCheckpoint)?;
+    let checkpoint_root = checkpoint_root_or_err(checkpoint)?;
+    if checkpoint_root.tree_size != stream_size
+        || !ct_eq(&checkpoint_root.root_hash, &current_root_hash)
+    {
         return Err(ProofError::CheckpointStale {
-            checkpoint_tree_size: checkpoint.tree_size(),
+            checkpoint_tree_size: checkpoint_root.tree_size,
             stream_tree_size: stream_size,
         });
     }
 
-    if seq >= stream_size {
+    let window_start = retained_window_start(stream)?;
+    let window_end = window_start.saturating_add(stream_size);
+    if seq < window_start || seq >= window_end {
         return Err(ProofError::SequenceOutOfRange {
             sequence: seq,
             tree_size: stream_size,
         });
     }
 
-    let leaf_hashes: Vec<Hash> = stream
-        .range(0, stream_size)
-        .iter()
-        .map(|marker| marker_leaf_hash(&marker.marker_hash))
-        .collect();
-
-    let leaf_index = seq as usize;
+    let leaf_index = (seq - window_start) as usize;
     let leaf_hash = leaf_hashes
         .get(leaf_index)
         .cloned()
@@ -324,7 +289,7 @@ pub fn mmr_inclusion_proof(
         })?;
 
     Ok(InclusionProof {
-        leaf_index: seq,
+        leaf_index: leaf_index as u64,
         tree_size: stream_size,
         leaf_hash,
         audit_path,
@@ -415,6 +380,12 @@ pub fn mmr_prefix_proof(
     let prefix_root_from_super =
         merkle_root_from_leaf_hashes(&checkpoint_b.leaf_hashes[..prefix_size])
             .ok_or(ProofError::EmptyCheckpoint)?;
+    if !ct_eq(&prefix_root_from_super, &root_a.root_hash) {
+        return Err(ProofError::InvalidProof {
+            reason: "super-checkpoint retained window does not witness the requested prefix"
+                .to_string(),
+        });
+    }
 
     Ok(PrefixProof {
         prefix_size: root_a.tree_size,
@@ -471,6 +442,23 @@ pub fn verify_prefix(
 #[must_use]
 pub fn marker_leaf_hash(marker_hash: &str) -> Hash {
     sha256_hex(format!("leaf:{marker_hash}").as_bytes())
+}
+
+fn retained_window_start(stream: &MarkerStream) -> Result<u64, ProofError> {
+    stream
+        .first()
+        .map(|marker| marker.sequence)
+        .ok_or(ProofError::EmptyCheckpoint)
+}
+
+fn retained_leaf_hashes(stream: &MarkerStream) -> Result<Vec<Hash>, ProofError> {
+    let window_start = retained_window_start(stream)?;
+    let window_end = window_start.saturating_add(stream.len() as u64);
+    Ok(stream
+        .range(window_start, window_end)
+        .iter()
+        .map(|marker| marker_leaf_hash(&marker.marker_hash))
+        .collect())
 }
 
 fn checkpoint_root_or_err(checkpoint: &MmrCheckpoint) -> Result<&MmrRoot, ProofError> {
@@ -657,6 +645,17 @@ mod tests {
     }
 
     #[test]
+    fn inclusion_proof_rejects_same_length_stale_checkpoint_after_eviction() {
+        let checkpoint = build_checkpoint(&build_stream(MAX_LEAF_HASHES as u64));
+        let stream = build_stream((MAX_LEAF_HASHES as u64) + 4);
+        let first_retained_sequence = stream.first().expect("first").sequence;
+
+        let err = mmr_inclusion_proof(&stream, &checkpoint, first_retained_sequence)
+            .expect_err("same-length stale");
+        assert_eq!(err.code(), "MMR_CHECKPOINT_STALE");
+    }
+
+    #[test]
     fn prefix_proof_verifies_matching_prefix() {
         let stream_a = build_stream(5);
         let stream_b = build_stream(10);
@@ -681,6 +680,15 @@ mod tests {
 
         let err = mmr_prefix_proof(&checkpoint_large, &checkpoint_small).expect_err("invalid");
         assert_eq!(err.code(), "MMR_PREFIX_SIZE_INVALID");
+    }
+
+    #[test]
+    fn prefix_proof_rejects_shifted_retained_windows_after_eviction() {
+        let checkpoint_a = build_checkpoint(&build_stream(MAX_LEAF_HASHES as u64));
+        let checkpoint_b = build_checkpoint(&build_stream((MAX_LEAF_HASHES as u64) + 4));
+
+        let err = mmr_prefix_proof(&checkpoint_a, &checkpoint_b).expect_err("shifted");
+        assert_eq!(err.code(), "MMR_INVALID_PROOF");
     }
 
     #[test]
@@ -733,6 +741,41 @@ mod tests {
             "expected <= 14, got {}",
             proof.audit_path.len()
         );
+    }
+
+    #[test]
+    fn rebuild_from_stream_keeps_full_retained_window_after_eviction() {
+        let stream = build_stream((MAX_LEAF_HASHES as u64) + 4);
+        let checkpoint = build_checkpoint(&stream);
+
+        assert_eq!(checkpoint.tree_size(), MAX_LEAF_HASHES as u64);
+        assert_eq!(checkpoint.leaf_hashes().len(), MAX_LEAF_HASHES);
+        assert_eq!(stream.first().expect("first").sequence, 4);
+        assert_eq!(stream.len(), MAX_LEAF_HASHES);
+    }
+
+    #[test]
+    fn inclusion_proof_uses_retained_window_index_after_eviction() {
+        let stream = build_stream((MAX_LEAF_HASHES as u64) + 4);
+        let checkpoint = build_checkpoint(&stream);
+        let root = checkpoint.root().expect("root");
+
+        let first_retained_sequence = stream.first().expect("first").sequence;
+        let proof =
+            mmr_inclusion_proof(&stream, &checkpoint, first_retained_sequence).expect("proof");
+        let marker = stream.get(first_retained_sequence).expect("marker");
+
+        assert_eq!(proof.leaf_index, 0);
+        verify_inclusion(&proof, root, &marker.marker_hash).expect("verify");
+    }
+
+    #[test]
+    fn inclusion_proof_rejects_evicted_sequence_after_eviction() {
+        let stream = build_stream((MAX_LEAF_HASHES as u64) + 4);
+        let checkpoint = build_checkpoint(&stream);
+        let err = mmr_inclusion_proof(&stream, &checkpoint, 0).expect_err("evicted");
+
+        assert_eq!(err.code(), "MMR_SEQUENCE_OUT_OF_RANGE");
     }
 
     #[test]

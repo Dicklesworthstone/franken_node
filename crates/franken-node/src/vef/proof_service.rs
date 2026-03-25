@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-const MAX_EVENTS: usize = 4096;
+use frankenengine_node::capacity_defaults::aliases::MAX_EVENTS;
 
 /// Constant-time string comparison (inline to avoid cross-crate path issues in test harnesses).
 fn ct_eq_inline(a: &str, b: &str) -> bool {

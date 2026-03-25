@@ -31,9 +31,8 @@ use uuid::Uuid;
 
 use crate::security::constant_time::ct_eq;
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_RUNS};
 const MAX_COMPARISONS: usize = 4096;
-const MAX_RUNS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

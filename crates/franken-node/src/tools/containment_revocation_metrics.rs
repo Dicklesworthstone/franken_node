@@ -60,8 +60,7 @@ pub mod invariants {
 
 pub const METRIC_VERSION: &str = "crm-v1.0";
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

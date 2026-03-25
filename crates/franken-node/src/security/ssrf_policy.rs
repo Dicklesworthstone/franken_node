@@ -10,7 +10,7 @@ use std::fmt;
 
 use super::network_guard::{Action, EgressPolicy, EgressRule, Protocol};
 
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_ALLOWLIST_ENTRIES: usize = 4096;
 
 // ── CIDR range ──────────────────────────────────────────────────────

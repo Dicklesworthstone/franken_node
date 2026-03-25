@@ -391,12 +391,12 @@ impl fmt::Display for DporError {
     }
 }
 
-/// Maximum audit log entries before oldest-first eviction.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
-/// Maximum exploration results before oldest-first eviction.
-const MAX_RESULTS: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_RESULTS};
 const MAX_OPERATIONS: usize = 4096;
 const MAX_SAFETY_PROPERTIES: usize = 4096;
+/// Conservative cap on materialized schedules until exploration enforces
+/// `ExplorationBudget` incrementally during traversal.
+const MAX_MATERIALIZED_SCHEDULES: usize = 100;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
@@ -559,7 +559,13 @@ impl DporExplorer {
         let mut current = Vec::new();
         let mut used = vec![false; ops.len()];
 
-        self.permute_topo(ops, &mut used, &mut current, &mut results, 100);
+        self.permute_topo(
+            ops,
+            &mut used,
+            &mut current,
+            &mut results,
+            MAX_MATERIALIZED_SCHEDULES,
+        );
         results
     }
 
@@ -892,6 +898,24 @@ mod tests {
             .unwrap();
         assert!(result.coverage_pct > 0.0);
         assert!(result.coverage_pct <= 100.0);
+    }
+
+    #[test]
+    fn generate_linearizations_caps_materialized_schedules() {
+        let e = DporExplorer::default();
+        let mut model = ProtocolModel::new(ProtocolModelId::Custom("wide".into()), "wide");
+        for idx in 0..7 {
+            model.add_operation(Operation::new(
+                &format!("op-{idx}"),
+                "actor",
+                &format!("operation {idx}"),
+            ));
+        }
+        model.add_safety_property(SafetyProperty::new("safe", "placeholder"));
+
+        let schedules = e.generate_linearizations(&model);
+
+        assert_eq!(schedules.len(), MAX_MATERIALIZED_SCHEDULES);
     }
 
     // ---- Audit log ----

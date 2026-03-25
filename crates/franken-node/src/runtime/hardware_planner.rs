@@ -34,8 +34,7 @@ pub const SCHEMA_VERSION: &str = "hwp-v1.0";
 /// Maximum valid risk level (inclusive).
 pub const MAX_RISK_LEVEL: u32 = 100;
 
-/// Maximum number of audit-log entries retained (ring-buffer style).
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_DECISIONS: usize = 4096;
 const MAX_DISPATCHES: usize = 4096;
 
@@ -1113,11 +1112,9 @@ impl HardwarePlanner {
         }
 
         self.active_placements.remove(workload_id);
-        let prof = self
-            .profiles
-            .get_mut(target_profile_id)
-            .expect("profile existence checked above");
-        prof.used_slots = prof.used_slots.saturating_sub(1);
+        if let Some(prof) = self.profiles.get_mut(target_profile_id) {
+            prof.used_slots = prof.used_slots.saturating_sub(1);
+        }
         Ok(())
     }
 

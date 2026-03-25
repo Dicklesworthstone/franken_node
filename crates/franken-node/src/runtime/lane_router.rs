@@ -29,7 +29,7 @@ pub mod error_codes {
 
 const MAX_OPERATION_ID_LEN: usize = 256;
 const MAX_QUEUE_WAIT_SAMPLES: usize = 1024;
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum ProductLane {
@@ -1024,6 +1024,7 @@ mod tests {
             remote_max_in_flight: 50,
             bulkhead_retry_after_ms: 20,
             lanes,
+            drain_timeout_ms: None,
         }
     }
 

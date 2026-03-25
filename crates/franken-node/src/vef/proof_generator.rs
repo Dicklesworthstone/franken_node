@@ -23,7 +23,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-const MAX_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 /// Schema version for proof generator output format.
 pub const PROOF_GENERATOR_SCHEMA_VERSION: &str = "vef-proof-generator-v1";

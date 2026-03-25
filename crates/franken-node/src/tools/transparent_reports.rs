@@ -57,7 +57,7 @@ pub mod invariants {
 }
 
 pub const REPORT_VERSION: &str = "tr-v1.0";
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_CORRECTIVE_ACTIONS: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {

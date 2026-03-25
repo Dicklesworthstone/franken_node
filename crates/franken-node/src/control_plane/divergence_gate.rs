@@ -401,10 +401,7 @@ pub struct RecoveryResult {
 // ControlPlaneDivergenceGate
 // ---------------------------------------------------------------------------
 
-/// Maximum events before oldest-first eviction.
-const MAX_EVENTS: usize = 4096;
-/// Maximum audit log entries before oldest-first eviction.
-const MAX_AUDIT_LOG_ENTRIES: usize = 4096;
+use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS};
 /// Maximum blocked mutations before oldest-first eviction.
 const MAX_BLOCKED_MUTATIONS: usize = 4096;
 /// Maximum quarantined partitions before oldest-first eviction.

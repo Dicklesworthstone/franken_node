@@ -343,7 +343,7 @@ pub struct ControlChannel {
     audit_log: Vec<ChannelAuditEntry>,
 }
 
-const MAX_SEEN_NONCES: usize = 8192;
+use crate::capacity_defaults::aliases::MAX_SEEN_NONCES;
 
 impl ControlChannel {
     pub fn new(config: ChannelConfig, root_secret: RootSecret) -> Result<Self, ChannelError> {

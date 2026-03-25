@@ -524,8 +524,7 @@ impl std::fmt::Display for SessionError {
 ///
 /// # INV-SCC-TERMINATED
 /// Once terminated, a session rejects all further messages.
-/// Maximum session events before oldest-first eviction.
-const MAX_SESSION_EVENTS: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_SESSION_EVENTS;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);

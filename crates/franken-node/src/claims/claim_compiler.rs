@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
-const MAX_BLOCKED_SOURCES: usize = 4096;
+use crate::capacity_defaults::aliases::MAX_BLOCKED_SOURCES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
