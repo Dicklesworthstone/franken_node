@@ -416,7 +416,9 @@ mod connector_runtime_integration_tests {
 
         // Build a policy with a very small cap
         let mut policy = LaneMappingPolicy::new();
-        policy.add_lane(LaneConfig::new(SchedulerLane::Maintenance, 20, 2));
+        policy
+            .add_lane(LaneConfig::new(SchedulerLane::Maintenance, 20, 2))
+            .expect("test policy should not duplicate maintenance lane");
         policy.add_rule(
             &task_classes::garbage_collection(),
             SchedulerLane::Maintenance,
@@ -673,7 +675,9 @@ mod connector_runtime_integration_tests {
         let mut policy = LaneMappingPolicy::new();
         let mut cfg = LaneConfig::new(SchedulerLane::Maintenance, 20, 1);
         cfg.starvation_window_ms = 100;
-        policy.add_lane(cfg);
+        policy
+            .add_lane(cfg)
+            .expect("test policy should not duplicate maintenance lane");
         policy.add_rule(&task_classes::compaction(), SchedulerLane::Maintenance);
         let mut sched = LaneScheduler::new(policy).unwrap();
 

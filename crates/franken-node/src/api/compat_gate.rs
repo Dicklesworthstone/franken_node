@@ -481,7 +481,8 @@ impl CompatGateService {
         let trace_id = self.next_trace_id();
         let receipt_id = self.next_receipt_id();
 
-        let is_escalation = request.from_mode.is_escalation(request.to_mode);
+        let current_mode = self.scopes.get(&request.scope_id).copied().unwrap_or(CompatMode::Strict);
+        let is_escalation = current_mode.is_escalation(request.to_mode);
         let approved = if is_escalation {
             !request.justification.is_empty()
         } else {
@@ -492,18 +493,18 @@ impl CompatGateService {
             if is_escalation {
                 format!(
                     "escalation from {} to {} approved with justification",
-                    request.from_mode, request.to_mode
+                    current_mode, request.to_mode
                 )
             } else {
                 format!(
                     "de-escalation from {} to {} auto-approved",
-                    request.from_mode, request.to_mode
+                    current_mode, request.to_mode
                 )
             }
         } else {
             format!(
                 "escalation from {} to {} denied: justification required",
-                request.from_mode, request.to_mode
+                current_mode, request.to_mode
             )
         };
 

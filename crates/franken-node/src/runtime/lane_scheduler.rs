@@ -202,9 +202,13 @@ impl LaneMappingPolicy {
     }
 
     /// Add a lane configuration.
-    pub fn add_lane(&mut self, config: LaneConfig) {
+    pub fn add_lane(&mut self, config: LaneConfig) -> Result<(), LaneSchedulerError> {
+        if self.lane_configs.contains_key(config.lane.as_str()) {
+            return Err(LaneSchedulerError::DuplicateLane { lane: config.lane });
+        }
         self.lane_configs
             .insert(config.lane.as_str().to_string(), config);
+        Ok(())
     }
 
     /// Add a mapping rule.
@@ -257,10 +261,18 @@ impl Default for LaneMappingPolicy {
 pub fn default_policy() -> LaneMappingPolicy {
     let mut policy = LaneMappingPolicy::new();
 
-    policy.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 8));
-    policy.add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 32));
-    policy.add_lane(LaneConfig::new(SchedulerLane::Maintenance, 20, 4));
-    policy.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 2));
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 8))
+        .expect("default policy must not duplicate control_critical lane");
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::RemoteEffect, 50, 32))
+        .expect("default policy must not duplicate remote_effect lane");
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Maintenance, 20, 4))
+        .expect("default policy must not duplicate maintenance lane");
+    policy
+        .add_lane(LaneConfig::new(SchedulerLane::Background, 10, 2))
+        .expect("default policy must not duplicate background lane");
 
     policy.add_rule(
         &task_classes::epoch_transition(),
@@ -632,11 +644,12 @@ impl LaneScheduler {
 
     /// Abort a queued task assignment, decrementing the queue depth.
     pub fn abort_queued_task(&mut self, task_class: &TaskClass) -> Result<(), LaneSchedulerError> {
-        let lane = self.policy.resolve(task_class).ok_or_else(|| {
-            LaneSchedulerError::UnknownClass {
-                task_class: task_class.to_string(),
-            }
-        })?;
+        let lane =
+            self.policy
+                .resolve(task_class)
+                .ok_or_else(|| LaneSchedulerError::UnknownClass {
+                    task_class: task_class.to_string(),
+                })?;
 
         let counters = self.counters.get_mut(lane.as_str()).ok_or_else(|| {
             LaneSchedulerError::UnknownLane {
@@ -844,6 +857,12 @@ mod tests {
         LaneScheduler::new(default_policy()).unwrap()
     }
 
+    fn add_lane_ok(policy: &mut LaneMappingPolicy, config: LaneConfig) {
+        policy
+            .add_lane(config)
+            .expect("lane config should be unique in test setup");
+    }
+
     // ---- SchedulerLane ----
 
     #[test]
@@ -931,7 +950,10 @@ mod tests {
     #[test]
     fn policy_with_unmapped_lane_invalid() {
         let mut p = LaneMappingPolicy::new();
-        p.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 8));
+        add_lane_ok(
+            &mut p,
+            LaneConfig::new(SchedulerLane::ControlCritical, 100, 8),
+        );
         p.add_rule(
             &task_classes::epoch_transition(),
             SchedulerLane::RemoteEffect,
@@ -942,7 +964,10 @@ mod tests {
     #[test]
     fn policy_with_zero_weight_invalid() {
         let mut p = LaneMappingPolicy::new();
-        p.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 0, 8));
+        add_lane_ok(
+            &mut p,
+            LaneConfig::new(SchedulerLane::ControlCritical, 0, 8),
+        );
         p.add_rule(
             &task_classes::epoch_transition(),
             SchedulerLane::ControlCritical,
@@ -953,12 +978,30 @@ mod tests {
     #[test]
     fn policy_with_zero_cap_invalid() {
         let mut p = LaneMappingPolicy::new();
-        p.add_lane(LaneConfig::new(SchedulerLane::ControlCritical, 100, 0));
+        add_lane_ok(
+            &mut p,
+            LaneConfig::new(SchedulerLane::ControlCritical, 100, 0),
+        );
         p.add_rule(
             &task_classes::epoch_transition(),
             SchedulerLane::ControlCritical,
         );
         assert!(p.validate().is_err());
+    }
+
+    #[test]
+    fn duplicate_lane_config_is_rejected_without_overwrite() {
+        let mut p = LaneMappingPolicy::new();
+        let original = LaneConfig::new(SchedulerLane::Background, 10, 1);
+        let duplicate = LaneConfig::new(SchedulerLane::Background, 99, 9);
+        add_lane_ok(&mut p, original.clone());
+
+        let err = p.add_lane(duplicate).expect_err("duplicate lane must fail");
+        assert_eq!(err.code(), error_codes::ERR_LANE_DUPLICATE);
+        assert_eq!(
+            p.lane_configs.get(SchedulerLane::Background.as_str()),
+            Some(&original)
+        );
     }
 
     // ---- LaneScheduler construction ----
@@ -1019,7 +1062,7 @@ mod tests {
     #[test]
     fn assign_task_cap_enforced() {
         let mut p = LaneMappingPolicy::new();
-        p.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1));
+        add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
@@ -1037,7 +1080,7 @@ mod tests {
     #[test]
     fn completion_does_not_drain_queue_depth_without_admission() {
         let mut p = LaneMappingPolicy::new();
-        p.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1));
+        add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
@@ -1059,7 +1102,7 @@ mod tests {
     #[test]
     fn successful_assignment_drains_one_pending_queue_slot() {
         let mut p = LaneMappingPolicy::new();
-        p.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1));
+        add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
@@ -1110,7 +1153,7 @@ mod tests {
         let mut p = LaneMappingPolicy::new();
         let mut cfg = LaneConfig::new(SchedulerLane::Background, 10, 1);
         cfg.starvation_window_ms = 100;
-        p.add_lane(cfg);
+        add_lane_ok(&mut p, cfg);
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
@@ -1133,7 +1176,7 @@ mod tests {
         let mut p = LaneMappingPolicy::new();
         let mut cfg = LaneConfig::new(SchedulerLane::Background, 10, 1);
         cfg.starvation_window_ms = 100;
-        p.add_lane(cfg);
+        add_lane_ok(&mut p, cfg);
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
@@ -1170,7 +1213,7 @@ mod tests {
         let mut p = LaneMappingPolicy::new();
         let mut cfg = LaneConfig::new(SchedulerLane::Background, 10, 1);
         cfg.starvation_window_ms = 100;
-        p.add_lane(cfg);
+        add_lane_ok(&mut p, cfg);
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
@@ -1207,7 +1250,7 @@ mod tests {
         let mut p = LaneMappingPolicy::new();
         let mut cfg = LaneConfig::new(SchedulerLane::Background, 10, 1);
         cfg.starvation_window_ms = 150;
-        p.add_lane(cfg);
+        add_lane_ok(&mut p, cfg);
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
@@ -1247,7 +1290,7 @@ mod tests {
         let mut p = LaneMappingPolicy::new();
         let mut cfg = LaneConfig::new(SchedulerLane::Background, 10, 1);
         cfg.starvation_window_ms = 100;
-        p.add_lane(cfg);
+        add_lane_ok(&mut p, cfg);
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
@@ -1390,7 +1433,7 @@ mod tests {
     #[test]
     fn audit_log_capacity_enforces_oldest_first_eviction() {
         let mut p = LaneMappingPolicy::new();
-        p.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1));
+        add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::with_audit_log_capacity(p, 2).unwrap();
 
@@ -1514,13 +1557,14 @@ mod tests {
     #[test]
     fn abort_queued_task_decrements_queue_depth() {
         let mut p = LaneMappingPolicy::new();
-        p.add_lane(LaneConfig::new(SchedulerLane::Background, 10, 1));
+        add_lane_ok(&mut p, LaneConfig::new(SchedulerLane::Background, 10, 1));
         p.add_rule(&task_classes::log_rotation(), SchedulerLane::Background);
         let mut s = LaneScheduler::new(p).unwrap();
 
         // Assign one active
-        s.assign_task(&task_classes::log_rotation(), 1000, "t1").unwrap();
-        
+        s.assign_task(&task_classes::log_rotation(), 1000, "t1")
+            .unwrap();
+
         // Queue two more
         let _ = s.assign_task(&task_classes::log_rotation(), 1001, "t2");
         let _ = s.assign_task(&task_classes::log_rotation(), 1002, "t3");
@@ -1530,13 +1574,13 @@ mod tests {
 
         // Abort one queued task
         s.abort_queued_task(&task_classes::log_rotation()).unwrap();
-        
+
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.queued_count, 1);
-        
+
         // Abort the other queued task
         s.abort_queued_task(&task_classes::log_rotation()).unwrap();
-        
+
         let counters = s.lane_counter(SchedulerLane::Background).unwrap();
         assert_eq!(counters.queued_count, 0);
         assert_eq!(counters.first_queued_at_ms, None);
