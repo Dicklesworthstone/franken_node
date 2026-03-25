@@ -500,7 +500,46 @@ fn publish_root_internal(
     let temp_path = dir.join(format!(".{}.tmp.{}", ROOT_POINTER_FILE, Uuid::now_v7()));
     let mut _temp_guard = TempFileGuard::new(temp_path.clone());
     let old_root = match read_root(dir) {
-        Ok(r) => Some(r),
+        Ok(r) => {
+            // Verify MAC of existing root before trusting its epoch
+            let auth_path = root_auth_path(dir);
+            let auth_bytes = match fs::read(&auth_path) {
+                Ok(b) => b,
+                Err(_) => {
+                    return Err(RootPointerError::SigningKeyInvalid {
+                        context: "verify_old_root_auth",
+                        reason: "existing root pointer found but auth record is missing".to_string(),
+                    });
+                }
+            };
+            let auth: RootAuthRecord = match serde_json::from_slice(&auth_bytes) {
+                Ok(a) => a,
+                Err(e) => {
+                    return Err(RootPointerError::Deserialize {
+                        path: auth_path.display().to_string(),
+                        source: e,
+                    });
+                }
+            };
+            
+            let root_bytes = fs::read(root_pointer_path(dir)).unwrap(); // Just succeeded in read_root
+            let root_hash = hash_hex(&root_bytes);
+            
+            let expected_mac = sign_payload(&root_hash, signing_key).map_err(|source| {
+                RootPointerError::SigningKeyInvalid {
+                    context: "verify_old_root_auth",
+                    reason: source.to_string(),
+                }
+            })?;
+            
+            if !constant_time_eq(&auth.mac, &expected_mac) || !constant_time_eq(&auth.root_hash, &root_hash) || auth.epoch != r.epoch {
+                return Err(RootPointerError::SigningKeyInvalid {
+                    context: "verify_old_root_auth",
+                    reason: "existing root pointer is tampered or invalid; epoch regression check cannot proceed safely".to_string(),
+                });
+            }
+            Some(r)
+        },
         Err(RootPointerError::MissingRoot { .. }) => None,
         Err(e) => return Err(e),
     };
@@ -1047,5 +1086,28 @@ mod tests {
         let err = bootstrap_root(dir.path(), &cfg).expect_err("version mismatch must fail");
         assert!(matches!(err, BootstrapError::RootVersionMismatch { .. }));
         assert_eq!(err.code(), "ROOT_BOOTSTRAP_VERSION_MISMATCH");
+    }
+
+    #[test]
+    fn epoch_regression_check_validates_existing_mac() {
+        let dir = TempDir::new().expect("tempdir");
+        let k = key();
+
+        // 1. Publish a legitimate high-epoch root (epoch 1000)
+        let root_1000 = root(1000, 10, "hash1000");
+        publish_root(dir.path(), &root_1000, &k, "trace-1").expect("seed");
+
+        // 2. Attacker modifies the root_pointer.json on disk to epoch 0, bypassing MAC
+        let mut tampered_root = root_1000.clone();
+        tampered_root.epoch = ControlEpoch(0);
+        fs::write(root_pointer_path(dir.path()), serde_json::to_vec_pretty(&tampered_root).unwrap()).unwrap();
+
+        // 3. The node attempts to publish a new root with epoch 1 (which SHOULD be a regression from 1000)
+        let root_1 = root(1, 11, "hash1");
+        
+        let err = publish_root(dir.path(), &root_1, &k, "trace-2")
+            .expect_err("tampered root should fail publication check");
+        
+        assert_eq!(err.code(), "ROOT_SIGNING_KEY_INVALID");
     }
 }
