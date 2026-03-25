@@ -2,7 +2,7 @@
   "gate": "transparency_verifier_verification",
   "bead": "bd-1z9s",
   "section": "10.13",
-  "verdict": "PASS",
+  "verdict": "FAIL",
   "checks": [
     {
       "id": "TL-IMPL",
@@ -38,8 +38,8 @@
     {
       "id": "TL-TESTS",
       "description": "Rust unit tests pass",
-      "status": "PASS",
-      "details": "23 tests passed"
+      "status": "FAIL",
+      "details": "Command '['/home/ubuntu/.cargo/bin/cargo', 'test', '-p', 'frankenengine-node', '--', 'supply_chain::transparency_verifier']' timed out after 120 seconds"
     },
     {
       "id": "TL-SPEC",
@@ -49,7 +49,7 @@
   ],
   "summary": {
     "total_checks": 8,
-    "passing_checks": 8,
-    "failing_checks": 0
+    "passing_checks": 7,
+    "failing_checks": 1
   }
 }

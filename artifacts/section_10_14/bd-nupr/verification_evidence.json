@@ -3,7 +3,7 @@
   "bead": "bd-nupr",
   "section": "10.14",
   "verdict": "PASS",
-  "timestamp": "2026-03-25T01:24:32.034996+00:00",
+  "timestamp": "2026-03-25T05:11:19.079812+00:00",
   "checks": [
     {
       "id": "EE-SCHEMA",
