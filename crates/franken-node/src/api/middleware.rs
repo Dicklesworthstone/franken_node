@@ -10,6 +10,8 @@
 //! 5. Handler execution
 //! 6. Structured response + telemetry emission
 
+#[cfg(any(test, feature = "extended-surfaces"))]
+use crate::security::constant_time::ct_eq;
 use serde::{Deserialize, Serialize};
 #[cfg(any(test, feature = "extended-surfaces"))]
 use std::collections::BTreeMap;
@@ -164,7 +166,7 @@ pub fn authenticate(
                     trace_id: trace_id.to_string(),
                 });
             }
-            if !authorized_keys.contains(key) {
+            if !authorized_keys.iter().any(|k| ct_eq(k, key)) {
                 return Err(ApiError::AuthFailed {
                     detail: "invalid API key".to_string(),
                     trace_id: trace_id.to_string(),
@@ -193,7 +195,7 @@ pub fn authenticate(
                     trace_id: trace_id.to_string(),
                 });
             }
-            if !authorized_keys.contains(token) {
+            if !authorized_keys.iter().any(|k| ct_eq(k, token)) {
                 return Err(ApiError::AuthFailed {
                     detail: "invalid bearer token".to_string(),
                     trace_id: trace_id.to_string(),
@@ -339,6 +341,9 @@ impl RateLimiter {
 
         // Refill tokens
         self.tokens += elapsed * f64::from(self.config.sustained_rps);
+        if !self.tokens.is_finite() {
+            self.tokens = 0.0; // fail-closed: deny until next refill
+        }
         if self.tokens > f64::from(self.config.burst_size) {
             self.tokens = f64::from(self.config.burst_size);
         }
@@ -709,7 +714,12 @@ mod tests {
     #[test]
     fn authenticate_api_key() {
         let keys = get_test_keys();
-        let result = authenticate(Some("ApiKey test-key-123"), &AuthMethod::ApiKey, "t-2", &keys);
+        let result = authenticate(
+            Some("ApiKey test-key-123"),
+            &AuthMethod::ApiKey,
+            "t-2",
+            &keys,
+        );
         let identity = result.expect("auth api key");
         assert!(identity.principal.starts_with("apikey:"));
     }
@@ -717,7 +727,12 @@ mod tests {
     #[test]
     fn authenticate_bearer_token() {
         let keys = get_test_keys();
-        let result = authenticate(Some("Bearer mytoken-abc"), &AuthMethod::BearerToken, "t-3", &keys);
+        let result = authenticate(
+            Some("Bearer mytoken-abc"),
+            &AuthMethod::BearerToken,
+            "t-3",
+            &keys,
+        );
         let identity = result.expect("auth bearer");
         assert!(identity.principal.starts_with("token:"));
     }
@@ -725,7 +740,12 @@ mod tests {
     #[test]
     fn authenticate_api_key_handles_unicode_without_panicking() {
         let keys = get_test_keys();
-        let result = authenticate(Some("ApiKey 🔐鍵🙂abc123"), &AuthMethod::ApiKey, "t-2u", &keys);
+        let result = authenticate(
+            Some("ApiKey 🔐鍵🙂abc123"),
+            &AuthMethod::ApiKey,
+            "t-2u",
+            &keys,
+        );
         let identity = result.expect("auth api key");
         let expected: String = "🔐鍵🙂abc123".chars().take(8).collect();
         assert_eq!(identity.principal, format!("apikey:{expected}"));

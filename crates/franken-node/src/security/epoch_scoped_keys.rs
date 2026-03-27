@@ -101,10 +101,18 @@ impl fmt::Debug for DerivedKey {
 }
 
 /// Signature bytes over artifact payload.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Signature {
     pub bytes: [u8; SIGNATURE_LEN],
 }
+
+impl PartialEq for Signature {
+    fn eq(&self, other: &Self) -> bool {
+        crate::security::constant_time::ct_eq_bytes(&self.bytes, &other.bytes)
+    }
+}
+
+impl Eq for Signature {}
 
 impl Signature {
     #[allow(dead_code)]
