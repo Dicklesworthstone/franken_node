@@ -67,8 +67,16 @@ impl fmt::Debug for RootSecret {
 }
 
 /// Epoch/domain derived key material.
-#[derive(Clone, PartialEq, Eq, Zeroize, ZeroizeOnDrop)]
+#[derive(Clone, Zeroize, ZeroizeOnDrop)]
 pub struct DerivedKey([u8; DERIVED_KEY_LEN]);
+
+impl PartialEq for DerivedKey {
+    fn eq(&self, other: &Self) -> bool {
+        crate::security::constant_time::ct_eq_bytes(&self.0, &other.0)
+    }
+}
+
+impl Eq for DerivedKey {}
 
 impl DerivedKey {
     pub fn as_bytes(&self) -> &[u8; DERIVED_KEY_LEN] {
@@ -209,9 +217,16 @@ impl std::error::Error for AuthError {}
 /// Derive an epoch+domain scoped key via HKDF-SHA256.
 pub fn derive_epoch_key(root_secret: &RootSecret, epoch: ControlEpoch, domain: &str) -> DerivedKey {
     let hkdf = Hkdf::<Sha256>::new(Some(KDF_SALT), root_secret.as_bytes());
-    let info = format!("franken-node:epoch={}:domain={domain}", epoch.value());
+    let epoch_bytes = epoch.value().to_le_bytes();
+    let domain_bytes = domain.as_bytes();
+    let domain_len = (domain_bytes.len() as u64).to_le_bytes();
+    let mut info = Vec::with_capacity(64);
+    info.extend_from_slice(b"franken-node:epoch-kdf-info:v1:");
+    info.extend_from_slice(&epoch_bytes);
+    info.extend_from_slice(&domain_len);
+    info.extend_from_slice(domain_bytes);
     let mut okm = [0u8; DERIVED_KEY_LEN];
-    if hkdf.expand(info.as_bytes(), &mut okm).is_err() {
+    if hkdf.expand(&info, &mut okm).is_err() {
         // DERIVED_KEY_LEN is a compile-time constant (32) well within HKDF limits;
         // if expansion ever fails, return zeroed key as fail-safe.
         okm = [0u8; DERIVED_KEY_LEN];
@@ -237,6 +252,7 @@ pub fn sign_epoch_artifact(
         }
     })?;
     mac.update(b"epoch_scoped_sign_v1:");
+    mac.update(&(artifact.len() as u64).to_le_bytes());
     mac.update(artifact);
     let bytes = mac.finalize().into_bytes();
     let mut out = [0u8; SIGNATURE_LEN];
@@ -263,6 +279,7 @@ pub fn verify_epoch_signature(
         }
     })?;
     mac.update(b"epoch_scoped_sign_v1:");
+    mac.update(&(artifact.len() as u64).to_le_bytes());
     mac.update(artifact);
     mac.verify_slice(&signature.bytes)
         .map_err(|_| AuthError::SignatureRejected {

@@ -217,6 +217,7 @@ fn compute_hash(value: &serde_json::Value) -> String {
     let canonical = serde_json::to_string(value).unwrap_or_else(|e| format!("__serde_err:{e}"));
     let mut hasher = Sha256::new();
     hasher.update(b"state_model_hash_v1:");
+    hasher.update((canonical.len() as u64).to_le_bytes());
     hasher.update(canonical.as_bytes());
     format!("{:064x}", hasher.finalize())
 }

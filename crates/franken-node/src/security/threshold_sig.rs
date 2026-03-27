@@ -4,6 +4,7 @@
 //! below threshold are rejected. Verification failures produce stable,
 //! machine-readable failure reasons.
 
+use crate::security::constant_time::ct_eq;
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -246,7 +247,7 @@ pub fn verify_threshold(
 
         // The signer identity must be bound to the configured key identity.
         // Otherwise a valid signature can be replayed under an arbitrary label.
-        if sig.signer_id != sig.key_id {
+        if !ct_eq(&sig.signer_id, &sig.key_id) {
             if first_failure.is_none() {
                 first_failure = Some(FailureReason::InvalidSignature {
                     signer_id: sig.signer_id.clone(),
@@ -256,7 +257,7 @@ pub fn verify_threshold(
         }
 
         // Verify signature first to prevent invalid signatures from poisoning the seen set
-        let key = config.signer_keys.iter().find(|k| k.key_id == sig.key_id);
+        let key = config.signer_keys.iter().find(|k| ct_eq(&k.key_id, &sig.key_id));
         if let Some(key) = key {
             if !verify_signature(key, &artifact.content_hash, sig) {
                 if first_failure.is_none() {
