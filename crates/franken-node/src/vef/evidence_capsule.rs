@@ -143,7 +143,7 @@ impl EvidenceCapsule {
 
         for ev in &self.evidence {
             if ev.verified && !ev.receipt_chain_commitment.is_empty() && !ev.proof_id.is_empty() {
-                passed += 1;
+                passed = passed.saturating_add(1);
             } else {
                 let mut reasons = Vec::new();
                 if !ev.verified {

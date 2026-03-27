@@ -726,12 +726,13 @@ impl VerificationGate {
 
         for report in &self.reports {
             match &report.decision {
-                TrustDecision::Allow => allow_count += 1,
+                TrustDecision::Allow => allow_count = allow_count.saturating_add(1),
                 TrustDecision::Deny(reason) => {
-                    deny_count += 1;
-                    *deny_reasons.entry(reason.clone()).or_insert(0) += 1;
+                    deny_count = deny_count.saturating_add(1);
+                    let entry = deny_reasons.entry(reason.clone()).or_insert(0);
+                    *entry = entry.saturating_add(1);
                 }
-                TrustDecision::Degrade(_) => degrade_count += 1,
+                TrustDecision::Degrade(_) => degrade_count = degrade_count.saturating_add(1),
             }
         }
 
@@ -788,7 +789,11 @@ fn compute_report_digest(
     let bytes = serde_json::to_vec(&material).map_err(|err| {
         VerifierError::internal(format!("failed to serialize digest material: {err}"))
     })?;
-    let digest = Sha256::digest([b"proof_verifier_hash_v1:" as &[u8], &bytes[..]].concat());
+    let mut hasher = Sha256::new();
+    hasher.update(b"proof_verifier_hash_v1:");
+    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(&bytes);
+    let digest = hasher.finalize();
     Ok(format!("sha256:{digest:x}"))
 }
 

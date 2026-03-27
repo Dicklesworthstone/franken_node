@@ -815,7 +815,7 @@ impl ExfiltrationSentinel {
     /// Check graph depth limit. Event: FN-IFL-010.
     pub fn check_depth_limit(&self, graph: &LineageGraph) -> bool {
         let _event = EVENT_DEPTH_LIMIT;
-        graph.edge_count() <= self.config.max_graph_depth
+        graph.edge_count() < self.config.max_graph_depth
     }
 
     /// Run a sentinel scan across all edges in the graph.
@@ -882,14 +882,16 @@ impl ExfiltrationSentinel {
 
         let recall_denom = true_positives.saturating_add(false_negatives);
         let recall = if recall_denom > 0 {
-            (true_positives as f64) / (recall_denom as f64) * 100.0
+            let raw = (true_positives as f64) / (recall_denom as f64) * 100.0;
+            if raw.is_finite() { raw } else { 0.0 }
         } else {
             100.0
         };
 
         let precision_denom = true_positives.saturating_add(false_positives);
         let precision = if precision_denom > 0 {
-            (true_positives as f64) / (precision_denom as f64) * 100.0
+            let raw = (true_positives as f64) / (precision_denom as f64) * 100.0;
+            if raw.is_finite() { raw } else { 0.0 }
         } else {
             100.0
         };
