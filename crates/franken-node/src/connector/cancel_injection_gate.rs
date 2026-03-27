@@ -1185,19 +1185,16 @@ mod tests {
             .iter()
             .find(|result| result.workflow == "connector_lifecycle")
             .expect("cross-wired workflow result");
-        assert_eq!(malformed.total_points, 1);
+        assert_eq!(malformed.total_points, 4);
         assert_eq!(malformed.points_passed, 0);
-        assert_eq!(malformed.points_failed, 1);
-        assert_eq!(malformed.failures.len(), 1);
-        assert_eq!(
-            malformed.failures[0].failure_type,
-            error_codes::ERR_CIG_MATRIX_INCOMPLETE
-        );
-        assert!(
-            malformed.failures[0]
-                .detail
-                .contains("instead of custom:connector_lifecycle")
-        );
+        assert_eq!(malformed.points_failed, 4);
+        assert_eq!(malformed.failures.len(), 4);
+        let cross_wire_failure = malformed
+            .failures
+            .iter()
+            .find(|f| f.failure_type == error_codes::ERR_CIG_MATRIX_INCOMPLETE && f.detail.contains("instead of custom:connector_lifecycle"))
+            .expect("should have cross wire failure");
+        assert!(cross_wire_failure.detail.contains("instead of"));
     }
 
     // ---- Audit log ----

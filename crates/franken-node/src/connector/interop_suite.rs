@@ -273,9 +273,9 @@ pub fn summarize(results: &[InteropResult]) -> BTreeMap<InteropClass, (usize, us
     let mut summary: BTreeMap<InteropClass, (usize, usize)> = BTreeMap::new();
     for r in results {
         let entry = summary.entry(r.class).or_insert((0, 0));
-        entry.1 += 1;
+        entry.1 = entry.1.saturating_add(1);
         if r.passed {
-            entry.0 += 1;
+            entry.0 = entry.0.saturating_add(1);
         }
     }
     summary

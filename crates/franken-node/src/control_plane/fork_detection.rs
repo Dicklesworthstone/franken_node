@@ -321,6 +321,15 @@ impl DivergenceDetector {
     /// Record a state vector into history. Bounded to 10 000 entries to prevent unbounded growth.
     pub fn record_state(&mut self, sv: StateVector) {
         const MAX_HISTORY: usize = 10_000;
+        // Deduplicate: if the state is already the latest in history, ignore it.
+        if self.history.last().is_some_and(|last| {
+            last.marker_id == sv.marker_id
+                && last.epoch == sv.epoch
+                && last.state_hash == sv.state_hash
+                && last.node_id == sv.node_id
+        }) {
+            return;
+        }
         if self.history.len() >= MAX_HISTORY {
             // Drop the oldest half to amortize the cost.
             self.history.drain(..MAX_HISTORY / 2);
@@ -511,6 +520,7 @@ impl DivergenceDetector {
     pub fn operator_reset(&mut self) {
         self.halted = false;
         self.last_result = None;
+        self.history.clear();
     }
 }
 
@@ -554,7 +564,10 @@ impl RollbackDetector {
                     remote_state: sv.clone(),
                     expected_parent_hash: last.state_hash.clone(),
                     actual_parent_hash: sv.parent_state_hash.clone(),
-                    detection_timestamp: sv.timestamp,
+                    detection_timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
                     trace_id: format!("rbd-{}-{}", last.epoch, sv.epoch),
                     detection_result: DetectionResult::RollbackDetected,
                 };
@@ -572,7 +585,10 @@ impl RollbackDetector {
                     remote_state: sv.clone(),
                     expected_parent_hash: last.state_hash.clone(),
                     actual_parent_hash: sv.parent_state_hash.clone(),
-                    detection_timestamp: sv.timestamp,
+                    detection_timestamp: std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
                     trace_id: format!("rbd-{}-{}", last.epoch, sv.epoch),
                     detection_result: DetectionResult::RollbackDetected,
                 };

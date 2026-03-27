@@ -185,13 +185,15 @@ impl RevocationRegistry {
         // revocations, letting previously-revoked artifacts pass is_revoked().
         // Reject at capacity instead of evicting.
         let zone_revoked = self.revoked.entry(head.zone_id.clone()).or_default();
-        if zone_revoked.len() < MAX_REVOKED_PER_ZONE {
-            zone_revoked.insert(head.revoked_artifact.clone());
+        if zone_revoked.len() >= MAX_REVOKED_PER_ZONE {
+            return Err(RevocationError::InvalidInput {
+                detail: format!(
+                    "zone {} revoked set at capacity ({MAX_REVOKED_PER_ZONE}); cannot record revocation for {}",
+                    head.zone_id, head.revoked_artifact
+                ),
+            });
         }
-        // If at capacity, the artifact's revocation is still recorded in the
-        // canonical log and the head sequence advances, but the per-zone set
-        // is not updated.  is_revoked() will miss it; callers should also
-        // check the canonical log for authoritative revocation status.
+        zone_revoked.insert(head.revoked_artifact.clone());
 
         push_bounded(
             &mut self.audits,
@@ -252,12 +254,14 @@ impl RevocationRegistry {
                 });
             }
             registry.heads.insert(entry.zone_id.clone(), entry.sequence);
-            registry
+            let zone_revoked = registry
                 .revoked
                 .entry(entry.zone_id.clone())
-                .or_default()
-                .insert(entry.revoked_artifact.clone());
-            registry.log.push(entry.clone());
+                .or_default();
+            if zone_revoked.len() < MAX_REVOKED_PER_ZONE {
+                zone_revoked.insert(entry.revoked_artifact.clone());
+            }
+            push_bounded(&mut registry.log, entry.clone(), MAX_LOG_ENTRIES);
         }
 
         Ok(registry)

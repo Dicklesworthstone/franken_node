@@ -496,7 +496,7 @@ impl ReceiptChain {
             created_at_millis: now_millis,
             trace_id,
         };
-        self.next_checkpoint_id = self.next_checkpoint_id.wrapping_add(1);
+        self.next_checkpoint_id = self.next_checkpoint_id.saturating_add(1);
         push_bounded(&mut self.checkpoints, checkpoint.clone(), MAX_CHECKPOINTS);
         self.last_checkpoint_entry = self.entries.len();
         Ok(checkpoint)

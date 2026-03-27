@@ -216,14 +216,18 @@ impl QuarantineController {
         for event in events {
             let (action, posterior) = self.submit_evidence(event.clone())?;
             if action != QuarantineAction::None {
-                batch_actions.push(ActionRecord {
-                    trace_id: event.trace_id.clone(),
-                    entity_id: event.entity_id.clone(),
-                    action,
-                    risk_posterior: posterior,
-                    timestamp: event.timestamp,
-                    event_code: ADV_005_ACTION_TRIGGERED.to_string(),
-                });
+                push_bounded(
+                    &mut batch_actions,
+                    ActionRecord {
+                        trace_id: event.trace_id.clone(),
+                        entity_id: event.entity_id.clone(),
+                        action,
+                        risk_posterior: posterior,
+                        timestamp: event.timestamp,
+                        event_code: ADV_005_ACTION_TRIGGERED.to_string(),
+                    },
+                    MAX_ACTION_LOG_ENTRIES,
+                );
             }
         }
         let snapshot: BTreeMap<EntityId, f64> = {

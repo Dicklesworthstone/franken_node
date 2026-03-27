@@ -261,6 +261,9 @@ impl SagaExecutor {
         let saga_id = format!("saga-{}", self.next_saga_id);
 
         if self.sagas.contains_key(&saga_id) {
+            // Advance the counter even on collision to prevent permanent deadlock:
+            // without this, every subsequent create_saga call generates the same ID.
+            self.next_saga_id = self.next_saga_id.saturating_add(1);
             return Err(format!(
                 "{ERR_SAGA_ID_REUSED}: generated saga id already exists: {saga_id}"
             ));
@@ -1289,7 +1292,7 @@ mod tests {
             .create_saga(make_steps(&["replacement"]), "t2")
             .expect_err("reused generated saga id must fail closed");
         assert!(err.contains(ERR_SAGA_ID_REUSED));
-        assert_eq!(exec.next_saga_id, 1);
+        assert_eq!(exec.next_saga_id, 2);
         assert_eq!(exec.saga_count(), 1);
         assert_eq!(exec.audit_log.len(), 2);
 

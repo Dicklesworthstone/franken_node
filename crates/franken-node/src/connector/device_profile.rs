@@ -268,7 +268,7 @@ impl DeviceProfileRegistry {
                 } else {
                     0
                 };
-                total_score += 1 + region_bonus;
+                total_score = total_score.saturating_add(1_u64.saturating_add(region_bonus));
             }
 
             if failed {

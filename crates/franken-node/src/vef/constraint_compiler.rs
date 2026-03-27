@@ -480,7 +480,7 @@ impl ConstraintCompiler {
             coverage.keys().map(|k| k.as_str()).collect();
         for ac in ActionClass::ALL {
             if !covered_classes.contains(ac.as_str()) {
-                warning_count += 1;
+                warning_count = warning_count.saturating_add(1);
                 events.push(CompileEvent {
                     event_code: event_codes::VEF_COMPILE_WARN.to_string(),
                     trace_id: self.trace_id.clone(),

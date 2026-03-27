@@ -377,8 +377,9 @@ pub fn write_bundle_to_path(bundle: &ReplayBundle, path: &Path) -> Result<(), Re
 }
 
 pub fn read_bundle_from_path(path: &Path) -> Result<ReplayBundle, ReplayBundleError> {
-    let raw = std::fs::read_to_string(path)?;
-    let bundle = serde_json::from_str::<ReplayBundle>(&raw)?;
+    let file = std::fs::File::open(path)?;
+    let reader = std::io::BufReader::new(file);
+    let bundle = serde_json::from_reader(reader)?;
     Ok(bundle)
 }
 
