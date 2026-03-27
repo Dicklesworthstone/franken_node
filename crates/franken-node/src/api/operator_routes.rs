@@ -366,11 +366,12 @@ pub fn get_status(
     _identity: &AuthIdentity,
     _trace: &TraceContext,
 ) -> Result<ApiResponse<NodeStatus>, ApiError> {
+    let config = operator_config_view();
     let status = NodeStatus {
         node_id: "franken-node-primary".to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_seconds: process_uptime_seconds(),
-        policy_profile: "balanced".to_string(),
+        policy_profile: config.profile,
         active_extensions: 0,
         quarantined_extensions: 0,
         control_epoch: 1,
@@ -501,6 +502,7 @@ mod tests {
         let result = get_status(&identity, &trace).expect("status");
         assert!(result.ok);
         assert!(!result.data.node_id.is_empty());
+        assert_eq!(result.data.policy_profile, "balanced");
     }
 
     #[test]
@@ -618,6 +620,27 @@ mod tests {
 
         let repeat = get_config(&identity, &trace).expect("repeat config");
         assert_eq!(after.data, repeat.data);
+    }
+
+    #[test]
+    fn service_bootstrap_updates_status_policy_profile() {
+        let _lock = process_start_test_lock();
+        clear_process_start_override_for_tests();
+        let identity = test_identity();
+        let trace = test_trace();
+
+        let before = get_status(&identity, &trace).expect("status before bootstrap");
+        assert_eq!(before.data.policy_profile, "balanced");
+
+        let custom_runtime_config =
+            crate::config::Config::for_profile(crate::config::Profile::LegacyRisky);
+        let _service = ControlPlaneService::new(crate::api::service::ServiceConfig {
+            runtime_config: custom_runtime_config,
+            ..Default::default()
+        });
+
+        let after = get_status(&identity, &trace).expect("status after bootstrap");
+        assert_eq!(after.data.policy_profile, "legacy-risky");
     }
 
     #[test]

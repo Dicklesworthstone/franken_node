@@ -9,6 +9,7 @@
 //! - `POST   /v1/fleet/coordinate`   — multi-node coordination command
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use super::error::ApiError;
 use super::middleware::{
@@ -96,6 +97,27 @@ pub struct CoordinationRequest {
     pub command_type: String,
     pub target_nodes: Vec<String>,
     pub timeout_seconds: u32,
+}
+
+fn validate_coordination_targets(target_nodes: &[String], trace_id: &str) -> Result<(), ApiError> {
+    if target_nodes.is_empty() {
+        return Err(ApiError::BadRequest {
+            detail: "coordination requires at least one target node".to_string(),
+            trace_id: trace_id.to_string(),
+        });
+    }
+
+    let mut seen = BTreeSet::new();
+    for node_id in target_nodes {
+        if !seen.insert(node_id.as_str()) {
+            return Err(ApiError::BadRequest {
+                detail: format!("duplicate target node `{node_id}` is not allowed"),
+                trace_id: trace_id.to_string(),
+            });
+        }
+    }
+
+    Ok(())
 }
 
 // ── Route Metadata ─────────────────────────────────────────────────────────
@@ -250,6 +272,8 @@ pub fn execute_coordination(
     trace: &TraceContext,
     request: &CoordinationRequest,
 ) -> Result<ApiResponse<CoordinationResult>, ApiError> {
+    validate_coordination_targets(&request.target_nodes, &trace.trace_id)?;
+
     let command_id = format!("coord-{}", utf8_prefix(&trace.trace_id, 12));
 
     let result = CoordinationResult {
@@ -304,7 +328,10 @@ mod tests {
     #[test]
     fn fencing_requires_mtls() {
         let routes = route_metadata();
-        let fence = routes.iter().find(|r| r.path.contains("fence")).expect("should exist");
+        let fence = routes
+            .iter()
+            .find(|r| r.path.contains("fence"))
+            .expect("should exist");
         assert_eq!(fence.auth_method, AuthMethod::MtlsClientCert);
     }
 
@@ -397,6 +424,46 @@ mod tests {
         assert!(result.ok);
         assert_eq!(result.data.status, CoordinationStatus::Acknowledged);
         assert_eq!(result.data.ack_count, 2);
+    }
+
+    #[test]
+    fn execute_coordination_rejects_empty_target_set() {
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = CoordinationRequest {
+            command_type: "policy-update".to_string(),
+            target_nodes: Vec::new(),
+            timeout_seconds: 30,
+        };
+
+        let err = execute_coordination(&identity, &trace, &request).expect_err("empty targets");
+        assert!(matches!(
+            err,
+            ApiError::BadRequest { ref trace_id, .. } if trace_id == "test-trace-fleet-001"
+        ));
+        let problem = err.to_problem("/v1/fleet/coordinate");
+        assert_eq!(problem.status, 400);
+        assert!(problem.detail.contains("at least one target node"));
+    }
+
+    #[test]
+    fn execute_coordination_rejects_duplicate_target_nodes() {
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = CoordinationRequest {
+            command_type: "policy-update".to_string(),
+            target_nodes: vec!["node-1".to_string(), "node-1".to_string()],
+            timeout_seconds: 30,
+        };
+
+        let err = execute_coordination(&identity, &trace, &request).expect_err("duplicate targets");
+        assert!(matches!(
+            err,
+            ApiError::BadRequest { ref trace_id, .. } if trace_id == "test-trace-fleet-001"
+        ));
+        let problem = err.to_problem("/v1/fleet/coordinate");
+        assert_eq!(problem.status, 400);
+        assert!(problem.detail.contains("duplicate target node `node-1`"));
     }
 
     #[test]
