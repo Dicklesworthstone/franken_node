@@ -1,4 +1,5 @@
-//! Deterministic guardrail against ambient Tokio/runtime reintroduction.
+//! Deterministic guardrails against ambient Tokio/runtime reintroduction and
+//! premature API transport-boundary activation.
 //!
 //! This module scans `frankenengine-node` source surfaces for forbidden
 //! async-executor bootstrap patterns. The dead Tokio bootstrap was removed
@@ -34,6 +35,16 @@ const BANNED_PATTERNS: &[&str] = &[
 
 /// Import patterns that suggest direct Tokio dependency usage.
 const BANNED_IMPORT_PATTERNS: &[&str] = &["use tokio::", "use tokio;", "extern crate tokio"];
+
+/// API-only patterns that indicate the control-plane service has grown a real
+/// transport boundary and should re-evaluate deferred request-region work.
+const API_TRANSPORT_BOUNDARY_PATTERNS: &[&str] = &[
+    "axum::Router",
+    "hyper::Server",
+    "tonic::transport::Server",
+    "std::net::TcpListener::bind(",
+    "TcpListener::bind(",
+];
 
 /// Structured exception marker prefix. Must be followed by `(bd-XXXX): <text>`.
 const EXCEPTION_PREFIX: &str = "// TOKIO_DRIFT_EXCEPTION(";
@@ -158,6 +169,12 @@ fn is_inside_string_literal(line: &str, pattern: &str) -> bool {
     quote_count % 2 == 1
 }
 
+/// Returns true if the file lives under `src/api/`.
+fn is_api_source_file(file: &Path) -> bool {
+    let normalized = file.to_string_lossy().replace('\\', "/");
+    normalized.contains("/src/api/") || normalized.starts_with("src/api/")
+}
+
 /// Check a single line for banned patterns.
 fn check_line_for_violations(
     line: &str,
@@ -217,6 +234,52 @@ fn check_line_for_violations(
                          This crate removed its Tokio dependency in bd-1now.2. \
                          If async runtime support is genuinely needed, add a \
                          TOKIO_DRIFT_EXCEPTION marker referencing a decision bead.",
+            });
+            return;
+        }
+    }
+}
+
+/// Check a single line for API transport-boundary trigger patterns.
+fn check_api_transport_boundary_line_for_violations(
+    line: &str,
+    line_number: usize,
+    preceding_line: Option<&str>,
+    file: &Path,
+    all_lines: &[&str],
+    violations: &mut Vec<DriftViolation>,
+    exceptions_honored: &mut usize,
+) {
+    if !is_api_source_file(file) {
+        return;
+    }
+
+    let trimmed = line.trim();
+
+    if trimmed.starts_with("//") && !trimmed.starts_with("//!") {
+        return;
+    }
+
+    if is_in_test_context(all_lines, line_number.saturating_sub(1)) {
+        return;
+    }
+
+    for pattern in API_TRANSPORT_BOUNDARY_PATTERNS {
+        if trimmed.contains(pattern) && !is_inside_string_literal(trimmed, pattern) {
+            if is_valid_exception(preceding_line) {
+                *exceptions_honored = exceptions_honored.saturating_add(1);
+                return;
+            }
+            violations.push(DriftViolation {
+                file: file.to_path_buf(),
+                line_number,
+                line_content: line.to_string(),
+                pattern: (*pattern).to_string(),
+                reason: "API transport boundary pattern detected in production code. \
+                         This is the wake-up condition for deferred Asupersync \
+                         request-region work (bd-1now.6). Add a TOKIO_DRIFT_EXCEPTION \
+                         marker referencing the decision bead if the boundary is \
+                         intentional and fully reviewed.",
             });
             return;
         }
@@ -373,10 +436,53 @@ pub fn check_tokio_drift(crate_root: &Path) -> DriftCheckResult {
     }
 }
 
+/// Detect whether `src/api/**` has grown a real transport boundary that should
+/// wake deferred request-region architecture work.
+pub fn check_api_transport_boundary_trigger(crate_root: &Path) -> DriftCheckResult {
+    let mut violations = Vec::new();
+    let mut files_scanned: usize = 0;
+    let mut exceptions_honored: usize = 0;
+
+    let src_dir = crate_root.join("src");
+    let source_files = collect_source_files(&src_dir);
+
+    for file_path in &source_files {
+        if !is_api_source_file(file_path) {
+            continue;
+        }
+
+        let Ok(content) = std::fs::read_to_string(file_path) else {
+            continue;
+        };
+        files_scanned = files_scanned.saturating_add(1);
+
+        let lines: Vec<&str> = content.lines().collect();
+        for (idx, line) in lines.iter().enumerate() {
+            let line_number = idx.saturating_add(1);
+            let preceding = if idx > 0 { Some(lines[idx - 1]) } else { None };
+            check_api_transport_boundary_line_for_violations(
+                line,
+                line_number,
+                preceding,
+                file_path,
+                &lines,
+                &mut violations,
+                &mut exceptions_honored,
+            );
+        }
+    }
+
+    DriftCheckResult {
+        violations,
+        files_scanned,
+        exceptions_honored,
+    }
+}
+
 /// Format a drift check result into a human-readable report.
 pub fn format_drift_report(result: &DriftCheckResult) -> String {
     let mut report = String::new();
-    report.push_str("=== Tokio Drift Checker Report ===\n");
+    report.push_str("=== Async Boundary Guard Report ===\n");
     report.push_str(&format!("Files scanned: {}\n", result.files_scanned));
     report.push_str(&format!(
         "Exceptions honored: {}\n",
@@ -577,6 +683,63 @@ mod tests {
         );
         assert_eq!(violations.len(), 1);
         assert!(violations[0].pattern.contains("use tokio::"));
+    }
+
+    #[test]
+    fn detects_api_transport_boundary_pattern() {
+        let lines = vec!["let listener = std::net::TcpListener::bind(\"127.0.0.1:9090\");"];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+        check_api_transport_boundary_line_for_violations(
+            lines[0],
+            1,
+            None,
+            Path::new("src/api/server.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].pattern.contains("TcpListener::bind"));
+    }
+
+    #[test]
+    fn non_api_transport_boundary_pattern_is_ignored() {
+        let lines = vec!["let listener = std::net::TcpListener::bind(\"127.0.0.1:9090\");"];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+        check_api_transport_boundary_line_for_violations(
+            lines[0],
+            1,
+            None,
+            Path::new("src/ops/telemetry_bridge.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+        assert!(violations.is_empty());
+        assert_eq!(exceptions, 0);
+    }
+
+    #[test]
+    fn api_transport_boundary_exception_suppresses_violation() {
+        let lines = vec![
+            "// TOKIO_DRIFT_EXCEPTION(bd-1now.6): reviewed API transport boundary",
+            "use axum::Router;",
+        ];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+        check_api_transport_boundary_line_for_violations(
+            lines[1],
+            2,
+            Some(lines[0]),
+            Path::new("src/api/server.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+        assert!(violations.is_empty());
+        assert_eq!(exceptions, 1);
     }
 
     #[test]
@@ -792,6 +955,23 @@ tokio = { version = "1", features = ["full"] }
         );
     }
 
+    #[test]
+    fn real_crate_has_no_api_transport_boundary_trigger() {
+        let crate_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let result = check_api_transport_boundary_trigger(&crate_root);
+        let report = format_drift_report(&result);
+
+        assert!(
+            result.is_clean(),
+            "Unexpected API transport boundary trigger in current crate:\n{report}"
+        );
+        assert!(
+            result.files_scanned > 0,
+            "Expected to scan api source files, got {}",
+            result.files_scanned
+        );
+    }
+
     // ---------------------------------------------------------------
     // Tempdir-based integration tests
     // ---------------------------------------------------------------
@@ -895,6 +1075,37 @@ fn main() {
         let result = check_tokio_drift(tmp.path());
         assert!(result.is_clean());
         assert_eq!(result.files_scanned, 2); // Cargo.toml + main.rs
+    }
+
+    #[test]
+    fn synthetic_crate_with_api_transport_boundary_fails_trigger_check() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(tmp.path().join("src/api")).unwrap();
+        std::fs::write(
+            tmp.path().join("Cargo.toml"),
+            r#"
+[package]
+name = "test-crate"
+version = "0.1.0"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("src/api/server.rs"),
+            r#"
+use axum::Router;
+
+pub fn build_router() {
+    let _router = Router::new();
+}
+"#,
+        )
+        .unwrap();
+
+        let result = check_api_transport_boundary_trigger(tmp.path());
+        assert!(!result.is_clean());
+        assert_eq!(result.violations.len(), 1);
+        assert!(result.violations[0].pattern.contains("axum::Router"));
     }
 
     #[test]
