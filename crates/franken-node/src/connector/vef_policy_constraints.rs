@@ -549,9 +549,10 @@ pub fn compile_policy(
             });
         }
 
-        *coverage
+        let counter = coverage
             .entry(rule.action_class.as_str().to_string())
-            .or_insert(0) += 1;
+            .or_insert(0);
+        *counter += 1;
     }
 
     if normalized.require_full_action_coverage {

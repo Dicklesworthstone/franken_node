@@ -12,6 +12,7 @@
 use std::collections::{BTreeMap, VecDeque};
 
 use crate::capacity_defaults::aliases::MAX_EVENTS;
+const MAX_DIAGNOSTICS: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -326,6 +327,11 @@ impl VoiScheduler {
         if self.diagnostics.contains_key(&diag.name) {
             return Err(VoiError::DuplicateDiagnostic(diag.name.clone()));
         }
+        if self.diagnostics.len() >= MAX_DIAGNOSTICS {
+            return Err(VoiError::InvalidConfig(format!(
+                "diagnostic registry at capacity ({MAX_DIAGNOSTICS})"
+            )));
+        }
         self.states
             .insert(diag.name.clone(), DiagnosticState::new());
         self.diagnostics.insert(diag.name.clone(), diag);
@@ -413,6 +419,12 @@ impl VoiScheduler {
             + self.config.weight_downstream * downstream
             + self.config.weight_historical * historical;
 
+        if !score.is_finite() {
+            return Err(VoiError::InvalidConfig(
+                "VOI score is not finite".to_string(),
+            ));
+        }
+
         Ok(score)
     }
 
@@ -488,9 +500,10 @@ impl VoiScheduler {
             }
             let voi = self.compute_voi(name, now_ts)?;
             let vpc = if diag.cost > 0.0 {
-                voi / diag.cost
+                let raw = voi / diag.cost;
+                if raw.is_finite() { raw } else { 0.0 }
             } else {
-                f64::MAX
+                0.0
             };
             candidates.push(Candidate {
                 name: name.clone(),

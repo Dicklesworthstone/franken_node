@@ -221,12 +221,24 @@ impl VefBudgetPolicy {
         hot_path: VefHotPath,
         mode: VefBudgetMode,
     ) -> Option<VefPathBudget> {
-        self.budget_for(hot_path, mode).map(|b| VefPathBudget {
-            hot_path: b.hot_path,
-            mode: b.mode,
-            p95_overhead_ms: b.p95_overhead_ms * self.noise_multiplier,
-            p99_overhead_ms: b.p99_overhead_ms * self.noise_multiplier,
-            cold_start_ms: b.cold_start_ms * self.noise_multiplier,
+        // Fail-closed: non-finite multiplier produces zero budgets (nothing passes).
+        let mult = if self.noise_multiplier.is_finite() && self.noise_multiplier > 0.0 {
+            self.noise_multiplier
+        } else {
+            0.0
+        };
+        self.budget_for(hot_path, mode).map(|b| {
+            let apply = |v: f64| {
+                let r = v * mult;
+                if r.is_finite() { r } else { 0.0 }
+            };
+            VefPathBudget {
+                hot_path: b.hot_path,
+                mode: b.mode,
+                p95_overhead_ms: apply(b.p95_overhead_ms),
+                p99_overhead_ms: apply(b.p99_overhead_ms),
+                cold_start_ms: apply(b.cold_start_ms),
+            }
         })
     }
 }
@@ -375,7 +387,12 @@ impl VefOverheadGate {
                 continue;
             }
 
-            let noisy = measurement.cv > self.policy.max_cv_pct / 100.0;
+            let cv_threshold = self.policy.max_cv_pct / 100.0;
+            let noisy = if cv_threshold.is_finite() {
+                measurement.cv > cv_threshold
+            } else {
+                true // fail-closed: non-finite threshold flags everything as noisy
+            };
             let p95_pass = measurement.p95_ms <= effective.p95_overhead_ms;
             let p99_pass = measurement.p99_ms <= effective.p99_overhead_ms;
             let cold_start_pass = measurement.cold_start_ms <= effective.cold_start_ms;

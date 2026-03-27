@@ -5,6 +5,7 @@
 //
 // bd-y0v — Section 10.12
 
+use hex::encode as hex_encode;
 use sha2::{Digest, Sha256};
 
 use crate::security::constant_time::ct_eq_bytes;
@@ -276,12 +277,20 @@ pub struct ReplayArtifact {
 // Audit entry
 // ---------------------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RecommendationDecision {
+    #[default]
+    Pending,
+    Accepted,
+    Rejected,
+}
+
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
     pub timestamp: u64,
     pub recommendation_id: String,
     pub action: String,
-    pub accepted: bool,
+    pub decision: RecommendationDecision,
     pub expected_loss: f64,
     pub context_fingerprint: [u8; 32],
 }
@@ -450,6 +459,30 @@ impl RecommendationEngine {
         self.degraded
     }
 
+    fn audit_entry(&self, recommendation_id: &str) -> Result<&AuditEntry, OIError> {
+        self.audit_trail
+            .iter()
+            .rev()
+            .find(|entry| entry.recommendation_id == recommendation_id)
+            .ok_or_else(|| {
+                OIError::NoContext(format!(
+                    "recommendation {recommendation_id} not present in audit trail"
+                ))
+            })
+    }
+
+    fn audit_entry_mut(&mut self, recommendation_id: &str) -> Result<&mut AuditEntry, OIError> {
+        self.audit_trail
+            .iter_mut()
+            .rev()
+            .find(|entry| entry.recommendation_id == recommendation_id)
+            .ok_or_else(|| {
+                OIError::NoContext(format!(
+                    "recommendation {recommendation_id} not present in audit trail"
+                ))
+            })
+    }
+
     /// Generate recommendations for the given context.
     /// INV-OIR-DETERMINISTIC: same inputs produce identical outputs.
     pub fn recommend(
@@ -525,7 +558,7 @@ impl RecommendationEngine {
                     timestamp,
                     recommendation_id: rec.id.clone(),
                     action: rec.action.clone(),
-                    accepted: false, // Not yet accepted.
+                    decision: RecommendationDecision::Pending,
                     expected_loss: rec.expected_loss,
                     context_fingerprint: context_fp,
                 },
@@ -563,43 +596,44 @@ impl RecommendationEngine {
         rec: &Recommendation,
         timestamp: u64,
     ) -> Result<(), OIError> {
-        let Some(entry) = self
-            .audit_trail
-            .iter_mut()
-            .rev()
-            .find(|e| e.recommendation_id == rec.id)
-        else {
-            return Err(OIError::NoContext(format!(
-                "recommendation {} not present in audit trail",
-                rec.id
-            )));
+        let expected_loss = {
+            let entry = self.audit_entry(&rec.id)?;
+            match entry.decision {
+                RecommendationDecision::Pending => {}
+                RecommendationDecision::Accepted => {
+                    return Err(OIError::NoContext(format!(
+                        "recommendation {} already accepted",
+                        rec.id
+                    )));
+                }
+                RecommendationDecision::Rejected => {
+                    return Err(OIError::NoContext(format!(
+                        "recommendation {} already rejected",
+                        rec.id
+                    )));
+                }
+            }
+            entry.expected_loss
         };
 
-        if entry.accepted {
-            return Err(OIError::NoContext(format!(
-                "recommendation {} already accepted",
-                rec.id
-            )));
-        }
-
-        if !rec.expected_loss.is_finite() {
+        if !expected_loss.is_finite() {
             return Err(OIError::ScoreOverflow {
                 cumulative: self.cumulative_loss,
                 budget: self.config.risk_budget,
             });
         }
-        let new_cumulative = self.cumulative_loss + rec.expected_loss;
+        let new_cumulative = self.cumulative_loss + expected_loss;
         if !new_cumulative.is_finite() || new_cumulative > self.config.risk_budget {
             return Err(OIError::ScoreOverflow {
                 cumulative: new_cumulative,
                 budget: self.config.risk_budget,
             });
         }
-        self.cumulative_loss = new_cumulative;
 
-        // Stamp acceptance at acceptance-time and mark explicit state transition.
-        entry.accepted = true;
+        let entry = self.audit_entry_mut(&rec.id)?;
+        entry.decision = RecommendationDecision::Accepted;
         entry.timestamp = timestamp;
+        self.cumulative_loss = new_cumulative;
 
         push_bounded(
             &mut self.events,
@@ -614,7 +648,31 @@ impl RecommendationEngine {
     }
 
     /// Reject a recommendation.
-    pub fn reject_recommendation(&mut self, rec: &Recommendation) {
+    pub fn reject_recommendation(
+        &mut self,
+        rec: &Recommendation,
+        timestamp: u64,
+    ) -> Result<(), OIError> {
+        let entry = self.audit_entry_mut(&rec.id)?;
+        match entry.decision {
+            RecommendationDecision::Pending => {
+                entry.decision = RecommendationDecision::Rejected;
+                entry.timestamp = timestamp;
+            }
+            RecommendationDecision::Accepted => {
+                return Err(OIError::NoContext(format!(
+                    "recommendation {} already accepted",
+                    rec.id
+                )));
+            }
+            RecommendationDecision::Rejected => {
+                return Err(OIError::NoContext(format!(
+                    "recommendation {} already rejected",
+                    rec.id
+                )));
+            }
+        }
+
         push_bounded(
             &mut self.events,
             OIEvent {
@@ -623,6 +681,8 @@ impl RecommendationEngine {
             },
             MAX_EVENTS,
         );
+
+        Ok(())
     }
 
     /// Execute an accepted recommendation and produce rollback proof.
@@ -633,11 +693,44 @@ impl RecommendationEngine {
         post_state: [u8; 32],
         ctx: &OperatorContext,
     ) -> Result<(RollbackProof, ReplayArtifact), OIError> {
+        let context_fp = ctx.fingerprint();
+        let (recommendation_id, action, expected_context_fp) = {
+            let entry = self.audit_entry(&rec.id)?;
+            match entry.decision {
+                RecommendationDecision::Accepted => {}
+                RecommendationDecision::Pending => {
+                    return Err(OIError::NoContext(format!(
+                        "recommendation {} not accepted",
+                        rec.id
+                    )));
+                }
+                RecommendationDecision::Rejected => {
+                    return Err(OIError::NoContext(format!(
+                        "recommendation {} was rejected",
+                        rec.id
+                    )));
+                }
+            }
+
+            (
+                entry.recommendation_id.clone(),
+                entry.action.clone(),
+                entry.context_fingerprint,
+            )
+        };
+
+        if !ct_eq_bytes(&expected_context_fp, &context_fp) {
+            return Err(OIError::ReplayMismatch {
+                expected: hex_encode(expected_context_fp),
+                actual: hex_encode(context_fp),
+            });
+        }
+
         let rollback_proof = RollbackProof {
             pre_state_hash: pre_state,
-            action_spec: rec.action.clone(),
+            action_spec: action.clone(),
             post_state_hash: post_state,
-            rollback_spec: format!("rollback:{}", rec.action),
+            rollback_spec: format!("rollback:{action}"),
         };
 
         rollback_proof.verify()?;
@@ -659,11 +752,10 @@ impl RecommendationEngine {
             MAX_EVENTS,
         );
 
-        let context_fp = ctx.fingerprint();
         let replay = ReplayArtifact {
-            recommendation_id: rec.id.clone(),
+            recommendation_id,
             input_context_fingerprint: context_fp,
-            action_executed: rec.action.clone(),
+            action_executed: action,
             outcome: "success".into(),
             rollback_proof: Some(rollback_proof.clone()),
         };
@@ -971,7 +1063,11 @@ mod tests {
         let recs = engine.recommend(&ctx, 1000).unwrap();
         let rec = &recs[0];
         engine.accept_recommendation(rec, 1001).unwrap();
-        let accepted = engine.audit_trail().iter().filter(|e| e.accepted).count();
+        let accepted = engine
+            .audit_trail()
+            .iter()
+            .filter(|entry| entry.decision == RecommendationDecision::Accepted)
+            .count();
         assert!(accepted > 0);
     }
 
@@ -990,7 +1086,7 @@ mod tests {
             .find(|e| e.recommendation_id == rec.id)
             .expect("accepted recommendation must exist in audit trail");
         assert_eq!(entry.timestamp, 2000);
-        assert!(entry.accepted);
+        assert_eq!(entry.decision, RecommendationDecision::Accepted);
     }
 
     #[test]
@@ -1029,16 +1125,90 @@ mod tests {
     }
 
     #[test]
+    fn test_accept_uses_authoritative_audit_expected_loss() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let recs = engine.recommend(&ctx, 1000).unwrap();
+        let mut forged = recs[0].clone();
+        let expected_loss = engine
+            .audit_trail()
+            .iter()
+            .find(|entry| entry.recommendation_id == forged.id)
+            .expect("generated recommendation must exist in audit trail")
+            .expected_loss;
+        forged.expected_loss = 0.0;
+
+        engine.accept_recommendation(&forged, 1001).unwrap();
+
+        assert!(
+            (engine.cumulative_loss() - expected_loss).abs() < f64::EPSILON,
+            "acceptance must use the audit-trail expected loss"
+        );
+    }
+
+    #[test]
     fn test_reject_recommendation() {
         let mut engine = make_engine();
         let ctx = test_context();
         let recs = engine.recommend(&ctx, 1000).unwrap();
-        engine.reject_recommendation(&recs[0]);
+        let rec = &recs[0];
+
+        engine.reject_recommendation(rec, 1001).unwrap();
+
+        let entry = engine
+            .audit_trail()
+            .iter()
+            .find(|entry| entry.recommendation_id == rec.id)
+            .expect("rejected recommendation must exist in audit trail");
+        assert_eq!(entry.decision, RecommendationDecision::Rejected);
+        assert_eq!(entry.timestamp, 1001);
         let has_reject = engine
             .events()
             .iter()
             .any(|e| e.code == EVT_RECOMMENDATION_REJECTED);
         assert!(has_reject);
+    }
+
+    #[test]
+    fn test_reject_rejects_unknown_recommendation() {
+        let mut engine = make_engine();
+        let unknown = Recommendation {
+            id: "unknown-rec".into(),
+            action: "noop".into(),
+            expected_loss: 0.1,
+            confidence: 0.9,
+            priority: 1,
+            prerequisites: Vec::new(),
+            estimated_time_ms: 1,
+            degraded_warning: None,
+        };
+
+        let err = engine.reject_recommendation(&unknown, 1234).unwrap_err();
+        assert!(matches!(err, OIError::NoContext(_)));
+    }
+
+    #[test]
+    fn test_reject_rejects_accepted_recommendation() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let recs = engine.recommend(&ctx, 1000).unwrap();
+        let rec = &recs[0];
+
+        engine.accept_recommendation(rec, 1001).unwrap();
+        let err = engine.reject_recommendation(rec, 1002).unwrap_err();
+        assert!(matches!(err, OIError::NoContext(_)));
+    }
+
+    #[test]
+    fn test_accept_rejects_previously_rejected_recommendation() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let recs = engine.recommend(&ctx, 1000).unwrap();
+        let rec = &recs[0];
+
+        engine.reject_recommendation(rec, 1001).unwrap();
+        let err = engine.accept_recommendation(rec, 1002).unwrap_err();
+        assert!(matches!(err, OIError::NoContext(_)));
     }
 
     // -- Budget enforcement --
@@ -1117,6 +1287,68 @@ mod tests {
         assert_eq!(proof.pre_state_hash, [1u8; 32]);
         assert_eq!(replay.recommendation_id, rec.id);
         assert_eq!(replay.input_context_fingerprint, ctx.fingerprint());
+    }
+
+    #[test]
+    fn test_execute_recommendation_rejects_unaccepted() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let recs = engine.recommend(&ctx, 1000).unwrap();
+
+        let err = engine
+            .execute_recommendation(&recs[0], [1u8; 32], [2u8; 32], &ctx)
+            .unwrap_err();
+        assert!(matches!(err, OIError::NoContext(_)));
+    }
+
+    #[test]
+    fn test_execute_recommendation_rejects_rejected_recommendation() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let recs = engine.recommend(&ctx, 1000).unwrap();
+        let rec = &recs[0];
+
+        engine.reject_recommendation(rec, 1001).unwrap();
+        let err = engine
+            .execute_recommendation(rec, [1u8; 32], [2u8; 32], &ctx)
+            .unwrap_err();
+        assert!(matches!(err, OIError::NoContext(_)));
+    }
+
+    #[test]
+    fn test_execute_recommendation_rejects_context_mismatch() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let recs = engine.recommend(&ctx, 1000).unwrap();
+        let rec = &recs[0];
+        engine.accept_recommendation(rec, 1001).unwrap();
+
+        let mut mismatched_ctx = test_context();
+        mismatched_ctx.error_rate = 0.42;
+
+        let err = engine
+            .execute_recommendation(rec, [1u8; 32], [2u8; 32], &mismatched_ctx)
+            .unwrap_err();
+        assert!(matches!(err, OIError::ReplayMismatch { .. }));
+    }
+
+    #[test]
+    fn test_execute_recommendation_uses_authoritative_audit_action() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let recs = engine.recommend(&ctx, 1000).unwrap();
+        let rec = &recs[0];
+        let expected_action = rec.action.clone();
+        engine.accept_recommendation(rec, 1001).unwrap();
+
+        let mut forged = rec.clone();
+        forged.action = "tampered".into();
+
+        let (proof, replay) = engine
+            .execute_recommendation(&forged, [1u8; 32], [2u8; 32], &ctx)
+            .unwrap();
+        assert_eq!(proof.action_spec, expected_action);
+        assert_eq!(replay.action_executed, expected_action);
     }
 
     #[test]
