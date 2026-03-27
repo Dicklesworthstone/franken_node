@@ -379,6 +379,10 @@ impl ObligationTracker {
         let id = ObligationId(format!("obl-{}", self.next_id));
         self.next_id = self.next_id.saturating_add(1);
 
+        if self.obligations.contains_key(&id.0) {
+            return Err(error_codes::ERR_OBL_DUPLICATE_RESERVE.to_string());
+        }
+
         let obligation = Obligation {
             id: id.clone(),
             flow: flow.clone(),

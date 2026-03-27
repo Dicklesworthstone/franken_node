@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 use crate::security::constant_time::ct_eq;
 
 use crate::capacity_defaults::aliases::MAX_REFERENCE_RUNTIMES;
+const MAX_DIVERGENCES: usize = 4096;
+const MAX_BLOCK_REASONS: usize = 256;
 
 // ── Schema version ─────────────────────────────────────────────────────
 
@@ -204,6 +206,7 @@ pub struct BoundarySample {
 fn digest_bytes(data: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(b"n_version_oracle_v1:");
+    h.update((data.len() as u64).to_le_bytes());
     h.update(data);
     hex::encode(h.finalize())
 }
@@ -279,7 +282,7 @@ pub fn run_harness(
             let ref_digest = digest_bytes(ref_output);
 
             if !ct_eq(&fe_digest, &ref_digest) {
-                div_counter += 1;
+                div_counter = div_counter.saturating_add(1);
                 let risk_tier = classify_divergence(
                     &sample.boundary_name,
                     &fe_digest,
@@ -307,7 +310,7 @@ pub fn run_harness(
                         sample.boundary_name, rt.runtime_id
                     ),
                 };
-                divergences.push(BoundaryDivergence {
+                push_bounded(&mut divergences, BoundaryDivergence {
                     divergence_id: format!("div-{div_counter:04}"),
                     boundary_name: sample.boundary_name.clone(),
                     franken_engine_output_digest: fe_digest.clone(),
@@ -316,7 +319,7 @@ pub fn run_harness(
                     risk_tier,
                     classification_reason: reason,
                     l1_oracle_link: None,
-                });
+                }, MAX_DIVERGENCES);
             }
         }
     }
@@ -340,30 +343,30 @@ pub fn run_harness(
     for div in &divergences {
         match div.risk_tier {
             RiskTier::High => {
-                high += 1;
+                high = high.saturating_add(1);
                 // INV-ORACLE-HIGH-RISK-BLOCKS: high risk always blocks.
-                high_risk_unresolved.push(div.divergence_id.clone());
+                push_bounded(&mut high_risk_unresolved, div.divergence_id.clone(), MAX_DIVERGENCES);
             }
             RiskTier::Medium | RiskTier::Low => {
                 match div.risk_tier {
-                    RiskTier::Medium => medium += 1,
-                    RiskTier::Low => low += 1,
+                    RiskTier::Medium => medium = medium.saturating_add(1),
+                    RiskTier::Low => low = low.saturating_add(1),
                     _ => unreachable!("outer arm constrains to Medium|Low"),
                 }
                 match receipt_index.get(div.divergence_id.as_str()) {
                     Some(receipt) => {
                         // INV-ORACLE-L1-LINKAGE: receipt must have valid L1 link.
                         if config.require_l1_links && receipt.l1_oracle_result_link.is_empty() {
-                            broken_l1.push(div.divergence_id.clone());
+                            push_bounded(&mut broken_l1, div.divergence_id.clone(), MAX_DIVERGENCES);
                         } else {
                             // ORACLE_POLICY_RECEIPT_ISSUED
                             let _ = event_codes::ORACLE_POLICY_RECEIPT_ISSUED;
-                            receipted += 1;
+                            receipted = receipted.saturating_add(1);
                         }
                     }
                     None => {
                         // INV-ORACLE-LOW-RISK-RECEIPTED
-                        missing_receipt.push(div.divergence_id.clone());
+                        push_bounded(&mut missing_receipt, div.divergence_id.clone(), MAX_DIVERGENCES);
                     }
                 }
             }
@@ -373,19 +376,19 @@ pub fn run_harness(
     if !high_risk_unresolved.is_empty() {
         // ORACLE_RELEASE_BLOCKED
         let _ = event_codes::ORACLE_RELEASE_BLOCKED;
-        block_reasons.push(ReleaseBlockReason::HighRiskUnresolved {
+        push_bounded(&mut block_reasons, ReleaseBlockReason::HighRiskUnresolved {
             divergence_ids: high_risk_unresolved.clone(),
-        });
+        }, MAX_BLOCK_REASONS);
     }
     if !missing_receipt.is_empty() {
-        block_reasons.push(ReleaseBlockReason::MissingReceipt {
+        push_bounded(&mut block_reasons, ReleaseBlockReason::MissingReceipt {
             divergence_ids: missing_receipt,
-        });
+        }, MAX_BLOCK_REASONS);
     }
     if !broken_l1.is_empty() {
-        block_reasons.push(ReleaseBlockReason::L1LinkBroken {
+        push_bounded(&mut block_reasons, ReleaseBlockReason::L1LinkBroken {
             divergence_ids: broken_l1,
-        });
+        }, MAX_BLOCK_REASONS);
     }
 
     let verdict = if block_reasons.is_empty() {

@@ -511,11 +511,11 @@ impl DurabilityController {
             // Quorum success
             let outcome = WriteOutcome::QuorumAcked {
                 acked: min_acks,
-                total: min_acks + 2,
+                total: min_acks.saturating_add(2),
             };
             let claim = DurabilityClaim::derive(&mode, &outcome);
             matrix.insert(
-                format!("quorum({})+acked({}/{})", min_acks, min_acks, min_acks + 2),
+                format!("quorum({})+acked({}/{})", min_acks, min_acks, min_acks.saturating_add(2)),
                 claim,
             );
 
@@ -523,7 +523,7 @@ impl DurabilityController {
             let outcome = WriteOutcome::QuorumFailed {
                 acked: min_acks.saturating_sub(1),
                 required: min_acks,
-                total: min_acks + 2,
+                total: min_acks.saturating_add(2),
             };
             let claim = DurabilityClaim::derive(&mode, &outcome);
             matrix.insert(
@@ -531,7 +531,7 @@ impl DurabilityController {
                     "quorum({})+failed({}/{})",
                     min_acks,
                     min_acks.saturating_sub(1),
-                    min_acks + 2
+                    min_acks.saturating_add(2)
                 ),
                 claim,
             );

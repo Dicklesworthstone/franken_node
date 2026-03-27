@@ -7,6 +7,14 @@
 /// Maximum number of mounted secrets tracked before oldest-first eviction.
 const MAX_MOUNTED_SECRETS: usize = 4096;
 
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    items.push(item);
+    if items.len() > cap {
+        let overflow = items.len() - cap;
+        items.drain(0..overflow);
+    }
+}
+
 /// Activation stages in fixed execution order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ActivationStage {
@@ -118,7 +126,7 @@ pub struct EphemeralSecretTracker {
 
 impl EphemeralSecretTracker {
     pub fn mount(&mut self, secret_ref: &str) {
-        self.mounted.push(secret_ref.to_string());
+        push_bounded(&mut self.mounted, secret_ref.to_string(), MAX_MOUNTED_SECRETS);
     }
 
     /// Clean up all mounted secrets. Idempotent.

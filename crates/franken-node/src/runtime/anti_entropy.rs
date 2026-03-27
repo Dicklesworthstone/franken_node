@@ -569,7 +569,7 @@ impl AntiEntropyReconciler {
                     trace_id: trace_id.clone(),
                     epoch: local.current_epoch(),
                 });
-                rejected += 1;
+                rejected = rejected.saturating_add(1);
                 continue;
             }
 
@@ -583,7 +583,7 @@ impl AntiEntropyReconciler {
                     trace_id: trace_id.clone(),
                     epoch: local.current_epoch(),
                 });
-                rejected += 1;
+                rejected = rejected.saturating_add(1);
                 continue;
             }
 
@@ -594,7 +594,7 @@ impl AntiEntropyReconciler {
         let mut applied = 0usize;
         for (record, replaced) in &accepted {
             if local.insert(record.clone()) {
-                applied += 1;
+                applied = applied.saturating_add(1);
                 self.push_event(ReconciliationEvent {
                     code: EVT_RECORD_ACCEPTED.to_string(),
                     detail: format!(

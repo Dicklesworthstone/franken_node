@@ -199,13 +199,15 @@ impl MeasurementResult {
         budget: &HotPathBudget,
         flamegraph_path: Option<String>,
     ) -> Self {
-        let overhead_p95_pct = if baseline_p95_us > 0.0 {
-            ((integrated_p95_us - baseline_p95_us) / baseline_p95_us) * 100.0
+        let overhead_p95_pct = if baseline_p95_us.is_finite() && baseline_p95_us > 0.0 {
+            let raw = ((integrated_p95_us - baseline_p95_us) / baseline_p95_us) * 100.0;
+            if raw.is_finite() { raw } else { 0.0 }
         } else {
             0.0
         };
-        let overhead_p99_pct = if baseline_p99_us > 0.0 {
-            ((integrated_p99_us - baseline_p99_us) / baseline_p99_us) * 100.0
+        let overhead_p99_pct = if baseline_p99_us.is_finite() && baseline_p99_us > 0.0 {
+            let raw = ((integrated_p99_us - baseline_p99_us) / baseline_p99_us) * 100.0;
+            if raw.is_finite() { raw } else { 0.0 }
         } else {
             0.0
         };

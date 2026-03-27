@@ -75,7 +75,7 @@ impl Default for BocpdConfig {
 
 impl BocpdConfig {
     pub fn validate(&self) -> Result<(), BocpdError> {
-        if self.hazard_lambda <= 0.0 {
+        if !self.hazard_lambda.is_finite() || self.hazard_lambda <= 0.0 {
             return Err(BocpdError::InvalidConfig(
                 "hazard_lambda must be > 0".into(),
             ));
@@ -133,8 +133,18 @@ pub enum HazardFunction {
 impl HazardFunction {
     pub fn evaluate(&self, _run_length: usize) -> f64 {
         match self {
-            Self::Constant { lambda } => 1.0 / lambda,
-            Self::Geometric { p } => *p,
+            Self::Constant { lambda } => {
+                if !lambda.is_finite() || *lambda <= 0.0 {
+                    return 0.0;
+                }
+                1.0 / lambda
+            }
+            Self::Geometric { p } => {
+                if !p.is_finite() || *p < 0.0 {
+                    return 0.0;
+                }
+                *p
+            }
         }
     }
 }
@@ -206,14 +216,23 @@ impl GaussianModel {
     pub(crate) fn predictive_prob(&self, stats: &GaussianSuffStats, x: f64) -> f64 {
         let n = stats.n;
         let kappa_n = self.kappa0 + n;
+        if !kappa_n.is_finite() || kappa_n <= 0.0 {
+            return 1e-300;
+        }
         let mu_n = (self.kappa0 * self.mu0 + n * stats.mean) / kappa_n;
         let alpha_n = self.alpha0 + n / 2.0;
+        if !alpha_n.is_finite() || alpha_n <= 0.0 {
+            return 1e-300;
+        }
         let beta_n = self.beta0
             + 0.5 * stats.sum_sq
             + 0.5 * self.kappa0 * n * (stats.mean - self.mu0).powi(2) / kappa_n;
 
         let nu = 2.0 * alpha_n;
         let sigma_sq = beta_n * (kappa_n + 1.0) / (alpha_n * kappa_n);
+        if !sigma_sq.is_finite() || sigma_sq <= 0.0 {
+            return 1e-300;
+        }
 
         student_t_pdf(x, mu_n, sigma_sq, nu)
     }
@@ -370,10 +389,11 @@ impl CategoricalModel {
         }
         let total =
             stats.counts.iter().copied().fold(0.0_f64, |a, b| a + b) + self.alpha0 * self.k as f64;
-        if total <= 0.0 {
+        if !total.is_finite() || total <= 0.0 {
             return 1e-300;
         }
-        (stats.counts[category] + self.alpha0) / total
+        let result = (stats.counts[category] + self.alpha0) / total;
+        if result.is_finite() { result } else { 1e-300 }
     }
 }
 
@@ -512,6 +532,15 @@ impl BocpdDetector {
             for p in &mut growth_probs {
                 *p /= total;
             }
+        } else {
+            // Posterior collapsed — reinitialize to changepoint prior to prevent
+            // permanent detector death from an all-zero/NaN posterior.
+            for p in &mut growth_probs {
+                *p = 0.0;
+            }
+            if !growth_probs.is_empty() {
+                growth_probs[0] = 1.0;
+            }
         }
 
         self.run_length_probs = growth_probs;
@@ -574,6 +603,9 @@ impl BocpdDetector {
 
         // Track regime statistics.
         self.current_regime_sum += x;
+        if !self.current_regime_sum.is_finite() {
+            self.current_regime_sum = 0.0;
+        }
         self.current_regime_count += 1.0;
 
         // Step 5: Check for changepoint.
@@ -587,7 +619,8 @@ impl BocpdDetector {
             // INV-BCP-MIN-RUN: only signal if enough observations in new regime.
             if self.current_run_length >= self.config.min_run_length {
                 let old_mean = if self.current_regime_count > 1.0 {
-                    (self.current_regime_sum - x) / (self.current_regime_count - 1.0)
+                    let raw = (self.current_regime_sum - x) / (self.current_regime_count - 1.0);
+                    if raw.is_finite() { raw } else { 0.0 }
                 } else {
                     0.0
                 };

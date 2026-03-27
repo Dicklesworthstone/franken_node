@@ -570,7 +570,7 @@ fn canonical_decode(bytes: &[u8]) -> Result<Vec<u8>, String> {
         return Err("payload too short: need at least 4 bytes for length prefix".to_string());
     }
     let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
-    if bytes.len() != 4 + len {
+    if bytes.len().saturating_sub(4) != len {
         return Err(format!(
             "length mismatch: prefix says {} bytes, got {}",
             len,
