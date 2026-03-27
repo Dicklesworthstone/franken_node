@@ -915,7 +915,7 @@ impl ReplayEngine {
                 });
             }
 
-            replay_duration_ns = replay_duration_ns.saturating_add(step.timestamp_ns);
+            replay_duration_ns = std::cmp::max(replay_duration_ns, step.timestamp_ns);
         }
 
         let verdict = if divergences.is_empty() {

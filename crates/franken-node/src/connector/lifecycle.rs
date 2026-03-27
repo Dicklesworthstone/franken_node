@@ -450,7 +450,9 @@ mod connector_runtime_integration_tests {
         assert_eq!(state, ConnectorState::Active);
 
         let mut channel: ObligationChannel<String> = ObligationChannel::new("conn-runtime");
-        let ob_id = channel.send("epoch-sync".to_string(), 1000, "trace-1");
+        let ob_id = channel
+            .send("epoch-sync".to_string(), 1000, "trace-1")
+            .expect("send should succeed");
 
         assert_eq!(channel.total_obligations(), 1);
         assert_eq!(channel.count_by_status(ObligationStatus::Created), 1);
@@ -468,7 +470,9 @@ mod connector_runtime_integration_tests {
 
         // Existing obligations should be cancelled
         let mut channel: ObligationChannel<String> = ObligationChannel::new("conn-cancel");
-        let ob_id = channel.send("pending-work".to_string(), 1000, "trace-2");
+        let ob_id = channel
+            .send("pending-work".to_string(), 1000, "trace-2")
+            .expect("send should succeed");
         channel.cancel(&ob_id, 1100, "trace-2").unwrap();
 
         assert_eq!(channel.count_by_status(ObligationStatus::Cancelled), 1);
@@ -489,9 +493,9 @@ mod connector_runtime_integration_tests {
             ObligationChannel::with_deadline("conn-deadlines", 500);
 
         // Send three obligations with 500ms deadline from now_ms=1000
-        let ob1 = channel.send("task-a".to_string(), 1000, "t1");
-        let ob2 = channel.send("task-b".to_string(), 1000, "t2");
-        let _ob3 = channel.send("task-c".to_string(), 1000, "t3");
+        let ob1 = channel.send("task-a".to_string(), 1000, "t1").unwrap();
+        let ob2 = channel.send("task-b".to_string(), 1000, "t2").unwrap();
+        let _ob3 = channel.send("task-c".to_string(), 1000, "t3").unwrap();
 
         // Fulfill one before deadline
         channel.fulfill(&ob1, 1200, "t1").unwrap();
@@ -845,7 +849,9 @@ mod connector_runtime_integration_tests {
             .unwrap();
 
         // Send obligation
-        let ob_id = channel.send("sync-data".to_string(), 1000, "audit");
+        let ob_id = channel
+            .send("sync-data".to_string(), 1000, "audit")
+            .expect("send should succeed");
 
         // Fulfill
         channel.fulfill(&ob_id, 1200, "audit").unwrap();

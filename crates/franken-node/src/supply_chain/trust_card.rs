@@ -59,6 +59,7 @@ fn compute_trust_card_derivation_hash(refs: &[VerifiedEvidenceRef], derived_at: 
     let mut hasher = Sha256::new();
     hasher.update(b"trust_card_derivation_v1:");
     hasher.update(derived_at.to_le_bytes());
+    hasher.update((refs.len() as u64).to_le_bytes());
     for r in refs {
         hasher.update((r.evidence_id.len() as u64).to_le_bytes());
         hasher.update(r.evidence_id.as_bytes());

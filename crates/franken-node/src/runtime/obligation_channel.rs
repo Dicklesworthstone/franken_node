@@ -84,6 +84,8 @@ pub mod event_codes {
     pub const FN_OB_011: &str = "FN-OB-011";
     /// Ledger query executed.
     pub const FN_OB_012: &str = "FN-OB-012";
+    /// Send rejected because the live queue is already at capacity.
+    pub const FN_OB_013: &str = "FN-OB-013";
 }
 
 // ── Error codes ─────────────────────────────────────────────────────────────
@@ -99,6 +101,7 @@ pub mod error_codes {
     pub const ERR_OCH_ROLLBACK_FAILED: &str = "ERR_OCH_ROLLBACK_FAILED";
     pub const ERR_OCH_DEADLINE_EXCEEDED: &str = "ERR_OCH_DEADLINE_EXCEEDED";
     pub const ERR_OCH_INVALID_TRANSITION: &str = "ERR_OCH_INVALID_TRANSITION";
+    pub const ERR_OCH_QUEUE_CAPACITY_EXCEEDED: &str = "ERR_OCH_QUEUE_CAPACITY_EXCEEDED";
 }
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -225,7 +228,7 @@ pub struct ClosureProof {
 /// Audit record for channel obligation events.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChannelAuditRecord {
-    /// Event code (FN-OB-001 through FN-OB-012).
+    /// Event code (FN-OB-001 through FN-OB-013).
     pub event_code: String,
     /// Obligation ID this event relates to (empty for flow-level events).
     pub obligation_id: String,
@@ -268,6 +271,54 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
         }
     }
 
+    fn evict_oldest_terminal_obligation(&mut self) -> bool {
+        let terminal_index = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter(|(_, (obligation, _))| obligation.status.is_terminal())
+            .min_by_key(|(_, (obligation, _))| {
+                (
+                    obligation
+                        .resolved_at_ms
+                        .unwrap_or(obligation.created_at_ms),
+                    obligation.created_at_ms,
+                    obligation.obligation_id.as_str(),
+                )
+            })
+            .map(|(index, _)| index);
+
+        if let Some(index) = terminal_index {
+            self.queue.remove(index);
+            return true;
+        }
+
+        false
+    }
+
+    fn ensure_capacity_for_send(&mut self, trace_id: &str) -> Result<(), String> {
+        if self.queue.len() < MAX_QUEUE_ENTRIES {
+            return Ok(());
+        }
+
+        if self.evict_oldest_terminal_obligation() {
+            return Ok(());
+        }
+
+        self.emit_audit(ChannelAuditRecord {
+            event_code: event_codes::FN_OB_013.to_string(),
+            obligation_id: String::new(),
+            status: "Rejected".to_string(),
+            trace_id: trace_id.to_string(),
+            schema_version: SCHEMA_VERSION.to_string(),
+            detail: format!(
+                "send rejected: queue capacity {} reached",
+                MAX_QUEUE_ENTRIES
+            ),
+        });
+        Err(error_codes::ERR_OCH_QUEUE_CAPACITY_EXCEEDED.to_string())
+    }
+
     /// Create a new channel with defaults.
     #[must_use]
     pub fn new(channel_id: &str) -> Self {
@@ -291,7 +342,9 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
 
     /// Send a message through the channel, creating a tracked obligation.
     /// INV-OCH-TRACKED, INV-OCH-DEADLINE
-    pub fn send(&mut self, message: T, now_ms: u64, trace_id: &str) -> String {
+    pub fn send(&mut self, message: T, now_ms: u64, trace_id: &str) -> Result<String, String> {
+        self.ensure_capacity_for_send(trace_id)?;
+
         let obligation_id = format!("och-{}-{}", self.channel_id, self.next_id);
         self.next_id = self.next_id.saturating_add(1);
 
@@ -324,8 +377,8 @@ impl<T: Clone + Serialize> ObligationChannel<T> {
             detail: "obligation sent to receiver".to_string(),
         });
 
-        push_bounded(&mut self.queue, (obligation, message), MAX_QUEUE_ENTRIES);
-        obligation_id
+        self.queue.push((obligation, message));
+        Ok(obligation_id)
     }
 
     /// Mark an obligation as fulfilled. INV-OCH-LEDGER-COMPLETE
@@ -992,6 +1045,7 @@ mod tests {
         assert!(!event_codes::FN_OB_010.is_empty());
         assert!(!event_codes::FN_OB_011.is_empty());
         assert!(!event_codes::FN_OB_012.is_empty());
+        assert!(!event_codes::FN_OB_013.is_empty());
     }
 
     // 4. error codes are defined and non-empty
@@ -1007,6 +1061,7 @@ mod tests {
         assert!(!error_codes::ERR_OCH_ROLLBACK_FAILED.is_empty());
         assert!(!error_codes::ERR_OCH_DEADLINE_EXCEEDED.is_empty());
         assert!(!error_codes::ERR_OCH_INVALID_TRANSITION.is_empty());
+        assert!(!error_codes::ERR_OCH_QUEUE_CAPACITY_EXCEEDED.is_empty());
     }
 
     // 5. ObligationStatus display and terminal state
@@ -1037,7 +1092,9 @@ mod tests {
     #[test]
     fn test_channel_send_creates_obligation() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("test-ch");
-        let id = ch.send("hello".to_string(), 1000, "trace-1");
+        let id = ch
+            .send("hello".to_string(), 1000, "trace-1")
+            .expect("send should succeed");
         assert!(id.starts_with("och-test-ch-"));
         assert_eq!(ch.total_obligations(), 1);
         let obl = ch.get_obligation(&id).unwrap();
@@ -1045,11 +1102,66 @@ mod tests {
         assert_eq!(obl.deadline, 1000 + DEFAULT_DEADLINE_MS);
     }
 
+    #[test]
+    fn test_channel_send_fails_closed_when_queue_full() {
+        let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-full");
+        let first_id = ch
+            .send("msg-0".to_string(), 1000, "trace-0")
+            .expect("first send should succeed");
+
+        for idx in 1..MAX_QUEUE_ENTRIES {
+            ch.send(format!("msg-{idx}"), 1000 + idx as u64, "trace-fill")
+                .expect("fill send should succeed");
+        }
+
+        let err = ch
+            .send("overflow".to_string(), 2000, "trace-overflow")
+            .expect_err("overflow send should fail closed");
+        assert_eq!(err, error_codes::ERR_OCH_QUEUE_CAPACITY_EXCEEDED);
+        assert_eq!(ch.total_obligations(), MAX_QUEUE_ENTRIES);
+        assert!(ch.get_obligation(&first_id).is_some());
+        assert_eq!(
+            ch.audit_log()
+                .last()
+                .map(|record| record.event_code.as_str()),
+            Some(event_codes::FN_OB_013)
+        );
+    }
+
+    #[test]
+    fn test_channel_send_reclaims_terminal_obligation_before_rejecting() {
+        let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-reclaim");
+        let first_id = ch
+            .send("msg-0".to_string(), 1000, "trace-0")
+            .expect("first send should succeed");
+
+        for idx in 1..MAX_QUEUE_ENTRIES {
+            ch.send(format!("msg-{idx}"), 1000 + idx as u64, "trace-fill")
+                .expect("fill send should succeed");
+        }
+
+        ch.fulfill(&first_id, 2000, "trace-fulfill")
+            .expect("terminal transition should succeed");
+
+        let replacement_id = ch
+            .send("replacement".to_string(), 3000, "trace-reclaim")
+            .expect("terminal entry should be reclaimed before rejecting");
+
+        assert_eq!(ch.total_obligations(), MAX_QUEUE_ENTRIES);
+        assert!(ch.get_obligation(&first_id).is_none());
+        assert!(ch.get_obligation(&replacement_id).is_some());
+        assert_eq!(ch.count_by_status(ObligationStatus::Fulfilled), 0);
+        assert_eq!(
+            ch.count_by_status(ObligationStatus::Created),
+            MAX_QUEUE_ENTRIES
+        );
+    }
+
     // 8. Channel fulfill transitions status
     #[test]
     fn test_channel_fulfill() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-ful");
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         ch.fulfill(&id, 1050, "trace-2").unwrap();
         let obl = ch.get_obligation(&id).unwrap();
         assert_eq!(obl.status, ObligationStatus::Fulfilled);
@@ -1060,7 +1172,7 @@ mod tests {
     #[test]
     fn test_channel_reject() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-rej");
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         ch.reject(&id, 1050, "trace-2").unwrap();
         let obl = ch.get_obligation(&id).unwrap();
         assert_eq!(obl.status, ObligationStatus::Rejected);
@@ -1070,7 +1182,7 @@ mod tests {
     #[test]
     fn test_double_fulfill_errors() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-df");
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         ch.fulfill(&id, 1050, "trace-2").unwrap();
         let err = ch.fulfill(&id, 1100, "trace-3").unwrap_err();
         assert_eq!(err, error_codes::ERR_OCH_ALREADY_FULFILLED);
@@ -1088,7 +1200,7 @@ mod tests {
     #[test]
     fn test_timeout_sweep() {
         let mut ch: ObligationChannel<String> = ObligationChannel::with_deadline("ch-sw", 100);
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         // Advance past deadline (1000 + 100 = 1100)
         let timed_out = ch.sweep_timeouts(1200, "trace-2");
         assert_eq!(timed_out.len(), 1);
@@ -1101,7 +1213,7 @@ mod tests {
     #[test]
     fn test_cancel_obligation() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-can");
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         ch.cancel(&id, 1050, "trace-2").unwrap();
         let obl = ch.get_obligation(&id).unwrap();
         assert_eq!(obl.status, ObligationStatus::Cancelled);
@@ -1111,7 +1223,7 @@ mod tests {
     #[test]
     fn test_cannot_cancel_terminal() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-ct");
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         ch.fulfill(&id, 1050, "trace-2").unwrap();
         let err = ch.cancel(&id, 1100, "trace-3").unwrap_err();
         assert_eq!(err, error_codes::ERR_OCH_INVALID_TRANSITION);
@@ -1245,7 +1357,7 @@ mod tests {
     #[test]
     fn test_audit_log_captures_events() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-audit");
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         ch.fulfill(&id, 1050, "trace-2").unwrap();
 
         let log = ch.audit_log();
@@ -1272,8 +1384,8 @@ mod tests {
     #[test]
     fn test_channel_count_by_status() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-cbs");
-        let id1 = ch.send("a".to_string(), 1000, "t1");
-        let _id2 = ch.send("b".to_string(), 1000, "t2");
+        let id1 = ch.send("a".to_string(), 1000, "t1").unwrap();
+        let _id2 = ch.send("b".to_string(), 1000, "t2").unwrap();
         ch.fulfill(&id1, 1050, "t3").unwrap();
 
         assert_eq!(ch.count_by_status(ObligationStatus::Created), 1);
@@ -1284,9 +1396,9 @@ mod tests {
     #[test]
     fn test_unique_ids() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-uid");
-        let id1 = ch.send("a".to_string(), 1000, "t1");
-        let id2 = ch.send("b".to_string(), 1001, "t2");
-        let id3 = ch.send("c".to_string(), 1002, "t3");
+        let id1 = ch.send("a".to_string(), 1000, "t1").unwrap();
+        let id2 = ch.send("b".to_string(), 1001, "t2").unwrap();
+        let id3 = ch.send("c".to_string(), 1002, "t3").unwrap();
         assert_ne!(id1, id2);
         assert_ne!(id2, id3);
         assert_ne!(id1, id3);
@@ -1356,6 +1468,7 @@ mod tests {
             event_codes::FN_OB_010,
             event_codes::FN_OB_011,
             event_codes::FN_OB_012,
+            event_codes::FN_OB_013,
         ];
         for code in &codes {
             assert!(
@@ -1369,7 +1482,7 @@ mod tests {
     #[test]
     fn test_channel_custom_deadline() {
         let mut ch: ObligationChannel<String> = ObligationChannel::with_deadline("ch-dl", 500);
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         let obl = ch.get_obligation(&id).unwrap();
         assert_eq!(obl.deadline, 1500);
     }
@@ -1378,7 +1491,9 @@ mod tests {
     #[test]
     fn test_channel_deadline_saturates_on_overflow() {
         let mut ch: ObligationChannel<String> = ObligationChannel::with_deadline("ch-overflow", 50);
-        let id = ch.send("msg".to_string(), u64::MAX - 10, "trace-overflow");
+        let id = ch
+            .send("msg".to_string(), u64::MAX - 10, "trace-overflow")
+            .unwrap();
         let obl = ch.get_obligation(&id).unwrap();
         assert_eq!(obl.deadline, u64::MAX);
     }
@@ -1406,7 +1521,7 @@ mod tests {
     #[test]
     fn test_reject_then_fulfill_errors() {
         let mut ch: ObligationChannel<String> = ObligationChannel::new("ch-rf");
-        let id = ch.send("msg".to_string(), 1000, "trace-1");
+        let id = ch.send("msg".to_string(), 1000, "trace-1").unwrap();
         ch.reject(&id, 1050, "trace-2").unwrap();
         let err = ch.fulfill(&id, 1100, "trace-3").unwrap_err();
         assert_eq!(err, error_codes::ERR_OCH_ALREADY_REJECTED);
