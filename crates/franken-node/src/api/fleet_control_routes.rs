@@ -9,7 +9,8 @@
 //! - `POST   /v1/fleet/coordinate`   — multi-node coordination command
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Mutex, OnceLock};
 
 use super::error::ApiError;
 use super::middleware::{
@@ -18,6 +19,7 @@ use super::middleware::{
 };
 use super::trust_card_routes::ApiResponse;
 use super::utf8_prefix;
+use crate::capacity_defaults::aliases::MAX_LEASES;
 
 // ── Response Types ─────────────────────────────────────────────────────────
 
@@ -99,7 +101,121 @@ pub struct CoordinationRequest {
     pub timeout_seconds: u32,
 }
 
-fn validate_coordination_targets(target_nodes: &[String], trace_id: &str) -> Result<(), ApiError> {
+#[derive(Debug, Clone)]
+struct StoredLease {
+    lease: Lease,
+    expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug)]
+struct FleetLeaseState {
+    leases: BTreeMap<String, StoredLease>,
+    next_lease_seq: u64,
+    next_fencing_seq: u64,
+    next_coordination_seq: u64,
+}
+
+impl Default for FleetLeaseState {
+    fn default() -> Self {
+        Self {
+            leases: BTreeMap::new(),
+            next_lease_seq: 1,
+            next_fencing_seq: 1,
+            next_coordination_seq: 1,
+        }
+    }
+}
+
+impl FleetLeaseState {
+    fn sweep_expired(&mut self, now: chrono::DateTime<chrono::Utc>) {
+        let expired_ids: Vec<String> = self
+            .leases
+            .iter()
+            .filter(|(_, stored)| stored.expires_at <= now)
+            .map(|(lease_id, _)| lease_id.clone())
+            .collect();
+
+        for lease_id in expired_ids {
+            self.leases.remove(&lease_id);
+        }
+    }
+
+    fn next_lease_id(&mut self, trace_id: &str) -> String {
+        let lease_id = format!(
+            "lease-{}-{:04}",
+            utf8_prefix(trace_id, 12),
+            self.next_lease_seq
+        );
+        self.next_lease_seq = self.next_lease_seq.saturating_add(1);
+        lease_id
+    }
+
+    fn issue_fencing_token(&mut self) -> u64 {
+        let fencing_seq = self.next_fencing_seq;
+        self.next_fencing_seq = self.next_fencing_seq.saturating_add(1);
+        fencing_seq
+    }
+
+    fn next_coordination_id(&mut self, trace_id: &str) -> String {
+        let command_id = format!(
+            "coord-{}-{:04}",
+            utf8_prefix(trace_id, 12),
+            self.next_coordination_seq
+        );
+        self.next_coordination_seq = self.next_coordination_seq.saturating_add(1);
+        command_id
+    }
+
+    fn active_leases(&self) -> Vec<Lease> {
+        let mut leases: Vec<Lease> = self
+            .leases
+            .values()
+            .map(|stored| stored.lease.clone())
+            .collect();
+        leases.sort_by(|left, right| {
+            left.acquired_at
+                .cmp(&right.acquired_at)
+                .then_with(|| left.lease_id.cmp(&right.lease_id))
+        });
+        leases
+    }
+}
+
+fn fleet_lease_state() -> &'static Mutex<FleetLeaseState> {
+    static STATE: OnceLock<Mutex<FleetLeaseState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(FleetLeaseState::default()))
+}
+
+fn with_fleet_lease_state<T>(
+    trace_id: &str,
+    f: impl FnOnce(&mut FleetLeaseState) -> Result<T, ApiError>,
+) -> Result<T, ApiError> {
+    let mut state = fleet_lease_state().lock().map_err(|_| ApiError::Internal {
+        detail: "fleet lease state lock poisoned".to_string(),
+        trace_id: trace_id.to_string(),
+    })?;
+    f(&mut state)
+}
+
+fn normalize_required_field(
+    value: &str,
+    field_name: &str,
+    trace_id: &str,
+) -> Result<String, ApiError> {
+    let normalized = value.trim();
+    if normalized.is_empty() {
+        return Err(ApiError::BadRequest {
+            detail: format!("fleet field `{field_name}` must not be empty"),
+            trace_id: trace_id.to_string(),
+        });
+    }
+    Ok(normalized.to_string())
+}
+
+fn validate_coordination_targets(
+    target_nodes: &[String],
+    trace_id: &str,
+) -> Result<Vec<String>, ApiError> {
     if target_nodes.is_empty() {
         return Err(ApiError::BadRequest {
             detail: "coordination requires at least one target node".to_string(),
@@ -108,16 +224,19 @@ fn validate_coordination_targets(target_nodes: &[String], trace_id: &str) -> Res
     }
 
     let mut seen = BTreeSet::new();
+    let mut normalized = Vec::with_capacity(target_nodes.len());
     for node_id in target_nodes {
-        if !seen.insert(node_id.as_str()) {
+        let normalized_node = normalize_required_field(node_id, "target_node", trace_id)?;
+        if !seen.insert(normalized_node.clone()) {
             return Err(ApiError::BadRequest {
-                detail: format!("duplicate target node `{node_id}` is not allowed"),
+                detail: format!("duplicate target node `{normalized_node}` is not allowed"),
                 trace_id: trace_id.to_string(),
             });
         }
+        normalized.push(normalized_node);
     }
 
-    Ok(())
+    Ok(normalized)
 }
 
 // ── Route Metadata ─────────────────────────────────────────────────────────
@@ -192,13 +311,15 @@ pub fn route_metadata() -> Vec<RouteMetadata> {
 /// Handle `GET /v1/fleet/leases`.
 pub fn list_leases(
     _identity: &AuthIdentity,
-    _trace: &TraceContext,
+    trace: &TraceContext,
 ) -> Result<ApiResponse<Vec<Lease>>, ApiError> {
-    // Skeleton: return empty lease list.
-    Ok(ApiResponse {
-        ok: true,
-        data: Vec::new(),
-        page: None,
+    with_fleet_lease_state(&trace.trace_id, |state| {
+        state.sweep_expired(chrono::Utc::now());
+        Ok(ApiResponse {
+            ok: true,
+            data: state.active_leases(),
+            page: None,
+        })
     })
 }
 
@@ -208,37 +329,87 @@ pub fn acquire_lease(
     trace: &TraceContext,
     request: &LeaseAcquireRequest,
 ) -> Result<ApiResponse<Lease>, ApiError> {
-    let lease_id = format!("lease-{}", utf8_prefix(&trace.trace_id, 12));
-    let now = chrono::Utc::now();
-    let expires = now + chrono::Duration::seconds(i64::from(request.ttl_seconds));
+    let resource = normalize_required_field(&request.resource, "resource", &trace.trace_id)?;
+    if request.ttl_seconds == 0 {
+        return Err(ApiError::BadRequest {
+            detail: "fleet lease ttl_seconds must be greater than zero".to_string(),
+            trace_id: trace.trace_id.clone(),
+        });
+    }
 
-    let lease = Lease {
-        lease_id,
-        holder: identity.principal.clone(),
-        resource: request.resource.clone(),
-        acquired_at: now.to_rfc3339(),
-        expires_at: expires.to_rfc3339(),
-        fencing_token: 1,
-    };
+    with_fleet_lease_state(&trace.trace_id, |state| {
+        let now = chrono::Utc::now();
+        state.sweep_expired(now);
 
-    Ok(ApiResponse {
-        ok: true,
-        data: lease,
-        page: None,
+        if state.leases.len() >= MAX_LEASES {
+            return Err(ApiError::Conflict {
+                detail: format!("fleet lease registry is at capacity ({MAX_LEASES})"),
+                trace_id: trace.trace_id.clone(),
+            });
+        }
+
+        if let Some(existing) = state
+            .leases
+            .values()
+            .find(|stored| stored.lease.resource == resource)
+        {
+            return Err(ApiError::Conflict {
+                detail: format!(
+                    "resource `{}` is already leased by `{}` via `{}`",
+                    resource, existing.lease.holder, existing.lease.lease_id
+                ),
+                trace_id: trace.trace_id.clone(),
+            });
+        }
+
+        let lease_id = state.next_lease_id(&trace.trace_id);
+        let expires_at = now + chrono::Duration::seconds(i64::from(request.ttl_seconds));
+        let lease = Lease {
+            lease_id: lease_id.clone(),
+            holder: identity.principal.clone(),
+            resource: resource.clone(),
+            acquired_at: now.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+            fencing_token: state.issue_fencing_token(),
+        };
+
+        state.leases.insert(
+            lease_id,
+            StoredLease {
+                lease: lease.clone(),
+                expires_at,
+            },
+        );
+
+        Ok(ApiResponse {
+            ok: true,
+            data: lease,
+            page: None,
+        })
     })
 }
 
 /// Handle `DELETE /v1/fleet/leases/{lease_id}`.
 pub fn release_lease(
     _identity: &AuthIdentity,
-    _trace: &TraceContext,
-    _lease_id: &str,
+    trace: &TraceContext,
+    lease_id: &str,
 ) -> Result<ApiResponse<bool>, ApiError> {
-    // Skeleton: always succeeds.
-    Ok(ApiResponse {
-        ok: true,
-        data: true,
-        page: None,
+    with_fleet_lease_state(&trace.trace_id, |state| {
+        state.sweep_expired(chrono::Utc::now());
+        state
+            .leases
+            .remove(lease_id)
+            .ok_or_else(|| ApiError::NotFound {
+                detail: format!("no active fleet lease found for `{lease_id}`"),
+                trace_id: trace.trace_id.clone(),
+            })?;
+
+        Ok(ApiResponse {
+            ok: true,
+            data: true,
+            page: None,
+        })
     })
 }
 
@@ -248,21 +419,32 @@ pub fn execute_fence(
     trace: &TraceContext,
     request: &FencingRequest,
 ) -> Result<ApiResponse<FencingResult>, ApiError> {
-    let operation_id = format!("fence-{}", utf8_prefix(&trace.trace_id, 12));
+    let target_node =
+        normalize_required_field(&request.target_node, "target_node", &trace.trace_id)?;
+    let _reason = normalize_required_field(&request.reason, "reason", &trace.trace_id)?;
 
-    let result = FencingResult {
-        operation_id,
-        target_node: request.target_node.clone(),
-        action: request.action,
-        status: FencingStatus::Completed,
-        fencing_token: 1,
-        executed_at: chrono::Utc::now().to_rfc3339(),
-    };
+    with_fleet_lease_state(&trace.trace_id, |state| {
+        let fencing_token = state.issue_fencing_token();
+        let operation_id = format!(
+            "fence-{}-{:04}",
+            utf8_prefix(&trace.trace_id, 12),
+            fencing_token
+        );
 
-    Ok(ApiResponse {
-        ok: true,
-        data: result,
-        page: None,
+        let result = FencingResult {
+            operation_id,
+            target_node: target_node.clone(),
+            action: request.action,
+            status: FencingStatus::Completed,
+            fencing_token,
+            executed_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        Ok(ApiResponse {
+            ok: true,
+            data: result,
+            page: None,
+        })
     })
 }
 
@@ -272,24 +454,34 @@ pub fn execute_coordination(
     trace: &TraceContext,
     request: &CoordinationRequest,
 ) -> Result<ApiResponse<CoordinationResult>, ApiError> {
-    validate_coordination_targets(&request.target_nodes, &trace.trace_id)?;
+    let command_type =
+        normalize_required_field(&request.command_type, "command_type", &trace.trace_id)?;
+    let target_nodes = validate_coordination_targets(&request.target_nodes, &trace.trace_id)?;
+    if request.timeout_seconds == 0 {
+        return Err(ApiError::BadRequest {
+            detail: "coordination timeout_seconds must be greater than zero".to_string(),
+            trace_id: trace.trace_id.clone(),
+        });
+    }
 
-    let command_id = format!("coord-{}", utf8_prefix(&trace.trace_id, 12));
+    with_fleet_lease_state(&trace.trace_id, |state| {
+        let command_id = state.next_coordination_id(&trace.trace_id);
 
-    let result = CoordinationResult {
-        command_id,
-        command_type: request.command_type.clone(),
-        participating_nodes: request.target_nodes.clone(),
-        ack_count: u32::try_from(request.target_nodes.len()).unwrap_or(u32::MAX),
-        total_nodes: u32::try_from(request.target_nodes.len()).unwrap_or(u32::MAX),
-        status: CoordinationStatus::Acknowledged,
-        issued_at: chrono::Utc::now().to_rfc3339(),
-    };
+        let result = CoordinationResult {
+            command_id,
+            command_type: command_type.clone(),
+            participating_nodes: target_nodes.clone(),
+            ack_count: u32::try_from(target_nodes.len()).unwrap_or(u32::MAX),
+            total_nodes: u32::try_from(target_nodes.len()).unwrap_or(u32::MAX),
+            status: CoordinationStatus::Acknowledged,
+            issued_at: chrono::Utc::now().to_rfc3339(),
+        };
 
-    Ok(ApiResponse {
-        ok: true,
-        data: result,
-        page: None,
+        Ok(ApiResponse {
+            ok: true,
+            data: result,
+            page: None,
+        })
     })
 }
 
@@ -297,6 +489,7 @@ pub fn execute_coordination(
 mod tests {
     use super::*;
     use crate::api::middleware::AuthMethod;
+    use std::sync::{Mutex, MutexGuard, OnceLock};
 
     fn admin_identity() -> AuthIdentity {
         AuthIdentity {
@@ -314,8 +507,22 @@ mod tests {
         }
     }
 
+    fn test_guard() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("test guard")
+    }
+
+    fn reset_fleet_lease_state() {
+        let mut state = fleet_lease_state().lock().expect("state lock");
+        *state = FleetLeaseState::default();
+    }
+
     #[test]
     fn route_metadata_has_five_endpoints() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let routes = route_metadata();
         assert_eq!(routes.len(), 5);
         assert!(
@@ -327,6 +534,8 @@ mod tests {
 
     #[test]
     fn fencing_requires_mtls() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let routes = route_metadata();
         let fence = routes
             .iter()
@@ -337,6 +546,8 @@ mod tests {
 
     #[test]
     fn coordinate_is_experimental() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let routes = route_metadata();
         let coord = routes
             .iter()
@@ -347,6 +558,8 @@ mod tests {
 
     #[test]
     fn list_leases_returns_empty() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let identity = admin_identity();
         let trace = test_trace();
         let result = list_leases(&identity, &trace).expect("list leases");
@@ -356,6 +569,8 @@ mod tests {
 
     #[test]
     fn acquire_lease_returns_lease() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let identity = admin_identity();
         let trace = test_trace();
         let request = LeaseAcquireRequest {
@@ -371,6 +586,8 @@ mod tests {
 
     #[test]
     fn acquire_lease_handles_unicode_trace_id() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let identity = admin_identity();
         let trace = TraceContext {
             trace_id: "🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂🙂".to_string(),
@@ -384,20 +601,29 @@ mod tests {
 
         let result = acquire_lease(&identity, &trace, &request).expect("acquire");
         let expected: String = trace.trace_id.chars().take(12).collect();
-        assert_eq!(result.data.lease_id, format!("lease-{expected}"));
+        assert_eq!(result.data.lease_id, format!("lease-{expected}-0001"));
     }
 
     #[test]
     fn release_lease_succeeds() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let identity = admin_identity();
         let trace = test_trace();
-        let result = release_lease(&identity, &trace, "lease-test-001").expect("release");
+        let request = LeaseAcquireRequest {
+            resource: "control-plane-lock".to_string(),
+            ttl_seconds: 300,
+        };
+        let lease = acquire_lease(&identity, &trace, &request).expect("acquire");
+        let result = release_lease(&identity, &trace, &lease.data.lease_id).expect("release");
         assert!(result.ok);
         assert!(result.data);
     }
 
     #[test]
     fn execute_fence_completes() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let identity = admin_identity();
         let trace = test_trace();
         let request = FencingRequest {
@@ -413,6 +639,8 @@ mod tests {
 
     #[test]
     fn execute_coordination_acknowledged() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let identity = admin_identity();
         let trace = test_trace();
         let request = CoordinationRequest {
@@ -428,6 +656,8 @@ mod tests {
 
     #[test]
     fn execute_coordination_rejects_empty_target_set() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let identity = admin_identity();
         let trace = test_trace();
         let request = CoordinationRequest {
@@ -448,6 +678,8 @@ mod tests {
 
     #[test]
     fn execute_coordination_rejects_duplicate_target_nodes() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let identity = admin_identity();
         let trace = test_trace();
         let request = CoordinationRequest {
@@ -468,6 +700,8 @@ mod tests {
 
     #[test]
     fn fleet_admin_role_required_for_mutations() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
         let routes = route_metadata();
         let mutation_routes: Vec<_> = routes
             .iter()
@@ -483,5 +717,199 @@ mod tests {
                 route.path
             );
         }
+    }
+
+    #[test]
+    fn list_leases_returns_active_lease_after_acquire() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = LeaseAcquireRequest {
+            resource: "control-plane-lock".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let acquired = acquire_lease(&identity, &trace, &request).expect("acquire");
+        let listed = list_leases(&identity, &trace).expect("list");
+
+        assert_eq!(listed.data.len(), 1);
+        assert_eq!(listed.data[0].lease_id, acquired.data.lease_id);
+        assert_eq!(listed.data[0].resource, "control-plane-lock");
+    }
+
+    #[test]
+    fn release_lease_rejects_unknown_id() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+
+        let err = release_lease(&identity, &trace, "lease-missing-0001").expect_err("missing");
+        assert!(matches!(err, ApiError::NotFound { .. }));
+    }
+
+    #[test]
+    fn acquire_lease_rejects_duplicate_active_resource() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = LeaseAcquireRequest {
+            resource: "control-plane-lock".to_string(),
+            ttl_seconds: 300,
+        };
+
+        acquire_lease(&identity, &trace, &request).expect("first");
+        let err = acquire_lease(&identity, &trace, &request).expect_err("duplicate resource");
+        assert!(matches!(err, ApiError::Conflict { .. }));
+    }
+
+    #[test]
+    fn acquire_lease_rejects_zero_ttl() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = LeaseAcquireRequest {
+            resource: "control-plane-lock".to_string(),
+            ttl_seconds: 0,
+        };
+
+        let err = acquire_lease(&identity, &trace, &request).expect_err("zero ttl");
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn acquire_lease_rejects_blank_resource() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = LeaseAcquireRequest {
+            resource: "   ".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let err = acquire_lease(&identity, &trace, &request).expect_err("blank resource");
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn release_lease_removes_active_lease() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = LeaseAcquireRequest {
+            resource: "control-plane-lock".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let lease = acquire_lease(&identity, &trace, &request).expect("acquire");
+        release_lease(&identity, &trace, &lease.data.lease_id).expect("release");
+        let listed = list_leases(&identity, &trace).expect("list");
+        assert!(listed.data.is_empty());
+    }
+
+    #[test]
+    fn execute_fence_rejects_blank_target_node() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = FencingRequest {
+            target_node: "   ".to_string(),
+            action: FencingAction::Isolate,
+            reason: "suspected compromise".to_string(),
+        };
+
+        let err = execute_fence(&identity, &trace, &request).expect_err("blank target");
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn execute_fence_issues_unique_monotonic_tokens() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = FencingRequest {
+            target_node: "node-2".to_string(),
+            action: FencingAction::Isolate,
+            reason: "suspected compromise".to_string(),
+        };
+
+        let first = execute_fence(&identity, &trace, &request).expect("first fence");
+        let second = execute_fence(&identity, &trace, &request).expect("second fence");
+
+        assert_ne!(first.data.operation_id, second.data.operation_id);
+        assert!(second.data.fencing_token > first.data.fencing_token);
+    }
+
+    #[test]
+    fn execute_coordination_rejects_blank_command_type() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = CoordinationRequest {
+            command_type: "   ".to_string(),
+            target_nodes: vec!["node-1".to_string()],
+            timeout_seconds: 30,
+        };
+
+        let err = execute_coordination(&identity, &trace, &request).expect_err("blank command");
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn execute_coordination_rejects_zero_timeout() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = CoordinationRequest {
+            command_type: "policy-update".to_string(),
+            target_nodes: vec!["node-1".to_string()],
+            timeout_seconds: 0,
+        };
+
+        let err = execute_coordination(&identity, &trace, &request).expect_err("zero timeout");
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn execute_coordination_rejects_blank_target_node() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = CoordinationRequest {
+            command_type: "policy-update".to_string(),
+            target_nodes: vec!["node-1".to_string(), "   ".to_string()],
+            timeout_seconds: 30,
+        };
+
+        let err = execute_coordination(&identity, &trace, &request).expect_err("blank target");
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+    }
+
+    #[test]
+    fn execute_coordination_issues_unique_command_ids_for_same_trace() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = CoordinationRequest {
+            command_type: "policy-update".to_string(),
+            target_nodes: vec!["node-1".to_string(), "node-2".to_string()],
+            timeout_seconds: 30,
+        };
+
+        let first = execute_coordination(&identity, &trace, &request).expect("first command");
+        let second = execute_coordination(&identity, &trace, &request).expect("second command");
+
+        assert_ne!(first.data.command_id, second.data.command_id);
     }
 }
