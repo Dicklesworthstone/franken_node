@@ -182,7 +182,14 @@ impl TrustObjectId {
     /// # INV-TOI-DETERMINISTIC
     /// Same domain + data always produce the same ID.
     pub fn derive_content_addressed(domain: DomainPrefix, data: &[u8]) -> Self {
-        let digest = sha256_digest(data);
+        let mut hasher = Sha256::new();
+        hasher.update(b"trust_object_hash_v1:");
+        let domain_bytes = domain.prefix().as_bytes();
+        hasher.update((domain_bytes.len() as u64).to_le_bytes());
+        hasher.update(domain_bytes);
+        hasher.update((data.len() as u64).to_le_bytes());
+        hasher.update(data);
+        let digest = hex::encode(hasher.finalize());
         Self {
             domain,
             hash_algorithm: "sha256".to_string(),
@@ -206,8 +213,12 @@ impl TrustObjectId {
     ) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(b"trust_object_derive_v1:");
+        let domain_bytes = domain.prefix().as_bytes();
+        hasher.update((domain_bytes.len() as u64).to_le_bytes());
+        hasher.update(domain_bytes);
         hasher.update(epoch.to_be_bytes());
         hasher.update(sequence.to_be_bytes());
+        hasher.update((data.len() as u64).to_le_bytes());
         hasher.update(data);
         let digest = hex::encode(hasher.finalize());
         Self {
@@ -458,6 +469,7 @@ pub struct IdEvent {
 pub fn sha256_digest(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"trust_object_hash_v1:");
+    hasher.update((data.len() as u64).to_le_bytes());
     hasher.update(data);
     hex::encode(hasher.finalize())
 }
@@ -614,8 +626,8 @@ mod tests {
     fn test_cross_domain_different_ids() {
         let id1 = TrustObjectId::derive_content_addressed(DomainPrefix::Extension, b"data");
         let id2 = TrustObjectId::derive_content_addressed(DomainPrefix::TrustCard, b"data");
-        // Same digest, different full_form due to prefix
-        assert_eq!(id1.digest, id2.digest);
+        // Different digest due to domain mixing
+        assert_ne!(id1.digest, id2.digest);
         assert_ne!(id1.full_form(), id2.full_form());
     }
 

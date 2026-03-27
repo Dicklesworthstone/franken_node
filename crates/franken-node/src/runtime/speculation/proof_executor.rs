@@ -281,7 +281,7 @@ fn signature_digest(
 ) -> String {
     // Length-prefixed encoding prevents delimiter-collision ambiguity.
     let mut hasher = Sha256::new();
-    hasher.update(b"proof_executor_digest_v1:");
+    hasher.update(b"proof_executor_signature_v1:");
     for field in [receipt_id, proof_hash, signer_id] {
         hasher.update((field.len() as u64).to_le_bytes());
         hasher.update(field.as_bytes());

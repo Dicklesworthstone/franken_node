@@ -301,7 +301,8 @@ impl AdversarialResilienceMetrics {
             if overall.is_finite() {
                 h.update(overall.to_le_bytes());
             } else {
-                h.update(f64::NAN.to_le_bytes());
+                // Use a fixed bit pattern for non-finite values to ensure INV-ARM-DETERMINISTIC.
+                h.update(0u64.to_le_bytes());
             }
             h.update((flagged.len() as u64).to_le_bytes());
             for ct in &flagged {

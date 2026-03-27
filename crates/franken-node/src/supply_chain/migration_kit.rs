@@ -297,6 +297,13 @@ impl MigrationKitEcosystem {
             ));
         }
 
+        if !self.config.min_api_coverage_pct.is_finite() {
+            return Err(format!(
+                "min_api_coverage_pct is not a finite number: {}",
+                self.config.min_api_coverage_pct
+            ));
+        }
+
         // Gate: compatibility check
         if self.config.require_compatibility_check
             && compatibility.api_coverage_pct < self.config.min_api_coverage_pct

@@ -72,7 +72,8 @@ fn hash_f64(hasher: &mut Sha256, value: f64) {
     if value.is_finite() {
         hasher.update(value.to_le_bytes());
     } else {
-        hasher.update(f64::NAN.to_le_bytes());
+        // Use a fixed bit pattern for non-finite values to ensure INV-PHM-DETERMINISTIC.
+        hasher.update(0u64.to_le_bytes());
     }
 }
 

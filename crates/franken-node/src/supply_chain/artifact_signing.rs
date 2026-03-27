@@ -176,6 +176,7 @@ impl ChecksumManifest {
                 if name.split('/').any(|s| s == "..")
                     || name.starts_with('/')
                     || name.contains('\\')
+                    || name.contains('\0')
                 {
                     continue;
                 }
@@ -223,11 +224,17 @@ pub struct KeyTransitionRecord {
 }
 
 impl KeyTransitionRecord {
-    /// Canonical bytes = old_key_id || new_key_id || new_public_key || timestamp.
+    /// Canonical bytes with domain separator and length-prefixed variable-length fields.
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut buf = Vec::new();
-        buf.extend(self.old_key_id.0.as_bytes());
-        buf.extend(self.new_key_id.0.as_bytes());
+        buf.extend(b"artifact_signing_transition_v1:");
+        let old_bytes = self.old_key_id.0.as_bytes();
+        buf.extend((old_bytes.len() as u64).to_le_bytes());
+        buf.extend(old_bytes);
+        let new_bytes = self.new_key_id.0.as_bytes();
+        buf.extend((new_bytes.len() as u64).to_le_bytes());
+        buf.extend(new_bytes);
+        buf.extend((self.new_public_key_bytes.len() as u64).to_le_bytes());
         buf.extend(&self.new_public_key_bytes);
         buf.extend(&self.timestamp.to_le_bytes());
         buf

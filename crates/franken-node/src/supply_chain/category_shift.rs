@@ -323,6 +323,12 @@ impl ReportingPipeline {
     ) -> Result<(), CategoryShiftError> {
         let mut claims = Vec::new();
         for input in claims_input {
+            if !input.value.is_finite() {
+                return Err(CategoryShiftError::ClaimInvalid(format!(
+                    "claim value must be finite, got {}",
+                    input.value
+                )));
+            }
             let evidence = self.verify_evidence(&input.evidence, now_secs)?;
             let claim_id = format!("CSR-CLAIM-{:03}", self.next_claim_id);
             self.next_claim_id = self.next_claim_id.saturating_add(1);
@@ -502,7 +508,7 @@ impl ReportingPipeline {
             out.push_str(&format!(
                 "| `{}` | `{}` | {:?} |\n",
                 entry.artifact_path,
-                &entry.sha256_hash[..16],
+                entry.sha256_hash.get(..16).unwrap_or(&entry.sha256_hash),
                 entry.freshness
             ));
         }
@@ -1091,6 +1097,36 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_claim_value_is_rejected() {
+        let mut pipeline = ReportingPipeline::default();
+        let now = 1_000_000;
+        let content = r#"{"ok":true}"#;
+        let result = pipeline.ingest_dimension(
+            ReportDimension::SecurityPosture,
+            "adv",
+            "bd-9is",
+            vec![ClaimInput {
+                summary: "bad claim".to_string(),
+                value: f64::NAN,
+                unit: "factor".to_string(),
+                evidence: EvidenceInput {
+                    artifact_path: "artifacts/test/good.json".to_string(),
+                    sha256_hash: sha256_hex(content.as_bytes()),
+                    generated_at_secs: now,
+                    content: Some(content.to_string()),
+                },
+            }],
+            now,
+            "trace",
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            CategoryShiftError::ClaimInvalid(detail)
+                if detail.contains("claim value must be finite")
+        ));
+    }
+
+    #[test]
     fn stale_evidence_marked_as_stale() {
         let mut pipeline = ReportingPipeline::default();
         let now: u64 = 10_000_000;
@@ -1289,7 +1325,9 @@ mod tests {
                 "trace",
             )
             .expect("should succeed");
-        let report2 = pipeline2.generate_report(now + 100, "trace").expect("should succeed");
+        let report2 = pipeline2
+            .generate_report(now + 100, "trace")
+            .expect("should succeed");
 
         let diffs = ReportingPipeline::diff_reports(&report1, &report2);
         assert!(!diffs.is_empty());
@@ -1449,9 +1487,17 @@ mod tests {
     fn canonicalize_sorts_keys() {
         let input = serde_json::json!({"z": 1, "a": 2, "m": {"b": 3, "a": 4}});
         let canonical = canonicalize_value(input);
-        let keys: Vec<&String> = canonical.as_object().expect("should succeed").keys().collect();
+        let keys: Vec<&String> = canonical
+            .as_object()
+            .expect("should succeed")
+            .keys()
+            .collect();
         assert_eq!(keys, vec!["a", "m", "z"]);
-        let nested_keys: Vec<&String> = canonical["m"].as_object().expect("should succeed").keys().collect();
+        let nested_keys: Vec<&String> = canonical["m"]
+            .as_object()
+            .expect("should succeed")
+            .keys()
+            .collect();
         assert_eq!(nested_keys, vec!["a", "b"]);
     }
 
@@ -1516,7 +1562,9 @@ mod tests {
             generated_at_secs: now - DEFAULT_FRESHNESS_WINDOW_SECS,
             content: Some(content.to_string()),
         };
-        let result = pipeline.verify_evidence(&evidence, now).expect("should succeed");
+        let result = pipeline
+            .verify_evidence(&evidence, now)
+            .expect("should succeed");
         assert_eq!(result.freshness, FreshnessStatus::Stale);
 
         // One second past boundary should be stale
@@ -1526,7 +1574,9 @@ mod tests {
             generated_at_secs: now - DEFAULT_FRESHNESS_WINDOW_SECS - 1,
             content: Some(content.to_string()),
         };
-        let result2 = pipeline.verify_evidence(&evidence2, now).expect("should succeed");
+        let result2 = pipeline
+            .verify_evidence(&evidence2, now)
+            .expect("should succeed");
         assert_eq!(result2.freshness, FreshnessStatus::Stale);
     }
 
