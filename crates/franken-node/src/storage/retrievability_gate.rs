@@ -236,8 +236,8 @@ pub struct TargetTierState {
 /// Gate that enforces retrievability proofs before L2→L3 eviction.
 pub struct RetrievabilityGate {
     config: RetrievabilityConfig,
-    /// Simulated target tier contents: (artifact_id, target_tier) -> state
-    target_state: BTreeMap<(String, String), TargetTierState>,
+    /// Simulated target tier contents: (artifact_id, segment_id, target_tier) -> state
+    target_state: BTreeMap<(String, String, String), TargetTierState>,
     receipts: Vec<ProofReceipt>,
     events: Vec<GateEvent>,
     /// Monotonic timestamp counter for deterministic testing.
@@ -270,11 +270,16 @@ impl RetrievabilityGate {
     pub fn register_target(
         &mut self,
         artifact_id: &ArtifactId,
+        segment_id: &SegmentId,
         target_tier: StorageTier,
         state: TargetTierState,
     ) {
         self.target_state.insert(
-            (artifact_id.0.clone(), target_tier.label().to_string()),
+            (
+                artifact_id.0.clone(),
+                segment_id.0.clone(),
+                target_tier.label().to_string(),
+            ),
             state,
         );
     }
@@ -296,7 +301,11 @@ impl RetrievabilityGate {
         self.timestamp_counter = self.timestamp_counter.saturating_add(1);
         let ts = self.timestamp_counter;
 
-        let key = (artifact_id.0.clone(), target_tier.label().to_string());
+        let key = (
+            artifact_id.0.clone(),
+            segment_id.0.clone(),
+            target_tier.label().to_string(),
+        );
         let state = self.target_state.get(&key);
 
         // Check reachability
@@ -304,9 +313,10 @@ impl RetrievabilityGate {
             Some(s) if !s.reachable => {
                 let reason = ProofFailureReason::TargetUnreachable {
                     detail: format!(
-                        "tier {} not reachable for artifact {}",
+                        "tier {} not reachable for artifact {} segment {}",
                         target_tier.label(),
-                        artifact_id
+                        artifact_id,
+                        segment_id
                     ),
                 };
                 let err = RetrievabilityError {
@@ -321,7 +331,7 @@ impl RetrievabilityGate {
                     segment_id,
                     source_tier,
                     target_tier,
-                    expected_hash,
+                    None,
                     ts,
                     &reason,
                     0,
@@ -331,8 +341,9 @@ impl RetrievabilityGate {
             None => {
                 let reason = ProofFailureReason::TargetUnreachable {
                     detail: format!(
-                        "no target state registered for artifact {} at {}",
+                        "no target state registered for artifact {} segment {} at {}",
                         artifact_id,
+                        segment_id,
                         target_tier.label()
                     ),
                 };
@@ -348,7 +359,7 @@ impl RetrievabilityGate {
                     segment_id,
                     source_tier,
                     target_tier,
-                    expected_hash,
+                    None,
                     ts,
                     &reason,
                     0,
@@ -360,9 +371,11 @@ impl RetrievabilityGate {
 
         // Check latency
         if state.fetch_latency_ms >= self.config.max_latency_ms {
+            let observed_content_hash = state.content_hash.clone();
+            let observed_latency_ms = state.fetch_latency_ms;
             let reason = ProofFailureReason::LatencyExceeded {
                 limit_ms: self.config.max_latency_ms,
-                actual_ms: state.fetch_latency_ms,
+                actual_ms: observed_latency_ms,
             };
             let err = RetrievabilityError {
                 code: ERR_LATENCY_EXCEEDED.to_string(),
@@ -376,19 +389,21 @@ impl RetrievabilityGate {
                 segment_id,
                 source_tier,
                 target_tier,
-                expected_hash,
+                Some(observed_content_hash.as_str()),
                 ts,
                 &reason,
-                state.fetch_latency_ms,
+                observed_latency_ms,
             );
             return Err(err);
         }
 
         // Check hash match
         if self.config.require_hash_match && !ct_eq(&state.content_hash, expected_hash) {
+            let observed_content_hash = state.content_hash.clone();
+            let observed_latency_ms = state.fetch_latency_ms;
             let reason = ProofFailureReason::HashMismatch {
                 expected: expected_hash.to_string(),
-                actual: state.content_hash.clone(),
+                actual: observed_content_hash.clone(),
             };
             let err = RetrievabilityError {
                 code: ERR_HASH_MISMATCH.to_string(),
@@ -402,21 +417,22 @@ impl RetrievabilityGate {
                 segment_id,
                 source_tier,
                 target_tier,
-                expected_hash,
+                Some(observed_content_hash.as_str()),
                 ts,
                 &reason,
-                state.fetch_latency_ms,
+                observed_latency_ms,
             );
             return Err(err);
         }
 
         // Success
+        let verified_content_hash = state.content_hash.clone();
         let proof = RetrievabilityProof {
             artifact_id: artifact_id.clone(),
             segment_id: segment_id.clone(),
             source_tier,
             target_tier,
-            content_hash: expected_hash.to_string(),
+            content_hash: verified_content_hash.clone(),
             proof_timestamp: ts,
             latency_ms: state.fetch_latency_ms,
         };
@@ -428,7 +444,7 @@ impl RetrievabilityGate {
                 segment_id: segment_id.0.clone(),
                 source_tier: source_tier.label().to_string(),
                 target_tier: target_tier.label().to_string(),
-                content_hash: expected_hash.to_string(),
+                content_hash: verified_content_hash.clone(),
                 proof_timestamp: ts,
                 latency_ms: state.fetch_latency_ms,
                 passed: true,
@@ -448,7 +464,9 @@ impl RetrievabilityGate {
                     source_tier.label(),
                     target_tier.label(),
                     state.fetch_latency_ms,
-                    &expected_hash[..8.min(expected_hash.len())]
+                    verified_content_hash
+                        .get(..8)
+                        .unwrap_or(verified_content_hash.as_str())
                 ),
             },
             MAX_EVENTS,
@@ -550,7 +568,7 @@ impl RetrievabilityGate {
         segment_id: &SegmentId,
         source_tier: StorageTier,
         target_tier: StorageTier,
-        expected_hash: &str,
+        observed_content_hash: Option<&str>,
         ts: u64,
         reason: &ProofFailureReason,
         latency_ms: u64,
@@ -562,7 +580,7 @@ impl RetrievabilityGate {
                 segment_id: segment_id.0.clone(),
                 source_tier: source_tier.label().to_string(),
                 target_tier: target_tier.label().to_string(),
-                content_hash: expected_hash.to_string(),
+                content_hash: observed_content_hash.unwrap_or_default().to_string(),
                 proof_timestamp: ts,
                 latency_ms,
                 passed: false,
@@ -652,7 +670,12 @@ mod tests {
     #[test]
     fn test_successful_proof() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("abc123"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("abc123"),
+        );
         let proof = gate
             .check_retrievability(
                 &aid("a1"),
@@ -672,7 +695,12 @@ mod tests {
     #[test]
     fn test_successful_proof_emits_event() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("abc123"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("abc123"),
+        );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
@@ -692,7 +720,12 @@ mod tests {
     #[test]
     fn test_successful_proof_creates_receipt() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("abc123"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("abc123"),
+        );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
@@ -704,6 +737,65 @@ mod tests {
         assert_eq!(gate.receipts().len(), 1);
         assert!(gate.receipts()[0].passed);
         assert!(gate.receipts()[0].failure_reason.is_none());
+        assert_eq!(gate.receipts()[0].content_hash, "abc123");
+    }
+
+    #[test]
+    fn test_relaxed_mode_success_binds_actual_content_hash() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig {
+            max_latency_ms: 5000,
+            require_hash_match: false,
+        });
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("actual_hash_value"),
+        );
+
+        let proof = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "caller_supplied_hash",
+            )
+            .expect("relaxed mode should still produce a proof");
+
+        assert_eq!(proof.content_hash, "actual_hash_value");
+        assert_eq!(gate.receipts()[0].content_hash, "actual_hash_value");
+    }
+
+    #[test]
+    fn test_relaxed_mode_event_uses_actual_hash_prefix() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig {
+            max_latency_ms: 5000,
+            require_hash_match: false,
+        });
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("actual_hash_value"),
+        );
+
+        gate.check_retrievability(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L2Warm,
+            StorageTier::L3Archive,
+            "caller_supplied_hash",
+        )
+        .expect("relaxed mode should still pass");
+
+        let pass_event = gate
+            .events()
+            .iter()
+            .find(|event| event.code == RG_PROOF_PASSED)
+            .expect("proof-passed event must exist");
+        assert!(pass_event.detail.contains("actual_h"));
+        assert!(!pass_event.detail.contains("caller_su"));
     }
 
     // -- Hash mismatch --
@@ -711,7 +803,12 @@ mod tests {
     #[test]
     fn test_hash_mismatch_blocks() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("wrong_hash"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("wrong_hash"),
+        );
         let err = gate
             .check_retrievability(
                 &aid("a1"),
@@ -727,7 +824,12 @@ mod tests {
     #[test]
     fn test_hash_mismatch_emits_failure_event() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("wrong"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("wrong"),
+        );
         let _ = gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
@@ -746,7 +848,12 @@ mod tests {
     #[test]
     fn test_hash_mismatch_records_receipt() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("wrong"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("wrong"),
+        );
         let _ = gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
@@ -757,6 +864,34 @@ mod tests {
         assert_eq!(gate.receipts().len(), 1);
         assert!(!gate.receipts()[0].passed);
         assert!(gate.receipts()[0].failure_reason.is_some());
+        assert_eq!(gate.receipts()[0].content_hash, "wrong");
+    }
+
+    #[test]
+    fn test_latency_failure_receipt_binds_actual_content_hash() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "archived_hash".to_string(),
+                reachable: true,
+                fetch_latency_ms: 10_000,
+            },
+        );
+
+        let _ = gate.check_retrievability(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L2Warm,
+            StorageTier::L3Archive,
+            "caller_supplied_hash",
+        );
+
+        assert_eq!(gate.receipts().len(), 1);
+        assert!(!gate.receipts()[0].passed);
+        assert_eq!(gate.receipts()[0].content_hash, "archived_hash");
     }
 
     // -- Latency exceeded --
@@ -766,6 +901,7 @@ mod tests {
         let mut gate = make_gate();
         gate.register_target(
             &aid("a1"),
+            &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
                 content_hash: "abc".to_string(),
@@ -790,6 +926,7 @@ mod tests {
         let mut gate = make_gate();
         gate.register_target(
             &aid("a1"),
+            &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
                 content_hash: "abc".to_string(),
@@ -814,6 +951,7 @@ mod tests {
         let mut gate = make_gate();
         gate.register_target(
             &aid("a1"),
+            &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
                 content_hash: "abc".to_string(),
@@ -840,6 +978,7 @@ mod tests {
         let mut gate = make_gate();
         gate.register_target(
             &aid("a1"),
+            &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
                 content_hash: "abc".to_string(),
@@ -857,6 +996,8 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code, ERR_TARGET_UNREACHABLE);
+        assert!(err.reason.to_string().contains("s1"));
+        assert!(gate.receipts()[0].content_hash.is_empty());
     }
 
     #[test]
@@ -873,6 +1014,7 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code, ERR_TARGET_UNREACHABLE);
+        assert!(gate.receipts()[0].content_hash.is_empty());
     }
 
     // -- Eviction gate --
@@ -880,7 +1022,12 @@ mod tests {
     #[test]
     fn test_eviction_succeeds_with_proof() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("hash1"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("hash1"),
+        );
         let permit = gate
             .attempt_eviction(&aid("a1"), &sid("s1"), "hash1")
             .unwrap();
@@ -913,7 +1060,12 @@ mod tests {
     #[test]
     fn test_eviction_permitted_emits_event() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("h1"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
         gate.attempt_eviction(&aid("a1"), &sid("s1"), "h1").unwrap();
         let permit_events: Vec<_> = gate
             .events()
@@ -928,7 +1080,12 @@ mod tests {
     #[test]
     fn test_proof_bound_to_segment() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("h1"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("seg-42"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
         let proof = gate
             .check_retrievability(
                 &aid("a1"),
@@ -944,7 +1101,12 @@ mod tests {
     #[test]
     fn test_proof_bound_to_artifact() {
         let mut gate = make_gate();
-        gate.register_target(&aid("art-99"), StorageTier::L3Archive, good_state("h1"));
+        gate.register_target(
+            &aid("art-99"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
         let proof = gate
             .check_retrievability(
                 &aid("art-99"),
@@ -960,7 +1122,12 @@ mod tests {
     #[test]
     fn test_proof_bound_to_target_tier() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("h1"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
         let proof = gate
             .check_retrievability(
                 &aid("a1"),
@@ -973,12 +1140,68 @@ mod tests {
         assert_eq!(proof.target_tier, StorageTier::L3Archive);
     }
 
+    #[test]
+    fn test_unregistered_segment_for_registered_artifact_blocks() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            &sid("seg-registered"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
+
+        let err = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("seg-missing"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "h1",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_TARGET_UNREACHABLE);
+        assert!(err.reason.to_string().contains("seg-missing"));
+    }
+
+    #[test]
+    fn test_segments_of_same_artifact_are_isolated() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            &sid("seg-a"),
+            StorageTier::L3Archive,
+            good_state("hash-a"),
+        );
+        gate.register_target(
+            &aid("a1"),
+            &sid("seg-b"),
+            StorageTier::L3Archive,
+            good_state("hash-b"),
+        );
+
+        let proof_a = gate
+            .attempt_eviction(&aid("a1"), &sid("seg-a"), "hash-a")
+            .unwrap();
+        assert_eq!(proof_a.proof.content_hash, "hash-a");
+
+        let err_b = gate
+            .attempt_eviction(&aid("a1"), &sid("seg-b"), "hash-a")
+            .unwrap_err();
+        assert_eq!(err_b.code, ERR_HASH_MISMATCH);
+    }
+
     // -- Counters --
 
     #[test]
     fn test_passed_count() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("h1"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
@@ -1008,7 +1231,12 @@ mod tests {
     #[test]
     fn test_mixed_counts() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("h1"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
@@ -1056,7 +1284,12 @@ mod tests {
     #[test]
     fn test_receipts_json_valid() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("h1"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
@@ -1232,7 +1465,12 @@ mod tests {
     #[test]
     fn test_no_bypass_hash_mismatch() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("wrong"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("wrong"),
+        );
         assert!(
             gate.attempt_eviction(&aid("a1"), &sid("s1"), "expected")
                 .is_err()
@@ -1244,6 +1482,7 @@ mod tests {
         let mut gate = make_gate();
         gate.register_target(
             &aid("a1"),
+            &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
                 content_hash: "h1".to_string(),
@@ -1259,6 +1498,7 @@ mod tests {
         let mut gate = make_gate();
         gate.register_target(
             &aid("a1"),
+            &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
                 content_hash: "h1".to_string(),
@@ -1274,8 +1514,18 @@ mod tests {
     #[test]
     fn test_multiple_artifacts_independent() {
         let mut gate = make_gate();
-        gate.register_target(&aid("a1"), StorageTier::L3Archive, good_state("h1"));
-        gate.register_target(&aid("a2"), StorageTier::L3Archive, good_state("h2"));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state("h1"),
+        );
+        gate.register_target(
+            &aid("a2"),
+            &sid("s2"),
+            StorageTier::L3Archive,
+            good_state("h2"),
+        );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
@@ -1374,7 +1624,12 @@ mod storage_migration_integration_tests {
     fn retrievability_proof_enables_direct_migration_admission() {
         let hash = content_hash(b"artifact-payload-v1");
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-1"), StorageTier::L3Archive, good_target(&hash));
+        gate.register_target(
+            &aid("art-1"),
+            &sid("seg-1"),
+            StorageTier::L3Archive,
+            good_target(&hash),
+        );
 
         // Proof succeeds → eviction permitted
         let permit = gate
@@ -1430,6 +1685,7 @@ mod storage_migration_integration_tests {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
         gate.register_target(
             &aid("art-3"),
+            &sid("seg-3"),
             StorageTier::L3Archive,
             good_target("corrupted_hash"),
         );
@@ -1466,7 +1722,12 @@ mod storage_migration_integration_tests {
     fn eviction_permit_with_severe_migration_requires_staged_rollout() {
         let hash = content_hash(b"payload-severe");
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-4"), StorageTier::L3Archive, good_target(&hash));
+        gate.register_target(
+            &aid("art-4"),
+            &sid("seg-4"),
+            StorageTier::L3Archive,
+            good_target(&hash),
+        );
 
         // Storage gate passes
         let permit = gate
@@ -1494,7 +1755,12 @@ mod storage_migration_integration_tests {
     fn rollout_health_check_correlates_with_proof_receipts() {
         let hash = content_hash(b"payload-rollout");
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-5"), StorageTier::L3Archive, good_target(&hash));
+        gate.register_target(
+            &aid("art-5"),
+            &sid("seg-5"),
+            StorageTier::L3Archive,
+            good_target(&hash),
+        );
 
         // Storage proof passes
         gate.attempt_eviction(&aid("art-5"), &sid("seg-5"), &hash)
@@ -1536,7 +1802,12 @@ mod storage_migration_integration_tests {
     fn rollback_triggered_after_eviction_completed() {
         let hash = content_hash(b"payload-rollback");
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-6"), StorageTier::L3Archive, good_target(&hash));
+        gate.register_target(
+            &aid("art-6"),
+            &sid("seg-6"),
+            StorageTier::L3Archive,
+            good_target(&hash),
+        );
 
         // Eviction completed
         gate.attempt_eviction(&aid("art-6"), &sid("seg-6"), &hash)
@@ -1583,7 +1854,12 @@ mod storage_migration_integration_tests {
         assert_eq!(hash.len(), 64); // SHA-256
 
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-7"), StorageTier::L3Archive, good_target(&hash));
+        gate.register_target(
+            &aid("art-7"),
+            &sid("seg-7"),
+            StorageTier::L3Archive,
+            good_target(&hash),
+        );
 
         // Proof binds the content hash
         let proof = gate
@@ -1620,6 +1896,7 @@ mod storage_migration_integration_tests {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
         gate.register_target(
             &aid("art-8"),
+            &sid("seg-8"),
             StorageTier::L3Archive,
             TargetTierState {
                 content_hash: "h1".to_string(),
@@ -1655,7 +1932,12 @@ mod storage_migration_integration_tests {
         let hash_b = content_hash(b"artifact-b");
 
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-a"), StorageTier::L3Archive, good_target(&hash_a));
+        gate.register_target(
+            &aid("art-a"),
+            &sid("seg-a"),
+            StorageTier::L3Archive,
+            good_target(&hash_a),
+        );
         // art-b not registered → will fail
 
         let _permit_a = gate
@@ -1686,7 +1968,12 @@ mod storage_migration_integration_tests {
     fn fallback_plan_structure_consistent_with_storage_receipts() {
         let hash = content_hash(b"payload-fb");
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-fb"), StorageTier::L3Archive, good_target(&hash));
+        gate.register_target(
+            &aid("art-fb"),
+            &sid("seg-fb"),
+            StorageTier::L3Archive,
+            good_target(&hash),
+        );
         gate.attempt_eviction(&aid("art-fb"), &sid("seg-fb"), &hash)
             .unwrap();
 
@@ -1718,7 +2005,12 @@ mod storage_migration_integration_tests {
     fn audit_events_span_storage_and_migration() {
         let hash = content_hash(b"audit-trail");
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-au"), StorageTier::L3Archive, good_target(&hash));
+        gate.register_target(
+            &aid("art-au"),
+            &sid("seg-au"),
+            StorageTier::L3Archive,
+            good_target(&hash),
+        );
         gate.attempt_eviction(&aid("art-au"), &sid("seg-au"), &hash)
             .unwrap();
 
@@ -1764,7 +2056,12 @@ mod storage_migration_integration_tests {
     fn progressive_rollout_phases_after_eviction() {
         let hash = content_hash(b"progressive-payload");
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
-        gate.register_target(&aid("art-prog"), StorageTier::L3Archive, good_target(&hash));
+        gate.register_target(
+            &aid("art-prog"),
+            &sid("seg-prog"),
+            StorageTier::L3Archive,
+            good_target(&hash),
+        );
         gate.attempt_eviction(&aid("art-prog"), &sid("seg-prog"), &hash)
             .unwrap();
 

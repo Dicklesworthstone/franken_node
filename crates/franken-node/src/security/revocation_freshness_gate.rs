@@ -261,10 +261,11 @@ impl RevocationFreshnessGate {
         SafetyTier::Advisory
     }
 
-    /// Verify a FreshnessProof's signature and nonce uniqueness.
+    /// Verify a FreshnessProof's signature and replay preconditions.
     ///
     /// INV-RFG-PROOF: Reject tampered proofs.
-    pub fn verify_proof(&mut self, proof: &FreshnessProof) -> Result<(), FreshnessError> {
+    /// INV-RFG-REPLAY-PRECHECK: Reused nonces fail before semantic checks.
+    pub fn verify_proof(&self, proof: &FreshnessProof) -> Result<(), FreshnessError> {
         // Check replay
         if self.consumed_nonces.contains(&proof.nonce) {
             return Err(FreshnessError::ReplayDetected {
@@ -279,17 +280,19 @@ impl RevocationFreshnessGate {
                 detail: "signature mismatch".into(),
             });
         }
+        Ok(())
+    }
 
+    fn consume_nonce(&mut self, nonce: &str) {
         // Consume nonce with bounded eviction to prevent unbounded memory growth.
-        if self.consumed_nonces.insert(proof.nonce.clone()) {
-            self.consumed_nonces_queue.push_back(proof.nonce.clone());
+        if self.consumed_nonces.insert(nonce.to_string()) {
+            self.consumed_nonces_queue.push_back(nonce.to_string());
             while self.consumed_nonces_queue.len() > MAX_CONSUMED_NONCES {
                 if let Some(oldest) = self.consumed_nonces_queue.pop_front() {
                     self.consumed_nonces.remove(&oldest);
                 }
             }
         }
-        Ok(())
     }
 
     /// Check freshness of a proof against the current epoch.
@@ -338,6 +341,7 @@ impl RevocationFreshnessGate {
 
         // Fresh enough: pass (fail-closed: exact boundary = stale)
         if staleness < max_staleness {
+            self.consume_nonce(&proof.nonce);
             return Ok(GateDecision {
                 action_id: action_id.to_string(),
                 tier,
@@ -365,6 +369,7 @@ impl RevocationFreshnessGate {
             SafetyTier::Standard => {
                 // INV-RFG-DEGRADE: owner-bypass allowed
                 if owner_bypass {
+                    self.consume_nonce(&proof.nonce);
                     Ok(GateDecision {
                         action_id: action_id.to_string(),
                         tier,
@@ -387,6 +392,7 @@ impl RevocationFreshnessGate {
             }
             SafetyTier::Advisory => {
                 // INV-RFG-DEGRADE: proceed-with-warning
+                self.consume_nonce(&proof.nonce);
                 Ok(GateDecision {
                     action_id: action_id.to_string(),
                     tier,
@@ -614,6 +620,7 @@ mod tests {
             .check(&p, 100, true, false, "key_rotate", "tr-1")
             .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_STALE");
+        assert!(!g.is_nonce_consumed("n1"));
     }
 
     #[test]
@@ -635,6 +642,7 @@ mod tests {
             .check(&p, 100, true, false, "policy_deploy", "tr-1")
             .unwrap_err();
         assert_eq!(err.code(), "ERR_RFG_STALE");
+        assert!(!g.is_nonce_consumed("n1"));
     }
 
     #[test]
@@ -886,6 +894,26 @@ mod tests {
         } else {
             unreachable!("Expected ProofTampered error");
         }
+        assert!(!g.is_nonce_consumed("n-large"));
+    }
+
+    #[test]
+    fn future_epoch_rejection_does_not_poison_retry_nonce() {
+        let mut g = gate();
+
+        let future = proof(SafetyTier::Advisory, 105, "n-retry");
+        let err = g
+            .check(&future, 100, true, false, "act", "tr-future")
+            .unwrap_err();
+        assert_eq!(err.code(), "ERR_RFG_TAMPERED");
+        assert!(!g.is_nonce_consumed("n-retry"));
+
+        let corrected = proof(SafetyTier::Advisory, 100, "n-retry");
+        let decision = g
+            .check(&corrected, 100, true, false, "act", "tr-corrected")
+            .unwrap();
+        assert!(decision.allowed);
+        assert!(g.is_nonce_consumed("n-retry"));
     }
 
     // --- Bounded nonce eviction ---

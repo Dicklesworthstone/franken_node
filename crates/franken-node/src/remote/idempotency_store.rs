@@ -339,6 +339,7 @@ impl IdempotencyDedupeStore {
         } else {
             Action::InsertNew
         };
+        let reuses_existing_slot = matches!(action, Action::Expired | Action::RetryAbandoned);
 
         // Now process with mutable borrows (entry borrow is dropped).
         match action {
@@ -413,11 +414,12 @@ impl IdempotencyDedupeStore {
             }
         }
 
-        // Capacity guard: sweep expired entries first, then reject if still full.
-        if self.entries.len() >= MAX_DEDUPE_ENTRIES {
+        // Capacity guard only applies when admitting a brand-new key. Replacing
+        // an expired or abandoned entry reuses its existing slot.
+        if !reuses_existing_slot && self.entries.len() >= MAX_DEDUPE_ENTRIES {
             self.sweep_expired(now_secs, trace_id);
         }
-        if self.entries.len() >= MAX_DEDUPE_ENTRIES {
+        if !reuses_existing_slot && self.entries.len() >= MAX_DEDUPE_ENTRIES {
             self.log(
                 event_codes::ID_ENTRY_CONFLICT,
                 trace_id,
@@ -648,6 +650,12 @@ mod tests {
         IdempotencyKey::from_bytes(bytes)
     }
 
+    fn indexed_test_key(index: usize) -> IdempotencyKey {
+        let mut bytes = [0_u8; 32];
+        bytes[..8].copy_from_slice(&(index as u64).to_le_bytes());
+        IdempotencyKey::from_bytes(bytes)
+    }
+
     #[test]
     fn test_new_entry() {
         let mut store = IdempotencyDedupeStore::new(3600);
@@ -860,6 +868,63 @@ mod tests {
         // Same key + same payload after abandon -> New (retry allowed).
         let r = store.check_or_insert(key, payload, 1002, "ta");
         assert_eq!(r, DedupeResult::New);
+    }
+
+    #[test]
+    fn test_abandoned_retry_reuses_slot_even_at_capacity() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = indexed_test_key(0);
+        let payload = b"retry-me";
+
+        assert_eq!(
+            store.check_or_insert(key, payload, 1000, "cap"),
+            DedupeResult::New
+        );
+        assert_eq!(store.recover_inflight("cap"), 1);
+
+        for index in 1..MAX_DEDUPE_ENTRIES {
+            let fill_key = indexed_test_key(index);
+            let fill_payload = (index as u64).to_le_bytes();
+            assert_eq!(
+                store.check_or_insert(fill_key, &fill_payload, 1000, "cap-fill"),
+                DedupeResult::New
+            );
+        }
+        assert_eq!(store.entry_count(), MAX_DEDUPE_ENTRIES);
+
+        let retry = store.check_or_insert(key, payload, 1001, "cap-retry");
+        assert_eq!(retry, DedupeResult::New);
+        assert_eq!(store.entry_count(), MAX_DEDUPE_ENTRIES);
+    }
+
+    #[test]
+    fn test_expired_entry_reuses_slot_even_at_capacity() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = indexed_test_key(0);
+
+        assert_eq!(
+            store.check_or_insert(key, b"expired", 1000, "cap-expired"),
+            DedupeResult::New
+        );
+        let entry = store
+            .entries
+            .get_mut(&key.to_hex())
+            .expect("target entry must exist");
+        entry.ttl_secs = 1;
+
+        for index in 1..MAX_DEDUPE_ENTRIES {
+            let fill_key = indexed_test_key(index);
+            let fill_payload = (index as u64).to_le_bytes();
+            assert_eq!(
+                store.check_or_insert(fill_key, &fill_payload, 1000, "cap-fill"),
+                DedupeResult::New
+            );
+        }
+        assert_eq!(store.entry_count(), MAX_DEDUPE_ENTRIES);
+
+        let replacement = store.check_or_insert(key, b"replacement", 1002, "cap-expired");
+        assert_eq!(replacement, DedupeResult::New);
+        assert_eq!(store.entry_count(), MAX_DEDUPE_ENTRIES);
     }
 
     #[test]

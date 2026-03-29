@@ -21,6 +21,7 @@
 //! - **INV-FSA-CONCURRENT-SAFE**: Concurrent access causes no corruption
 //! - **INV-FSA-SCHEMA-VERSIONED**: Schema migrations are versioned and reversible
 
+use crate::security::constant_time::ct_eq_bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -311,8 +312,22 @@ impl FrankensqliteAdapter {
     ) -> Result<WriteResult, AdapterError> {
         let start = Instant::now();
         let tier = class.tier();
+        let store_key = (class, key.to_string());
 
-        self.store.insert((class, key.to_string()), value.to_vec());
+        if class == PersistenceClass::AuditLog && self.store.contains_key(&store_key) {
+            self.write_failures = self.write_failures.saturating_add(1);
+            self.emit_event(
+                event_codes::FRANKENSQLITE_WRITE_FAIL,
+                class.label(),
+                format!("key={key}, duplicate audit log entry rejected"),
+            );
+            return Err(AdapterError::WriteFailure {
+                key: key.to_string(),
+                reason: "duplicate audit log keys violate append-only semantics".into(),
+            });
+        }
+
+        self.store.insert(store_key, value.to_vec());
         let tier_writes = self.writes_by_tier.entry(tier).or_insert(0);
         *tier_writes = tier_writes.saturating_add(1);
         self.write_count = self.write_count.saturating_add(1);
@@ -371,7 +386,7 @@ impl FrankensqliteAdapter {
         let mut results = Vec::new();
         for (key, expected) in &log_snapshot {
             let stored = self.store.get(&(PersistenceClass::AuditLog, key.clone()));
-            let matches = stored.is_some_and(|v| v == expected);
+            let matches = stored.is_some_and(|v| ct_eq_bytes(v, expected));
             if !matches {
                 self.replay_mismatches = self.replay_mismatches.saturating_add(1);
                 self.emit_event(
@@ -726,6 +741,34 @@ mod tests {
         assert_eq!(result.value.expect("should succeed"), b"v2");
     }
 
+    #[test]
+    fn test_audit_log_rejects_duplicate_keys() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .write(PersistenceClass::AuditLog, "entry_1", b"audit_data")
+            .expect("initial audit log write should succeed");
+
+        let err = adapter
+            .write(PersistenceClass::AuditLog, "entry_1", b"tampered")
+            .expect_err("duplicate audit keys must fail closed");
+
+        assert!(matches!(err, AdapterError::WriteFailure { .. }));
+        let result = adapter.read(PersistenceClass::AuditLog, "entry_1");
+        assert_eq!(
+            result
+                .value
+                .expect("original audit value must remain intact"),
+            b"audit_data"
+        );
+        assert_eq!(adapter.summary().write_failures, 1);
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::FRANKENSQLITE_WRITE_FAIL)
+        );
+    }
+
     // -- Replay tests --
 
     #[test]
@@ -823,7 +866,9 @@ mod tests {
     fn test_gate_pass_after_writes() {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
-            adapter.write(*class, "test_key", b"test").expect("should succeed");
+            adapter
+                .write(*class, "test_key", b"test")
+                .expect("should succeed");
         }
         assert!(adapter.gate_pass());
     }
@@ -836,7 +881,9 @@ mod tests {
         adapter
             .write(PersistenceClass::ControlState, "k1", b"v")
             .expect("should succeed");
-        adapter.write(PersistenceClass::Cache, "k2", b"v").expect("should succeed");
+        adapter
+            .write(PersistenceClass::Cache, "k2", b"v")
+            .expect("should succeed");
         adapter.read(PersistenceClass::ControlState, "k1");
         let summary = adapter.summary();
         assert_eq!(summary.total_writes, 2);
@@ -850,7 +897,9 @@ mod tests {
         adapter
             .write(PersistenceClass::ControlState, "k", b"v")
             .expect("should succeed");
-        adapter.write(PersistenceClass::Cache, "k", b"v").expect("should succeed");
+        adapter
+            .write(PersistenceClass::Cache, "k", b"v")
+            .expect("should succeed");
         let summary = adapter.summary();
         assert!(summary.writes_by_tier.contains_key("tier1_wal_crash_safe"));
         assert!(summary.writes_by_tier.contains_key("tier3_ephemeral"));
@@ -898,7 +947,9 @@ mod tests {
     fn test_report_structure() {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
-            adapter.write(*class, "test", b"val").expect("should succeed");
+            adapter
+                .write(*class, "test", b"val")
+                .expect("should succeed");
         }
         let report = adapter.to_report();
         assert_eq!(report["bead_id"], "bd-2tua");
@@ -917,7 +968,13 @@ mod tests {
     fn test_report_persistence_classes() {
         let adapter = FrankensqliteAdapter::default();
         let report = adapter.to_report();
-        assert_eq!(report["persistence_classes"].as_array().expect("should succeed").len(), 4);
+        assert_eq!(
+            report["persistence_classes"]
+                .as_array()
+                .expect("should succeed")
+                .len(),
+            4
+        );
     }
 
     // -- Concurrent access simulation --
@@ -943,7 +1000,9 @@ mod tests {
     fn test_concurrent_different_classes() {
         let mut adapter = FrankensqliteAdapter::default();
         for class in PersistenceClass::all() {
-            adapter.write(*class, "same_key", b"class_data").expect("should succeed");
+            adapter
+                .write(*class, "same_key", b"class_data")
+                .expect("should succeed");
         }
         for class in PersistenceClass::all() {
             let result = adapter.read(*class, "same_key");
