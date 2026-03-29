@@ -44,6 +44,14 @@ pub enum ReplayBundleError {
     Json(#[from] serde_json::Error),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("bundle created_at does not match canonical timeline derivation")]
+    CreatedAtMismatch,
+    #[error("bundle id does not match canonical incident/timeline derivation")]
+    BundleIdMismatch,
+    #[error("bundle manifest does not match canonical timeline derivation")]
+    ManifestMismatch,
+    #[error("bundle chunks do not match canonical timeline derivation")]
+    ChunkLayoutMismatch,
     #[error("bundle integrity mismatch")]
     IntegrityMismatch,
 }
@@ -260,10 +268,7 @@ pub fn generate_replay_bundle(
         })
         .collect();
 
-    let created_at = timeline.last().map_or_else(
-        || DEFAULT_CREATED_AT.to_string(),
-        |event| event.timestamp.clone(),
-    );
+    let created_at = derive_created_at(&timeline);
 
     let initial_state_snapshot = prepared
         .iter()
@@ -277,36 +282,13 @@ pub fn generate_replay_bundle(
         .unwrap_or_else(|| DEFAULT_POLICY_VERSION.to_string());
 
     let bundle_id = deterministic_bundle_id(incident_id, &created_at, &timeline)?;
-    let decision_sequence_hash =
-        compute_decision_sequence_hash(&timeline, &initial_state_snapshot, &policy_version)?;
-
-    let timeline_value = canonicalize_value(&serde_json::to_value(&timeline)?, "$.timeline")?;
-    let timeline_bytes = canonical_json_bytes(&timeline_value)?;
-    let compressed_size_bytes = gzip_size_bytes(&timeline_bytes)?;
     let chunks = chunk_timeline(bundle_id, &timeline)?;
-
-    let (first_timestamp, last_timestamp) = match (timeline.first(), timeline.last()) {
-        (Some(first), Some(last)) => (Some(first.timestamp.clone()), Some(last.timestamp.clone())),
-        _ => (None, None),
-    };
-    let time_span_micros = match (timeline.first(), timeline.last()) {
-        (Some(first), Some(last)) => {
-            let first_micros = normalize_timestamp(&first.timestamp)?.1;
-            let last_micros = normalize_timestamp(&last.timestamp)?.1;
-            u64::try_from(last_micros.saturating_sub(first_micros)).unwrap_or(0)
-        }
-        _ => 0,
-    };
-
-    let manifest = BundleManifest {
-        event_count: timeline.len(),
-        first_timestamp,
-        last_timestamp,
-        time_span_micros,
-        compressed_size_bytes,
-        chunk_count: u32::try_from(chunks.len()).unwrap_or(u32::MAX),
-        decision_sequence_hash,
-    };
+    let manifest = derive_bundle_manifest(
+        &timeline,
+        &initial_state_snapshot,
+        &policy_version,
+        chunks.len(),
+    )?;
 
     let mut bundle = ReplayBundle {
         bundle_id,
@@ -325,6 +307,7 @@ pub fn generate_replay_bundle(
 }
 
 pub fn validate_bundle_integrity(bundle: &ReplayBundle) -> Result<bool, ReplayBundleError> {
+    validate_bundle_structure(bundle)?;
     let recomputed = compute_integrity_hash(bundle)?;
     Ok(crate::security::constant_time::ct_eq(
         &recomputed,
@@ -337,18 +320,8 @@ pub fn replay_bundle(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundl
         return Err(ReplayBundleError::IntegrityMismatch);
     }
 
-    let replay_timeline = if bundle.chunks.len() > 1 {
-        bundle
-            .chunks
-            .iter()
-            .flat_map(|chunk| chunk.events.iter().cloned())
-            .collect::<Vec<_>>()
-    } else {
-        bundle.timeline.clone()
-    };
-
     let replayed_sequence_hash = compute_decision_sequence_hash(
-        &replay_timeline,
+        &bundle.timeline,
         &bundle.initial_state_snapshot,
         &bundle.policy_version,
     )?;
@@ -361,7 +334,7 @@ pub fn replay_bundle(bundle: &ReplayBundle) -> Result<ReplayOutcome, ReplayBundl
             &bundle.manifest.decision_sequence_hash,
         ),
         replayed_sequence_hash,
-        event_count: replay_timeline.len(),
+        event_count: bundle.timeline.len(),
     })
 }
 
@@ -379,7 +352,10 @@ pub fn write_bundle_to_path(bundle: &ReplayBundle, path: &Path) -> Result<(), Re
 pub fn read_bundle_from_path(path: &Path) -> Result<ReplayBundle, ReplayBundleError> {
     let file = std::fs::File::open(path)?;
     let reader = std::io::BufReader::new(file);
-    let bundle = serde_json::from_reader(reader)?;
+    let bundle: ReplayBundle = serde_json::from_reader(reader)?;
+    if !validate_bundle_integrity(&bundle)? {
+        return Err(ReplayBundleError::IntegrityMismatch);
+    }
     Ok(bundle)
 }
 
@@ -512,6 +488,78 @@ fn compute_integrity_hash(bundle: &ReplayBundle) -> Result<String, ReplayBundleE
     };
     let canonical = canonicalize_value(&serde_json::to_value(view)?, "$.integrity_view")?;
     Ok(sha256_hex(&canonical_json_bytes(&canonical)?))
+}
+
+fn validate_bundle_structure(bundle: &ReplayBundle) -> Result<(), ReplayBundleError> {
+    let expected_created_at = derive_created_at(&bundle.timeline);
+    if bundle.created_at != expected_created_at {
+        return Err(ReplayBundleError::CreatedAtMismatch);
+    }
+
+    let expected_bundle_id =
+        deterministic_bundle_id(&bundle.incident_id, &expected_created_at, &bundle.timeline)?;
+    if bundle.bundle_id != expected_bundle_id {
+        return Err(ReplayBundleError::BundleIdMismatch);
+    }
+
+    let expected_chunks = chunk_timeline(expected_bundle_id, &bundle.timeline)?;
+    if bundle.chunks != expected_chunks {
+        return Err(ReplayBundleError::ChunkLayoutMismatch);
+    }
+
+    let expected_manifest = derive_bundle_manifest(
+        &bundle.timeline,
+        &bundle.initial_state_snapshot,
+        &bundle.policy_version,
+        expected_chunks.len(),
+    )?;
+    if bundle.manifest != expected_manifest {
+        return Err(ReplayBundleError::ManifestMismatch);
+    }
+
+    Ok(())
+}
+
+fn derive_created_at(timeline: &[TimelineEvent]) -> String {
+    timeline.last().map_or_else(
+        || DEFAULT_CREATED_AT.to_string(),
+        |event| event.timestamp.clone(),
+    )
+}
+
+fn derive_bundle_manifest(
+    timeline: &[TimelineEvent],
+    initial_state_snapshot: &Value,
+    policy_version: &str,
+    chunk_count: usize,
+) -> Result<BundleManifest, ReplayBundleError> {
+    let decision_sequence_hash =
+        compute_decision_sequence_hash(timeline, initial_state_snapshot, policy_version)?;
+    let timeline_value = canonicalize_value(&serde_json::to_value(timeline)?, "$.timeline")?;
+    let timeline_bytes = canonical_json_bytes(&timeline_value)?;
+    let compressed_size_bytes = gzip_size_bytes(&timeline_bytes)?;
+    let (first_timestamp, last_timestamp) = match (timeline.first(), timeline.last()) {
+        (Some(first), Some(last)) => (Some(first.timestamp.clone()), Some(last.timestamp.clone())),
+        _ => (None, None),
+    };
+    let time_span_micros = match (timeline.first(), timeline.last()) {
+        (Some(first), Some(last)) => {
+            let first_micros = normalize_timestamp(&first.timestamp)?.1;
+            let last_micros = normalize_timestamp(&last.timestamp)?.1;
+            u64::try_from(last_micros.saturating_sub(first_micros)).unwrap_or(0)
+        }
+        _ => 0,
+    };
+
+    Ok(BundleManifest {
+        event_count: timeline.len(),
+        first_timestamp,
+        last_timestamp,
+        time_span_micros,
+        compressed_size_bytes,
+        chunk_count: u32::try_from(chunk_count).unwrap_or(u32::MAX),
+        decision_sequence_hash,
+    })
 }
 
 fn chunk_timeline(
@@ -680,6 +728,34 @@ mod tests {
         ]
     }
 
+    fn chunked_fixture_bundle() -> ReplayBundle {
+        let large = "x".repeat(3 * 1024 * 1024);
+        let events = vec![
+            RawEvent::new(
+                "2026-02-20T10:00:00.000001Z",
+                EventType::StateChange,
+                serde_json::json!({"blob": large}),
+            ),
+            RawEvent::new(
+                "2026-02-20T10:00:00.000002Z",
+                EventType::PolicyEval,
+                serde_json::json!({"blob": "y".repeat(3 * 1024 * 1024)}),
+            ),
+            RawEvent::new(
+                "2026-02-20T10:00:00.000003Z",
+                EventType::OperatorAction,
+                serde_json::json!({"blob": "z".repeat(3 * 1024 * 1024)}),
+            ),
+            RawEvent::new(
+                "2026-02-20T10:00:00.000004Z",
+                EventType::ExternalSignal,
+                serde_json::json!({"blob": "w".repeat(3 * 1024 * 1024)}),
+            ),
+        ];
+
+        generate_replay_bundle("INC-CHUNK-FIXTURE-001", &events).expect("chunked bundle")
+    }
+
     #[test]
     fn bundle_generation_is_deterministic() {
         let events = fixture_events();
@@ -725,6 +801,46 @@ mod tests {
     }
 
     #[test]
+    fn validate_bundle_integrity_rejects_manifest_drift_even_with_recomputed_hash() {
+        let mut bundle = generate_replay_bundle("INC-RPL-003", &fixture_events()).expect("bundle");
+        bundle.manifest.event_count = bundle.manifest.event_count.saturating_add(1);
+        bundle.integrity_hash = compute_integrity_hash(&bundle).expect("rehash");
+
+        let err = validate_bundle_integrity(&bundle).expect_err("must reject manifest drift");
+        assert!(matches!(err, ReplayBundleError::ManifestMismatch));
+    }
+
+    #[test]
+    fn validate_bundle_integrity_rejects_created_at_drift_even_with_recomputed_hash() {
+        let mut bundle = generate_replay_bundle("INC-RPL-004", &fixture_events()).expect("bundle");
+        bundle.created_at = DEFAULT_CREATED_AT.to_string();
+        bundle.integrity_hash = compute_integrity_hash(&bundle).expect("rehash");
+
+        let err = validate_bundle_integrity(&bundle).expect_err("must reject created_at drift");
+        assert!(matches!(err, ReplayBundleError::CreatedAtMismatch));
+    }
+
+    #[test]
+    fn replay_rejects_chunk_layout_drift_even_with_recomputed_hash() {
+        let mut bundle = chunked_fixture_bundle();
+        bundle.chunks.swap(0, 1);
+        bundle.integrity_hash = compute_integrity_hash(&bundle).expect("rehash");
+
+        let err = replay_bundle(&bundle).expect_err("must reject chunk drift");
+        assert!(matches!(err, ReplayBundleError::ChunkLayoutMismatch));
+    }
+
+    #[test]
+    fn validate_bundle_integrity_rejects_bundle_id_drift_even_with_recomputed_hash() {
+        let mut bundle = generate_replay_bundle("INC-RPL-005", &fixture_events()).expect("bundle");
+        bundle.bundle_id = Uuid::nil();
+        bundle.integrity_hash = compute_integrity_hash(&bundle).expect("rehash");
+
+        let err = validate_bundle_integrity(&bundle).expect_err("must reject bundle id drift");
+        assert!(matches!(err, ReplayBundleError::BundleIdMismatch));
+    }
+
+    #[test]
     fn float_payload_is_rejected() {
         let events = vec![RawEvent::new(
             "2026-02-20T10:00:00Z",
@@ -740,31 +856,7 @@ mod tests {
 
     #[test]
     fn chunking_activates_for_large_payload() {
-        let large = "x".repeat(3 * 1024 * 1024);
-        let events = vec![
-            RawEvent::new(
-                "2026-02-20T10:00:00.000001Z",
-                EventType::StateChange,
-                serde_json::json!({"blob": large}),
-            ),
-            RawEvent::new(
-                "2026-02-20T10:00:00.000002Z",
-                EventType::PolicyEval,
-                serde_json::json!({"blob": "y".repeat(3 * 1024 * 1024)}),
-            ),
-            RawEvent::new(
-                "2026-02-20T10:00:00.000003Z",
-                EventType::OperatorAction,
-                serde_json::json!({"blob": "z".repeat(3 * 1024 * 1024)}),
-            ),
-            RawEvent::new(
-                "2026-02-20T10:00:00.000004Z",
-                EventType::ExternalSignal,
-                serde_json::json!({"blob": "w".repeat(3 * 1024 * 1024)}),
-            ),
-        ];
-
-        let bundle = generate_replay_bundle("INC-CHUNK-001", &events).expect("bundle");
+        let bundle = chunked_fixture_bundle();
         assert!(bundle.manifest.chunk_count > 1);
         assert_eq!(
             usize::try_from(bundle.manifest.chunk_count).ok(),
@@ -803,6 +895,27 @@ mod tests {
         write_bundle_to_path(&bundle, &path).expect("write");
         let loaded = read_bundle_from_path(&path).expect("read");
         assert_eq!(bundle, loaded);
+    }
+
+    #[test]
+    fn read_rejects_tampered_bundle_from_disk() {
+        let bundle = generate_replay_bundle("INC-IO-002", &fixture_events()).expect("bundle");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("bundle.json");
+        write_bundle_to_path(&bundle, &path).expect("write");
+
+        let mut tampered: Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).expect("read raw"))
+                .expect("parse bundle json");
+        tampered["manifest"]["event_count"] = Value::from(999_u64);
+        std::fs::write(
+            &path,
+            serde_json::to_string(&tampered).expect("serialize tampered bundle"),
+        )
+        .expect("write tampered bundle");
+
+        let err = read_bundle_from_path(&path).expect_err("must reject tampered bundle");
+        assert!(matches!(err, ReplayBundleError::ManifestMismatch));
     }
 
     #[test]

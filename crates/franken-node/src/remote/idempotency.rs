@@ -1,12 +1,14 @@
 //! bd-12n3: Idempotency key derivation from request bytes with epoch binding.
 //!
 //! Derivation input contract:
-//! `domain_prefix || 0x1F || computation_name || 0x1F || epoch_be_u64 || 0x1F || request_bytes`
+//! `len(domain_prefix)_be_u64 || domain_prefix || len(computation_name)_be_u64 ||`
+//! `computation_name || epoch_be_u64 || len(request_bytes)_be_u64 || request_bytes`
 //!
 //! This enforces:
 //! - deterministic key generation
 //! - domain separation (different computation_name => different key)
 //! - epoch binding (same request in different epochs => different key)
+//! - injective framing even when computation_name / request_bytes contain control bytes
 
 use crate::remote::computation_registry::ComputationRegistry;
 use serde::{Deserialize, Serialize};
@@ -16,6 +18,7 @@ use std::fmt;
 
 pub const IDEMPOTENCY_DOMAIN_PREFIX: &[u8] = b"franken_node.idempotency.v1";
 pub const IDEMPOTENCY_KEY_LEN: usize = 32;
+const IDEMPOTENCY_DERIVATION_TAG: &[u8] = b"idempotency_key_derive_v1:";
 
 /// Structured event codes for key derivation telemetry.
 pub mod event_codes {
@@ -163,6 +166,11 @@ impl IdempotencyKeyDeriver {
         &self.domain_prefix
     }
 
+    fn append_len_prefixed_field(output: &mut Vec<u8>, bytes: &[u8]) {
+        output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        output.extend_from_slice(bytes);
+    }
+
     fn canonical_input(
         &self,
         computation_name: &str,
@@ -174,15 +182,12 @@ impl IdempotencyKeyDeriver {
         }
 
         let mut input = Vec::with_capacity(
-            self.domain_prefix.len() + computation_name.len() + request_bytes.len() + 11,
+            self.domain_prefix.len() + computation_name.len() + request_bytes.len() + 32,
         );
-        input.extend_from_slice(&self.domain_prefix);
-        input.push(0x1F);
-        input.extend_from_slice(computation_name.as_bytes());
-        input.push(0x1F);
+        Self::append_len_prefixed_field(&mut input, &self.domain_prefix);
+        Self::append_len_prefixed_field(&mut input, computation_name.as_bytes());
         input.extend_from_slice(&epoch.to_be_bytes());
-        input.push(0x1F);
-        input.extend_from_slice(request_bytes);
+        Self::append_len_prefixed_field(&mut input, request_bytes);
         Ok(input)
     }
 
@@ -193,7 +198,10 @@ impl IdempotencyKeyDeriver {
         request_bytes: &[u8],
     ) -> Result<IdempotencyKey, IdempotencyError> {
         let canonical = self.canonical_input(computation_name, epoch, request_bytes)?;
-        let digest = Sha256::digest([b"idempotency_key_derive_v1:" as &[u8], &canonical].concat());
+        let mut hasher = Sha256::new();
+        hasher.update(IDEMPOTENCY_DERIVATION_TAG);
+        hasher.update(&canonical);
+        let digest = hasher.finalize();
         let mut out = [0_u8; IDEMPOTENCY_KEY_LEN];
         out.copy_from_slice(&digest);
         Ok(IdempotencyKey::from_bytes(out))
@@ -247,6 +255,25 @@ mod tests {
     use crate::remote::computation_registry::ComputationEntry;
     use crate::security::remote_cap::RemoteOperation;
 
+    fn legacy_separator_canonical_input(
+        domain_prefix: &[u8],
+        computation_name: &str,
+        epoch: u64,
+        request_bytes: &[u8],
+    ) -> Vec<u8> {
+        let mut input = Vec::with_capacity(
+            domain_prefix.len() + computation_name.len() + request_bytes.len() + 11,
+        );
+        input.extend_from_slice(domain_prefix);
+        input.push(0x1F);
+        input.extend_from_slice(computation_name.as_bytes());
+        input.push(0x1F);
+        input.extend_from_slice(&epoch.to_be_bytes());
+        input.push(0x1F);
+        input.extend_from_slice(request_bytes);
+        input
+    }
+
     fn seeded_payload(seed: u64) -> Vec<u8> {
         let mut payload = vec![0_u8; 24];
         payload[..8].copy_from_slice(&seed.to_be_bytes());
@@ -290,7 +317,9 @@ mod tests {
         let a = deriver
             .derive_key("core.remote_compute.v1", 7, b"payload")
             .expect("should succeed");
-        let b = deriver.derive_key("core.audit.v1", 7, b"payload").expect("should succeed");
+        let b = deriver
+            .derive_key("core.audit.v1", 7, b"payload")
+            .expect("should succeed");
         assert_ne!(a, b);
     }
 
@@ -375,6 +404,43 @@ mod tests {
             .collision_count("core.remote_compute.v1", 7, &payloads)
             .expect("collision check should run");
         assert_eq!(collisions, 0);
+    }
+
+    #[test]
+    fn separator_collision_inputs_do_not_alias_after_derivation_fix() {
+        let deriver = IdempotencyKeyDeriver::default();
+        let computation_a = "core.remote_compute.v1";
+        let computation_b = "core.remote_compute.v1\u{1f}\0\0\0\0\0\0\0\0\u{1f}suffix";
+        let request_a = b"suffix\x1f\0\0\0\0\0\0\0\x01\x1frest";
+        let request_b = b"rest";
+
+        let legacy_a =
+            legacy_separator_canonical_input(deriver.domain_prefix(), computation_a, 0, request_a);
+        let legacy_b =
+            legacy_separator_canonical_input(deriver.domain_prefix(), computation_b, 1, request_b);
+        assert_eq!(
+            legacy_a, legacy_b,
+            "the old separator framing admitted tuple aliasing"
+        );
+
+        let canonical_a = deriver
+            .canonical_input(computation_a, 0, request_a)
+            .expect("canonical input a");
+        let canonical_b = deriver
+            .canonical_input(computation_b, 1, request_b)
+            .expect("canonical input b");
+        assert_ne!(
+            canonical_a, canonical_b,
+            "length-prefixed framing must remain injective"
+        );
+
+        let key_a = deriver
+            .derive_key(computation_a, 0, request_a)
+            .expect("derive key a");
+        let key_b = deriver
+            .derive_key(computation_b, 1, request_b)
+            .expect("derive key b");
+        assert_ne!(key_a, key_b, "distinct tuples must not alias");
     }
 
     #[test]

@@ -681,11 +681,11 @@ impl RemoteBulkhead {
     }
 
     /// Record foreground latency observation.
-    pub fn record_foreground_latency(&mut self, latency_ms: u64) {
+    pub fn record_foreground_latency(&mut self, latency_ms: u64, now_ms: u64) {
         self.push_latency_sample(latency_ms);
         self.log_event(
             event_codes::RB_LATENCY_REPORT,
-            0,
+            now_ms,
             format!("latency_ms={latency_ms}"),
         );
     }
@@ -955,8 +955,11 @@ mod tests {
     #[test]
     fn p99_is_computed_deterministically() {
         let mut b = bulkhead_reject(4);
-        for latency in [10_u64, 11, 12, 13, 14, 15, 100] {
-            b.record_foreground_latency(latency);
+        for (idx, latency) in [10_u64, 11, 12, 13, 14, 15, 100].into_iter().enumerate() {
+            b.record_foreground_latency(
+                latency,
+                u64::try_from(idx + 1).expect("usize->u64 conversion should not overflow"),
+            );
         }
         assert_eq!(b.p99_foreground_latency_ms(), Some(100));
     }
@@ -964,13 +967,27 @@ mod tests {
     #[test]
     fn latency_target_gate_reflects_samples() {
         let mut b = bulkhead_reject(4);
-        for latency in [20_u64, 25, 30, 45] {
-            b.record_foreground_latency(latency);
+        for (idx, latency) in [20_u64, 25, 30, 45].into_iter().enumerate() {
+            b.record_foreground_latency(
+                latency,
+                u64::try_from(idx + 1).expect("usize->u64 conversion should not overflow"),
+            );
         }
         assert!(b.latency_within_target());
 
-        b.record_foreground_latency(80);
+        b.record_foreground_latency(80, 10);
         assert!(!b.latency_within_target());
+    }
+
+    #[test]
+    fn latency_report_event_preserves_supplied_timestamp() {
+        let mut b = bulkhead_reject(1);
+        b.record_foreground_latency(42, 777);
+
+        let event = b.events().last().expect("latency event should be recorded");
+        assert_eq!(event.event_code, event_codes::RB_LATENCY_REPORT);
+        assert_eq!(event.now_ms, 777);
+        assert_eq!(event.detail, "latency_ms=42");
     }
 
     #[test]
@@ -1013,7 +1030,7 @@ mod tests {
         let total = MAX_BULKHEAD_EVENTS + 7;
         for idx in 0..total {
             let latency = u64::try_from(idx).expect("usize->u64 conversion should not overflow");
-            b.record_foreground_latency(latency);
+            b.record_foreground_latency(latency, latency);
         }
 
         assert_eq!(b.events().len(), MAX_BULKHEAD_EVENTS);
@@ -1037,7 +1054,7 @@ mod tests {
         let total = MAX_LATENCY_SAMPLES + 11;
         for idx in 0..total {
             let latency = u64::try_from(idx).expect("usize->u64 conversion should not overflow");
-            b.record_foreground_latency(latency);
+            b.record_foreground_latency(latency, latency);
         }
 
         assert_eq!(b.latency_samples().len(), MAX_LATENCY_SAMPLES);
