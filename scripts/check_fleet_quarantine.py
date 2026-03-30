@@ -13,8 +13,7 @@ import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 
 # ── File paths ─────────────────────────────────────────────────────────────
@@ -66,6 +65,7 @@ REQUIRED_ERROR_CODES = [
     "FLEET_CONVERGENCE_TIMEOUT",
     "FLEET_ROLLBACK_FAILED",
     "FLEET_NOT_ACTIVATED",
+    "FLEET_OPERATION_ID_EXHAUSTED",
 ]
 
 REQUIRED_INVARIANTS = [
@@ -347,7 +347,7 @@ def self_test() -> tuple:
     checks.append(_check("REQUIRED_STRUCTS count", len(REQUIRED_STRUCTS) >= 14))
     checks.append(_check("REQUIRED_EVENT_CODES count", len(REQUIRED_EVENT_CODES) == 5))
     checks.append(_check("REQUIRED_EVENT_NAMES count", len(REQUIRED_EVENT_NAMES) == 5))
-    checks.append(_check("REQUIRED_ERROR_CODES count", len(REQUIRED_ERROR_CODES) == 5))
+    checks.append(_check("REQUIRED_ERROR_CODES count", len(REQUIRED_ERROR_CODES) == 6))
     checks.append(_check("REQUIRED_INVARIANTS count", len(REQUIRED_INVARIANTS) == 5))
     checks.append(_check("REQUIRED_FUNCTIONS count", len(REQUIRED_FUNCTIONS) >= 18))
 
@@ -368,7 +368,7 @@ def self_test() -> tuple:
 
 
 def main():
-    logger = configure_test_logging("check_fleet_quarantine")
+    configure_test_logging("check_fleet_quarantine")
     if "--self-test" in sys.argv:
         ok, checks = self_test()
         passed = sum(1 for c in checks if c["pass"])

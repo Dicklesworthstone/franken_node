@@ -1,17 +1,8 @@
 //! Conformance tests for bd-12n3 idempotency key derivation vectors.
 
-#[path = "../../crates/franken-node/src/remote/computation_registry.rs"]
-pub mod computation_registry_impl;
-
-pub mod remote {
-    pub use super::computation_registry_impl as computation_registry;
-}
-
-#[path = "../../crates/franken-node/src/remote/idempotency.rs"]
-mod idempotency;
-
-use idempotency::IdempotencyKeyDeriver;
-use remote::computation_registry::{ComputationEntry, ComputationRegistry, RequiredCapability};
+use frankenengine_node::remote::computation_registry::{ComputationEntry, ComputationRegistry};
+use frankenengine_node::remote::idempotency::IdempotencyKeyDeriver;
+use frankenengine_node::security::remote_cap::RemoteOperation;
 use serde::Deserialize;
 use std::fs;
 use std::path::Path;
@@ -47,21 +38,20 @@ struct IdempotencyVector {
 }
 
 fn demo_registry() -> ComputationRegistry {
-    let mut registry = ComputationRegistry::init("trace-conformance");
+    let mut registry = ComputationRegistry::new(1, "trace-conformance");
     for name in [
         "core.remote_compute.v1",
         "core.audit.v1",
         "core.telemetry_export.v1",
     ] {
         registry
-            .register(
+            .register_computation(
                 ComputationEntry {
                     name: name.to_string(),
                     description: "registered for conformance vectors".to_string(),
-                    required_capabilities: vec![RequiredCapability::RemoteComputation],
+                    required_capabilities: vec![RemoteOperation::DataFetch],
                     input_schema: "{}".to_string(),
                     output_schema: "{}".to_string(),
-                    registered_at_version: 1,
                 },
                 "trace-conformance",
             )
@@ -165,13 +155,13 @@ fn separator_collision_inputs_do_not_alias_after_derivation_fix() {
     let request_b = b"rest";
 
     let legacy_a = legacy_separator_framing(
-        idempotency::IDEMPOTENCY_DOMAIN_PREFIX,
+        frankenengine_node::remote::idempotency::IDEMPOTENCY_DOMAIN_PREFIX,
         computation_a,
         0,
         request_a,
     );
     let legacy_b = legacy_separator_framing(
-        idempotency::IDEMPOTENCY_DOMAIN_PREFIX,
+        frankenengine_node::remote::idempotency::IDEMPOTENCY_DOMAIN_PREFIX,
         computation_b,
         1,
         request_b,

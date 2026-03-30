@@ -24,6 +24,10 @@ class TestCheckFileHelper(TestCase):
         result = mod.check_file(mod.IMPL, "self")
         self.assertTrue(result["pass"])
 
+    def test_schema_file_exists(self):
+        result = mod.check_file(mod.SCHEMA, "schema")
+        self.assertTrue(result["pass"])
+
     def test_file_missing(self):
         result = mod.check_file(ROOT / "nonexistent.rs", "missing")
         self.assertFalse(result["pass"])
@@ -119,7 +123,7 @@ class TestRequiredConstants(TestCase):
         self.assertEqual(len(mod.INVARIANTS), 3)
 
     def test_required_tests_count(self):
-        self.assertEqual(len(mod.REQUIRED_TESTS), 39)
+        self.assertEqual(len(mod.REQUIRED_TESTS), 40)
 
     def test_trace_event_types_count(self):
         self.assertEqual(len(mod.TRACE_EVENT_TYPES), 6)

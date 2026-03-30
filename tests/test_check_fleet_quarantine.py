@@ -8,7 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts"))
 
-import check_fleet_quarantine as mod
+import check_fleet_quarantine as mod  # noqa: E402
 
 
 class TestConstants(unittest.TestCase):
@@ -22,7 +22,7 @@ class TestConstants(unittest.TestCase):
         self.assertEqual(len(mod.REQUIRED_EVENT_NAMES), 5)
 
     def test_required_error_codes_count(self):
-        self.assertEqual(len(mod.REQUIRED_ERROR_CODES), 5)
+        self.assertEqual(len(mod.REQUIRED_ERROR_CODES), 6)
 
     def test_required_invariants_count(self):
         self.assertEqual(len(mod.REQUIRED_INVARIANTS), 5)

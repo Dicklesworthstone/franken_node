@@ -14,7 +14,7 @@ verification: every failure can be reproduced mechanically.
 
 | Type | Role |
 |------|------|
-| `ReproBundle` | Self-contained bundle: seed, config, event trace, evidence refs, failure context |
+| `ReproBundle` | Self-contained bundle: seed, config, event trace, evidence refs, and full failure context including failure timestamp |
 | `TraceEvent` | Single event in the control-plane event trace (seq, type, timestamp, payload) |
 | `TraceEventType` | Enum: EpochTransition, BarrierEvent, PolicyEvaluation, MarkerIntegrityCheck, ConfigChange, ExternalSignal |
 | `EvidenceRef` | Reference to evidence artifact with portable relative path |
@@ -34,9 +34,10 @@ verification: every failure can be reproduced mechanically.
 
 ## Deterministic Bundle Generation
 
-Bundle IDs are derived via `DefaultHasher` over: seed, epoch_id, timestamp_ms,
-failure type/message, all event types/timestamps/payloads, all evidence refs,
-and all config entries. Identical input always produces identical bundle_id.
+Bundle IDs are derived via `Sha256` over: seed, epoch_id, timestamp_ms,
+failure type/message/trigger/failure timestamp, all event types/timestamps/payloads,
+all evidence refs, and all config entries. Identical input always produces
+identical bundle_id.
 
 ## Auto-Export Triggers
 
@@ -62,4 +63,8 @@ checks all refs and config values.
 ## Schema Validation
 
 `validate_bundle()` checks: bundle_id present, schema_version == 1,
-error_message non-empty, all paths portable. Returns `Vec<SchemaError>` on failure.
+error_message non-empty, all paths portable. The portable JSON export/schema
+must also include both the export timestamp (`timestamp_ms`) and the failure
+timestamp (`failure_timestamp_ms`) so the serialized artifact preserves the
+entire `FailureContext` used in bundle derivation. Returns `Vec<SchemaError>`
+on failure.

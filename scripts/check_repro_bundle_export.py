@@ -12,11 +12,11 @@ import sys
 from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-from pathlib import Path
+from scripts.lib.test_logger import configure_test_logging  # noqa: E402
 
 IMPL = ROOT / "crates" / "franken-node" / "src" / "tools" / "repro_bundle_export.rs"
 SPEC = ROOT / "docs" / "specs" / "section_10_14" / "bd-2808_contract.md"
+SCHEMA = ROOT / "artifacts" / "10.14" / "repro_bundle_schema_v1.json"
 MOD_RS = ROOT / "crates" / "franken-node" / "src" / "tools" / "mod.rs"
 
 REQUIRED_TYPES = [
@@ -112,6 +112,7 @@ REQUIRED_TESTS = [
     "empty_trace_produces_valid_bundle",
     "bundle_is_portable",
     "bundle_to_json",
+    "bundle_to_json_includes_failure_timestamp",
     "replay_produces_match",
     "replay_deterministic_100_runs",
     "replay_wrong_schema_version",
@@ -131,6 +132,10 @@ REQUIRED_TESTS = [
     "exporter_time_range_query",
     "json_round_trip_preserves_key_fields",
     "config_snapshot_in_bundle",
+]
+
+REQUIRED_JSON_FIELDS = [
+    "failure_timestamp_ms",
 ]
 
 
@@ -207,6 +212,7 @@ def run_checks():
     checks = []
     checks.append(check_file(IMPL, "implementation"))
     checks.append(check_file(SPEC, "spec contract"))
+    checks.append(check_file(SCHEMA, "schema artifact"))
     checks.append(check_module_registered())
     checks.append(check_test_count())
     checks.append(check_schema_version())
@@ -220,6 +226,8 @@ def run_checks():
     checks.extend(check_content(IMPL, REPLAY_VARIANTS, "replay_variant"))
     checks.extend(check_content(IMPL, SCHEMA_ERROR_VARIANTS, "schema_error"))
     checks.extend(check_content(IMPL, REQUIRED_TESTS, "test"))
+    checks.extend(check_content(IMPL, REQUIRED_JSON_FIELDS, "json_field"))
+    checks.extend(check_content(SCHEMA, REQUIRED_JSON_FIELDS, "schema_field"))
 
     passed = sum(1 for c in checks if c["pass"])
     total = len(checks)
@@ -237,7 +245,7 @@ def run_checks():
 
 
 def main():
-    logger = configure_test_logging("check_repro_bundle_export")
+    configure_test_logging("check_repro_bundle_export")
     if "--self-test" in sys.argv:
         ok, results = self_test()
         print(f"self_test: {'PASS' if ok else 'FAIL'}")

@@ -12,6 +12,7 @@
     "failure_type",
     "error_message",
     "trigger",
+    "failure_timestamp_ms",
     "config",
     "event_trace",
     "evidence_refs"
@@ -60,6 +61,11 @@
     "trigger": {
       "type": "string",
       "description": "Triggering condition description"
+    },
+    "failure_timestamp_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Timestamp when the triggering failure was detected (ms)"
     },
     "config": {
       "type": "object",

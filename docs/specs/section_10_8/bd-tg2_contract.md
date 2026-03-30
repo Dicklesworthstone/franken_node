@@ -232,6 +232,7 @@ Fleet status for a zone, returned by the status endpoint:
 | ConvergenceTimeout         | FLEET_CONVERGENCE_TIMEOUT     | Fleet action did not converge within the configured timeout          |
 | RollbackFailed             | FLEET_ROLLBACK_FAILED         | Release/rollback could not restore pre-quarantine state              |
 | NotActivated               | FLEET_NOT_ACTIVATED           | Fleet control API is in safe-mode (read-only) and has not been activated |
+| OperationIdExhausted       | FLEET_OPERATION_ID_EXHAUSTED  | Fleet operation ID space is exhausted; mutations fail closed         |
 
 Each variant exposes a `code() -> &'static str` method returning the
 machine-readable error code, and implements `Display` with a human-readable
@@ -334,6 +335,7 @@ follows the canonical structured observability contracts from 10.13 (bd-1ta).
 | FLEET_CONVERGENCE_TIMEOUT    | Fleet action did not converge within the configured timeout              |
 | FLEET_ROLLBACK_FAILED        | Release/rollback could not restore pre-quarantine state on all nodes     |
 | FLEET_NOT_ACTIVATED          | Fleet control API is in safe-mode and requires explicit activation       |
+| FLEET_OPERATION_ID_EXHAUSTED | Fleet operation identifier space is exhausted; new mutations are blocked |
 
 Error codes follow the stable error taxonomy contracts from 10.13. Each error
 code is a `&'static str` constant and is included in both the API response body
@@ -379,7 +381,7 @@ duration, failed node list, etc.).
 6. **Canonical structured observability:** All five event codes (FLEET-001
    through FLEET-005) are emitted with the 10.13 canonical event structure
    including non-empty `trace_id`, `action_id`, zone metadata, and ISO 8601
-   timestamps. All five error codes follow the stable error taxonomy with
+   timestamps. All six error codes follow the stable error taxonomy with
    machine-readable codes and structured context fields.
 
 7. **Deterministic safe-mode startup:** The fleet control API starts in

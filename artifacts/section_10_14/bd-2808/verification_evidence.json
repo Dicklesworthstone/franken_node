@@ -4,11 +4,11 @@
   "section": "10.14",
   "overall_pass": true,
   "verdict": "PASS",
-  "test_count": 39,
+  "test_count": 46,
   "summary": {
-    "passing": 93,
+    "passing": 97,
     "failing": 0,
-    "total": 93
+    "total": 97
   },
   "checks": [
     {
@@ -22,6 +22,11 @@
       "detail": "exists: docs/specs/section_10_14/bd-2808_contract.md"
     },
     {
+      "check": "file: schema artifact",
+      "pass": true,
+      "detail": "exists: artifacts/10.14/repro_bundle_schema_v1.json"
+    },
+    {
       "check": "module registered in mod.rs",
       "pass": true,
       "detail": "found"
@@ -29,7 +34,7 @@
     {
       "check": "unit test count",
       "pass": true,
-      "detail": "39 tests (minimum 25)"
+      "detail": "46 tests (minimum 25)"
     },
     {
       "check": "schema version constant",
@@ -37,7 +42,7 @@
       "detail": "found"
     },
     {
-      "check": "DefaultHasher for determinism",
+      "check": "Sha256 for determinism",
       "pass": true,
       "detail": "found"
     },
@@ -382,6 +387,11 @@
       "detail": "found"
     },
     {
+      "check": "test: bundle_to_json_includes_failure_timestamp",
+      "pass": true,
+      "detail": "found"
+    },
+    {
       "check": "test: replay_produces_match",
       "pass": true,
       "detail": "found"
@@ -473,6 +483,16 @@
     },
     {
       "check": "test: config_snapshot_in_bundle",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "json_field: failure_timestamp_ms",
+      "pass": true,
+      "detail": "found"
+    },
+    {
+      "check": "schema_field: failure_timestamp_ms",
       "pass": true,
       "detail": "found"
     }
