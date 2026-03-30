@@ -138,6 +138,16 @@ fn is_valid_trace_flags(value: &str) -> bool {
     value.len() == 2 && is_lower_hex(value)
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
+fn contains_authorized_key_constant_time(
+    authorized_keys: &std::collections::BTreeSet<String>,
+    candidate: &str,
+) -> bool {
+    authorized_keys
+        .iter()
+        .fold(false, |acc, authorized| acc | ct_eq(authorized, candidate))
+}
+
 // ── Authentication ─────────────────────────────────────────────────────────
 
 /// Supported authentication methods.
@@ -199,7 +209,7 @@ pub fn authenticate(
                     trace_id: trace_id.to_string(),
                 });
             }
-            if !authorized_keys.iter().any(|k| ct_eq(k, key)) {
+            if !contains_authorized_key_constant_time(authorized_keys, key) {
                 return Err(ApiError::AuthFailed {
                     detail: "invalid API key".to_string(),
                     trace_id: trace_id.to_string(),
@@ -228,9 +238,7 @@ pub fn authenticate(
                     trace_id: trace_id.to_string(),
                 });
             }
-            let is_valid = authorized_keys
-                .iter()
-                .fold(false, |acc, k| acc | ct_eq(k, token));
+            let is_valid = contains_authorized_key_constant_time(authorized_keys, token);
             if !is_valid {
                 return Err(ApiError::AuthFailed {
                     detail: "invalid bearer token".to_string(),
@@ -258,9 +266,8 @@ pub fn authenticate(
                     trace_id: trace_id.to_string(),
                 });
             }
-            let is_valid = authorized_keys
-                .iter()
-                .fold(false, |acc, k| acc | ct_eq(k, propagated_identity));
+            let is_valid =
+                contains_authorized_key_constant_time(authorized_keys, propagated_identity);
             if !is_valid {
                 return Err(ApiError::AuthFailed {
                     detail: "invalid mTLS client identity".to_string(),
@@ -790,6 +797,24 @@ mod tests {
         keys.insert("valid-token-abc".to_string());
         keys.insert("fleet-service-cert".to_string());
         keys
+    }
+
+    #[test]
+    fn contains_authorized_key_constant_time_matches_and_misses() {
+        let keys = get_test_keys();
+        assert!(contains_authorized_key_constant_time(&keys, "test-key-123"));
+        assert!(contains_authorized_key_constant_time(
+            &keys,
+            "valid-token-abc"
+        ));
+        assert!(contains_authorized_key_constant_time(
+            &keys,
+            "fleet-service-cert"
+        ));
+        assert!(!contains_authorized_key_constant_time(
+            &keys,
+            "missing-credential"
+        ));
     }
 
     #[test]

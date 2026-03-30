@@ -978,6 +978,8 @@ pub enum CompatGateError {
         predicate_id: String,
         reason: String,
     },
+    /// Internal sequence counter exhausted.
+    CounterExhausted { counter: String },
     /// Package not found.
     PackageNotFound { package_id: String },
 }
@@ -1012,6 +1014,9 @@ impl fmt::Display for CompatGateError {
                 reason,
             } => {
                 write!(f, "invalid predicate {predicate_id}: {reason}")
+            }
+            Self::CounterExhausted { counter } => {
+                write!(f, "counter exhausted: {counter}")
             }
             Self::PackageNotFound { package_id } => {
                 write!(f, "package not found: {package_id}")
@@ -1048,6 +1053,8 @@ pub struct CompatGateEvaluator {
     validated_predicates: BTreeMap<String, String>,
     next_receipt_seq: u64,
     next_audit_seq: u64,
+    receipt_seq_exhausted: bool,
+    audit_seq_exhausted: bool,
 }
 
 impl CompatGateEvaluator {
@@ -1067,6 +1074,8 @@ impl CompatGateEvaluator {
             validated_predicates: BTreeMap::new(),
             next_receipt_seq: 0,
             next_audit_seq: 0,
+            receipt_seq_exhausted: false,
+            audit_seq_exhausted: false,
         }
     }
 
@@ -1080,6 +1089,38 @@ impl CompatGateEvaluator {
     /// Get a reference to the shim registry.
     pub fn registry(&self) -> &ShimRegistry {
         &self.registry
+    }
+
+    fn next_receipt_sequence(&mut self) -> Result<u64, CompatGateError> {
+        if self.receipt_seq_exhausted {
+            return Err(CompatGateError::CounterExhausted {
+                counter: "receipt_sequence".to_string(),
+            });
+        }
+
+        let sequence = self.next_receipt_seq;
+        if let Some(next) = self.next_receipt_seq.checked_add(1) {
+            self.next_receipt_seq = next;
+        } else {
+            self.receipt_seq_exhausted = true;
+        }
+        Ok(sequence)
+    }
+
+    fn next_audit_sequence(&mut self) -> Result<u64, CompatGateError> {
+        if self.audit_seq_exhausted {
+            return Err(CompatGateError::CounterExhausted {
+                counter: "audit_sequence".to_string(),
+            });
+        }
+
+        let sequence = self.next_audit_seq;
+        if let Some(next) = self.next_audit_seq.checked_add(1) {
+            self.next_audit_seq = next;
+        } else {
+            self.audit_seq_exhausted = true;
+        }
+        Ok(sequence)
     }
 
     // ── Mode Management ──
@@ -1123,8 +1164,7 @@ impl CompatGateEvaluator {
             vec![reason_codes::POLICY_COMPAT_MODE_RECEIPT_SIGNED.to_string()],
             vec!["request explicit approval before risk escalation".to_string()],
         );
-        let seq = self.next_receipt_seq;
-        self.next_receipt_seq = self.next_receipt_seq.wrapping_add(1);
+        let seq = self.next_receipt_sequence()?;
         let mut receipt = ModeSelectionReceipt {
             receipt_id: format!("rcpt-{}-{}", scope_id, seq),
             scope_id: scope_id.to_string(),
@@ -1266,8 +1306,7 @@ impl CompatGateEvaluator {
         scope_id: &str,
         trace_id: &str,
     ) -> Result<GateCheckResult, CompatGateError> {
-        let audit_seq = self.next_audit_seq;
-        self.next_audit_seq = self.next_audit_seq.wrapping_add(1);
+        let audit_seq = self.next_audit_sequence()?;
         let (mode, scope_receipt, scope_predicates) = {
             let scope =
                 self.scopes
@@ -2766,6 +2805,22 @@ mod tests {
         assert_eq!(eval.audit_log_for_scope("other").len(), 0);
     }
 
+    #[test]
+    fn gate_eval_fails_closed_when_audit_sequence_exhausted() {
+        let mut eval = evaluator_with_scope();
+        eval.next_audit_seq = u64::MAX;
+        eval.audit_seq_exhausted = true;
+
+        let err = eval
+            .evaluate_gate("shim-edge-1", "project-1", "trace-audit-overflow")
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            CompatGateError::CounterExhausted { ref counter } if counter == "audit_sequence"
+        ));
+    }
+
     // ── Non-Interference ──
 
     #[test]
@@ -2849,6 +2904,62 @@ mod tests {
         assert_eq!(eval.all_receipts().len(), 2);
         assert_eq!(eval.receipts_for_scope("s1").len(), 1);
         assert_eq!(eval.receipts_for_scope("s2").len(), 1);
+    }
+
+    #[test]
+    fn receipt_sequence_uses_last_value_before_exhausting() {
+        let mut eval = CompatGateEvaluator::new(sample_registry());
+        eval.next_receipt_seq = u64::MAX;
+
+        let final_seq = eval
+            .next_receipt_sequence()
+            .expect("last receipt sequence should still be usable");
+        assert_eq!(final_seq, u64::MAX);
+        assert!(eval.receipt_seq_exhausted);
+
+        let err = eval
+            .next_receipt_sequence()
+            .expect_err("receipt sequence should fail after last value");
+        assert!(matches!(
+            err,
+            CompatGateError::CounterExhausted { ref counter } if counter == "receipt_sequence"
+        ));
+    }
+
+    #[test]
+    fn audit_sequence_uses_last_value_before_exhausting() {
+        let mut eval = evaluator_with_scope();
+        eval.next_audit_seq = u64::MAX;
+
+        let final_seq = eval
+            .next_audit_sequence()
+            .expect("last audit sequence should still be usable");
+        assert_eq!(final_seq, u64::MAX);
+        assert!(eval.audit_seq_exhausted);
+
+        let err = eval
+            .next_audit_sequence()
+            .expect_err("audit sequence should fail after last value");
+        assert!(matches!(
+            err,
+            CompatGateError::CounterExhausted { ref counter } if counter == "audit_sequence"
+        ));
+    }
+
+    #[test]
+    fn set_mode_fails_closed_when_receipt_sequence_exhausted() {
+        let mut eval = CompatGateEvaluator::new(sample_registry());
+        eval.next_receipt_seq = u64::MAX;
+        eval.receipt_seq_exhausted = true;
+
+        let err = eval
+            .set_mode("s1", CompatibilityMode::Strict, "admin", "init", true)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            CompatGateError::CounterExhausted { ref counter } if counter == "receipt_sequence"
+        ));
     }
 
     #[test]

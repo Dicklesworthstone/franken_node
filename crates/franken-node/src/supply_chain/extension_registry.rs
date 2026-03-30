@@ -406,10 +406,7 @@ impl AdmissionKernel {
                 admitted: false,
                 witness: Some(NegativeWitness {
                     rejection_code: event_codes::SER_ERR_TRANSPARENCY_FAILED.to_string(),
-                    rejection_reason: format!(
-                        "transparency verification failed: {}",
-                        failure
-                    ),
+                    rejection_reason: format!("transparency verification failed: {}", failure),
                     checked_fields: vec!["transparency_proof".to_string()],
                     remediation: "Submit a valid Merkle inclusion proof from a pinned \
                                   transparency log."
@@ -563,15 +560,20 @@ impl SignedExtensionRegistry {
         );
 
         if !receipt.admitted {
-            let (rejection_code, rejection_reason, remediation) = if let Some(witness) = receipt.witness.as_ref() {
-                (witness.rejection_code.clone(), witness.rejection_reason.clone(), witness.remediation.clone())
-            } else {
-                (
-                    event_codes::SER_ERR_INTERNAL.to_string(),
-                    "Admission rejected without a witness record".to_string(),
-                    "Check system logs for missing witness payload".to_string()
-                )
-            };
+            let (rejection_code, rejection_reason, remediation) =
+                if let Some(witness) = receipt.witness.as_ref() {
+                    (
+                        witness.rejection_code.clone(),
+                        witness.rejection_reason.clone(),
+                        witness.remediation.clone(),
+                    )
+                } else {
+                    (
+                        event_codes::SER_ERR_INTERNAL.to_string(),
+                        "Admission rejected without a witness record".to_string(),
+                        "Check system logs for missing witness payload".to_string(),
+                    )
+                };
 
             self.log(
                 &rejection_code,
@@ -664,7 +666,7 @@ impl SignedExtensionRegistry {
                 return RegistryResult {
                     success: false,
                     extension_id: Some(extension_id.to_string()),
-                    error_code: Some("NOT_FOUND".to_string()),
+                    error_code: Some(event_codes::SER_ERR_NOT_FOUND.to_string()),
                     detail: "Extension not found".to_string(),
                 };
             }
@@ -693,7 +695,11 @@ impl SignedExtensionRegistry {
                 detail: "Extension disappeared during version add".to_string(),
             };
         };
-        push_bounded(&mut ext.versions, version.clone(), MAX_VERSIONS_PER_EXTENSION);
+        push_bounded(
+            &mut ext.versions,
+            version.clone(),
+            MAX_VERSIONS_PER_EXTENSION,
+        );
         ext.updated_at = Utc::now().to_rfc3339();
 
         self.log(
@@ -719,7 +725,7 @@ impl SignedExtensionRegistry {
                 return RegistryResult {
                     success: false,
                     extension_id: Some(extension_id.to_string()),
-                    error_code: Some("NOT_FOUND".to_string()),
+                    error_code: Some(event_codes::SER_ERR_NOT_FOUND.to_string()),
                     detail: "Extension not found".to_string(),
                 };
             }
@@ -771,7 +777,7 @@ impl SignedExtensionRegistry {
                 return RegistryResult {
                     success: false,
                     extension_id: Some(extension_id.to_string()),
-                    error_code: Some("NOT_FOUND".to_string()),
+                    error_code: Some(event_codes::SER_ERR_NOT_FOUND.to_string()),
                     detail: "Extension not found".to_string(),
                 };
             }
@@ -792,6 +798,23 @@ impl SignedExtensionRegistry {
             Some(false) => {}
         }
 
+        let Some(next_revocation_sequence) = self.revocation_sequence.checked_add(1) else {
+            self.log(
+                event_codes::SER_ERR_INTERNAL,
+                extension_id,
+                trace_id,
+                serde_json::json!({
+                    "reason": "revocation_sequence_exhausted",
+                }),
+            );
+            return RegistryResult {
+                success: false,
+                extension_id: Some(extension_id.to_string()),
+                error_code: Some(event_codes::SER_ERR_INTERNAL.to_string()),
+                detail: "Revocation sequence exhausted".to_string(),
+            };
+        };
+
         let Some(ext) = self.extensions.get_mut(extension_id) else {
             return RegistryResult {
                 success: false,
@@ -804,7 +827,7 @@ impl SignedExtensionRegistry {
         ext.updated_at = Utc::now().to_rfc3339();
         let revoked_at = ext.updated_at.clone();
 
-        self.revocation_sequence = self.revocation_sequence.saturating_add(1);
+        self.revocation_sequence = next_revocation_sequence;
         let record = RevocationRecord {
             extension_id: extension_id.to_string(),
             revoked_at,
@@ -956,18 +979,16 @@ mod tests {
             output_hash: "f".repeat(64),
             slsa_level_claim: 2,
             envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
-            links: vec![
-                AttestationLink {
-                    role: ChainLinkRole::Publisher,
-                    signer_id: "pub-001".to_string(),
-                    signer_version: "1.0.0".to_string(),
-                    signature: String::new(), // will be filled by sign_links_in_place
-                    signed_payload_hash: "f".repeat(64), // matches output_hash
-                    issued_at_epoch: now_epoch.saturating_sub(60),
-                    expires_at_epoch: now_epoch.saturating_add(86400),
-                    revoked: false,
-                },
-            ],
+            links: vec![AttestationLink {
+                role: ChainLinkRole::Publisher,
+                signer_id: "pub-001".to_string(),
+                signer_version: "1.0.0".to_string(),
+                signature: String::new(), // will be filled by sign_links_in_place
+                signed_payload_hash: "f".repeat(64), // matches output_hash
+                issued_at_epoch: now_epoch.saturating_sub(60),
+                expires_at_epoch: now_epoch.saturating_add(86400),
+                revoked: false,
+            }],
             custom_claims: BTreeMap::new(),
         };
         // Sign links in place so the provenance verifier accepts them.
@@ -1005,11 +1026,7 @@ mod tests {
     }
 
     /// Build a valid registration request signed by the given key.
-    fn valid_request(
-        name: &str,
-        sk: &SigningKey,
-        now_epoch: u64,
-    ) -> RegistrationRequest {
+    fn valid_request(name: &str, sk: &SigningKey, now_epoch: u64) -> RegistrationRequest {
         let manifest_bytes = format!("manifest:{}:1.0.0", name).into_bytes();
         let signature_bytes = artifact_signing::sign_bytes(sk, &manifest_bytes);
         let key_id = KeyId::from_verifying_key(&sk.verifying_key());
@@ -1046,7 +1063,11 @@ mod tests {
     fn register_valid_extension() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let result = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let result = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         assert!(result.success, "detail: {}", result.detail);
         assert!(result.extension_id.is_some());
     }
@@ -1055,7 +1076,11 @@ mod tests {
     fn register_sets_active_status() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let result = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let result = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let ext = reg.query(result.extension_id.as_ref().unwrap()).unwrap();
         assert_eq!(ext.status, ExtensionStatus::Active);
     }
@@ -1064,7 +1089,11 @@ mod tests {
     fn register_produces_admission_receipt() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         assert_eq!(reg.admission_receipts().len(), 1);
         assert!(reg.admission_receipts()[0].admitted);
         assert!(reg.admission_receipts()[0].witness.is_none());
@@ -1089,7 +1118,11 @@ mod tests {
         let receipt = &reg.admission_receipts()[0];
         assert!(!receipt.admitted);
         let witness = receipt.witness.as_ref().unwrap();
-        assert!(witness.rejection_reason.contains("signature verification failed"));
+        assert!(
+            witness
+                .rejection_reason
+                .contains("signature verification failed")
+        );
     }
 
     #[test]
@@ -1115,7 +1148,11 @@ mod tests {
         let (_sk2, vk2) = test_keypair_2();
         // Registry only trusts vk2, but request is signed with sk (vk)
         let mut reg = test_registry(&vk2);
-        let result = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let result = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         assert!(!result.success);
         assert_eq!(
             result.error_code.as_deref(),
@@ -1248,7 +1285,11 @@ mod tests {
     fn add_version_to_active_extension() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let r = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let ext_id = r.extension_id.unwrap();
         let result = reg.add_version(&ext_id, valid_version("2.0.0"), &make_trace());
         assert!(result.success);
@@ -1256,10 +1297,34 @@ mod tests {
     }
 
     #[test]
+    fn add_version_does_not_depend_on_revocation_sequence_capacity() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let now = now_epoch();
+        let result = reg.register(valid_request("ext-a", &sk, now), &make_trace(), now);
+        let ext_id = result.extension_id.expect("extension id");
+        reg.revocation_sequence = u64::MAX;
+
+        let add_version = reg.add_version(&ext_id, valid_version("2.0.0"), &make_trace());
+
+        assert!(add_version.success);
+        assert_eq!(reg.version_lineage(&ext_id).expect("lineage").len(), 2);
+        assert_eq!(
+            reg.query(&ext_id).expect("extension").status,
+            ExtensionStatus::Active
+        );
+        assert_eq!(reg.revocation_sequence, u64::MAX);
+    }
+
+    #[test]
     fn add_version_to_revoked_extension_fails() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let r = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let ext_id = r.extension_id.unwrap();
         reg.revoke(
             &ext_id,
@@ -1285,7 +1350,11 @@ mod tests {
     fn deprecate_active_extension() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let r = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let ext_id = r.extension_id.unwrap();
         let result = reg.deprecate(&ext_id, &make_trace());
         assert!(result.success);
@@ -1299,7 +1368,11 @@ mod tests {
     fn deprecate_revoked_extension_fails() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let r = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let ext_id = r.extension_id.unwrap();
         reg.revoke(
             &ext_id,
@@ -1317,7 +1390,11 @@ mod tests {
     fn revoke_active_extension() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let r = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let ext_id = r.extension_id.unwrap();
         let result = reg.revoke(
             &ext_id,
@@ -1333,7 +1410,11 @@ mod tests {
     fn revoke_already_revoked_fails() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let r = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let ext_id = r.extension_id.unwrap();
         reg.revoke(
             &ext_id,
@@ -1379,6 +1460,39 @@ mod tests {
     }
 
     #[test]
+    fn revocation_fails_closed_when_sequence_is_exhausted() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let now = now_epoch();
+        let result = reg.register(valid_request("ext-a", &sk, now), &make_trace(), now);
+        let ext_id = result.extension_id.expect("extension id");
+        reg.revocation_sequence = u64::MAX;
+
+        let revoke = reg.revoke(
+            &ext_id,
+            RevocationReason::SecurityVulnerability,
+            "admin",
+            &make_trace(),
+        );
+
+        assert!(!revoke.success);
+        assert_eq!(
+            revoke.error_code.as_deref(),
+            Some(event_codes::SER_ERR_INTERNAL)
+        );
+        assert_eq!(revoke.detail, "Revocation sequence exhausted");
+        assert!(reg.revocations().is_empty());
+        assert_eq!(
+            reg.query(&ext_id).expect("extension").status,
+            ExtensionStatus::Active
+        );
+        assert_eq!(
+            reg.audit_log().last().expect("audit").event_code,
+            event_codes::SER_ERR_INTERNAL
+        );
+    }
+
+    #[test]
     fn revocation_reasons() {
         let reasons = [
             RevocationReason::SecurityVulnerability,
@@ -1396,7 +1510,11 @@ mod tests {
     fn query_existing_extension() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        let r = reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let ext = reg.query(r.extension_id.as_ref().unwrap());
         assert!(ext.is_some());
         assert_eq!(ext.unwrap().name, "ext-a");
@@ -1469,7 +1587,11 @@ mod tests {
     fn registration_produces_audit_entries() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         // admission evaluated + sig verified + provenance validated + registered = 4
         assert!(reg.audit_log().len() >= 4);
     }
@@ -1478,7 +1600,11 @@ mod tests {
     fn audit_log_has_event_codes() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let codes: Vec<&str> = reg
             .audit_log()
             .iter()
@@ -1493,7 +1619,11 @@ mod tests {
     fn export_jsonl() {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
-        reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let jsonl = reg.export_audit_log_jsonl().unwrap();
         let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert!(!first["event_code"].as_str().unwrap().is_empty());
@@ -1515,7 +1645,11 @@ mod tests {
         let (sk, vk) = test_keypair();
         let mut reg = test_registry(&vk);
         let hash1 = reg.content_hash();
-        reg.register(valid_request("ext-a", &sk, now_epoch()), &make_trace(), now_epoch());
+        reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
         let hash2 = reg.content_hash();
         assert_ne!(hash1, hash2);
     }
@@ -1579,8 +1713,24 @@ mod tests {
             signed_at: Utc::now().to_rfc3339(),
         };
 
-        let r1 = kernel.evaluate(manifest1, &sig(sig1), &valid_provenance(now), None, "ext-1", now, "t1");
-        let r2 = kernel.evaluate(manifest2, &sig(sig2), &valid_provenance(now), None, "ext-2", now, "t2");
+        let r1 = kernel.evaluate(
+            manifest1,
+            &sig(sig1),
+            &valid_provenance(now),
+            None,
+            "ext-1",
+            now,
+            "t1",
+        );
+        let r2 = kernel.evaluate(
+            manifest2,
+            &sig(sig2),
+            &valid_provenance(now),
+            None,
+            "ext-2",
+            now,
+            "t2",
+        );
         assert!(r1.admitted);
         assert!(r2.admitted);
         assert_ne!(r1.manifest_digest, r2.manifest_digest);

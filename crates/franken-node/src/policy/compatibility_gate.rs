@@ -198,6 +198,67 @@ pub struct ScopeMode {
     pub proof: CompatibilityProofMetadata,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GateEngineError {
+    CurrentModeMismatch {
+        current: CompatMode,
+        claimed: CompatMode,
+    },
+    ScopePolicyPredicateStale,
+    ScopePolicyPredicateSignatureInvalid,
+    ScopePredicateScopeWidening {
+        reason: String,
+    },
+    ScopeNotFound {
+        scope_id: String,
+    },
+    ScopeModeCanonicalization {
+        detail: String,
+    },
+    TransitionReceiptCanonicalization {
+        detail: String,
+    },
+    TraceIdSpaceExhausted,
+}
+
+impl std::fmt::Display for GateEngineError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CurrentModeMismatch { current, claimed } => write!(
+                f,
+                "Current mode is {} but request claims {}",
+                current.label(),
+                claimed.label()
+            ),
+            Self::ScopePolicyPredicateStale => f.write_str("scope policy predicate is stale"),
+            Self::ScopePolicyPredicateSignatureInvalid => {
+                f.write_str("scope policy predicate signature verification failed")
+            }
+            Self::ScopePredicateScopeWidening { reason } => {
+                write!(
+                    f,
+                    "scope policy predicate widens beyond active scope: {reason}"
+                )
+            }
+            Self::ScopeNotFound { scope_id } => write!(f, "scope {scope_id} not found"),
+            Self::ScopeModeCanonicalization { detail } => {
+                write!(f, "failed canonicalizing scope mode payload: {detail}")
+            }
+            Self::TransitionReceiptCanonicalization { detail } => {
+                write!(
+                    f,
+                    "failed canonicalizing transition receipt payload: {detail}"
+                )
+            }
+            Self::TraceIdSpaceExhausted => {
+                f.write_str("compatibility gate trace ID space exhausted")
+            }
+        }
+    }
+}
+
+impl std::error::Error for GateEngineError {}
+
 #[derive(Debug, serde::Serialize)]
 struct ScopeModeSigningPayload<'a> {
     scope_id: &'a str,
@@ -332,6 +393,7 @@ pub struct GateEngine {
     compiled_predicates: BTreeMap<String, CompiledPolicyPredicate>,
     next_trace: u64,
     trace_epoch: u64,
+    trace_ids_exhausted: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -372,6 +434,7 @@ impl GateEngine {
             compiled_predicates: BTreeMap::new(),
             next_trace: 1,
             trace_epoch: 0,
+            trace_ids_exhausted: false,
         }
     }
 
@@ -382,25 +445,33 @@ impl GateEngine {
         Self::with_receipt_ttl(signing_key, config.default_receipt_ttl_secs)
     }
 
-    fn allocate_trace_slot(&mut self) -> TraceSlot {
+    fn allocate_trace_slot(&mut self) -> Result<TraceSlot, GateEngineError> {
+        if self.trace_ids_exhausted {
+            return Err(GateEngineError::TraceIdSpaceExhausted);
+        }
+
         let slot = TraceSlot {
             epoch: self.trace_epoch,
             sequence: self.next_trace,
         };
 
         if self.next_trace == u64::MAX {
-            // Roll to the next epoch so IDs remain unique even at counter boundaries.
-            self.next_trace = 1;
-            self.trace_epoch = self.trace_epoch.wrapping_add(1);
+            if self.trace_epoch == u64::MAX {
+                self.trace_ids_exhausted = true;
+            } else {
+                // Roll to the next epoch so IDs remain unique even at counter boundaries.
+                self.next_trace = 1;
+                self.trace_epoch += 1;
+            }
         } else {
             self.next_trace += 1;
         }
 
-        slot
+        Ok(slot)
     }
 
-    fn next_trace_id(&mut self) -> String {
-        self.allocate_trace_slot().trace_id()
+    fn next_trace_id(&mut self) -> Result<String, GateEngineError> {
+        Ok(self.allocate_trace_slot()?.trace_id())
     }
 
     fn now_iso(&self) -> String {
@@ -450,8 +521,11 @@ impl GateEngine {
     ///
     /// Returns a structured decision with rationale, trace ID, and event code.
     /// Emits PCG-001 on allow, PCG-002 on deny.
-    pub fn gate_check(&mut self, req: &GateCheckRequest) -> GateCheckResult {
-        let trace_id = self.next_trace_id();
+    pub fn gate_check(
+        &mut self,
+        req: &GateCheckRequest,
+    ) -> Result<GateCheckResult, GateEngineError> {
+        let trace_id = self.next_trace_id()?;
 
         // Look up scope mode; default to Strict if unset.
         let scope_state = self.scope_modes.get(&req.scope).cloned();
@@ -507,13 +581,13 @@ impl GateEngine {
                     "compatibility gate evaluated"
                 );
                 self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
-                return GateCheckResult {
+                return Ok(GateCheckResult {
                     decision: Verdict::Deny,
                     rationale,
                     trace_id,
                     receipt_id: None,
                     event_code: PCG_002.to_string(),
-                };
+                });
             }
             if !self.verify_scope_mode_signature(scope_mode_state) {
                 reason_codes
@@ -551,13 +625,13 @@ impl GateEngine {
                     "compatibility gate evaluated"
                 );
                 self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
-                return GateCheckResult {
+                return Ok(GateCheckResult {
                     decision: Verdict::Deny,
                     rationale,
                     trace_id,
                     receipt_id: None,
                     event_code: PCG_002.to_string(),
-                };
+                });
             }
         }
 
@@ -606,13 +680,13 @@ impl GateEngine {
                     "compatibility gate evaluated"
                 );
                 self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
-                return GateCheckResult {
+                return Ok(GateCheckResult {
                     decision: Verdict::Deny,
                     rationale,
                     trace_id,
                     receipt_id: None,
                     event_code: PCG_002.to_string(),
-                };
+                });
             }
 
             if let Err(reason) = predicate_scope_delta(&req.scope, predicate) {
@@ -649,13 +723,13 @@ impl GateEngine {
                     "compatibility gate evaluated"
                 );
                 self.emit_audit(PCG_002, &req.scope, &rationale.explanation, &trace_id);
-                return GateCheckResult {
+                return Ok(GateCheckResult {
                     decision: Verdict::Deny,
                     rationale,
                     trace_id,
                     receipt_id: None,
                     event_code: PCG_002.to_string(),
-                };
+                });
             }
 
             let compiled = self
@@ -724,7 +798,7 @@ impl GateEngine {
         );
         self.emit_audit(event_code, &req.scope, &explanation, &trace_id);
 
-        GateCheckResult {
+        Ok(GateCheckResult {
             decision,
             rationale: GateRationale {
                 matched_predicates: matched,
@@ -744,7 +818,7 @@ impl GateEngine {
             trace_id,
             receipt_id: None,
             event_code: event_code.to_string(),
-        }
+        })
     }
 
     // ---- Mode transitions ----
@@ -821,11 +895,11 @@ impl GateEngine {
         &mut self,
         scope_id: &str,
         predicate: PolicyPredicate,
-    ) -> Result<(), String> {
+    ) -> Result<(), GateEngineError> {
         if compute_freshness_state(&predicate.issued_at, &predicate.expires_at)
             != CompatibilityFreshnessState::Fresh
         {
-            return Err("scope policy predicate is stale".to_string());
+            return Err(GateEngineError::ScopePolicyPredicateStale);
         }
         if !verify_ed25519_canonical(
             COMPAT_POLICY_PREDICATE_DOMAIN,
@@ -833,9 +907,10 @@ impl GateEngine {
             &predicate.signature,
             &predicate.proof.key_id,
         ) {
-            return Err("scope policy predicate signature verification failed".to_string());
+            return Err(GateEngineError::ScopePolicyPredicateSignatureInvalid);
         }
-        predicate_scope_delta(scope_id, &predicate).map_err(|reason| reason.to_string())?;
+        predicate_scope_delta(scope_id, &predicate)
+            .map_err(|reason| GateEngineError::ScopePredicateScopeWidening { reason })?;
         let compiled = compile_policy_predicate(
             &predicate.predicate_id,
             &predicate.activation_condition,
@@ -845,14 +920,18 @@ impl GateEngine {
             .insert(predicate.predicate_id.clone(), compiled);
 
         let Some(scope_mode) = self.scope_modes.get_mut(scope_id) else {
-            return Err(format!("scope {scope_id} not found"));
+            return Err(GateEngineError::ScopeNotFound {
+                scope_id: scope_id.to_string(),
+            });
         };
         scope_mode.policy_predicate = Some(predicate);
         scope_mode.receipt_signature = sign_hmac_canonical(
             COMPAT_TRANSITION_RECEIPT_DOMAIN,
             &scope_mode_signing_payload(scope_mode),
         )
-        .map_err(|err| format!("failed canonicalizing scope mode payload: {err}"))?;
+        .map_err(|err| GateEngineError::ScopeModeCanonicalization {
+            detail: err.to_string(),
+        })?;
         Ok(())
     }
 
@@ -861,7 +940,7 @@ impl GateEngine {
     pub fn request_transition(
         &mut self,
         req: &ModeTransitionRequest,
-    ) -> Result<ModeTransitionReceipt, String> {
+    ) -> Result<ModeTransitionReceipt, GateEngineError> {
         let current = self
             .scope_modes
             .get(&req.scope_id)
@@ -869,11 +948,10 @@ impl GateEngine {
             .unwrap_or(CompatMode::Strict);
 
         if current != req.from_mode {
-            return Err(format!(
-                "Current mode is {} but request claims {}",
-                current.label(),
-                req.from_mode.label()
-            ));
+            return Err(GateEngineError::CurrentModeMismatch {
+                current,
+                claimed: req.from_mode,
+            });
         }
 
         // Escalation check
@@ -886,7 +964,7 @@ impl GateEngine {
             true // de-escalation is auto-approved
         };
 
-        let slot = self.allocate_trace_slot();
+        let slot = self.allocate_trace_slot()?;
         let trace_id = slot.trace_id();
         let issued_at = self.now_iso();
         let expires_at = default_receipt_expiry_with_ttl(&issued_at, self.receipt_ttl_secs);
@@ -939,7 +1017,9 @@ impl GateEngine {
             COMPAT_TRANSITION_RECEIPT_DOMAIN,
             &transition_receipt_signing_payload(&receipt),
         )
-        .map_err(|err| format!("failed canonicalizing transition receipt payload: {err}"))?;
+        .map_err(|err| GateEngineError::TransitionReceiptCanonicalization {
+            detail: err.to_string(),
+        })?;
 
         tracing::info!(
             event_code = %PCG_003,
@@ -967,8 +1047,8 @@ impl GateEngine {
         shim_id: &str,
         description: &str,
         severity: &str,
-    ) -> DivergenceReceipt {
-        let slot = self.allocate_trace_slot();
+    ) -> Result<DivergenceReceipt, GateEngineError> {
+        let slot = self.allocate_trace_slot()?;
         let trace_id = slot.trace_id();
         let receipt_id = slot.receipt_id();
         let timestamp = self.now_iso();
@@ -1028,7 +1108,7 @@ impl GateEngine {
         );
 
         push_bounded(&mut self.divergence_receipts, receipt.clone(), MAX_RECEIPTS);
-        receipt
+        Ok(receipt)
     }
 
     /// Query divergence receipts, optionally filtered by scope and severity.
@@ -1216,12 +1296,14 @@ mod tests {
     #[test]
     fn test_gate_check_allow() {
         let mut engine = test_engine();
-        let result = engine.gate_check(&GateCheckRequest {
-            package_id: "npm:test-pkg".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "tenant-1".into(),
-            policy_context: BTreeMap::new(),
-        });
+        let result = engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:test-pkg".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         assert_eq!(result.decision, Verdict::Allow);
         assert_eq!(result.event_code, PCG_001);
     }
@@ -1229,12 +1311,14 @@ mod tests {
     #[test]
     fn test_gate_check_deny() {
         let mut engine = test_engine();
-        let result = engine.gate_check(&GateCheckRequest {
-            package_id: "npm:test-pkg".into(),
-            requested_mode: CompatMode::LegacyRisky,
-            scope: "tenant-1".into(),
-            policy_context: BTreeMap::new(),
-        });
+        let result = engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:test-pkg".into(),
+                requested_mode: CompatMode::LegacyRisky,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         assert_eq!(result.decision, Verdict::Deny);
         assert_eq!(result.event_code, PCG_002);
     }
@@ -1242,12 +1326,14 @@ mod tests {
     #[test]
     fn test_gate_check_audit_trail() {
         let mut engine = test_engine();
-        engine.gate_check(&GateCheckRequest {
-            package_id: "npm:x".into(),
-            requested_mode: CompatMode::Balanced,
-            scope: "tenant-1".into(),
-            policy_context: BTreeMap::new(),
-        });
+        engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:x".into(),
+                requested_mode: CompatMode::Balanced,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         assert!(!engine.audit_trail().is_empty());
         assert!(!engine.audit_trail()[0].trace_id.is_empty());
     }
@@ -1350,12 +1436,14 @@ mod tests {
     #[test]
     fn test_divergence_receipt_issued() {
         let mut engine = test_engine();
-        let receipt = engine.issue_divergence_receipt(
-            "tenant-1",
-            "shim-buffer-compat",
-            "Buffer constructor returns different prototype chain",
-            "major",
-        );
+        let receipt = engine
+            .issue_divergence_receipt(
+                "tenant-1",
+                "shim-buffer-compat",
+                "Buffer constructor returns different prototype chain",
+                "major",
+            )
+            .unwrap();
         assert!(!receipt.receipt_id.is_empty());
         assert_eq!(receipt.severity, "major");
         assert!(!receipt.signature.is_empty());
@@ -1364,19 +1452,23 @@ mod tests {
     #[test]
     fn test_divergence_receipt_signature_verified() {
         let mut engine = test_engine();
-        let receipt = engine.issue_divergence_receipt(
-            "tenant-1",
-            "shim-buffer-compat",
-            "Buffer edge case",
-            "minor",
-        );
+        let receipt = engine
+            .issue_divergence_receipt(
+                "tenant-1",
+                "shim-buffer-compat",
+                "Buffer edge case",
+                "minor",
+            )
+            .unwrap();
         assert!(engine.verify_receipt_signature(&receipt));
     }
 
     #[test]
     fn receipt_id_uses_same_slot_as_trace_id() {
         let mut engine = test_engine();
-        let receipt = engine.issue_divergence_receipt("tenant-1", "shim-a", "div-a", "major");
+        let receipt = engine
+            .issue_divergence_receipt("tenant-1", "shim-a", "div-a", "major")
+            .unwrap();
         assert_eq!(
             receipt.receipt_id.replacen("rcpt-", "trace-", 1),
             receipt.trace_id
@@ -1389,8 +1481,12 @@ mod tests {
         engine.trace_epoch = 9;
         engine.next_trace = u64::MAX;
 
-        let first = engine.issue_divergence_receipt("tenant-1", "shim-a", "div-a", "major");
-        let second = engine.issue_divergence_receipt("tenant-1", "shim-b", "div-b", "major");
+        let first = engine
+            .issue_divergence_receipt("tenant-1", "shim-a", "div-a", "major")
+            .unwrap();
+        let second = engine
+            .issue_divergence_receipt("tenant-1", "shim-b", "div-b", "major")
+            .unwrap();
 
         assert_ne!(first.receipt_id, second.receipt_id);
         assert_eq!(first.trace_id, "trace-0000000000000009-ffffffffffffffff");
@@ -1400,10 +1496,53 @@ mod tests {
     }
 
     #[test]
+    fn trace_slot_uses_terminal_value_before_failing_closed() {
+        let mut engine = test_engine();
+        engine.trace_epoch = u64::MAX;
+        engine.next_trace = u64::MAX;
+
+        let receipt = engine
+            .issue_divergence_receipt("tenant-1", "shim-a", "div-a", "major")
+            .unwrap();
+        assert_eq!(receipt.trace_id, "trace-ffffffffffffffff-ffffffffffffffff");
+        assert!(engine.trace_ids_exhausted);
+        let err = engine
+            .issue_divergence_receipt("tenant-1", "shim-b", "div-b", "major")
+            .expect_err("trace slot exhaustion must fail closed");
+        assert_eq!(err, GateEngineError::TraceIdSpaceExhausted);
+        assert_eq!(engine.trace_epoch, u64::MAX);
+        assert_eq!(engine.next_trace, u64::MAX);
+    }
+
+    #[test]
+    fn gate_check_fails_closed_when_trace_space_is_exhausted() {
+        let mut engine = test_engine();
+        engine.trace_epoch = u64::MAX;
+        engine.next_trace = u64::MAX;
+        engine.trace_ids_exhausted = true;
+
+        let err = engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:test-pkg".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .expect_err("trace slot exhaustion must reject gate checks");
+
+        assert_eq!(err, GateEngineError::TraceIdSpaceExhausted);
+        assert!(engine.audit_trail().is_empty());
+    }
+
+    #[test]
     fn test_divergence_receipt_query_by_scope() {
         let mut engine = test_engine();
-        engine.issue_divergence_receipt("tenant-1", "shim-a", "div-a", "major");
-        engine.issue_divergence_receipt("tenant-2", "shim-b", "div-b", "minor");
+        engine
+            .issue_divergence_receipt("tenant-1", "shim-a", "div-a", "major")
+            .unwrap();
+        engine
+            .issue_divergence_receipt("tenant-2", "shim-b", "div-b", "minor")
+            .unwrap();
         let t1 = engine.query_receipts(Some("tenant-1"), None);
         assert_eq!(t1.len(), 1);
         assert_eq!(t1[0].scope_id, "tenant-1");
@@ -1412,8 +1551,12 @@ mod tests {
     #[test]
     fn test_divergence_receipt_query_by_severity() {
         let mut engine = test_engine();
-        engine.issue_divergence_receipt("tenant-1", "shim-a", "div-a", "critical");
-        engine.issue_divergence_receipt("tenant-1", "shim-b", "div-b", "minor");
+        engine
+            .issue_divergence_receipt("tenant-1", "shim-a", "div-a", "critical")
+            .unwrap();
+        engine
+            .issue_divergence_receipt("tenant-1", "shim-b", "div-b", "minor")
+            .unwrap();
         let critical = engine.query_receipts(None, Some("critical"));
         assert_eq!(critical.len(), 1);
     }
@@ -1421,7 +1564,9 @@ mod tests {
     #[test]
     fn test_pcg_004_emitted_on_receipt() {
         let mut engine = test_engine();
-        engine.issue_divergence_receipt("tenant-1", "shim-x", "desc", "major");
+        engine
+            .issue_divergence_receipt("tenant-1", "shim-x", "desc", "major")
+            .unwrap();
         let pcg4 = engine
             .audit_trail()
             .iter()
@@ -1487,12 +1632,14 @@ mod tests {
     fn test_non_interference() {
         let mut engine = test_engine();
         engine.set_scope_mode("tenant-2", CompatMode::Strict);
-        engine.gate_check(&GateCheckRequest {
-            package_id: "npm:pkg".into(),
-            requested_mode: CompatMode::Balanced,
-            scope: "tenant-1".into(),
-            policy_context: BTreeMap::new(),
-        });
+        engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:pkg".into(),
+                requested_mode: CompatMode::Balanced,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         assert!(engine.check_non_interference("tenant-1", "tenant-2"));
     }
 
@@ -1506,12 +1653,14 @@ mod tests {
     fn test_gate_check_default_scope_strict() {
         let mut engine = GateEngine::new(b"key".to_vec());
         // No scope mode set -> defaults to Strict.
-        let result = engine.gate_check(&GateCheckRequest {
-            package_id: "npm:x".into(),
-            requested_mode: CompatMode::Balanced,
-            scope: "unknown-scope".into(),
-            policy_context: BTreeMap::new(),
-        });
+        let result = engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:x".into(),
+                requested_mode: CompatMode::Balanced,
+                scope: "unknown-scope".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         assert_eq!(result.decision, Verdict::Deny);
     }
 
@@ -1519,18 +1668,22 @@ mod tests {
     fn test_audit_by_scope() {
         let mut engine = test_engine();
         engine.set_scope_mode("tenant-2", CompatMode::Strict);
-        engine.gate_check(&GateCheckRequest {
-            package_id: "npm:x".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "tenant-1".into(),
-            policy_context: BTreeMap::new(),
-        });
-        engine.gate_check(&GateCheckRequest {
-            package_id: "npm:y".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "tenant-2".into(),
-            policy_context: BTreeMap::new(),
-        });
+        engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:x".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
+        engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:y".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "tenant-2".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         let t1_events = engine.audit_by_scope("tenant-1");
         assert!(t1_events.iter().all(|e| e.scope_id == "tenant-1"));
     }
@@ -1589,7 +1742,7 @@ mod tests {
                 signed_scope_predicate("tenant-1", vec!["scope=tenant-2".to_string()]),
             )
             .unwrap_err();
-        assert!(err.contains("widens beyond active scope"));
+        assert!(err.to_string().contains("widens beyond active scope"));
     }
 
     #[test]
@@ -1600,12 +1753,14 @@ mod tests {
             scope_mode.scope_id = "tenant-x".to_string();
             assert_eq!(scope_mode.scope_id.len(), "tenant-1".len());
         }
-        let result = engine.gate_check(&GateCheckRequest {
-            package_id: "npm:test-pkg".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "tenant-1".into(),
-            policy_context: BTreeMap::new(),
-        });
+        let result = engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:test-pkg".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         assert_eq!(result.decision, Verdict::Deny);
         assert!(
             result
@@ -1640,12 +1795,14 @@ mod tests {
             .unwrap();
         }
 
-        let result = engine.gate_check(&GateCheckRequest {
-            package_id: "npm:test-pkg".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "tenant-1".into(),
-            policy_context: BTreeMap::new(),
-        });
+        let result = engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:test-pkg".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         assert_eq!(result.decision, Verdict::Deny);
         assert!(
             result
@@ -1695,12 +1852,14 @@ mod tests {
     #[test]
     fn test_rationale_contains_explanation() {
         let mut engine = test_engine();
-        let result = engine.gate_check(&GateCheckRequest {
-            package_id: "npm:test".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "tenant-1".into(),
-            policy_context: BTreeMap::new(),
-        });
+        let result = engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:test".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
         assert!(!result.rationale.explanation.is_empty());
         assert!(!result.rationale.matched_predicates.is_empty());
     }

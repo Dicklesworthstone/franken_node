@@ -69,6 +69,7 @@ pub mod event_codes {
 pub mod error_codes {
     pub const ERR_SCC_NO_SESSION: &str = "ERR_SCC_NO_SESSION";
     pub const ERR_SCC_SEQUENCE_VIOLATION: &str = "ERR_SCC_SEQUENCE_VIOLATION";
+    pub const ERR_SCC_SEQUENCE_EXHAUSTED: &str = "ERR_SCC_SEQUENCE_EXHAUSTED";
     pub const ERR_SCC_SESSION_TERMINATED: &str = "ERR_SCC_SESSION_TERMINATED";
     pub const ERR_SCC_SESSION_EXPIRED: &str = "ERR_SCC_SESSION_EXPIRED";
     pub const ERR_SCC_DUPLICATE_SESSION: &str = "ERR_SCC_DUPLICATE_SESSION";
@@ -169,8 +170,14 @@ pub struct AuthenticatedSession {
     pub last_activity_at: u64,
     /// Next outbound sequence number.
     pub send_seq: u64,
+    /// True once the terminal outbound sequence has been consumed.
+    #[serde(default)]
+    pub send_seq_exhausted: bool,
     /// Next inbound sequence number.
     pub recv_seq: u64,
+    /// True once the terminal inbound sequence has been consumed.
+    #[serde(default)]
+    pub recv_seq_exhausted: bool,
     /// Configured replay window size.
     pub replay_window: u64,
     /// Epoch under which this session was established.
@@ -221,6 +228,28 @@ fn hex_nibble(b: u8) -> Option<u8> {
     }
 }
 
+fn allocate_next_sequence(
+    counter: &mut u64,
+    exhausted: &mut bool,
+    session_id: &str,
+    direction: MessageDirection,
+) -> Result<u64, SessionError> {
+    if *exhausted {
+        return Err(SessionError::SequenceExhausted {
+            session_id: session_id.to_string(),
+            direction,
+        });
+    }
+
+    let seq = *counter;
+    if let Some(next) = counter.checked_add(1) {
+        *counter = next;
+    } else {
+        *exhausted = true;
+    }
+    Ok(seq)
+}
+
 impl AuthenticatedSession {
     /// Create a new session in the Establishing state.
     #[allow(clippy::too_many_arguments)]
@@ -244,7 +273,9 @@ impl AuthenticatedSession {
             established_at: 0,
             last_activity_at: 0,
             send_seq: 0,
+            send_seq_exhausted: false,
             recv_seq: 0,
+            recv_seq_exhausted: false,
             replay_window,
             epoch,
             handshake_mac,
@@ -301,17 +332,23 @@ impl AuthenticatedSession {
     }
 
     /// Advance send sequence and return the assigned number.
-    pub fn next_send_seq(&mut self) -> u64 {
-        let seq = self.send_seq;
-        self.send_seq = self.send_seq.saturating_add(1);
-        seq
+    pub fn next_send_seq(&mut self) -> Result<u64, SessionError> {
+        allocate_next_sequence(
+            &mut self.send_seq,
+            &mut self.send_seq_exhausted,
+            &self.session_id,
+            MessageDirection::Send,
+        )
     }
 
     /// Advance recv sequence and return the assigned number.
-    pub fn next_recv_seq(&mut self) -> u64 {
-        let seq = self.recv_seq;
-        self.recv_seq = self.recv_seq.saturating_add(1);
-        seq
+    pub fn next_recv_seq(&mut self) -> Result<u64, SessionError> {
+        allocate_next_sequence(
+            &mut self.recv_seq,
+            &mut self.recv_seq_exhausted,
+            &self.session_id,
+            MessageDirection::Receive,
+        )
     }
 }
 
@@ -402,6 +439,10 @@ pub enum SessionError {
     DuplicateLiveSession {
         session_id: String,
     },
+    SequenceExhausted {
+        session_id: String,
+        direction: MessageDirection,
+    },
     SequenceViolation {
         session_id: String,
         direction: MessageDirection,
@@ -438,6 +479,7 @@ impl SessionError {
         match self {
             Self::NoSession { .. } => error_codes::ERR_SCC_NO_SESSION,
             Self::DuplicateLiveSession { .. } => error_codes::ERR_SCC_DUPLICATE_SESSION,
+            Self::SequenceExhausted { .. } => error_codes::ERR_SCC_SEQUENCE_EXHAUSTED,
             Self::SequenceViolation { .. } => error_codes::ERR_SCC_SEQUENCE_VIOLATION,
             Self::SessionTerminated { .. } => error_codes::ERR_SCC_SESSION_TERMINATED,
             Self::SessionExpired { .. } => error_codes::ERR_SCC_SESSION_EXPIRED,
@@ -457,6 +499,16 @@ impl std::fmt::Display for SessionError {
             }
             Self::DuplicateLiveSession { session_id } => {
                 write!(f, "duplicate live session id: {session_id}")
+            }
+            Self::SequenceExhausted {
+                session_id,
+                direction,
+            } => {
+                write!(
+                    f,
+                    "sequence exhausted on {}: session={session_id}",
+                    direction.label()
+                )
             }
             Self::SequenceViolation {
                 session_id,
@@ -1073,25 +1125,72 @@ impl SessionManager {
         }
 
         // Advance session sequence counter
-        let session_mut =
-            self.sessions
-                .get_mut(session_id)
-                .ok_or_else(|| SessionError::NoSession {
-                    session_id: session_id.to_string(),
-                })?;
-        match direction {
-            MessageDirection::Send => {
-                if sequence >= session_mut.send_seq {
-                    session_mut.send_seq = sequence.saturating_add(1);
+        let advance_result = {
+            let session_mut =
+                self.sessions
+                    .get_mut(session_id)
+                    .ok_or_else(|| SessionError::NoSession {
+                        session_id: session_id.to_string(),
+                    })?;
+
+            match direction {
+                MessageDirection::Send => {
+                    if sequence >= session_mut.send_seq {
+                        if session_mut.send_seq_exhausted {
+                            Err(SessionError::SequenceExhausted {
+                                session_id: session_id.to_string(),
+                                direction,
+                            })
+                        } else {
+                            if let Some(next) = sequence.checked_add(1) {
+                                session_mut.send_seq = next;
+                            } else {
+                                session_mut.send_seq_exhausted = true;
+                            }
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    }
+                }
+                MessageDirection::Receive => {
+                    if sequence >= session_mut.recv_seq {
+                        if session_mut.recv_seq_exhausted {
+                            Err(SessionError::SequenceExhausted {
+                                session_id: session_id.to_string(),
+                                direction,
+                            })
+                        } else {
+                            if let Some(next) = sequence.checked_add(1) {
+                                session_mut.recv_seq = next;
+                            } else {
+                                session_mut.recv_seq_exhausted = true;
+                            }
+                            Ok(())
+                        }
+                    } else {
+                        Ok(())
+                    }
                 }
             }
-            MessageDirection::Receive => {
-                if sequence >= session_mut.recv_seq {
-                    session_mut.recv_seq = sequence.saturating_add(1);
-                }
-            }
+        };
+        if let Err(err) = advance_result {
+            self.push_event(SessionEvent {
+                event_code: event_codes::SCC_MESSAGE_REJECTED.to_string(),
+                session_id: session_id.to_string(),
+                trace_id: trace_id.to_string(),
+                detail: format!("sequence exhausted: dir={}", direction.label()),
+                timestamp,
+            });
+            return Err(err);
         }
-        session_mut.mark_activity(timestamp);
+
+        self.sessions
+            .get_mut(session_id)
+            .ok_or_else(|| SessionError::NoSession {
+                session_id: session_id.to_string(),
+            })?
+            .mark_activity(timestamp);
 
         let msg = AuthenticatedMessage {
             session_id: session_id.to_string(),
@@ -1570,9 +1669,9 @@ mod tests {
             1,
             [0u8; SIGNATURE_LEN],
         );
-        assert_eq!(s.next_send_seq(), 0);
-        assert_eq!(s.next_send_seq(), 1);
-        assert_eq!(s.next_send_seq(), 2);
+        assert_eq!(s.next_send_seq().unwrap(), 0);
+        assert_eq!(s.next_send_seq().unwrap(), 1);
+        assert_eq!(s.next_send_seq().unwrap(), 2);
     }
 
     #[test]
@@ -1587,8 +1686,72 @@ mod tests {
             1,
             [0u8; SIGNATURE_LEN],
         );
-        assert_eq!(s.next_recv_seq(), 0);
-        assert_eq!(s.next_recv_seq(), 1);
+        assert_eq!(s.next_recv_seq().unwrap(), 0);
+        assert_eq!(s.next_recv_seq().unwrap(), 1);
+    }
+
+    #[test]
+    fn test_next_send_seq_fails_closed_at_terminal_boundary() {
+        let mut s = AuthenticatedSession::new(
+            "s1".into(),
+            "c".into(),
+            "sv".into(),
+            "e".into(),
+            "sg".into(),
+            0,
+            1,
+            [0u8; SIGNATURE_LEN],
+        );
+        s.send_seq = u64::MAX - 1;
+
+        assert_eq!(s.next_send_seq().unwrap(), u64::MAX - 1);
+        assert_eq!(s.next_send_seq().unwrap(), u64::MAX);
+        match s
+            .next_send_seq()
+            .expect_err("terminal send sequence must fail closed")
+        {
+            SessionError::SequenceExhausted {
+                session_id,
+                direction,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(direction, MessageDirection::Send);
+            }
+            other => unreachable!("unexpected error: {other}"),
+        }
+        assert!(s.send_seq_exhausted);
+    }
+
+    #[test]
+    fn test_next_recv_seq_fails_closed_at_terminal_boundary() {
+        let mut s = AuthenticatedSession::new(
+            "s1".into(),
+            "c".into(),
+            "sv".into(),
+            "e".into(),
+            "sg".into(),
+            0,
+            1,
+            [0u8; SIGNATURE_LEN],
+        );
+        s.recv_seq = u64::MAX - 1;
+
+        assert_eq!(s.next_recv_seq().unwrap(), u64::MAX - 1);
+        assert_eq!(s.next_recv_seq().unwrap(), u64::MAX);
+        match s
+            .next_recv_seq()
+            .expect_err("terminal recv sequence must fail closed")
+        {
+            SessionError::SequenceExhausted {
+                session_id,
+                direction,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(direction, MessageDirection::Receive);
+            }
+            other => unreachable!("unexpected error: {other}"),
+        }
+        assert!(s.recv_seq_exhausted);
     }
 
     // ── MessageDirection tests ──────────────────────────────────────
@@ -1633,6 +1796,12 @@ mod tests {
         };
         assert_eq!(e3.code(), "ERR_SCC_SEQUENCE_VIOLATION");
 
+        let exhausted = SessionError::SequenceExhausted {
+            session_id: "s".into(),
+            direction: MessageDirection::Receive,
+        };
+        assert_eq!(exhausted.code(), "ERR_SCC_SEQUENCE_EXHAUSTED");
+
         let e4 = SessionError::SessionTerminated {
             session_id: "s".into(),
         };
@@ -1670,6 +1839,11 @@ mod tests {
             session_id: "dup".into(),
         };
         assert!(e.to_string().contains("dup"));
+        let e = SessionError::SequenceExhausted {
+            session_id: "exhausted".into(),
+            direction: MessageDirection::Send,
+        };
+        assert!(e.to_string().contains("exhausted"));
         let e = SessionError::SessionExpired {
             session_id: "expired".into(),
         };
@@ -2211,6 +2385,160 @@ mod tests {
     }
 
     #[test]
+    fn test_send_sequence_exhaustion_rejected_before_duplicate_terminal_use() {
+        let mut mgr = default_manager();
+        establish_test_session(&mut mgr, "s1");
+        mgr.sessions.get_mut("s1").unwrap().send_seq = u64::MAX - 1;
+
+        let final_mac = sign_msg(&mgr, "s1", MessageDirection::Send, u64::MAX - 1, "h-final");
+        assert!(
+            mgr.process_message(
+                "s1",
+                MessageDirection::Send,
+                u64::MAX - 1,
+                "h-final",
+                &final_mac,
+                2_000,
+                "t"
+            )
+            .is_ok()
+        );
+        assert_eq!(mgr.get_session("s1").unwrap().send_seq, u64::MAX);
+        assert!(!mgr.get_session("s1").unwrap().send_seq_exhausted);
+
+        let terminal_mac = sign_msg(&mgr, "s1", MessageDirection::Send, u64::MAX, "h-terminal");
+        assert!(
+            mgr.process_message(
+                "s1",
+                MessageDirection::Send,
+                u64::MAX,
+                "h-terminal",
+                &terminal_mac,
+                3_000,
+                "t",
+            )
+            .is_ok()
+        );
+        assert_eq!(mgr.get_session("s1").unwrap().send_seq, u64::MAX);
+        assert!(mgr.get_session("s1").unwrap().send_seq_exhausted);
+
+        let exhausted_mac = sign_msg(&mgr, "s1", MessageDirection::Send, u64::MAX, "h-overflow");
+        match mgr
+            .process_message(
+                "s1",
+                MessageDirection::Send,
+                u64::MAX,
+                "h-overflow",
+                &exhausted_mac,
+                4_000,
+                "t",
+            )
+            .expect_err("terminal send sequence must fail closed")
+        {
+            SessionError::SequenceExhausted {
+                session_id,
+                direction,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(direction, MessageDirection::Send);
+            }
+            other => unreachable!("unexpected error: {other}"),
+        }
+        let rejection = mgr
+            .events()
+            .last()
+            .expect("send exhaustion rejection event");
+        assert_eq!(rejection.event_code, event_codes::SCC_MESSAGE_REJECTED);
+        assert!(rejection.detail.contains("sequence exhausted"));
+    }
+
+    #[test]
+    fn test_recv_sequence_exhaustion_rejected_before_duplicate_terminal_use() {
+        let mut mgr = default_manager();
+        establish_test_session(&mut mgr, "s1");
+        mgr.sessions.get_mut("s1").unwrap().recv_seq = u64::MAX - 1;
+
+        let final_mac = sign_msg(
+            &mgr,
+            "s1",
+            MessageDirection::Receive,
+            u64::MAX - 1,
+            "h-final",
+        );
+        assert!(
+            mgr.process_message(
+                "s1",
+                MessageDirection::Receive,
+                u64::MAX - 1,
+                "h-final",
+                &final_mac,
+                2_000,
+                "t"
+            )
+            .is_ok()
+        );
+        assert_eq!(mgr.get_session("s1").unwrap().recv_seq, u64::MAX);
+        assert!(!mgr.get_session("s1").unwrap().recv_seq_exhausted);
+
+        let terminal_mac = sign_msg(
+            &mgr,
+            "s1",
+            MessageDirection::Receive,
+            u64::MAX,
+            "h-terminal",
+        );
+        assert!(
+            mgr.process_message(
+                "s1",
+                MessageDirection::Receive,
+                u64::MAX,
+                "h-terminal",
+                &terminal_mac,
+                3_000,
+                "t",
+            )
+            .is_ok()
+        );
+        assert_eq!(mgr.get_session("s1").unwrap().recv_seq, u64::MAX);
+        assert!(mgr.get_session("s1").unwrap().recv_seq_exhausted);
+
+        let exhausted_mac = sign_msg(
+            &mgr,
+            "s1",
+            MessageDirection::Receive,
+            u64::MAX,
+            "h-overflow",
+        );
+        match mgr
+            .process_message(
+                "s1",
+                MessageDirection::Receive,
+                u64::MAX,
+                "h-overflow",
+                &exhausted_mac,
+                4_000,
+                "t",
+            )
+            .expect_err("terminal recv sequence must fail closed")
+        {
+            SessionError::SequenceExhausted {
+                session_id,
+                direction,
+            } => {
+                assert_eq!(session_id, "s1");
+                assert_eq!(direction, MessageDirection::Receive);
+            }
+            other => unreachable!("unexpected error: {other}"),
+        }
+        let rejection = mgr
+            .events()
+            .last()
+            .expect("recv exhaustion rejection event");
+        assert_eq!(rejection.event_code, event_codes::SCC_MESSAGE_REJECTED);
+        assert!(rejection.detail.contains("sequence exhausted"));
+    }
+
+    #[test]
     fn test_no_session_rejected() {
         let mut mgr = default_manager();
         let fake_mac = [0u8; SIGNATURE_LEN];
@@ -2615,6 +2943,39 @@ mod tests {
         assert_eq!(parsed.state, SessionState::Active);
         assert_eq!(parsed.handshake_mac, [0xABu8; SIGNATURE_LEN]);
         assert_eq!(parsed.last_activity_at, 42);
+    }
+
+    #[test]
+    fn test_authenticated_session_serde_preserves_exhaustion_flags() {
+        let mut s = AuthenticatedSession::new(
+            "s1".into(),
+            "c".into(),
+            "sv".into(),
+            "e".into(),
+            "sg".into(),
+            0,
+            1,
+            [0xABu8; SIGNATURE_LEN],
+        );
+        s.send_seq = u64::MAX;
+        s.recv_seq = u64::MAX;
+        s.recv_seq_exhausted = true;
+
+        let json = serde_json::to_string(&s).expect("serialize");
+        assert!(
+            json.contains("\"send_seq_exhausted\":false"),
+            "serialize must preserve the pre-terminal send state explicitly"
+        );
+        assert!(
+            json.contains("\"recv_seq_exhausted\":true"),
+            "serialize must preserve the exhausted recv state explicitly"
+        );
+
+        let parsed: AuthenticatedSession = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(parsed.send_seq, u64::MAX);
+        assert!(!parsed.send_seq_exhausted);
+        assert_eq!(parsed.recv_seq, u64::MAX);
+        assert!(parsed.recv_seq_exhausted);
     }
 
     #[test]

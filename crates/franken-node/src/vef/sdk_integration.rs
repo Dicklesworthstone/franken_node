@@ -571,8 +571,9 @@ impl ExternalVerificationEndpoint {
             )));
         }
 
-        // Compute binding hash from proof payload
-        let binding_hash = sha256_hex(submission.proof_payload.as_bytes());
+        // Reuse the module's canonical binding contract so exported evidence
+        // stays tied to both proof_ref and payload, not payload alone.
+        let binding_hash = compute_binding_hash(&submission.proof_ref, &submission.proof_payload)?;
 
         let record = EvidenceRecord {
             submission_id: submission.submission_id.clone(),
@@ -612,15 +613,15 @@ impl ExternalVerificationEndpoint {
             .store
             .values()
             .filter(|record| {
-                if let Some(ref pr) = query.proof_ref {
-                    if &record.proof_ref != pr {
-                        return false;
-                    }
+                if let Some(ref pr) = query.proof_ref
+                    && &record.proof_ref != pr
+                {
+                    return false;
                 }
-                if let Some(sf) = query.status_filter {
-                    if record.status != sf {
-                        return false;
-                    }
+                if let Some(sf) = query.status_filter
+                    && record.status != sf
+                {
+                    return false;
                 }
                 true
             })
@@ -678,7 +679,10 @@ impl ExternalVerificationEndpoint {
         })?;
 
         // Guard: Rejected and Expired are terminal — no regression allowed.
-        if matches!(record.status, EvidenceStatus::Rejected | EvidenceStatus::Expired) {
+        if matches!(
+            record.status,
+            EvidenceStatus::Rejected | EvidenceStatus::Expired
+        ) {
             return Err(VsiError::submission_rejected(format!(
                 "submission '{submission_id}' is in terminal state {:?}",
                 record.status
@@ -912,6 +916,42 @@ mod tests {
         assert_eq!(resp.status, EvidenceStatus::Accepted);
         assert_eq!(resp.submission_id, "sub-001");
         assert!(!resp.format_version.is_empty());
+    }
+
+    #[test]
+    fn endpoint_binding_hash_matches_module_contract() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        let sub = sample_submission("sub-bind", "proof-bind");
+        endpoint.submit(&sub).unwrap();
+
+        let record = endpoint.store().get("sub-bind").unwrap();
+        let expected = compute_binding_hash(&sub.proof_ref, &sub.proof_payload).unwrap();
+        assert_eq!(record.binding_hash, expected);
+    }
+
+    #[test]
+    fn endpoint_binding_hash_changes_with_proof_ref_for_same_payload() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        let first = sample_submission("sub-bind-1", "proof-a");
+        let mut second = sample_submission("sub-bind-2", "proof-b");
+        second.proof_payload = first.proof_payload.clone();
+
+        endpoint.submit(&first).unwrap();
+        endpoint.submit(&second).unwrap();
+
+        let first_hash = endpoint
+            .store()
+            .get("sub-bind-1")
+            .unwrap()
+            .binding_hash
+            .clone();
+        let second_hash = endpoint
+            .store()
+            .get("sub-bind-2")
+            .unwrap()
+            .binding_hash
+            .clone();
+        assert_ne!(first_hash, second_hash);
     }
 
     // ── 15. ExternalVerificationEndpoint rejects empty proof_ref ──

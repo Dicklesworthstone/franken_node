@@ -46,6 +46,8 @@ struct VerifierRouteState {
     audit_log: Vec<AuditLogEntry>,
     next_check_seq: u64,
     next_audit_seq: u64,
+    check_ids_exhausted: bool,
+    audit_ids_exhausted: bool,
 }
 
 impl Default for VerifierRouteState {
@@ -56,16 +58,45 @@ impl Default for VerifierRouteState {
             audit_log: Vec::new(),
             next_check_seq: 1,
             next_audit_seq: 1,
+            check_ids_exhausted: false,
+            audit_ids_exhausted: false,
         }
     }
 }
 
 impl VerifierRouteState {
-    fn next_check_id(&mut self, trace_id: &str) -> String {
+    fn reserve_trigger_ids(&mut self, trace_id: &str) -> Result<(String, String), ApiError> {
+        if self.check_ids_exhausted {
+            return Err(ApiError::Internal {
+                detail: "verifier check_id counter exhausted".to_string(),
+                trace_id: trace_id.to_string(),
+            });
+        }
+        if self.audit_ids_exhausted {
+            return Err(ApiError::Internal {
+                detail: "verifier audit entry counter exhausted".to_string(),
+                trace_id: trace_id.to_string(),
+            });
+        }
+
         let prefix = utf8_prefix(trace_id, 12);
         let check_id = format!("chk-{prefix}-{:04}", self.next_check_seq);
-        self.next_check_seq = self.next_check_seq.saturating_add(1);
-        check_id
+        let audit_entry_id = format!("audit-{:04}", self.next_audit_seq);
+        let next_check_seq = self.next_check_seq.checked_add(1);
+        let next_audit_seq = self.next_audit_seq.checked_add(1);
+
+        if let Some(next) = next_check_seq {
+            self.next_check_seq = next;
+        } else {
+            self.check_ids_exhausted = true;
+        }
+        if let Some(next) = next_audit_seq {
+            self.next_audit_seq = next;
+        } else {
+            self.audit_ids_exhausted = true;
+        }
+
+        Ok((check_id, audit_entry_id))
     }
 
     fn store_check(&mut self, check_id: String, evidence: EvidenceArtifact) {
@@ -82,8 +113,26 @@ impl VerifierRouteState {
         }
     }
 
-    fn append_audit(
+    fn next_audit_entry_id(&mut self, trace_id: &str) -> Result<String, ApiError> {
+        if self.audit_ids_exhausted {
+            return Err(ApiError::Internal {
+                detail: "verifier audit entry counter exhausted".to_string(),
+                trace_id: trace_id.to_string(),
+            });
+        }
+
+        let entry_id = format!("audit-{:04}", self.next_audit_seq);
+        if let Some(next) = self.next_audit_seq.checked_add(1) {
+            self.next_audit_seq = next;
+        } else {
+            self.audit_ids_exhausted = true;
+        }
+        Ok(entry_id)
+    }
+
+    fn push_audit_entry(
         &mut self,
+        entry_id: String,
         action: &str,
         actor: &str,
         resource: &str,
@@ -91,7 +140,7 @@ impl VerifierRouteState {
         trace_id: &str,
     ) {
         self.audit_log.push(AuditLogEntry {
-            entry_id: format!("audit-{:04}", self.next_audit_seq),
+            entry_id,
             timestamp: chrono::Utc::now().to_rfc3339(),
             action: action.to_string(),
             actor: actor.to_string(),
@@ -99,12 +148,24 @@ impl VerifierRouteState {
             outcome: outcome.to_string(),
             trace_id: trace_id.to_string(),
         });
-        self.next_audit_seq = self.next_audit_seq.saturating_add(1);
 
         if self.audit_log.len() > MAX_VERIFIER_AUDIT_LOG_ENTRIES {
             let overflow = self.audit_log.len() - MAX_VERIFIER_AUDIT_LOG_ENTRIES;
             self.audit_log.drain(0..overflow);
         }
+    }
+
+    fn append_audit(
+        &mut self,
+        action: &str,
+        actor: &str,
+        resource: &str,
+        outcome: &str,
+        trace_id: &str,
+    ) -> Result<(), ApiError> {
+        let entry_id = self.next_audit_entry_id(trace_id)?;
+        self.push_audit_entry(entry_id, action, actor, resource, outcome, trace_id);
+        Ok(())
     }
 }
 
@@ -264,7 +325,7 @@ pub fn trigger_conformance(
     request: &ConformanceTriggerRequest,
 ) -> Result<ApiResponse<ConformanceResult>, ApiError> {
     with_verifier_route_state(&trace.trace_id, |state| {
-        let check_id = state.next_check_id(&trace.trace_id);
+        let (check_id, audit_entry_id) = state.reserve_trigger_ids(&trace.trace_id)?;
         let findings = vec![
             ConformanceFinding {
                 check_name: "trust_card_schema".to_string(),
@@ -340,7 +401,8 @@ pub fn trigger_conformance(
         };
 
         state.store_check(result.check_id.clone(), evidence);
-        state.append_audit(
+        state.push_audit_entry(
+            audit_entry_id,
             "conformance.trigger",
             &identity.principal,
             &result.check_id,
@@ -363,23 +425,23 @@ pub fn get_evidence(
     check_id: &str,
 ) -> Result<ApiResponse<EvidenceArtifact>, ApiError> {
     with_verifier_route_state(&trace.trace_id, |state| {
-        let artifact = state
+        let Some(artifact) = state
             .checks
             .get(check_id)
             .map(|check| check.evidence.clone())
-            .ok_or_else(|| {
-                state.append_audit(
-                    "evidence.read",
-                    &identity.principal,
-                    check_id,
-                    "not_found",
-                    &trace.trace_id,
-                );
-                ApiError::NotFound {
-                    detail: format!("no verifier evidence recorded for check_id `{check_id}`"),
-                    trace_id: trace.trace_id.clone(),
-                }
-            })?;
+        else {
+            state.append_audit(
+                "evidence.read",
+                &identity.principal,
+                check_id,
+                "not_found",
+                &trace.trace_id,
+            )?;
+            return Err(ApiError::NotFound {
+                detail: format!("no verifier evidence recorded for check_id `{check_id}`"),
+                trace_id: trace.trace_id.clone(),
+            });
+        };
 
         state.append_audit(
             "evidence.read",
@@ -387,7 +449,7 @@ pub fn get_evidence(
             check_id,
             "success",
             &trace.trace_id,
-        );
+        )?;
 
         Ok(ApiResponse {
             ok: true,
@@ -804,5 +866,89 @@ mod tests {
         let first = trigger_conformance(&identity, &trace, &request).expect("first");
         let second = trigger_conformance(&identity, &trace, &request).expect("second");
         assert_ne!(first.data.check_id, second.data.check_id);
+    }
+
+    #[test]
+    fn check_id_counter_fails_closed_after_last_id() {
+        let _guard = test_guard();
+        reset_verifier_state();
+        {
+            let mut state = verifier_route_state().lock().expect("state lock");
+            state.next_check_seq = u64::MAX;
+        }
+
+        let identity = test_identity();
+        let trace = test_trace();
+        let request = ConformanceTriggerRequest {
+            scope: None,
+            verbose: false,
+        };
+
+        let final_result = trigger_conformance(&identity, &trace, &request).expect("final id");
+        assert!(final_result.data.check_id.ends_with("18446744073709551615"));
+
+        let err =
+            trigger_conformance(&identity, &trace, &request).expect_err("counter should exhaust");
+        assert!(matches!(err, ApiError::Internal { .. }));
+        if let ApiError::Internal { detail, .. } = err {
+            assert!(detail.contains("check_id counter exhausted"));
+        }
+    }
+
+    #[test]
+    fn audit_counter_fails_closed_after_last_entry() {
+        let _guard = test_guard();
+        reset_verifier_state();
+        {
+            let mut state = verifier_route_state().lock().expect("state lock");
+            state.next_audit_seq = u64::MAX;
+        }
+
+        let identity = test_identity();
+        let trace = test_trace();
+        let request = ConformanceTriggerRequest {
+            scope: None,
+            verbose: false,
+        };
+
+        let conformance = trigger_conformance(&identity, &trace, &request).expect("final audit");
+        let err = get_evidence(&identity, &trace, &conformance.data.check_id)
+            .expect_err("audit counter should exhaust");
+        assert!(matches!(err, ApiError::Internal { .. }));
+        if let ApiError::Internal { detail, .. } = err {
+            assert!(detail.contains("audit entry counter exhausted"));
+        }
+    }
+
+    #[test]
+    fn trigger_failure_does_not_consume_check_id_space() {
+        let _guard = test_guard();
+        reset_verifier_state();
+        {
+            let mut state = verifier_route_state().lock().expect("state lock");
+            state.next_check_seq = 41;
+            state.next_audit_seq = 9;
+            state.audit_ids_exhausted = true;
+        }
+
+        let identity = test_identity();
+        let trace = test_trace();
+        let request = ConformanceTriggerRequest {
+            scope: None,
+            verbose: false,
+        };
+
+        let err = trigger_conformance(&identity, &trace, &request)
+            .expect_err("audit exhaustion should fail before consuming ids");
+        assert!(matches!(err, ApiError::Internal { .. }));
+        if let ApiError::Internal { detail, .. } = err {
+            assert!(detail.contains("audit entry counter exhausted"));
+        }
+
+        let state = verifier_route_state().lock().expect("state lock");
+        assert_eq!(state.next_check_seq, 41);
+        assert_eq!(state.next_audit_seq, 9);
+        assert!(state.checks.is_empty());
+        assert!(state.audit_log.is_empty());
     }
 }

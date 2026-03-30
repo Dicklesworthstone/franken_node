@@ -37,11 +37,11 @@ impl std::error::Error for EngineProcessError {}
 fn default_engine_binary_candidates() -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            candidates.push(exe_dir.join("franken-engine"));
-            candidates.push(exe_dir.join("franken-engine.exe"));
-        }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        candidates.push(exe_dir.join("franken-engine"));
+        candidates.push(exe_dir.join("franken-engine.exe"));
     }
     
     candidates.push(PathBuf::from("franken-engine"));

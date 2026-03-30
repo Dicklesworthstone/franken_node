@@ -69,6 +69,7 @@ pub const FLEET_ZONE_UNREACHABLE: &str = "FLEET_ZONE_UNREACHABLE";
 pub const FLEET_CONVERGENCE_TIMEOUT: &str = "FLEET_CONVERGENCE_TIMEOUT";
 pub const FLEET_ROLLBACK_FAILED: &str = "FLEET_ROLLBACK_FAILED";
 pub const FLEET_NOT_ACTIVATED: &str = "FLEET_NOT_ACTIVATED";
+pub const FLEET_OPERATION_ID_EXHAUSTED: &str = "FLEET_OPERATION_ID_EXHAUSTED";
 #[cfg(any(test, feature = "extended-surfaces"))]
 pub const FLEET_INCIDENT_CAPACITY_EXCEEDED: &str = "FLEET_INCIDENT_CAPACITY_EXCEEDED";
 #[cfg(any(test, feature = "extended-surfaces"))]
@@ -282,6 +283,8 @@ pub enum FleetControlError {
     },
     /// API not activated (safe-start mode).
     NotActivated { code: String },
+    /// Operation identifier space exhausted.
+    OperationIdExhausted { code: String },
     /// Incident registry is full of unreleased entries.
     #[cfg(any(test, feature = "extended-surfaces"))]
     IncidentCapacityExceeded { code: String },
@@ -328,6 +331,12 @@ impl FleetControlError {
         }
     }
 
+    pub fn operation_id_exhausted() -> Self {
+        Self::OperationIdExhausted {
+            code: FLEET_OPERATION_ID_EXHAUSTED.to_string(),
+        }
+    }
+
     #[cfg(any(test, feature = "extended-surfaces"))]
     pub fn incident_capacity_exceeded() -> Self {
         Self::IncidentCapacityExceeded {
@@ -352,6 +361,7 @@ impl FleetControlError {
             Self::ConvergenceTimeout { code, .. } => code,
             Self::RollbackFailed { code, .. } => code,
             Self::NotActivated { code } => code,
+            Self::OperationIdExhausted { code } => code,
             #[cfg(any(test, feature = "extended-surfaces"))]
             Self::IncidentCapacityExceeded { code } => code,
             #[cfg(any(test, feature = "extended-surfaces"))]
@@ -471,6 +481,8 @@ pub struct FleetControlManager {
     next_op_id: u64,
     /// Epoch used to keep operation IDs unique across counter rollover.
     op_epoch: u64,
+    /// Set after the final unique operation ID has been allocated.
+    operation_ids_exhausted: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -518,6 +530,28 @@ struct SharedFleetControlOwner {
     inner: Mutex<FleetControlManager>,
 }
 
+fn map_fleet_control_error(action: &str, trace: &TraceContext, err: FleetControlError) -> ApiError {
+    if matches!(err, FleetControlError::OperationIdExhausted { .. }) {
+        return ApiError::Internal {
+            detail: format!(
+                "{}: fleet control operation identifier space exhausted during {action}",
+                err.error_code()
+            ),
+            trace_id: trace.trace_id.clone(),
+        };
+    }
+
+    let detail = match action {
+        "release" => format!("{}: {err:?}", err.error_code()),
+        "status" => format!("{}: {}", err.error_code(), "status failed"),
+        _ => format!("{}: {action} failed", err.error_code()),
+    };
+    ApiError::BadRequest {
+        detail,
+        trace_id: trace.trace_id.clone(),
+    }
+}
+
 impl SharedFleetControlOwner {
     fn new() -> Self {
         Self {
@@ -541,10 +575,7 @@ impl SharedFleetControlOwner {
     ) -> Result<FleetActionResult, ApiError> {
         let mut mgr = self.lock(trace)?;
         mgr.quarantine(&request.extension_id, &request.scope, identity, trace)
-            .map_err(|e| ApiError::BadRequest {
-                detail: format!("{}: {}", e.error_code(), "quarantine failed"),
-                trace_id: trace.trace_id.clone(),
-            })
+            .map_err(|e| map_fleet_control_error("quarantine", trace, e))
     }
 
     #[cfg(any(test, feature = "extended-surfaces"))]
@@ -556,10 +587,7 @@ impl SharedFleetControlOwner {
     ) -> Result<FleetActionResult, ApiError> {
         let mut mgr = self.lock(trace)?;
         mgr.revoke(&request.extension_id, &request.scope, identity, trace)
-            .map_err(|e| ApiError::BadRequest {
-                detail: format!("{}: {}", e.error_code(), "revocation failed"),
-                trace_id: trace.trace_id.clone(),
-            })
+            .map_err(|e| map_fleet_control_error("revocation", trace, e))
     }
 
     fn release(
@@ -570,18 +598,13 @@ impl SharedFleetControlOwner {
     ) -> Result<FleetActionResult, ApiError> {
         let mut mgr = self.lock(trace)?;
         mgr.release(incident_id, identity, trace)
-            .map_err(|e| ApiError::BadRequest {
-                detail: format!("{}: {e:?}", e.error_code()),
-                trace_id: trace.trace_id.clone(),
-            })
+            .map_err(|e| map_fleet_control_error("release", trace, e))
     }
 
     fn status(&self, trace: &TraceContext, zone_id: &str) -> Result<FleetStatus, ApiError> {
         let mgr = self.lock(trace)?;
-        mgr.status(zone_id).map_err(|e| ApiError::BadRequest {
-            detail: format!("{}: {}", e.error_code(), "status failed"),
-            trace_id: trace.trace_id.clone(),
-        })
+        mgr.status(zone_id)
+            .map_err(|e| map_fleet_control_error("status", trace, e))
     }
 
     fn reconcile(
@@ -591,10 +614,7 @@ impl SharedFleetControlOwner {
     ) -> Result<FleetActionResult, ApiError> {
         let mut mgr = self.lock(trace)?;
         mgr.reconcile(identity, trace)
-            .map_err(|e| ApiError::BadRequest {
-                detail: format!("{}: {}", e.error_code(), "reconcile failed"),
-                trace_id: trace.trace_id.clone(),
-            })
+            .map_err(|e| map_fleet_control_error("reconcile", trace, e))
     }
 
     #[cfg(test)]
@@ -639,6 +659,7 @@ impl FleetControlManager {
             events: Vec::new(),
             next_op_id: 1,
             op_epoch: 0,
+            operation_ids_exhausted: false,
         }
     }
 
@@ -670,11 +691,15 @@ impl FleetControlManager {
         }
         let zone_id = Self::validated_zone_id(&scope.zone_id)?;
 
-        let op_id = self.next_operation_id();
+        let planned_slot = self.peek_operation_slot()?;
+        let planned_op_id = planned_slot.operation_id();
+        let planned_incident_id = format!("inc-{planned_op_id}");
+        let reclaimed_zone_key = self.prepare_zone_status_slot(zone_id)?;
+        let reclaimed_incident_key = self.prepare_incident_slot(&planned_incident_id)?;
+        let op_id = self.next_operation_id()?;
+        debug_assert_eq!(op_id, planned_op_id);
         let now = chrono::Utc::now().to_rfc3339();
         let incident_id = format!("inc-{op_id}");
-        let reclaimed_zone_key = self.prepare_zone_status_slot(zone_id)?;
-        let reclaimed_incident_key = self.prepare_incident_slot(&incident_id)?;
 
         // Create incident handle
         let incident = IncidentHandle {
@@ -754,15 +779,19 @@ impl FleetControlManager {
         }
         let zone_id = Self::validated_zone_id(&scope.zone_id)?;
 
-        let op_id = self.next_operation_id();
-        let now = chrono::Utc::now().to_rfc3339();
+        let planned_slot = self.peek_operation_slot()?;
+        let planned_op_id = planned_slot.operation_id();
+        let planned_incident_id = format!("inc-{planned_op_id}");
         let reclaimed_zone_key = self.prepare_zone_status_slot(zone_id)?;
-        let incident_id = format!("inc-{op_id}");
         let reclaimed_incident_key = if scope.severity == RevocationSeverity::Emergency {
-            self.prepare_incident_slot(&incident_id)?
+            self.prepare_incident_slot(&planned_incident_id)?
         } else {
             None
         };
+        let op_id = self.next_operation_id()?;
+        debug_assert_eq!(op_id, planned_op_id);
+        let now = chrono::Utc::now().to_rfc3339();
+        let incident_id = format!("inc-{op_id}");
 
         // Update zone status (bounded by MAX_ZONE_STATUS)
         if let Some(reclaimed_zone_key) = reclaimed_zone_key {
@@ -855,7 +884,7 @@ impl FleetControlManager {
         self.incident_convergences.remove(incident_id);
         self.sync_zone_pending_convergences(&zone_id);
 
-        let op_id = self.next_operation_id();
+        let op_id = self.next_operation_id()?;
         let now = chrono::Utc::now().to_rfc3339();
         let receipt = self.build_receipt(&op_id, &identity.principal, &zone_id, &now);
 
@@ -907,7 +936,7 @@ impl FleetControlManager {
             return Err(FleetControlError::not_activated());
         }
 
-        let op_id = self.next_operation_id();
+        let op_id = self.next_operation_id()?;
         let now = chrono::Utc::now().to_rfc3339();
         let zone_count = self.zone_status.len();
 
@@ -974,25 +1003,44 @@ impl FleetControlManager {
 
     // ── Internal helpers ──────────────────────────────────────────────────
 
-    fn allocate_operation_slot(&mut self) -> OperationSlot {
+    fn peek_operation_slot(&self) -> Result<OperationSlot, FleetControlError> {
+        if self.operation_ids_exhausted {
+            return Err(FleetControlError::operation_id_exhausted());
+        }
+
+        Ok(OperationSlot {
+            epoch: self.op_epoch,
+            sequence: self.next_op_id,
+        })
+    }
+
+    fn allocate_operation_slot(&mut self) -> Result<OperationSlot, FleetControlError> {
+        if self.operation_ids_exhausted {
+            return Err(FleetControlError::operation_id_exhausted());
+        }
+
         let slot = OperationSlot {
             epoch: self.op_epoch,
             sequence: self.next_op_id,
         };
 
         if self.next_op_id == u64::MAX {
-            // Roll to the next epoch so IDs stay unique at counter boundaries.
-            self.next_op_id = 1;
-            self.op_epoch = self.op_epoch.wrapping_add(1);
+            if self.op_epoch == u64::MAX {
+                self.operation_ids_exhausted = true;
+            } else {
+                // Roll to the next epoch so IDs stay unique at counter boundaries.
+                self.next_op_id = 1;
+                self.op_epoch = self.op_epoch.saturating_add(1);
+            }
         } else {
-            self.next_op_id += 1;
+            self.next_op_id = self.next_op_id.saturating_add(1);
         }
 
-        slot
+        Ok(slot)
     }
 
-    fn next_operation_id(&mut self) -> String {
-        self.allocate_operation_slot().operation_id()
+    fn next_operation_id(&mut self) -> Result<String, FleetControlError> {
+        Ok(self.allocate_operation_slot()?.operation_id())
     }
 
     #[cfg(any(test, feature = "extended-surfaces"))]
@@ -1833,6 +1881,7 @@ mod tests {
             .expect_err("full live registry must reject");
 
         assert_eq!(err.error_code(), FLEET_INCIDENT_CAPACITY_EXCEEDED);
+        assert_eq!(mgr.next_op_id, MAX_INCIDENTS as u64 + 2);
         assert_eq!(mgr.incident_count(), MAX_INCIDENTS);
         assert!(mgr.incidents.contains_key("inc-fleet-op-2"));
         assert!(!mgr.incidents.contains_key(&rejected_id));
@@ -1870,6 +1919,7 @@ mod tests {
             .expect_err("full live registry must reject");
 
         assert_eq!(err.error_code(), FLEET_INCIDENT_CAPACITY_EXCEEDED);
+        assert_eq!(mgr.next_op_id, MAX_INCIDENTS as u64 + 2);
         assert_eq!(mgr.incident_count(), MAX_INCIDENTS);
         assert!(mgr.incidents.contains_key("inc-fleet-op-2"));
         assert!(!mgr.incidents.contains_key(&rejected_id));
@@ -2056,6 +2106,7 @@ mod tests {
             .expect_err("full live zone registry must reject");
 
         assert_eq!(err.error_code(), FLEET_ZONE_STATUS_CAPACITY_EXCEEDED);
+        assert_eq!(mgr.next_op_id, 1);
         assert_eq!(mgr.incident_count(), 0);
         assert!(!mgr.zone_status.contains_key("zone-new"));
         assert!(mgr.zone_status.contains_key("zone-live-0001"));
@@ -2334,6 +2385,12 @@ mod tests {
     }
 
     #[test]
+    fn error_operation_id_exhausted() {
+        let err = FleetControlError::operation_id_exhausted();
+        assert_eq!(err.error_code(), FLEET_OPERATION_ID_EXHAUSTED);
+    }
+
+    #[test]
     fn error_incident_capacity_exceeded() {
         let err = FleetControlError::incident_capacity_exceeded();
         assert_eq!(err.error_code(), FLEET_INCIDENT_CAPACITY_EXCEEDED);
@@ -2343,6 +2400,19 @@ mod tests {
     fn error_zone_status_capacity_exceeded() {
         let err = FleetControlError::zone_status_capacity_exceeded();
         assert_eq!(err.error_code(), FLEET_ZONE_STATUS_CAPACITY_EXCEEDED);
+    }
+
+    #[test]
+    fn operation_id_exhaustion_maps_to_internal_api_error() {
+        let err = map_fleet_control_error(
+            "quarantine",
+            &test_trace(),
+            FleetControlError::operation_id_exhausted(),
+        );
+        assert!(matches!(err, ApiError::Internal { .. }));
+        if let ApiError::Internal { detail, .. } = err {
+            assert!(detail.contains(FLEET_OPERATION_ID_EXHAUSTED));
+        }
     }
 
     // ── ConvergencePhase tests ────────────────────────────────────────────
@@ -2781,14 +2851,29 @@ mod tests {
         let mut mgr = FleetControlManager::new();
         mgr.next_op_id = u64::MAX;
 
-        let first = mgr.next_operation_id();
-        let second = mgr.next_operation_id();
+        let first = mgr.next_operation_id().expect("first");
+        let second = mgr.next_operation_id().expect("second");
 
         assert_ne!(first, second);
         assert_eq!(first, "fleet-op-18446744073709551615");
         assert_eq!(second, "fleet-op-0000000000000001-0000000000000001");
         assert_eq!(mgr.op_epoch, 1);
         assert_eq!(mgr.next_op_id, 2);
+    }
+
+    #[test]
+    fn operation_id_allocation_fails_closed_after_absolute_exhaustion() {
+        let mut mgr = FleetControlManager::new();
+        mgr.op_epoch = u64::MAX;
+        mgr.next_op_id = u64::MAX;
+
+        let final_id = mgr.next_operation_id().expect("last id");
+        assert_eq!(final_id, "fleet-op-ffffffffffffffff-ffffffffffffffff");
+
+        let err = mgr
+            .next_operation_id()
+            .expect_err("allocator should fail after last unique id");
+        assert_eq!(err.error_code(), FLEET_OPERATION_ID_EXHAUSTED);
     }
 
     #[test]
@@ -2814,6 +2899,23 @@ mod tests {
             .map(|i| i.incident_id.clone())
             .collect();
         assert_eq!(incident_ids.len(), 2);
+    }
+
+    #[test]
+    fn quarantine_fails_closed_when_operation_ids_are_exhausted() {
+        let mut mgr = FleetControlManager::new();
+        mgr.activate();
+        mgr.op_epoch = u64::MAX;
+        mgr.next_op_id = u64::MAX;
+        let scope = test_quarantine_scope();
+
+        mgr.quarantine("ext-final", &scope, &admin_identity(), &test_trace())
+            .expect("final operation id should still work");
+        let err = mgr
+            .quarantine("ext-overflow", &scope, &admin_identity(), &test_trace())
+            .expect_err("second quarantine should fail closed");
+        assert_eq!(err.error_code(), FLEET_OPERATION_ID_EXHAUSTED);
+        assert_eq!(mgr.active_incidents().len(), 1);
     }
 
     // ── Hash determinism test ─────────────────────────────────────────────

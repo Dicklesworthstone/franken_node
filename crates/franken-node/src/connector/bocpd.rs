@@ -535,9 +535,7 @@ impl BocpdDetector {
         } else {
             // Posterior collapsed — reinitialize to changepoint prior to prevent
             // permanent detector death from an all-zero/NaN posterior.
-            for p in &mut growth_probs {
-                *p = 0.0;
-            }
+            growth_probs.fill(0.0);
             if !growth_probs.is_empty() {
                 growth_probs[0] = 1.0;
             }

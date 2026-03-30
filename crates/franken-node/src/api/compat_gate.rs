@@ -47,6 +47,8 @@ use event_codes::*;
 pub mod error_codes {
     pub const ERR_COMPAT_SHIM_CAPACITY: &str = "ERR_COMPAT_SHIM_CAPACITY";
     pub const ERR_COMPAT_PREDICATE_CAPACITY: &str = "ERR_COMPAT_PREDICATE_CAPACITY";
+    pub const ERR_COMPAT_TRACE_ID_EXHAUSTED: &str = "ERR_COMPAT_TRACE_ID_EXHAUSTED";
+    pub const ERR_COMPAT_RECEIPT_ID_EXHAUSTED: &str = "ERR_COMPAT_RECEIPT_ID_EXHAUSTED";
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +197,33 @@ impl fmt::Display for CompatGateRegistrationError {
 
 impl std::error::Error for CompatGateRegistrationError {}
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatGateOperationError {
+    TraceIdSpaceExhausted,
+    ReceiptIdSpaceExhausted,
+}
+
+impl CompatGateOperationError {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::TraceIdSpaceExhausted => error_codes::ERR_COMPAT_TRACE_ID_EXHAUSTED,
+            Self::ReceiptIdSpaceExhausted => error_codes::ERR_COMPAT_RECEIPT_ID_EXHAUSTED,
+        }
+    }
+}
+
+impl fmt::Display for CompatGateOperationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TraceIdSpaceExhausted => f.write_str("compat gate trace ID space exhausted"),
+            Self::ReceiptIdSpaceExhausted => f.write_str("compat gate receipt ID space exhausted"),
+        }
+    }
+}
+
+impl std::error::Error for CompatGateOperationError {}
+
 // ---------------------------------------------------------------------------
 // Gate check request/response
 // ---------------------------------------------------------------------------
@@ -306,40 +335,59 @@ impl CompatGateService {
         }
     }
 
-    fn next_trace_id(&mut self) -> String {
+    fn next_trace_id(&mut self) -> Result<String, CompatGateOperationError> {
         if self.trace_counter == u64::MAX {
+            let Some(next_epoch) = self.trace_epoch.checked_add(1) else {
+                return Err(CompatGateOperationError::TraceIdSpaceExhausted);
+            };
             self.trace_counter = 1;
-            self.trace_epoch = self.trace_epoch.wrapping_add(1);
+            self.trace_epoch = next_epoch;
         } else {
             self.trace_counter += 1;
         }
 
-        if self.trace_epoch == 0 {
+        Ok(if self.trace_epoch == 0 {
             format!("trace-{:06}", self.trace_counter)
         } else {
             format!(
                 "trace-{:016x}-{:016x}",
                 self.trace_epoch, self.trace_counter
             )
-        }
+        })
     }
 
-    fn next_receipt_id(&mut self) -> String {
+    fn next_receipt_id(&mut self) -> Result<String, CompatGateOperationError> {
         if self.receipt_counter == u64::MAX {
+            let Some(next_epoch) = self.receipt_epoch.checked_add(1) else {
+                return Err(CompatGateOperationError::ReceiptIdSpaceExhausted);
+            };
             self.receipt_counter = 1;
-            self.receipt_epoch = self.receipt_epoch.wrapping_add(1);
+            self.receipt_epoch = next_epoch;
         } else {
             self.receipt_counter += 1;
         }
 
-        if self.receipt_epoch == 0 {
+        Ok(if self.receipt_epoch == 0 {
             format!("rcpt-{:06}", self.receipt_counter)
         } else {
             format!(
                 "rcpt-{:016x}-{:016x}",
                 self.receipt_epoch, self.receipt_counter
             )
+        })
+    }
+
+    fn reserve_gate_ids(&mut self) -> Result<(String, String), CompatGateOperationError> {
+        if self.trace_counter == u64::MAX && self.trace_epoch == u64::MAX {
+            return Err(CompatGateOperationError::TraceIdSpaceExhausted);
         }
+        if self.receipt_counter == u64::MAX && self.receipt_epoch == u64::MAX {
+            return Err(CompatGateOperationError::ReceiptIdSpaceExhausted);
+        }
+
+        let trace_id = self.next_trace_id()?;
+        let receipt_id = self.next_receipt_id()?;
+        Ok((trace_id, receipt_id))
     }
 
     /// Register a compatibility shim.
@@ -399,9 +447,13 @@ impl CompatGateService {
     }
 
     /// Perform a gate check: is a package allowed under a given compatibility mode?
-    pub fn gate_check(&mut self, request: &GateCheckRequest) -> GateCheckResponse {
-        let trace_id = self.next_trace_id();
-        let receipt_id = self.next_receipt_id();
+    ///
+    /// Returns an error if the trace/receipt identifier space is exhausted.
+    pub fn gate_check(
+        &mut self,
+        request: &GateCheckRequest,
+    ) -> Result<GateCheckResponse, CompatGateOperationError> {
+        let (trace_id, receipt_id) = self.reserve_gate_ids()?;
 
         let scope_mode = self
             .scopes
@@ -455,60 +507,65 @@ impl CompatGateService {
             MAX_RECEIPTS,
         );
 
-        GateCheckResponse {
+        Ok(GateCheckResponse {
             decision,
             rationale,
             trace_id,
             receipt_id,
-        }
+        })
     }
 
     /// Request a mode transition. Escalations require justification; de-escalations are auto-approved.
+    ///
+    /// Returns an error if the trace/receipt identifier space is exhausted.
     pub fn request_transition(
         &mut self,
         request: &ModeTransitionRequest,
-    ) -> ModeTransitionResponse {
-        let trace_id = self.next_trace_id();
-        let receipt_id = self.next_receipt_id();
+    ) -> Result<ModeTransitionResponse, CompatGateOperationError> {
+        let (trace_id, receipt_id) = self.reserve_gate_ids()?;
 
-        let current_mode = self.scopes.get(&request.scope_id).copied().unwrap_or(CompatMode::Strict);
-        
-        if current_mode != request.from_mode {
-            return ModeTransitionResponse {
-                transition_id: trace_id,
-                approved: false,
-                receipt_id,
-                rationale: format!(
+        let current_mode = self
+            .scopes
+            .get(&request.scope_id)
+            .copied()
+            .unwrap_or(CompatMode::Strict);
+
+        let (approved, rationale) = if current_mode != request.from_mode {
+            (
+                false,
+                format!(
                     "transition denied: requested from_mode {} does not match actual current mode {}",
                     request.from_mode, current_mode
                 ),
-            };
-        }
-
-        let is_escalation = current_mode.is_escalation(request.to_mode);
-        let approved = if is_escalation {
-            !request.justification.is_empty()
+            )
         } else {
-            true
-        };
+            let is_escalation = current_mode.is_escalation(request.to_mode);
+            let approved = if is_escalation {
+                !request.justification.is_empty()
+            } else {
+                true
+            };
 
-        let rationale = if approved {
-            if is_escalation {
-                format!(
-                    "escalation from {} to {} approved with justification",
-                    current_mode, request.to_mode
-                )
+            let rationale = if approved {
+                if is_escalation {
+                    format!(
+                        "escalation from {} to {} approved with justification",
+                        current_mode, request.to_mode
+                    )
+                } else {
+                    format!(
+                        "de-escalation from {} to {} auto-approved",
+                        current_mode, request.to_mode
+                    )
+                }
             } else {
                 format!(
-                    "de-escalation from {} to {} auto-approved",
+                    "escalation from {} to {} denied: justification required",
                     current_mode, request.to_mode
                 )
-            }
-        } else {
-            format!(
-                "escalation from {} to {} denied: justification required",
-                current_mode, request.to_mode
-            )
+            };
+
+            (approved, rationale)
         };
 
         if approved {
@@ -521,34 +578,39 @@ impl CompatGateService {
                 &request.scope_id,
                 &rationale,
             );
-
-            push_bounded(
-                &mut self.receipts,
-                CompatReceipt {
-                    receipt_id: receipt_id.clone(),
-                    scope: request.scope_id.clone(),
-                    receipt_type: "mode_transition".to_string(),
-                    severity: request.to_mode.risk_level().to_string(),
-                    issued_at: "2026-01-01T00:00:00Z".to_string(),
-                    signature: format!("sig-{}", receipt_id),
-                    payload_hash: format!("hash-{}", receipt_id),
-                },
-                MAX_RECEIPTS,
-            );
         }
 
-        ModeTransitionResponse {
+        push_bounded(
+            &mut self.receipts,
+            CompatReceipt {
+                receipt_id: receipt_id.clone(),
+                scope: request.scope_id.clone(),
+                receipt_type: "mode_transition".to_string(),
+                severity: request.to_mode.risk_level().to_string(),
+                issued_at: "2026-01-01T00:00:00Z".to_string(),
+                signature: format!("sig-{}", receipt_id),
+                payload_hash: format!("hash-{}", receipt_id),
+            },
+            MAX_RECEIPTS,
+        );
+
+        Ok(ModeTransitionResponse {
             transition_id: trace_id,
             approved,
             receipt_id,
             rationale,
-        }
+        })
     }
 
     /// Issue a divergence receipt.
-    pub fn issue_divergence_receipt(&mut self, scope: &str, severity: &str) -> CompatReceipt {
-        let receipt_id = self.next_receipt_id();
-        let trace_id = self.next_trace_id();
+    ///
+    /// Returns an error if the trace/receipt identifier space is exhausted.
+    pub fn issue_divergence_receipt(
+        &mut self,
+        scope: &str,
+        severity: &str,
+    ) -> Result<CompatReceipt, CompatGateOperationError> {
+        let (trace_id, receipt_id) = self.reserve_gate_ids()?;
 
         let receipt = CompatReceipt {
             receipt_id: receipt_id.clone(),
@@ -568,7 +630,7 @@ impl CompatGateService {
         );
 
         push_bounded(&mut self.receipts, receipt.clone(), MAX_RECEIPTS);
-        receipt
+        Ok(receipt)
     }
 
     /// Query receipts, optionally filtered by scope and severity.
@@ -808,24 +870,28 @@ mod tests {
     #[test]
     fn gate_check_allows_within_scope_mode() {
         let mut svc = make_service_with_scope();
-        let resp = svc.gate_check(&GateCheckRequest {
-            package_id: "pkg-1".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "project-1".into(),
-            policy_context: None,
-        });
+        let resp = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-1".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "project-1".into(),
+                policy_context: None,
+            })
+            .unwrap();
         assert_eq!(resp.decision, GateDecision::Allow);
     }
 
     #[test]
     fn gate_check_denies_when_mode_exceeds_scope() {
         let mut svc = make_service_with_scope();
-        let resp = svc.gate_check(&GateCheckRequest {
-            package_id: "pkg-2".into(),
-            requested_mode: CompatMode::LegacyRisky,
-            scope: "project-1".into(),
-            policy_context: None,
-        });
+        let resp = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-2".into(),
+                requested_mode: CompatMode::LegacyRisky,
+                scope: "project-1".into(),
+                policy_context: None,
+            })
+            .unwrap();
         assert_eq!(resp.decision, GateDecision::Deny);
     }
 
@@ -837,7 +903,8 @@ mod tests {
             requested_mode: CompatMode::Strict,
             scope: "project-1".into(),
             policy_context: None,
-        });
+        })
+        .unwrap();
         assert!(svc.events().iter().any(|e| e.code == PCG_001_GATE_PASSED));
     }
 
@@ -849,19 +916,22 @@ mod tests {
             requested_mode: CompatMode::LegacyRisky,
             scope: "project-1".into(),
             policy_context: None,
-        });
+        })
+        .unwrap();
         assert!(svc.events().iter().any(|e| e.code == PCG_002_GATE_FAILED));
     }
 
     #[test]
     fn gate_check_creates_receipt() {
         let mut svc = make_service_with_scope();
-        let resp = svc.gate_check(&GateCheckRequest {
-            package_id: "pkg-1".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "project-1".into(),
-            policy_context: None,
-        });
+        let resp = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-1".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "project-1".into(),
+                policy_context: None,
+            })
+            .unwrap();
         assert!(!resp.receipt_id.is_empty());
         assert!(!svc.receipts().is_empty());
     }
@@ -869,12 +939,14 @@ mod tests {
     #[test]
     fn gate_check_has_trace_id() {
         let mut svc = make_service_with_scope();
-        let resp = svc.gate_check(&GateCheckRequest {
-            package_id: "pkg-1".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "project-1".into(),
-            policy_context: None,
-        });
+        let resp = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-1".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "project-1".into(),
+                policy_context: None,
+            })
+            .unwrap();
         assert!(!resp.trace_id.is_empty());
     }
 
@@ -883,8 +955,8 @@ mod tests {
         let mut svc = make_service_with_scope();
         svc.trace_counter = u64::MAX - 1;
 
-        let first = svc.next_trace_id();
-        let second = svc.next_trace_id();
+        let first = svc.next_trace_id().unwrap();
+        let second = svc.next_trace_id().unwrap();
 
         assert_ne!(first, second);
         assert_eq!(first, "trace-18446744073709551615");
@@ -894,12 +966,28 @@ mod tests {
     }
 
     #[test]
+    fn trace_counter_fails_closed_after_terminal_value_is_issued() {
+        let mut svc = make_service_with_scope();
+        svc.trace_counter = u64::MAX - 1;
+        svc.trace_epoch = u64::MAX;
+        let final_id = svc.next_trace_id().unwrap();
+        assert_eq!(final_id, "trace-ffffffffffffffff-ffffffffffffffff");
+        let err = svc
+            .next_trace_id()
+            .expect_err("trace ID exhaustion must fail closed");
+        assert_eq!(err, CompatGateOperationError::TraceIdSpaceExhausted);
+        assert_eq!(err.code(), error_codes::ERR_COMPAT_TRACE_ID_EXHAUSTED);
+        assert_eq!(svc.trace_counter, u64::MAX);
+        assert_eq!(svc.trace_epoch, u64::MAX);
+    }
+
+    #[test]
     fn receipt_counter_rollover_preserves_unique_ids() {
         let mut svc = make_service_with_scope();
         svc.receipt_counter = u64::MAX - 1;
 
-        let first = svc.next_receipt_id();
-        let second = svc.next_receipt_id();
+        let first = svc.next_receipt_id().unwrap();
+        let second = svc.next_receipt_id().unwrap();
 
         assert_ne!(first, second);
         assert_eq!(first, "rcpt-18446744073709551615");
@@ -909,26 +997,90 @@ mod tests {
     }
 
     #[test]
+    fn receipt_counter_fails_closed_after_terminal_value_is_issued() {
+        let mut svc = make_service_with_scope();
+        svc.receipt_counter = u64::MAX - 1;
+        svc.receipt_epoch = u64::MAX;
+        let final_id = svc.next_receipt_id().unwrap();
+        assert_eq!(final_id, "rcpt-ffffffffffffffff-ffffffffffffffff");
+        let err = svc
+            .next_receipt_id()
+            .expect_err("receipt ID exhaustion must fail closed");
+        assert_eq!(err, CompatGateOperationError::ReceiptIdSpaceExhausted);
+        assert_eq!(err.code(), error_codes::ERR_COMPAT_RECEIPT_ID_EXHAUSTED);
+        assert_eq!(svc.receipt_counter, u64::MAX);
+        assert_eq!(svc.receipt_epoch, u64::MAX);
+    }
+
+    #[test]
     fn gate_check_rollover_keeps_trace_and_receipt_ids_unique() {
         let mut svc = make_service_with_scope();
         svc.trace_counter = u64::MAX - 1;
         svc.receipt_counter = u64::MAX - 1;
 
-        let first = svc.gate_check(&GateCheckRequest {
-            package_id: "pkg-1".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "project-1".into(),
-            policy_context: None,
-        });
-        let second = svc.gate_check(&GateCheckRequest {
-            package_id: "pkg-1".into(),
-            requested_mode: CompatMode::Strict,
-            scope: "project-1".into(),
-            policy_context: None,
-        });
+        let first = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-1".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "project-1".into(),
+                policy_context: None,
+            })
+            .unwrap();
+        let second = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-1".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "project-1".into(),
+                policy_context: None,
+            })
+            .unwrap();
 
         assert_ne!(first.trace_id, second.trace_id);
         assert_ne!(first.receipt_id, second.receipt_id);
+    }
+
+    #[test]
+    fn gate_check_fails_closed_when_trace_id_space_is_exhausted() {
+        let mut svc = make_service_with_scope();
+        svc.trace_counter = u64::MAX;
+        svc.trace_epoch = u64::MAX;
+
+        let err = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-1".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "project-1".into(),
+                policy_context: None,
+            })
+            .expect_err("trace ID exhaustion must reject gate checks");
+
+        assert_eq!(err, CompatGateOperationError::TraceIdSpaceExhausted);
+        assert_eq!(svc.receipt_counter, 0);
+        assert!(svc.events().is_empty());
+        assert!(svc.receipts().is_empty());
+    }
+
+    #[test]
+    fn gate_check_fails_closed_when_receipt_id_space_is_exhausted_without_burning_trace_id() {
+        let mut svc = make_service_with_scope();
+        svc.trace_counter = 41;
+        svc.receipt_counter = u64::MAX;
+        svc.receipt_epoch = u64::MAX;
+
+        let err = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-1".into(),
+                requested_mode: CompatMode::Strict,
+                scope: "project-1".into(),
+                policy_context: None,
+            })
+            .expect_err("receipt ID exhaustion must reject gate checks");
+
+        assert_eq!(err, CompatGateOperationError::ReceiptIdSpaceExhausted);
+        assert_eq!(svc.trace_counter, 41);
+        assert_eq!(svc.receipt_counter, u64::MAX);
+        assert!(svc.events().is_empty());
+        assert!(svc.receipts().is_empty());
     }
 
     // ── Mode query ────────────────────────────────────────────────────────
@@ -952,39 +1104,72 @@ mod tests {
     #[test]
     fn transition_de_escalation_auto_approved() {
         let mut svc = make_service_with_scope();
-        let resp = svc.request_transition(&ModeTransitionRequest {
-            scope_id: "project-1".into(),
-            from_mode: CompatMode::Balanced,
-            to_mode: CompatMode::Strict,
-            justification: String::new(),
-            requestor: "admin".into(),
-        });
+        let resp = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "project-1".into(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::Strict,
+                justification: String::new(),
+                requestor: "admin".into(),
+            })
+            .unwrap();
         assert!(resp.approved);
     }
 
     #[test]
     fn transition_escalation_requires_justification() {
         let mut svc = make_service_with_scope();
-        let resp = svc.request_transition(&ModeTransitionRequest {
-            scope_id: "project-1".into(),
-            from_mode: CompatMode::Balanced,
-            to_mode: CompatMode::LegacyRisky,
-            justification: String::new(),
-            requestor: "admin".into(),
-        });
+        let resp = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "project-1".into(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::LegacyRisky,
+                justification: String::new(),
+                requestor: "admin".into(),
+            })
+            .unwrap();
         assert!(!resp.approved);
+        let receipt = svc
+            .receipts()
+            .iter()
+            .find(|receipt| receipt.receipt_id == resp.receipt_id)
+            .expect("denied transition receipt must be queryable");
+        assert_eq!(receipt.receipt_type, "mode_transition");
+    }
+
+    #[test]
+    fn transition_wrong_current_still_persists_receipt() {
+        let mut svc = make_service_with_scope();
+        let resp = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "project-1".into(),
+                from_mode: CompatMode::Strict,
+                to_mode: CompatMode::LegacyRisky,
+                justification: "Requested under stale state".into(),
+                requestor: "admin".into(),
+            })
+            .unwrap();
+        assert!(!resp.approved);
+        let receipt = svc
+            .receipts()
+            .iter()
+            .find(|receipt| receipt.receipt_id == resp.receipt_id)
+            .expect("mismatched-current denial receipt must be queryable");
+        assert_eq!(receipt.receipt_type, "mode_transition");
     }
 
     #[test]
     fn transition_escalation_with_justification_approved() {
         let mut svc = make_service_with_scope();
-        let resp = svc.request_transition(&ModeTransitionRequest {
-            scope_id: "project-1".into(),
-            from_mode: CompatMode::Balanced,
-            to_mode: CompatMode::LegacyRisky,
-            justification: "Required for legacy migration".into(),
-            requestor: "admin".into(),
-        });
+        let resp = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "project-1".into(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::LegacyRisky,
+                justification: "Required for legacy migration".into(),
+                requestor: "admin".into(),
+            })
+            .unwrap();
         assert!(resp.approved);
     }
 
@@ -997,7 +1182,8 @@ mod tests {
             to_mode: CompatMode::Strict,
             justification: String::new(),
             requestor: "admin".into(),
-        });
+        })
+        .unwrap();
         assert!(
             svc.events()
                 .iter()
@@ -1014,7 +1200,8 @@ mod tests {
             to_mode: CompatMode::Strict,
             justification: String::new(),
             requestor: "admin".into(),
-        });
+        })
+        .unwrap();
         assert_eq!(
             svc.query_mode("project-1").unwrap().mode,
             CompatMode::Strict
@@ -1026,7 +1213,7 @@ mod tests {
     #[test]
     fn divergence_receipt_issued() {
         let mut svc = make_service_with_scope();
-        let receipt = svc.issue_divergence_receipt("project-1", "medium");
+        let receipt = svc.issue_divergence_receipt("project-1", "medium").unwrap();
         assert!(!receipt.receipt_id.is_empty());
         assert_eq!(receipt.receipt_type, "divergence");
     }
@@ -1034,7 +1221,7 @@ mod tests {
     #[test]
     fn divergence_receipt_emits_pcg_004() {
         let mut svc = make_service_with_scope();
-        svc.issue_divergence_receipt("project-1", "medium");
+        svc.issue_divergence_receipt("project-1", "medium").unwrap();
         assert!(
             svc.events()
                 .iter()
@@ -1175,7 +1362,8 @@ mod tests {
             requested_mode: CompatMode::Strict,
             scope: "project-1".into(),
             policy_context: None,
-        });
+        })
+        .unwrap();
         assert!(svc.gate_pass());
     }
 
@@ -1238,7 +1426,8 @@ mod tests {
             requested_mode: CompatMode::Strict,
             scope: "project-1".into(),
             policy_context: None,
-        });
+        })
+        .unwrap();
         let events = svc.take_events();
         assert!(!events.is_empty());
         assert!(svc.events().is_empty());
@@ -1255,7 +1444,8 @@ mod tests {
                 requested_mode: CompatMode::Strict,
                 scope: "project-1".into(),
                 policy_context: None,
-            });
+            })
+            .unwrap();
             svc
         };
 

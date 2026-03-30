@@ -65,12 +65,20 @@ pub const ERR_LB_NO_SEED: &str = "ERR_LB_NO_SEED";
 pub const ERR_LB_TICK_OVERFLOW: &str = "ERR_LB_TICK_OVERFLOW";
 /// Referenced virtual link does not exist.
 pub const ERR_LB_LINK_NOT_FOUND: &str = "ERR_LB_LINK_NOT_FOUND";
+/// Virtual-link capacity would be exceeded.
+pub const ERR_LB_LINK_CAPACITY_EXCEEDED: &str = "ERR_LB_LINK_CAPACITY_EXCEEDED";
 /// Fault probability outside [0.0, 1.0].
 pub const ERR_LB_FAULT_RANGE: &str = "ERR_LB_FAULT_RANGE";
 /// DPOR interleaving budget exceeded.
 pub const ERR_LB_BUDGET_EXCEEDED: &str = "ERR_LB_BUDGET_EXCEEDED";
 /// Replay diverged from recorded execution.
 pub const ERR_LB_REPLAY_DIVERGENCE: &str = "ERR_LB_REPLAY_DIVERGENCE";
+/// Repro bundle failed to serialize to JSON.
+pub const ERR_LB_BUNDLE_SERIALIZATION: &str = "ERR_LB_BUNDLE_SERIALIZATION";
+/// Repro bundle failed to parse from JSON.
+pub const ERR_LB_BUNDLE_DESERIALIZATION: &str = "ERR_LB_BUNDLE_DESERIALIZATION";
+/// Repro bundle content is internally inconsistent or unsupported.
+pub const ERR_LB_BUNDLE_VALIDATION: &str = "ERR_LB_BUNDLE_VALIDATION";
 
 // ---------------------------------------------------------------------------
 // Invariant constants
@@ -102,6 +110,8 @@ pub enum LabError {
     TickOverflow { current: u64, delta: u64 },
     /// Virtual link not found.
     LinkNotFound { source: String, target: String },
+    /// Virtual-link capacity exceeded.
+    LinkCapacityExceeded { limit: usize },
     /// Fault probability out of valid range.
     FaultRange { field: String, value: f64 },
     /// DPOR exploration budget exceeded.
@@ -111,6 +121,12 @@ pub enum LabError {
         expected_events: usize,
         actual_events: usize,
     },
+    /// Repro bundle failed to serialize.
+    BundleSerialization { detail: String },
+    /// Repro bundle failed to deserialize.
+    BundleDeserialization { detail: String },
+    /// Repro bundle content failed validation.
+    BundleValidation { detail: String },
 }
 
 impl fmt::Display for LabError {
@@ -125,6 +141,9 @@ impl fmt::Display for LabError {
             }
             Self::LinkNotFound { source, target } => {
                 write!(f, "{ERR_LB_LINK_NOT_FOUND}: {source} -> {target}")
+            }
+            Self::LinkCapacityExceeded { limit } => {
+                write!(f, "{ERR_LB_LINK_CAPACITY_EXCEEDED}: limit={limit}")
             }
             Self::FaultRange { field, value } => {
                 write!(
@@ -145,6 +164,15 @@ impl fmt::Display for LabError {
                 f,
                 "{ERR_LB_REPLAY_DIVERGENCE}: expected {expected_events} events, got {actual_events}"
             ),
+            Self::BundleSerialization { detail } => {
+                write!(f, "{ERR_LB_BUNDLE_SERIALIZATION}: {detail}")
+            }
+            Self::BundleDeserialization { detail } => {
+                write!(f, "{ERR_LB_BUNDLE_DESERIALIZATION}: {detail}")
+            }
+            Self::BundleValidation { detail } => {
+                write!(f, "{ERR_LB_BUNDLE_VALIDATION}: {detail}")
+            }
         }
     }
 }
@@ -514,17 +542,41 @@ pub struct ReproBundle {
 }
 
 impl ReproBundle {
+    fn validate(&self) -> Result<(), LabError> {
+        if self.schema_version != SCHEMA_VERSION {
+            return Err(LabError::BundleValidation {
+                detail: format!(
+                    "unsupported schema_version={}, expected={SCHEMA_VERSION}",
+                    self.schema_version
+                ),
+            });
+        }
+        if self.seed != self.config.seed {
+            return Err(LabError::BundleValidation {
+                detail: format!(
+                    "seed mismatch: bundle.seed={}, config.seed={}",
+                    self.seed, self.config.seed
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// Serialize to a deterministic JSON string.
-    pub fn to_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+    pub fn to_json(&self) -> Result<String, LabError> {
+        serde_json::to_string(self).map_err(|err| LabError::BundleSerialization {
+            detail: err.to_string(),
+        })
     }
 
     /// Deserialize from JSON.
     pub fn from_json(s: &str) -> Result<Self, LabError> {
-        serde_json::from_str(s).map_err(|_e| LabError::ReplayDivergence {
-            expected_events: 0,
-            actual_events: 0,
-        })
+        let bundle: Self =
+            serde_json::from_str(s).map_err(|err| LabError::BundleDeserialization {
+                detail: err.to_string(),
+            })?;
+        bundle.validate()?;
+        Ok(bundle)
     }
 }
 
@@ -593,6 +645,13 @@ impl LabRuntime {
     /// Add a virtual link to the runtime.
     pub fn add_link(&mut self, link: VirtualLink) -> Result<usize, LabError> {
         link.fault_profile.validate()?;
+        if self.virtual_links.len() >= MAX_VIRTUAL_LINKS
+            || self.reorder_buffers.len() >= MAX_REORDER_BUFFERS
+        {
+            return Err(LabError::LinkCapacityExceeded {
+                limit: MAX_VIRTUAL_LINKS.min(MAX_REORDER_BUFFERS),
+            });
+        }
         let idx = self.virtual_links.len();
         self.emit(
             EVT_VIRTUAL_LINK_CREATED,
@@ -605,8 +664,8 @@ impl LabRuntime {
                 link.fault_profile.delay_ticks,
             ),
         );
-        push_bounded(&mut self.virtual_links, link, MAX_VIRTUAL_LINKS);
-        push_bounded(&mut self.reorder_buffers, Vec::new(), MAX_REORDER_BUFFERS);
+        self.virtual_links.push(link);
+        self.reorder_buffers.push(Vec::new());
         Ok(idx)
     }
 
@@ -658,19 +717,38 @@ impl LabRuntime {
             });
         }
 
+        if self.reorder_buffers.len() <= link_idx {
+            self.reorder_buffers.resize_with(link_idx + 1, Vec::new);
+        }
+
         if profile.reorder_depth > 0 {
-            let buf = &mut self.reorder_buffers[link_idx];
-            buf.push(message.to_string());
-            if buf.len() >= profile.reorder_depth {
-                // Shuffle the buffer deterministically.
-                let len = buf.len();
-                for i in (1..len).rev() {
-                    let j = self.rng.next_usize(i + 1);
-                    buf.swap(i, j);
+            let reordered_len = {
+                let buf = self.reorder_buffers.get_mut(link_idx).ok_or_else(|| {
+                    LabError::LinkNotFound {
+                        source: format!("idx={link_idx}"),
+                        target: "unknown".into(),
+                    }
+                })?;
+                buf.push(message.to_string());
+                if buf.len() >= profile.reorder_depth {
+                    // Shuffle the buffer deterministically, then clear it before
+                    // re-borrowing `self` for audit emission.
+                    let len = buf.len();
+                    for i in (1..len).rev() {
+                        let j = self.rng.next_usize(i + 1);
+                        buf.swap(i, j);
+                    }
+                    buf.clear();
+                    Some(len)
+                } else {
+                    None
                 }
+            };
+
+            if let Some(len) = reordered_len {
                 self.emit(
                     EVT_FAULT_INJECTED,
-                    format!("reordered {} messages on {source}->{target}", len),
+                    format!("reordered {} messages on {}->{}", len, source, target),
                 );
                 return Ok(MessageOutcome::Reordered {
                     buffer_position: len - 1,
@@ -744,16 +822,17 @@ impl LabRuntime {
         };
         self.emit(event_code, format!("passed={passed}"));
 
-        let repro_bundle = if !passed {
+        let (events, repro_bundle) = if !passed {
             let bundle = self.export_repro_bundle(passed);
-            Some(bundle.to_json())
+            let serialized = bundle.to_json()?;
+            (bundle.events.clone(), Some(serialized))
         } else {
-            None
+            (self.events.clone(), None)
         };
 
         Ok(ScenarioResult {
             passed,
-            events: self.events.clone(),
+            events,
             seed: self.seed,
             interleavings_explored: 0,
             bugs_found: if passed { 0 } else { 1 },
@@ -827,41 +906,59 @@ impl LabRuntime {
 
     /// Export a repro bundle capturing the current runtime state.
     /// INV-LB-REPLAY: this bundle can be fed back to reproduce the execution.
-    pub fn export_repro_bundle(&mut self, passed: bool) -> ReproBundle {
-        self.emit(
-            EVT_REPRO_EXPORTED,
-            format!("events={}, passed={passed}", self.events.len()),
+    pub fn export_repro_bundle(&self, passed: bool) -> ReproBundle {
+        let mut events = self.events.clone();
+        push_bounded(
+            &mut events,
+            LabEvent {
+                tick: self.test_clock.current_tick,
+                event_code: EVT_REPRO_EXPORTED.to_string(),
+                payload: format!("events={}, passed={passed}", self.events.len()),
+            },
+            MAX_EVENTS,
         );
         ReproBundle {
             schema_version: SCHEMA_VERSION.to_string(),
             seed: self.seed,
             config: self.config.clone(),
             links: self.virtual_links.clone(),
-            events: self.events.clone(),
+            events,
             passed,
         }
     }
 
-    /// Replay a repro bundle and verify the outcome matches.
-    /// INV-LB-REPLAY: replay must produce identical pass/fail.
+    /// Replay a repro bundle and verify the stored execution trace matches.
+    /// INV-LB-REPLAY: replay must preserve the full recorded event trace.
     pub fn replay_bundle(
         bundle: &ReproBundle,
         scenario: &dyn Fn(&mut LabRuntime) -> Result<bool, LabError>,
     ) -> Result<ScenarioResult, LabError> {
+        bundle.validate()?;
         let mut rt = LabRuntime::new(bundle.config.clone())?;
         for link in &bundle.links {
             rt.add_link(link.clone())?;
         }
-        let result = rt.run_scenario(scenario)?;
+        let mut result = rt.run_scenario(scenario)?;
 
-        // Verify determinism: the pass/fail outcome must match.
-        if result.passed != bundle.passed {
+        // Failure replays already carry `EVT_REPRO_EXPORTED` in the returned
+        // `ScenarioResult.events`. Passing bundles need an explicit export here
+        // so both paths compare against the same stored event surface.
+        let replayed_events = if bundle.passed && result.passed {
+            rt.export_repro_bundle(result.passed).events
+        } else {
+            result.events.clone()
+        };
+
+        // Verify determinism: both the final verdict and the full event trace
+        // must match the stored repro bundle.
+        if result.passed != bundle.passed || replayed_events != bundle.events {
             return Err(LabError::ReplayDivergence {
                 expected_events: bundle.events.len(),
-                actual_events: result.events.len(),
+                actual_events: replayed_events.len(),
             });
         }
 
+        result.events = replayed_events;
         Ok(result)
     }
 
@@ -1214,6 +1311,34 @@ mod tests {
     }
 
     #[test]
+    fn test_lab_runtime_add_link_rejects_capacity_overflow() {
+        let mut rt = LabRuntime::new(default_config()).unwrap();
+        rt.virtual_links = (0..MAX_VIRTUAL_LINKS)
+            .map(|idx| {
+                let source = format!("src-{idx}");
+                let target = format!("dst-{idx}");
+                make_link(&source, &target, FaultProfile::default())
+            })
+            .collect();
+        rt.reorder_buffers = vec![Vec::new(); MAX_REORDER_BUFFERS];
+
+        let err = rt
+            .add_link(make_link(
+                "overflow-src",
+                "overflow-dst",
+                FaultProfile::default(),
+            ))
+            .expect_err("capacity overflow must fail closed");
+        assert!(matches!(
+            err,
+            LabError::LinkCapacityExceeded {
+                limit: MAX_VIRTUAL_LINKS
+            }
+        ));
+        assert_eq!(rt.link_count(), MAX_VIRTUAL_LINKS);
+    }
+
+    #[test]
     fn test_lab_runtime_find_link() {
         let mut rt = LabRuntime::new(default_config()).unwrap();
         rt.add_link(make_link("x", "y", FaultProfile::default()))
@@ -1321,6 +1446,50 @@ mod tests {
             || matches!(o2, MessageOutcome::Reordered { .. })
             || matches!(o3, MessageOutcome::Reordered { .. });
         assert!(has_reorder, "at least one message should be reordered");
+    }
+
+    #[test]
+    fn test_send_message_reorder_clears_buffer_before_next_cycle() {
+        let mut rt = LabRuntime::new(default_config()).unwrap();
+        rt.add_link(make_link("a", "b", reorder_profile())).unwrap();
+
+        assert!(matches!(
+            rt.send_message(0, "m1").unwrap(),
+            MessageOutcome::Delivered { .. }
+        ));
+        assert!(matches!(
+            rt.send_message(0, "m2").unwrap(),
+            MessageOutcome::Delivered { .. }
+        ));
+        assert!(matches!(
+            rt.send_message(0, "m3").unwrap(),
+            MessageOutcome::Reordered {
+                buffer_position: 2,
+                delay_ticks: 1
+            }
+        ));
+        assert!(matches!(
+            rt.send_message(0, "m4").unwrap(),
+            MessageOutcome::Delivered { .. }
+        ));
+    }
+
+    #[test]
+    fn test_send_message_repairs_missing_reorder_buffers_after_deserialize() {
+        let mut original = LabRuntime::new(default_config()).unwrap();
+        original
+            .add_link(make_link("sender", "receiver", reorder_profile()))
+            .unwrap();
+
+        let json = serde_json::to_string(&original).expect("serialize runtime");
+        let mut restored: LabRuntime = serde_json::from_str(&json).expect("deserialize runtime");
+        assert!(restored.reorder_buffers.is_empty());
+
+        assert!(matches!(
+            restored.send_message(0, "hello").unwrap(),
+            MessageOutcome::Delivered { delay_ticks: 1 }
+        ));
+        assert_eq!(restored.reorder_buffers.len(), 1);
     }
 
     #[test]
@@ -1476,7 +1645,7 @@ mod tests {
             .unwrap();
         let bundle = rt.export_repro_bundle(false);
 
-        let json = bundle.to_json();
+        let json = bundle.to_json().unwrap();
         assert!(!json.is_empty());
 
         let restored = ReproBundle::from_json(&json).unwrap();
@@ -1487,8 +1656,92 @@ mod tests {
     }
 
     #[test]
+    fn test_repro_bundle_to_json_reports_serialization_error() {
+        let mut bundle = LabRuntime::new(default_config())
+            .unwrap()
+            .export_repro_bundle(true);
+        bundle.links.push(VirtualLink {
+            source: "a".into(),
+            target: "b".into(),
+            fault_profile: FaultProfile {
+                drop_pct: f64::NAN,
+                ..FaultProfile::default()
+            },
+        });
+
+        let err = bundle
+            .to_json()
+            .expect_err("NaN should fail JSON serialization");
+        assert!(matches!(err, LabError::BundleSerialization { .. }));
+    }
+
+    #[test]
+    fn test_repro_bundle_export_is_idempotent_for_same_state() {
+        let mut rt = LabRuntime::new(default_config()).unwrap();
+        rt.add_link(make_link("a", "b", FaultProfile::default()))
+            .unwrap();
+        let runtime_events = rt.events().to_vec();
+
+        let first = rt.export_repro_bundle(true);
+        let second = rt.export_repro_bundle(true);
+
+        assert_eq!(first, second);
+        assert_eq!(rt.events(), runtime_events.as_slice());
+    }
+
+    #[test]
+    fn test_repro_bundle_export_respects_max_events_bound() {
+        let mut rt = LabRuntime::new(default_config()).unwrap();
+        rt.events = (0..MAX_EVENTS)
+            .map(|idx| LabEvent {
+                tick: idx as u64,
+                event_code: EVT_SCENARIO_STARTED.to_string(),
+                payload: format!("event-{idx}"),
+            })
+            .collect();
+
+        let bundle = rt.export_repro_bundle(true);
+
+        assert_eq!(bundle.events.len(), MAX_EVENTS);
+        assert_eq!(
+            bundle.events.last().map(|event| event.event_code.as_str()),
+            Some(EVT_REPRO_EXPORTED)
+        );
+    }
+
+    #[test]
+    fn test_repro_bundle_from_json_reports_parse_error() {
+        let err = ReproBundle::from_json("{not-json").expect_err("invalid JSON must fail");
+        assert!(matches!(err, LabError::BundleDeserialization { .. }));
+    }
+
+    #[test]
+    fn test_repro_bundle_from_json_rejects_unsupported_schema_version() {
+        let mut bundle = LabRuntime::new(default_config())
+            .unwrap()
+            .export_repro_bundle(true);
+        bundle.schema_version = "lab-v0.9".into();
+
+        let json = serde_json::to_string(&bundle).unwrap();
+        let err = ReproBundle::from_json(&json).expect_err("unsupported schema must fail");
+        assert!(matches!(err, LabError::BundleValidation { .. }));
+    }
+
+    #[test]
+    fn test_repro_bundle_from_json_rejects_seed_mismatch() {
+        let mut bundle = LabRuntime::new(default_config())
+            .unwrap()
+            .export_repro_bundle(true);
+        bundle.seed = bundle.seed.wrapping_add(1);
+
+        let json = serde_json::to_string(&bundle).unwrap();
+        let err = ReproBundle::from_json(&json).expect_err("seed mismatch must fail");
+        assert!(matches!(err, LabError::BundleValidation { .. }));
+    }
+
+    #[test]
     fn test_repro_bundle_replay_deterministic() {
-        // INV-LB-REPLAY: replay produces same outcome.
+        // INV-LB-REPLAY: replay preserves the full failure trace.
         let config = default_config();
         let mut rt = LabRuntime::new(config.clone()).unwrap();
         rt.add_link(make_link("x", "y", lossy_profile())).unwrap();
@@ -1515,6 +1768,7 @@ mod tests {
         .unwrap();
 
         assert!(!replay_result.passed);
+        assert_eq!(replay_result.events, bundle.events);
     }
 
     #[test]
@@ -1530,6 +1784,79 @@ mod tests {
             LabError::ReplayDivergence { .. } => {}
             other => unreachable!("expected ReplayDivergence, got {other}"),
         }
+    }
+
+    #[test]
+    fn test_repro_bundle_replay_detects_trace_divergence_with_same_outcome() {
+        let config = default_config();
+        let mut rt = LabRuntime::new(config).unwrap();
+        rt.add_link(make_link("x", "y", FaultProfile::default()))
+            .unwrap();
+
+        rt.run_scenario(&|rt| {
+            rt.send_message(0, "ping")?;
+            Ok(false)
+        })
+        .unwrap();
+
+        let bundle = rt.export_repro_bundle(false);
+        let result = LabRuntime::replay_bundle(&bundle, &|rt| {
+            rt.send_message(0, "pong")?;
+            Ok(false)
+        });
+
+        assert!(matches!(result, Err(LabError::ReplayDivergence { .. })));
+    }
+
+    #[test]
+    fn test_repro_bundle_replay_rejects_invalid_bundle_metadata() {
+        let mut bundle = LabRuntime::new(default_config())
+            .unwrap()
+            .export_repro_bundle(true);
+        bundle.seed = bundle.seed.wrapping_add(1);
+
+        let result = LabRuntime::replay_bundle(&bundle, &|_rt| Ok(true));
+        assert!(matches!(result, Err(LabError::BundleValidation { .. })));
+    }
+
+    #[test]
+    fn test_run_scenario_failure_returns_exported_trace_without_mutating_runtime() {
+        let mut rt = LabRuntime::new(default_config()).unwrap();
+
+        let result = rt.run_scenario(&|_rt| Ok(false)).unwrap();
+
+        assert_eq!(
+            result.events.last().map(|event| event.event_code.as_str()),
+            Some(EVT_REPRO_EXPORTED)
+        );
+        assert_eq!(
+            rt.events().last().map(|event| event.event_code.as_str()),
+            Some(EVT_SCENARIO_FAILED)
+        );
+    }
+
+    #[test]
+    fn test_repro_bundle_replay_preserves_trace_for_passing_bundle() {
+        let config = default_config();
+        let mut rt = LabRuntime::new(config).unwrap();
+        rt.add_link(make_link("x", "y", FaultProfile::default()))
+            .unwrap();
+
+        rt.run_scenario(&|rt| {
+            rt.send_message(0, "ping")?;
+            Ok(true)
+        })
+        .unwrap();
+
+        let bundle = rt.export_repro_bundle(true);
+        let replay_result = LabRuntime::replay_bundle(&bundle, &|rt| {
+            rt.send_message(0, "ping")?;
+            Ok(true)
+        })
+        .unwrap();
+
+        assert!(replay_result.passed);
+        assert_eq!(replay_result.events, bundle.events);
     }
 
     #[test]
@@ -1658,6 +1985,22 @@ mod tests {
             actual_events: 5,
         };
         assert!(e.to_string().contains(ERR_LB_REPLAY_DIVERGENCE));
+    }
+
+    #[test]
+    fn test_error_display_bundle_deserialization() {
+        let e = LabError::BundleDeserialization {
+            detail: "expected value".into(),
+        };
+        assert!(e.to_string().contains(ERR_LB_BUNDLE_DESERIALIZATION));
+    }
+
+    #[test]
+    fn test_error_display_bundle_validation() {
+        let e = LabError::BundleValidation {
+            detail: "unsupported schema".into(),
+        };
+        assert!(e.to_string().contains(ERR_LB_BUNDLE_VALIDATION));
     }
 
     // ---------------------------------------------------------------

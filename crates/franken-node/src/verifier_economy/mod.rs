@@ -570,6 +570,37 @@ struct PublishedVerifierStats {
     dimensions: BTreeSet<VerificationDimension>,
 }
 
+fn next_sequential_id(
+    counter: &mut u64,
+    exhausted: &mut bool,
+    prefix: &str,
+    entity: &str,
+) -> VepResult<String> {
+    if *exhausted {
+        return Err(VepError {
+            code: ERR_VEP_CAPACITY_EXCEEDED.to_string(),
+            message: format!("{entity} ID sequence exhausted"),
+        });
+    }
+
+    let current = *counter;
+    if let Some(next) = counter.checked_add(1) {
+        *counter = next;
+    } else {
+        *exhausted = true;
+    }
+    Ok(format!("{prefix}-{:04}", current))
+}
+
+fn increment_submission_count(count: &mut u32, verifier_id: &str) -> VepResult<u32> {
+    let next = count.checked_add(1).ok_or_else(|| VepError {
+        code: ERR_VEP_ANTI_GAMING.to_string(),
+        message: format!("Submission counter exhausted for verifier {verifier_id}"),
+    })?;
+    *count = next;
+    Ok(next)
+}
+
 // ---------------------------------------------------------------------------
 // Registry
 // ---------------------------------------------------------------------------
@@ -587,6 +618,9 @@ pub struct VerifierEconomyRegistry {
     next_verifier_id: u64,
     next_attestation_id: u64,
     next_dispute_id: u64,
+    verifier_id_exhausted: bool,
+    attestation_id_exhausted: bool,
+    dispute_id_exhausted: bool,
     /// Sybil resistance: track submission counts per verifier per window.
     submission_counts: BTreeMap<String, u32>,
     /// Maximum submissions per verifier per window.
@@ -621,6 +655,9 @@ impl VerifierEconomyRegistry {
             next_verifier_id: 1,
             next_attestation_id: 1,
             next_dispute_id: 1,
+            verifier_id_exhausted: false,
+            attestation_id_exhausted: false,
+            dispute_id_exhausted: false,
             submission_counts: BTreeMap::new(),
             max_submissions_per_window: 100,
             replay_capsule_freshness_secs,
@@ -740,8 +777,12 @@ impl VerifierEconomyRegistry {
             });
         }
 
-        let verifier_id = format!("ver-{:04}", self.next_verifier_id);
-        self.next_verifier_id = self.next_verifier_id.wrapping_add(1);
+        let verifier_id = next_sequential_id(
+            &mut self.next_verifier_id,
+            &mut self.verifier_id_exhausted,
+            "ver",
+            "Verifier",
+        )?;
 
         let verifier = Verifier {
             verifier_id: verifier_id.clone(),
@@ -869,12 +910,27 @@ impl VerifierEconomyRegistry {
         }
 
         // Anti-gaming: sybil resistance rate limiting
-        let count = self
-            .submission_counts
-            .entry(submission.verifier_id.clone())
-            .or_insert(0);
-        *count = count.wrapping_add(1);
-        if *count > self.max_submissions_per_window {
+        let submission_total = {
+            let count = self
+                .submission_counts
+                .entry(submission.verifier_id.clone())
+                .or_insert(0);
+            increment_submission_count(count, &submission.verifier_id)
+        };
+        let submission_total = match submission_total {
+            Ok(total) => total,
+            Err(error) => {
+                self.emit(
+                    VEP_006,
+                    &format!(
+                        "Anti-gaming: submission counter exhausted for {}",
+                        submission.verifier_id
+                    ),
+                );
+                return Err(error);
+            }
+        };
+        if submission_total > self.max_submissions_per_window {
             self.emit(
                 VEP_006,
                 &format!(
@@ -919,8 +975,12 @@ impl VerifierEconomyRegistry {
             return Err(error);
         }
 
-        let attestation_id = format!("att-{:04}", self.next_attestation_id);
-        self.next_attestation_id = self.next_attestation_id.wrapping_add(1);
+        let attestation_id = next_sequential_id(
+            &mut self.next_attestation_id,
+            &mut self.attestation_id_exhausted,
+            "att",
+            "Attestation",
+        )?;
 
         let attestation = Attestation {
             attestation_id: attestation_id.clone(),
@@ -1159,8 +1219,12 @@ impl VerifierEconomyRegistry {
         })?;
         att.state = AttestationState::Disputed;
 
-        let dispute_id = format!("dsp-{:04}", self.next_dispute_id);
-        self.next_dispute_id = self.next_dispute_id.wrapping_add(1);
+        let dispute_id = next_sequential_id(
+            &mut self.next_dispute_id,
+            &mut self.dispute_id_exhausted,
+            "dsp",
+            "Dispute",
+        )?;
 
         let dispute = Dispute {
             dispute_id: dispute_id.clone(),
@@ -1460,11 +1524,11 @@ impl VerifierEconomyRegistry {
             if attestation.state != AttestationState::Published {
                 continue;
             }
-            total_attestations = total_attestations.wrapping_add(1);
+            total_attestations = total_attestations.saturating_add(1);
             let stats = published_stats
                 .entry(attestation.verifier_id.clone())
                 .or_default();
-            stats.attestation_count = stats.attestation_count.wrapping_add(1);
+            stats.attestation_count = stats.attestation_count.saturating_add(1);
             stats.dimensions.insert(attestation.claim.dimension.clone());
         }
 
@@ -1810,6 +1874,34 @@ mod tests {
     }
 
     #[test]
+    fn test_register_verifier_fails_when_id_sequence_is_exhausted() {
+        let mut reg = make_registry();
+        reg.next_verifier_id = u64::MAX;
+        reg.verifier_id_exhausted = true;
+
+        let error = reg.register_verifier(make_registration()).unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPACITY_EXCEEDED);
+        assert!(error.message.contains("Verifier ID sequence exhausted"));
+    }
+
+    #[test]
+    fn test_next_sequential_id_uses_last_value_before_exhausting() {
+        let mut counter = u64::MAX;
+        let mut exhausted = false;
+
+        let final_id = next_sequential_id(&mut counter, &mut exhausted, "ver", "Verifier")
+            .expect("last sequential ID should still be usable");
+        assert_eq!(final_id, "ver-18446744073709551615");
+        assert!(exhausted);
+        assert_eq!(counter, u64::MAX);
+
+        let error = next_sequential_id(&mut counter, &mut exhausted, "ver", "Verifier")
+            .expect_err("allocator should fail after the last sequential ID");
+        assert_eq!(error.code, ERR_VEP_CAPACITY_EXCEEDED);
+        assert!(error.message.contains("Verifier ID sequence exhausted"));
+    }
+
+    #[test]
     fn test_register_verifier_rejects_malformed_public_key() {
         let mut reg = make_registry();
         let mut registration = make_registration();
@@ -2108,6 +2200,25 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_submit_attestation_fails_when_id_sequence_is_exhausted() {
+        let mut reg = make_registry();
+        let verifier = reg
+            .register_verifier(make_registration())
+            .expect("should succeed");
+        reg.next_attestation_id = u64::MAX;
+        reg.attestation_id_exhausted = true;
+
+        let error = reg
+            .submit_attestation(make_submission(
+                &verifier.verifier_id,
+                &registration_signing_key(),
+            ))
+            .unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPACITY_EXCEEDED);
+        assert!(error.message.contains("Attestation ID sequence exhausted"));
+    }
+
     // -- Publishing flow tests (INV-VEP-PUBLISH) ------------------------------
 
     #[test]
@@ -2397,6 +2508,28 @@ mod tests {
                 .state,
             AttestationState::Published
         );
+    }
+
+    #[test]
+    fn test_file_dispute_fails_when_id_sequence_is_exhausted() {
+        let mut reg = make_registry();
+        let (verifier, attestation) = register_and_submit(&mut reg);
+        reg.review_attestation(&attestation.attestation_id).unwrap();
+        reg.publish_attestation(&attestation.attestation_id)
+            .unwrap();
+        reg.next_dispute_id = u64::MAX;
+        reg.dispute_id_exhausted = true;
+
+        let error = reg
+            .file_dispute(
+                &attestation.attestation_id,
+                &verifier.verifier_id,
+                "overflow dispute id",
+                vec![],
+            )
+            .unwrap_err();
+        assert_eq!(error.code, ERR_VEP_CAPACITY_EXCEEDED);
+        assert!(error.message.contains("Dispute ID sequence exhausted"));
     }
 
     // -- Replay capsule tests -------------------------------------------------
@@ -2864,6 +2997,27 @@ mod tests {
         let sub = make_submission(&v.verifier_id, &registration_signing_key());
         let _ = reg.submit_attestation(sub);
         assert!(reg.events().iter().any(|e| e.code == VEP_006));
+    }
+
+    #[test]
+    fn test_submit_attestation_fails_closed_when_submission_counter_overflows() {
+        let mut reg = make_registry();
+        reg.max_submissions_per_window = u32::MAX;
+        let verifier = reg
+            .register_verifier(make_registration())
+            .expect("should succeed");
+        reg.submission_counts
+            .insert(verifier.verifier_id.clone(), u32::MAX);
+
+        let error = reg
+            .submit_attestation(make_submission(
+                &verifier.verifier_id,
+                &registration_signing_key(),
+            ))
+            .unwrap_err();
+        assert_eq!(error.code, ERR_VEP_ANTI_GAMING);
+        assert!(error.message.contains("Submission counter exhausted"));
+        assert!(reg.events().iter().any(|event| event.code == VEP_006));
     }
 
     #[test]

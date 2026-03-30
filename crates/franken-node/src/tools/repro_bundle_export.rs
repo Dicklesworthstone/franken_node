@@ -323,6 +323,7 @@ impl ReproBundle {
             "failure_type": self.failure_context.failure_type.label(),
             "error_message": self.failure_context.error_message,
             "trigger": self.failure_context.trigger,
+            "failure_timestamp_ms": self.failure_context.timestamp_ms,
             "config": config,
             "event_trace": event_trace,
             "evidence_refs": evidence_refs,
@@ -1014,6 +1015,19 @@ mod tests {
         assert_eq!(parsed["config"]["key\"x"].as_str(), Some("val\\ue\nline2"));
     }
 
+    #[test]
+    fn bundle_to_json_includes_failure_timestamp() {
+        let ctx = make_context();
+        let bundle = generate_repro_bundle(&ctx);
+        let json = bundle.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json expected");
+
+        assert_eq!(
+            parsed["failure_timestamp_ms"].as_u64(),
+            Some(bundle.failure_context.timestamp_ms)
+        );
+    }
+
     // ── Replay ──
 
     #[test]
@@ -1294,6 +1308,7 @@ mod tests {
             parsed["failure_type"].as_str().unwrap(),
             "epoch_transition_timeout"
         );
+        assert_eq!(parsed["failure_timestamp_ms"].as_u64().unwrap(), 7000);
     }
 
     // ── Config in bundle ──

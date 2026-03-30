@@ -43,3 +43,8 @@ tracing-subscriber = { workspace = true }
 [[test]]
 name = "verifier_sdk_capsule_replay"
 path = "../../tests/conformance/verifier_sdk_capsule_replay.rs"
+
+[[test]]
+name = "idempotency_key_derivation"
+path = "../../tests/conformance/idempotency_key_derivation.rs"
+required-features = ["extended-surfaces"]
