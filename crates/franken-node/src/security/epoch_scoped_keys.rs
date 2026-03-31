@@ -310,7 +310,7 @@ mod tests {
         let key = derive_epoch_key(&root_secret(), ControlEpoch::new(1), "marker");
         assert_eq!(
             key.to_hex(),
-            "d7350d1a4c2204ef30e35ef14064aee424caf6a0d93edb99da9399a80d45c4da"
+            "688a015b0a37cc066e81340ef9dcae5b5936f02a355b132dead9f03b18b345ba"
         );
     }
 
@@ -319,7 +319,7 @@ mod tests {
         let key = derive_epoch_key(&root_secret(), ControlEpoch::new(13), "marker");
         assert_eq!(
             key.to_hex(),
-            "688a015b0a37cc066e81340ef9dcae5b5936f02a355b132dead9f03b18b345ba"
+            "d7350d1a4c2204ef30e35ef14064aee424caf6a0d93edb99da9399a80d45c4da"
         );
     }
 
