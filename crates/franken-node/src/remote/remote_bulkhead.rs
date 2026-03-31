@@ -145,6 +145,9 @@ pub enum BulkheadError {
     UnknownPermit {
         permit_id: u64,
     },
+    PermitIdExhausted {
+        request_id: String,
+    },
     InvalidRequestId {
         detail: String,
     },
@@ -169,6 +172,7 @@ impl BulkheadError {
             Self::UnknownRequest { .. } => "RB_ERR_UNKNOWN_REQUEST",
             Self::DuplicateRequest { .. } => "RB_ERR_DUPLICATE_REQUEST",
             Self::UnknownPermit { .. } => "RB_ERR_UNKNOWN_PERMIT",
+            Self::PermitIdExhausted { .. } => "RB_ERR_PERMIT_ID_EXHAUSTED",
             Self::InvalidRequestId { .. } => "RB_ERR_INVALID_REQUEST_ID",
             Self::Draining { .. } => "RB_ERR_DRAINING",
             Self::InvalidConfig { .. } => "RB_ERR_INVALID_CONFIG",
@@ -207,6 +211,13 @@ impl fmt::Display for BulkheadError {
             Self::UnknownPermit { permit_id } => {
                 write!(f, "{}: unknown permit_id={permit_id}", self.code())
             }
+            Self::PermitIdExhausted { request_id } => {
+                write!(
+                    f,
+                    "{}: permit id space exhausted request_id={request_id}",
+                    self.code()
+                )
+            }
             Self::InvalidRequestId { detail } => {
                 write!(f, "{}: {detail}", self.code())
             }
@@ -237,6 +248,7 @@ pub struct RemoteBulkhead {
     outstanding_permits: BTreeMap<u64, String>,
     active_request_ids: BTreeSet<String>,
     next_permit_id: u64,
+    permit_ids_exhausted: bool,
     draining_target: Option<usize>,
     p99_target_ms: u64,
     latency_samples: Vec<ForegroundLatencySample>,
@@ -270,6 +282,7 @@ impl RemoteBulkhead {
             outstanding_permits: BTreeMap::new(),
             active_request_ids: BTreeSet::new(),
             next_permit_id: 1,
+            permit_ids_exhausted: false,
             draining_target: None,
             p99_target_ms,
             latency_samples: Vec::new(),
@@ -380,12 +393,30 @@ impl RemoteBulkhead {
             issued_at_ms: now_ms,
             cap_snapshot: self.max_in_flight,
         };
-        self.next_permit_id = self.next_permit_id.saturating_add(1);
+        if self.next_permit_id == u64::MAX {
+            self.permit_ids_exhausted = true;
+        } else {
+            self.next_permit_id += 1;
+        }
         self.outstanding_permits
             .insert(permit.permit_id, request_id.to_string());
         self.active_request_ids.insert(request_id.to_string());
         self.in_flight = self.in_flight.saturating_add(1);
         permit
+    }
+
+    fn permit_id_exhausted_error(
+        &mut self,
+        request_id: impl Into<String>,
+        now_ms: u64,
+    ) -> BulkheadError {
+        let request_id = request_id.into();
+        self.log_event(
+            event_codes::RB_REQUEST_REJECTED,
+            now_ms,
+            format!("request_id={request_id} permit_id space exhausted"),
+        );
+        BulkheadError::PermitIdExhausted { request_id }
     }
 
     fn evict_expired_queue_entries(&mut self, now_ms: u64) {
@@ -500,6 +531,10 @@ impl RemoteBulkhead {
                 });
             }
             self.draining_target = None;
+        }
+
+        if self.permit_ids_exhausted {
+            return Err(self.permit_id_exhausted_error(request_id, now_ms));
         }
 
         if self.in_flight < self.max_in_flight && !self.queue_has_waiters() {
@@ -617,6 +652,15 @@ impl RemoteBulkhead {
             return Err(BulkheadError::DuplicateRequest {
                 request_id: request_id.to_string(),
             });
+        }
+
+        if self.permit_ids_exhausted {
+            let Some(expired_request) = self.queue.remove(position) else {
+                return Err(BulkheadError::UnknownRequest {
+                    request_id: request_id.to_string(),
+                });
+            };
+            return Err(self.permit_id_exhausted_error(expired_request.request_id, now_ms));
         }
 
         if position != 0 || self.in_flight >= self.max_in_flight {
@@ -899,6 +943,88 @@ mod tests {
         b.release(promoted, 6).expect("release promoted");
         assert_eq!(b.current_in_flight(), 0);
         assert_eq!(b.queue_depth(), 0);
+    }
+
+    #[test]
+    fn terminal_permit_id_is_issued_once_then_direct_acquire_fails_closed() {
+        let mut b = bulkhead_reject(1);
+        b.next_permit_id = u64::MAX;
+
+        let terminal = b
+            .acquire(true, "terminal", 1)
+            .expect("terminal permit id should still be issued once");
+        assert_eq!(terminal.permit_id(), u64::MAX);
+        b.release(terminal, 2).expect("release terminal permit");
+
+        let err = b
+            .acquire(true, "after-terminal", 3)
+            .expect_err("permit id exhaustion must fail closed");
+        assert!(matches!(
+            err,
+            BulkheadError::PermitIdExhausted { ref request_id } if request_id == "after-terminal"
+        ));
+        let rejection = b
+            .events()
+            .iter()
+            .rev()
+            .find(|event| event.event_code == event_codes::RB_REQUEST_REJECTED)
+            .expect("exhaustion rejection should be logged");
+        assert!(rejection.detail.contains("request_id=after-terminal"));
+    }
+
+    #[test]
+    fn queued_request_is_rejected_after_terminal_permit_id_is_consumed() {
+        let mut b = bulkhead_queue(1, 3, 100);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        let _queued = b
+            .acquire(true, "queued-1", 2)
+            .expect_err("queue first waiter");
+        let _queued = b
+            .acquire(true, "queued-2", 3)
+            .expect_err("queue second waiter");
+
+        b.next_permit_id = u64::MAX;
+        b.release(active, 4).expect("release active permit");
+
+        let terminal = b
+            .poll_queued("queued-1", 5)
+            .expect("front queued request should get terminal permit id");
+        assert_eq!(terminal.permit_id(), u64::MAX);
+        b.release(terminal, 6).expect("release terminal permit");
+
+        let err = b
+            .poll_queued("queued-2", 7)
+            .expect_err("remaining queued request must fail closed after exhaustion");
+        assert!(matches!(
+            err,
+            BulkheadError::PermitIdExhausted { ref request_id } if request_id == "queued-2"
+        ));
+        assert_eq!(b.queue_depth(), 0);
+    }
+
+    #[test]
+    fn serde_round_trip_preserves_permit_id_exhaustion_state() {
+        let mut b = bulkhead_reject(1);
+        b.next_permit_id = u64::MAX;
+
+        let terminal = b
+            .acquire(true, "terminal", 1)
+            .expect("terminal permit id should still be issued once");
+        b.release(terminal, 2).expect("release terminal permit");
+        assert!(b.permit_ids_exhausted);
+
+        let json = serde_json::to_string(&b).expect("serialize bulkhead");
+        let mut restored: RemoteBulkhead =
+            serde_json::from_str(&json).expect("deserialize bulkhead");
+
+        assert!(restored.permit_ids_exhausted);
+        let err = restored
+            .acquire(true, "after-round-trip", 3)
+            .expect_err("exhaustion must survive serde round-trip");
+        assert!(matches!(
+            err,
+            BulkheadError::PermitIdExhausted { ref request_id } if request_id == "after-round-trip"
+        ));
     }
 
     #[test]
