@@ -1168,12 +1168,32 @@ mod tests {
         let mut gate = make_gate();
         gate.register_control_workflow(
             ControlWorkflow::ConnectorLifecycle,
-            vec![AwaitPoint::new(
-                WorkflowId::Custom("rollout_transition".into()),
-                0,
-                "init_start",
-                "Before connector initialization",
-            )],
+            vec![
+                AwaitPoint::new(
+                    WorkflowId::Custom("rollout_transition".into()),
+                    0,
+                    "init_start",
+                    "Before connector initialization",
+                ),
+                AwaitPoint::new(
+                    WorkflowId::Custom("connector_lifecycle".into()),
+                    1,
+                    "health_probe",
+                    "Health check point",
+                ),
+                AwaitPoint::new(
+                    WorkflowId::Custom("connector_lifecycle".into()),
+                    2,
+                    "state_load",
+                    "Load canonical state",
+                ),
+                AwaitPoint::new(
+                    WorkflowId::Custom("connector_lifecycle".into()),
+                    3,
+                    "ready_signal",
+                    "Connector ready",
+                ),
+            ],
             "test",
         );
 

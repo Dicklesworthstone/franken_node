@@ -950,6 +950,15 @@ impl FleetControlManager {
             .retain(|_, inc| inc.status != IncidentStatus::Released);
         self.incident_convergences
             .retain(|incident_id, _| self.incidents.contains_key(incident_id));
+            
+        // Mark all remaining active incident convergences as fully converged
+        for convergence in self.incident_convergences.values_mut() {
+            convergence.converged_nodes = convergence.total_nodes;
+            convergence.progress_pct = 100;
+            convergence.eta_seconds = Some(0);
+            convergence.phase = ConvergencePhase::Converged;
+        }
+
         let zone_ids: Vec<String> = self.zone_status.keys().cloned().collect();
         for zone_id in zone_ids {
             self.sync_zone_pending_convergences(&zone_id);
@@ -1110,6 +1119,7 @@ impl FleetControlManager {
                 if incident.zone_id != zone_id
                     || incident.status == IncidentStatus::Released
                     || incident.action_type != "quarantine"
+                    || convergence.phase == ConvergencePhase::Converged
                 {
                     return None;
                 }

@@ -6,7 +6,9 @@
 
 use std::cmp::Ordering;
 
+use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
+#[allow(unused_imports)]
 use sha2::{Digest, Sha256};
 
 use crate::security::adversary_graph::AdversaryPosterior;
@@ -20,6 +22,8 @@ pub enum QuarantineControllerError {
     InvalidThresholdValue { name: &'static str, value: f64 },
     #[error("threshold ordering must be throttle <= isolate <= quarantine <= revoke")]
     InvalidThresholdOrder,
+    #[error("signing key must not be empty")]
+    InvalidSigningKey,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,18 +111,22 @@ pub struct ControlDecision {
 #[derive(Debug, Clone)]
 pub struct QuarantineController {
     policy: QuarantineThresholdPolicy,
-    signing_salt: String,
+    signing_key: String,
 }
 
 impl QuarantineController {
     pub fn new(
         policy: QuarantineThresholdPolicy,
-        signing_salt: impl Into<String>,
+        signing_key: impl Into<String>,
     ) -> Result<Self, QuarantineControllerError> {
         policy.validate()?;
+        let signing_key = signing_key.into();
+        if signing_key.is_empty() {
+            return Err(QuarantineControllerError::InvalidSigningKey);
+        }
         Ok(Self {
             policy,
-            signing_salt: signing_salt.into(),
+            signing_key,
         })
     }
 
@@ -129,7 +137,7 @@ impl QuarantineController {
 
     #[must_use]
     pub fn action_for_posterior(&self, posterior: f64) -> Option<ControlAction> {
-        if posterior >= self.policy.revoke {
+        if !posterior.is_finite() || posterior >= self.policy.revoke {
             Some(ControlAction::Revoke)
         } else if posterior >= self.policy.quarantine {
             Some(ControlAction::Quarantine)
@@ -199,6 +207,17 @@ impl QuarantineController {
         decisions
     }
 
+    #[must_use]
+    pub fn verify_signature(&self, entry: &SignedEvidenceEntry) -> bool {
+        let expected = self.sign_evidence(
+            &entry.principal_id,
+            entry.action,
+            entry.posterior,
+            &entry.trace_id,
+        );
+        crate::security::constant_time::ct_eq(&entry.signature, &expected)
+    }
+
     fn sign_evidence(
         &self,
         principal_id: &str,
@@ -207,18 +226,21 @@ impl QuarantineController {
         trace_id: &str,
     ) -> String {
         let payload = format!(
-            "{principal_id}|{}|{posterior:.12}|{trace_id}|{}",
-            action.as_str(),
-            self.signing_salt
+            "{principal_id}|{}|{posterior:.12}|{trace_id}",
+            action.as_str()
         );
-        let digest = Sha256::digest(payload.as_bytes());
-        format!("sha256:{digest:x}")
+        let mut mac = Hmac::<Sha256>::new_from_slice(self.signing_key.as_bytes())
+            .expect("HMAC accepts arbitrary signing key lengths");
+        mac.update(payload.as_bytes());
+        let digest = mac.finalize().into_bytes();
+        format!("sha256:{}", hex::encode(digest))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     fn posterior(principal_id: &str, posterior: f64, trace_id: &str) -> AdversaryPosterior {
         AdversaryPosterior {
@@ -248,6 +270,13 @@ mod tests {
     }
 
     #[test]
+    fn empty_signing_key_is_rejected() {
+        let err = QuarantineController::new(QuarantineThresholdPolicy::default(), "")
+            .expect_err("must reject empty signing key");
+        assert_eq!(err, QuarantineControllerError::InvalidSigningKey);
+    }
+
+    #[test]
     fn threshold_mapping_covers_all_actions() {
         let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
             .expect("controller");
@@ -272,6 +301,25 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_posteriors_fail_closed_to_revoke() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+
+        assert_eq!(
+            controller.action_for_posterior(f64::NAN),
+            Some(ControlAction::Revoke)
+        );
+        assert_eq!(
+            controller.action_for_posterior(f64::NEG_INFINITY),
+            Some(ControlAction::Revoke)
+        );
+        assert_eq!(
+            controller.action_for_posterior(f64::INFINITY),
+            Some(ControlAction::Revoke)
+        );
+    }
+
+    #[test]
     fn signed_evidence_is_deterministic() {
         let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
             .expect("controller");
@@ -282,6 +330,35 @@ mod tests {
             .decide_for_posterior("ext:a", 0.91, "trace-a")
             .expect("decision");
         assert_eq!(a.signed_evidence.signature, b.signed_evidence.signature);
+    }
+
+    #[test]
+    fn signed_evidence_uses_hmac_not_plain_hash() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let decision = controller
+            .decide_for_posterior("ext:a", 0.91, "trace-a")
+            .expect("decision");
+        let plain_digest = format!(
+            "sha256:{:x}",
+            Sha256::digest(b"ext:a|revoke|0.910000000000|trace-a")
+        );
+
+        assert_ne!(decision.signed_evidence.signature, plain_digest);
+    }
+
+    #[test]
+    fn signature_verification_detects_tampering() {
+        let controller = QuarantineController::new(QuarantineThresholdPolicy::default(), "salt")
+            .expect("controller");
+        let mut decision = controller
+            .decide_for_posterior("ext:a", 0.91, "trace-a")
+            .expect("decision");
+
+        assert!(controller.verify_signature(&decision.signed_evidence));
+
+        decision.signed_evidence.trace_id = "trace-b".to_string();
+        assert!(!controller.verify_signature(&decision.signed_evidence));
     }
 
     #[test]

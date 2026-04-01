@@ -1203,14 +1203,15 @@ mod tests {
         policy.registered_extensions.insert("ext-001".into());
 
         // Add a rule that quarantines data_mutation.
+        // Insert at priority 0 to ensure it is evaluated before default rules.
         let rule = TrafficPolicyRule {
             intent: IntentClassification::DataMutation,
             verdict: FirewallVerdict::Quarantine,
             host_pattern: None,
-            priority: 100,
+            priority: 0,
             rationale: "quarantine mutations for testing".into(),
         };
-        policy.rules.insert(100, rule);
+        policy.rules.insert(0, rule);
 
         let mut fw = EffectsFirewall::new(policy);
 
