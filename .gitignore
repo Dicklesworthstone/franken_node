@@ -32,6 +32,9 @@ __pycache__/
 
 # Beads issue tracker history backups
 .beads/.br_history/
+.beads/*.bad_*
+.beads/*.rebuild_*
+.beads/recovery_*/
 
 # Agent coordination config
 .agent-mail.yaml
@@ -39,9 +42,11 @@ __pycache__/
 # Remote compilation helper temp directories
 .rch_tmp/
 .rch_*/
+/.rch-target-*/
 
 # UBS (Ultimate Bug Scanner) output
 ubs.json
+/ubs-*.txt
 ubs_*.txt
 ubs_*.json
 ubs_*.sarif
@@ -57,6 +62,10 @@ final_ubs*.txt
 text_ubs_output.txt
 clippy_out.txt
 fixer.txt
+/ubs-report.txt
+/ubs-runtime.txt
+/ubs-runtime-control.txt
+/ubs-control-plane.txt
 
 # Debug/scratch audience token output
 audience_token*.json
@@ -74,16 +83,25 @@ test_remaining.py
 /test.rs
 /test_chrono.rs
 /test_panic.rs
+/test_borrow
+/test_borrow.rs
+/test_bypass.rs
+/test_epoch_downgrade.rs
 
 # Ephemeral output files
 /out.json
 /reproduction_report.json
+/patch.diff
+/unwrap_list.txt
+/clippy.txt
+/1
 
 # Runtime SQLite databases
 storage.sqlite3
 *.sqlite3-wal
 *.sqlite3-shm
 *.sqlite3-journal
+/storage.sqlite3.bak*
 
 # Agent-generated analysis scripts
 find_commands.py

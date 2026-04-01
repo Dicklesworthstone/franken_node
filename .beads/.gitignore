@@ -2,6 +2,8 @@
 *.db
 *.db-shm
 *.db-wal
+beads.db.bad_*
+beads.db.rebuild_*
 
 # Lock files
 *.lock
@@ -9,3 +11,4 @@
 # Temporary
 last-touched
 *.tmp
+recovery_*/
