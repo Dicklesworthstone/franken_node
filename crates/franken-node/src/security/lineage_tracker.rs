@@ -695,7 +695,20 @@ impl ExfiltrationSentinel {
         let _inv_boundary = INV_BOUNDARY_ENFORCED;
         let _inv_det = INV_DETERMINISTIC;
 
+        if graph
+            .get_edge(&edge.edge_id)
+            .is_some_and(|stored_edge| stored_edge.quarantined)
+        {
+            return Err(LineageError::AlreadyQuarantined {
+                detail: format!(
+                    "{}: edge '{}' already quarantined",
+                    ERR_IFL_ALREADY_QUARANTINED, edge.edge_id
+                ),
+            });
+        }
+
         let mut worst_verdict = FlowVerdict::Pass;
+        let mut edge_quarantined = false;
 
         for boundary in self.boundaries.values() {
             // Check if this edge crosses this boundary
@@ -732,24 +745,27 @@ impl ExfiltrationSentinel {
 
                 // Auto-contain: quarantine the edge
                 // INV-IFL-QUARANTINE-RECEIPT
-                let _inv_receipt = INV_QUARANTINE_RECEIPT;
-                let _event_quarantine = EVENT_FLOW_QUARANTINED;
-                graph.quarantine_edge(&edge.edge_id)?;
+                if !edge_quarantined {
+                    let _inv_receipt = INV_QUARANTINE_RECEIPT;
+                    let _event_quarantine = EVENT_FLOW_QUARANTINED;
+                    graph.quarantine_edge(&edge.edge_id)?;
 
-                // Issue containment receipt
-                self.receipt_counter += 1;
-                let receipt_id = format!("receipt-{}", self.receipt_counter);
-                let _event_receipt = EVENT_CONTAINMENT_RECEIPT;
+                    // Issue containment receipt once per edge quarantine.
+                    self.receipt_counter += 1;
+                    let receipt_id = format!("receipt-{}", self.receipt_counter);
+                    let _event_receipt = EVENT_CONTAINMENT_RECEIPT;
 
-                let receipt = ContainmentReceipt {
-                    receipt_id: receipt_id.clone(),
-                    alert_id: format!("alert-{}", self.alert_counter),
-                    edge_id: edge.edge_id.clone(),
-                    quarantine_timestamp_ms: edge.timestamp_ms,
-                    containment_action: "quarantine_edge".to_string(),
-                    success: true,
-                };
-                self.receipts.insert(receipt_id, receipt);
+                    let receipt = ContainmentReceipt {
+                        receipt_id: receipt_id.clone(),
+                        alert_id: format!("alert-{}", self.alert_counter),
+                        edge_id: edge.edge_id.clone(),
+                        quarantine_timestamp_ms: edge.timestamp_ms,
+                        containment_action: "quarantine_edge".to_string(),
+                        success: true,
+                    };
+                    self.receipts.insert(receipt_id, receipt);
+                    edge_quarantined = true;
+                }
 
                 worst_verdict = FlowVerdict::Quarantine;
             }
@@ -833,9 +849,10 @@ impl ExfiltrationSentinel {
                     Ok(FlowVerdict::Alert) => {
                         detected += 1;
                     }
-                    Err(_) => {
+                    Err(LineageError::AlreadyQuarantined { .. }) => {
                         // Edge may already be quarantined from a previous pass.
                     }
+                    Err(err) => return Err(err),
                 }
             }
         }
@@ -1429,6 +1446,41 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_boundary_violations_emit_all_alerts_but_single_receipt() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+
+        sentinel
+            .add_boundary(make_boundary("b1", "internal", "external", &["PII"]))
+            .unwrap();
+        sentinel
+            .add_boundary(make_boundary("b2", "internal", "external", &["SECRET"]))
+            .unwrap();
+
+        let mut ts = TaintSet::new();
+        ts.insert("PII");
+        ts.insert("SECRET");
+
+        let edge = FlowEdge {
+            edge_id: "multi-boundary-1".to_string(),
+            source: "internal-db".to_string(),
+            sink: "external-api".to_string(),
+            operation: "export".to_string(),
+            taint_set: ts,
+            timestamp_ms: 605,
+            quarantined: false,
+        };
+        graph.append_edge(edge.clone()).unwrap();
+
+        let verdict = sentinel.evaluate_edge(&edge, &mut graph).unwrap();
+        assert_eq!(verdict, FlowVerdict::Quarantine);
+        assert_eq!(sentinel.alert_count(), 2);
+        assert_eq!(sentinel.receipt_count(), 1);
+        assert!(graph.get_edge("multi-boundary-1").unwrap().quarantined);
+    }
+
+    #[test]
     fn test_boundary_crossing_requires_zone_boundary_match() {
         let config = default_config();
         let mut graph = LineageGraph::new(config.clone());
@@ -1764,6 +1816,40 @@ mod tests {
         let result = sentinel.scan_graph(&mut graph).unwrap();
         assert_eq!(result.exfiltrations_detected, 1);
         assert_eq!(result.exfiltrations_contained, 1);
+    }
+
+    #[test]
+    fn test_scan_graph_counts_multi_boundary_exfiltration_once() {
+        let config = default_config();
+        let mut graph = LineageGraph::new(config.clone());
+        let mut sentinel = ExfiltrationSentinel::new(config);
+        sentinel
+            .add_boundary(make_boundary("b1", "priv", "pub", &["PII"]))
+            .unwrap();
+        sentinel
+            .add_boundary(make_boundary("b2", "priv", "pub", &["SECRET"]))
+            .unwrap();
+
+        let mut ts = TaintSet::new();
+        ts.insert("PII");
+        ts.insert("SECRET");
+
+        let edge = FlowEdge {
+            edge_id: "scan-multi-1".to_string(),
+            source: "priv-svc".to_string(),
+            sink: "pub-cdn".to_string(),
+            operation: "export".to_string(),
+            taint_set: ts,
+            timestamp_ms: 2,
+            quarantined: false,
+        };
+        graph.append_edge(edge).unwrap();
+
+        let result = sentinel.scan_graph(&mut graph).unwrap();
+        assert_eq!(result.exfiltrations_detected, 1);
+        assert_eq!(result.exfiltrations_contained, 1);
+        assert_eq!(sentinel.alert_count(), 2);
+        assert_eq!(sentinel.receipt_count(), 1);
     }
 
     #[test]
