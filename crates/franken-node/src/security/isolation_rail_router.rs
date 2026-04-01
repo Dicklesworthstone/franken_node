@@ -75,6 +75,8 @@ pub const ERR_ISO_DUPLICATE_WORKLOAD: &str = "ERR_ISO_DUPLICATE_WORKLOAD";
 pub const ERR_ISO_INVALID_RISK_SCORE: &str = "ERR_ISO_INVALID_RISK_SCORE";
 /// Elevation to the same rail (no-op) is rejected as a logical error.
 pub const ERR_ISO_SAME_RAIL_ELEVATION: &str = "ERR_ISO_SAME_RAIL_ELEVATION";
+/// Hot-elevation is disabled by policy for this router.
+pub const ERR_ISO_HOT_ELEVATION_DISABLED: &str = "ERR_ISO_HOT_ELEVATION_DISABLED";
 
 /// All error codes for enumeration.
 pub const ALL_ERROR_CODES: &[&str] = &[
@@ -84,6 +86,7 @@ pub const ALL_ERROR_CODES: &[&str] = &[
     ERR_ISO_DUPLICATE_WORKLOAD,
     ERR_ISO_INVALID_RISK_SCORE,
     ERR_ISO_SAME_RAIL_ELEVATION,
+    ERR_ISO_HOT_ELEVATION_DISABLED,
 ];
 
 // ─── Core types ─────────────────────────────────────────────────────────────
@@ -242,6 +245,13 @@ pub enum RailRouterError {
         workload_id: String,
         rail: IsolationRail,
     },
+    /// Hot-elevation was requested but policy forbids runtime elevation.
+    #[serde(rename = "ERR_ISO_HOT_ELEVATION_DISABLED")]
+    HotElevationDisabled {
+        workload_id: String,
+        current: IsolationRail,
+        requested: IsolationRail,
+    },
 }
 
 impl fmt::Display for RailRouterError {
@@ -285,6 +295,16 @@ impl fmt::Display for RailRouterError {
                 write!(
                     f,
                     "{ERR_ISO_SAME_RAIL_ELEVATION}: workload '{workload_id}' already on rail {rail}"
+                )
+            }
+            Self::HotElevationDisabled {
+                workload_id,
+                current,
+                requested,
+            } => {
+                write!(
+                    f,
+                    "{ERR_ISO_HOT_ELEVATION_DISABLED}: workload '{workload_id}' cannot hot-elevate from {current} to {requested} because policy disables hot elevation"
                 )
             }
         }
@@ -426,6 +446,14 @@ impl RailRouter {
                 &format!("downgrade rejected: {from_rail} -> {target_rail}"),
             );
             return Err(RailRouterError::DowngradeRejected {
+                workload_id: workload_id.to_string(),
+                current: from_rail,
+                requested: target_rail,
+            });
+        }
+
+        if !self.policy.allow_hot_elevation {
+            return Err(RailRouterError::HotElevationDisabled {
                 workload_id: workload_id.to_string(),
                 current: from_rail,
                 requested: target_rail,
@@ -745,6 +773,28 @@ mod tests {
     }
 
     #[test]
+    fn hot_elevate_respects_disabled_policy() {
+        let mut r = RailRouter::new(ElevationPolicy {
+            allow_hot_elevation: false,
+            ..ElevationPolicy::default()
+        });
+        r.classify_workload("w1", 0.1).unwrap();
+
+        let err = r
+            .hot_elevate("w1", IsolationRail::Sandboxed, "policy-off")
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            RailRouterError::HotElevationDisabled {
+                current: IsolationRail::Shared,
+                requested: IsolationRail::Sandboxed,
+                ..
+            }
+        ));
+        assert_eq!(r.get_rail("w1").unwrap(), IsolationRail::Shared);
+    }
+
+    #[test]
     fn hot_elevate_updates_classification() {
         let mut r = default_router();
         r.classify_workload("w1", 0.1).unwrap();
@@ -949,6 +999,11 @@ mod tests {
                 workload_id: "w".into(),
                 rail: IsolationRail::Shared,
             },
+            RailRouterError::HotElevationDisabled {
+                workload_id: "w".into(),
+                current: IsolationRail::Shared,
+                requested: IsolationRail::Sandboxed,
+            },
         ];
         let expected_codes = [
             ERR_ISO_UNCLASSIFIED,
@@ -957,6 +1012,7 @@ mod tests {
             ERR_ISO_DUPLICATE_WORKLOAD,
             ERR_ISO_INVALID_RISK_SCORE,
             ERR_ISO_SAME_RAIL_ELEVATION,
+            ERR_ISO_HOT_ELEVATION_DISABLED,
         ];
         for (err, code) in errors.iter().zip(expected_codes.iter()) {
             assert!(
@@ -983,7 +1039,7 @@ mod tests {
 
     #[test]
     fn all_error_codes_listed() {
-        assert_eq!(ALL_ERROR_CODES.len(), 6);
+        assert_eq!(ALL_ERROR_CODES.len(), 7);
     }
 
     #[test]

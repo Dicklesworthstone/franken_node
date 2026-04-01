@@ -12,6 +12,8 @@ use sha2::{Digest, Sha256};
 pub const ADVERSARY_GRAPH_SCHEMA_VERSION: &str = "adversary-graph-state-v1";
 pub const EVD_ADV_GRAPH_001: &str = "EVD-ADV-GRAPH-001";
 pub const EVD_ADV_GRAPH_002: &str = "EVD-ADV-GRAPH-002";
+const DEFAULT_PRIOR_ALPHA: u64 = 1;
+const DEFAULT_PRIOR_BETA: u64 = 9;
 
 #[derive(Debug, Clone, thiserror::Error, PartialEq)]
 pub enum AdversaryGraphError {
@@ -79,8 +81,8 @@ struct AdversaryNode {
 impl Default for AdversaryNode {
     fn default() -> Self {
         Self {
-            alpha: 1,
-            beta: 1,
+            alpha: DEFAULT_PRIOR_ALPHA,
+            beta: DEFAULT_PRIOR_BETA,
             evidence_count: 0,
             last_trace_id: String::new(),
             evidence_hash: String::new(),
@@ -273,6 +275,21 @@ mod tests {
         assert_ne!(
             first.evidence_hash, second.evidence_hash,
             "evidence hash chain must evolve"
+        );
+    }
+
+    #[test]
+    fn weak_prior_starts_at_point_one_risk() {
+        let mut graph = AdversaryGraph::new();
+        let posterior = graph
+            .ingest(&obs("ext:a", 1.0, 1, "ev-1", "trace-1"))
+            .expect("ingest");
+
+        assert_eq!(posterior.alpha, 2);
+        assert_eq!(posterior.beta, 9);
+        assert!(
+            (posterior.posterior - (2.0 / 11.0)).abs() < 1e-12,
+            "single adverse observation must be applied on top of the weak 1/9 prior"
         );
     }
 

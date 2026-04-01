@@ -360,10 +360,41 @@ impl TrafficPolicy {
         }
     }
 
-    /// Look up the highest-priority rule for a given intent category.
-    pub fn match_rule(&self, intent: IntentClassification) -> Option<&TrafficPolicyRule> {
+    /// Look up the highest-priority rule for a given intent category and host.
+    pub fn match_rule(
+        &self,
+        intent: IntentClassification,
+        target_host: &str,
+    ) -> Option<&TrafficPolicyRule> {
         // BTreeMap iterates in key order (ascending priority = highest priority first).
-        self.rules.values().find(|r| r.intent == intent)
+        self.rules
+            .values()
+            .find(|r| r.intent == intent && r.matches_host(target_host))
+    }
+}
+
+impl TrafficPolicyRule {
+    fn matches_host(&self, target_host: &str) -> bool {
+        let Some(pattern) = self.host_pattern.as_deref() else {
+            return true;
+        };
+
+        if pattern.is_empty() {
+            return true;
+        }
+
+        if let Some(suffix) = pattern.strip_prefix("*.") {
+            return target_host.len() > suffix.len()
+                && target_host
+                    .get(target_host.len() - suffix.len()..)
+                    .is_some_and(|tail| tail.eq_ignore_ascii_case(suffix))
+                && target_host
+                    .as_bytes()
+                    .get(target_host.len() - suffix.len() - 1)
+                    == Some(&b'.');
+        }
+
+        target_host.eq_ignore_ascii_case(pattern)
     }
 }
 
@@ -744,7 +775,7 @@ impl EffectsFirewall {
         }
 
         // Match policy rule.
-        let rule = self.policy.match_rule(intent);
+        let rule = self.policy.match_rule(intent, &effect.target_host);
         let (verdict, rule_priority, rationale) = match rule {
             Some(r) => (r.verdict, Some(r.priority), r.rationale.clone()),
             None => {
@@ -1247,6 +1278,68 @@ mod tests {
             .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Challenge);
         assert!(decision.rationale.contains("manual review required"));
+    }
+
+    #[test]
+    fn test_host_pattern_rule_only_matches_target_host() {
+        let mut policy = TrafficPolicy::default_policy();
+        policy.registered_extensions.insert("ext-001".into());
+        policy.rules.insert(
+            0,
+            TrafficPolicyRule {
+                intent: IntentClassification::DataFetch,
+                verdict: FirewallVerdict::Challenge,
+                host_pattern: Some("admin.example.com".into()),
+                priority: 0,
+                rationale: "challenge admin fetches".into(),
+            },
+        );
+
+        let mut fw = EffectsFirewall::new(policy);
+        let mut admin_effect = make_effect("e-admin", "ext-001");
+        admin_effect.target_host = "admin.example.com".into();
+        let admin_decision = fw
+            .evaluate(&admin_effect, "trace-admin", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(admin_decision.verdict, FirewallVerdict::Challenge);
+
+        let mut api_effect = make_effect("e-api", "ext-001");
+        api_effect.target_host = "api.example.com".into();
+        let api_decision = fw
+            .evaluate(&api_effect, "trace-api", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(api_decision.verdict, FirewallVerdict::Allow);
+    }
+
+    #[test]
+    fn test_wildcard_host_pattern_matches_subdomains_only() {
+        let mut policy = TrafficPolicy::default_policy();
+        policy.registered_extensions.insert("ext-001".into());
+        policy.rules.insert(
+            0,
+            TrafficPolicyRule {
+                intent: IntentClassification::DataFetch,
+                verdict: FirewallVerdict::Simulate,
+                host_pattern: Some("*.example.com".into()),
+                priority: 0,
+                rationale: "simulate subdomain fetches".into(),
+            },
+        );
+
+        let mut fw = EffectsFirewall::new(policy);
+        let mut subdomain_effect = make_effect("e-sub", "ext-001");
+        subdomain_effect.target_host = "edge.example.com".into();
+        let subdomain_decision = fw
+            .evaluate(&subdomain_effect, "trace-sub", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(subdomain_decision.verdict, FirewallVerdict::Simulate);
+
+        let mut apex_effect = make_effect("e-apex", "ext-001");
+        apex_effect.target_host = "example.com".into();
+        let apex_decision = fw
+            .evaluate(&apex_effect, "trace-apex", "2026-01-01T00:00:00Z")
+            .unwrap();
+        assert_eq!(apex_decision.verdict, FirewallVerdict::Allow);
     }
 
     #[test]
