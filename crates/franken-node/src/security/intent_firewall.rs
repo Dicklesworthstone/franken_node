@@ -228,13 +228,13 @@ pub struct RemoteEffect {
 impl RemoteEffect {
     /// Validate that the effect descriptor is well-formed.
     pub fn validate(&self) -> Result<(), FirewallError> {
-        if self.effect_id.is_empty() {
+        if self.effect_id.trim().is_empty() {
             return Err(FirewallError::InvalidEffect("empty effect_id".into()));
         }
-        if self.target_host.is_empty() {
+        if self.target_host.trim().is_empty() {
             return Err(FirewallError::InvalidEffect("empty target_host".into()));
         }
-        if self.method.is_empty() {
+        if self.method.trim().is_empty() {
             return Err(FirewallError::InvalidEffect("empty method".into()));
         }
         Ok(())
@@ -1223,6 +1223,29 @@ mod tests {
         let mut effect = make_effect("e-bad-host", "ext-001");
         effect.target_host = String::new();
         let result = fw.evaluate(&effect, "trace-7", "2026-01-01T00:00:00Z");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), ERR_FW_INVALID_EFFECT);
+    }
+
+    #[test]
+    fn test_invalid_effect_blank_fields() {
+        let mut fw = make_firewall();
+
+        let mut blank_id = make_effect("e-blank-id", "ext-001");
+        blank_id.effect_id = "   ".into();
+        let result = fw.evaluate(&blank_id, "trace-blank-id", "2026-01-01T00:00:00Z");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), ERR_FW_INVALID_EFFECT);
+
+        let mut blank_host = make_effect("e-blank-host", "ext-001");
+        blank_host.target_host = "   ".into();
+        let result = fw.evaluate(&blank_host, "trace-blank-host", "2026-01-01T00:00:00Z");
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), ERR_FW_INVALID_EFFECT);
+
+        let mut blank_method = make_effect("e-blank-method", "ext-001");
+        blank_method.method = "   ".into();
+        let result = fw.evaluate(&blank_method, "trace-blank-method", "2026-01-01T00:00:00Z");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), ERR_FW_INVALID_EFFECT);
     }
