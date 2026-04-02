@@ -4,7 +4,7 @@
 //! and optional `parent_span_id`.  Missing context is a conformance failure.
 //! Traces can be stitched across services via shared `trace_id`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 const MAX_SPANS_PER_TRACE: usize = 4096;
@@ -182,11 +182,8 @@ impl TraceStore {
     /// Check conformance: every artifact in the list must have valid trace context.
     pub fn check_conformance(artifacts: &[TracedArtifact]) -> ConformanceReport {
         let mut violations = Vec::new();
-        let trace_id = artifacts
-            .first()
-            .and_then(|a| a.trace_context.as_ref())
-            .map(|tc| tc.trace_id.clone())
-            .unwrap_or_default();
+        let mut trace_id = None;
+        let mut valid_contexts = Vec::new();
 
         for art in artifacts {
             match &art.trace_context {
@@ -200,8 +197,39 @@ impl TraceStore {
                             artifact_id: art.artifact_id.clone(),
                             reason: e.to_string(),
                         });
+                        continue;
                     }
+
+                    let flow_trace_id = trace_id.get_or_insert_with(|| tc.trace_id.clone());
+                    if tc.trace_id != *flow_trace_id {
+                        violations.push(TraceViolation {
+                            artifact_id: art.artifact_id.clone(),
+                            reason: TraceError::ConformanceFailed(format!(
+                                "trace_id '{}' does not match flow trace_id '{}'",
+                                tc.trace_id, flow_trace_id
+                            ))
+                            .to_string(),
+                        });
+                        continue;
+                    }
+
+                    valid_contexts.push((art.artifact_id.clone(), tc.clone()));
                 }
+            }
+        }
+
+        let known_spans: BTreeSet<String> = valid_contexts
+            .iter()
+            .map(|(_, tc)| tc.span_id.clone())
+            .collect();
+        for (artifact_id, tc) in &valid_contexts {
+            if let Some(parent) = &tc.parent_span_id
+                && !known_spans.contains(parent)
+            {
+                violations.push(TraceViolation {
+                    artifact_id: artifact_id.clone(),
+                    reason: TraceError::ParentNotFound(parent.clone()).to_string(),
+                });
             }
         }
 
@@ -212,7 +240,7 @@ impl TraceStore {
         };
 
         ConformanceReport {
-            trace_id,
+            trace_id: trace_id.unwrap_or_default(),
             total_artifacts: artifacts.len(),
             violations,
             verdict,
@@ -356,6 +384,62 @@ mod tests {
         }];
         let report = TraceStore::check_conformance(&arts);
         assert_eq!(report.verdict, "FAIL");
+    }
+
+    #[test]
+    fn conformance_fail_mixed_trace_ids() {
+        let mut other = ctx(None);
+        other.trace_id = "ffffffffffffffffffffffffffffffff".into();
+        let arts = vec![
+            TracedArtifact {
+                artifact_id: "a1".into(),
+                artifact_type: "invoke".into(),
+                trace_context: Some(ctx(None)),
+            },
+            TracedArtifact {
+                artifact_id: "a2".into(),
+                artifact_type: "receipt".into(),
+                trace_context: Some(other),
+            },
+        ];
+        let report = TraceStore::check_conformance(&arts);
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, tid());
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.violations[0].artifact_id, "a2");
+        assert!(
+            report.violations[0]
+                .reason
+                .contains("TRC_CONFORMANCE_FAILED")
+        );
+    }
+
+    #[test]
+    fn conformance_fail_orphan_parent_in_flow() {
+        let orphan = TraceContext {
+            trace_id: tid(),
+            span_id: sid(2),
+            parent_span_id: Some(sid(99)),
+            timestamp: "ts2".into(),
+        };
+        let arts = vec![
+            TracedArtifact {
+                artifact_id: "a1".into(),
+                artifact_type: "invoke".into(),
+                trace_context: Some(ctx(None)),
+            },
+            TracedArtifact {
+                artifact_id: "a2".into(),
+                artifact_type: "receipt".into(),
+                trace_context: Some(orphan),
+            },
+        ];
+        let report = TraceStore::check_conformance(&arts);
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, tid());
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.violations[0].artifact_id, "a2");
+        assert!(report.violations[0].reason.contains("TRC_PARENT_NOT_FOUND"));
     }
 
     #[test]

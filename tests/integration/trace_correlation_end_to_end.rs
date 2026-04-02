@@ -5,6 +5,9 @@ use frankenengine_node::connector::trace_context::*;
 fn tid() -> String {
     "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6".to_string()
 }
+fn other_tid() -> String {
+    "ffffffffffffffffffffffffffffffff".to_string()
+}
 fn sid(n: u8) -> String {
     format!("00000000000000{n:02x}")
 }
@@ -76,4 +79,64 @@ fn inv_trc_conformance() {
     assert_eq!(report.verdict, "FAIL");
     assert_eq!(report.violations.len(), 1);
     assert_eq!(report.violations[0].artifact_id, "a2");
+}
+
+#[test]
+fn inv_trc_conformance_rejects_mixed_trace_ids() {
+    let good = TracedArtifact {
+        artifact_id: "a1".into(),
+        artifact_type: "invoke".into(),
+        trace_context: Some(TraceContext {
+            trace_id: tid(),
+            span_id: sid(1),
+            parent_span_id: None,
+            timestamp: "ts".into(),
+        }),
+    };
+    let mixed = TracedArtifact {
+        artifact_id: "a2".into(),
+        artifact_type: "receipt".into(),
+        trace_context: Some(TraceContext {
+            trace_id: other_tid(),
+            span_id: sid(2),
+            parent_span_id: Some(sid(1)),
+            timestamp: "ts".into(),
+        }),
+    };
+    let report = TraceStore::check_conformance(&[good, mixed]);
+    assert_eq!(report.verdict, "FAIL");
+    assert_eq!(report.trace_id, tid());
+    assert_eq!(report.violations.len(), 1);
+    assert_eq!(report.violations[0].artifact_id, "a2");
+    assert!(report.violations[0].reason.contains("TRC_CONFORMANCE_FAILED"));
+}
+
+#[test]
+fn inv_trc_conformance_rejects_orphan_parent() {
+    let good = TracedArtifact {
+        artifact_id: "a1".into(),
+        artifact_type: "invoke".into(),
+        trace_context: Some(TraceContext {
+            trace_id: tid(),
+            span_id: sid(1),
+            parent_span_id: None,
+            timestamp: "ts".into(),
+        }),
+    };
+    let orphan = TracedArtifact {
+        artifact_id: "a2".into(),
+        artifact_type: "receipt".into(),
+        trace_context: Some(TraceContext {
+            trace_id: tid(),
+            span_id: sid(2),
+            parent_span_id: Some(sid(99)),
+            timestamp: "ts".into(),
+        }),
+    };
+    let report = TraceStore::check_conformance(&[good, orphan]);
+    assert_eq!(report.verdict, "FAIL");
+    assert_eq!(report.trace_id, tid());
+    assert_eq!(report.violations.len(), 1);
+    assert_eq!(report.violations[0].artifact_id, "a2");
+    assert!(report.violations[0].reason.contains("TRC_PARENT_NOT_FOUND"));
 }
