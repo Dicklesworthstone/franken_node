@@ -108,7 +108,11 @@ fn inv_trc_conformance_rejects_mixed_trace_ids() {
     assert_eq!(report.trace_id, tid());
     assert_eq!(report.violations.len(), 1);
     assert_eq!(report.violations[0].artifact_id, "a2");
-    assert!(report.violations[0].reason.contains("TRC_CONFORMANCE_FAILED"));
+    assert!(
+        report.violations[0]
+            .reason
+            .contains("TRC_CONFORMANCE_FAILED")
+    );
 }
 
 #[test]
