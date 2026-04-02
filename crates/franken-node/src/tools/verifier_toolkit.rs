@@ -92,6 +92,64 @@ fn deterministic_digest(domain: &[u8], fields: &[&str]) -> [u8; 32] {
     bytes
 }
 
+fn seed_float_token(value: f64) -> String {
+    format!("0x{:016x}", value.to_bits())
+}
+
+fn seed_string_map(entries: &BTreeMap<String, String>) -> serde_json::Value {
+    serde_json::Value::Object(
+        entries
+            .iter()
+            .map(|(key, value)| (key.clone(), serde_json::Value::String(value.clone())))
+            .collect(),
+    )
+}
+
+fn seed_float_map(entries: &BTreeMap<String, f64>) -> serde_json::Value {
+    serde_json::Value::Object(
+        entries
+            .iter()
+            .map(|(key, value)| {
+                (
+                    key.clone(),
+                    serde_json::Value::String(seed_float_token(*value)),
+                )
+            })
+            .collect(),
+    )
+}
+
+fn seed_claim_value(claim: &VerifiableClaim) -> serde_json::Value {
+    let mut claim_value = serde_json::Map::new();
+    claim_value.insert(
+        "claim_id".to_string(),
+        serde_json::Value::String(claim.claim_id.clone()),
+    );
+    claim_value.insert(
+        "claim_type".to_string(),
+        serde_json::Value::String(claim.claim_type.label().to_string()),
+    );
+    claim_value.insert(
+        "source_bead".to_string(),
+        serde_json::Value::String(claim.source_bead.clone()),
+    );
+    claim_value.insert(
+        "description".to_string(),
+        serde_json::Value::String(claim.description.clone()),
+    );
+    claim_value.insert(
+        "evidence_hash".to_string(),
+        serde_json::Value::String(claim.evidence_hash.clone()),
+    );
+    claim_value.insert(
+        "metric_values".to_string(),
+        seed_float_map(&claim.metric_values),
+    );
+    claim_value.insert("thresholds".to_string(), seed_float_map(&claim.thresholds));
+    claim_value.insert("metadata".to_string(), seed_string_map(&claim.metadata));
+    serde_json::Value::Object(claim_value)
+}
+
 fn deterministic_id(prefix: &str, domain: &[u8], fields: &[&str]) -> String {
     let digest = deterministic_digest(domain, fields);
     format!("{prefix}-{}", hex::encode(&digest[..16]))
@@ -695,8 +753,9 @@ impl VerifierToolkit {
     }
 
     fn run_seed(&self, claims: &[VerifiableClaim], trace_id: &str) -> String {
+        let seed_claims: Vec<serde_json::Value> = claims.iter().map(seed_claim_value).collect();
         let seed_input = serde_json::json!({
-            "claims": claims,
+            "claims": seed_claims,
             "trace_id": trace_id,
             "toolkit_version": &self.config.toolkit_version,
             "strict_mode": self.config.strict_mode,
@@ -1171,6 +1230,15 @@ mod tests {
         let mut toolkit = VerifierToolkit::default();
         let mut claim = sample_claim("nan-full");
         claim.metric_values.insert("score".to_string(), f64::NAN);
+        let report = toolkit.validate_claims(&[claim], &make_trace());
+        assert_eq!(report.overall_verdict, ValidationVerdict::Fail);
+    }
+
+    #[test]
+    fn nan_threshold_fails_full_validation() {
+        let mut toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("nan-threshold-full");
+        claim.thresholds.insert("score".to_string(), f64::NAN);
         let report = toolkit.validate_claims(&[claim], &make_trace());
         assert_eq!(report.overall_verdict, ValidationVerdict::Fail);
     }

