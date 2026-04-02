@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from pathlib import Path
 """Verification script for bd-2m2b: Network Guard Egress Layer."""
 
 import json
@@ -7,10 +6,17 @@ import os
 import re
 import subprocess
 import sys
-ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from scripts.lib.test_logger import configure_test_logging
-CHECKS = []
+
+CHECKS: list[dict[str, object]] = []
+NETWORK_GUARD_TEST_FILTER = "security::network_guard"
+GUARD_TEST_TIMEOUT_SECONDS = int(
+    os.environ.get("FRANKEN_NODE_GUARD_TEST_TIMEOUT_SECONDS", "600")
+)
 
 
 def check(check_id, description, passed, details=None):
@@ -25,16 +31,64 @@ def check(check_id, description, passed, details=None):
     return passed
 
 
+def load_non_empty_lines(path: Path) -> list[str]:
+    with path.open(encoding="utf-8") as file_handle:
+        return [line.strip() for line in file_handle if line.strip()]
+
+
+def load_json_document(path: Path) -> dict[str, object] | None:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
+def audit_samples_are_valid(audit_path: Path) -> bool:
+    try:
+        lines = load_non_empty_lines(audit_path)
+    except OSError:
+        return False
+    if len(lines) < 2:
+        return False
+
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            return False
+        if "trace_id" not in event or "action" not in event:
+            return False
+
+    return True
+
+
+def build_guard_test_command() -> list[str]:
+    return [
+        "rch",
+        "exec",
+        "--",
+        "cargo",
+        "test",
+        "-p",
+        "frankenengine-node",
+        "--lib",
+        "--",
+        NETWORK_GUARD_TEST_FILTER,
+    ]
+
+
 def main():
-    logger = configure_test_logging("check_network_guard")
+    from scripts.lib.test_logger import configure_test_logging
+
+    configure_test_logging("check_network_guard")
     print("bd-2m2b: Network Guard Egress Layer — Verification\n")
     all_pass = True
 
     # GUARD-IMPL: Implementation file
-    impl_path = os.path.join(ROOT, "crates/franken-node/src/security/network_guard.rs")
-    impl_exists = os.path.isfile(impl_path)
+    impl_path = ROOT / "crates/franken-node/src/security/network_guard.rs"
+    impl_exists = impl_path.is_file()
     if impl_exists:
-        content = Path(impl_path).read_text()
+        content = impl_path.read_text(encoding="utf-8")
         has_guard = "struct NetworkGuard" in content
         has_policy = "struct EgressPolicy" in content
         has_rule = "struct EgressRule" in content
@@ -47,7 +101,7 @@ def main():
 
     # GUARD-PROTOCOLS: HTTP and TCP support
     if impl_exists:
-        content = Path(impl_path).read_text()
+        content = impl_path.read_text(encoding="utf-8")
         has_http = "Http" in content
         has_tcp = "Tcp" in content
         all_pass &= check("GUARD-PROTOCOLS", "HTTP and TCP protocol support", has_http and has_tcp)
@@ -56,7 +110,7 @@ def main():
 
     # GUARD-ERRORS: All 3 error codes
     if impl_exists:
-        content = Path(impl_path).read_text()
+        content = impl_path.read_text(encoding="utf-8")
         errors = ["GUARD_POLICY_INVALID", "GUARD_EGRESS_DENIED", "GUARD_AUDIT_FAILED"]
         found = [e for e in errors if e in content]
         all_pass &= check("GUARD-ERRORS", "All 3 error codes present",
@@ -65,37 +119,26 @@ def main():
         all_pass &= check("GUARD-ERRORS", "Error codes", False)
 
     # GUARD-FIXTURES: Fixture files
-    fixture_path = os.path.join(ROOT, "fixtures/network_guard/egress_policy_scenarios.json")
+    fixture_path = ROOT / "fixtures/network_guard/egress_policy_scenarios.json"
     fixture_valid = False
-    if os.path.isfile(fixture_path):
-        try:
-            data = json.loads(Path(fixture_path).read_text())
+    if fixture_path.is_file():
+        data = load_json_document(fixture_path)
+        if data is not None:
             fixture_valid = "cases" in data and len(data["cases"]) >= 4
-        except json.JSONDecodeError:
-            pass
     all_pass &= check("GUARD-FIXTURES", "Egress policy fixture with scenarios", fixture_valid)
 
     # GUARD-AUDIT-SAMPLES: Audit JSONL samples
-    audit_path = os.path.join(ROOT, "artifacts/section_10_13/bd-2m2b/network_guard_audit_samples.jsonl")
+    audit_path = ROOT / "artifacts/section_10_13/bd-2m2b/network_guard_audit_samples.jsonl"
     audit_valid = False
-    if os.path.isfile(audit_path):
-        lines = open(audit_path).readlines()
-        audit_valid = len(lines) >= 2
-        for line in lines:
-            if line.strip():
-                try:
-                    event = json.loads(line)
-                    if "trace_id" not in event or "action" not in event:
-                        audit_valid = False
-                except json.JSONDecodeError:
-                    audit_valid = False
+    if audit_path.is_file():
+        audit_valid = audit_samples_are_valid(audit_path)
     all_pass &= check("GUARD-AUDIT-SAMPLES", "Audit JSONL samples with trace IDs", audit_valid)
 
     # GUARD-CONFORMANCE: Conformance test file
-    conf_path = os.path.join(ROOT, "tests/conformance/network_guard_policy.rs")
-    conf_exists = os.path.isfile(conf_path)
+    conf_path = ROOT / "tests/conformance/network_guard_policy.rs"
+    conf_exists = conf_path.is_file()
     if conf_exists:
-        content = Path(conf_path).read_text()
+        content = conf_path.read_text(encoding="utf-8")
         has_deny = "default_deny" in content or "deny" in content.lower()
         has_order = "order" in content.lower()
         has_audit = "audit" in content.lower()
@@ -107,9 +150,9 @@ def main():
     # GUARD-TESTS: Rust tests pass
     try:
         result = subprocess.run(
-            [os.path.expanduser("~/.cargo/bin/cargo"), "test", "-p", "frankenengine-node", "--", "security::network_guard"],
-            capture_output=True, text=True, timeout=120,
-            cwd=os.path.join(ROOT, "crates/franken-node")
+            build_guard_test_command(),
+            capture_output=True, text=True, timeout=GUARD_TEST_TIMEOUT_SECONDS,
+            cwd=ROOT,
         )
         test_output = result.stdout + result.stderr
         match = re.search(r"test result: ok\. (\d+) passed", test_output)
@@ -121,10 +164,10 @@ def main():
         all_pass &= check("GUARD-TESTS", "Rust unit tests pass", False, str(e))
 
     # GUARD-SPEC: Spec contract
-    spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-2m2b_contract.md")
-    spec_exists = os.path.isfile(spec_path)
+    spec_path = ROOT / "docs/specs/section_10_13/bd-2m2b_contract.md"
+    spec_exists = spec_path.is_file()
     if spec_exists:
-        content = Path(spec_path).read_text()
+        content = spec_path.read_text(encoding="utf-8")
         has_invariants = "INV-GUARD" in content
         has_audit = "Audit Event" in content
     else:
@@ -146,9 +189,9 @@ def main():
         "summary": {"total_checks": total, "passing_checks": passing, "failing_checks": total - passing}
     }
 
-    evidence_dir = os.path.join(ROOT, "artifacts/section_10_13/bd-2m2b")
-    os.makedirs(evidence_dir, exist_ok=True)
-    with open(os.path.join(evidence_dir, "verification_evidence.json"), "w") as f:
+    evidence_dir = ROOT / "artifacts/section_10_13/bd-2m2b"
+    evidence_dir.mkdir(parents=True, exist_ok=True)
+    with (evidence_dir / "verification_evidence.json").open("w", encoding="utf-8") as f:
         json.dump(evidence, f, indent=2)
         f.write("\n")
 
