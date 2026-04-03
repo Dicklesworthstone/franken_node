@@ -70,7 +70,7 @@ use crate::policy::{
     policy_explainer::{PolicyExplainer, PolicyExplanation, WordingValidation, validate_wording},
 };
 #[cfg(test)]
-use crate::tools::replay_bundle::{generate_replay_bundle, sample_incident_events};
+use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
 use anyhow::{Context, Result};
 use clap::Parser;
 use frankenengine_node::{
@@ -2379,7 +2379,7 @@ mod migrate_audit_output_tests {
 #[cfg(test)]
 mod incident_list_tests {
     use super::*;
-    use crate::tools::replay_bundle::{
+    use frankenengine_node::tools::replay_bundle::{
         EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
         IncidentEvidencePackage, IncidentSeverity,
     };
@@ -2390,8 +2390,8 @@ mod incident_list_tests {
         LOCK.get_or_init(|| Mutex::new(()))
     }
 
-    fn write_sample_bundle(path: &Path, incident_id: &str, severity: &str) {
-        let mut events = sample_incident_events(incident_id);
+    fn write_fixture_bundle(path: &Path, incident_id: &str, severity: &str) {
+        let mut events = fixture_incident_events(incident_id);
         if let Some(first) = events.first_mut()
             && let Some(payload) = first.payload.as_object_mut()
         {
@@ -2401,7 +2401,7 @@ mod incident_list_tests {
         write_bundle_to_path(&bundle, path).expect("write bundle");
     }
 
-    fn write_incident_evidence_package(workspace: &Path, incident_id: &str) -> PathBuf {
+    fn write_fixture_incident_evidence_package(workspace: &Path, incident_id: &str) -> PathBuf {
         let evidence_path = workspace
             .join(INCIDENT_EVIDENCE_RELATIVE_DIR)
             .join(incident_id_slug(incident_id))
@@ -2460,9 +2460,9 @@ mod incident_list_tests {
                 "refs/logs/event-003.json".to_string(),
             ],
             metadata: IncidentEvidenceMetadata {
-                title: "Synthetic incident".to_string(),
+                title: "Fixture incident evidence".to_string(),
                 affected_components: vec!["auth-svc".to_string()],
-                tags: vec!["test".to_string()],
+                tags: vec!["fixture".to_string(), "test".to_string()],
             },
         };
         std::fs::write(
@@ -2500,8 +2500,8 @@ mod incident_list_tests {
         let nested = root.join("incidents");
         std::fs::create_dir_all(&nested).expect("create nested dir");
 
-        write_sample_bundle(&root.join("high-incident.fnbundle"), "INC-HIGH-001", "high");
-        write_sample_bundle(&nested.join("low-incident.fnbundle"), "INC-LOW-001", "low");
+        write_fixture_bundle(&root.join("high-incident.fnbundle"), "INC-HIGH-001", "high");
+        write_fixture_bundle(&nested.join("low-incident.fnbundle"), "INC-LOW-001", "low");
 
         let all = collect_incident_list_entries(root, None).expect("all entries");
         assert_eq!(all.len(), 2);
@@ -2573,7 +2573,7 @@ mod incident_list_tests {
             "profile = \"balanced\"\n",
         )
         .expect("write config");
-        let evidence_path = write_incident_evidence_package(dir.path(), incident_id);
+        let evidence_path = write_fixture_incident_evidence_package(dir.path(), incident_id);
         std::env::set_current_dir(dir.path()).expect("set cwd");
 
         let run_result = handle_incident_bundle_command(&cli::IncidentBundleArgs {

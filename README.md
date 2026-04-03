@@ -64,8 +64,9 @@ franken-node trust card npm:@example/plugin
 # 7) Run with strict policy controls
 franken-node run ./my-app --policy strict
 
-# 8) Replay a high-severity incident bundle
-franken-node incident replay --bundle ./incidents/INC-2026-0007.fnbundle
+# 8) Export and replay a high-severity incident bundle
+franken-node incident bundle --id INC-2026-0007 --evidence-path ./incidents/INC-2026-0007/evidence.v1.json --verify
+franken-node incident replay --bundle ./INC-2026-0007.fnbundle
 ```
 
 ## Charter
@@ -174,13 +175,18 @@ franken-node incident list --severity high
 | `franken-node trust quarantine` | Quarantine a suspicious artifact fleet-wide | `franken-node trust quarantine --artifact sha256:...` |
 | `franken-node fleet status` | Show policy and quarantine state across nodes | `franken-node fleet status --zone prod-us-east` |
 | `franken-node fleet release` | Lift quarantine/revocation controls with receipts | `franken-node fleet release --incident INC-2026-0007` |
-| `franken-node incident bundle` | Export deterministic incident bundle | `franken-node incident bundle --id INC-2026-0007` |
+| `franken-node incident bundle` | Export deterministic incident bundle from authoritative evidence | `franken-node incident bundle --id INC-2026-0007 --evidence-path ./incidents/INC-2026-0007/evidence.v1.json --verify` |
 | `franken-node incident replay` | Replay incident timeline locally | `franken-node incident replay --bundle ./INC-2026-0007.fnbundle` |
 | `franken-node incident counterfactual` | Simulate alternative policy actions | `franken-node incident counterfactual --bundle ./INC-2026-0007.fnbundle --policy strict` |
 | `franken-node registry publish` | Publish signed extension artifact | `franken-node registry publish ./dist/plugin.fnext` |
 | `franken-node registry search` | Query extension registry with trust filters | `franken-node registry search auth --min-assurance 3` |
 | `franken-node bench run` | Run benchmark suite and emit signed report | `franken-node bench run --scenario secure-extension-heavy` |
 | `franken-node doctor` | Diagnose environment and policy setup (optionally with live policy activation telemetry) | `franken-node doctor --verbose --policy-activation-input ./fixtures/policy_activation/doctor_policy_activation_pass.json` |
+
+`franken-node incident bundle` reads authoritative evidence from `--evidence-path`
+or from
+`<project-root>/.franken-node/state/incidents/<incident-id-slug>/evidence.v1.json`.
+Deterministic fixture timelines remain test-only.
 
 ## Configuration
 
@@ -281,7 +287,7 @@ max_degraded_duration_secs = 3600
 | `revocation frontier stale` | Local trust state is older than policy requirement | Run `franken-node trust sync --force` and retry risky action |
 | `artifact rejected: missing attestation` | Registry policy requires provenance proofs | Rebuild artifact with provenance metadata and re-sign before publish |
 | `quarantine not converged` | One or more nodes did not apply control action in time | Run `franken-node fleet status --verbose`, then `franken-node fleet reconcile` |
-| `incident replay nondeterministic` | Missing or corrupted bundle components | Re-export with `franken-node incident bundle --verify` and ensure signed bundle integrity passes |
+| `incident replay nondeterministic` | Missing, corrupted, or stale incident evidence / bundle components | Re-export with `franken-node incident bundle --id INC-2026-0007 --verify --evidence-path ./incidents/INC-2026-0007/evidence.v1.json` or ensure `<project-root>/.franken-node/state/incidents/<incident-id-slug>/evidence.v1.json` exists |
 
 ## Limitations
 

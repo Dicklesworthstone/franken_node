@@ -90,8 +90,9 @@ snapshots, integrity metadata, and chunk manifests for large incidents.
 - `write_bundle_to_path(bundle, path) -> Result<(), ReplayBundleError>`
 - `read_bundle_from_path(path) -> Result<ReplayBundle, ReplayBundleError>`
 - `to_canonical_json(bundle) -> Result<String, ReplayBundleError>`
-- `sample_incident_events(incident_id) -> Vec<RawEvent>` (fixture-only helper;
-  not valid for live operator evidence import after `bd-2fqyv.4`)
+- `fixture_incident_events(incident_id) -> Vec<RawEvent>` (fixture-only helper;
+  retained for deterministic tests/examples and not valid for live operator
+  evidence import after `bd-2fqyv.4`)
 
 ## Error Classes
 
@@ -105,9 +106,11 @@ snapshots, integrity metadata, and chunk manifests for large incidents.
 
 ## CLI Surface
 
-- `franken-node incident bundle --id <incident_id> [--verify]`
-  - Generates deterministic replay bundle and writes to:
-    - `artifacts/section_10_5/bd-vll/<incident_id>_bundle.json`
+- `franken-node incident bundle --id <incident_id> [--evidence-path <path>] [--verify]`
+  - Reads authoritative incident evidence from `--evidence-path` or
+    `<project-root>/.franken-node/state/incidents/<incident-id-slug>/evidence.v1.json`
+  - Generates deterministic replay bundle and writes `<incident-id-slug>.fnbundle`
+    in the current working directory
 - `franken-node incident replay --bundle <bundle_path>`
   - Replays bundle and verifies sequence equivalence hash
 

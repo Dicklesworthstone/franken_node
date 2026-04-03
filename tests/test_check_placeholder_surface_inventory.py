@@ -36,6 +36,7 @@ class InventoryParsingTests(unittest.TestCase):
         self.assertIn("`PSI-003`", inventory_ids)
         self.assertIn("`PSI-010`", inventory_ids)
         self.assertTrue(any("fixture_registry(...)" in surface for surface in allowed_surfaces))
+        self.assertTrue(any("fixture_incident_events(...)" in surface for surface in allowed_surfaces))
 
 
 class EvaluateRuleTests(unittest.TestCase):
@@ -57,29 +58,29 @@ class EvaluateRuleTests(unittest.TestCase):
         self.assertEqual(result["reason_code"], mod.ALLOWLIST_ESCAPE)
         self.assertEqual(result["allowlist_escape_count"], 1)
 
-    def test_documented_live_occurrence_is_recorded_without_failure(self) -> None:
-        rule = _rule("incident_sample_event_boundary")
+    def test_fixture_only_occurrence_is_allowlisted_without_documented_live_debt(self) -> None:
+        rule = _rule("incident_fixture_event_boundary")
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             _copy_real_inventory(root)
             main_rs = root / "crates/franken-node/src/main.rs"
             main_rs.parent.mkdir(parents=True, exist_ok=True)
             main_rs.write_text(
-                "fn live() {\n    let _ = sample_incident_events(\"INC-1\");\n}\n",
+                "#[cfg(test)]\nmod incident_list_tests {\n    #[test]\n    fn fixture_usage() {\n        let _ = fixture_incident_events(\"INC-1\");\n    }\n}\n",
                 encoding="utf-8",
             )
             replay_bundle = root / "crates/franken-node/src/tools/replay_bundle.rs"
             replay_bundle.parent.mkdir(parents=True, exist_ok=True)
             replay_bundle.write_text(
-                "pub fn sample_incident_events(id: &str) -> Vec<()> { let _ = id; Vec::new() }\n",
+                "#[cfg(test)]\npub(crate) fn fixture_incident_events(id: &str) -> Vec<()> { let _ = id; Vec::new() }\n",
                 encoding="utf-8",
             )
 
             result = mod.evaluate_rule(rule, root=root)
 
         self.assertTrue(result["pass"])
-        self.assertEqual(result["documented_occurrence_count"], 1)
-        self.assertEqual(result["allowlisted_occurrence_count"], 1)
+        self.assertEqual(result["documented_occurrence_count"], 0)
+        self.assertEqual(result["allowlisted_occurrence_count"], 2)
         self.assertEqual(result["reason_code"], mod.STATIC_PASS)
 
     def test_inventory_drift_fails_when_required_row_missing(self) -> None:
@@ -117,13 +118,14 @@ class RealRepoTests(unittest.TestCase):
         workflow = ROOT / ".github/workflows/placeholder-remediation-gate.yml"
         self.assertTrue(workflow.is_file())
 
-    def test_incident_sample_events_rule_reports_documented_live_debt(self) -> None:
+    def test_fixture_incident_events_rule_confines_occurrences_to_allowlist(self) -> None:
         payload = mod.run_all()
-        rule = next(rule for rule in payload["rules"] if rule["rule_id"] == "incident_sample_event_boundary")
-        documented_paths = {entry["path"] for entry in rule["documented_occurrences"]}
+        rule = next(rule for rule in payload["rules"] if rule["rule_id"] == "incident_fixture_event_boundary")
 
-        self.assertIn("crates/franken-node/src/main.rs", documented_paths)
-        self.assertGreaterEqual(rule["documented_occurrence_count"], 1)
+        self.assertEqual(rule["documented_occurrence_count"], 0)
+        self.assertEqual(rule["unexpected_occurrence_count"], 0)
+        self.assertEqual(rule["allowlist_escape_count"], 0)
+        self.assertGreaterEqual(rule["allowlisted_occurrence_count"], 1)
 
     def test_demo_signing_key_rule_confines_occurrences_to_allowlist(self) -> None:
         payload = mod.run_all()

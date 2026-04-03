@@ -686,8 +686,9 @@ pub fn to_canonical_json(bundle: &ReplayBundle) -> Result<String, ReplayBundleEr
     Ok(serde_json::to_string(&canonical)?)
 }
 
+/// Deterministic fixture-only incident timeline for unit tests and examples.
 #[must_use]
-pub fn sample_incident_events(incident_id: &str) -> Vec<RawEvent> {
+pub fn fixture_incident_events(incident_id: &str) -> Vec<RawEvent> {
     vec![
         RawEvent::new(
             "2026-02-20T12:00:00.000001Z",
@@ -719,7 +720,7 @@ pub fn sample_incident_events(incident_id: &str) -> Vec<RawEvent> {
             EventType::OperatorAction,
             serde_json::json!({
                 "action": "isolate-artifact",
-                "artifact": "sha256:incident-sample",
+                "artifact": "sha256:fixture-incident-sample",
                 "result": "accepted"
             }),
         )
@@ -1316,8 +1317,8 @@ mod tests {
 
     #[test]
     fn sample_events_are_stable() {
-        let first = sample_incident_events("INC-STABLE-001");
-        let second = sample_incident_events("INC-STABLE-001");
+        let first = fixture_incident_events("INC-STABLE-001");
+        let second = fixture_incident_events("INC-STABLE-001");
         assert_eq!(first, second);
     }
 

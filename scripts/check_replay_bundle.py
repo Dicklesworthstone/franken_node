@@ -140,7 +140,7 @@ def chunk_events(bundle_id: str, timeline: list[dict[str, Any]]) -> list[dict[st
     return chunks
 
 
-def generate_sample_bundle(incident_id: str, vectors: list[dict[str, Any]]) -> dict[str, Any]:
+def generate_fixture_bundle(incident_id: str, vectors: list[dict[str, Any]]) -> dict[str, Any]:
     events = fixture_to_events(vectors)
     timeline = []
     for idx, event in enumerate(events, start=1):
@@ -210,7 +210,7 @@ def generate_sample_bundle(incident_id: str, vectors: list[dict[str, Any]]) -> d
     return bundle
 
 
-def validate_sample_bundle_integrity(bundle: dict[str, Any]) -> bool:
+def validate_fixture_bundle_integrity(bundle: dict[str, Any]) -> bool:
     copy = dict(bundle)
     expected = copy.pop("integrity_hash", "")
     actual = sha256_hex(canonical_json(copy).encode("utf-8"))
@@ -254,8 +254,11 @@ def run_checks() -> dict[str, Any]:
             MAIN_RS,
             [
                 "generate_replay_bundle",
+                "generate_replay_bundle_from_evidence",
+                "read_incident_evidence_package",
                 "read_bundle_from_path",
                 "incident bundle written",
+                "evidence=",
                 "incident replay result",
             ],
             "cli wiring",
@@ -273,20 +276,20 @@ def run_checks() -> dict[str, Any]:
     )
 
     if fixture_ok:
-        bundle_a = generate_sample_bundle("INC-SAMPLE-001", vectors)
-        bundle_b = generate_sample_bundle("INC-SAMPLE-001", vectors)
+        bundle_a = generate_fixture_bundle("INC-SAMPLE-001", vectors)
+        bundle_b = generate_fixture_bundle("INC-SAMPLE-001", vectors)
         deterministic = canonical_json(bundle_a) == canonical_json(bundle_b)
-        integrity_ok = validate_sample_bundle_integrity(bundle_a)
+        integrity_ok = validate_fixture_bundle_integrity(bundle_a)
         checks.append(
             {
-                "check": "sample determinism",
+                "check": "fixture determinism",
                 "pass": deterministic,
                 "detail": "bundle A == bundle B",
             }
         )
         checks.append(
             {
-                "check": "sample integrity",
+                "check": "fixture integrity",
                 "pass": integrity_ok,
                 "detail": "integrity hash recomputes",
             }

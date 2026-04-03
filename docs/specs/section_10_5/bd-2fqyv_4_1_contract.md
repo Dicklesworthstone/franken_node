@@ -7,7 +7,7 @@ This contract defines the authoritative input surface for
 
 It replaces the current live shortcut where
 `crates/franken-node/src/main.rs` calls
-`crates/franken-node/src/tools/replay_bundle.rs::sample_incident_events(...)`
+`crates/franken-node/src/tools/replay_bundle.rs::fixture_incident_events(...)`
 to fabricate plausible replay input. The contract specifies:
 
 - where operator-facing incident evidence is loaded from
@@ -160,7 +160,7 @@ Operator-facing `franken-node incident bundle` behavior is binary:
 
 The command MUST NOT:
 
-- fall back to `sample_incident_events(...)`
+- fall back to `fixture_incident_events(...)`
 - invent placeholder metadata or provenance
 - silently skip invalid package validation failures
 
@@ -168,7 +168,7 @@ For this forensic surface, no bundle is better than a fabricated one.
 
 ## Fixture Boundary
 
-`sample_incident_events(...)` and fixture evidence packages remain allowed only
+`fixture_incident_events(...)` and fixture evidence packages remain allowed only
 for deterministic tests and examples.
 
 Fixture-only source rules:
@@ -177,7 +177,7 @@ Fixture-only source rules:
   test directories
 - tests/examples must inject fixture packages explicitly
 - the live CLI path must never consult fixture packages implicitly
-- production code must not call `sample_incident_events(...)` in the live
+- production code must not call `fixture_incident_events(...)` in the live
   incident-bundle path
 
 The fixture boundary must be obvious in naming, module placement, and docs.
@@ -192,5 +192,5 @@ Minimum coverage for implementation bead `bd-2fqyv.4.2`:
   `provenance_ref` / `parent_event_id` links, invalid timestamps, and
   non-deterministic float payloads
 - identical authoritative evidence-package input yields byte-identical replay bundles
-- the operator-facing command no longer calls `sample_incident_events(...)`
+- the operator-facing command no longer calls `fixture_incident_events(...)`
 - tests/docs distinguish authoritative project state from fixture-only evidence
