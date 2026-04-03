@@ -488,7 +488,20 @@ impl CancellationProtocol {
             &format!("cancel requested, {} in-flight", in_flight_count),
         ));
 
-        push_bounded(&mut self.records, record, DEFAULT_MAX_RECORDS);
+        // Garbage collect only finalized records if we are at capacity
+        if self.records.len() >= DEFAULT_MAX_RECORDS {
+            // Retain active records, and try to make room
+            self.records.retain(|r| r.current_phase != CancelPhase::Finalized);
+            
+            // If we still have too many (i.e. all active), we are forced to drop the oldest active 
+            // as a last resort DOS defense to prevent OOM
+            if self.records.len() >= DEFAULT_MAX_RECORDS {
+                let overflow = self.records.len() - DEFAULT_MAX_RECORDS + 1;
+                self.records.drain(0..overflow);
+            }
+        }
+        self.records.push(record);
+
         self.records
             .last()
             .ok_or_else(|| CancelProtocolError::InvariantViolation {

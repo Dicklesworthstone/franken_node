@@ -579,8 +579,10 @@ impl RollbackDetector {
                 });
             }
             if sv.epoch > last.epoch + 1 {
+                let local_epoch = last.epoch;
+                self.last_known = Some(sv.clone());
                 return Err(ForkDetectionError::RfdGapDetected {
-                    local_epoch: last.epoch,
+                    local_epoch,
                     remote_epoch: sv.epoch,
                 });
             }

@@ -258,11 +258,12 @@ impl RetroactiveHardeningPipeline {
         from_level: HardeningLevel,
         to_level: HardeningLevel,
     ) -> Vec<ProtectionArtifact> {
-        if to_level <= from_level {
+        let effective_from = from_level.max(object.creation_level);
+        if to_level <= effective_from {
             return Vec::new();
         }
 
-        let existing = required_protections(from_level);
+        let existing = required_protections(effective_from);
         let target = required_protections(to_level);
 
         // Determine which new protection types are needed
@@ -397,7 +398,8 @@ impl RetroactiveHardeningPipeline {
         object: &CanonicalObject,
         level: HardeningLevel,
     ) -> Vec<ProtectionArtifact> {
-        required_protections(level)
+        let effective_level = level.max(object.creation_level);
+        required_protections(effective_level)
             .into_iter()
             .map(|ptype| {
                 let data = self.generate_artifact_data(object, ptype);
@@ -677,6 +679,15 @@ mod tests {
     fn test_harden_already_at_max_no_artifacts() {
         let obj = test_object("obj-001");
         let artifacts = pipeline().harden(&obj, HardeningLevel::Critical, HardeningLevel::Critical);
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn test_harden_object_already_at_target_creation_level() {
+        let obj = CanonicalObject::new("obj-enhanced", vec![0x00; 32], HardeningLevel::Enhanced);
+        // Even if the system is at Baseline and escalates to Standard, 
+        // the object was natively created at Enhanced and thus needs no Standard artifacts.
+        let artifacts = pipeline().harden(&obj, HardeningLevel::Baseline, HardeningLevel::Standard);
         assert!(artifacts.is_empty());
     }
 
