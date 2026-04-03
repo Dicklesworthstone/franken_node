@@ -112,6 +112,7 @@ impl Config {
                 },
                 security: SecurityConfig {
                     max_degraded_duration_secs: 3_600,
+                    decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                 },
                 engine: EngineConfig::default(),
@@ -166,6 +167,7 @@ impl Config {
                 },
                 security: SecurityConfig {
                     max_degraded_duration_secs: 3_600,
+                    decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                 },
                 engine: EngineConfig::default(),
@@ -220,6 +222,7 @@ impl Config {
                 },
                 security: SecurityConfig {
                     max_degraded_duration_secs: 3_600,
+                    decision_receipt_signing_key_path: None,
                     authorized_api_keys: std::collections::BTreeSet::new(),
                 },
                 engine: EngineConfig::default(),
@@ -675,6 +678,16 @@ impl Config {
                 value,
             ));
         }
+        if let Some(section) = &overrides.security
+            && let Some(value) = &section.decision_receipt_signing_key_path
+        {
+            self.security.decision_receipt_signing_key_path = Some(value.clone());
+            decisions.push(MergeDecision::new(
+                stage.clone(),
+                "security.decision_receipt_signing_key_path",
+                value.display(),
+            ));
+        }
 
         if let Some(section) = &overrides.engine
             && let Some(value) = &section.binary_path
@@ -1055,6 +1068,18 @@ impl Config {
                 "security.max_degraded_duration_secs",
                 parsed,
             ));
+        }
+        if let Some(value) = env_lookup("FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH") {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                let path = PathBuf::from(trimmed);
+                self.security.decision_receipt_signing_key_path = Some(path.clone());
+                decisions.push(MergeDecision::new(
+                    MergeStage::Env,
+                    "security.decision_receipt_signing_key_path",
+                    path.display(),
+                ));
+            }
         }
 
         if let Some(value) = env_lookup("FRANKEN_NODE_ENGINE_BINARY_PATH") {
@@ -1555,6 +1580,7 @@ struct RemoteOverrides {
 #[serde(default, deny_unknown_fields)]
 struct SecurityOverrides {
     pub max_degraded_duration_secs: Option<u64>,
+    pub decision_receipt_signing_key_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1786,6 +1812,10 @@ pub struct RemoteConfig {
 pub struct SecurityConfig {
     /// Maximum time the system may remain in degraded mode before suspension.
     pub max_degraded_duration_secs: u64,
+
+    /// Optional Ed25519 private signing key path for live decision-receipt export.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_receipt_signing_key_path: Option<PathBuf>,
 
     /// List of authorized API keys for control-plane access.
     #[serde(default)]

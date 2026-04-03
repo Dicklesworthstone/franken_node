@@ -86,14 +86,17 @@ def main() -> int:
         cli_ok = (
             "receipt_out" in cli_content
             and "receipt_summary_out" in cli_content
+            and "receipt_signing_key" in cli_content
             and "TrustRevokeArgs" in cli_content
             and "TrustQuarantineArgs" in cli_content
             and "IncidentBundleArgs" in cli_content
-            and "maybe_export_demo_receipts" in main_content
+            and "maybe_export_signed_receipts" in main_content
+            and "FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH" in main_content
+            and "decision_receipt_signing_key_path" in main_content
         )
     all_pass &= check(
         "SR-CLI",
-        "CLI receipt export wiring exists for trust/incident paths",
+        "CLI receipt export wiring exists for trust/incident paths without implicit demo signing",
         cli_ok,
     )
 
@@ -118,7 +121,12 @@ def main() -> int:
             artifact_ok = (
                 isinstance(chain, list)
                 and len(chain) >= 2
-                and all("chain_hash" in r and "signature" in r for r in chain)
+                and all(
+                    "chain_hash" in r
+                    and "signature" in r
+                    and "signer_key_id" in r
+                    for r in chain
+                )
             )
         except json.JSONDecodeError:
             artifact_ok = False
@@ -136,6 +144,8 @@ def main() -> int:
                 "INV-RECEIPT-CHAIN",
                 "INV-RECEIPT-HIGH-IMPACT",
                 "INV-RECEIPT-EXPORT",
+                "INV-RECEIPT-NO-IMPLICIT-KEY",
+                "INV-RECEIPT-PROVENANCE",
             ]
         )
     all_pass &= check("SR-SPEC", "Spec contract defines receipt invariants", spec_ok)
@@ -146,6 +156,9 @@ def main() -> int:
     try:
         chain = json.loads(Path(artifact_path).read_text()).get("chain", [])
         verify_key = SigningKey(bytes([42] * 32)).verify_key
+        signer_key_id = hashlib.sha256(
+            b"artifact_signing_keyid_v1:" + bytes(verify_key)
+        ).digest()[:8].hex()
         previous = None
         for receipt in chain:
             payload_fields = {
@@ -165,13 +178,23 @@ def main() -> int:
             }
 
             payload = json.dumps(payload_fields, separators=(",", ":"), sort_keys=True).encode()
-            expected_chain_hash = hashlib.sha256(
-                ((previous or "GENESIS") + ":" + payload.decode()).encode()
-            ).hexdigest()
+            prev_bytes = (previous or "GENESIS").encode()
+            hasher = hashlib.sha256()
+            hasher.update(b"decision_receipt_chain_v1:")
+            hasher.update(len(prev_bytes).to_bytes(8, "little"))
+            hasher.update(prev_bytes)
+            hasher.update(len(payload).to_bytes(8, "little"))
+            hasher.update(payload)
+            expected_chain_hash = hasher.hexdigest()
             if expected_chain_hash != receipt["chain_hash"]:
                 raise ValueError(
                     f"chain hash mismatch for {receipt['receipt_id']}: "
                     f"expected={expected_chain_hash} actual={receipt['chain_hash']}"
+                )
+            if receipt.get("signer_key_id") != signer_key_id:
+                raise ValueError(
+                    f"signer_key_id mismatch for {receipt['receipt_id']}: "
+                    f"expected={signer_key_id} actual={receipt.get('signer_key_id')}"
                 )
 
             signature_bytes = base64.b64decode(receipt["signature"])

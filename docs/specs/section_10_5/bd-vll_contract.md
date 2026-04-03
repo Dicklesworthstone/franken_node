@@ -90,7 +90,8 @@ snapshots, integrity metadata, and chunk manifests for large incidents.
 - `write_bundle_to_path(bundle, path) -> Result<(), ReplayBundleError>`
 - `read_bundle_from_path(path) -> Result<ReplayBundle, ReplayBundleError>`
 - `to_canonical_json(bundle) -> Result<String, ReplayBundleError>`
-- `synthetic_incident_events(incident_id) -> Vec<RawEvent>`
+- `sample_incident_events(incident_id) -> Vec<RawEvent>` (fixture-only helper;
+  not valid for live operator evidence import after `bd-2fqyv.4`)
 
 ## Error Classes
 

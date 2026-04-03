@@ -8,6 +8,7 @@
 //! - INV-RB-INTEGRITY: bundle hash verifies canonical serialization
 //! - INV-RB-CHUNKING: bundles larger than 10 MiB are split into indexed chunks
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use chrono::{DateTime, SecondsFormat, Utc};
@@ -20,6 +21,7 @@ use uuid::Uuid;
 const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
 const DEFAULT_POLICY_VERSION: &str = "0.1.0";
 const DEFAULT_CREATED_AT: &str = "1970-01-01T00:00:00.000000Z";
+pub const INCIDENT_EVIDENCE_SCHEMA: &str = "franken-node/incident-evidence-source/v1";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplayBundleError {
@@ -54,6 +56,53 @@ pub enum ReplayBundleError {
     ChunkLayoutMismatch,
     #[error("bundle integrity mismatch")]
     IntegrityMismatch,
+    #[error("incident evidence schema mismatch: expected `{expected}`, found `{actual}`")]
+    EvidenceSchemaMismatch {
+        expected: &'static str,
+        actual: String,
+    },
+    #[error("incident evidence incident_id mismatch: expected `{expected}`, found `{actual}`")]
+    EvidenceIncidentIdMismatch { expected: String, actual: String },
+    #[error("incident evidence field `{field}` cannot be empty")]
+    EvidenceFieldEmpty { field: String },
+    #[error("incident evidence evidence_refs must be non-empty")]
+    EvidenceRefsEmpty,
+    #[error("incident evidence events must be non-empty")]
+    EvidenceEventsEmpty,
+    #[error("incident evidence contains duplicate event_id `{event_id}`")]
+    EvidenceDuplicateEventId { event_id: String },
+    #[error(
+        "incident evidence event `{event_id}` references missing parent_event_id `{parent_event_id}`"
+    )]
+    EvidenceMissingParentRef {
+        event_id: String,
+        parent_event_id: String,
+    },
+    #[error("incident evidence event `{event_id}` cannot reference itself as parent_event_id")]
+    EvidenceSelfParentRef { event_id: String },
+    #[error(
+        "incident evidence event `{event_id}` references unknown provenance_ref `{provenance_ref}`"
+    )]
+    EvidenceUnknownProvenanceRef {
+        event_id: String,
+        provenance_ref: String,
+    },
+    #[error("incident evidence reference `{reference}` must be relative to the incident root")]
+    EvidenceRefNotRelative { reference: String },
+    #[error(
+        "incident evidence event `{event_id}` has invalid causal_parent={causal_parent}; it must refer to an earlier event"
+    )]
+    EvidenceCausalParentInvalid {
+        event_id: String,
+        causal_parent: u64,
+    },
+    #[error(
+        "incident evidence events are not sorted by timestamp: event {previous_index} must not come after event {next_index}"
+    )]
+    EvidenceEventsUnsorted {
+        previous_index: usize,
+        next_index: usize,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
@@ -73,6 +122,17 @@ impl EventType {
             Self::PolicyEval => "policy_eval",
             Self::ExternalSignal => "external_signal",
             Self::OperatorAction => "operator_action",
+        }
+    }
+
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "state_change" => Some(Self::StateChange),
+            "policy_eval" => Some(Self::PolicyEval),
+            "external_signal" => Some(Self::ExternalSignal),
+            "operator_action" => Some(Self::OperatorAction),
+            _ => None,
         }
     }
 }
@@ -176,6 +236,54 @@ pub struct ReplayOutcome {
     pub event_count: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IncidentSeverity {
+    Low,
+    Medium,
+    High,
+    Critical,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentEvidenceMetadata {
+    pub title: String,
+    pub affected_components: Vec<String>,
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentEvidenceEvent {
+    pub event_id: String,
+    pub timestamp: String,
+    pub event_type: EventType,
+    pub payload: Value,
+    pub provenance_ref: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_event_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_snapshot: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_version: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IncidentEvidencePackage {
+    pub schema_version: String,
+    pub incident_id: String,
+    pub collected_at: String,
+    pub trace_id: String,
+    pub severity: IncidentSeverity,
+    pub incident_type: String,
+    pub detector: String,
+    pub policy_version: String,
+    pub initial_state_snapshot: Value,
+    pub events: Vec<IncidentEvidenceEvent>,
+    pub evidence_refs: Vec<String>,
+    pub metadata: IncidentEvidenceMetadata,
+}
+
 #[derive(Debug)]
 struct PreparedEvent {
     normalized_timestamp: String,
@@ -199,6 +307,219 @@ struct ReplayBundleIntegrityView<'a> {
     policy_version: &'a str,
     manifest: &'a BundleManifest,
     chunks: &'a [BundleChunk],
+}
+
+pub fn read_incident_evidence_package(
+    path: &Path,
+    expected_incident_id: Option<&str>,
+) -> Result<IncidentEvidencePackage, ReplayBundleError> {
+    let raw = std::fs::read_to_string(path)?;
+    let package: IncidentEvidencePackage = serde_json::from_str(&raw)?;
+    validate_incident_evidence_package(&package, expected_incident_id)?;
+    Ok(package)
+}
+
+pub fn validate_incident_evidence_package(
+    package: &IncidentEvidencePackage,
+    expected_incident_id: Option<&str>,
+) -> Result<(), ReplayBundleError> {
+    if package.schema_version != INCIDENT_EVIDENCE_SCHEMA {
+        return Err(ReplayBundleError::EvidenceSchemaMismatch {
+            expected: INCIDENT_EVIDENCE_SCHEMA,
+            actual: package.schema_version.clone(),
+        });
+    }
+
+    if package.incident_id.trim().is_empty() {
+        return Err(ReplayBundleError::EvidenceFieldEmpty {
+            field: "incident_id".to_string(),
+        });
+    }
+
+    if let Some(expected_incident_id) = expected_incident_id
+        && package.incident_id != expected_incident_id
+    {
+        return Err(ReplayBundleError::EvidenceIncidentIdMismatch {
+            expected: expected_incident_id.to_string(),
+            actual: package.incident_id.clone(),
+        });
+    }
+
+    normalize_timestamp(&package.collected_at)?;
+    validate_nonempty_field("metadata.title", &package.metadata.title)?;
+    validate_nonempty_field("trace_id", &package.trace_id)?;
+    validate_nonempty_field("incident_type", &package.incident_type)?;
+    validate_nonempty_field("detector", &package.detector)?;
+    validate_nonempty_field("policy_version", &package.policy_version)?;
+
+    if package.evidence_refs.is_empty() {
+        return Err(ReplayBundleError::EvidenceRefsEmpty);
+    }
+    for evidence_ref in &package.evidence_refs {
+        validate_relative_evidence_ref(evidence_ref)?;
+    }
+    if package.events.is_empty() {
+        return Err(ReplayBundleError::EvidenceEventsEmpty);
+    }
+
+    canonicalize_value(&package.initial_state_snapshot, "$.initial_state_snapshot")?;
+
+    let evidence_refs = package
+        .evidence_refs
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let mut event_ids = BTreeSet::new();
+    for (idx, event) in package.events.iter().enumerate() {
+        validate_nonempty_field(&format!("events[{idx}].event_id"), &event.event_id)?;
+        validate_nonempty_field(
+            &format!("events[{idx}].provenance_ref"),
+            &event.provenance_ref,
+        )?;
+        if !event_ids.insert(event.event_id.as_str()) {
+            return Err(ReplayBundleError::EvidenceDuplicateEventId {
+                event_id: event.event_id.clone(),
+            });
+        }
+
+        normalize_timestamp(&event.timestamp)?;
+        canonicalize_value(&event.payload, &format!("$.events[{idx}].payload"))?;
+        if let Some(snapshot) = &event.state_snapshot {
+            canonicalize_value(snapshot, &format!("$.events[{idx}].state_snapshot"))?;
+        }
+        if let Some(policy_version) = &event.policy_version {
+            validate_nonempty_field(&format!("events[{idx}].policy_version"), policy_version)?;
+        }
+        if !evidence_refs.contains(event.provenance_ref.as_str()) {
+            return Err(ReplayBundleError::EvidenceUnknownProvenanceRef {
+                event_id: event.event_id.clone(),
+                provenance_ref: event.provenance_ref.clone(),
+            });
+        }
+        if let Some(parent_event_id) = &event.parent_event_id
+            && parent_event_id == &event.event_id
+        {
+            return Err(ReplayBundleError::EvidenceSelfParentRef {
+                event_id: event.event_id.clone(),
+            });
+        }
+    }
+
+    let known_event_ids = package
+        .events
+        .iter()
+        .map(|event| event.event_id.as_str())
+        .collect::<BTreeSet<_>>();
+    for event in &package.events {
+        if let Some(parent_event_id) = &event.parent_event_id
+            && !known_event_ids.contains(parent_event_id.as_str())
+        {
+            return Err(ReplayBundleError::EvidenceMissingParentRef {
+                event_id: event.event_id.clone(),
+                parent_event_id: parent_event_id.clone(),
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_relative_evidence_ref(reference: &str) -> Result<(), ReplayBundleError> {
+    let path = Path::new(reference);
+    if reference.trim().is_empty()
+        || path.is_absolute()
+        || path
+            .components()
+            .any(|component| matches!(component, std::path::Component::ParentDir))
+    {
+        return Err(ReplayBundleError::EvidenceRefNotRelative {
+            reference: reference.to_string(),
+        });
+    }
+    Ok(())
+}
+
+pub fn generate_replay_bundle_from_evidence(
+    package: &IncidentEvidencePackage,
+) -> Result<ReplayBundle, ReplayBundleError> {
+    validate_incident_evidence_package(package, None)?;
+
+    let mut sorted_events = package
+        .events
+        .iter()
+        .cloned()
+        .map(|event| {
+            let (_, micros) = normalize_timestamp(&event.timestamp)?;
+            Ok((micros, event))
+        })
+        .collect::<Result<Vec<_>, ReplayBundleError>>()?;
+    sorted_events.sort_by(|(left_micros, left), (right_micros, right)| {
+        left_micros
+            .cmp(right_micros)
+            .then_with(|| left.event_id.cmp(&right.event_id))
+    });
+
+    let id_to_index = sorted_events
+        .iter()
+        .enumerate()
+        .map(|(idx, (_, event))| {
+            (
+                event.event_id.clone(),
+                u64::try_from(idx + 1).unwrap_or(u64::MAX),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let selected_policy_version = sorted_events
+        .iter()
+        .find_map(|(_, event)| event.policy_version.clone())
+        .unwrap_or_else(|| package.policy_version.clone());
+
+    let mut event_log = Vec::with_capacity(sorted_events.len());
+    for (_, event) in sorted_events {
+        let causal_parent = match &event.parent_event_id {
+            Some(parent_event_id) => {
+                let causal_parent = id_to_index.get(parent_event_id).copied().ok_or_else(|| {
+                    ReplayBundleError::EvidenceMissingParentRef {
+                        event_id: event.event_id.clone(),
+                        parent_event_id: parent_event_id.clone(),
+                    }
+                })?;
+                let current_index = u64::try_from(event_log.len() + 1).unwrap_or(u64::MAX);
+                if causal_parent >= current_index {
+                    return Err(ReplayBundleError::EvidenceCausalParentInvalid {
+                        event_id: event.event_id.clone(),
+                        causal_parent,
+                    });
+                }
+                Some(causal_parent)
+            }
+            None => None,
+        };
+        event_log.push(RawEvent {
+            timestamp: event.timestamp,
+            event_type: event.event_type,
+            payload: event.payload,
+            causal_parent,
+            state_snapshot: event.state_snapshot,
+            policy_version: None,
+        });
+    }
+
+    if let Some(first) = event_log.first_mut() {
+        first.state_snapshot = Some(package.initial_state_snapshot.clone());
+        first.policy_version = Some(selected_policy_version);
+    }
+
+    generate_replay_bundle(&package.incident_id, &event_log)
+}
+
+fn validate_nonempty_field(field: &str, value: &str) -> Result<(), ReplayBundleError> {
+    if value.trim().is_empty() {
+        return Err(ReplayBundleError::EvidenceFieldEmpty {
+            field: field.to_string(),
+        });
+    }
+    Ok(())
 }
 
 pub fn generate_replay_bundle(
@@ -728,6 +1049,62 @@ mod tests {
         ]
     }
 
+    fn fixture_evidence_package(incident_id: &str) -> IncidentEvidencePackage {
+        IncidentEvidencePackage {
+            schema_version: INCIDENT_EVIDENCE_SCHEMA.to_string(),
+            incident_id: incident_id.to_string(),
+            collected_at: "2026-02-20T10:05:00.000000Z".to_string(),
+            trace_id: "trace-incident-evidence".to_string(),
+            severity: IncidentSeverity::High,
+            incident_type: "security".to_string(),
+            detector: "unit-test".to_string(),
+            policy_version: "1.2.3".to_string(),
+            initial_state_snapshot: serde_json::json!({"epoch": 7_u64, "mode": "strict"}),
+            events: vec![
+                IncidentEvidenceEvent {
+                    event_id: "evt-001".to_string(),
+                    timestamp: "2026-02-20T10:00:00.000100Z".to_string(),
+                    event_type: EventType::ExternalSignal,
+                    payload: serde_json::json!({"signal":"anomaly","severity":"high"}),
+                    provenance_ref: "refs/logs/event-001.json".to_string(),
+                    parent_event_id: None,
+                    state_snapshot: None,
+                    policy_version: None,
+                },
+                IncidentEvidenceEvent {
+                    event_id: "evt-002".to_string(),
+                    timestamp: "2026-02-20T10:00:00.000200Z".to_string(),
+                    event_type: EventType::PolicyEval,
+                    payload: serde_json::json!({"decision":"quarantine","confidence":91_u64}),
+                    provenance_ref: "refs/logs/event-002.json".to_string(),
+                    parent_event_id: Some("evt-001".to_string()),
+                    state_snapshot: None,
+                    policy_version: None,
+                },
+                IncidentEvidenceEvent {
+                    event_id: "evt-003".to_string(),
+                    timestamp: "2026-02-20T10:00:00.000300Z".to_string(),
+                    event_type: EventType::OperatorAction,
+                    payload: serde_json::json!({"action":"seal","result":"accepted"}),
+                    provenance_ref: "refs/logs/event-003.json".to_string(),
+                    parent_event_id: Some("evt-002".to_string()),
+                    state_snapshot: None,
+                    policy_version: None,
+                },
+            ],
+            evidence_refs: vec![
+                "refs/logs/event-001.json".to_string(),
+                "refs/logs/event-002.json".to_string(),
+                "refs/logs/event-003.json".to_string(),
+            ],
+            metadata: IncidentEvidenceMetadata {
+                title: "Synthetic incident".to_string(),
+                affected_components: vec!["auth-svc".to_string()],
+                tags: vec!["test".to_string()],
+            },
+        }
+    }
+
     fn chunked_fixture_bundle() -> ReplayBundle {
         let large = "x".repeat(3 * 1024 * 1024);
         let events = vec![
@@ -942,5 +1319,80 @@ mod tests {
         let first = sample_incident_events("INC-STABLE-001");
         let second = sample_incident_events("INC-STABLE-001");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn evidence_package_generation_is_deterministic() {
+        let package = fixture_evidence_package("INC-EVID-DET-001");
+        let first = generate_replay_bundle_from_evidence(&package).expect("bundle 1");
+        let second = generate_replay_bundle_from_evidence(&package).expect("bundle 2");
+        assert_eq!(
+            to_canonical_json(&first).expect("json 1"),
+            to_canonical_json(&second).expect("json 2")
+        );
+    }
+
+    #[test]
+    fn evidence_package_rejects_empty_evidence_refs() {
+        let mut package = fixture_evidence_package("INC-EVID-VAL-001");
+        package.evidence_refs.clear();
+
+        let err = validate_incident_evidence_package(&package, Some("INC-EVID-VAL-001"))
+            .expect_err("must fail");
+        assert!(matches!(err, ReplayBundleError::EvidenceRefsEmpty));
+    }
+
+    #[test]
+    fn evidence_package_rejects_unknown_provenance_refs() {
+        let mut package = fixture_evidence_package("INC-EVID-VAL-002");
+        package.events[0].provenance_ref = "refs/logs/missing.json".to_string();
+
+        let err = validate_incident_evidence_package(&package, Some("INC-EVID-VAL-002"))
+            .expect_err("must fail");
+        assert!(matches!(
+            err,
+            ReplayBundleError::EvidenceUnknownProvenanceRef { .. }
+        ));
+    }
+
+    #[test]
+    fn read_incident_evidence_package_rejects_incident_id_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("evidence.json");
+        let package = fixture_evidence_package("INC-EVID-READ-001");
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&package).expect("serialize evidence"),
+        )
+        .expect("write evidence");
+
+        let err = read_incident_evidence_package(&path, Some("INC-OTHER"))
+            .expect_err("must reject mismatch");
+        assert!(matches!(
+            err,
+            ReplayBundleError::EvidenceIncidentIdMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn read_incident_evidence_package_rejects_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing.json");
+        let err =
+            read_incident_evidence_package(&path, Some("INC-EVID-MISSING-001")).expect_err("io");
+        assert!(matches!(err, ReplayBundleError::Io(_)));
+    }
+
+    #[test]
+    fn generate_replay_bundle_from_evidence_uses_authoritative_snapshot_and_policy_version() {
+        let package = fixture_evidence_package("INC-EVID-BUNDLE-001");
+        let bundle = generate_replay_bundle_from_evidence(&package).expect("bundle");
+
+        assert_eq!(
+            bundle.initial_state_snapshot,
+            package.initial_state_snapshot
+        );
+        assert_eq!(bundle.policy_version, package.policy_version);
+        assert_eq!(bundle.incident_id, package.incident_id);
     }
 }

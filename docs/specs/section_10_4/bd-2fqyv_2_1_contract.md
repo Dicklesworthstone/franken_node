@@ -2,8 +2,9 @@
 
 ## Scope
 
-This contract replaces the current live CLI shortcut that hydrates
-`demo_registry()` for trust-card and trust-control operations. It defines the
+This contract replaces the current live CLI shortcut that hydrated the
+fixture-only `fixture_registry()` helper for trust-card and trust-control
+operations. It defines the
 authoritative persisted state shape, bootstrap behavior, and durability rules
 for the storage-backed trust-card registry used by:
 
@@ -25,12 +26,14 @@ Default authoritative registry path:
 
 Resolution rules:
 
-1. If `franken_node.toml` was resolved from disk, `<project-root>` is the parent
-   directory of that config file.
-2. If a future explicit registry-path override is provided, that override wins.
-3. If no config file exists and no explicit override is provided, operator-facing
-   trust commands MUST fail closed instead of inventing a synthetic location or
-   silently loading demo data.
+1. `<project-root>` is the directory containing a project-local
+   `franken_node.toml`.
+2. A user-global config under `~/.config/franken-node/config.toml` is not a
+   valid anchor for project-scoped trust state by itself.
+3. If a future explicit registry-path override is provided, that override wins.
+4. If no project-local config exists and no explicit override is provided,
+   operator-facing trust commands MUST fail closed instead of inventing a
+   synthetic location or silently loading demo data.
 
 The persisted registry is project-scoped state, not a global user cache.
 
@@ -70,7 +73,7 @@ not authoritative state.
 
 ## Bootstrap Semantics
 
-Normal operator-facing commands MUST NOT auto-seed from `demo_registry()`.
+Normal operator-facing commands MUST NOT auto-seed from `fixture_registry()`.
 
 Missing-state behavior:
 
@@ -103,7 +106,7 @@ pretend the mutation became authoritative.
 
 ## Migration From Current Demo Wiring
 
-The current `demo_registry()` path is non-conformant for live CLI usage and must
+The current `fixture_registry()` path is non-conformant for live CLI usage and must
 be removed by follow-on implementation bead `bd-2fqyv.2.2`.
 
 Migration requirements:
@@ -124,4 +127,3 @@ Minimum coverage for the implementation bead:
 - load rejects mismatched extension buckets
 - operator-facing CLI rejects missing registry state instead of showing demo data
 - mutation paths persist state and subsequent CLI invocations observe it
-

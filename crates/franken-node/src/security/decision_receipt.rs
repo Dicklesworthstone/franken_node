@@ -64,6 +64,7 @@ pub struct Receipt {
 pub struct SignedReceipt {
     #[serde(flatten)]
     pub receipt: Receipt,
+    pub signer_key_id: String,
     pub chain_hash: String,
     pub signature: String,
 }
@@ -221,9 +222,11 @@ pub fn sign_receipt(
     let signature = signing_key.sign(payload.as_bytes());
     let signature_b64 = BASE64_STANDARD.encode(signature.to_bytes());
     let chain_hash = compute_chain_hash(receipt.previous_receipt_hash.as_deref(), &payload);
+    let signer_key_id = signing_key_id(&signing_key.verifying_key());
 
     Ok(SignedReceipt {
         receipt: receipt.clone(),
+        signer_key_id,
         chain_hash,
         signature: signature_b64,
     })
@@ -235,6 +238,11 @@ pub fn verify_receipt(
     public_key: &Ed25519PublicKey,
 ) -> Result<bool, ReceiptError> {
     validate_confidence(signed.receipt.confidence)?;
+    let expected_key_id = signing_key_id(public_key);
+    if !crate::security::constant_time::ct_eq(&signed.signer_key_id, &expected_key_id) {
+        return Ok(false);
+    }
+
     let payload = canonical_json(&signed.receipt)?;
     let sig_bytes = BASE64_STANDARD
         .decode(&signed.signature)
@@ -251,6 +259,19 @@ pub fn verify_receipt(
         &expected_chain_hash,
         &signed.chain_hash,
     ))
+}
+
+/// Deterministic key ID shared with release-verification trust roots.
+#[must_use]
+pub fn signing_key_id(public_key: &Ed25519PublicKey) -> String {
+    let hash = Sha256::digest(
+        [
+            b"artifact_signing_keyid_v1:" as &[u8],
+            public_key.as_bytes(),
+        ]
+        .concat(),
+    );
+    hex::encode(&hash[..8])
 }
 
 /// Append and sign a receipt while preserving chain linkage.
@@ -398,7 +419,7 @@ pub fn export_receipts_to_path(
 #[must_use]
 pub fn render_receipts_markdown(receipts: &[SignedReceipt]) -> String {
     let mut output = String::from(
-        "# Signed Decision Receipts\n\n| Receipt ID | Action | Actor | Decision | Timestamp |\n|---|---|---|---|---|\n",
+        "# Signed Decision Receipts\n\n| Receipt ID | Action | Actor | Decision | Key ID | Timestamp |\n|---|---|---|---|---|---|\n",
     );
     for receipt in receipts {
         let decision = match receipt.receipt.decision {
@@ -407,11 +428,12 @@ pub fn render_receipts_markdown(receipts: &[SignedReceipt]) -> String {
             Decision::Escalated => "escalated",
         };
         output.push_str(&format!(
-            "| {} | {} | {} | {} | {} |\n",
+            "| {} | {} | {} | {} | {} | {} |\n",
             receipt.receipt.receipt_id,
             receipt.receipt.action_name,
             receipt.receipt.actor_identity,
             decision,
+            receipt.signer_key_id,
             receipt.receipt.timestamp
         ));
     }
@@ -430,14 +452,13 @@ pub fn write_receipts_markdown(
     })
 }
 
-/// Fixed demo signing key for deterministic sample exports in the current
-/// placeholder CLI.
+/// Deterministic fixture signing key for tests and sample artifacts.
 #[must_use]
 pub fn demo_signing_key() -> Ed25519PrivateKey {
     SigningKey::from_bytes(&[42_u8; 32])
 }
 
-/// Fixed demo verification key matching [`demo_signing_key`].
+/// Deterministic fixture verification key matching [`demo_signing_key`].
 #[must_use]
 pub fn demo_public_key() -> Ed25519PublicKey {
     demo_signing_key().verifying_key()
@@ -546,6 +567,17 @@ mod tests {
     }
 
     #[test]
+    fn sign_receipt_records_signer_key_id() {
+        let receipt = make_receipt("quarantine", Decision::Approved);
+        let signing_key = demo_signing_key();
+        let signed = sign_receipt(&receipt, &signing_key).expect("receipt should sign");
+        assert_eq!(
+            signed.signer_key_id,
+            signing_key_id(&signing_key.verifying_key())
+        );
+    }
+
+    #[test]
     fn receipt_new_rejects_out_of_range_confidence() {
         let err = Receipt::new(
             "quarantine",
@@ -584,6 +616,17 @@ mod tests {
         let err = verify_receipt(&signed, &public_key)
             .expect_err("non-finite confidence must fail verification");
         assert!(matches!(err, ReceiptError::InvalidConfidence { value } if value.is_nan()));
+    }
+
+    #[test]
+    fn verify_receipt_rejects_wrong_signer_key_id() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.signer_key_id = "deadbeefdeadbeef".to_string();
+        let verified = verify_receipt(&signed, &public_key).expect("verify");
+        assert!(!verified);
     }
 
     #[test]
@@ -689,7 +732,9 @@ mod tests {
         let signed = sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).unwrap();
         let markdown = render_receipts_markdown(&[signed]);
         assert!(markdown.contains("Signed Decision Receipts"));
-        assert!(markdown.contains("| Receipt ID | Action | Actor | Decision | Timestamp |"));
+        assert!(
+            markdown.contains("| Receipt ID | Action | Actor | Decision | Key ID | Timestamp |")
+        );
     }
 
     #[test]

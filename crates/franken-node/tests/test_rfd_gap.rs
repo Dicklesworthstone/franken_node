@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod tests {
-    use frankenengine_node::control_plane::fork_detection::{RollbackDetector, StateVector, ForkDetectionError};
+    use frankenengine_node::control_plane::fork_detection::{
+        ForkDetectionError, RollbackDetector, StateVector,
+    };
 
     #[test]
     fn test_rollback_detector_recovers_after_gap() {
@@ -36,7 +38,7 @@ mod tests {
             timestamp: 1000,
             node_id: "node".into(),
         };
-        
+
         // This will fail because last_known is still 1!
         let result = detector.feed(sv4);
         println!("{:?}", result);

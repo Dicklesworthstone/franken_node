@@ -195,6 +195,49 @@ impl ProtocolModel {
                 }
             }
         }
+
+        // Check for dependency cycles using Kahn's algorithm
+        let mut in_degree: BTreeMap<&str, usize> = self
+            .operations
+            .iter()
+            .map(|op| (op.id.as_str(), op.depends_on.len()))
+            .collect();
+        let mut queue = std::collections::VecDeque::new();
+
+        for (id, &deg) in &in_degree {
+            if deg == 0 {
+                queue.push_back(*id);
+            }
+        }
+
+        let mut processed = 0;
+        while let Some(id) = queue.pop_front() {
+            processed += 1;
+            for op in &self.operations {
+                if op.depends_on.contains(id)
+                    && let Some(count) = in_degree.get_mut(op.id.as_str())
+                {
+                    *count -= 1;
+                    if *count == 0 {
+                        queue.push_back(op.id.as_str());
+                    }
+                }
+            }
+        }
+
+        if processed < self.operations.len() {
+            let mut cycle: Vec<String> = in_degree
+                .into_iter()
+                .filter(|(_, deg)| *deg > 0)
+                .map(|(id, _)| id.to_string())
+                .collect();
+            cycle.sort();
+            return Err(DporError::CycleDetected {
+                model: self.id.to_string(),
+                cycle,
+            });
+        }
+
         Ok(())
     }
 }
@@ -874,6 +917,17 @@ mod tests {
             m.validate().unwrap_err().code(),
             error_codes::ERR_DPOR_INVALID_OPERATION
         );
+    }
+
+    #[test]
+    fn model_with_cycle_rejected() {
+        let mut m = ProtocolModel::new(ProtocolModelId::Custom("cyclic".into()), "test");
+        m.add_operation(Operation::new("op1", "actor", "label").with_dep("op2"));
+        m.add_operation(Operation::new("op2", "actor", "label").with_dep("op1"));
+        m.add_safety_property(SafetyProperty::new("prop", "desc"));
+
+        let err = m.validate().unwrap_err();
+        assert_eq!(err.code(), error_codes::ERR_DPOR_CYCLE_DETECTED);
     }
 
     // ---- Estimated schedules ----

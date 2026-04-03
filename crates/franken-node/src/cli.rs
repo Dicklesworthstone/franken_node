@@ -324,6 +324,10 @@ pub struct TrustRevokeArgs {
     /// Extension identifier with optional version.
     pub extension_id: String,
 
+    /// Optional explicit Ed25519 signing key file for receipt export.
+    #[arg(long)]
+    pub receipt_signing_key: Option<PathBuf>,
+
     /// Optional path to export signed decision receipts (JSON or `.cbor`).
     #[arg(long)]
     pub receipt_out: Option<PathBuf>,
@@ -338,6 +342,10 @@ pub struct TrustQuarantineArgs {
     /// Artifact hash to quarantine.
     #[arg(long)]
     pub artifact: String,
+
+    /// Optional explicit Ed25519 signing key file for receipt export.
+    #[arg(long)]
+    pub receipt_signing_key: Option<PathBuf>,
 
     /// Optional path to export signed decision receipts (JSON or `.cbor`).
     #[arg(long)]
@@ -551,9 +559,17 @@ pub struct IncidentBundleArgs {
     #[arg(long)]
     pub id: String,
 
+    /// Optional authoritative incident evidence package path.
+    #[arg(long)]
+    pub evidence_path: Option<PathBuf>,
+
     /// Verify bundle integrity.
     #[arg(long)]
     pub verify: bool,
+
+    /// Optional explicit Ed25519 signing key file for receipt export.
+    #[arg(long)]
+    pub receipt_signing_key: Option<PathBuf>,
 
     /// Optional path to export signed decision receipts (JSON or `.cbor`).
     #[arg(long)]

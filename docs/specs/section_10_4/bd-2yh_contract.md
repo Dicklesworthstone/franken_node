@@ -50,7 +50,7 @@ Required command family in `src/cli.rs` + `src/main.rs`:
 CLI and API must use the same registry/model logic; no duplicate business rules.
 
 Operator-facing trust commands must load authoritative persisted registry state,
-not `demo_registry()`. Persistence/bootstrap rules are defined in
+not the fixture-only `fixture_registry()` helper. Persistence/bootstrap rules are defined in
 `docs/specs/section_10_4/bd-2fqyv_2_1_contract.md`.
 
 ## Versioning + Integrity Invariants

@@ -1,0 +1,845 @@
+{
+  "artifacts": {
+    "verification_evidence": "artifacts/program/bd-2fqyv.1.3/verification_evidence.json",
+    "verification_summary": "artifacts/program/bd-2fqyv.1.3/verification_summary.md"
+  },
+  "bead_id": "bd-2fqyv.1.2",
+  "failed_rules": [],
+  "inventory_doc": "docs/governance/placeholder_surface_inventory.md",
+  "overall_pass": true,
+  "parent_bead_id": "bd-2fqyv",
+  "rules": [
+    {
+      "allowed_simulation_label": "fixture_registry(...)",
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 30,
+      "allowlisted_occurrences": [
+        {
+          "context": "test",
+          "line": 265,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 274,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 293,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 346,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 368,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 427,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 453,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 468,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 511,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/api/trust_card_routes.rs"
+        },
+        {
+          "context": "test",
+          "line": 2121,
+          "line_text": "let mut registry = supply_chain::trust_card::fixture_registry(now_unix_secs())",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/main.rs"
+        },
+        {
+          "context": "test",
+          "line": 2156,
+          "line_text": "supply_chain::trust_card::fixture_registry(now_secs).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/main.rs"
+        },
+        {
+          "context": "test",
+          "line": 2173,
+          "line_text": "supply_chain::trust_card::fixture_registry(now_secs).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/main.rs"
+        },
+        {
+          "context": "production",
+          "line": 1305,
+          "line_text": "pub fn fixture_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError> {",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1665,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1678,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1696,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1714,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1728,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1745,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1770,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1792,
+          "line_text": "let registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1852,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 1899,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 2096,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 2178,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 2228,
+          "line_text": "let mut registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 2312,
+          "line_text": "let registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 2340,
+          "line_text": "let registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 2357,
+          "line_text": "let registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/supply_chain/trust_card.rs"
+        },
+        {
+          "context": "test",
+          "line": 54,
+          "line_text": "let registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/tests/trust_cli_e2e.rs"
+        }
+      ],
+      "classification": "allowlisted_simulation",
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
+      "inventory_alignment_failures": [],
+      "inventory_id": null,
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [
+        "scripts/check_trust_card.py"
+      ],
+      "remediation_bead": "bd-2fqyv.2",
+      "rule_id": "fixture_registry_boundary",
+      "surface": "fixture trust-card registry remains test-only",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": "decision_receipt::demo_signing_key(...)",
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 19,
+      "allowlisted_occurrences": [
+        {
+          "context": "production",
+          "line": 457,
+          "line_text": "pub fn demo_signing_key() -> Ed25519PrivateKey {",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "production",
+          "line": 464,
+          "line_text": "demo_signing_key().verifying_key()",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 572,
+          "line_text": "let signing_key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 600,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 610,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 623,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 634,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 645,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 670,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 687,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 720,
+          "line_text": "&demo_signing_key(),",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 731,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 742,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 756,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/src/security/decision_receipt.rs"
+        },
+        {
+          "context": "test",
+          "line": 48,
+          "line_text": "let signing_key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/tests/verify_release_cli_e2e.rs"
+        },
+        {
+          "context": "test",
+          "line": 88,
+          "line_text": "let correct_key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "crates/franken-node/tests/verify_release_cli_e2e.rs"
+        },
+        {
+          "context": "production",
+          "line": 69,
+          "line_text": "\"pub fn demo_signing_key(\",",
+          "marker": "demo_signing_key(",
+          "path": "scripts/check_artifact_signing.py"
+        },
+        {
+          "context": "test",
+          "line": 31,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "tests/integration/decision_receipt_export.rs"
+        },
+        {
+          "context": "test",
+          "line": 61,
+          "line_text": "let key = demo_signing_key();",
+          "marker": "demo_signing_key(",
+          "path": "tests/integration/decision_receipt_export.rs"
+        }
+      ],
+      "classification": "allowlisted_simulation",
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
+      "inventory_alignment_failures": [],
+      "inventory_id": null,
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [
+        "scripts/check_signed_receipt.py"
+      ],
+      "remediation_bead": "bd-2fqyv.3",
+      "rule_id": "decision_receipt_demo_key_boundary",
+      "surface": "decision receipt demo signing key remains fixture-only",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": null,
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 0,
+      "allowlisted_occurrences": [],
+      "classification": "disallowed_live_shortcut",
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-002",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [
+        "scripts/check_signed_receipt.py"
+      ],
+      "remediation_bead": "bd-2fqyv.3",
+      "rule_id": "no_legacy_demo_receipt_export",
+      "surface": "legacy demo receipt export path removed from live CLI",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": "sample_incident_events(...)",
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 3,
+      "allowlisted_occurrences": [
+        {
+          "context": "production",
+          "line": 369,
+          "line_text": "pub fn sample_incident_events(incident_id: &str) -> Vec<RawEvent> {",
+          "marker": "sample_incident_events(",
+          "path": "crates/franken-node/src/tools/replay_bundle.rs"
+        },
+        {
+          "context": "test",
+          "line": 942,
+          "line_text": "let first = sample_incident_events(\"INC-STABLE-001\");",
+          "marker": "sample_incident_events(",
+          "path": "crates/franken-node/src/tools/replay_bundle.rs"
+        },
+        {
+          "context": "test",
+          "line": 943,
+          "line_text": "let second = sample_incident_events(\"INC-STABLE-001\");",
+          "marker": "sample_incident_events(",
+          "path": "crates/franken-node/src/tools/replay_bundle.rs"
+        }
+      ],
+      "classification": "disallowed_live_shortcut",
+      "documented_occurrence_count": 2,
+      "documented_occurrences": [
+        {
+          "context": "test",
+          "line": 2375,
+          "line_text": "let mut events = sample_incident_events(incident_id);",
+          "marker": "sample_incident_events(",
+          "path": "crates/franken-node/src/main.rs"
+        },
+        {
+          "context": "test",
+          "line": 4527,
+          "line_text": "let events = sample_incident_events(&args.id);",
+          "marker": "sample_incident_events(",
+          "path": "crates/franken-node/src/main.rs"
+        }
+      ],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-003",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [
+        "scripts/check_replay_bundle.py"
+      ],
+      "remediation_bead": "bd-2fqyv.4",
+      "rule_id": "incident_sample_event_boundary",
+      "surface": "incident sample-event helper is documented debt in live CLI and fixture-only elsewhere",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": "synthetic_bearer_admin_route()",
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 0,
+      "allowlisted_occurrences": [],
+      "classification": "deferred_skeleton",
+      "documented_occurrence_count": 9,
+      "documented_occurrences": [
+        {
+          "context": "production",
+          "line": 174,
+          "line_text": "kind: TransportBoundaryKind::InProcessCatalog,",
+          "marker": "TransportBoundaryKind::InProcessCatalog",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "production",
+          "line": 188,
+          "line_text": "UnavailablePendingTransport,",
+          "marker": "UnavailablePendingTransport",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "production",
+          "line": 228,
+          "line_text": "status: PerformanceBaselineStatus::UnavailablePendingTransport,",
+          "marker": "UnavailablePendingTransport",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 410,
+          "line_text": "TransportBoundaryKind::InProcessCatalog",
+          "marker": "TransportBoundaryKind::InProcessCatalog",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 415,
+          "line_text": "baseline.status == PerformanceBaselineStatus::UnavailablePendingTransport",
+          "marker": "UnavailablePendingTransport",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 468,
+          "line_text": "TransportBoundaryKind::InProcessCatalog",
+          "marker": "TransportBoundaryKind::InProcessCatalog",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 476,
+          "line_text": "== PerformanceBaselineStatus::UnavailablePendingTransport)",
+          "marker": "UnavailablePendingTransport",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 626,
+          "line_text": "fn synthetic_bearer_admin_route() -> RouteMetadata {",
+          "marker": "synthetic_bearer_admin_route(",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 766,
+          "line_text": "let route = synthetic_bearer_admin_route();",
+          "marker": "synthetic_bearer_admin_route(",
+          "path": "crates/franken-node/src/api/service.rs"
+        }
+      ],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-004",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [],
+      "remediation_bead": "bd-2fqyv.5",
+      "rule_id": "service_skeleton_quarantine",
+      "surface": "control-plane catalog boundary remains explicitly non-live",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": null,
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 0,
+      "allowlisted_occurrences": [],
+      "classification": "truthful_partial_surface",
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-005",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [],
+      "remediation_bead": "bd-2fqyv.6",
+      "rule_id": "migration_truth_anchor",
+      "surface": "migration surface stays explicitly audit/rewrite/validate only",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": null,
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 0,
+      "allowlisted_occurrences": [],
+      "classification": "allowlisted_simulation",
+      "documented_occurrence_count": 2,
+      "documented_occurrences": [
+        {
+          "context": "production",
+          "line": 219,
+          "line_text": "error: \"simulated crash\".into(),",
+          "marker": "simulated crash",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "context": "production",
+          "line": 232,
+          "line_text": "coverage_pct: 0.0,",
+          "marker": "coverage_pct: 0.0",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        }
+      ],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-006",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [
+        "scripts/check_fuzz_corpus.py"
+      ],
+      "remediation_bead": "bd-2fqyv.7",
+      "rule_id": "fuzz_gate_simulation_confinement",
+      "surface": "fuzz gate simulation remains confined to its modeling surface",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": null,
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 4,
+      "allowlisted_occurrences": [
+        {
+          "context": "test",
+          "line": 344,
+          "line_text": "let verdict = c.run_gate();",
+          "marker": ".run_gate(",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "context": "test",
+          "line": 358,
+          "line_text": "let verdict = c.run_gate();",
+          "marker": ".run_gate(",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "context": "test",
+          "line": 65,
+          "line_text": "let verdict = c.run_gate();",
+          "marker": ".run_gate(",
+          "path": "tests/integration/fuzz_corpus_gates.rs"
+        },
+        {
+          "context": "test",
+          "line": 74,
+          "line_text": "let verdict = c.run_gate();",
+          "marker": ".run_gate(",
+          "path": "tests/integration/fuzz_corpus_gates.rs"
+        }
+      ],
+      "classification": "allowlisted_simulation",
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-006",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [
+        "scripts/check_fuzz_corpus.py"
+      ],
+      "remediation_bead": "bd-2fqyv.7",
+      "rule_id": "fuzz_gate_callsite_boundary",
+      "surface": "fuzz gate callsites remain confined to fixture and verification paths",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": null,
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 0,
+      "allowlisted_occurrences": [],
+      "classification": "disallowed_live_shortcut",
+      "documented_occurrence_count": 2,
+      "documented_occurrences": [
+        {
+          "context": "production",
+          "line": 686,
+          "line_text": "/// Mark the guard as rolled back. Must be called after `tracker.rollback()`.",
+          "marker": "tracker.rollback()",
+          "path": "crates/franken-node/src/connector/obligation_tracker.rs"
+        },
+        {
+          "context": "production",
+          "line": 706,
+          "line_text": "// In a real implementation this would call tracker.rollback().",
+          "marker": "tracker.rollback()",
+          "path": "crates/franken-node/src/connector/obligation_tracker.rs"
+        }
+      ],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-007",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [],
+      "remediation_bead": "bd-2fqyv.8",
+      "rule_id": "obligation_tracker_rollback_placeholder",
+      "surface": "obligation guard rollback remains documented debt rather than hidden behavior",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": null,
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 0,
+      "allowlisted_occurrences": [],
+      "classification": "truthful_partial_surface",
+      "documented_occurrence_count": 2,
+      "documented_occurrences": [
+        {
+          "context": "production",
+          "line": 514,
+          "line_text": "compromise_reduction_factor: 1.0, // Placeholder \u2014 computed from external benchmark.",
+          "marker": "compromise_reduction_factor: 1.0",
+          "path": "crates/franken-node/src/supply_chain/ecosystem_telemetry.rs"
+        },
+        {
+          "context": "production",
+          "line": 517,
+          "line_text": "certification_distribution: BTreeMap::new(), // Populated from live data.",
+          "marker": "certification_distribution: BTreeMap::new()",
+          "path": "crates/franken-node/src/supply_chain/ecosystem_telemetry.rs"
+        }
+      ],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-008",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [],
+      "remediation_bead": "bd-2fqyv.9",
+      "rule_id": "ecosystem_health_placeholder_metrics",
+      "surface": "ecosystem health export placeholder metrics stay explicitly documented",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": null,
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 0,
+      "allowlisted_occurrences": [],
+      "classification": "truthful_partial_surface",
+      "documented_occurrence_count": 1,
+      "documented_occurrences": [
+        {
+          "context": "production",
+          "line": 665,
+          "line_text": "// Build a synthetic barrier for the receipt (use first matching or create placeholder)",
+          "marker": "Build a synthetic barrier for the receipt",
+          "path": "crates/franken-node/src/security/dgis/barrier_primitives.rs"
+        }
+      ],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-009",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [],
+      "remediation_bead": "bd-2fqyv.11",
+      "rule_id": "dgis_placeholder_barrier_context",
+      "surface": "DGIS placeholder barrier context remains explicitly documented debt",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    },
+    {
+      "allowed_simulation_label": null,
+      "allowlist_escape_count": 0,
+      "allowlist_escapes": [],
+      "allowlisted_occurrence_count": 0,
+      "allowlisted_occurrences": [],
+      "classification": "disallowed_live_shortcut",
+      "documented_occurrence_count": 1,
+      "documented_occurrences": [
+        {
+          "context": "production",
+          "line": 119,
+          "line_text": "\"detail\": \"verification simulated (full execution requires test harness)\",",
+          "marker": "verification simulated (full execution requires test harness)",
+          "path": "scripts/reproduce.py"
+        }
+      ],
+      "inventory_alignment_failures": [],
+      "inventory_id": "PSI-010",
+      "missing_anchor_markers": [],
+      "pass": true,
+      "reason_code": "PLACEHOLDER_SCANNER_PASS",
+      "related_checkers": [],
+      "remediation_bead": "bd-2fqyv.10",
+      "rule_id": "reproduction_script_simulated_verification",
+      "surface": "external reproduction script remains explicitly simulated until replaced",
+      "unexpected_occurrence_count": 0,
+      "unexpected_occurrences": []
+    }
+  ],
+  "schema_version": "placeholder-surface-scanner-v1.0",
+  "summary": {
+    "allowed_simulation_count": 5,
+    "allowlist_escapes": 0,
+    "allowlisted_occurrences": 56,
+    "documented_occurrences": 19,
+    "inventory_drift_failures": 0,
+    "inventory_entry_count": 10,
+    "missing_anchor_markers": 0,
+    "rule_count": 12,
+    "unexpected_occurrences": 0
+  },
+  "temporary_allowlist_strategy": {
+    "modes": [
+      {
+        "description": "Marker is allowed only in listed fixture/test paths or on the explicitly allowlisted helper line.",
+        "mode": "explicit_test_fixture"
+      },
+      {
+        "description": "Marker is temporarily tolerated only at the inventory-declared live path until the owning remediation bead closes.",
+        "mode": "documented_open_debt"
+      },
+      {
+        "description": "Truthful partial or deferred surfaces must retain the honesty markers that keep their narrow scope explicit.",
+        "mode": "truth_anchor"
+      }
+    ],
+    "pass_condition": "Documented open debt may remain at its declared anchors, but any undocumented occurrence, allowlist escape, missing truth anchor, or inventory drift fails the scan.",
+    "steady_state": "The final ratchet should shrink documented_open_debt to zero and leave only explicit test fixtures with narrowly scoped allowlists."
+  },
+  "verdict": "PASS",
+  "verification_method": "python3 scripts/check_placeholder_surface_inventory.py --json"
+}

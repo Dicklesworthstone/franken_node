@@ -21,7 +21,8 @@
       "confidence": 0.93,
       "rollback_command": "franken-node fleet release --incident INC-2026-0007",
       "previous_receipt_hash": null,
-      "chain_hash": "2584267e26d6a13f5e0ca8cc8b2b66482b92f4dbb37aa44244026ddc934150c1",
+      "signer_key_id": "72416df9f1dcd9b3",
+      "chain_hash": "1b84fc4d4d7140472f2d0b0cf8b2012f99f1a020e00088fd4da2b8082c455fc8",
       "signature": "iT87WHCWjuD/9z5pVG3/9uvVxsu41Ddzaesu/lszCEF/vd2ySIJ4lEW1p9pqPocQXa8UWMnisanLKAIHgIrdBw=="
     },
     {
@@ -43,9 +44,10 @@
       ],
       "confidence": 0.88,
       "rollback_command": "franken-node trust sync --force",
-      "previous_receipt_hash": "2584267e26d6a13f5e0ca8cc8b2b66482b92f4dbb37aa44244026ddc934150c1",
-      "chain_hash": "99018508162fe9804c1fd2482ceaa2948718863f2531170f17d1d8aa11914fb1",
-      "signature": "ZJHZpB3z9PbFZNKuAksPDCmcQntRKglvqOIr/kjX8u9vFr96ucjzsEM5ZdtEDIoSb8kx7qb6veUJbI+ZDjWgCg=="
+      "previous_receipt_hash": "1b84fc4d4d7140472f2d0b0cf8b2012f99f1a020e00088fd4da2b8082c455fc8",
+      "signer_key_id": "72416df9f1dcd9b3",
+      "chain_hash": "dedb1579a5598448dfa6025b70d330d97d2fdac19eacf34d53ea21f93a83c389",
+      "signature": "pvoe48/lJ7zwBhJx+lIb9mbwwSTEdkiEInvf6ef5RUwlkYWmRJBThq6R9cq1vlXSueJ+ZH+J6CG+sUQWK+xDBg=="
     }
   ]
 }

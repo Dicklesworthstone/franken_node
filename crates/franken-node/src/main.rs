@@ -69,6 +69,8 @@ use crate::policy::{
     hardening_state_machine::HardeningLevel,
     policy_explainer::{PolicyExplainer, PolicyExplanation, WordingValidation, validate_wording},
 };
+#[cfg(test)]
+use crate::tools::replay_bundle::{generate_replay_bundle, sample_incident_events};
 use anyhow::{Context, Result};
 use clap::Parser;
 use frankenengine_node::{
@@ -76,8 +78,8 @@ use frankenengine_node::{
     ops, runtime,
     security::{
         decision_receipt::{
-            Decision, Receipt, ReceiptQuery, append_signed_receipt, demo_signing_key,
-            export_receipts_to_path, write_receipts_markdown,
+            Decision, Receipt, ReceiptQuery, append_signed_receipt, export_receipts_to_path,
+            write_receipts_markdown,
         },
         remote_cap::{CapabilityProvider, RemoteOperation, RemoteScope},
     },
@@ -89,7 +91,7 @@ use frankenengine_node::{
         trust_card::{
             ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel, TrustCard,
             TrustCardListFilter, TrustCardMutation, TrustCardRegistry, TrustCardSyncReport,
-            demo_registry as demo_trust_registry, render_comparison_human, render_trust_card_human,
+            render_comparison_human, render_trust_card_human,
             to_canonical_json as trust_card_to_json,
         },
     },
@@ -105,8 +107,9 @@ use frankenengine_node::{
             to_canonical_json as counterfactual_to_json,
         },
         replay_bundle::{
-            generate_replay_bundle, read_bundle_from_path, replay_bundle as replay_incident_bundle,
-            sample_incident_events, validate_bundle_integrity, write_bundle_to_path,
+            generate_replay_bundle_from_evidence, read_bundle_from_path,
+            read_incident_evidence_package, replay_bundle as replay_incident_bundle,
+            validate_bundle_integrity, write_bundle_to_path,
         },
     },
 };
@@ -158,6 +161,15 @@ const VERIFY_MIGRATION_IDS: &[&str] = &[
     "dgis_migration_gate",
 ];
 const VERIFY_CORPUS_SEARCH_ROOTS: &[&str] = &["fixtures", "vectors"];
+const TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH: &str =
+    ".franken-node/state/trust-card-registry.v1.json";
+const INCIDENT_EVIDENCE_RELATIVE_DIR: &str = ".franken-node/state/incidents";
+const INCIDENT_EVIDENCE_FILE_NAME: &str = "evidence.v1.json";
+
+struct TrustCardCliRegistryState {
+    path: PathBuf,
+    registry: TrustCardRegistry,
+}
 
 #[derive(Debug, Serialize)]
 struct VerifyContractOutput {
@@ -171,19 +183,160 @@ struct VerifyContractOutput {
     reason: String,
 }
 
-fn maybe_export_demo_receipts(
+struct ReceiptSigningMaterial {
+    path: PathBuf,
+    source: &'static str,
+    signing_key: ed25519_dalek::SigningKey,
+}
+
+fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> {
+    use base64::Engine;
+
+    if raw.len() == 32
+        && let Ok(bytes) = <[u8; 32]>::try_from(raw)
+    {
+        return Some(ed25519_dalek::SigningKey::from_bytes(&bytes));
+    }
+
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return None;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let mut candidates = vec![trimmed.to_string()];
+    if trimmed.starts_with('{')
+        && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    {
+        for field in [
+            "private_key",
+            "signing_key",
+            "secret_key",
+            "ed25519_private_key",
+        ] {
+            if let Some(entry) = value.get(field).and_then(serde_json::Value::as_str) {
+                candidates.push(entry.to_string());
+            }
+        }
+    }
+
+    for candidate in candidates {
+        let normalized = candidate.trim().trim_start_matches("ed25519:").trim();
+        if normalized.is_empty() {
+            continue;
+        }
+
+        if let Ok(decoded_hex) = hex::decode(normalized)
+            && let Ok(bytes) = <[u8; 32]>::try_from(decoded_hex.as_slice())
+        {
+            return Some(ed25519_dalek::SigningKey::from_bytes(&bytes));
+        }
+
+        if let Ok(decoded_b64) = base64::engine::general_purpose::STANDARD.decode(normalized)
+            && let Ok(bytes) = <[u8; 32]>::try_from(decoded_b64.as_slice())
+        {
+            return Some(ed25519_dalek::SigningKey::from_bytes(&bytes));
+        }
+    }
+
+    None
+}
+
+fn resolve_receipt_signing_key_path(
+    cli_override: Option<&Path>,
+) -> Result<Option<(PathBuf, &'static str)>> {
+    if let Some(path) = cli_override {
+        return Ok(Some((path.to_path_buf(), "cli")));
+    }
+
+    let resolved = config::Config::resolve(None, CliOverrides::default())
+        .context("failed resolving configuration for receipt export")?;
+    let Some(path) = resolved
+        .config
+        .security
+        .decision_receipt_signing_key_path
+        .clone()
+    else {
+        return Ok(None);
+    };
+
+    let source = resolved
+        .decisions
+        .iter()
+        .rev()
+        .find(|decision| decision.field == "security.decision_receipt_signing_key_path")
+        .map(|decision| match decision.stage {
+            config::MergeStage::Env => "env",
+            _ => "config",
+        })
+        .unwrap_or("config");
+    Ok(Some((path, source)))
+}
+
+fn load_receipt_signing_material(
+    cli_override: Option<&Path>,
+) -> Result<Option<ReceiptSigningMaterial>> {
+    let Some((path, source)) = resolve_receipt_signing_key_path(cli_override)? else {
+        return Ok(None);
+    };
+
+    if !path.is_file() {
+        anyhow::bail!(
+            "receipt signing key must point to a file: {}",
+            path.display()
+        );
+    }
+
+    let raw = std::fs::read(&path)
+        .with_context(|| format!("failed reading receipt signing key {}", path.display()))?;
+    let Some(signing_key) = parse_signing_key_from_blob(&raw) else {
+        anyhow::bail!(
+            "failed decoding Ed25519 receipt signing key from {}",
+            path.display()
+        );
+    };
+
+    Ok(Some(ReceiptSigningMaterial {
+        path,
+        source,
+        signing_key,
+    }))
+}
+
+fn prepare_receipt_signing_material(
+    receipt_out: Option<&Path>,
+    receipt_summary_out: Option<&Path>,
+    cli_override: Option<&Path>,
+) -> Result<Option<ReceiptSigningMaterial>> {
+    if receipt_out.is_none() && receipt_summary_out.is_none() {
+        return Ok(None);
+    }
+
+    load_receipt_signing_material(cli_override)?.ok_or_else(|| {
+        anyhow::anyhow!(
+            "receipt export requested but no signing key was configured; pass --receipt-signing-key, set FRANKEN_NODE_SECURITY_DECISION_RECEIPT_SIGNING_KEY_PATH, or configure security.decision_receipt_signing_key_path"
+        )
+    }).map(Some)
+}
+
+fn maybe_export_signed_receipts(
     action_name: &str,
     actor_identity: &str,
     rationale: &str,
     receipt_out: Option<&Path>,
     receipt_summary_out: Option<&Path>,
+    signing_material: Option<&ReceiptSigningMaterial>,
 ) -> Result<()> {
     if receipt_out.is_none() && receipt_summary_out.is_none() {
         return Ok(());
     }
 
+    let signing_material = signing_material.ok_or_else(|| {
+        anyhow::anyhow!("missing prepared receipt signing material for {action_name}")
+    })?;
     let mut chain = Vec::new();
-    let key = demo_signing_key();
 
     let receipt = Receipt::new(
         action_name,
@@ -203,7 +356,7 @@ fn maybe_export_demo_receipts(
         0.93,
         "franken-node trust sync --force",
     )?;
-    append_signed_receipt(&mut chain, receipt, &key)?;
+    let signed = append_signed_receipt(&mut chain, receipt, &signing_material.signing_key)?;
 
     let filter = ReceiptQuery::default();
     if let Some(path) = receipt_out {
@@ -214,11 +367,18 @@ fn maybe_export_demo_receipts(
         write_receipts_markdown(&chain, path)
             .with_context(|| format!("failed writing receipt summary to {}", path.display()))?;
     }
+    eprintln!(
+        "receipt export signed: action={} signer_key_id={} signing_source={} signing_key_path={}",
+        action_name,
+        signed.signer_key_id,
+        signing_material.source,
+        signing_material.path.display()
+    );
 
     Ok(())
 }
 
-fn incident_bundle_output_path(incident_id: &str) -> PathBuf {
+fn incident_id_slug(incident_id: &str) -> String {
     let mut slug = String::new();
     for ch in incident_id.chars() {
         if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
@@ -230,7 +390,11 @@ fn incident_bundle_output_path(incident_id: &str) -> PathBuf {
     if slug.is_empty() {
         slug.push_str("incident");
     }
-    PathBuf::from(format!("{}.fnbundle", slug))
+    slug
+}
+
+fn incident_bundle_output_path(incident_id: &str) -> PathBuf {
+    PathBuf::from(format!("{}.fnbundle", incident_id_slug(incident_id)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1963,7 +2127,8 @@ mod trust_command_tests {
 
     #[test]
     fn trust_list_filters_by_risk_and_revocation_status() {
-        let mut registry = trust_card_cli_registry().expect("registry");
+        let mut registry =
+            supply_chain::trust_card::fixture_registry(now_unix_secs()).expect("fixture registry");
         let cards = registry
             .list(&TrustCardListFilter::empty(), "trace-test", now_unix_secs())
             .expect("list");
@@ -1996,7 +2161,8 @@ mod trust_command_tests {
     #[test]
     fn trust_revoke_uses_logical_now_secs_for_timestamps() {
         let now_secs = 1_700_000_123;
-        let mut registry = demo_trust_registry(now_secs).expect("registry");
+        let mut registry =
+            supply_chain::trust_card::fixture_registry(now_secs).expect("fixture registry");
 
         let card = revoke_trust_card(&mut registry, "npm:@acme/auth-guard", now_secs)
             .expect("revoke should succeed");
@@ -2012,7 +2178,8 @@ mod trust_command_tests {
     #[test]
     fn trust_quarantine_matches_sha256_prefix_and_uses_logical_now_secs() {
         let now_secs = 1_700_000_456;
-        let mut registry = demo_trust_registry(now_secs).expect("registry");
+        let mut registry =
+            supply_chain::trust_card::fixture_registry(now_secs).expect("fixture registry");
 
         let updates = quarantine_trust_cards(&mut registry, "sha256:deadbeef", now_secs)
             .expect("quarantine should succeed");
@@ -2212,6 +2379,16 @@ mod migrate_audit_output_tests {
 #[cfg(test)]
 mod incident_list_tests {
     use super::*;
+    use crate::tools::replay_bundle::{
+        EventType, INCIDENT_EVIDENCE_SCHEMA, IncidentEvidenceEvent, IncidentEvidenceMetadata,
+        IncidentEvidencePackage, IncidentSeverity,
+    };
+    use std::sync::{Mutex, OnceLock};
+
+    fn cwd_test_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
 
     fn write_sample_bundle(path: &Path, incident_id: &str, severity: &str) {
         let mut events = sample_incident_events(incident_id);
@@ -2222,6 +2399,78 @@ mod incident_list_tests {
         }
         let bundle = generate_replay_bundle(incident_id, &events).expect("bundle");
         write_bundle_to_path(&bundle, path).expect("write bundle");
+    }
+
+    fn write_incident_evidence_package(workspace: &Path, incident_id: &str) -> PathBuf {
+        let evidence_path = workspace
+            .join(INCIDENT_EVIDENCE_RELATIVE_DIR)
+            .join(incident_id_slug(incident_id))
+            .join(INCIDENT_EVIDENCE_FILE_NAME);
+        std::fs::create_dir_all(
+            evidence_path
+                .parent()
+                .expect("incident evidence path should have parent"),
+        )
+        .expect("create evidence directory");
+        let package = IncidentEvidencePackage {
+            schema_version: INCIDENT_EVIDENCE_SCHEMA.to_string(),
+            incident_id: incident_id.to_string(),
+            collected_at: "2026-02-20T10:05:00.000000Z".to_string(),
+            trace_id: "trace-incident-evidence".to_string(),
+            severity: IncidentSeverity::High,
+            incident_type: "security".to_string(),
+            detector: "unit-test".to_string(),
+            policy_version: "1.2.3".to_string(),
+            initial_state_snapshot: serde_json::json!({"epoch": 7_u64, "mode": "strict"}),
+            events: vec![
+                IncidentEvidenceEvent {
+                    event_id: "evt-001".to_string(),
+                    timestamp: "2026-02-20T10:00:00.000100Z".to_string(),
+                    event_type: EventType::ExternalSignal,
+                    payload: serde_json::json!({"signal":"anomaly","severity":"high"}),
+                    provenance_ref: "refs/logs/event-001.json".to_string(),
+                    parent_event_id: None,
+                    state_snapshot: None,
+                    policy_version: None,
+                },
+                IncidentEvidenceEvent {
+                    event_id: "evt-002".to_string(),
+                    timestamp: "2026-02-20T10:00:00.000200Z".to_string(),
+                    event_type: EventType::PolicyEval,
+                    payload: serde_json::json!({"decision":"quarantine","confidence":91_u64}),
+                    provenance_ref: "refs/logs/event-002.json".to_string(),
+                    parent_event_id: Some("evt-001".to_string()),
+                    state_snapshot: None,
+                    policy_version: None,
+                },
+                IncidentEvidenceEvent {
+                    event_id: "evt-003".to_string(),
+                    timestamp: "2026-02-20T10:00:00.000300Z".to_string(),
+                    event_type: EventType::OperatorAction,
+                    payload: serde_json::json!({"action":"seal","result":"accepted"}),
+                    provenance_ref: "refs/logs/event-003.json".to_string(),
+                    parent_event_id: Some("evt-002".to_string()),
+                    state_snapshot: None,
+                    policy_version: None,
+                },
+            ],
+            evidence_refs: vec![
+                "refs/logs/event-001.json".to_string(),
+                "refs/logs/event-002.json".to_string(),
+                "refs/logs/event-003.json".to_string(),
+            ],
+            metadata: IncidentEvidenceMetadata {
+                title: "Synthetic incident".to_string(),
+                affected_components: vec!["auth-svc".to_string()],
+                tags: vec!["test".to_string()],
+            },
+        };
+        std::fs::write(
+            &evidence_path,
+            serde_json::to_string_pretty(&package).expect("serialize evidence package"),
+        )
+        .expect("write evidence package");
+        evidence_path
     }
 
     #[test]
@@ -2271,6 +2520,124 @@ mod incident_list_tests {
             rendered,
             "incident list: no bundles found for severity=critical"
         );
+    }
+
+    #[test]
+    fn resolve_incident_evidence_path_prefers_explicit_override() {
+        let override_path = PathBuf::from("/tmp/custom-incident-evidence.json");
+        let resolved =
+            resolve_incident_evidence_path("INC-OVERRIDE-001", Some(override_path.as_path()))
+                .expect("resolve");
+        assert_eq!(resolved, override_path);
+    }
+
+    #[test]
+    fn resolve_incident_evidence_path_uses_project_local_default() {
+        let _lock = cwd_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let previous_cwd = std::env::current_dir().expect("cwd");
+        std::fs::write(
+            dir.path().join("franken_node.toml"),
+            "profile = \"balanced\"\n",
+        )
+        .expect("write config");
+        std::env::set_current_dir(dir.path()).expect("set cwd");
+
+        let resolve_result = resolve_incident_evidence_path("INC/TEST:001", None);
+        let restore_result = std::env::set_current_dir(&previous_cwd);
+
+        let resolved = resolve_result.expect("resolve");
+        restore_result.expect("restore cwd");
+
+        assert_eq!(
+            resolved,
+            dir.path()
+                .join(INCIDENT_EVIDENCE_RELATIVE_DIR)
+                .join("INC_TEST_001")
+                .join(INCIDENT_EVIDENCE_FILE_NAME)
+        );
+    }
+
+    #[test]
+    fn incident_bundle_command_reads_project_local_evidence_and_writes_bundle() {
+        let _lock = cwd_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let previous_cwd = std::env::current_dir().expect("cwd");
+        let incident_id = "INC/TEST:001";
+        std::fs::write(
+            dir.path().join("franken_node.toml"),
+            "profile = \"balanced\"\n",
+        )
+        .expect("write config");
+        let evidence_path = write_incident_evidence_package(dir.path(), incident_id);
+        std::env::set_current_dir(dir.path()).expect("set cwd");
+
+        let run_result = handle_incident_bundle_command(&cli::IncidentBundleArgs {
+            id: incident_id.to_string(),
+            evidence_path: None,
+            verify: true,
+            receipt_signing_key: None,
+            receipt_out: None,
+            receipt_summary_out: None,
+        });
+        let output_path = dir.path().join(incident_bundle_output_path(incident_id));
+        let restore_result = std::env::set_current_dir(&previous_cwd);
+
+        run_result.expect("bundle command should succeed");
+        restore_result.expect("restore cwd");
+
+        assert!(evidence_path.is_file());
+        assert!(output_path.is_file());
+
+        let bundle = read_bundle_from_path(&output_path).expect("read bundle");
+        assert_eq!(bundle.incident_id, incident_id);
+        assert_eq!(
+            bundle.initial_state_snapshot,
+            serde_json::json!({"epoch": 7_u64, "mode": "strict"})
+        );
+        assert_eq!(bundle.policy_version, "1.2.3");
+        assert_eq!(bundle.timeline.len(), 3);
+    }
+
+    #[test]
+    fn incident_bundle_command_fails_closed_when_authoritative_evidence_is_missing() {
+        let _lock = cwd_test_lock()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let dir = tempfile::tempdir().expect("tempdir");
+        let previous_cwd = std::env::current_dir().expect("cwd");
+        let incident_id = "INC-MISSING-001";
+        std::fs::write(
+            dir.path().join("franken_node.toml"),
+            "profile = \"balanced\"\n",
+        )
+        .expect("write config");
+        std::env::set_current_dir(dir.path()).expect("set cwd");
+
+        let run_result = handle_incident_bundle_command(&cli::IncidentBundleArgs {
+            id: incident_id.to_string(),
+            evidence_path: None,
+            verify: false,
+            receipt_signing_key: None,
+            receipt_out: None,
+            receipt_summary_out: None,
+        });
+        let output_path = dir.path().join(incident_bundle_output_path(incident_id));
+        let restore_result = std::env::set_current_dir(&previous_cwd);
+
+        let err = run_result.expect_err("missing evidence must fail closed");
+        restore_result.expect("restore cwd");
+
+        assert!(
+            err.to_string()
+                .contains("failed reading authoritative incident evidence"),
+            "{err:#}"
+        );
+        assert!(!output_path.exists());
     }
 }
 
@@ -2347,8 +2714,139 @@ fn handle_remotecap_issue(args: &RemoteCapIssueArgs) -> Result<()> {
     Ok(())
 }
 
-fn trust_card_cli_registry() -> Result<TrustCardRegistry> {
-    demo_trust_registry(now_unix_secs()).map_err(Into::into)
+fn trust_card_cli_registry(now_secs: u64) -> Result<TrustCardCliRegistryState> {
+    let resolved = config::Config::resolve(None, CliOverrides::default())
+        .context("failed resolving configuration for trust registry")?;
+    let project_root = project_local_root_from_source_path(
+        resolved.source_path.as_deref(),
+        "trust-card registry",
+    )?;
+    let path = project_root.join(TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH);
+    if !path.is_file() {
+        anyhow::bail!(
+            "authoritative trust-card registry not initialized at {}; bootstrap or import trust state before using trust commands",
+            path.display()
+        );
+    }
+    let cache_ttl = resolved.config.trust.card_cache_ttl_secs.unwrap_or(60);
+    let registry = TrustCardRegistry::load_authoritative_state(&path, cache_ttl, now_secs)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    Ok(TrustCardCliRegistryState { path, registry })
+}
+
+fn persist_trust_card_cli_registry(state: &TrustCardCliRegistryState) -> Result<()> {
+    state
+        .registry
+        .persist_authoritative_state(&state.path)
+        .map_err(|err| anyhow::anyhow!(err.to_string()))
+}
+
+fn project_local_root_from_source_path(
+    source_path: Option<&Path>,
+    authoritative_surface: &str,
+) -> Result<PathBuf> {
+    let source_path = source_path.ok_or_else(|| {
+        anyhow::anyhow!(
+            "authoritative {authoritative_surface} requires a project-local `franken_node.toml`; no local config was discovered"
+        )
+    })?;
+    if source_path.file_name().and_then(|name| name.to_str()) != Some("franken_node.toml") {
+        anyhow::bail!(
+            "authoritative {authoritative_surface} requires a project-local `franken_node.toml`; discovered non-project config source `{}`",
+            source_path.display()
+        );
+    }
+    let root = source_path.parent().map(Path::to_path_buf).ok_or_else(|| {
+        anyhow::anyhow!(
+            "could not resolve project root from {authoritative_surface} config source `{}`",
+            source_path.display()
+        )
+    })?;
+    if root.is_absolute() {
+        return Ok(root);
+    }
+
+    std::env::current_dir()
+        .with_context(|| {
+            format!("failed resolving current working directory for {authoritative_surface}")
+        })
+        .map(|cwd| cwd.join(root))
+}
+
+fn resolve_incident_evidence_path(
+    incident_id: &str,
+    evidence_path_override: Option<&Path>,
+) -> Result<PathBuf> {
+    if let Some(path) = evidence_path_override {
+        return Ok(path.to_path_buf());
+    }
+
+    let resolved = config::Config::resolve(None, CliOverrides::default())
+        .context("failed resolving configuration for incident evidence")?;
+    let project_root =
+        project_local_root_from_source_path(resolved.source_path.as_deref(), "incident evidence")?;
+    Ok(project_root
+        .join(INCIDENT_EVIDENCE_RELATIVE_DIR)
+        .join(incident_id_slug(incident_id))
+        .join(INCIDENT_EVIDENCE_FILE_NAME))
+}
+
+fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> {
+    let receipt_signing_material = prepare_receipt_signing_material(
+        args.receipt_out.as_deref(),
+        args.receipt_summary_out.as_deref(),
+        args.receipt_signing_key.as_deref(),
+    )?;
+    eprintln!(
+        "franken-node incident bundle: id={} verify={}",
+        args.id, args.verify
+    );
+    let evidence_path = resolve_incident_evidence_path(&args.id, args.evidence_path.as_deref())?;
+    let evidence =
+        read_incident_evidence_package(&evidence_path, Some(&args.id)).with_context(|| {
+            format!(
+                "failed reading authoritative incident evidence {}",
+                evidence_path.display()
+            )
+        })?;
+    let bundle = generate_replay_bundle_from_evidence(&evidence).with_context(|| {
+        format!(
+            "failed generating replay bundle from authoritative evidence {}",
+            evidence_path.display()
+        )
+    })?;
+    if args.verify {
+        let valid = validate_bundle_integrity(&bundle)
+            .with_context(|| format!("failed validating replay bundle for {}", args.id))?;
+        eprintln!(
+            "bundle integrity: {}",
+            if valid { "valid" } else { "invalid" }
+        );
+    }
+
+    let output_path = incident_bundle_output_path(&args.id);
+    write_bundle_to_path(&bundle, &output_path).with_context(|| {
+        format!(
+            "failed writing incident bundle to {}",
+            output_path.display()
+        )
+    })?;
+
+    maybe_export_signed_receipts(
+        "incident_bundle",
+        "incident-control-plane",
+        "Incident bundle receipt export for deterministic replay evidence",
+        args.receipt_out.as_deref(),
+        args.receipt_summary_out.as_deref(),
+        receipt_signing_material.as_ref(),
+    )?;
+    eprintln!(
+        "incident bundle written: {} evidence={}",
+        output_path.display(),
+        evidence_path.display()
+    );
+
+    Ok(())
 }
 
 fn provenance_commit_prefix(digest: &str) -> String {
@@ -3868,13 +4366,14 @@ fn emit_verify_corpus(args: &VerifyCorpusArgs) -> i32 {
 }
 
 fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
-    let mut registry = trust_card_cli_registry()?;
     let now_secs = now_unix_secs();
     let trace_id = "trace-cli-trust-card";
 
     match command {
         TrustCardCommand::Show(args) => {
-            let response = get_trust_card(&mut registry, &args.extension_id, now_secs, trace_id)?;
+            let mut state = trust_card_cli_registry(now_secs)?;
+            let response =
+                get_trust_card(&mut state.registry, &args.extension_id, now_secs, trace_id)?;
             let card = response
                 .data
                 .ok_or_else(|| anyhow::anyhow!("trust card not found: {}", args.extension_id))?;
@@ -3888,22 +4387,25 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
             if !args.json {
                 anyhow::bail!("`trust-card export` requires `--json`");
             }
-            let response = get_trust_card(&mut registry, &args.extension_id, now_secs, trace_id)?;
+            let mut state = trust_card_cli_registry(now_secs)?;
+            let response =
+                get_trust_card(&mut state.registry, &args.extension_id, now_secs, trace_id)?;
             let card = response
                 .data
                 .ok_or_else(|| anyhow::anyhow!("trust card not found: {}", args.extension_id))?;
             println!("{}", trust_card_to_json(&card)?);
         }
         TrustCardCommand::List(args) => {
+            let mut state = trust_card_cli_registry(now_secs)?;
             let pagination = Pagination {
                 page: args.page,
                 per_page: args.per_page,
             };
             let response = if let Some(query) = args.query.as_deref() {
-                search_trust_cards(&mut registry, query, now_secs, trace_id, pagination)?
+                search_trust_cards(&mut state.registry, query, now_secs, trace_id, pagination)?
             } else if let Some(publisher_id) = args.publisher.as_deref() {
                 get_trust_cards_by_publisher(
-                    &mut registry,
+                    &mut state.registry,
                     publisher_id,
                     now_secs,
                     trace_id,
@@ -3911,7 +4413,7 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
                 )?
             } else {
                 list_trust_cards(
-                    &mut registry,
+                    &mut state.registry,
                     &TrustCardListFilter::empty(),
                     now_secs,
                     trace_id,
@@ -3926,8 +4428,9 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
             }
         }
         TrustCardCommand::Compare(args) => {
+            let mut state = trust_card_cli_registry(now_secs)?;
             let response = compare_trust_cards(
-                &mut registry,
+                &mut state.registry,
                 &args.left_extension_id,
                 &args.right_extension_id,
                 now_secs,
@@ -3940,8 +4443,9 @@ fn handle_trust_card_command(command: TrustCardCommand) -> Result<()> {
             }
         }
         TrustCardCommand::Diff(args) => {
+            let mut state = trust_card_cli_registry(now_secs)?;
             let response = compare_trust_card_versions(
-                &mut registry,
+                &mut state.registry,
                 &args.extension_id,
                 args.left_version,
                 args.right_version,
@@ -4174,9 +4678,9 @@ fn main() -> Result<()> {
 
         Command::Trust(sub) => match sub {
             TrustCommand::Card(args) => {
-                let mut registry = trust_card_cli_registry()?;
+                let mut state = trust_card_cli_registry(now_unix_secs())?;
                 let response = get_trust_card(
-                    &mut registry,
+                    &mut state.registry,
                     &args.extension_id,
                     now_unix_secs(),
                     "trace-cli-trust-card",
@@ -4188,8 +4692,9 @@ fn main() -> Result<()> {
             }
             TrustCommand::List(args) => {
                 let risk_filter = parse_risk_level_filter(args.risk.as_deref())?;
-                let mut registry = trust_card_cli_registry()?;
-                let cards = registry
+                let mut state = trust_card_cli_registry(now_unix_secs())?;
+                let cards = state
+                    .registry
                     .list(
                         &TrustCardListFilter::empty(),
                         "trace-cli-trust-list",
@@ -4201,43 +4706,60 @@ fn main() -> Result<()> {
                 println!("{}", render_trust_card_list(&filtered));
             }
             TrustCommand::Revoke(args) => {
+                let receipt_signing_material = prepare_receipt_signing_material(
+                    args.receipt_out.as_deref(),
+                    args.receipt_summary_out.as_deref(),
+                    args.receipt_signing_key.as_deref(),
+                )?;
                 let now_secs = now_unix_secs();
-                let mut registry = trust_card_cli_registry()?;
-                let card = revoke_trust_card(&mut registry, &args.extension_id, now_secs)?;
+                let mut state = trust_card_cli_registry(now_secs)?;
+                let card = revoke_trust_card(&mut state.registry, &args.extension_id, now_secs)?;
+                persist_trust_card_cli_registry(&state)?;
                 println!("{}", render_trust_card_human(&card));
-                maybe_export_demo_receipts(
+                maybe_export_signed_receipts(
                     "revocation",
                     "trust-control-plane",
                     "Revocation decision exported for audit traceability",
                     args.receipt_out.as_deref(),
                     args.receipt_summary_out.as_deref(),
+                    receipt_signing_material.as_ref(),
                 )?;
             }
             TrustCommand::Quarantine(args) => {
+                let receipt_signing_material = prepare_receipt_signing_material(
+                    args.receipt_out.as_deref(),
+                    args.receipt_summary_out.as_deref(),
+                    args.receipt_signing_key.as_deref(),
+                )?;
                 let now_secs = now_unix_secs();
-                let mut registry = trust_card_cli_registry()?;
-                let updates = quarantine_trust_cards(&mut registry, &args.artifact, now_secs)?;
+                let mut state = trust_card_cli_registry(now_secs)?;
+                let updates =
+                    quarantine_trust_cards(&mut state.registry, &args.artifact, now_secs)?;
+                persist_trust_card_cli_registry(&state)?;
                 println!(
                     "quarantine applied: artifact={} affected_cards={}",
                     args.artifact,
                     updates.len()
                 );
                 println!("{}", render_trust_card_list(&updates));
-                maybe_export_demo_receipts(
+                maybe_export_signed_receipts(
                     "quarantine",
                     "trust-control-plane",
                     "Quarantine decision exported for incident forensics",
                     args.receipt_out.as_deref(),
                     args.receipt_summary_out.as_deref(),
+                    receipt_signing_material.as_ref(),
                 )?;
             }
             TrustCommand::Sync(args) => {
-                let mut registry = trust_card_cli_registry()?;
                 let now_secs = now_unix_secs();
-                let sync_report = registry
+                let mut state = trust_card_cli_registry(now_secs)?;
+                let sync_report = state
+                    .registry
                     .sync_cache(now_secs, "trace-cli-trust-sync", args.force)
                     .map_err(|err| anyhow::anyhow!(err.to_string()))?;
-                let cards = registry
+                let cards = state
+                    .registry
                     .list(
                         &TrustCardListFilter::empty(),
                         "trace-cli-trust-sync",
@@ -4297,39 +4819,7 @@ fn main() -> Result<()> {
 
         Command::Incident(sub) => match sub {
             IncidentCommand::Bundle(args) => {
-                eprintln!(
-                    "franken-node incident bundle: id={} verify={}",
-                    args.id, args.verify
-                );
-                let events = sample_incident_events(&args.id);
-                let bundle = generate_replay_bundle(&args.id, &events)
-                    .with_context(|| format!("failed generating replay bundle for {}", args.id))?;
-                if args.verify {
-                    let valid = validate_bundle_integrity(&bundle).with_context(|| {
-                        format!("failed validating replay bundle for {}", args.id)
-                    })?;
-                    eprintln!(
-                        "bundle integrity: {}",
-                        if valid { "valid" } else { "invalid" }
-                    );
-                }
-
-                let output_path = incident_bundle_output_path(&args.id);
-                write_bundle_to_path(&bundle, &output_path).with_context(|| {
-                    format!(
-                        "failed writing incident bundle to {}",
-                        output_path.display()
-                    )
-                })?;
-
-                maybe_export_demo_receipts(
-                    "incident_bundle",
-                    "incident-control-plane",
-                    "Incident bundle receipt export for deterministic replay evidence",
-                    args.receipt_out.as_deref(),
-                    args.receipt_summary_out.as_deref(),
-                )?;
-                eprintln!("incident bundle written: {}", output_path.display());
+                handle_incident_bundle_command(&args)?;
             }
             IncidentCommand::Replay(args) => {
                 eprintln!(

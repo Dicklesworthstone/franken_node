@@ -4,12 +4,18 @@
 //! state into a deterministic, signed profile that can be queried via API and
 //! displayed via CLI.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    fs::File,
+    io::Write,
+    path::{Path, PathBuf},
+};
 
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tempfile::NamedTempFile;
 
 use super::certification::{DerivationMetadata, VerifiedEvidenceRef};
 
@@ -87,8 +93,7 @@ pub const TRUST_CARD_DIFF_COMPUTED: &str = "TRUST_CARD_DIFF_COMPUTED";
 
 const DEFAULT_CACHE_TTL_SECS: u64 = 60;
 const DEFAULT_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
-pub const TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA: &str =
-    "franken-node/trust-card-registry-state/v1";
+pub const TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA: &str = "franken-node/trust-card-registry-state/v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -118,6 +123,12 @@ pub enum TrustCardError {
     UnsupportedSnapshotSchema(String),
     #[error("invalid trust-card registry snapshot: {0}")]
     InvalidSnapshot(String),
+    #[error("failed reading trust-card registry snapshot {path}: {detail}")]
+    SnapshotRead { path: PathBuf, detail: String },
+    #[error("failed parsing trust-card registry snapshot {path}: {detail}")]
+    SnapshotParse { path: PathBuf, detail: String },
+    #[error("failed writing trust-card registry snapshot {path}: {detail}")]
+    SnapshotWrite { path: PathBuf, detail: String },
 }
 
 impl From<serde_json::Error> for TrustCardError {
@@ -413,6 +424,60 @@ impl TrustCardRegistry {
         }
 
         Ok(registry)
+    }
+
+    pub fn load_authoritative_state(
+        path: &Path,
+        cache_ttl_secs: u64,
+        loaded_at_secs: u64,
+    ) -> Result<Self, TrustCardError> {
+        let raw = std::fs::read_to_string(path).map_err(|err| TrustCardError::SnapshotRead {
+            path: path.to_path_buf(),
+            detail: err.to_string(),
+        })?;
+        let snapshot = serde_json::from_str::<TrustCardRegistrySnapshot>(&raw).map_err(|err| {
+            TrustCardError::SnapshotParse {
+                path: path.to_path_buf(),
+                detail: err.to_string(),
+            }
+        })?;
+        let mut registry = Self::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, loaded_at_secs)?;
+        registry.cache_ttl_secs = cache_ttl_secs.max(1);
+        Ok(registry)
+    }
+
+    pub fn persist_authoritative_state(&self, path: &Path) -> Result<(), TrustCardError> {
+        let encoded = to_canonical_json(&self.snapshot())?;
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent).map_err(|err| TrustCardError::SnapshotWrite {
+            path: path.to_path_buf(),
+            detail: err.to_string(),
+        })?;
+        let mut temp =
+            NamedTempFile::new_in(parent).map_err(|err| TrustCardError::SnapshotWrite {
+                path: path.to_path_buf(),
+                detail: err.to_string(),
+            })?;
+        temp.write_all(encoded.as_bytes())
+            .map_err(|err| TrustCardError::SnapshotWrite {
+                path: path.to_path_buf(),
+                detail: err.to_string(),
+            })?;
+        temp.as_file()
+            .sync_all()
+            .map_err(|err| TrustCardError::SnapshotWrite {
+                path: path.to_path_buf(),
+                detail: err.to_string(),
+            })?;
+        temp.persist(path)
+            .map_err(|err| TrustCardError::SnapshotWrite {
+                path: path.to_path_buf(),
+                detail: err.error.to_string(),
+            })?;
+        if let Ok(dir) = File::open(parent) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
     }
 
     pub fn create(
@@ -1216,17 +1281,17 @@ pub fn to_canonical_json<T: Serialize>(value: &T) -> Result<String, TrustCardErr
     Ok(serde_json::to_string(&canonical)?)
 }
 
-fn demo_evidence_refs() -> Vec<VerifiedEvidenceRef> {
+fn fixture_evidence_refs() -> Vec<VerifiedEvidenceRef> {
     use super::certification::EvidenceType;
     vec![
         VerifiedEvidenceRef {
-            evidence_id: "ev-demo-prov-001".to_string(),
+            evidence_id: "ev-fixture-prov-001".to_string(),
             evidence_type: EvidenceType::ProvenanceChain,
             verified_at_epoch: 1000,
             verification_receipt_hash: "a".repeat(64),
         },
         VerifiedEvidenceRef {
-            evidence_id: "ev-demo-rep-001".to_string(),
+            evidence_id: "ev-fixture-rep-001".to_string(),
             evidence_type: EvidenceType::ReputationSignal,
             verified_at_epoch: 1000,
             verification_receipt_hash: "b".repeat(64),
@@ -1234,9 +1299,12 @@ fn demo_evidence_refs() -> Vec<VerifiedEvidenceRef> {
     ]
 }
 
-pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError> {
+/// Deterministic trust-card fixture registry for tests and seeded fixture state.
+///
+/// This helper must remain unreachable from operator-facing trust flows.
+pub fn fixture_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError> {
     let mut registry = TrustCardRegistry::default();
-    let base_trace = "trace-demo";
+    let base_trace = "trace-fixture-registry";
 
     registry.create(
         TrustCardInput {
@@ -1270,7 +1338,7 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
             revocation_status: RevocationStatus::Active,
             provenance_summary: ProvenanceSummary {
                 attestation_level: "slsa-l3".to_string(),
-                source_uri: "https://registry.example/acme/auth-guard".to_string(),
+                source_uri: "fixture://trust-card/acme/auth-guard".to_string(),
                 artifact_hashes: vec![format!("sha256:deadbeef{}", "a".repeat(56))],
                 verified_at: "2026-02-20T12:00:00Z".to_string(),
             },
@@ -1288,7 +1356,7 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
                     "Token validation extension with strong provenance and no local disk access"
                         .to_string(),
             },
-            evidence_refs: demo_evidence_refs(),
+            evidence_refs: fixture_evidence_refs(),
         },
         now_secs,
         base_trace,
@@ -1320,7 +1388,7 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
             revocation_status: RevocationStatus::Active,
             provenance_summary: ProvenanceSummary {
                 attestation_level: "slsa-l2".to_string(),
-                source_uri: "https://registry.example/beta/telemetry-bridge".to_string(),
+                source_uri: "fixture://trust-card/beta/telemetry-bridge".to_string(),
                 artifact_hashes: vec![format!("sha256:deadbeef{}", "b".repeat(56))],
                 verified_at: "2026-02-20T12:00:01Z".to_string(),
             },
@@ -1338,7 +1406,7 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
                     "Telemetry extension with elevated network and local spool behavior; monitor closely"
                         .to_string(),
             },
-            evidence_refs: demo_evidence_refs(),
+            evidence_refs: fixture_evidence_refs(),
         },
         now_secs.saturating_add(1),
         base_trace,
@@ -1375,7 +1443,7 @@ fn validate_snapshot_history(
     registry_key: &[u8],
 ) -> Result<(), TrustCardError> {
     let mut previous_version = None;
-    let mut previous_hash = None;
+    let mut previous_hash: Option<String> = None;
 
     for card in history {
         if card.extension.extension_id != extension_id {
@@ -1594,7 +1662,7 @@ mod tests {
 
     #[test]
     fn list_filter_by_publisher_and_capability() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let by_pub = registry
             .list_by_publisher("pub-acme", 1_010, "trace")
             .expect("list by publisher");
@@ -1607,7 +1675,7 @@ mod tests {
 
     #[test]
     fn list_by_publisher_ignores_tampered_non_matching_card() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         registry
             .cards_by_extension
             .get_mut("npm:@beta/telemetry-bridge")
@@ -1625,7 +1693,7 @@ mod tests {
 
     #[test]
     fn search_ignores_tampered_non_matching_card() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         registry
             .cards_by_extension
             .get_mut("npm:@beta/telemetry-bridge")
@@ -1643,7 +1711,7 @@ mod tests {
 
     #[test]
     fn compare_shows_changes() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let diff = registry
             .compare(
                 "npm:@acme/auth-guard",
@@ -1657,7 +1725,7 @@ mod tests {
 
     #[test]
     fn compare_versions_for_same_extension() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let diff = registry
             .compare_versions("npm:@beta/telemetry-bridge", 1, 2, 1_100, "trace")
             .expect("compare versions");
@@ -1674,7 +1742,7 @@ mod tests {
 
     #[test]
     fn compare_rejects_tampered_latest_card() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let latest = registry
             .cards_by_extension
             .get_mut("npm:@beta/telemetry-bridge")
@@ -1699,7 +1767,7 @@ mod tests {
 
     #[test]
     fn compare_versions_rejects_tampered_history_card() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let original = registry
             .cards_by_extension
             .get("npm:@beta/telemetry-bridge")
@@ -1721,7 +1789,7 @@ mod tests {
 
     #[test]
     fn read_specific_version() {
-        let registry = demo_registry(1_000).expect("demo");
+        let registry = fixture_registry(1_000).expect("fixture registry");
         let version_1 = registry
             .read_version("npm:@beta/telemetry-bridge", 1)
             .expect("read version")
@@ -1781,7 +1849,7 @@ mod tests {
 
     #[test]
     fn sync_cache_counts_missing_entries_without_force() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let total_cards = registry.cards_by_extension.len();
         let missing_extension = registry
             .cards_by_extension
@@ -1828,7 +1896,7 @@ mod tests {
 
     #[test]
     fn sync_cache_force_refreshes_fresh_entries() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let total_cards = registry.cards_by_extension.len();
 
         let report = registry
@@ -2025,7 +2093,7 @@ mod tests {
 
     #[test]
     fn list_rejects_tampered_latest_card() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         registry
             .cards_by_extension
             .get_mut("npm:@beta/telemetry-bridge")
@@ -2107,7 +2175,7 @@ mod tests {
 
     #[test]
     fn search_rejects_tampered_matching_card() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         registry
             .cards_by_extension
             .get_mut("npm:@beta/telemetry-bridge")
@@ -2157,7 +2225,7 @@ mod tests {
 
     #[test]
     fn read_version_rejects_tampered_history_card() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         registry
             .cards_by_extension
             .get_mut("npm:@beta/telemetry-bridge")
@@ -2241,15 +2309,17 @@ mod tests {
 
     #[test]
     fn registry_snapshot_roundtrip_preserves_latest_cards() {
-        let registry = demo_registry(1_000).expect("demo");
-        let snapshot = registry.snapshot();
-        assert_eq!(
-            snapshot.schema_version,
-            TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA
-        );
+        let registry = fixture_registry(1_000).expect("fixture registry");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json");
+        registry
+            .persist_authoritative_state(&path)
+            .expect("persist authoritative state");
 
         let mut restored =
-            TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000).expect("load");
+            TrustCardRegistry::load_authoritative_state(&path, 60, 2_000).expect("load");
 
         let cards = restored
             .list(&TrustCardListFilter::empty(), "trace-roundtrip", 2_000)
@@ -2267,7 +2337,7 @@ mod tests {
 
     #[test]
     fn registry_snapshot_rejects_tampered_card_history() {
-        let registry = demo_registry(1_000).expect("demo");
+        let registry = fixture_registry(1_000).expect("fixture registry");
         let mut snapshot = registry.snapshot();
         snapshot
             .cards_by_extension
@@ -2284,7 +2354,7 @@ mod tests {
 
     #[test]
     fn registry_snapshot_rejects_mismatched_extension_bucket() {
-        let registry = demo_registry(1_000).expect("demo");
+        let registry = fixture_registry(1_000).expect("fixture registry");
         let mut snapshot = registry.snapshot();
         let history = snapshot
             .cards_by_extension

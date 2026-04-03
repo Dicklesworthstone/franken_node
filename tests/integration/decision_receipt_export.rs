@@ -3,7 +3,7 @@
 use frankenengine_node::security::decision_receipt::{
     Decision, HighImpactActionRegistry, Receipt, ReceiptQuery, append_signed_receipt,
     demo_public_key, demo_signing_key, enforce_high_impact_receipt, export_receipts,
-    export_receipts_cbor, import_receipts_cbor, verify_hash_chain, verify_receipt,
+    export_receipts_cbor, import_receipts_cbor, signing_key_id, verify_hash_chain, verify_receipt,
 };
 use serde_json::json;
 
@@ -47,6 +47,8 @@ fn sign_verify_chain_export_roundtrip() {
     verify_hash_chain(&chain).expect("chain should verify");
     assert!(verify_receipt(&chain[0], &pub_key).expect("verify #1"));
     assert!(verify_receipt(&chain[1], &pub_key).expect("verify #2"));
+    assert_eq!(chain[0].signer_key_id, signing_key_id(&pub_key));
+    assert_eq!(chain[1].signer_key_id, signing_key_id(&pub_key));
 
     let cbor = export_receipts_cbor(&chain, &ReceiptQuery::default()).expect("encode");
     let decoded = import_receipts_cbor(&cbor).expect("decode");

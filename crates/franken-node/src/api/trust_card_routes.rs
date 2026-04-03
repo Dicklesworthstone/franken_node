@@ -198,7 +198,7 @@ mod tests {
     use crate::supply_chain::trust_card::{
         CapabilityDeclaration, CapabilityRisk, CertificationLevel, ExtensionIdentity,
         PublisherIdentity, ReputationTrend, RevocationStatus, RiskAssessment, RiskLevel,
-        TrustCardInput, TrustCardMutation, demo_registry,
+        TrustCardInput, TrustCardMutation, fixture_registry,
     };
 
     fn route_test_evidence_refs() -> Vec<VerifiedEvidenceRef> {
@@ -243,7 +243,7 @@ mod tests {
             revocation_status: RevocationStatus::Active,
             provenance_summary: crate::supply_chain::trust_card::ProvenanceSummary {
                 attestation_level: "slsa-l1".to_string(),
-                source_uri: "registry://demo/ext-1".to_string(),
+                source_uri: "fixture://trust-card/unit-route".to_string(),
                 artifact_hashes: vec!["sha256:".to_string() + &"f".repeat(64)],
                 verified_at: "2026-01-01T00:00:00Z".to_string(),
             },
@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn get_card_returns_data() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = get_trust_card(&mut registry, "npm:@acme/auth-guard", 1_001, "trace")
             .expect("response");
         assert!(response.ok);
@@ -271,7 +271,7 @@ mod tests {
 
     #[test]
     fn publisher_list_paginates() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = get_trust_cards_by_publisher(
             &mut registry,
             "pub-acme",
@@ -290,7 +290,7 @@ mod tests {
 
     #[test]
     fn search_supports_pagination() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = search_trust_cards(
             &mut registry,
             "npm:@",
@@ -343,7 +343,7 @@ mod tests {
 
     #[test]
     fn list_route_filters_by_publisher() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = list_trust_cards(
             &mut registry,
             &TrustCardListFilter {
@@ -365,7 +365,7 @@ mod tests {
 
     #[test]
     fn list_route_rejects_invalid_zero_per_page() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let err = list_trust_cards(
             &mut registry,
             &TrustCardListFilter::empty(),
@@ -424,7 +424,7 @@ mod tests {
 
     #[test]
     fn search_no_results_returns_empty() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = search_trust_cards(
             &mut registry,
             "zzz-nonexistent-query",
@@ -450,7 +450,7 @@ mod tests {
 
     #[test]
     fn publisher_list_empty_publisher_returns_empty() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = get_trust_cards_by_publisher(
             &mut registry,
             "pub-nonexistent",
@@ -465,7 +465,7 @@ mod tests {
 
     #[test]
     fn list_filter_by_certification_level() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let response = list_trust_cards(
             &mut registry,
             &TrustCardListFilter {
@@ -508,7 +508,7 @@ mod tests {
 
     #[test]
     fn compare_routes_produce_diffs() {
-        let mut registry = demo_registry(1_000).expect("demo");
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
         let compare = compare_trust_cards(
             &mut registry,
             "npm:@acme/auth-guard",

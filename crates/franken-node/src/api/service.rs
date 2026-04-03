@@ -1,16 +1,16 @@
-//! Control-plane service skeleton assembling all endpoint groups with
-//! the middleware chain, rate limiters, and metrics aggregation.
+//! In-process control-plane catalog and middleware assembly surface.
 //!
 //! This is the central entry point for the fastapi_rust service layer
 //! defined in bd-2f5l. It wires operator, verifier, and fleet-control
 //! route groups through the middleware chain and provides a unified
-//! `ControlPlaneService` with dispatch, metrics, and endpoint catalog.
+//! `ControlPlaneService` with dispatch, metrics, and endpoint catalog data.
 //!
 //! This module is intentionally still an in-process assembly/catalog layer.
-//! It does not yet own a live async socket boundary, request task lifecycle,
-//! or transport-bound cancellation semantics. Revisit native Asupersync
-//! request-region work only if this file grows a real server boundary instead
-//! of remaining metadata and dispatch assembly.
+//! It does not own a live async socket boundary, request task lifecycle, or
+//! transport-bound cancellation semantics. Treat it as a truthful control-plane
+//! catalog surface until a real HTTP/gRPC boundary exists. Revisit native
+//! Asupersync request-region work only if this file grows that real server
+//! boundary instead of remaining metadata and dispatch assembly.
 
 use crate::config::Config as RuntimeConfig;
 use serde::{Deserialize, Serialize};
@@ -29,8 +29,10 @@ use super::verifier_routes;
 /// Configuration for the control-plane service.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ServiceConfig {
-    /// Listen address (for future HTTP binding).
-    pub listen_addr: String,
+    /// Reserved bind target hint for a future HTTP/gRPC transport boundary.
+    ///
+    /// The current in-process control-plane assembly never binds this address.
+    pub bind_target_hint: String,
     /// Rate limit overrides per endpoint group.
     pub rate_limits: BTreeMap<String, RateLimitConfig>,
     /// Whether to enable OpenTelemetry export.
@@ -45,7 +47,7 @@ pub struct ServiceConfig {
 impl Default for ServiceConfig {
     fn default() -> Self {
         Self {
-            listen_addr: "127.0.0.1:9090".to_string(),
+            bind_target_hint: "127.0.0.1:9090".to_string(),
             rate_limits: BTreeMap::new(),
             otel_enabled: false,
             service_name: "franken-node-control-plane".to_string(),
@@ -148,18 +150,58 @@ pub fn check_middleware_coverage() -> MiddlewareCoverage {
 
 // ── Performance Baselines ──────────────────────────────────────────────────
 
+/// Current transport-boundary ownership state for the control-plane surface.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportBoundaryKind {
+    InProcessCatalog,
+    LiveTransport,
+}
+
+/// Structured description of what this module actually owns today.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransportBoundaryStatus {
+    pub kind: TransportBoundaryKind,
+    pub owns_listener: bool,
+    pub bind_target_hint: String,
+    pub request_lifecycle: String,
+    pub cancellation_semantics: String,
+}
+
+impl TransportBoundaryStatus {
+    fn in_process_catalog(bind_target_hint: impl Into<String>) -> Self {
+        Self {
+            kind: TransportBoundaryKind::InProcessCatalog,
+            owns_listener: false,
+            bind_target_hint: bind_target_hint.into(),
+            request_lifecycle: "caller-owned in-process dispatch only".to_string(),
+            cancellation_semantics: "no transport-owned cancellation boundary".to_string(),
+        }
+    }
+}
+
+/// Whether a performance baseline is measured or intentionally unavailable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerformanceBaselineStatus {
+    Measured,
+    UnavailablePendingTransport,
+}
+
 /// Performance baseline entry for an endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PerformanceBaseline {
     pub endpoint: String,
-    pub p50_ms: f64,
-    pub p95_ms: f64,
-    pub p99_ms: f64,
+    pub status: PerformanceBaselineStatus,
+    pub p50_ms: Option<f64>,
+    pub p95_ms: Option<f64>,
+    pub p99_ms: Option<f64>,
+    pub provenance: String,
 }
 
 // ── Endpoint Report ────────────────────────────────────────────────────────
 
-/// Full endpoint report for the live service catalog surface.
+/// Full endpoint report for the control-plane catalog surface.
 ///
 /// This report is distinct from the older FastAPI skeleton artifact in
 /// `artifacts/10.16/fastapi_endpoint_report.json`.
@@ -167,28 +209,37 @@ pub struct PerformanceBaseline {
 pub struct EndpointReport {
     pub endpoints: Vec<EndpointCatalogEntry>,
     pub middleware_coverage: MiddlewareCoverage,
+    pub transport_boundary: TransportBoundaryStatus,
     pub performance_baselines: Vec<PerformanceBaseline>,
     pub generated_at: String,
 }
 
 /// Generate the endpoint report for artifact output.
-pub fn generate_endpoint_report() -> EndpointReport {
+pub fn generate_endpoint_report(config: &ServiceConfig) -> EndpointReport {
     let endpoints = build_endpoint_catalog();
     let middleware_coverage = check_middleware_coverage();
+    let transport_boundary =
+        TransportBoundaryStatus::in_process_catalog(config.bind_target_hint.clone());
 
     let performance_baselines: Vec<PerformanceBaseline> = endpoints
         .iter()
         .map(|e| PerformanceBaseline {
             endpoint: format!("{} {}", e.method, e.path),
-            p50_ms: 0.0, // skeleton — real baselines populated after load testing
-            p95_ms: 0.0,
-            p99_ms: 0.0,
+            status: PerformanceBaselineStatus::UnavailablePendingTransport,
+            p50_ms: None,
+            p95_ms: None,
+            p99_ms: None,
+            provenance: "No live async HTTP/gRPC transport boundary is owned; \
+                         load-test baselines are intentionally unavailable until \
+                         that trigger exists."
+                .to_string(),
         })
         .collect();
 
     EndpointReport {
         endpoints,
         middleware_coverage,
+        transport_boundary,
         performance_baselines,
         generated_at: chrono::Utc::now().to_rfc3339(),
     }
@@ -198,6 +249,9 @@ pub fn generate_endpoint_report() -> EndpointReport {
 
 /// The assembled control-plane service with route dispatch, rate limiters,
 /// and metrics collection.
+///
+/// Despite the name, this struct is not a network server. It is an in-process
+/// catalog/dispatch assembly layer until a real transport boundary exists.
 pub struct ControlPlaneService {
     config: ServiceConfig,
     operator_limiter: RateLimiter,
@@ -271,9 +325,14 @@ impl ControlPlaneService {
         build_endpoint_catalog()
     }
 
+    /// Describe what transport boundary this surface actually owns.
+    pub fn transport_boundary(&self) -> TransportBoundaryStatus {
+        TransportBoundaryStatus::in_process_catalog(self.config.bind_target_hint.clone())
+    }
+
     /// Get the endpoint report.
     pub fn report(&self) -> EndpointReport {
-        generate_endpoint_report()
+        generate_endpoint_report(&self.config)
     }
 }
 
@@ -342,10 +401,22 @@ mod tests {
     fn endpoint_report_generation() {
         let _lock = super::operator_routes::process_start_test_lock();
         super::operator_routes::clear_process_start_override_for_tests();
-        let report = generate_endpoint_report();
+        let report = generate_endpoint_report(&ServiceConfig::default());
         assert_eq!(report.endpoints.len(), 17);
         assert!(report.middleware_coverage.auth_coverage);
         assert_eq!(report.performance_baselines.len(), 17);
+        assert_eq!(
+            report.transport_boundary.kind,
+            TransportBoundaryKind::InProcessCatalog
+        );
+        assert!(!report.transport_boundary.owns_listener);
+        assert_eq!(report.transport_boundary.bind_target_hint, "127.0.0.1:9090");
+        assert!(report.performance_baselines.iter().all(|baseline| {
+            baseline.status == PerformanceBaselineStatus::UnavailablePendingTransport
+                && baseline.p50_ms.is_none()
+                && baseline.p95_ms.is_none()
+                && baseline.p99_ms.is_none()
+        }));
         assert!(!report.generated_at.is_empty());
     }
 
@@ -354,7 +425,7 @@ mod tests {
         let _lock = super::operator_routes::process_start_test_lock();
         super::operator_routes::clear_process_start_override_for_tests();
         let service = ControlPlaneService::default();
-        assert_eq!(service.config().listen_addr, "127.0.0.1:9090");
+        assert_eq!(service.config().bind_target_hint, "127.0.0.1:9090");
         assert_eq!(service.request_count(), 0);
     }
 
@@ -363,12 +434,12 @@ mod tests {
         let _lock = super::operator_routes::process_start_test_lock();
         super::operator_routes::clear_process_start_override_for_tests();
         let config = ServiceConfig {
-            listen_addr: "0.0.0.0:8080".to_string(),
+            bind_target_hint: "0.0.0.0:8080".to_string(),
             otel_enabled: true,
             ..Default::default()
         };
         let service = ControlPlaneService::new(config);
-        assert_eq!(service.config().listen_addr, "0.0.0.0:8080");
+        assert_eq!(service.config().bind_target_hint, "0.0.0.0:8080");
         assert!(service.config().otel_enabled);
     }
 
@@ -380,6 +451,30 @@ mod tests {
         let catalog = service.catalog();
         let report = service.report();
         assert_eq!(catalog.len(), report.endpoints.len());
+    }
+
+    #[test]
+    fn service_report_carries_configured_bind_target_hint() {
+        let _lock = super::operator_routes::process_start_test_lock();
+        super::operator_routes::clear_process_start_override_for_tests();
+        let service = ControlPlaneService::new(ServiceConfig {
+            bind_target_hint: "10.0.0.5:7443".to_string(),
+            ..Default::default()
+        });
+
+        let report = service.report();
+        assert_eq!(
+            report.transport_boundary.kind,
+            TransportBoundaryKind::InProcessCatalog
+        );
+        assert_eq!(report.transport_boundary.bind_target_hint, "10.0.0.5:7443");
+        assert!(
+            report
+                .performance_baselines
+                .iter()
+                .all(|baseline| baseline.status
+                    == PerformanceBaselineStatus::UnavailablePendingTransport)
+        );
     }
 
     #[test]

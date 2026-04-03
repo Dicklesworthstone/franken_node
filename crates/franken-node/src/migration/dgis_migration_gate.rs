@@ -127,7 +127,10 @@ fn evaluate_policy(
         || delta.cascade_risk_delta > thresholds.max_cascade_risk_delta
     {
         let detail = if !delta.cascade_risk_delta.is_finite() {
-            format!("cascade risk delta {} is not finite", delta.cascade_risk_delta)
+            format!(
+                "cascade risk delta {} is not finite",
+                delta.cascade_risk_delta
+            )
         } else {
             format!(
                 "cascade risk delta {:.4} exceeds max {:.4}",

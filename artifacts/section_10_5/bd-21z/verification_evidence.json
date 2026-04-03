@@ -16,7 +16,7 @@
     },
     {
       "id": "SR-CLI",
-      "description": "CLI receipt export wiring exists for trust/incident paths",
+      "description": "CLI receipt export wiring exists for trust/incident paths without implicit demo signing",
       "status": "PASS"
     },
     {

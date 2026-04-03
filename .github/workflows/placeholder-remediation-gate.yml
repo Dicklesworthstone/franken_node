@@ -1,0 +1,57 @@
+name: Placeholder Remediation Gate
+
+on:
+  pull_request:
+    paths:
+      - "crates/franken-node/src/**"
+      - "crates/franken-node/tests/**"
+      - "scripts/**"
+      - "tests/**"
+      - "docs/governance/placeholder_surface_inventory.md"
+      - ".github/workflows/placeholder-remediation-gate.yml"
+  push:
+    branches: [main]
+    paths:
+      - "crates/franken-node/src/**"
+      - "crates/franken-node/tests/**"
+      - "scripts/**"
+      - "tests/**"
+      - "docs/governance/placeholder_surface_inventory.md"
+      - ".github/workflows/placeholder-remediation-gate.yml"
+
+jobs:
+  placeholder-remediation:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scanner self-test
+        run: python3 scripts/check_placeholder_surface_inventory.py --self-test
+
+      - name: Scanner unit tests
+        run: python3 -m unittest tests.test_check_placeholder_surface_inventory
+
+      - name: Run placeholder regression scanner
+        run: |
+          python3 scripts/check_placeholder_surface_inventory.py --write-artifacts --json > /tmp/placeholder_surface_inventory_gate.json
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          payload = json.loads(Path("/tmp/placeholder_surface_inventory_gate.json").read_text())
+          verdict = payload.get("verdict")
+          if verdict != "PASS":
+              raise SystemExit(f"placeholder remediation gate failed: {verdict}")
+          PY
+
+      - name: Print audit summary
+        run: cat artifacts/program/bd-2fqyv.1.3/verification_summary.md
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: placeholder-remediation-evidence
+          path: |
+            /tmp/placeholder_surface_inventory_gate.json
+            artifacts/program/bd-2fqyv.1.3/verification_evidence.json
+            artifacts/program/bd-2fqyv.1.3/verification_summary.md

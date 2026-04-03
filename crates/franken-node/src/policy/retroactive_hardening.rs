@@ -685,7 +685,7 @@ mod tests {
     #[test]
     fn test_harden_object_already_at_target_creation_level() {
         let obj = CanonicalObject::new("obj-enhanced", vec![0x00; 32], HardeningLevel::Enhanced);
-        // Even if the system is at Baseline and escalates to Standard, 
+        // Even if the system is at Baseline and escalates to Standard,
         // the object was natively created at Enhanced and thus needs no Standard artifacts.
         let artifacts = pipeline().harden(&obj, HardeningLevel::Baseline, HardeningLevel::Standard);
         assert!(artifacts.is_empty());

@@ -1,7 +1,7 @@
 # Placeholder Surface Inventory
 
 **Program:** `bd-2fqyv`  
-**Bead:** `bd-2fqyv.1.1`  
+**Beads:** `bd-2fqyv.1.1` inventory, `bd-2fqyv.1.2` scanner  
 **Status:** Active inventory for placeholder/demo/simulated production-surface remediation.
 
 ## Purpose
@@ -48,10 +48,10 @@ clearly labeled as synthetic.
 
 | ID | Classification | Surface | Entry points / files | Reachability | Current behavior | Remediation owner |
 |---|---|---|---|---|---|---|
-| `PSI-001` | `disallowed_live_shortcut` | Trust CLI demo registry | `crates/franken-node/src/main.rs` via `trust_card_cli_registry()`, `handle_trust_card_command(...)`; demo data from `crates/franken-node/src/supply_chain/trust_card.rs::demo_registry(...)` | Live CLI | `trust list`, `trust revoke`, `trust quarantine`, `trust sync`, and `trust-card *` commands operate on canned in-memory trust-card state rather than authoritative persisted state. Persistence/bootstrap contract is defined in `docs/specs/section_10_4/bd-2fqyv_2_1_contract.md`. | `bd-2fqyv.2` |
-| `PSI-002` | `disallowed_live_shortcut` | Demo receipt signing in live CLI flows | `crates/franken-node/src/main.rs::maybe_export_demo_receipts(...)`; key material from `crates/franken-node/src/security/decision_receipt.rs::demo_signing_key(...)` | Live CLI | Trust and incident flows can export signed receipts using fixed demo key material, which makes outputs look operational without operator-managed trust roots. | `bd-2fqyv.3` |
-| `PSI-003` | `disallowed_live_shortcut` | Incident bundle generated from sample events | `crates/franken-node/src/main.rs` `Command::Incident::Bundle`; helper `crates/franken-node/src/tools/replay_bundle.rs::sample_incident_events(...)` | Live CLI | `franken-node incident bundle` emits plausible replay bundles from hard-coded sample events instead of authoritative incident evidence. | `bd-2fqyv.4` |
-| `PSI-004` | `deferred_skeleton` | Control-plane service skeleton with zeroed perf baselines | `crates/franken-node/src/api/service.rs`, `crates/franken-node/src/api/middleware.rs`; supporting docs in `docs/architecture/blueprint.md` and `docs/architecture/tri_kernel_ownership_contract.md` | Not a live server boundary | Route catalog, middleware, and endpoint reports exist, but the module explicitly does not own a real async HTTP/gRPC boundary and reports `0.0` latency baselines. This is allowed only as a documented skeleton. | Follow-on bead required under `bd-2fqyv` program; scanner policy under `bd-2fqyv.1.2` must keep it allowlisted until a real transport boundary exists. |
+| `PSI-001` | `disallowed_live_shortcut` | Trust CLI demo registry | `crates/franken-node/src/main.rs` via `trust_card_cli_registry()`, `handle_trust_card_command(...)`; historical fixture source lived at `crates/franken-node/src/supply_chain/trust_card.rs::fixture_registry(...)` | Live CLI | `trust list`, `trust revoke`, `trust quarantine`, `trust sync`, and `trust-card *` commands previously operated on canned in-memory trust-card state rather than authoritative persisted state. Persistence/bootstrap contract is defined in `docs/specs/section_10_4/bd-2fqyv_2_1_contract.md`. | `bd-2fqyv.2` |
+| `PSI-002` | `disallowed_live_shortcut` | Demo receipt signing in live CLI flows | Legacy shortcut previously lived in `crates/franken-node/src/main.rs::maybe_export_demo_receipts(...)`; live path is being replaced by `maybe_export_signed_receipts(...)`. Deterministic fixture key remains in `crates/franken-node/src/security/decision_receipt.rs::demo_signing_key(...)` for tests/artifacts only. | Live CLI + fixture boundary | Live trust and incident paths now target explicit signing-material discovery (`--receipt-signing-key` -> env -> config) and emit deterministic `signer_key_id` provenance. This inventory item remains until validation closes the loop and the regression scanner is updated to ensure the fixture key cannot leak back into operator-facing code. | `bd-2fqyv.3` |
+| `PSI-003` | `disallowed_live_shortcut` | Incident bundle generated from sample events | `crates/franken-node/src/main.rs` `Command::Incident::Bundle`; helper `crates/franken-node/src/tools/replay_bundle.rs::sample_incident_events(...)` | Live CLI | `franken-node incident bundle` emits plausible replay bundles from hard-coded sample events instead of authoritative incident evidence. The source contract for remediation is defined in `docs/specs/section_10_5/bd-2fqyv_4_1_contract.md`. | `bd-2fqyv.4` |
+| `PSI-004` | `deferred_skeleton` | Control-plane catalog boundary with explicitly unavailable perf baselines | `crates/franken-node/src/api/service.rs`, `crates/franken-node/src/api/middleware.rs`; supporting docs in `docs/architecture/blueprint.md` and `docs/architecture/tri_kernel_ownership_contract.md` | Not a live server boundary | Route catalog, middleware, and endpoint reports exist, but the module explicitly declares `TransportBoundaryKind::InProcessCatalog`, leaves request lifecycle/cancellation transport-unowned, and marks perf baselines as unavailable pending a real transport boundary instead of emitting fake `0.0` measurements. This is allowed only as a documented deferred boundary. | Validation ratchet under `bd-2fqyv.5.4`; scanner policy under `bd-2fqyv.1.2` must keep it allowlisted until a real transport boundary exists. |
 | `PSI-005` | `truthful_partial_surface` | Migration live surface is audit/manifest-rewrite only | `crates/franken-node/src/main.rs` `MigrateCommand::{Audit,Rewrite,Validate}`; implementation in `crates/franken-node/src/migration/mod.rs::{run_audit, run_rewrite, run_validate}` | Live CLI | Current migration behavior is real but narrow: audit, lockfile/script checks, `package.json` engine pinning, manual-review reporting, and validation gates. It is not a general state/data migration executor and must not be represented as one. | Follow-on remediation bead required under `bd-2fqyv`; scanner policy under `bd-2fqyv.1.2` should flag overclaims about full migration execution. |
 | `PSI-006` | `allowlisted_simulation` | Fuzz gate simulation helper | `crates/franken-node/src/connector/fuzz_corpus.rs::run_gate(...)`; verified by `scripts/check_fuzz_corpus.py` | Library / verification only | Crashes are inferred from seed text containing `crash`, and coverage is hard-coded to `0.0`. This is acceptable only as an internal modeling helper until a live empirical fuzz runner exists. | Keep allowlisted for now; `bd-2fqyv.1.2` must fail if any live gate or operator path starts consuming it as real fuzz evidence. |
 | `PSI-007` | `disallowed_live_shortcut` | Obligation guard drop path logs instead of rolling back | `crates/franken-node/src/connector/obligation_tracker.rs::ObligationGuard::drop(...)` | Library, safety-critical | The contract comment says dropping an unresolved guard triggers rollback, but the implementation only emits an `eprintln!` and relies on later leak detection. This is a deceptive safety shortcut, not a real rollback path. | Follow-on remediation bead required under `bd-2fqyv`; scanner policy under `bd-2fqyv.1.2` should flag log-only rollback claims. |
@@ -66,8 +66,9 @@ test/modeling helpers rather than deceptive live surfaces:
 
 | Surface | Why it is allowed |
 |---|---|
-| `demo_registry(...)` inside unit tests in `crates/franken-node/src/supply_chain/trust_card.rs` and `crates/franken-node/src/api/trust_card_routes.rs` tests | Test-only fixture state used to exercise registry behavior; not acceptable in live CLI wiring. |
-| `sample_incident_events(...)` when used by tests in `crates/franken-node/src/tools/replay_bundle.rs` | Deterministic fixture generation for replay-bundle tests; not acceptable in live incident evidence export. |
+| `fixture_registry(...)` inside unit tests in `crates/franken-node/src/supply_chain/trust_card.rs`, `crates/franken-node/src/api/trust_card_routes.rs`, `crates/franken-node/src/main.rs`, and trust CLI e2e workspace seeding | Explicit deterministic fixture state used to exercise registry behavior; not acceptable in live CLI wiring. |
+| `sample_incident_events(...)` when used by tests in `crates/franken-node/src/tools/replay_bundle.rs` or `crates/franken-node/src/main.rs` | Deterministic fixture generation for replay-bundle tests and incident-list test coverage; not acceptable in live incident evidence export. |
+| `decision_receipt::demo_signing_key(...)` in `crates/franken-node/src/security/decision_receipt.rs` fixture helpers/tests, `crates/franken-node/tests/verify_release_cli_e2e.rs`, `tests/integration/decision_receipt_export.rs`, and symbol-checker scripts such as `scripts/check_artifact_signing.py` | Deterministic fixture signing material remains acceptable only for tests, artifacts, and checker assertions. Operator-facing receipt export must use explicit operator-managed signing material. |
 | `synthetic_bearer_admin_route()` in `crates/franken-node/src/api/service.rs` tests | Explicit negative test helper proving bearer auth cannot reach mTLS-only admin routes. |
 | Python script self-tests that generate synthetic data (`scripts/check_*`, `scripts/project_scanner.py`, `scripts/e2e_test_server.py`) | Internal test harness behavior is acceptable when the script/docstring makes the synthetic nature explicit and no live operator contract treats the output as real evidence. |
 
@@ -81,13 +82,67 @@ test/modeling helpers rather than deceptive live surfaces:
   narrow real scope is documented explicitly and downstream consumers do not
   mistake them for completed product capabilities.
 
+## Regression Scanner Contract
+
+`bd-2fqyv.1.2` implements the first repo-wide regression scanner at:
+
+- `scripts/check_placeholder_surface_inventory.py`
+- `tests/test_check_placeholder_surface_inventory.py`
+- `.github/workflows/placeholder-remediation-gate.yml`
+
+The scanner uses a two-stage policy:
+
+1. Lexical stage: find suspicious helper names and placeholder markers such as
+   `fixture_registry(...)`, `sample_incident_events(...)`,
+   `demo_signing_key(...)`, `verification simulated`, and other explicit
+   truth-anchor tokens listed in the scanner rule set.
+2. Reachability stage: classify each hit as one of:
+   - explicit allowlisted fixture/test usage
+   - documented open debt at a declared live anchor
+   - failure due to allowlist escape, undocumented occurrence, missing truth
+     anchor, or inventory drift
+
+Current exit semantics are intentionally narrow: the scanner passes on
+documented open debt that still matches this inventory, and fails only when the
+documented boundary drifts or expands deceptively.
+
+Run it with:
+
+```bash
+python3 scripts/check_placeholder_surface_inventory.py --json
+python3 scripts/check_placeholder_surface_inventory.py --write-artifacts --json
+python3 -m unittest tests.test_check_placeholder_surface_inventory
+```
+
+When `--write-artifacts` is used, the scanner emits:
+
+- `artifacts/program/bd-2fqyv.1.3/verification_evidence.json`
+- `artifacts/program/bd-2fqyv.1.3/verification_summary.md`
+
+## Temporary Allowlist Strategy
+
+The temporary allowlist is explicit and shrinking:
+
+- `explicit_test_fixture`: helper is allowed only in the listed fixture/test
+  paths or on the explicitly allowlisted helper-definition line.
+- `documented_open_debt`: the marker may remain only at the live source anchor
+  already documented in this inventory while the owning remediation bead is
+  still open.
+- `truth_anchor`: truthful partial and deferred skeleton surfaces must keep the
+  honesty markers that prevent them from masquerading as complete live
+  behavior.
+
+No marker earns a permanent carve-out. When the owning remediation bead closes,
+its documented live anchor must either disappear entirely or collapse into a
+strictly test-only allowlist entry.
+
 ## Reproduction Procedure
 
 The current inventory can be refreshed with focused searches like:
 
 ```bash
-rg -n "demo_registry\\(|sample_incident_events\\(|demo_signing_key\\(|maybe_export_demo_receipts|trust_card_cli_registry" crates/franken-node/src
-rg -n "service skeleton|real baselines|synthetic_bearer_admin_route" crates/franken-node/src/api
+rg -n "demo_registry\\(|sample_incident_events\\(|demo_signing_key\\(|maybe_export_(demo_)?signed_receipts|trust_card_cli_registry" crates/franken-node/src
+rg -n "in-process catalog|UnavailablePendingTransport|synthetic_bearer_admin_route" crates/franken-node/src/api
 rg -n "run_rewrite|run_validate|engines.node|manual review" crates/franken-node/src/migration
 rg -n "simulated crash|coverage_pct: 0.0" crates/franken-node/src/connector/fuzz_corpus.rs
 rg -n "In a real implementation this would call tracker.rollback" crates/franken-node/src/connector/obligation_tracker.rs

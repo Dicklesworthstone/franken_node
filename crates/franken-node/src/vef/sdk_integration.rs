@@ -1369,16 +1369,18 @@ mod tests {
     #[test]
     fn endpoint_capacity_eviction() {
         let mut endpoint = ExternalVerificationEndpoint::new();
-        
+
         // Fill to capacity
         for i in 0..MAX_EVIDENCE_RECORDS {
             let sub = sample_submission(&format!("sub-{i}"), &format!("proof-{i}"));
             endpoint.submit(&sub).unwrap();
         }
-        
+
         // Submit one more, should not fail, should evict
         let overflow_sub = sample_submission("sub-overflow", "proof-overflow");
-        endpoint.submit(&overflow_sub).expect("should evict and accept");
+        endpoint
+            .submit(&overflow_sub)
+            .expect("should evict and accept");
         assert_eq!(endpoint.store().len(), MAX_EVIDENCE_RECORDS);
     }
 }

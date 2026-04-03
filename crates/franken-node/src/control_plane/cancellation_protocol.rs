@@ -491,9 +491,10 @@ impl CancellationProtocol {
         // Garbage collect only finalized records if we are at capacity
         if self.records.len() >= DEFAULT_MAX_RECORDS {
             // Retain active records, and try to make room
-            self.records.retain(|r| r.current_phase != CancelPhase::Finalized);
-            
-            // If we still have too many (i.e. all active), we are forced to drop the oldest active 
+            self.records
+                .retain(|r| r.current_phase != CancelPhase::Finalized);
+
+            // If we still have too many (i.e. all active), we are forced to drop the oldest active
             // as a last resort DOS defense to prevent OOM
             if self.records.len() >= DEFAULT_MAX_RECORDS {
                 let overflow = self.records.len() - DEFAULT_MAX_RECORDS + 1;

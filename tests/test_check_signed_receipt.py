@@ -54,6 +54,7 @@ class TestReceiptArtifact(unittest.TestCase):
         for receipt in data["chain"]:
             self.assertIn("signature", receipt)
             self.assertIn("chain_hash", receipt)
+            self.assertIn("signer_key_id", receipt)
 
 
 class TestReceiptImplementation(unittest.TestCase):
@@ -71,7 +72,12 @@ class TestReceiptImplementation(unittest.TestCase):
         self.assertIn("enum Decision", self.content)
 
     def test_has_signature_api(self):
-        for symbol in ["fn sign_receipt", "fn verify_receipt", "fn verify_hash_chain"]:
+        for symbol in [
+            "fn sign_receipt",
+            "fn verify_receipt",
+            "fn verify_hash_chain",
+            "fn signing_key_id",
+        ]:
             self.assertIn(symbol, self.content)
 
     def test_has_export_api(self):
@@ -102,11 +108,13 @@ class TestReceiptSpec(unittest.TestCase):
             "INV-RECEIPT-CHAIN",
             "INV-RECEIPT-HIGH-IMPACT",
             "INV-RECEIPT-EXPORT",
+            "INV-RECEIPT-NO-IMPLICIT-KEY",
+            "INV-RECEIPT-PROVENANCE",
         ]:
             self.assertIn(invariant, self.content)
 
     def test_has_required_types(self):
-        for marker in ["Receipt", "SignedReceipt", "ReceiptQuery", "Decision"]:
+        for marker in ["Receipt", "SignedReceipt", "ReceiptQuery", "Decision", "signer_key_id"]:
             self.assertIn(marker, self.content)
 
 
