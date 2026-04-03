@@ -563,12 +563,24 @@ impl ExternalVerificationEndpoint {
             )));
         }
 
-        // Capacity check: prevent unbounded store growth.
+        // Capacity management: prevent unbounded store growth while avoiding DoS lockout.
+        // If at capacity, evict the oldest record (preferring terminal states).
         if self.store.len() >= MAX_EVIDENCE_RECORDS {
-            return Err(VsiError::submission_rejected(format!(
-                "evidence store at capacity ({} records, max {MAX_EVIDENCE_RECORDS})",
-                self.store.len()
-            )));
+            let eviction_candidate = self
+                .store
+                .iter()
+                .min_by_key(|(_, record)| {
+                    let state_priority = match record.status {
+                        EvidenceStatus::Rejected | EvidenceStatus::Expired => 0,
+                        _ => 1,
+                    };
+                    (state_priority, record.submitted_at_millis)
+                })
+                .map(|(k, _)| k.clone());
+
+            if let Some(key) = eviction_candidate {
+                self.store.remove(&key);
+            }
         }
 
         // Reuse the module's canonical binding contract so exported evidence
@@ -1350,5 +1362,23 @@ mod tests {
             embedding.binding_hash.starts_with("sha256:"),
             "binding hash should start with sha256: prefix"
         );
+    }
+
+    // ── 39. Endpoint capacity eviction (INV-VSI-CAPACITY) ──
+
+    #[test]
+    fn endpoint_capacity_eviction() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        
+        // Fill to capacity
+        for i in 0..MAX_EVIDENCE_RECORDS {
+            let sub = sample_submission(&format!("sub-{i}"), &format!("proof-{i}"));
+            endpoint.submit(&sub).unwrap();
+        }
+        
+        // Submit one more, should not fail, should evict
+        let overflow_sub = sample_submission("sub-overflow", "proof-overflow");
+        endpoint.submit(&overflow_sub).expect("should evict and accept");
+        assert_eq!(endpoint.store().len(), MAX_EVIDENCE_RECORDS);
     }
 }

@@ -87,6 +87,8 @@ pub const TRUST_CARD_DIFF_COMPUTED: &str = "TRUST_CARD_DIFF_COMPUTED";
 
 const DEFAULT_CACHE_TTL_SECS: u64 = 60;
 const DEFAULT_REGISTRY_KEY: &[u8] = b"franken-node-trust-card-registry-key-v1";
+pub const TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA: &str =
+    "franken-node/trust-card-registry-state/v1";
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -112,6 +114,10 @@ pub enum TrustCardError {
     EvidenceRequiredForUpgrade,
     #[error("revocation is irreversible: cannot transition from Revoked to Active")]
     RevocationIrreversible,
+    #[error("unsupported trust-card registry snapshot schema `{0}`")]
+    UnsupportedSnapshotSchema(String),
+    #[error("invalid trust-card registry snapshot: {0}")]
+    InvalidSnapshot(String),
 }
 
 impl From<serde_json::Error> for TrustCardError {
@@ -332,6 +338,14 @@ pub struct TrustCardSyncReport {
     pub forced_refreshes: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustCardRegistrySnapshot {
+    pub schema_version: String,
+    pub cache_ttl_secs: u64,
+    pub cards_by_extension: BTreeMap<String, Vec<TrustCard>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TrustCardRegistry {
     cards_by_extension: BTreeMap<String, Vec<TrustCard>>,
@@ -357,6 +371,48 @@ impl TrustCardRegistry {
             registry_key: registry_key.to_vec(),
             telemetry: Vec::new(),
         }
+    }
+
+    #[must_use]
+    pub fn snapshot(&self) -> TrustCardRegistrySnapshot {
+        TrustCardRegistrySnapshot {
+            schema_version: TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA.to_string(),
+            cache_ttl_secs: self.cache_ttl_secs,
+            cards_by_extension: self.cards_by_extension.clone(),
+        }
+    }
+
+    pub fn from_snapshot(
+        snapshot: TrustCardRegistrySnapshot,
+        registry_key: &[u8],
+        loaded_at_secs: u64,
+    ) -> Result<Self, TrustCardError> {
+        if snapshot.schema_version != TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA {
+            return Err(TrustCardError::UnsupportedSnapshotSchema(
+                snapshot.schema_version,
+            ));
+        }
+
+        let mut registry = Self::new(snapshot.cache_ttl_secs, registry_key);
+        registry.cards_by_extension = snapshot.cards_by_extension;
+
+        for (extension_id, history) in &registry.cards_by_extension {
+            validate_snapshot_history(extension_id, history, &registry.registry_key)?;
+            let latest = history.last().cloned().ok_or_else(|| {
+                TrustCardError::InvalidSnapshot(format!(
+                    "extension bucket `{extension_id}` cannot be empty"
+                ))
+            })?;
+            registry.cache_by_extension.insert(
+                extension_id.clone(),
+                CachedCard {
+                    card: latest,
+                    cached_at_secs: loaded_at_secs,
+                },
+            );
+        }
+
+        Ok(registry)
     }
 
     pub fn create(
@@ -1313,6 +1369,44 @@ pub fn demo_registry(now_secs: u64) -> Result<TrustCardRegistry, TrustCardError>
     Ok(registry)
 }
 
+fn validate_snapshot_history(
+    extension_id: &str,
+    history: &[TrustCard],
+    registry_key: &[u8],
+) -> Result<(), TrustCardError> {
+    let mut previous_version = None;
+    let mut previous_hash = None;
+
+    for card in history {
+        if card.extension.extension_id != extension_id {
+            return Err(TrustCardError::InvalidSnapshot(format!(
+                "extension bucket `{extension_id}` contains card for `{}`",
+                card.extension.extension_id
+            )));
+        }
+        verify_card_signature(card, registry_key)?;
+        if let Some(prev_version) = previous_version
+            && card.trust_card_version <= prev_version
+        {
+            return Err(TrustCardError::InvalidSnapshot(format!(
+                "extension `{extension_id}` has non-monotonic trust_card_version history"
+            )));
+        }
+        if let Some(prev_hash) = &previous_hash
+            && card.previous_version_hash.as_deref() != Some(prev_hash.as_str())
+        {
+            return Err(TrustCardError::InvalidSnapshot(format!(
+                "extension `{extension_id}` broke previous_version_hash linkage"
+            )));
+        }
+
+        previous_version = Some(card.trust_card_version);
+        previous_hash = Some(card.card_hash.clone());
+    }
+
+    Ok(())
+}
+
 fn canonical_card_without_hash_and_signature(card: &TrustCard) -> Result<Value, TrustCardError> {
     let mut value = serde_json::to_value(card)?;
     let Some(map) = value.as_object_mut() else {
@@ -2142,6 +2236,68 @@ mod tests {
         assert!(
             !ts.chars().all(|c| c.is_ascii_digit() || c == 'Z'),
             "fallback must not be raw digits+Z: {ts}"
+        );
+    }
+
+    #[test]
+    fn registry_snapshot_roundtrip_preserves_latest_cards() {
+        let registry = demo_registry(1_000).expect("demo");
+        let snapshot = registry.snapshot();
+        assert_eq!(
+            snapshot.schema_version,
+            TRUST_CARD_REGISTRY_SNAPSHOT_SCHEMA
+        );
+
+        let mut restored =
+            TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000).expect("load");
+
+        let cards = restored
+            .list(&TrustCardListFilter::empty(), "trace-roundtrip", 2_000)
+            .expect("list");
+        assert_eq!(cards.len(), 2);
+        assert_eq!(
+            restored
+                .cache_by_extension
+                .get("npm:@beta/telemetry-bridge")
+                .expect("cached")
+                .cached_at_secs,
+            2_000
+        );
+    }
+
+    #[test]
+    fn registry_snapshot_rejects_tampered_card_history() {
+        let registry = demo_registry(1_000).expect("demo");
+        let mut snapshot = registry.snapshot();
+        snapshot
+            .cards_by_extension
+            .get_mut("npm:@beta/telemetry-bridge")
+            .expect("history")[0]
+            .reputation_score_basis_points = 1;
+
+        let err = TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000)
+            .expect_err("tampered snapshot must fail");
+        assert!(
+            matches!(err, TrustCardError::CardHashMismatch(extension) if extension == "npm:@beta/telemetry-bridge")
+        );
+    }
+
+    #[test]
+    fn registry_snapshot_rejects_mismatched_extension_bucket() {
+        let registry = demo_registry(1_000).expect("demo");
+        let mut snapshot = registry.snapshot();
+        let history = snapshot
+            .cards_by_extension
+            .remove("npm:@acme/auth-guard")
+            .expect("history");
+        snapshot
+            .cards_by_extension
+            .insert("npm:@wrong/extension".to_string(), history);
+
+        let err = TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000)
+            .expect_err("wrong bucket must fail");
+        assert!(
+            matches!(err, TrustCardError::InvalidSnapshot(detail) if detail.contains("contains card"))
         );
     }
 }
