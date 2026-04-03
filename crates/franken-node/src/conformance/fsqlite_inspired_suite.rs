@@ -309,7 +309,13 @@ impl ConformanceSuiteRunner {
     }
 
     fn push_fixture(&mut self, fixture: ConformanceFixture) {
-        push_bounded(&mut self.fixtures, fixture, MAX_CONFORMANCE_FIXTURES);
+        self.fixtures.push(fixture);
+        if self.fixtures.len() > MAX_CONFORMANCE_FIXTURES {
+            let overflow = self.fixtures.len() - MAX_CONFORMANCE_FIXTURES;
+            for f in self.fixtures.drain(0..overflow) {
+                self.id_registry.remove(f.conformance_id.as_str());
+            }
+        }
     }
 
     fn push_result(&mut self, record: ConformanceTestRecord) {

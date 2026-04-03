@@ -533,16 +533,18 @@ impl SsrfPolicyTemplate {
             trace_id: trace_id.to_string(),
         };
 
-        push_bounded(
-            &mut self.allowlist,
-            AllowlistEntry {
-                host: host.to_string(),
-                port,
-                reason: reason.to_string(),
-                receipt: receipt.clone(),
-            },
-            MAX_ALLOWLIST_ENTRIES,
-        );
+        if self.allowlist.len() >= MAX_ALLOWLIST_ENTRIES {
+            return Err(SsrfError::SsrfTemplateInvalid {
+                reason: format!("allowlist capacity exceeded ({})", MAX_ALLOWLIST_ENTRIES),
+            });
+        }
+
+        self.allowlist.push(AllowlistEntry {
+            host: host.to_string(),
+            port,
+            reason: reason.to_string(),
+            receipt: receipt.clone(),
+        });
 
         Ok(receipt)
     }
@@ -1175,5 +1177,15 @@ mod tests {
             found.is_some(),
             "allowlist matching should normalize trailing dots and surrounding whitespace"
         );
+    }
+
+    #[test]
+    fn allowlist_capacity_enforced() {
+        let mut p = test_template();
+        for i in 0..MAX_ALLOWLIST_ENTRIES {
+            p.add_allowlist(&format!("host-{i}"), None, "r", "t", "time").unwrap();
+        }
+        let err = p.add_allowlist("overflow", None, "r", "t", "time").unwrap_err();
+        assert_eq!(err.code(), "SSRF_TEMPLATE_INVALID");
     }
 }
