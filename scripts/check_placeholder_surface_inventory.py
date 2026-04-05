@@ -237,18 +237,22 @@ RULES: tuple[RuleSpec, ...] = (
         related_checkers=("scripts/check_fuzz_corpus.py",),
     ),
     RuleSpec(
-        rule_id="obligation_tracker_rollback_placeholder",
-        surface="obligation guard rollback remains documented debt rather than hidden behavior",
+        rule_id="obligation_tracker_drop_rollback_guardrail",
+        surface="obligation guard drop path remains a real rollback with cleanup diagnostics",
         classification="disallowed_live_shortcut",
-        markers=("tracker.rollback()",),
-        search_paths=("crates/**/*.rs",),
-        documented_paths=("crates/franken-node/src/connector/obligation_tracker.rs",),
-        required_anchor_markers=(
-            "INV-OBL-DROP-SAFE",
+        markers=(
             "In a real implementation this would call tracker.rollback().",
+            "[OBL-DROP] ObligationGuard dropped without resolution",
+            "logs instead of rolling back",
+        ),
+        search_paths=("crates/**/*.rs", "docs/**/*.md"),
+        required_anchor_markers=(
+            "impl Drop for ObligationGuard",
+            "tracker: Arc<Mutex<TrackerState>>",
+            "obligation rolled back by guard drop",
+            "OBL_DROP_SKIPPED",
         ),
         anchor_paths=("crates/franken-node/src/connector/obligation_tracker.rs",),
-        inventory_id="PSI-007",
         remediation_bead="bd-2fqyv.8",
     ),
     RuleSpec(
@@ -268,14 +272,20 @@ RULES: tuple[RuleSpec, ...] = (
     ),
     RuleSpec(
         rule_id="dgis_placeholder_barrier_context",
-        surface="DGIS placeholder barrier context remains explicitly documented debt",
+        surface="DGIS no-barrier receipts remain explicit not-applicable outcomes",
         classification="truthful_partial_surface",
-        markers=("Build a synthetic barrier for the receipt",),
-        search_paths=("crates/**/*.rs",),
-        documented_paths=("crates/franken-node/src/security/dgis/barrier_primitives.rs",),
-        required_anchor_markers=(
+        markers=(
             "Build a synthetic barrier for the receipt",
             "fn make_pass_receipt(",
+            "passthrough-",
+        ),
+        search_paths=("crates/**/*.rs", "docs/**/*.md"),
+        required_anchor_markers=(
+            "BARRIER_CHECK_NOT_APPLICABLE",
+            "make_not_applicable_receipt(",
+            "BarrierAction::NotApplicable",
+            "not-applicable:",
+            "check_passes_when_no_barriers_exist",
         ),
         anchor_paths=("crates/franken-node/src/security/dgis/barrier_primitives.rs",),
         inventory_id="PSI-009",

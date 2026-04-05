@@ -5,24 +5,20 @@
 - Verdict: `PASS`
 - Inventory doc: `docs/governance/placeholder_surface_inventory.md`
 - Rule count: `12`
-- Documented open-debt occurrences: `19`
-- Allowlisted fixture occurrences: `56`
+- Documented open-debt occurrences: `13`
+- Allowlisted fixture occurrences: `57`
 - Unexpected occurrences: `0`
 - Allowlist escapes: `0`
 
 ## Documented Open Debt
-- `PSI-003` incident sample-event helper is documented debt in live CLI and fixture-only elsewhere: 2 documented occurrence(s); owner `bd-2fqyv.4`.
 - `PSI-004` control-plane catalog boundary remains explicitly non-live: 9 documented occurrence(s); owner `bd-2fqyv.5`.
 - `PSI-006` fuzz gate simulation remains confined to its modeling surface: 2 documented occurrence(s); owner `bd-2fqyv.7`.
-- `PSI-007` obligation guard rollback remains documented debt rather than hidden behavior: 2 documented occurrence(s); owner `bd-2fqyv.8`.
 - `PSI-008` ecosystem health export placeholder metrics stay explicitly documented: 2 documented occurrence(s); owner `bd-2fqyv.9`.
-- `PSI-009` DGIS placeholder barrier context remains explicitly documented debt: 1 documented occurrence(s); owner `bd-2fqyv.11`.
-- `PSI-010` external reproduction script remains explicitly simulated until replaced: 1 documented occurrence(s); owner `bd-2fqyv.10`.
 
 ## Explicit Allowlists
 - `fixture_registry_boundary` fixture trust-card registry remains test-only: 30 allowlisted occurrence(s); rationale `fixture_registry(...)`.
 - `decision_receipt_demo_key_boundary` decision receipt demo signing key remains fixture-only: 19 allowlisted occurrence(s); rationale `decision_receipt::demo_signing_key(...)`.
-- `incident_sample_event_boundary` incident sample-event helper is documented debt in live CLI and fixture-only elsewhere: 3 allowlisted occurrence(s); rationale `sample_incident_events(...)`.
+- `incident_fixture_event_boundary` incident fixture-event helper remains test-only: 4 allowlisted occurrence(s); rationale `fixture_incident_events(...)`.
 - `fuzz_gate_callsite_boundary` fuzz gate callsites remain confined to fixture and verification paths: 4 allowlisted occurrence(s); rationale `allowlisted_simulation`.
 
 ## Failures

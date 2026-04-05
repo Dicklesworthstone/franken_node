@@ -80,21 +80,21 @@
         },
         {
           "context": "test",
-          "line": 2121,
-          "line_text": "let mut registry = supply_chain::trust_card::fixture_registry(now_unix_secs())",
+          "line": 2131,
+          "line_text": "supply_chain::trust_card::fixture_registry(now_unix_secs()).expect(\"fixture registry\");",
           "marker": "fixture_registry(",
           "path": "crates/franken-node/src/main.rs"
         },
         {
           "context": "test",
-          "line": 2156,
+          "line": 2165,
           "line_text": "supply_chain::trust_card::fixture_registry(now_secs).expect(\"fixture registry\");",
           "marker": "fixture_registry(",
           "path": "crates/franken-node/src/main.rs"
         },
         {
           "context": "test",
-          "line": 2173,
+          "line": 2182,
           "line_text": "supply_chain::trust_card::fixture_registry(now_secs).expect(\"fixture registry\");",
           "marker": "fixture_registry(",
           "path": "crates/franken-node/src/main.rs"
@@ -424,51 +424,43 @@
       "unexpected_occurrences": []
     },
     {
-      "allowed_simulation_label": "sample_incident_events(...)",
+      "allowed_simulation_label": "fixture_incident_events(...)",
       "allowlist_escape_count": 0,
       "allowlist_escapes": [],
-      "allowlisted_occurrence_count": 3,
+      "allowlisted_occurrence_count": 4,
       "allowlisted_occurrences": [
         {
+          "context": "test",
+          "line": 2394,
+          "line_text": "let mut events = fixture_incident_events(incident_id);",
+          "marker": "fixture_incident_events(",
+          "path": "crates/franken-node/src/main.rs"
+        },
+        {
           "context": "production",
-          "line": 369,
-          "line_text": "pub fn sample_incident_events(incident_id: &str) -> Vec<RawEvent> {",
-          "marker": "sample_incident_events(",
+          "line": 691,
+          "line_text": "pub fn fixture_incident_events(incident_id: &str) -> Vec<RawEvent> {",
+          "marker": "fixture_incident_events(",
           "path": "crates/franken-node/src/tools/replay_bundle.rs"
         },
         {
           "context": "test",
-          "line": 942,
-          "line_text": "let first = sample_incident_events(\"INC-STABLE-001\");",
-          "marker": "sample_incident_events(",
+          "line": 1320,
+          "line_text": "let first = fixture_incident_events(\"INC-STABLE-001\");",
+          "marker": "fixture_incident_events(",
           "path": "crates/franken-node/src/tools/replay_bundle.rs"
         },
         {
           "context": "test",
-          "line": 943,
-          "line_text": "let second = sample_incident_events(\"INC-STABLE-001\");",
-          "marker": "sample_incident_events(",
+          "line": 1321,
+          "line_text": "let second = fixture_incident_events(\"INC-STABLE-001\");",
+          "marker": "fixture_incident_events(",
           "path": "crates/franken-node/src/tools/replay_bundle.rs"
         }
       ],
-      "classification": "disallowed_live_shortcut",
-      "documented_occurrence_count": 2,
-      "documented_occurrences": [
-        {
-          "context": "test",
-          "line": 2375,
-          "line_text": "let mut events = sample_incident_events(incident_id);",
-          "marker": "sample_incident_events(",
-          "path": "crates/franken-node/src/main.rs"
-        },
-        {
-          "context": "test",
-          "line": 4527,
-          "line_text": "let events = sample_incident_events(&args.id);",
-          "marker": "sample_incident_events(",
-          "path": "crates/franken-node/src/main.rs"
-        }
-      ],
+      "classification": "allowlisted_simulation",
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
       "inventory_alignment_failures": [],
       "inventory_id": "PSI-003",
       "missing_anchor_markers": [],
@@ -478,8 +470,8 @@
         "scripts/check_replay_bundle.py"
       ],
       "remediation_bead": "bd-2fqyv.4",
-      "rule_id": "incident_sample_event_boundary",
-      "surface": "incident sample-event helper is documented debt in live CLI and fixture-only elsewhere",
+      "rule_id": "incident_fixture_event_boundary",
+      "surface": "incident fixture-event helper remains test-only",
       "unexpected_occurrence_count": 0,
       "unexpected_occurrences": []
     },
@@ -686,32 +678,17 @@
       "allowlisted_occurrence_count": 0,
       "allowlisted_occurrences": [],
       "classification": "disallowed_live_shortcut",
-      "documented_occurrence_count": 2,
-      "documented_occurrences": [
-        {
-          "context": "production",
-          "line": 686,
-          "line_text": "/// Mark the guard as rolled back. Must be called after `tracker.rollback()`.",
-          "marker": "tracker.rollback()",
-          "path": "crates/franken-node/src/connector/obligation_tracker.rs"
-        },
-        {
-          "context": "production",
-          "line": 706,
-          "line_text": "// In a real implementation this would call tracker.rollback().",
-          "marker": "tracker.rollback()",
-          "path": "crates/franken-node/src/connector/obligation_tracker.rs"
-        }
-      ],
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
       "inventory_alignment_failures": [],
-      "inventory_id": "PSI-007",
+      "inventory_id": null,
       "missing_anchor_markers": [],
       "pass": true,
       "reason_code": "PLACEHOLDER_SCANNER_PASS",
       "related_checkers": [],
       "remediation_bead": "bd-2fqyv.8",
-      "rule_id": "obligation_tracker_rollback_placeholder",
-      "surface": "obligation guard rollback remains documented debt rather than hidden behavior",
+      "rule_id": "obligation_tracker_drop_rollback_guardrail",
+      "surface": "obligation guard drop path remains a real rollback with cleanup diagnostics",
       "unexpected_occurrence_count": 0,
       "unexpected_occurrences": []
     },
@@ -726,14 +703,14 @@
       "documented_occurrences": [
         {
           "context": "production",
-          "line": 514,
+          "line": 611,
           "line_text": "compromise_reduction_factor: 1.0, // Placeholder \u2014 computed from external benchmark.",
           "marker": "compromise_reduction_factor: 1.0",
           "path": "crates/franken-node/src/supply_chain/ecosystem_telemetry.rs"
         },
         {
           "context": "production",
-          "line": 517,
+          "line": 614,
           "line_text": "certification_distribution: BTreeMap::new(), // Populated from live data.",
           "marker": "certification_distribution: BTreeMap::new()",
           "path": "crates/franken-node/src/supply_chain/ecosystem_telemetry.rs"
@@ -758,16 +735,8 @@
       "allowlisted_occurrence_count": 0,
       "allowlisted_occurrences": [],
       "classification": "truthful_partial_surface",
-      "documented_occurrence_count": 1,
-      "documented_occurrences": [
-        {
-          "context": "production",
-          "line": 665,
-          "line_text": "// Build a synthetic barrier for the receipt (use first matching or create placeholder)",
-          "marker": "Build a synthetic barrier for the receipt",
-          "path": "crates/franken-node/src/security/dgis/barrier_primitives.rs"
-        }
-      ],
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
       "inventory_alignment_failures": [],
       "inventory_id": "PSI-009",
       "missing_anchor_markers": [],
@@ -776,7 +745,7 @@
       "related_checkers": [],
       "remediation_bead": "bd-2fqyv.11",
       "rule_id": "dgis_placeholder_barrier_context",
-      "surface": "DGIS placeholder barrier context remains explicitly documented debt",
+      "surface": "DGIS no-barrier receipts remain explicit not-applicable outcomes",
       "unexpected_occurrence_count": 0,
       "unexpected_occurrences": []
     },
@@ -787,16 +756,8 @@
       "allowlisted_occurrence_count": 0,
       "allowlisted_occurrences": [],
       "classification": "disallowed_live_shortcut",
-      "documented_occurrence_count": 1,
-      "documented_occurrences": [
-        {
-          "context": "production",
-          "line": 119,
-          "line_text": "\"detail\": \"verification simulated (full execution requires test harness)\",",
-          "marker": "verification simulated (full execution requires test harness)",
-          "path": "scripts/reproduce.py"
-        }
-      ],
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
       "inventory_alignment_failures": [],
       "inventory_id": "PSI-010",
       "missing_anchor_markers": [],
@@ -814,10 +775,10 @@
   "summary": {
     "allowed_simulation_count": 5,
     "allowlist_escapes": 0,
-    "allowlisted_occurrences": 56,
-    "documented_occurrences": 19,
+    "allowlisted_occurrences": 57,
+    "documented_occurrences": 13,
     "inventory_drift_failures": 0,
-    "inventory_entry_count": 10,
+    "inventory_entry_count": 9,
     "missing_anchor_markers": 0,
     "rule_count": 12,
     "unexpected_occurrences": 0
