@@ -2,6 +2,10 @@
 //!
 //! Version transitions require declared migration paths. Migrations are
 //! idempotent, replay-stable, and failed migrations roll back cleanly.
+//! This module currently provides version-path planning primitives plus a
+//! scaffold receipt. The executable step semantics required for live state
+//! mutation are defined in `docs/specs/section_10_13/bd-2fqyv_6_1_contract.md`
+//! and are implemented by follow-on remediation work.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -239,8 +243,12 @@ impl MigrationRegistry {
 }
 
 /// Execute a migration plan, producing a receipt.
-/// In this scaffolding, execution is simulated — real connectors would
-/// apply each hint's transformation to the state data.
+///
+/// Current behavior is intentionally narrow: this function validates step-chain
+/// continuity and emits a scaffold receipt, but it does not yet mutate
+/// connector state. The fail-closed executable semantics for real state
+/// mutation, rollback, idempotency, and step-level receipts are defined in
+/// `docs/specs/section_10_13/bd-2fqyv_6_1_contract.md`.
 pub fn execute_plan(plan: &MigrationPlan, timestamp: &str) -> MigrationReceipt {
     let total = plan.steps.len();
 
