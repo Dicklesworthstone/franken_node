@@ -1705,6 +1705,130 @@ mod tests {
     }
 
     #[test]
+    fn check_returns_not_applicable_when_only_other_barrier_kinds_exist() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+
+        engine
+            .apply_barrier(make_firewall_barrier("mixed-node", "boundary-a"), &trace)
+            .unwrap();
+
+        let sandbox_receipt = engine
+            .check_sandbox_escalation(
+                "mixed-node",
+                "network_http",
+                SandboxTier::Permissive,
+                &trace,
+            )
+            .unwrap();
+        assert_eq!(
+            sandbox_receipt.event_code,
+            event_codes::BARRIER_CHECK_NOT_APPLICABLE
+        );
+        assert_eq!(sandbox_receipt.action, BarrierAction::NotApplicable);
+        assert_eq!(
+            sandbox_receipt.details["reason"],
+            serde_json::json!("no_sandbox_barrier_configured")
+        );
+
+        let firewall_receipt = engine
+            .check_composition_firewall("mixed-node", "exec_child", "boundary-b", &trace)
+            .unwrap();
+        assert_eq!(
+            firewall_receipt.event_code,
+            event_codes::BARRIER_CHECK_NOT_APPLICABLE
+        );
+        assert_eq!(firewall_receipt.action, BarrierAction::NotApplicable);
+        assert_eq!(
+            firewall_receipt.details["reason"],
+            serde_json::json!("no_matching_firewall_boundary")
+        );
+
+        let fork_pin_receipt = engine
+            .check_fork_pin("mixed-node", "sha256:any-digest", &trace)
+            .unwrap();
+        assert_eq!(
+            fork_pin_receipt.event_code,
+            event_codes::BARRIER_CHECK_NOT_APPLICABLE
+        );
+        assert_eq!(fork_pin_receipt.action, BarrierAction::NotApplicable);
+        assert_eq!(
+            fork_pin_receipt.details["reason"],
+            serde_json::json!("no_verified_fork_barrier_configured")
+        );
+    }
+
+    #[test]
+    fn audit_log_and_jsonl_export_preserve_not_applicable_receipts() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+
+        engine
+            .check_sandbox_escalation(
+                "audit-unbarriered-node",
+                "network_http",
+                SandboxTier::Permissive,
+                &trace,
+            )
+            .unwrap();
+        engine
+            .check_composition_firewall(
+                "audit-unbarriered-node",
+                "exec_child",
+                "missing-boundary",
+                &trace,
+            )
+            .unwrap();
+        engine
+            .check_fork_pin("audit-unbarriered-node", "sha256:any-digest", &trace)
+            .unwrap();
+
+        let log = engine.audit_log();
+        assert_eq!(log.len(), 3);
+        assert!(
+            log.iter()
+                .all(|receipt| receipt.event_code == event_codes::BARRIER_CHECK_NOT_APPLICABLE)
+        );
+        assert!(
+            log.iter()
+                .all(|receipt| receipt.action == BarrierAction::NotApplicable)
+        );
+        assert!(
+            log.iter()
+                .all(|receipt| receipt.barrier_id.starts_with("not-applicable:"))
+        );
+        assert_eq!(
+            log.iter()
+                .map(|receipt| receipt.details["reason"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec![
+                "no_sandbox_barrier_configured",
+                "no_matching_firewall_boundary",
+                "no_verified_fork_barrier_configured",
+            ]
+        );
+
+        let jsonl = engine.export_audit_log_jsonl().unwrap();
+        let lines: Vec<&str> = jsonl.lines().collect();
+        assert_eq!(lines.len(), 3);
+
+        for line in lines {
+            let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(
+                parsed["event_code"],
+                serde_json::json!(event_codes::BARRIER_CHECK_NOT_APPLICABLE)
+            );
+            assert_eq!(parsed["action"], serde_json::json!("not_applicable"));
+            assert!(
+                parsed["barrier_id"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("not-applicable:")
+            );
+        }
+    }
+
+    #[test]
     fn duplicate_barrier_id_is_rejected_before_node_routing_is_corrupted() {
         let mut engine = BarrierEngine::new();
         let trace = make_trace_id();

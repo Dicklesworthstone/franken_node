@@ -58,6 +58,8 @@ REQUIRED_TEST_PATTERNS = [
     "two_rollout_fences.*conflict",
     "barrier_removal_emits_receipt",
     "audit_log_records",
+    "check_returns_not_applicable_when_only_other_barrier_kinds_exist",
+    "audit_log_and_jsonl_export_preserve_not_applicable_receipts",
     "barrier_plan_applies",
 ]
 

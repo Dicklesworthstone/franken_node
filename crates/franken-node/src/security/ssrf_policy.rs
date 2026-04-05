@@ -1186,6 +1186,6 @@ mod tests {
             p.add_allowlist(&format!("host-{i}"), None, "r", "t", "time").unwrap();
         }
         let err = p.add_allowlist("overflow", None, "r", "t", "time").unwrap_err();
-        assert_eq!(err.code(), "SSRF_TEMPLATE_INVALID");
+        assert!(matches!(err, SsrfError::SsrfTemplateInvalid { .. }));
     }
 }
