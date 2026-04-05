@@ -36,7 +36,7 @@ EVIDENCE_PATH = ROOT / "artifacts" / "section_10_15" / "bd-1n5p" / "verification
 SUMMARY_PATH = ROOT / "artifacts" / "section_10_15" / "bd-1n5p" / "verification_summary.md"
 
 EVENT_CODES = [
-    "OBL-001", "OBL-002", "OBL-003", "OBL-004", "OBL-005",
+    "OBL-001", "OBL-002", "OBL-003", "OBL-004", "OBL-005", "OBL-006",
 ]
 
 INVARIANTS = [

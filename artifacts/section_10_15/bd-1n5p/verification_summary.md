@@ -3,7 +3,7 @@
 **Bead:** bd-1n5p
 **Section:** 10.15
 **Verdict:** PASS
-**Date:** 2026-02-22
+**Date:** 2026-04-03
 
 ## Overview
 
@@ -23,7 +23,7 @@ periodic leak oracle that detects and force-rolls-back orphaned obligations.
 | Check                | Status | Details                                          |
 |----------------------|--------|--------------------------------------------------|
 | SOURCE_EXISTS        | PASS   | obligation_tracker.rs present in connector       |
-| EVENT_CODES          | PASS   | 5 codes: OBL-001 through OBL-005                |
+| EVENT_CODES          | PASS   | 6 codes: OBL-001 through OBL-006                |
 | INVARIANTS           | PASS   | 8 invariants defined and enforced                |
 | ERROR_CODES          | PASS   | 6 error codes defined                            |
 | CORE_TYPES           | PASS   | 10 types: ObligationTracker, FlowObligationCounts, ObligationGuard, etc. |
@@ -31,7 +31,7 @@ periodic leak oracle that detects and force-rolls-back orphaned obligations.
 | REQUIRED_METHODS     | PASS   | 12 methods implemented (incl. try_reserve, per_flow_counts) |
 | SCHEMA_VERSION       | PASS   | obl-v1.0 declared                                |
 | SERDE_DERIVES        | PASS   | Serialize/Deserialize present                    |
-| TEST_COVERAGE        | PASS   | 42 Rust unit tests (>= 15 required)             |
+| TEST_COVERAGE        | PASS   | 47 Rust unit tests (>= 15 required)             |
 | MODULE_REGISTERED    | PASS   | obligation_tracker in connector/mod.rs           |
 | SPEC_EXISTS          | PASS   | Contract spec at section_10_15/bd-1n5p           |
 | TWO_PHASE_SPEC       | PASS   | Two-phase effects spec at two_phase_effects.md   |
@@ -55,8 +55,9 @@ periodic leak oracle that detects and force-rolls-back orphaned obligations.
    with event code, flow, state, and trace ID. INV-OBL-AUDIT-COMPLETE.
 5. **Budget enforcement:** Per-flow concurrent reservation limits via `try_reserve()`
    prevent unbounded resource consumption. INV-OBL-BUDGET-BOUND.
-6. **Drop safety:** ObligationGuard implements Drop to auto-rollback on scope exit
-   if not explicitly resolved. INV-OBL-DROP-SAFE.
+6. **Drop safety:** ObligationGuard implements Drop over shared tracker state,
+   auto-rolls back reserved obligations on scope exit, and emits OBL-006 when
+   drop observes an already-terminal or missing reservation. INV-OBL-DROP-SAFE.
 7. **Leaked state:** A dedicated `Leaked` variant in ObligationState distinguishes
    leak-oracle-detected obligations from explicit rollbacks.
 8. **Per-flow counts:** The `FlowObligationCounts` struct reports per-flow obligation
@@ -64,10 +65,10 @@ periodic leak oracle that detects and force-rolls-back orphaned obligations.
 
 ## Test Coverage
 
-- 42 Rust unit tests covering all invariants, state transitions, Leaked state,
+- 47 Rust unit tests covering all invariants, state transitions, Leaked state,
   budget enforcement, per-flow counts, ObligationGuard, leak detection, audit
   logging, flow lifecycle, and error conditions.
-- 84 gate checks in verification script with self-test mode.
+- 86 gate checks in verification script with self-test mode.
 - 40 Python unit tests for the verification script.
 
 ## Artifacts

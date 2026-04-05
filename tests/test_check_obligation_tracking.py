@@ -79,7 +79,7 @@ class TestEventCodes(unittest.TestCase):
             self.assertTrue(check["passed"], f"{code}: {check['detail']}")
 
     def test_event_code_count(self):
-        self.assertEqual(len(checker.EVENT_CODES), 5)
+        self.assertEqual(len(checker.EVENT_CODES), 6)
 
 
 class TestInvariants(unittest.TestCase):

@@ -64,7 +64,9 @@ and emitted as OBL-004 events. The scan itself emits OBL-005.
 
 The `ObligationGuard` struct wraps a reserved obligation and implements `Drop`. If the
 guard is dropped without an explicit `commit()` or `rollback()`, the obligation is
-automatically rolled back, satisfying INV-OBL-DROP-SAFE.
+automatically rolled back, satisfying INV-OBL-DROP-SAFE. Drop-time cleanup that finds
+an already-terminal or missing obligation emits OBL-006 structured diagnostics instead
+of silently succeeding.
 
 ## Invariants
 
@@ -88,6 +90,7 @@ automatically rolled back, satisfying INV-OBL-DROP-SAFE.
 | OBL-003 | Obligation rolled back |
 | OBL-004 | Obligation leak detected (force-rollback) |
 | OBL-005 | Leak scan completed |
+| OBL-006 | Guard drop observed terminal or missing state and skipped rollback |
 
 ## Error Codes
 
@@ -122,7 +125,7 @@ The gate script `scripts/check_obligation_tracking.py` validates:
 2. Spec contract exists at `docs/specs/section_10_15/bd-1n5p_contract.md`
 3. Module is wired in `connector/mod.rs`
 4. All invariant constants are present in source (INV-OBL-TWO-PHASE, INV-OBL-NO-LEAK, INV-OBL-BUDGET-BOUND, INV-OBL-DROP-SAFE)
-5. All event codes OBL-001 through OBL-005 are defined
+5. All event codes OBL-001 through OBL-006 are defined
 6. Leak oracle report artifact exists and is valid JSON
 7. ObligationGuard with Drop implementation is present
 8. Schema version `obl-v1.0` is declared
@@ -136,7 +139,7 @@ Exit code 0 on PASS, 1 on FAIL. Use `--json` for machine-readable output.
 3. Spec contract exists at `docs/specs/section_10_15/bd-1n5p_contract.md`
 4. All five tracked flows (publish, revoke, quarantine, migration, fencing) are represented
 5. Leak oracle report artifact exists at `artifacts/10.15/obligation_leak_oracle_report.json`
-6. Event codes OBL-001 through OBL-005 are defined and emitted
+6. Event codes OBL-001 through OBL-006 are defined and emitted
 7. All five error codes are defined
 8. All eight invariants are referenced in source
 9. At least 15 inline tests pass

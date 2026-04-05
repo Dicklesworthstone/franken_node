@@ -18,6 +18,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Schema version for the obligation tracker.
 pub const SCHEMA_VERSION: &str = "obl-v1.0";
@@ -33,6 +35,14 @@ use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_OBLIGATIONS};
 /// Maximum scan results before oldest are evicted.
 const MAX_SCAN_RESULTS: usize = 1024;
 
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| u64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
 // ── Event codes ──────────────────────────────────────────────────────────────
 
 pub mod event_codes {
@@ -46,6 +56,8 @@ pub mod event_codes {
     pub const OBL_LEAK_DETECTED: &str = "OBL-004";
     /// Leak scan completed.
     pub const OBL_SCAN_COMPLETED: &str = "OBL-005";
+    /// Guard drop observed an already-terminal or missing obligation and skipped rollback.
+    pub const OBL_DROP_SKIPPED: &str = "OBL-006";
 }
 
 // ── Error codes ──────────────────────────────────────────────────────────────
@@ -227,9 +239,8 @@ pub struct LeakOracleReport {
     pub verdict: String,
 }
 
-/// The obligation tracker managing two-phase channels. INV-OBL-TWO-PHASE
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ObligationTracker {
+struct TrackerState {
     obligations: BTreeMap<String, Obligation>,
     audit_log: Vec<ObligationAuditRecord>,
     next_id: u64,
@@ -239,9 +250,15 @@ pub struct ObligationTracker {
     flow_budget: usize,
 }
 
-impl ObligationTracker {
-    /// Create a new tracker with the default leak timeout.
-    pub fn new() -> Self {
+fn lock_tracker_state(tracker: &Arc<Mutex<TrackerState>>) -> MutexGuard<'_, TrackerState> {
+    match tracker.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
+
+impl TrackerState {
+    fn new() -> Self {
         Self {
             obligations: BTreeMap::new(),
             audit_log: Vec::new(),
@@ -250,20 +267,6 @@ impl ObligationTracker {
             scan_results: Vec::new(),
             flow_budget: DEFAULT_FLOW_BUDGET,
         }
-    }
-
-    /// Create a tracker with a custom leak timeout.
-    pub fn with_leak_timeout(leak_timeout_secs: u64) -> Self {
-        let mut t = Self::new();
-        t.leak_timeout_secs = leak_timeout_secs;
-        t
-    }
-
-    /// Create a tracker with a custom per-flow budget. INV-OBL-BUDGET-BOUND
-    pub fn with_flow_budget(flow_budget: usize) -> Self {
-        let mut t = Self::new();
-        t.flow_budget = flow_budget;
-        t
     }
 
     fn push_audit(&mut self, record: ObligationAuditRecord) {
@@ -367,7 +370,7 @@ impl ObligationTracker {
     /// Reserve an obligation slot (phase 1). INV-OBL-AUDIT-COMPLETE
     ///
     /// Returns the `ObligationId` for subsequent commit/rollback.
-    pub fn reserve(
+    fn reserve(
         &mut self,
         flow: ObligationFlow,
         payload: Vec<u8>,
@@ -410,7 +413,7 @@ impl ObligationTracker {
     /// Reserve with budget enforcement. INV-OBL-BUDGET-BOUND
     ///
     /// Like `reserve()`, but returns an error if the per-flow budget is exceeded.
-    pub fn try_reserve(
+    fn try_reserve(
         &mut self,
         flow: ObligationFlow,
         payload: Vec<u8>,
@@ -429,7 +432,7 @@ impl ObligationTracker {
     /// - `ERR_OBL_NOT_FOUND` if the obligation ID is unknown
     /// - `ERR_OBL_ALREADY_COMMITTED` if already committed
     /// - `ERR_OBL_ALREADY_ROLLED_BACK` if already rolled back
-    pub fn commit(&mut self, id: &ObligationId, now_ms: u64, trace_id: &str) -> Result<(), String> {
+    fn commit(&mut self, id: &ObligationId, now_ms: u64, trace_id: &str) -> Result<(), String> {
         let obligation = self
             .obligations
             .get_mut(&id.0)
@@ -470,11 +473,16 @@ impl ObligationTracker {
     /// # Errors
     /// - `ERR_OBL_NOT_FOUND` if the obligation ID is unknown
     /// - `ERR_OBL_ALREADY_COMMITTED` if already committed
-    pub fn rollback(
+    fn rollback(&mut self, id: &ObligationId, now_ms: u64, trace_id: &str) -> Result<(), String> {
+        self.rollback_with_detail(id, now_ms, trace_id, "obligation rolled back")
+    }
+
+    fn rollback_with_detail(
         &mut self,
         id: &ObligationId,
         now_ms: u64,
         trace_id: &str,
+        detail: &str,
     ) -> Result<(), String> {
         let obligation = self
             .obligations
@@ -504,7 +512,7 @@ impl ObligationTracker {
             state: "RolledBack".to_string(),
             trace_id: trace_id.to_string(),
             schema_version: SCHEMA_VERSION.to_string(),
-            detail: "obligation rolled back".to_string(),
+            detail: detail.to_string(),
         });
 
         Ok(())
@@ -514,7 +522,7 @@ impl ObligationTracker {
     ///
     /// Detects obligations that have remained in `Reserved` state longer than
     /// `leak_timeout_secs` and force-rolls them back.
-    pub fn run_leak_scan(&mut self, now_ms: u64, trace_id: &str) -> LeakScanResult {
+    fn run_leak_scan(&mut self, now_ms: u64, trace_id: &str) -> LeakScanResult {
         let leaked_ids = self.mark_expired_reserved_as_leaked(now_ms, trace_id);
 
         let scanned = self.obligations.len();
@@ -543,12 +551,12 @@ impl ObligationTracker {
     }
 
     /// Get an obligation by ID.
-    pub fn get_obligation(&self, id: &ObligationId) -> Option<&Obligation> {
-        self.obligations.get(&id.0)
+    fn get_obligation(&self, id: &ObligationId) -> Option<Obligation> {
+        self.obligations.get(&id.0).cloned()
     }
 
     /// Count obligations in a given state.
-    pub fn count_in_state(&self, state: ObligationState) -> usize {
+    fn count_in_state(&self, state: ObligationState) -> usize {
         self.obligations
             .values()
             .filter(|o| o.state == state)
@@ -556,12 +564,12 @@ impl ObligationTracker {
     }
 
     /// Total number of tracked obligations.
-    pub fn total_obligations(&self) -> usize {
+    fn total_obligations(&self) -> usize {
         self.obligations.len()
     }
 
     /// Export audit log as JSONL.
-    pub fn export_audit_log_jsonl(&self) -> String {
+    fn export_audit_log_jsonl(&self) -> String {
         self.audit_log
             .iter()
             .map(|r| serde_json::to_string(r).unwrap_or_default())
@@ -570,7 +578,7 @@ impl ObligationTracker {
     }
 
     /// Compute per-flow obligation counts for the oracle report.
-    pub fn per_flow_counts(&self) -> Vec<FlowObligationCounts> {
+    fn per_flow_counts(&self) -> Vec<FlowObligationCounts> {
         ObligationFlow::all()
             .iter()
             .map(|flow| {
@@ -604,7 +612,7 @@ impl ObligationTracker {
     }
 
     /// Generate the leak oracle report artifact.
-    pub fn generate_leak_oracle_report(&self) -> LeakOracleReport {
+    fn generate_leak_oracle_report(&self) -> LeakOracleReport {
         let total_leaks: usize = self
             .scan_results
             .iter()
@@ -623,24 +631,208 @@ impl ObligationTracker {
     }
 
     /// Export the leak oracle report as JSON.
-    pub fn export_leak_oracle_report_json(&self) -> String {
+    fn export_leak_oracle_report_json(&self) -> String {
         let report = self.generate_leak_oracle_report();
         serde_json::to_string_pretty(&report).unwrap_or_default()
     }
 
     /// Get the configured leak timeout in seconds.
-    pub fn leak_timeout_secs(&self) -> u64 {
+    fn leak_timeout_secs(&self) -> u64 {
         self.leak_timeout_secs
     }
 
     /// Get the configured per-flow budget.
-    pub fn flow_budget(&self) -> usize {
+    fn flow_budget(&self) -> usize {
         self.flow_budget
     }
 
     /// Count of audit log entries.
-    pub fn audit_log_count(&self) -> usize {
+    fn audit_log_count(&self) -> usize {
         self.audit_log.len()
+    }
+}
+
+/// The obligation tracker managing two-phase channels. INV-OBL-TWO-PHASE
+#[derive(Debug, Clone)]
+pub struct ObligationTracker {
+    inner: Arc<Mutex<TrackerState>>,
+}
+
+impl Serialize for ObligationTracker {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        Serialize::serialize(&*self.lock_state(), serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for ObligationTracker {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let state = TrackerState::deserialize(deserializer)?;
+        Ok(Self {
+            inner: Arc::new(Mutex::new(state)),
+        })
+    }
+}
+
+impl ObligationTracker {
+    /// Create a new tracker with the default leak timeout.
+    pub fn new() -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(TrackerState::new())),
+        }
+    }
+
+    /// Create a tracker with a custom leak timeout.
+    pub fn with_leak_timeout(leak_timeout_secs: u64) -> Self {
+        let tracker = Self::new();
+        tracker.with_inner_mut(|state| {
+            state.leak_timeout_secs = leak_timeout_secs;
+        });
+        tracker
+    }
+
+    /// Create a tracker with a custom per-flow budget. INV-OBL-BUDGET-BOUND
+    pub fn with_flow_budget(flow_budget: usize) -> Self {
+        let tracker = Self::new();
+        tracker.with_inner_mut(|state| {
+            state.flow_budget = flow_budget;
+        });
+        tracker
+    }
+
+    fn lock_state(&self) -> MutexGuard<'_, TrackerState> {
+        lock_tracker_state(&self.inner)
+    }
+
+    fn with_inner<R>(&self, f: impl FnOnce(&TrackerState) -> R) -> R {
+        let state = self.lock_state();
+        f(&state)
+    }
+
+    fn with_inner_mut<R>(&self, f: impl FnOnce(&mut TrackerState) -> R) -> R {
+        let mut state = self.lock_state();
+        f(&mut state)
+    }
+
+    /// Reserve an obligation slot (phase 1). INV-OBL-AUDIT-COMPLETE
+    pub fn reserve(
+        &mut self,
+        flow: ObligationFlow,
+        payload: Vec<u8>,
+        now_ms: u64,
+        trace_id: &str,
+    ) -> Result<ObligationId, String> {
+        self.with_inner_mut(|state| state.reserve(flow, payload, now_ms, trace_id))
+    }
+
+    /// Reserve an obligation and bind its lifecycle to an RAII guard.
+    pub fn reserve_guard(
+        &mut self,
+        flow: ObligationFlow,
+        payload: Vec<u8>,
+        now_ms: u64,
+        trace_id: &str,
+    ) -> Result<ObligationGuard, String> {
+        let obligation_id = self.reserve(flow, payload, now_ms, trace_id)?;
+        Ok(ObligationGuard::new(self, obligation_id, trace_id))
+    }
+
+    /// Reserve with budget enforcement. INV-OBL-BUDGET-BOUND
+    pub fn try_reserve(
+        &mut self,
+        flow: ObligationFlow,
+        payload: Vec<u8>,
+        now_ms: u64,
+        trace_id: &str,
+    ) -> Result<ObligationId, String> {
+        self.with_inner_mut(|state| state.try_reserve(flow, payload, now_ms, trace_id))
+    }
+
+    /// Reserve with budget enforcement and bind the lifecycle to an RAII guard.
+    pub fn try_reserve_guard(
+        &mut self,
+        flow: ObligationFlow,
+        payload: Vec<u8>,
+        now_ms: u64,
+        trace_id: &str,
+    ) -> Result<ObligationGuard, String> {
+        let obligation_id = self.try_reserve(flow, payload, now_ms, trace_id)?;
+        Ok(ObligationGuard::new(self, obligation_id, trace_id))
+    }
+
+    /// Commit an obligation (phase 2a). INV-OBL-ATOMIC-COMMIT
+    pub fn commit(&mut self, id: &ObligationId, now_ms: u64, trace_id: &str) -> Result<(), String> {
+        self.with_inner_mut(|state| state.commit(id, now_ms, trace_id))
+    }
+
+    /// Roll back an obligation (phase 2b). INV-OBL-ROLLBACK-SAFE
+    pub fn rollback(
+        &mut self,
+        id: &ObligationId,
+        now_ms: u64,
+        trace_id: &str,
+    ) -> Result<(), String> {
+        self.with_inner_mut(|state| state.rollback(id, now_ms, trace_id))
+    }
+
+    /// Run the leak oracle scan. INV-OBL-NO-LEAK, INV-OBL-SCAN-PERIODIC
+    pub fn run_leak_scan(&mut self, now_ms: u64, trace_id: &str) -> LeakScanResult {
+        self.with_inner_mut(|state| state.run_leak_scan(now_ms, trace_id))
+    }
+
+    /// Get an obligation by ID.
+    pub fn get_obligation(&self, id: &ObligationId) -> Option<Obligation> {
+        self.with_inner(|state| state.get_obligation(id))
+    }
+
+    /// Count obligations in a given state.
+    pub fn count_in_state(&self, state: ObligationState) -> usize {
+        self.with_inner(|inner| inner.count_in_state(state))
+    }
+
+    /// Total number of tracked obligations.
+    pub fn total_obligations(&self) -> usize {
+        self.with_inner(TrackerState::total_obligations)
+    }
+
+    /// Export audit log as JSONL.
+    pub fn export_audit_log_jsonl(&self) -> String {
+        self.with_inner(TrackerState::export_audit_log_jsonl)
+    }
+
+    /// Compute per-flow obligation counts for the oracle report.
+    pub fn per_flow_counts(&self) -> Vec<FlowObligationCounts> {
+        self.with_inner(TrackerState::per_flow_counts)
+    }
+
+    /// Generate the leak oracle report artifact.
+    pub fn generate_leak_oracle_report(&self) -> LeakOracleReport {
+        self.with_inner(TrackerState::generate_leak_oracle_report)
+    }
+
+    /// Export the leak oracle report as JSON.
+    pub fn export_leak_oracle_report_json(&self) -> String {
+        self.with_inner(TrackerState::export_leak_oracle_report_json)
+    }
+
+    /// Get the configured leak timeout in seconds.
+    pub fn leak_timeout_secs(&self) -> u64 {
+        self.with_inner(TrackerState::leak_timeout_secs)
+    }
+
+    /// Get the configured per-flow budget.
+    pub fn flow_budget(&self) -> usize {
+        self.with_inner(TrackerState::flow_budget)
+    }
+
+    /// Count of audit log entries.
+    pub fn audit_log_count(&self) -> usize {
+        self.with_inner(TrackerState::audit_log_count)
     }
 }
 
@@ -655,11 +847,11 @@ impl Default for ObligationTracker {
 /// RAII guard for a reserved obligation. INV-OBL-DROP-SAFE
 ///
 /// If the guard is dropped without an explicit `commit()` or `rollback()`,
-/// the obligation is marked as needing rollback. The caller should use
-/// `ObligationGuard::new()` after reserving and call `.commit()` or
-/// `.rollback()` before the guard goes out of scope.
+/// it resolves the reservation through the shared tracker state immediately.
+/// The preferred constructor is `ObligationTracker::reserve_guard()`.
 #[derive(Debug)]
 pub struct ObligationGuard {
+    tracker: Arc<Mutex<TrackerState>>,
     /// The obligation ID this guard protects.
     pub obligation_id: ObligationId,
     /// Whether the guard has been explicitly resolved (committed or rolled back).
@@ -670,22 +862,37 @@ pub struct ObligationGuard {
 
 impl ObligationGuard {
     /// Create a new guard for a reserved obligation.
-    pub fn new(obligation_id: ObligationId, trace_id: &str) -> Self {
+    pub fn new(tracker: &ObligationTracker, obligation_id: ObligationId, trace_id: &str) -> Self {
         Self {
+            tracker: Arc::clone(&tracker.inner),
             obligation_id,
             resolved: false,
             trace_id: trace_id.to_string(),
         }
     }
 
-    /// Mark the guard as committed. Must be called after `tracker.commit()`.
-    pub fn mark_committed(&mut self) {
-        self.resolved = true;
+    /// Commit the guarded reservation and disarm the drop rollback path.
+    pub fn commit(mut self, now_ms: u64) -> Result<(), String> {
+        let result = {
+            let mut state = lock_tracker_state(&self.tracker);
+            state.commit(&self.obligation_id, now_ms, &self.trace_id)
+        };
+        if result.is_ok() {
+            self.resolved = true;
+        }
+        result
     }
 
-    /// Mark the guard as rolled back. Must be called after `tracker.rollback()`.
-    pub fn mark_rolled_back(&mut self) {
-        self.resolved = true;
+    /// Roll back the guarded reservation and disarm the drop rollback path.
+    pub fn rollback(mut self, now_ms: u64) -> Result<(), String> {
+        let result = {
+            let mut state = lock_tracker_state(&self.tracker);
+            state.rollback(&self.obligation_id, now_ms, &self.trace_id)
+        };
+        if result.is_ok() {
+            self.resolved = true;
+        }
+        result
     }
 
     /// Check whether the guard has been resolved.
@@ -703,14 +910,50 @@ impl ObligationGuard {
 impl Drop for ObligationGuard {
     fn drop(&mut self) {
         if !self.resolved {
-            // In a real implementation this would call tracker.rollback().
-            // Since we cannot hold a mutable reference to the tracker in the guard
-            // (without RefCell/Arc), we log the drop event. The leak oracle will
-            // catch any truly unresolved obligations. INV-OBL-DROP-SAFE
-            eprintln!(
-                "[OBL-DROP] ObligationGuard dropped without resolution: id={} trace={}",
-                self.obligation_id, self.trace_id
-            );
+            let now_ms = now_unix_ms();
+            let mut state = lock_tracker_state(&self.tracker);
+            let current = state
+                .obligations
+                .get(&self.obligation_id.0)
+                .map(|obligation| (obligation.state, obligation.flow.as_str().to_string()));
+
+            match current {
+                Some((ObligationState::Reserved, _)) => {
+                    let _ = state.rollback_with_detail(
+                        &self.obligation_id,
+                        now_ms,
+                        &self.trace_id,
+                        "obligation rolled back by guard drop",
+                    );
+                }
+                Some((state_name, flow)) => {
+                    state.push_audit(ObligationAuditRecord {
+                        event_code: event_codes::OBL_DROP_SKIPPED.to_string(),
+                        obligation_id: self.obligation_id.0.clone(),
+                        flow,
+                        state: state_name.to_string(),
+                        trace_id: self.trace_id.clone(),
+                        schema_version: SCHEMA_VERSION.to_string(),
+                        detail: format!(
+                            "guard drop observed terminal state {state_name}; rollback skipped"
+                        ),
+                    });
+                }
+                None => {
+                    state.push_audit(ObligationAuditRecord {
+                        event_code: event_codes::OBL_DROP_SKIPPED.to_string(),
+                        obligation_id: self.obligation_id.0.clone(),
+                        flow: String::new(),
+                        state: String::new(),
+                        trace_id: self.trace_id.clone(),
+                        schema_version: SCHEMA_VERSION.to_string(),
+                        detail: "guard drop found no tracked obligation; rollback skipped"
+                            .to_string(),
+                    });
+                }
+            }
+
+            self.resolved = true;
         }
     }
 }
@@ -1055,6 +1298,7 @@ mod tests {
         assert!(!event_codes::OBL_ROLLED_BACK.is_empty());
         assert!(!event_codes::OBL_LEAK_DETECTED.is_empty());
         assert!(!event_codes::OBL_SCAN_COMPLETED.is_empty());
+        assert!(!event_codes::OBL_DROP_SKIPPED.is_empty());
     }
 
     // 29. error codes are defined and non-empty
@@ -1116,35 +1360,87 @@ mod tests {
         assert!(result.leaked_ids.contains(&id3.0));
     }
 
-    // 33. ObligationGuard marks committed
+    // 33. ObligationGuard commit updates shared tracker state
     #[test]
-    fn test_guard_mark_committed() {
-        let id = ObligationId("obl-test".to_string());
-        let mut guard = ObligationGuard::new(id, "trace-1");
+    fn test_guard_commit_updates_tracker_state() {
+        let mut t = make_tracker();
+        let guard = t
+            .reserve_guard(ObligationFlow::Publish, vec![1], 1000, "trace-1")
+            .unwrap();
+        let id = guard.obligation_id.clone();
         assert!(!guard.is_resolved());
-        guard.mark_committed();
-        assert!(guard.is_resolved());
+        guard.commit(1050).unwrap();
+        let obligation = t.get_obligation(&id).unwrap();
+        assert_eq!(obligation.state, ObligationState::Committed);
     }
 
-    // 34. ObligationGuard marks rolled back
+    // 34. ObligationGuard rollback updates shared tracker state
     #[test]
-    fn test_guard_mark_rolled_back() {
-        let id = ObligationId("obl-test".to_string());
-        let mut guard = ObligationGuard::new(id, "trace-1");
-        guard.mark_rolled_back();
-        assert!(guard.is_resolved());
+    fn test_guard_rollback_updates_tracker_state() {
+        let mut t = make_tracker();
+        let guard = t
+            .reserve_guard(ObligationFlow::Revoke, vec![], 1000, "trace-1")
+            .unwrap();
+        let id = guard.obligation_id.clone();
+        guard.rollback(1050).unwrap();
+        let obligation = t.get_obligation(&id).unwrap();
+        assert_eq!(obligation.state, ObligationState::RolledBack);
     }
 
-    // 35. ObligationGuard into_id consumes without drop warning
+    // 35. ObligationGuard drop triggers rollback when still reserved
+    #[test]
+    fn test_guard_drop_rolls_back_reserved_obligation() {
+        let mut t = make_tracker();
+        let id = {
+            let guard = t
+                .reserve_guard(ObligationFlow::Migration, vec![], 1000, "trace-1")
+                .unwrap();
+            guard.obligation_id.clone()
+        };
+
+        let obligation = t.get_obligation(&id).unwrap();
+        assert_eq!(obligation.state, ObligationState::RolledBack);
+        assert!(
+            t.export_audit_log_jsonl()
+                .contains("obligation rolled back by guard drop")
+        );
+    }
+
+    // 36. ObligationGuard into_id consumes without drop rollback
     #[test]
     fn test_guard_into_id() {
-        let id = ObligationId("obl-test".to_string());
-        let guard = ObligationGuard::new(id.clone(), "trace-1");
+        let mut t = make_tracker();
+        let guard = t
+            .reserve_guard(ObligationFlow::Fencing, vec![], 1000, "trace-1")
+            .unwrap();
+        let id = guard.obligation_id.clone();
         let extracted = guard.into_id();
         assert_eq!(extracted, id);
+        assert_eq!(
+            t.get_obligation(&id).unwrap().state,
+            ObligationState::Reserved
+        );
     }
 
-    // 36. ObligationGuard has Drop implementation (INV-OBL-DROP-SAFE)
+    // 37. ObligationGuard drop path records diagnostics for terminal external state
+    #[test]
+    fn test_guard_drop_skips_when_obligation_already_committed() {
+        let mut t = make_tracker();
+        let id = t
+            .reserve(ObligationFlow::Publish, vec![], 1000, "trace-1")
+            .unwrap();
+        let guard = ObligationGuard::new(&t, id.clone(), "trace-1");
+        t.commit(&id, 1050, "trace-1").unwrap();
+        drop(guard);
+
+        assert_eq!(
+            t.get_obligation(&id).unwrap().state,
+            ObligationState::Committed
+        );
+        assert!(t.export_audit_log_jsonl().contains("rollback skipped"));
+    }
+
+    // 38. ObligationGuard has Drop implementation (INV-OBL-DROP-SAFE)
     #[test]
     fn test_guard_drop_impl_exists() {
         let src = include_str!("obligation_tracker.rs");
@@ -1152,7 +1448,7 @@ mod tests {
         assert!(src.contains("INV-OBL-DROP-SAFE"));
     }
 
-    // 37. per_flow_counts returns counts for all flows
+    // 39. per_flow_counts returns counts for all flows
     #[test]
     fn test_per_flow_counts() {
         let mut t = make_tracker();
@@ -1173,7 +1469,7 @@ mod tests {
         assert_eq!(revoke.rolled_back, 1);
     }
 
-    // 38. Leaked state in counts
+    // 40. Leaked state in counts
     #[test]
     fn test_leaked_state_count() {
         let mut t = ObligationTracker::with_leak_timeout(1);
@@ -1186,7 +1482,7 @@ mod tests {
         assert_eq!(publish.leaked, 1);
     }
 
-    // 39. budget enforcement via try_reserve (INV-OBL-BUDGET-BOUND)
+    // 41. budget enforcement via try_reserve (INV-OBL-BUDGET-BOUND)
     #[test]
     fn test_try_reserve_budget_enforcement() {
         let mut t = ObligationTracker::with_flow_budget(2);
@@ -1204,7 +1500,7 @@ mod tests {
             .unwrap();
     }
 
-    // 40. budget is per-flow, not global
+    // 42. budget is per-flow, not global
     #[test]
     fn test_budget_per_flow() {
         let mut t = ObligationTracker::with_flow_budget(1);
@@ -1217,7 +1513,7 @@ mod tests {
         assert_eq!(t.total_obligations(), 3);
     }
 
-    // 41. leak oracle report includes per_flow_counts
+    // 43. leak oracle report includes per_flow_counts
     #[test]
     fn test_leak_oracle_report_has_per_flow_counts() {
         let mut t = make_tracker();
@@ -1229,7 +1525,7 @@ mod tests {
         assert!(json.contains("per_flow_counts"));
     }
 
-    // 42. error code for budget exceeded is defined
+    // 44. error code for budget exceeded is defined
     #[test]
     fn test_budget_exceeded_error_code() {
         assert!(!error_codes::ERR_OBL_BUDGET_EXCEEDED.is_empty());
@@ -1238,23 +1534,25 @@ mod tests {
     #[test]
     fn test_reserve_rejects_when_registry_full_of_live_entries() {
         let mut t = make_tracker();
-        t.next_id = MAX_OBLIGATIONS as u64 + 1;
+        t.with_inner_mut(|state| {
+            state.next_id = MAX_OBLIGATIONS as u64 + 1;
 
-        for i in 0..MAX_OBLIGATIONS {
-            let id = format!("obl-live-{i}");
-            t.obligations.insert(
-                id.clone(),
-                Obligation {
-                    id: ObligationId(id),
-                    flow: ObligationFlow::Publish,
-                    state: ObligationState::Reserved,
-                    payload: Vec::new(),
-                    reserved_at_ms: 10_000,
-                    resolved_at_ms: None,
-                    trace_id: "seed".to_string(),
-                },
-            );
-        }
+            for i in 0..MAX_OBLIGATIONS {
+                let id = format!("obl-live-{i}");
+                state.obligations.insert(
+                    id.clone(),
+                    Obligation {
+                        id: ObligationId(id),
+                        flow: ObligationFlow::Publish,
+                        state: ObligationState::Reserved,
+                        payload: Vec::new(),
+                        reserved_at_ms: 10_000,
+                        resolved_at_ms: None,
+                        trace_id: "seed".to_string(),
+                    },
+                );
+            }
+        });
 
         let err = t
             .reserve(ObligationFlow::Revoke, vec![], 12_000, "trace-cap")
@@ -1268,23 +1566,25 @@ mod tests {
     #[test]
     fn test_reserve_reclaims_expired_obligations_before_inserting() {
         let mut t = ObligationTracker::with_leak_timeout(1);
-        t.next_id = MAX_OBLIGATIONS as u64 + 1;
+        t.with_inner_mut(|state| {
+            state.next_id = MAX_OBLIGATIONS as u64 + 1;
 
-        for i in 0..MAX_OBLIGATIONS {
-            let id = format!("obl-stale-{i}");
-            t.obligations.insert(
-                id.clone(),
-                Obligation {
-                    id: ObligationId(id),
-                    flow: ObligationFlow::Publish,
-                    state: ObligationState::Reserved,
-                    payload: Vec::new(),
-                    reserved_at_ms: 1_000,
-                    resolved_at_ms: None,
-                    trace_id: "seed".to_string(),
-                },
-            );
-        }
+            for i in 0..MAX_OBLIGATIONS {
+                let id = format!("obl-stale-{i}");
+                state.obligations.insert(
+                    id.clone(),
+                    Obligation {
+                        id: ObligationId(id),
+                        flow: ObligationFlow::Publish,
+                        state: ObligationState::Reserved,
+                        payload: Vec::new(),
+                        reserved_at_ms: 1_000,
+                        resolved_at_ms: None,
+                        trace_id: "seed".to_string(),
+                    },
+                );
+            }
+        });
 
         let inserted = t
             .reserve(ObligationFlow::Revoke, vec![], 4_000, "trace-reclaim")
