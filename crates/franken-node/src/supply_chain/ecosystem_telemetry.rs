@@ -5,9 +5,15 @@
 //! Implements privacy-respecting aggregation, anomaly detection, and time-series
 //! retention for ecosystem-level trust and adoption signals.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+
+use super::{
+    certification::{CertificationLevel, CertificationRegistry},
+    extension_registry::{ExtensionStatus, SignedExtensionRegistry},
+};
 
 const MAX_ANOMALY_ALERTS: usize = 4096;
 const MAX_DATA_POINTS: usize = 4096;
@@ -283,6 +289,48 @@ pub struct DerivedMetricContract {
     pub implementation_scope: Vec<String>,
 }
 
+/// Provenance and availability metadata for a derived health-export metric.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DerivedMetricMetadata {
+    /// Stable metric identifier.
+    pub metric_id: String,
+    /// Explicit availability status for the derived value.
+    pub availability: DerivedMetricAvailability,
+    /// Canonical authoritative inputs for the metric.
+    pub authoritative_inputs: Vec<String>,
+    /// Concrete inputs observed while producing this export.
+    pub observed_inputs: Vec<String>,
+    /// Timestamp of the upstream source used for this metric, if one was available.
+    pub source_timestamp: Option<String>,
+    /// Human-readable provenance / status summary.
+    pub detail: String,
+}
+
+/// Minimal verified compromise-reduction report surface used by health export.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompromiseReductionReport {
+    pub bead_id: String,
+    pub generated_at_utc: String,
+    pub trace_id: String,
+    pub campaign_name: String,
+    pub campaign_version: String,
+    pub reproducible_command: String,
+    pub minimum_required_ratio: f64,
+    pub baseline_compromised: u64,
+    pub hardened_compromised: u64,
+    pub compromise_reduction_ratio: f64,
+    pub total_attack_vectors: u64,
+    pub containment_vectors: u64,
+}
+
+/// Load the authoritative Section 13 compromise-reduction report from disk.
+pub fn load_compromise_reduction_report(path: &Path) -> Result<CompromiseReductionReport, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
+    serde_json::from_str(&raw)
+        .map_err(|err| format!("failed parsing {}: {err}", path.display()))
+}
+
 /// Contract for the compromise reduction metric.
 #[must_use]
 pub fn compromise_reduction_factor_contract() -> DerivedMetricContract {
@@ -353,20 +401,17 @@ pub struct EcosystemHealthExport {
     pub migration_velocity: f64,
     /// Compromise reduction metric (relative to baseline).
     ///
-    /// Canonical formula and missing-data behavior are defined by
-    /// `compromise_reduction_factor_contract()`. The current numeric export
-    /// remains a placeholder until bead `bd-2fqyv.9.2` wires authoritative
-    /// Section 13 evidence into this surface.
-    pub compromise_reduction_factor: f64,
+    /// Numeric output is present only when a verified Section 13 report for the
+    /// same reporting window was provided and the ratio is defined.
+    pub compromise_reduction_factor: Option<f64>,
+    /// Provenance and availability details for `compromise_reduction_factor`.
+    pub compromise_reduction_metadata: DerivedMetricMetadata,
     /// Provenance coverage rate (0.0..=1.0).
     pub provenance_coverage: f64,
-    /// Certification level distribution.
-    ///
-    /// Canonical grouping rules are defined by
-    /// `certification_distribution_contract()`. The current map remains a
-    /// placeholder until bead `bd-2fqyv.9.2` joins active extensions against
-    /// certification records.
+    /// Certification level distribution for the active extension set.
     pub certification_distribution: BTreeMap<String, u64>,
+    /// Provenance and availability details for `certification_distribution`.
+    pub certification_distribution_metadata: DerivedMetricMetadata,
     /// Average quarantine-to-resolution time (seconds).
     pub avg_quarantine_resolution_secs: f64,
     /// Active anomaly alerts.
@@ -595,11 +640,27 @@ impl TelemetryPipeline {
 
     /// Generate an ecosystem health export for Section 13 success criteria.
     ///
-    /// `compromise_reduction_factor` and `certification_distribution` remain
-    /// intentionally non-authoritative until the follow-on implementation bead
-    /// replaces the placeholder values with the contract helpers above.
+    /// The derived compromise-reduction and certification-distribution fields
+    /// are computed only from the authoritative upstream inputs declared by
+    /// their contracts. When those inputs are unavailable or stale, the export
+    /// remains explicit about that instead of inventing placeholder values.
     #[must_use]
-    pub fn export_health(&self, timestamp: &str) -> EcosystemHealthExport {
+    pub fn export_health(
+        &self,
+        timestamp: &str,
+        compromise_report: Option<&CompromiseReductionReport>,
+        extension_registry: Option<&SignedExtensionRegistry>,
+        certification_registry: Option<&CertificationRegistry>,
+    ) -> EcosystemHealthExport {
+        let (compromise_reduction_factor, compromise_reduction_metadata) =
+            derive_compromise_reduction_metric(timestamp, compromise_report);
+        let (certification_distribution, certification_distribution_metadata) =
+            derive_certification_distribution_metric(
+                timestamp,
+                extension_registry,
+                certification_registry,
+            );
+
         EcosystemHealthExport {
             exported_at: timestamp.to_owned(),
             compatibility_pass_rate: self.compute_metric_avg(MetricKind::Trust(
@@ -608,10 +669,12 @@ impl TelemetryPipeline {
             migration_velocity: self.compute_metric_avg(MetricKind::Adoption(
                 AdoptionMetricKind::ExtensionsPublished,
             )),
-            compromise_reduction_factor: 1.0, // Placeholder — computed from external benchmark.
+            compromise_reduction_factor,
+            compromise_reduction_metadata,
             provenance_coverage: self
                 .compute_metric_avg(MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate)),
-            certification_distribution: BTreeMap::new(), // Populated from live data.
+            certification_distribution,
+            certification_distribution_metadata,
             avg_quarantine_resolution_secs: self
                 .compute_metric_avg(MetricKind::Trust(TrustMetricKind::QuarantineResolutionTime)),
             active_alerts: self.anomaly_alerts.clone(),
@@ -665,11 +728,278 @@ impl TelemetryPipeline {
     }
 }
 
+fn metric_metadata(
+    contract: &DerivedMetricContract,
+    availability: DerivedMetricAvailability,
+    observed_inputs: Vec<String>,
+    source_timestamp: Option<String>,
+    detail: impl Into<String>,
+) -> DerivedMetricMetadata {
+    DerivedMetricMetadata {
+        metric_id: contract.metric_id.clone(),
+        availability,
+        authoritative_inputs: contract.authoritative_inputs.clone(),
+        observed_inputs,
+        source_timestamp,
+        detail: detail.into(),
+    }
+}
+
+fn reporting_window_id(timestamp: &str) -> Option<String> {
+    DateTime::parse_from_rfc3339(timestamp)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc).date_naive().to_string())
+}
+
+fn same_reporting_window(source_timestamp: &str, exported_at: &str) -> bool {
+    reporting_window_id(source_timestamp)
+        .zip(reporting_window_id(exported_at))
+        .is_some_and(|(source, export)| source == export)
+}
+
+fn derive_compromise_reduction_metric(
+    exported_at: &str,
+    report: Option<&CompromiseReductionReport>,
+) -> (Option<f64>, DerivedMetricMetadata) {
+    let contract = compromise_reduction_factor_contract();
+    let observed_input = contract
+        .authoritative_inputs
+        .first()
+        .cloned()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    let Some(report) = report else {
+        return (
+            None,
+            metric_metadata(
+                &contract,
+                DerivedMetricAvailability::MissingUpstream,
+                Vec::new(),
+                None,
+                "no verified Section 13 compromise-reduction report was supplied",
+            ),
+        );
+    };
+
+    if !same_reporting_window(&report.generated_at_utc, exported_at) {
+        return (
+            None,
+            metric_metadata(
+                &contract,
+                DerivedMetricAvailability::StaleUpstream,
+                observed_input,
+                Some(report.generated_at_utc.clone()),
+                format!(
+                    "compromise-reduction report window does not match export window: trace_id={}",
+                    report.trace_id
+                ),
+            ),
+        );
+    }
+
+    if report.baseline_compromised == 0 {
+        return (
+            None,
+            metric_metadata(
+                &contract,
+                DerivedMetricAvailability::BaselineAbsent,
+                observed_input,
+                Some(report.generated_at_utc.clone()),
+                format!(
+                    "baseline compromises are zero for trace_id={}; ratio is undefined",
+                    report.trace_id
+                ),
+            ),
+        );
+    }
+
+    if report.hardened_compromised == 0 {
+        return (
+            None,
+            metric_metadata(
+                &contract,
+                DerivedMetricAvailability::CompleteContainment,
+                observed_input,
+                Some(report.generated_at_utc.clone()),
+                format!(
+                    "hardened compromises are zero for trace_id={}; report demonstrates complete containment",
+                    report.trace_id
+                ),
+            ),
+        );
+    }
+
+    let ratio = report.baseline_compromised as f64 / report.hardened_compromised as f64;
+    (
+        Some(ratio),
+        metric_metadata(
+            &contract,
+            DerivedMetricAvailability::Available,
+            observed_input,
+            Some(report.generated_at_utc.clone()),
+            format!(
+                "computed from Section 13 report trace_id={} baseline={} hardened={}",
+                report.trace_id, report.baseline_compromised, report.hardened_compromised
+            ),
+        ),
+    )
+}
+
+fn empty_certification_distribution() -> BTreeMap<String, u64> {
+    [
+        CertificationLevel::Uncertified,
+        CertificationLevel::Basic,
+        CertificationLevel::Standard,
+        CertificationLevel::Verified,
+        CertificationLevel::Audited,
+    ]
+    .into_iter()
+    .map(|level| (level.to_string(), 0_u64))
+    .collect()
+}
+
+fn derive_certification_distribution_metric(
+    exported_at: &str,
+    extension_registry: Option<&SignedExtensionRegistry>,
+    certification_registry: Option<&CertificationRegistry>,
+) -> (BTreeMap<String, u64>, DerivedMetricMetadata) {
+    let contract = certification_distribution_contract();
+    let mut distribution = empty_certification_distribution();
+
+    let (Some(extension_registry), Some(certification_registry)) =
+        (extension_registry, certification_registry)
+    else {
+        return (
+            BTreeMap::new(),
+            metric_metadata(
+                &contract,
+                DerivedMetricAvailability::MissingUpstream,
+                Vec::new(),
+                None,
+                "active extension registry and certification registry are both required",
+            ),
+        );
+    };
+
+    let active_extensions = extension_registry.list(Some(ExtensionStatus::Active));
+    if active_extensions.is_empty() {
+        return (
+            distribution,
+            metric_metadata(
+                &contract,
+                DerivedMetricAvailability::Available,
+                contract.authoritative_inputs.clone(),
+                None,
+                "active extension registry is empty for this export window",
+            ),
+        );
+    }
+
+    if let Some(stale_extension) = active_extensions
+        .iter()
+        .find(|extension| !same_reporting_window(&extension.updated_at, exported_at))
+    {
+        return (
+            BTreeMap::new(),
+            metric_metadata(
+                &contract,
+                DerivedMetricAvailability::StaleUpstream,
+                contract.authoritative_inputs.clone(),
+                Some(stale_extension.updated_at.clone()),
+                format!(
+                    "active extension snapshot is stale for extension_id={}",
+                    stale_extension.extension_id
+                ),
+            ),
+        );
+    }
+
+    let mut missing_certifications = 0_u64;
+
+    for extension in active_extensions {
+        let Some(version) = extension.versions.last() else {
+            return (
+                BTreeMap::new(),
+                metric_metadata(
+                    &contract,
+                    DerivedMetricAvailability::MissingUpstream,
+                    contract.authoritative_inputs.clone(),
+                    Some(extension.updated_at.clone()),
+                    format!(
+                        "active extension_id={} is missing version lineage for distribution export",
+                        extension.extension_id
+                    ),
+                ),
+            );
+        };
+
+        let level = match certification_registry.get_record(&extension.extension_id, &version.version)
+        {
+            Ok(record) => {
+                if !same_reporting_window(&record.evaluated_at, exported_at) {
+                    return (
+                        BTreeMap::new(),
+                        metric_metadata(
+                            &contract,
+                            DerivedMetricAvailability::StaleUpstream,
+                            contract.authoritative_inputs.clone(),
+                            Some(record.evaluated_at.clone()),
+                            format!(
+                                "certification record is stale for {}@{}",
+                                extension.extension_id, version.version
+                            ),
+                        ),
+                    );
+                }
+                record.level
+            }
+            Err(_) => {
+                missing_certifications = missing_certifications.saturating_add(1);
+                CertificationLevel::Uncertified
+            }
+        };
+
+        if let Some(bucket) = distribution.get_mut(&level.to_string()) {
+            *bucket = bucket.saturating_add(1);
+        }
+    }
+
+    (
+        distribution,
+        metric_metadata(
+            &contract,
+            DerivedMetricAvailability::Available,
+            contract.authoritative_inputs.clone(),
+            Some(exported_at.to_owned()),
+            format!(
+                "counted {} active extension versions; {} missing certification records fell back to uncertified",
+                extension_registry.list(Some(ExtensionStatus::Active)).len(),
+                missing_certifications
+            ),
+        ),
+    )
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::supply_chain::{
+        artifact_signing::{self, KeyId, KeyRing},
+        certification::{CertificationInput, EvidenceType, ProvenanceLevel, VerifiedEvidenceRef},
+        extension_registry::{
+            AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig, VersionEntry,
+        },
+        provenance::{
+            self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole,
+        },
+        reputation::ReputationTier,
+        transparency_verifier as tv,
+    };
+    use ed25519_dalek::SigningKey;
+    use std::collections::BTreeSet;
 
     fn make_point(id: &str, metric: MetricKind, value: f64, ts: &str) -> TelemetryDataPoint {
         TelemetryDataPoint {
@@ -685,6 +1015,197 @@ mod tests {
 
     fn ts(n: u32) -> String {
         format!("2026-01-{n:02}T00:00:00Z")
+    }
+
+    fn sample_compromise_report(
+        generated_at_utc: &str,
+        baseline_compromised: u64,
+        hardened_compromised: u64,
+    ) -> CompromiseReductionReport {
+        CompromiseReductionReport {
+            bead_id: "bd-3cpa".to_string(),
+            generated_at_utc: generated_at_utc.to_string(),
+            trace_id: "trace-bd-3cpa".to_string(),
+            campaign_name: "campaign".to_string(),
+            campaign_version: "2026.01.03".to_string(),
+            reproducible_command: "python3 scripts/check_compromise_reduction_gate.py --json"
+                .to_string(),
+            minimum_required_ratio: 10.0,
+            baseline_compromised,
+            hardened_compromised,
+            compromise_reduction_ratio: if hardened_compromised == 0 {
+                0.0
+            } else {
+                baseline_compromised as f64 / hardened_compromised as f64
+            },
+            total_attack_vectors: 20,
+            containment_vectors: 3,
+        }
+    }
+
+    fn sample_evidence_refs() -> Vec<VerifiedEvidenceRef> {
+        vec![
+            VerifiedEvidenceRef {
+                evidence_id: "ev-prov-001".to_string(),
+                evidence_type: EvidenceType::ProvenanceChain,
+                verified_at_epoch: 1_000,
+                verification_receipt_hash: "a".repeat(64),
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "ev-rep-001".to_string(),
+                evidence_type: EvidenceType::ReputationSignal,
+                verified_at_epoch: 1_000,
+                verification_receipt_hash: "b".repeat(64),
+            },
+        ]
+    }
+
+    fn certification_input(extension_id: &str, version: &str) -> CertificationInput {
+        CertificationInput {
+            extension_id: extension_id.to_string(),
+            version: version.to_string(),
+            publisher_id: "pub-test".to_string(),
+            provenance_level: ProvenanceLevel::PublisherSigned,
+            reputation_tier: ReputationTier::Established,
+            reputation_score: 60.0,
+            capabilities: BTreeSet::from(["file_read".to_string()]),
+            has_test_coverage_evidence: false,
+            test_coverage_pct: None,
+            has_reproducible_build_evidence: false,
+            has_audit_attestation: false,
+            audit_attestation: None,
+            evidence_refs: sample_evidence_refs(),
+        }
+    }
+
+    fn test_keypair() -> (SigningKey, ed25519_dalek::VerifyingKey) {
+        let sk = SigningKey::from_bytes(&[42_u8; 32]);
+        let vk = sk.verifying_key();
+        (sk, vk)
+    }
+
+    fn valid_provenance(now_epoch: u64) -> prov::ProvenanceAttestation {
+        let mut attestation = prov::ProvenanceAttestation {
+            schema_version: "1.0".to_string(),
+            source_repository_url: "https://github.com/example/ext".to_string(),
+            build_system_identifier: "github-actions".to_string(),
+            builder_identity: "pub-001".to_string(),
+            builder_version: "1.0.0".to_string(),
+            vcs_commit_sha: "abc123def456".to_string(),
+            build_timestamp_epoch: now_epoch.saturating_sub(60),
+            reproducibility_hash: "d".repeat(64),
+            input_hash: "e".repeat(64),
+            output_hash: "f".repeat(64),
+            slsa_level_claim: 2,
+            envelope_format: AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
+            links: vec![AttestationLink {
+                role: ChainLinkRole::Publisher,
+                signer_id: "pub-001".to_string(),
+                signer_version: "1.0.0".to_string(),
+                signature: String::new(),
+                signed_payload_hash: "f".repeat(64),
+                issued_at_epoch: now_epoch.saturating_sub(60),
+                expires_at_epoch: now_epoch.saturating_add(86_400),
+                revoked: false,
+            }],
+            custom_claims: BTreeMap::new(),
+        };
+        prov::sign_links_in_place(&mut attestation).expect("sign provenance");
+        attestation
+    }
+
+    fn test_kernel(vk: &ed25519_dalek::VerifyingKey) -> AdmissionKernel {
+        let mut key_ring = KeyRing::new();
+        key_ring.add_key(*vk);
+        AdmissionKernel {
+            key_ring,
+            provenance_policy: prov::VerificationPolicy::development_profile(),
+            transparency_policy: tv::TransparencyPolicy {
+                required: false,
+                pinned_roots: vec![],
+            },
+        }
+    }
+
+    fn valid_request(name: &str, version: &str, sk: &SigningKey, now_epoch: u64) -> RegistrationRequest {
+        let manifest_bytes = format!("manifest:{name}:{version}").into_bytes();
+        let signature_bytes = artifact_signing::sign_bytes(sk, &manifest_bytes);
+        let key_id = KeyId::from_verifying_key(&sk.verifying_key());
+
+        RegistrationRequest {
+            name: name.to_string(),
+            description: format!("Test extension: {name}"),
+            publisher_id: "pub-001".to_string(),
+            signature: ExtensionSignature {
+                key_id: key_id.to_string(),
+                algorithm: "ed25519".to_string(),
+                signature_bytes,
+                signed_at: Utc::now().to_rfc3339(),
+            },
+            provenance: valid_provenance(now_epoch),
+            initial_version: VersionEntry {
+                version: version.to_string(),
+                parent_version: None,
+                content_hash: "c".repeat(64),
+                registered_at: Utc::now().to_rfc3339(),
+                compatible_with: vec![],
+            },
+            tags: vec!["test".to_string()],
+            manifest_bytes,
+            transparency_proof: None,
+        }
+    }
+
+    fn make_active_extension_registry(export_ts: &str) -> SignedExtensionRegistry {
+        let (sk, vk) = test_keypair();
+        let export_epoch = 1_700_000_000_u64;
+        let mut registry = SignedExtensionRegistry::new(RegistryConfig::default(), test_kernel(&vk));
+
+        let first = registry.register(
+            valid_request("ext-a", "1.0.0", &sk, export_epoch),
+            "trace-ext-a",
+            export_epoch,
+        );
+        assert!(first.success, "detail: {}", first.detail);
+        let first_id = first.extension_id.expect("extension id");
+        let ext_a = registry
+            .extensions
+            .get_mut(&first_id)
+            .expect("registered ext-a");
+        ext_a.updated_at = export_ts.to_string();
+
+        let second = registry.register(
+            valid_request("ext-b", "2.0.0", &sk, export_epoch),
+            "trace-ext-b",
+            export_epoch,
+        );
+        assert!(second.success, "detail: {}", second.detail);
+        let second_id = second.extension_id.expect("extension id");
+        let ext_b = registry
+            .extensions
+            .get_mut(&second_id)
+            .expect("registered ext-b");
+        ext_b.updated_at = export_ts.to_string();
+
+        registry
+    }
+
+    fn make_certification_registry(
+        extension_registry: &SignedExtensionRegistry,
+        export_ts: &str,
+    ) -> CertificationRegistry {
+        let mut registry = CertificationRegistry::new();
+        let active = extension_registry.list(Some(ExtensionStatus::Active));
+        let ext_a = active
+            .iter()
+            .find(|entry| entry.name == "ext-a")
+            .expect("active ext-a");
+        let ext_a_version = ext_a.versions.last().expect("ext-a version");
+        registry.evaluate_and_register(
+            &certification_input(&ext_a.extension_id, &ext_a_version.version),
+            export_ts,
+        );
+        registry
     }
 
     #[test]
@@ -960,9 +1481,13 @@ mod tests {
         pipeline.ingest(make_point("p1", metric, 0.85, &ts(1)));
         pipeline.ingest(make_point("p2", metric, 0.90, &ts(2)));
 
-        let export = pipeline.export_health(&ts(3));
+        let export = pipeline.export_health(&ts(3), None, None, None);
         assert!(!export.exported_at.is_empty());
         assert!(export.provenance_coverage > 0.0);
+        assert_eq!(
+            export.compromise_reduction_metadata.availability,
+            DerivedMetricAvailability::MissingUpstream
+        );
     }
 
     #[test]
@@ -982,9 +1507,107 @@ mod tests {
             .data_points
             .push(make_point("p2", metric, 0.90, &ts(4)));
 
-        let export = pipeline.export_health(&ts(5));
+        let export = pipeline.export_health(&ts(5), None, None, None);
         assert!(export.provenance_coverage.is_finite());
         assert!((export.provenance_coverage - 0.875).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_load_compromise_reduction_report_from_artifact() {
+        let report = load_compromise_reduction_report(Path::new(
+            "artifacts/13/compromise_reduction_report.json",
+        ))
+        .expect("load compromise report");
+        assert_eq!(report.bead_id, "bd-3cpa");
+        assert_eq!(report.baseline_compromised, 20);
+        assert_eq!(report.hardened_compromised, 2);
+    }
+
+    #[test]
+    fn test_health_export_computes_compromise_reduction_from_authoritative_report() {
+        let pipeline = TelemetryPipeline::new();
+        let report = sample_compromise_report(&ts(3), 20, 2);
+
+        let export = pipeline.export_health(&ts(3), Some(&report), None, None);
+        assert_eq!(export.compromise_reduction_factor, Some(10.0));
+        assert_eq!(
+            export.compromise_reduction_metadata.availability,
+            DerivedMetricAvailability::Available
+        );
+    }
+
+    #[test]
+    fn test_health_export_surfaces_complete_containment_instead_of_placeholder_ratio() {
+        let pipeline = TelemetryPipeline::new();
+        let report = sample_compromise_report(&ts(3), 20, 0);
+
+        let export = pipeline.export_health(&ts(3), Some(&report), None, None);
+        assert_eq!(export.compromise_reduction_factor, None);
+        assert_eq!(
+            export.compromise_reduction_metadata.availability,
+            DerivedMetricAvailability::CompleteContainment
+        );
+    }
+
+    #[test]
+    fn test_health_export_surfaces_baseline_absent_for_undefined_compromise_ratio() {
+        let pipeline = TelemetryPipeline::new();
+        let report = sample_compromise_report(&ts(3), 0, 4);
+
+        let export = pipeline.export_health(&ts(3), Some(&report), None, None);
+        assert_eq!(export.compromise_reduction_factor, None);
+        assert_eq!(
+            export.compromise_reduction_metadata.availability,
+            DerivedMetricAvailability::BaselineAbsent
+        );
+    }
+
+    #[test]
+    fn test_health_export_surfaces_stale_compromise_report() {
+        let pipeline = TelemetryPipeline::new();
+        let report = sample_compromise_report(&ts(1), 20, 2);
+
+        let export = pipeline.export_health(&ts(3), Some(&report), None, None);
+        assert_eq!(export.compromise_reduction_factor, None);
+        assert_eq!(
+            export.compromise_reduction_metadata.availability,
+            DerivedMetricAvailability::StaleUpstream
+        );
+    }
+
+    #[test]
+    fn test_health_export_counts_active_extensions_using_certification_registry() {
+        let pipeline = TelemetryPipeline::new();
+        let registry = make_active_extension_registry(&ts(3));
+        let certification_registry = make_certification_registry(&registry, &ts(3));
+
+        let export = pipeline.export_health(&ts(3), None, Some(&registry), Some(&certification_registry));
+        assert_eq!(
+            export.certification_distribution.get("basic"),
+            Some(&1)
+        );
+        assert_eq!(
+            export.certification_distribution.get("uncertified"),
+            Some(&1)
+        );
+        assert_eq!(
+            export.certification_distribution_metadata.availability,
+            DerivedMetricAvailability::Available
+        );
+    }
+
+    #[test]
+    fn test_health_export_marks_stale_certification_distribution_inputs() {
+        let pipeline = TelemetryPipeline::new();
+        let registry = make_active_extension_registry(&ts(1));
+        let certification_registry = make_certification_registry(&registry, &ts(1));
+
+        let export = pipeline.export_health(&ts(3), None, Some(&registry), Some(&certification_registry));
+        assert!(export.certification_distribution.is_empty());
+        assert_eq!(
+            export.certification_distribution_metadata.availability,
+            DerivedMetricAvailability::StaleUpstream
+        );
     }
 
     #[test]
