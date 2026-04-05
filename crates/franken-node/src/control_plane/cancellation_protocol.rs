@@ -571,6 +571,24 @@ impl CancellationProtocol {
         // INV-CANP-DRAIN-BOUNDED: check timeout
         if elapsed >= timeout {
             self.records[idx].drain_timed_out = true;
+
+            if !force {
+                self.record_audit_event(CancelAuditEvent::new(
+                    event_codes::CAN_004,
+                    workflow_id,
+                    CancelPhase::Draining,
+                    CancelPhase::Draining,
+                    timestamp_ms,
+                    trace_id,
+                    &format!("drain timeout after {}ms (limit {}ms)", elapsed, timeout),
+                ));
+                return Err(CancelProtocolError::DrainTimeout {
+                    workflow_id: workflow_id.to_string(),
+                    elapsed_ms: elapsed,
+                    timeout_ms: timeout,
+                });
+            }
+
             self.records[idx].drain_complete_ms = Some(timestamp_ms);
 
             self.record_audit_event(CancelAuditEvent::new(
@@ -582,14 +600,6 @@ impl CancellationProtocol {
                 trace_id,
                 &format!("drain timeout after {}ms (limit {}ms)", elapsed, timeout),
             ));
-
-            if !force {
-                return Err(CancelProtocolError::DrainTimeout {
-                    workflow_id: workflow_id.to_string(),
-                    elapsed_ms: elapsed,
-                    timeout_ms: timeout,
-                });
-            }
         } else {
             self.records[idx].drain_complete_ms = Some(timestamp_ms);
 

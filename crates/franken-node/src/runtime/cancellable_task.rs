@@ -86,12 +86,12 @@ pub mod event_codes {
 // ---------------------------------------------------------------------------
 
 pub mod error_codes {
-    pub const ERR_CXT_INVALID_PHASE: &str = "ERR_CXT_INVALID_PHASE";
-    pub const ERR_CXT_DRAIN_TIMEOUT: &str = "ERR_CXT_DRAIN_TIMEOUT";
-    pub const ERR_CXT_CLOSURE_INCOMPLETE: &str = "ERR_CXT_CLOSURE_INCOMPLETE";
-    pub const ERR_CXT_TASK_NOT_FOUND: &str = "ERR_CXT_TASK_NOT_FOUND";
-    pub const ERR_CXT_ALREADY_FINALIZED: &str = "ERR_CXT_ALREADY_FINALIZED";
-    pub const ERR_CXT_DUPLICATE_TASK: &str = "ERR_CXT_DUPLICATE_TASK";
+    pub const ERR_CXT_INVALID_PHASE: &str = "ERR-CXT_INVALID_PHASE";
+    pub const ERR_CXT_DRAIN_TIMEOUT: &str = "ERR-CXT_DRAIN_TIMEOUT";
+    pub const ERR_CXT_CLOSURE_INCOMPLETE: &str = "ERR-CXT_CLOSURE_INCOMPLETE";
+    pub const ERR_CXT_TASK_NOT_FOUND: &str = "ERR-CXT_TASK_NOT_FOUND";
+    pub const ERR_CXT_ALREADY_FINALIZED: &str = "ERR-CXT_ALREADY_FINALIZED";
+    pub const ERR_CXT_DUPLICATE_TASK: &str = "ERR-CXT_DUPLICATE_TASK";
 }
 
 // ---------------------------------------------------------------------------
@@ -740,6 +740,28 @@ impl CancellationRuntime {
             event_codes::FN_CX_004
         };
 
+        if timed_out && !self.tasks[task_id].drain_config.force_finalize_on_timeout {
+            self.emit_audit(CancellableTaskAuditEvent {
+                event_code: event_code.to_string(),
+                task_id: task_id.to_string(),
+                from_phase: from,
+                to_phase: from,
+                timestamp_ms,
+                trace_id: trace_id.to_string(),
+                detail: format!(
+                    "drain timeout after {}ms (limit {}ms)",
+                    elapsed, timeout
+                ),
+                schema_version: SCHEMA_VERSION.to_string(),
+            });
+
+            return Err(CancellableTaskError::DrainTimeout {
+                task_id: task_id.to_string(),
+                elapsed_ms: elapsed,
+                timeout_ms: timeout,
+            });
+        }
+
         let entry =
             self.tasks
                 .get_mut(task_id)
@@ -763,14 +785,6 @@ impl CancellationRuntime {
             ),
             schema_version: SCHEMA_VERSION.to_string(),
         });
-
-        if timed_out && !self.tasks[task_id].drain_config.force_finalize_on_timeout {
-            return Err(CancellableTaskError::DrainTimeout {
-                task_id: task_id.to_string(),
-                elapsed_ms: elapsed,
-                timeout_ms: timeout,
-            });
-        }
 
         self.tasks
             .get(task_id)

@@ -576,21 +576,24 @@ impl ControlLanePolicy {
                     );
                 }
             } else if *counter > 0 {
-                Self::push_bounded(
-                    &mut self.starvation_events,
-                    StarvationEvent {
-                        lane,
-                        consecutive_zero_ticks: *counter,
-                        threshold: self
-                            .budgets
-                            .get(&lane)
-                            .map(|b| b.max_starve_ticks)
-                            .unwrap_or(DEFAULT_STARVATION_THRESHOLD_TICKS),
-                        event_code: event_codes::LAN_004.to_string(),
-                        trace_id: trace_id.to_string(),
-                    },
-                    self.max_starvation_events,
-                );
+                let threshold = self
+                    .budgets
+                    .get(&lane)
+                    .map(|b| b.max_starve_ticks)
+                    .unwrap_or(DEFAULT_STARVATION_THRESHOLD_TICKS);
+                if *counter >= threshold {
+                    Self::push_bounded(
+                        &mut self.starvation_events,
+                        StarvationEvent {
+                            lane,
+                            consecutive_zero_ticks: *counter,
+                            threshold,
+                            event_code: event_codes::LAN_004.to_string(),
+                            trace_id: trace_id.to_string(),
+                        },
+                        self.max_starvation_events,
+                    );
+                }
                 *counter = 0;
             }
         }

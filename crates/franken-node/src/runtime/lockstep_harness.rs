@@ -489,23 +489,21 @@ impl LockstepHarness {
         let timeout = Duration::from_secs(30);
         let start = Instant::now();
 
-        let status = loop {
+        let mut is_timeout = false;
+        let mut exit_code = -1;
+        loop {
             if let Some(status) = child.try_wait()? {
-                break status;
+                exit_code = status.code().unwrap_or(-1);
+                break;
             }
             if Self::has_timed_out(start.elapsed(), timeout) {
                 let _ = child.kill();
                 let _ = child.wait(); // Reclaim resources
-                // Join reader threads to avoid leaking them after kill.
-                let _ = stdout_thread.join();
-                let _ = stderr_thread.join();
-                anyhow::bail!(
-                    "Execution timeout for runtime {} (exceeded 30s limit)",
-                    runtime
-                );
+                is_timeout = true;
+                break;
             }
             thread::sleep(Duration::from_millis(50));
-        };
+        }
 
         let stdout_bytes = stdout_thread
             .join()
@@ -519,7 +517,11 @@ impl LockstepHarness {
         combined_output.extend_from_slice(b"\n--- STDERR ---\n");
         combined_output.extend_from_slice(&stderr_bytes);
         combined_output.extend_from_slice(b"\n--- EXIT CODE ---\n");
-        combined_output.extend_from_slice(status.code().unwrap_or(-1).to_string().as_bytes());
+        if is_timeout {
+            combined_output.extend_from_slice(b"TIMEOUT");
+        } else {
+            combined_output.extend_from_slice(exit_code.to_string().as_bytes());
+        }
 
         // Append deterministic strace output to detect behavioral divergences
         combined_output.extend_from_slice(b"\n--- SYSTEM CALL BOUNDARIES ---\n");
@@ -1081,7 +1083,8 @@ mod tests {
         outputs.insert("franken-node".to_string(), b"hello world".to_vec());
 
         let check = oracle
-            .run_cross_check("check-1", BoundaryScope::IO, b"input", &outputs)
+            .run_cross_check(
+                "check-1", BoundaryScope::IO, b"input", &outputs)
             .expect("cross check");
 
         assert!(check.outcome.is_some());
