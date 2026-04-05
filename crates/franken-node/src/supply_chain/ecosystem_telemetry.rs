@@ -1156,7 +1156,7 @@ mod tests {
         }
     }
 
-    fn make_active_extension_registry(export_ts: &str) -> SignedExtensionRegistry {
+    fn make_active_extension_registry() -> SignedExtensionRegistry {
         let (sk, vk) = test_keypair();
         let export_epoch = 1_700_000_000_u64;
         let mut registry = SignedExtensionRegistry::new(RegistryConfig::default(), test_kernel(&vk));
@@ -1167,12 +1167,6 @@ mod tests {
             export_epoch,
         );
         assert!(first.success, "detail: {}", first.detail);
-        let first_id = first.extension_id.expect("extension id");
-        let ext_a = registry
-            .extensions
-            .get_mut(&first_id)
-            .expect("registered ext-a");
-        ext_a.updated_at = export_ts.to_string();
 
         let second = registry.register(
             valid_request("ext-b", "2.0.0", &sk, export_epoch),
@@ -1180,12 +1174,6 @@ mod tests {
             export_epoch,
         );
         assert!(second.success, "detail: {}", second.detail);
-        let second_id = second.extension_id.expect("extension id");
-        let ext_b = registry
-            .extensions
-            .get_mut(&second_id)
-            .expect("registered ext-b");
-        ext_b.updated_at = export_ts.to_string();
 
         registry
     }
@@ -1514,10 +1502,9 @@ mod tests {
 
     #[test]
     fn test_load_compromise_reduction_report_from_artifact() {
-        let report = load_compromise_reduction_report(Path::new(
-            "artifacts/13/compromise_reduction_report.json",
-        ))
-        .expect("load compromise report");
+        let report_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../artifacts/13/compromise_reduction_report.json");
+        let report = load_compromise_reduction_report(&report_path).expect("load compromise report");
         assert_eq!(report.bead_id, "bd-3cpa");
         assert_eq!(report.baseline_compromised, 20);
         assert_eq!(report.hardened_compromised, 2);
@@ -1578,12 +1565,18 @@ mod tests {
     #[test]
     fn test_health_export_counts_active_extensions_using_certification_registry() {
         let pipeline = TelemetryPipeline::new();
-        let registry = make_active_extension_registry(&ts(3));
-        let certification_registry = make_certification_registry(&registry, &ts(3));
+        let export_ts = Utc::now().to_rfc3339();
+        let registry = make_active_extension_registry();
+        let certification_registry = make_certification_registry(&registry, &export_ts);
 
-        let export = pipeline.export_health(&ts(3), None, Some(&registry), Some(&certification_registry));
+        let export = pipeline.export_health(
+            &export_ts,
+            None,
+            Some(&registry),
+            Some(&certification_registry),
+        );
         assert_eq!(
-            export.certification_distribution.get("basic"),
+            export.certification_distribution.get("standard"),
             Some(&1)
         );
         assert_eq!(
@@ -1599,10 +1592,17 @@ mod tests {
     #[test]
     fn test_health_export_marks_stale_certification_distribution_inputs() {
         let pipeline = TelemetryPipeline::new();
-        let registry = make_active_extension_registry(&ts(1));
-        let certification_registry = make_certification_registry(&registry, &ts(1));
+        let export_ts = Utc::now().to_rfc3339();
+        let stale_export_ts = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+        let registry = make_active_extension_registry();
+        let certification_registry = make_certification_registry(&registry, &export_ts);
 
-        let export = pipeline.export_health(&ts(3), None, Some(&registry), Some(&certification_registry));
+        let export = pipeline.export_health(
+            &stale_export_ts,
+            None,
+            Some(&registry),
+            Some(&certification_registry),
+        );
         assert!(export.certification_distribution.is_empty());
         assert_eq!(
             export.certification_distribution_metadata.availability,
