@@ -3,7 +3,13 @@
 //! This module defines the transport-facing action log, node heartbeat/state shape,
 //! and object-safe transport trait used by the fleet-control track.
 
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File, OpenOptions, TryLockError},
+    io::{BufRead, BufReader, Write},
+    path::{Path, PathBuf},
+    thread,
+    time::Duration,
+};
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -13,6 +19,7 @@ pub const FLEET_ACTION_LOG_FILE: &str = "actions.jsonl";
 pub const FLEET_NODE_DIR: &str = "nodes";
 pub const FLEET_LOCK_DIR: &str = "locks";
 const MAX_NODE_ID_LEN: usize = 128;
+const LOCK_RETRY_BACKOFF_MILLIS: [u64; 3] = [100, 200, 400];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -234,8 +241,252 @@ pub trait FleetTransport {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileFleetTransport {
+    layout: FleetTransportLayout,
+}
+
+impl FileFleetTransport {
+    #[must_use]
+    pub fn new(root_dir: impl Into<PathBuf>) -> Self {
+        Self {
+            layout: FleetTransportLayout::new(root_dir),
+        }
+    }
+
+    #[must_use]
+    pub fn layout(&self) -> &FleetTransportLayout {
+        &self.layout
+    }
+
+    pub fn list_stale_nodes(
+        &self,
+        now: DateTime<Utc>,
+        staleness_threshold: Duration,
+    ) -> Result<Vec<NodeStatus>, FleetTransportError> {
+        let staleness_threshold = chrono::TimeDelta::from_std(staleness_threshold)
+            .map_err(|err| FleetTransportError::stale_state(format!("invalid threshold: {err}")))?;
+
+        let mut stale_nodes: Vec<NodeStatus> = self
+            .list_node_statuses()?
+            .into_iter()
+            .filter(|status| now.signed_duration_since(status.last_seen) > staleness_threshold)
+            .collect();
+        stale_nodes.sort_by(|left, right| left.node_id.cmp(&right.node_id));
+        Ok(stale_nodes)
+    }
+
+    fn ensure_initialized(&self) -> Result<(), FleetTransportError> {
+        if !self.layout.root_dir().is_dir()
+            || !self.layout.nodes_dir().is_dir()
+            || !self.layout.locks_dir().is_dir()
+            || !self.layout.actions_path().is_file()
+        {
+            return Err(FleetTransportError::not_initialized(
+                "call initialize() before using the file transport",
+            ));
+        }
+        Ok(())
+    }
+
+    fn action_log_file(&self, write: bool) -> Result<File, FleetTransportError> {
+        let mut options = OpenOptions::new();
+        options.read(true);
+        if write {
+            options.append(true).create(true);
+        }
+        options.open(self.layout.actions_path()).map_err(|err| {
+            FleetTransportError::io(format!(
+                "failed opening fleet action log {}: {err}",
+                self.layout.actions_path().display()
+            ))
+        })
+    }
+
+    fn node_lock_path(&self, node_id: &str) -> Result<PathBuf, FleetTransportError> {
+        let node_id = validate_node_id(node_id)?;
+        Ok(self.layout.locks_dir().join(format!("node-{node_id}.lock")))
+    }
+
+    fn lock_file(&self, path: &Path) -> Result<File, FleetTransportError> {
+        OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(path)
+            .map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed opening fleet lock file {}: {err}",
+                    path.display()
+                ))
+            })
+    }
+
+    fn read_action_log(&self) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
+        let file = self.action_log_file(false)?;
+        lock_file_with_backoff(&file, self.layout.actions_path(), true)?;
+        let read_result =
+            parse_jsonl_records::<FleetActionRecord>(&file, self.layout.actions_path());
+        let unlock_result = unlock_file(&file, self.layout.actions_path());
+        let actions = read_result?;
+        unlock_result?;
+        Ok(actions)
+    }
+
+    fn write_node_status(&self, status: &NodeStatus) -> Result<(), FleetTransportError> {
+        let path = self.layout.node_status_path(&status.node_id)?;
+        let lock_path = self.node_lock_path(&status.node_id)?;
+        let lock_file = self.lock_file(&lock_path)?;
+        lock_file_with_backoff(&lock_file, &lock_path, false)?;
+
+        let write_result = (|| {
+            let temp_path = path.with_extension("json.tmp");
+            let payload = serde_json::to_vec(status).map_err(|err| {
+                FleetTransportError::serialization(format!(
+                    "failed serializing node status {}: {err}",
+                    path.display()
+                ))
+            })?;
+            let mut temp_file = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&temp_path)
+                .map_err(|err| {
+                    FleetTransportError::io(format!(
+                        "failed opening temp node status {}: {err}",
+                        temp_path.display()
+                    ))
+                })?;
+            temp_file.write_all(&payload).map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed writing temp node status {}: {err}",
+                    temp_path.display()
+                ))
+            })?;
+            temp_file.sync_data().map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed syncing temp node status {}: {err}",
+                    temp_path.display()
+                ))
+            })?;
+            fs::rename(&temp_path, &path).map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed promoting temp node status {} to {}: {err}",
+                    temp_path.display(),
+                    path.display()
+                ))
+            })?;
+            Ok(())
+        })();
+
+        let unlock_result = unlock_file(&lock_file, &lock_path);
+        write_result?;
+        unlock_result?;
+        Ok(())
+    }
+}
+
+impl FleetTransport for FileFleetTransport {
+    fn initialize(&mut self) -> Result<(), FleetTransportError> {
+        self.layout.initialize()
+    }
+
+    fn publish_action(&mut self, action: &FleetActionRecord) -> Result<(), FleetTransportError> {
+        self.ensure_initialized()?;
+        let file = self.action_log_file(true)?;
+        lock_file_with_backoff(&file, self.layout.actions_path(), false)?;
+
+        let write_result = (|| {
+            let payload = serde_json::to_vec(action).map_err(|err| {
+                FleetTransportError::serialization(format!(
+                    "failed serializing fleet action {}: {err}",
+                    action.action_id
+                ))
+            })?;
+
+            let mut handle = &file;
+            handle.write_all(&payload).map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed writing fleet action log {}: {err}",
+                    self.layout.actions_path().display()
+                ))
+            })?;
+            handle.write_all(b"\n").map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed writing fleet action delimiter {}: {err}",
+                    self.layout.actions_path().display()
+                ))
+            })?;
+            file.sync_data().map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed syncing fleet action log {}: {err}",
+                    self.layout.actions_path().display()
+                ))
+            })?;
+            Ok(())
+        })();
+
+        let unlock_result = unlock_file(&file, self.layout.actions_path());
+        write_result?;
+        unlock_result?;
+        Ok(())
+    }
+
+    fn list_actions(&self) -> Result<Vec<FleetActionRecord>, FleetTransportError> {
+        self.ensure_initialized()?;
+        self.read_action_log()
+    }
+
+    fn upsert_node_status(&mut self, status: &NodeStatus) -> Result<(), FleetTransportError> {
+        self.ensure_initialized()?;
+        validate_node_id(&status.node_id)?;
+        self.write_node_status(status)
+    }
+
+    fn list_node_statuses(&self) -> Result<Vec<NodeStatus>, FleetTransportError> {
+        self.ensure_initialized()?;
+
+        let mut nodes = Vec::new();
+        for entry in fs::read_dir(self.layout.nodes_dir()).map_err(|err| {
+            FleetTransportError::io(format!(
+                "failed reading fleet nodes directory {}: {err}",
+                self.layout.nodes_dir().display()
+            ))
+        })? {
+            let entry = entry.map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed reading fleet nodes directory entry {}: {err}",
+                    self.layout.nodes_dir().display()
+                ))
+            })?;
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+
+            let file = File::open(&path).map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed opening node status {}: {err}",
+                    path.display()
+                ))
+            })?;
+            let status: NodeStatus = serde_json::from_reader(file).map_err(|err| {
+                FleetTransportError::serialization(format!(
+                    "failed parsing node status {}: {err}",
+                    path.display()
+                ))
+            })?;
+            validate_node_id(&status.node_id)?;
+            nodes.push(status);
+        }
+
+        Ok(nodes)
+    }
+}
+
 pub fn validate_node_id(node_id: &str) -> Result<&str, FleetTransportError> {
-    let node_id = node_id.trim();
     if node_id.is_empty() || node_id.len() > MAX_NODE_ID_LEN {
         return Err(FleetTransportError::serialization(format!(
             "node_id must be 1..={MAX_NODE_ID_LEN} characters"
@@ -254,9 +505,99 @@ pub fn validate_node_id(node_id: &str) -> Result<&str, FleetTransportError> {
     ))
 }
 
+fn lock_retry_backoffs() -> [Duration; LOCK_RETRY_BACKOFF_MILLIS.len()] {
+    LOCK_RETRY_BACKOFF_MILLIS.map(Duration::from_millis)
+}
+
+fn lock_file_with_backoff(
+    file: &File,
+    path: &Path,
+    shared: bool,
+) -> Result<(), FleetTransportError> {
+    let attempt = || {
+        if shared {
+            file.try_lock_shared()
+        } else {
+            file.try_lock()
+        }
+    };
+
+    match attempt() {
+        Ok(()) => return Ok(()),
+        Err(TryLockError::WouldBlock) => {}
+        Err(TryLockError::Error(err)) => {
+            return Err(FleetTransportError::io(format!(
+                "failed acquiring flock for {}: {err}",
+                path.display()
+            )));
+        }
+    }
+
+    for delay in lock_retry_backoffs() {
+        thread::sleep(delay);
+        match attempt() {
+            Ok(()) => return Ok(()),
+            Err(TryLockError::WouldBlock) => {}
+            Err(TryLockError::Error(err)) => {
+                return Err(FleetTransportError::io(format!(
+                    "failed acquiring flock for {}: {err}",
+                    path.display()
+                )));
+            }
+        }
+    }
+
+    Err(FleetTransportError::lock_contention(format!(
+        "timed out acquiring flock for {} after retries at 100ms/200ms/400ms",
+        path.display()
+    )))
+}
+
+fn unlock_file(file: &File, path: &Path) -> Result<(), FleetTransportError> {
+    file.unlock().map_err(|err| {
+        FleetTransportError::io(format!(
+            "failed releasing flock for {}: {err}",
+            path.display()
+        ))
+    })
+}
+
+fn parse_jsonl_records<T>(file: &File, path: &Path) -> Result<Vec<T>, FleetTransportError>
+where
+    T: for<'de> Deserialize<'de>,
+{
+    let mut records = Vec::new();
+    let reader = BufReader::new(file);
+    for (index, line) in reader.lines().enumerate() {
+        let line = line.map_err(|err| {
+            FleetTransportError::io(format!(
+                "failed reading JSONL line {} from {}: {err}",
+                index + 1,
+                path.display()
+            ))
+        })?;
+
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        let record = serde_json::from_str(&line).map_err(|err| {
+            FleetTransportError::serialization(format!(
+                "failed parsing JSONL line {} from {}: {err}",
+                index + 1,
+                path.display()
+            ))
+        })?;
+        records.push(record);
+    }
+    Ok(records)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{fs, time::Instant};
+
     use tempfile::tempdir;
 
     struct TestTransport {
@@ -338,6 +679,40 @@ mod tests {
 
     fn accepts_dyn_transport(_transport: &mut dyn FleetTransport) {}
 
+    fn release_action_record(
+        action_id: impl Into<String>,
+        emitted_at: &str,
+        incident_id: impl Into<String>,
+    ) -> FleetActionRecord {
+        FleetActionRecord {
+            action_id: action_id.into(),
+            emitted_at: DateTime::parse_from_rfc3339(emitted_at)
+                .expect("timestamp")
+                .with_timezone(&Utc),
+            action: FleetAction::Release {
+                zone_id: "prod".to_string(),
+                incident_id: incident_id.into(),
+                reason: None,
+            },
+        }
+    }
+
+    fn node_status(
+        node_id: impl Into<String>,
+        last_seen: &str,
+        quarantine_version: u64,
+        health: NodeHealth,
+    ) -> NodeStatus {
+        NodeStatus {
+            node_id: node_id.into(),
+            last_seen: DateTime::parse_from_rfc3339(last_seen)
+                .expect("timestamp")
+                .with_timezone(&Utc),
+            quarantine_version,
+            health,
+        }
+    }
+
     #[test]
     fn fleet_transport_trait_is_object_safe() {
         let tempdir = tempdir().expect("tempdir");
@@ -359,6 +734,8 @@ mod tests {
         for invalid in [
             "",
             " ",
+            " node",
+            "node ",
             "../escape",
             "node/slash",
             "node\\slash",
@@ -525,5 +902,194 @@ mod tests {
                 .join("node-node-alpha.json")
         );
         assert!(layout.node_status_path("../escape").is_err());
+    }
+
+    #[test]
+    fn file_transport_initialization_creates_directory_structure() {
+        let tempdir = tempdir().expect("tempdir");
+        let root = tempdir.path().join("fleet-state");
+        let mut transport = FileFleetTransport::new(&root);
+
+        transport.initialize().expect("initialize file transport");
+
+        assert!(root.is_dir());
+        assert!(transport.layout().actions_path().is_file());
+        assert!(transport.layout().nodes_dir().is_dir());
+        assert!(transport.layout().locks_dir().is_dir());
+    }
+
+    #[test]
+    fn file_transport_persists_actions_and_latest_node_state() {
+        let tempdir = tempdir().expect("tempdir");
+        let root = tempdir.path().join("fleet-state");
+        let mut transport = FileFleetTransport::new(&root);
+        transport.initialize().expect("initialize");
+
+        transport
+            .publish_action(&release_action_record(
+                "fleet-action-10",
+                "2026-04-06T02:00:00Z",
+                "inc-10",
+            ))
+            .expect("publish action");
+        transport
+            .upsert_node_status(&node_status(
+                "node-alpha",
+                "2026-04-06T02:00:01Z",
+                10,
+                NodeHealth::Healthy,
+            ))
+            .expect("write node");
+        transport
+            .upsert_node_status(&node_status(
+                "node-alpha",
+                "2026-04-06T02:00:02Z",
+                11,
+                NodeHealth::Quarantined,
+            ))
+            .expect("rewrite node");
+
+        let state = transport.read_shared_state().expect("shared state");
+        assert_eq!(state.actions.len(), 1);
+        assert_eq!(state.nodes.len(), 1);
+        assert_eq!(state.nodes[0].quarantine_version, 11);
+        assert_eq!(state.nodes[0].health, NodeHealth::Quarantined);
+
+        let persisted: NodeStatus = serde_json::from_str(
+            &fs::read_to_string(
+                transport
+                    .layout()
+                    .node_status_path("node-alpha")
+                    .expect("node status path"),
+            )
+            .expect("read node file"),
+        )
+        .expect("parse node file");
+        assert_eq!(persisted, state.nodes[0]);
+    }
+
+    #[test]
+    fn file_transport_concurrent_appends_preserve_jsonl_integrity() {
+        let tempdir = tempdir().expect("tempdir");
+        let root = tempdir.path().join("fleet-state");
+        let mut transport = FileFleetTransport::new(&root);
+        transport.initialize().expect("initialize");
+
+        let mut workers = Vec::new();
+        for worker in 0..4 {
+            let root = root.clone();
+            workers.push(std::thread::spawn(move || {
+                let mut transport = FileFleetTransport::new(root);
+                for index in 0..25 {
+                    transport
+                        .publish_action(&FleetActionRecord {
+                            action_id: format!("worker-{worker}-action-{index}"),
+                            emitted_at: Utc::now(),
+                            action: FleetAction::Release {
+                                zone_id: "prod".to_string(),
+                                incident_id: format!("inc-{worker}-{index}"),
+                                reason: None,
+                            },
+                        })
+                        .expect("publish action");
+                }
+            }));
+        }
+
+        for worker in workers {
+            worker.join().expect("worker join");
+        }
+
+        let log = fs::read_to_string(transport.layout().actions_path()).expect("read action log");
+        let lines: Vec<&str> = log.lines().collect();
+        assert_eq!(lines.len(), 100);
+        for line in lines {
+            let parsed: FleetActionRecord = serde_json::from_str(line).expect("parse JSONL line");
+            assert!(parsed.action_id.starts_with("worker-"));
+        }
+
+        let persisted = transport.list_actions().expect("list actions");
+        assert_eq!(persisted.len(), 100);
+    }
+
+    #[test]
+    fn file_transport_lists_stale_nodes_from_persisted_state() {
+        let tempdir = tempdir().expect("tempdir");
+        let root = tempdir.path().join("fleet-state");
+        let mut transport = FileFleetTransport::new(&root);
+        transport.initialize().expect("initialize");
+
+        transport
+            .upsert_node_status(&node_status(
+                "node-fresh",
+                "2026-04-06T03:09:30Z",
+                3,
+                NodeHealth::Healthy,
+            ))
+            .expect("write fresh node");
+        transport
+            .upsert_node_status(&node_status(
+                "node-stale",
+                "2026-04-06T03:00:00Z",
+                3,
+                NodeHealth::Degraded,
+            ))
+            .expect("write stale node");
+
+        let stale = transport
+            .list_stale_nodes(
+                DateTime::parse_from_rfc3339("2026-04-06T03:10:00Z")
+                    .expect("timestamp")
+                    .with_timezone(&Utc),
+                Duration::from_secs(60),
+            )
+            .expect("stale nodes");
+
+        assert_eq!(stale.len(), 1);
+        assert_eq!(stale[0].node_id, "node-stale");
+    }
+
+    #[test]
+    fn lock_retry_backoffs_match_expected_schedule() {
+        assert_eq!(
+            lock_retry_backoffs(),
+            [
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+                Duration::from_millis(400),
+            ]
+        );
+    }
+
+    #[test]
+    fn file_transport_reports_lock_contention_after_retry_budget() {
+        let tempdir = tempdir().expect("tempdir");
+        let root = tempdir.path().join("fleet-state");
+        let mut transport = FileFleetTransport::new(&root);
+        transport.initialize().expect("initialize");
+
+        let file = OpenOptions::new()
+            .read(true)
+            .append(true)
+            .open(transport.layout().actions_path())
+            .expect("open action log");
+        file.lock().expect("take lock");
+
+        let started = Instant::now();
+        let error = transport
+            .publish_action(&release_action_record(
+                "fleet-action-locked",
+                "2026-04-06T04:00:00Z",
+                "inc-locked",
+            ))
+            .expect_err("lock contention");
+        file.unlock().expect("release lock");
+
+        assert!(matches!(error, FleetTransportError::LockContention { .. }));
+        assert!(
+            started.elapsed() >= Duration::from_millis(650),
+            "expected retry backoff budget to elapse, got {:?}",
+            started.elapsed()
+        );
     }
 }
