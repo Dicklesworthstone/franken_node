@@ -680,6 +680,8 @@ enum InitFileActionKind {
     Created,
     Overwritten,
     BackedUpAndOverwritten,
+    DirectoryCreated,
+    SkippedExisting,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -851,6 +853,144 @@ fn render_init_report_human(report: &InitReport, verbose: bool) -> String {
         }
     }
     lines.join("\n")
+}
+
+// ── State directory bootstrap ─────────────────────────────────────────
+
+/// Subdirectories to create under the `.franken-node/` root during init.
+const STATE_BOOTSTRAP_SUBDIRS: &[&str] = &[
+    "state",
+    "state/incidents",
+    "state/execution-receipts",
+    "state/registry",
+    "state/registry/artifacts",
+    "state/fleet",
+    "state/migrations",
+    "keys",
+];
+
+/// Contents for .franken-node/.gitignore — exclude sensitive and transient state.
+const STATE_GITIGNORE_CONTENTS: &str = "\
+# franken-node state — managed automatically
+# Exclude signing keys and transient execution receipts from version control.
+keys/
+state/execution-receipts/
+";
+
+/// Bootstrap the `.franken-node/` state directory structure.
+///
+/// Creates all required subdirectories, an empty trust-card registry, and a
+/// `.gitignore` that excludes sensitive material. The operation is idempotent:
+/// existing directories and files are skipped without error.
+fn bootstrap_state_directory(
+    root: &Path,
+    profile_name: &str,
+) -> Result<Vec<InitFileAction>> {
+    let mut actions = Vec::new();
+    let dot_dir = root.join(".franken-node");
+
+    // Create each subdirectory.
+    for subdir in STATE_BOOTSTRAP_SUBDIRS {
+        let dir_path = dot_dir.join(subdir);
+        if dir_path.is_dir() {
+            actions.push(InitFileAction {
+                path: dir_path.display().to_string(),
+                action: InitFileActionKind::SkippedExisting,
+                backup_path: None,
+            });
+        } else {
+            std::fs::create_dir_all(&dir_path).with_context(|| {
+                format!("failed creating state directory {}", dir_path.display())
+            })?;
+            // Restrict keys/ directory permissions on Unix.
+            #[cfg(unix)]
+            if *subdir == "keys" {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    &dir_path,
+                    std::fs::Permissions::from_mode(0o700),
+                )
+                .with_context(|| {
+                    format!(
+                        "failed setting permissions on {}",
+                        dir_path.display()
+                    )
+                })?;
+            }
+            actions.push(InitFileAction {
+                path: dir_path.display().to_string(),
+                action: InitFileActionKind::DirectoryCreated,
+                backup_path: None,
+            });
+        }
+    }
+
+    // Write .gitignore (idempotent — skip if already present).
+    let gitignore_path = dot_dir.join(".gitignore");
+    if gitignore_path.is_file() {
+        actions.push(InitFileAction {
+            path: gitignore_path.display().to_string(),
+            action: InitFileActionKind::SkippedExisting,
+            backup_path: None,
+        });
+    } else {
+        std::fs::write(&gitignore_path, STATE_GITIGNORE_CONTENTS).with_context(|| {
+            format!("failed writing {}", gitignore_path.display())
+        })?;
+        actions.push(InitFileAction {
+            path: gitignore_path.display().to_string(),
+            action: InitFileActionKind::Created,
+            backup_path: None,
+        });
+    }
+
+    // Write empty trust-card registry (idempotent — skip if already present).
+    let registry_path = dot_dir.join("state/trust-card-registry.v1.json");
+    if registry_path.is_file() {
+        actions.push(InitFileAction {
+            path: registry_path.display().to_string(),
+            action: InitFileActionKind::SkippedExisting,
+            backup_path: None,
+        });
+    } else {
+        let empty_registry = supply_chain::trust_card::TrustCardRegistry::default();
+        empty_registry
+            .persist_authoritative_state(&registry_path)
+            .map_err(|err| anyhow::anyhow!("failed writing empty trust-card registry: {err}"))?;
+        actions.push(InitFileAction {
+            path: registry_path.display().to_string(),
+            action: InitFileActionKind::Created,
+            backup_path: None,
+        });
+    }
+
+    tracing::info!(
+        root = %root.display(),
+        profile = profile_name,
+        dirs_created = actions.iter().filter(|a| matches!(a.action, InitFileActionKind::DirectoryCreated)).count(),
+        files_created = actions.iter().filter(|a| matches!(a.action, InitFileActionKind::Created)).count(),
+        skipped = actions.iter().filter(|a| matches!(a.action, InitFileActionKind::SkippedExisting)).count(),
+        "state directory bootstrap complete"
+    );
+
+    Ok(actions)
+}
+
+/// Ensure the `.franken-node/state/` subtree exists.  Called by commands that
+/// need state storage but may run before `init`.  Creates on demand and emits a
+/// warning suggesting `franken-node init`.
+fn ensure_state_dir(project_root: &Path) -> Result<PathBuf> {
+    let state_dir = project_root.join(".franken-node/state");
+    if !state_dir.is_dir() {
+        std::fs::create_dir_all(&state_dir).with_context(|| {
+            format!("failed creating state directory {}", state_dir.display())
+        })?;
+        tracing::warn!(
+            state_dir = %state_dir.display(),
+            "state directory created on demand; consider running `franken-node init` to bootstrap the full directory structure"
+        );
+    }
+    Ok(state_dir)
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -4474,6 +4614,8 @@ fn main() -> Result<()> {
                 backup_existing,
                 json,
                 trace_id,
+                state_dir,
+                no_state,
             } = args;
 
             validate_init_flags(overwrite, backup_existing)?;
@@ -4532,6 +4674,19 @@ fn main() -> Result<()> {
             } else {
                 wrote_to_stdout = true;
                 stdout_config_toml = Some(config_toml.clone());
+            }
+
+            // Bootstrap .franken-node/ state directory structure unless --no-state.
+            if !no_state {
+                let bootstrap_root = state_dir
+                    .as_deref()
+                    .or(out_dir.as_deref())
+                    .unwrap_or_else(|| Path::new("."));
+                let state_actions = bootstrap_state_directory(
+                    bootstrap_root,
+                    &resolved.selected_profile.to_string(),
+                )?;
+                file_actions.extend(state_actions);
             }
 
             let report = build_init_report(

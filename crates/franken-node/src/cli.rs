@@ -100,6 +100,14 @@ pub struct InitArgs {
     /// Stable trace ID for correlating init events.
     #[arg(long, default_value = "init-bootstrap")]
     pub trace_id: String,
+
+    /// Override the state directory location (default: .franken-node/ relative to out-dir or cwd).
+    #[arg(long)]
+    pub state_dir: Option<PathBuf>,
+
+    /// Skip bootstrapping the state directory structure (config files only).
+    #[arg(long)]
+    pub no_state: bool,
 }
 
 // -- run --
