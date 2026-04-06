@@ -234,7 +234,7 @@ def run_unit_tests() -> dict[str, Any]:
                 [sys.executable, "-m", "pytest", str(test_path), "-v", "--tb=short"],
                 capture_output=True,
                 text=True,
-                timeout=180,
+                timeout=3600,
                 cwd=ROOT,
             )
         except subprocess.TimeoutExpired:

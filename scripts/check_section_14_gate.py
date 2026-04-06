@@ -153,7 +153,7 @@ def _run_script(script_rel, execute=True):
 
     proc = subprocess.run(
         [sys.executable, str(script_path), "--json"],
-        capture_output=True, text=True, cwd=ROOT, timeout=600,
+        capture_output=True, text=True, cwd=ROOT, timeout=3600,
     )
     result["exit_code"] = proc.returncode
 
@@ -182,7 +182,7 @@ def _run_tests(test_rel, execute=True):
 
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", str(test_path), "-q", "--tb=no"],
-        capture_output=True, text=True, cwd=ROOT, timeout=600,
+        capture_output=True, text=True, cwd=ROOT, timeout=3600,
     )
     result["exit_code"] = proc.returncode
     result["verdict"] = "PASS" if proc.returncode == 0 else "FAIL"

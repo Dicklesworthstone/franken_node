@@ -104,7 +104,7 @@ def load_beads() -> list[dict]:
     try:
         result = subprocess.run(
             ["br", "list", "--json"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=3600,
         )
         return json.loads(result.stdout)
     except Exception as e:

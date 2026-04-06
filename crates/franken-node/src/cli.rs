@@ -620,6 +620,10 @@ pub enum RegistryCommand {
 pub struct RegistryPublishArgs {
     /// Path to extension package to publish.
     pub package_path: PathBuf,
+
+    /// Path to the operator-managed Ed25519 signing key file.
+    #[arg(long)]
+    pub signing_key: PathBuf,
 }
 
 #[derive(Debug, Parser)]

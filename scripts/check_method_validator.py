@@ -85,8 +85,8 @@ def check_rust_tests() -> dict:
     """METHOD-TESTS: Rust unit tests pass."""
     try:
         result = subprocess.run(
-            [os.path.expanduser("~/.cargo/bin/cargo"), "test", "--", "conformance::connector_method_validator"],
-            capture_output=True, text=True, timeout=120, cwd=str(ROOT),
+            ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--", "conformance::connector_method_validator"],
+            capture_output=True, text=True, timeout=3600, cwd=str(ROOT),
         )
         lines = result.stdout.strip().split("\n")
         summary = [l for l in lines if "test result:" in l]

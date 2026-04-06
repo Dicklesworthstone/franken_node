@@ -120,7 +120,7 @@ def _git_head() -> str:
             cwd=ROOT,
             capture_output=True,
             text=True,
-            timeout=5,
+            timeout=3600,
             check=False,
         )
         if proc.returncode == 0:

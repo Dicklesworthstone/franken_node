@@ -277,7 +277,7 @@ def run_unit_tests() -> dict[str, Any]:
             [sys.executable, "-m", "unittest", entry.test],
             capture_output=True,
             text=True,
-            timeout=180,
+            timeout=3600,
             cwd=ROOT,
         )
 

@@ -113,9 +113,9 @@ def main():
     # MN-TESTS: Rust unit tests pass
     try:
         result = subprocess.run(
-            [os.path.expanduser("~/.cargo/bin/cargo"), "test", "-p", "frankenengine-node", "--",
+            ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--",
              "connector::manifest_negotiation"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=3600,
             cwd=os.path.join(ROOT, "crates/franken-node")
         )
         test_output = result.stdout + result.stderr

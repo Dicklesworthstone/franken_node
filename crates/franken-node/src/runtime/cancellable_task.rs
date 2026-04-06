@@ -748,10 +748,7 @@ impl CancellationRuntime {
                 to_phase: from,
                 timestamp_ms,
                 trace_id: trace_id.to_string(),
-                detail: format!(
-                    "drain timeout after {}ms (limit {}ms)",
-                    elapsed, timeout
-                ),
+                detail: format!("drain timeout after {}ms (limit {}ms)", elapsed, timeout),
                 schema_version: SCHEMA_VERSION.to_string(),
             });
 

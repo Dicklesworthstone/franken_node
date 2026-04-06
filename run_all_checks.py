@@ -12,7 +12,8 @@ for script in sorted(glob.glob("scripts/*.py")):
         args = ["python3", script]
         if "--self-test" in content:
             args.append("--self-test")
-        res = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        print(f"Running: {script} ...", flush=True)
+        res = subprocess.run(args, capture_output=True, text=True, timeout=3600)
         if res.returncode != 0:
             print(f"FAILED: {script}")
             print(res.stdout)

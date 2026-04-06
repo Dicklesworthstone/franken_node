@@ -1183,9 +1183,12 @@ mod tests {
     fn allowlist_capacity_enforced() {
         let mut p = SsrfPolicyTemplate::default_template("test-conn".into());
         for i in 0..MAX_ALLOWLIST_ENTRIES {
-            p.add_allowlist(&format!("host-{i}"), None, "r", "t", "time").unwrap();
+            p.add_allowlist(&format!("host-{i}"), None, "r", "t", "time")
+                .unwrap();
         }
-        let err = p.add_allowlist("overflow", None, "r", "t", "time").unwrap_err();
+        let err = p
+            .add_allowlist("overflow", None, "r", "t", "time")
+            .unwrap_err();
         assert!(matches!(err, SsrfError::SsrfTemplateInvalid { .. }));
     }
 }

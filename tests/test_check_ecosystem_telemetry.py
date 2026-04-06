@@ -62,7 +62,7 @@ class TestRustSymbols:
 
     def test_twenty_symbols(self):
         result = checker.check_content("rust", checker.RUST_IMPL_PATH, checker.REQUIRED_RUST_SYMBOLS)
-        assert len(result["found"]) == 20
+        assert len(result["found"]) == 23
 
 
 class TestEventCodes:
@@ -122,7 +122,7 @@ class TestInlineTests:
 
     def test_fifteen_tests(self):
         result = checker.check_content("rust", checker.RUST_IMPL_PATH, checker.REQUIRED_TESTS)
-        assert len(result["found"]) == 15
+        assert len(result["found"]) == 22
 
 
 class TestModRegistration:
@@ -176,11 +176,12 @@ class TestFullEvidence:
 
     def test_summary_counts(self):
         evidence = checker.run_all_checks()
-        assert evidence["summary"]["total_checks"] == 14
-        assert evidence["summary"]["passed"] == 14
+        assert evidence["summary"]["total_checks"] == 16
+        assert evidence["summary"]["passed"] == 16
 
     def test_json_serializable(self):
         evidence = checker.run_all_checks()
         serialized = json.dumps(evidence)
         roundtrip = json.loads(serialized)
         assert roundtrip["bead_id"] == "bd-phf"
+

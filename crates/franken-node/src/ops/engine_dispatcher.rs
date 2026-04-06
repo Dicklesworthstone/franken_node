@@ -2,8 +2,10 @@ use crate::config::Config;
 use crate::ops::telemetry_bridge::{
     ShutdownReason, TelemetryBridge, TelemetryRuntimeHandle, TelemetryRuntimeReport,
 };
+use crate::runtime::lockstep_harness::LockstepHarness;
 use crate::storage::frankensqlite_adapter::FrankensqliteAdapter;
 use anyhow::{Context, Result};
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 use std::sync::{Arc, Mutex};
@@ -11,6 +13,27 @@ use std::sync::{Arc, Mutex};
 pub struct EngineDispatcher {
     engine_bin_path: String,
     configured_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DispatchPlan {
+    FrankenEngine { binary: String },
+    RuntimeFallback(RuntimeFallbackPlan),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RuntimeFallbackPlan {
+    runtime: String,
+    target: PathBuf,
+    working_dir: PathBuf,
+}
+
+struct DispatchResolutionInputs<'a> {
+    configured_hint: &'a str,
+    env_override: Option<&'a str>,
+    cli_path: Option<&'a Path>,
+    config_path: Option<&'a Path>,
+    candidates: &'a [PathBuf],
 }
 
 #[derive(Debug)]
@@ -51,6 +74,43 @@ fn default_engine_binary_candidates() -> Vec<PathBuf> {
 
 fn has_path_separator(raw: &str) -> bool {
     raw.contains('/') || raw.contains('\\')
+}
+
+fn command_exists_with(
+    command: &str,
+    path_env: Option<OsString>,
+    path_exists: &impl Fn(&Path) -> bool,
+) -> bool {
+    let trimmed = command.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute() || has_path_separator(trimmed) {
+        return path_exists(path);
+    }
+
+    let Some(path_env) = path_env else {
+        return false;
+    };
+
+    for dir in std::env::split_paths(&path_env) {
+        let candidate = dir.join(trimmed);
+        if path_exists(&candidate) {
+            return true;
+        }
+        #[cfg(windows)]
+        if candidate.extension().is_none() {
+            for ext in [".exe", ".cmd", ".bat"] {
+                if path_exists(&candidate.with_extension(ext.trim_start_matches('.'))) {
+                    return true;
+                }
+            }
+        }
+    }
+
+    false
 }
 
 fn resolve_engine_binary_path_with(
@@ -126,6 +186,121 @@ pub(crate) fn resolve_engine_binary_path(configured_hint: &str) -> String {
     )
 }
 
+fn project_root_for_path(app_path: &Path) -> &Path {
+    if app_path.is_dir() {
+        app_path
+    } else {
+        app_path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."))
+    }
+}
+
+fn project_prefers_bun(app_path: &Path) -> bool {
+    if app_path
+        .extension()
+        .and_then(std::ffi::OsStr::to_str)
+        .is_some_and(|ext| matches!(ext, "ts" | "tsx"))
+    {
+        return true;
+    }
+
+    let root = project_root_for_path(app_path);
+    if root.join("bun.lock").is_file() || root.join("bun.lockb").is_file() {
+        return true;
+    }
+
+    let package_json = root.join("package.json");
+    let Ok(contents) = std::fs::read_to_string(&package_json) else {
+        return false;
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+
+    manifest
+        .get("packageManager")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|manager| manager.trim_start().starts_with("bun@"))
+}
+
+fn fallback_runtime_candidates(app_path: &Path) -> [&'static str; 2] {
+    if project_prefers_bun(app_path) {
+        ["bun", "node"]
+    } else {
+        ["node", "bun"]
+    }
+}
+
+fn resolve_fallback_runtime_plan_with(
+    app_path: &Path,
+    path_env: Option<OsString>,
+    path_exists: &impl Fn(&Path) -> bool,
+) -> Result<RuntimeFallbackPlan> {
+    for runtime in fallback_runtime_candidates(app_path) {
+        if !command_exists_with(runtime, path_env.clone(), path_exists) {
+            continue;
+        }
+
+        return Ok(RuntimeFallbackPlan {
+            runtime: runtime.to_string(),
+            target: LockstepHarness::resolve_runtime_target(runtime, app_path)?,
+            working_dir: project_root_for_path(app_path).to_path_buf(),
+        });
+    }
+
+    anyhow::bail!(
+        "franken-engine was not found and no fallback runtime is available; install node or bun, or configure --engine-bin/FRANKEN_ENGINE_BIN/FRANKEN_NODE_ENGINE_BINARY_PATH"
+    )
+}
+
+fn resolve_dispatch_plan_with(
+    app_path: &Path,
+    inputs: DispatchResolutionInputs<'_>,
+    path_env: Option<OsString>,
+    path_exists: &impl Fn(&Path) -> bool,
+) -> Result<DispatchPlan> {
+    let binary = resolve_engine_binary_path_with(
+        inputs.configured_hint,
+        inputs.env_override,
+        inputs.cli_path,
+        inputs.config_path,
+        inputs.candidates,
+        path_exists,
+    );
+
+    if command_exists_with(&binary, path_env.clone(), path_exists) {
+        return Ok(DispatchPlan::FrankenEngine { binary });
+    }
+
+    let explicit_override = inputs.cli_path.is_some()
+        || inputs.config_path.is_some()
+        || inputs
+            .env_override
+            .is_some_and(|value| !value.trim().is_empty());
+    if explicit_override {
+        anyhow::bail!(
+            "configured franken-engine binary `{binary}` was not found; fix --engine-bin, FRANKEN_ENGINE_BIN, FRANKEN_NODE_ENGINE_BINARY_PATH, or [engine].binary_path"
+        );
+    }
+
+    resolve_fallback_runtime_plan_with(app_path, path_env, path_exists)
+        .map(DispatchPlan::RuntimeFallback)
+}
+
+fn finish_child_status(status: ExitStatus, process_label: &str) -> Result<()> {
+    if status.success() {
+        return Ok(());
+    }
+
+    if let Some(code) = status.code() {
+        std::process::exit(code);
+    }
+
+    anyhow::bail!("{process_label} exited abnormally (terminated by signal)");
+}
+
 impl Default for EngineDispatcher {
     fn default() -> Self {
         let default_hint = default_engine_binary_candidates()
@@ -166,23 +341,47 @@ impl EngineDispatcher {
         // Precedence: CLI --engine-bin > FRANKEN_ENGINE_BIN env > config [engine].binary_path > candidates.
         let env_override = std::env::var("FRANKEN_ENGINE_BIN").ok();
         let config_path = config.engine.binary_path.as_deref();
-        let bin_path = resolve_engine_binary_path_with(
-            &self.engine_bin_path,
-            env_override.as_deref(),
-            self.configured_path.as_deref(),
-            config_path,
-            &default_engine_binary_candidates(),
+        let dispatch_plan = resolve_dispatch_plan_with(
+            app_path,
+            DispatchResolutionInputs {
+                configured_hint: &self.engine_bin_path,
+                env_override: env_override.as_deref(),
+                cli_path: self.configured_path.as_deref(),
+                config_path,
+                candidates: &default_engine_binary_candidates(),
+            },
+            std::env::var_os("PATH"),
             &|path| path.exists(),
-        );
-        if bin_path == "franken-engine"
-            && self.configured_path.is_none()
-            && config.engine.binary_path.is_none()
-            && !Path::new(&self.engine_bin_path).exists()
-        {
+        )?;
+
+        if let DispatchPlan::RuntimeFallback(plan) = dispatch_plan {
             eprintln!(
-                "Warning: Engine binary not found via configured override or sibling build; attempting `franken-engine` from PATH (override with --engine-bin, FRANKEN_ENGINE_BIN, FRANKEN_NODE_ENGINE_BINARY_PATH, or [engine].binary_path in config).",
+                "franken-engine unavailable; falling back to `{}` for {}. Reduced guarantees: no engine-native policy enforcement, telemetry bridge, or post-execution receipts.",
+                plan.runtime,
+                app_path.display(),
             );
+
+            let status = Command::new(&plan.runtime)
+                .arg(&plan.target)
+                .current_dir(&plan.working_dir)
+                .env("FRANKEN_NODE_REQUESTED_POLICY_MODE", policy_mode)
+                .env("FRANKEN_NODE_FALLBACK_RUNTIME", &plan.runtime)
+                .env("FRANKEN_NODE_FALLBACK_REASON", "franken_engine_unavailable")
+                .status()
+                .with_context(|| {
+                    format!(
+                        "failed launching fallback runtime `{}` for {}",
+                        plan.runtime,
+                        plan.target.display()
+                    )
+                })?;
+
+            return finish_child_status(status, &plan.runtime);
         }
+
+        let DispatchPlan::FrankenEngine { binary: bin_path } = dispatch_plan else {
+            unreachable!("runtime fallback returns early");
+        };
 
         let serialized_config = config.to_toml()?;
         let temp_dir = tempfile::Builder::new()
@@ -215,8 +414,6 @@ impl EngineDispatcher {
 
         let (status, report) = Self::run_engine_process(&mut cmd, telemetry_handle)
             .map_err(|err| anyhow::anyhow!("{err}"))?;
-        let exit_code = status.code();
-
         if !report.drain_completed {
             eprintln!(
                 "Warning: telemetry drain did not complete within {}ms ({} events persisted, {} shed, {} dropped)",
@@ -230,15 +427,7 @@ impl EngineDispatcher {
         // Clean up temp directory explicitly before potential process exit
         drop(temp_dir);
 
-        if !status.success() {
-            if let Some(code) = exit_code {
-                std::process::exit(code);
-            } else {
-                anyhow::bail!("franken_engine exited abnormally (terminated by signal)");
-            }
-        }
-
-        Ok(())
+        finish_child_status(status, "franken_engine")
     }
 
     fn run_engine_process(
@@ -442,6 +631,115 @@ mod tests {
             &|_| false,
         );
         assert_eq!(resolved, "/env-config/franken-engine");
+    }
+
+    #[test]
+    fn command_lookup_searches_path_for_command_style_binaries() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let fake_bin = temp_dir.path().join("bun");
+        std::fs::write(&fake_bin, "#!/bin/sh\n").expect("write fake bin");
+        let path_env = Some(temp_dir.path().as_os_str().to_os_string());
+
+        assert!(command_exists_with("bun", path_env, &|path| path.exists()));
+    }
+
+    #[test]
+    fn dispatch_plan_falls_back_to_node_when_engine_is_missing() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let app_dir = temp_dir.path().join("app");
+        std::fs::create_dir(&app_dir).expect("mkdir");
+        let entry = app_dir.join("index.js");
+        std::fs::write(&entry, "console.log('hello');").expect("write entry");
+
+        let runtime_dir = temp_dir.path().join("bin");
+        std::fs::create_dir(&runtime_dir).expect("runtime dir");
+        std::fs::write(runtime_dir.join("node"), "#!/bin/sh\n").expect("write fake node");
+
+        let plan = resolve_dispatch_plan_with(
+            &app_dir,
+            DispatchResolutionInputs {
+                configured_hint: "/missing/franken-engine",
+                env_override: None,
+                cli_path: None,
+                config_path: None,
+                candidates: &[PathBuf::from("/missing/auto")],
+            },
+            Some(runtime_dir.as_os_str().to_os_string()),
+            &|path| path.exists(),
+        )
+        .expect("plan");
+
+        assert_eq!(
+            plan,
+            DispatchPlan::RuntimeFallback(RuntimeFallbackPlan {
+                runtime: "node".to_string(),
+                target: entry,
+                working_dir: app_dir,
+            })
+        );
+    }
+
+    #[test]
+    fn dispatch_plan_prefers_bun_for_bun_projects() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let app_dir = temp_dir.path().join("app");
+        std::fs::create_dir(&app_dir).expect("mkdir");
+        let entry = app_dir.join("index.ts");
+        std::fs::write(&entry, "console.log('hello');").expect("write entry");
+        std::fs::write(app_dir.join("bun.lockb"), "").expect("write bun lock");
+
+        let runtime_dir = temp_dir.path().join("bin");
+        std::fs::create_dir(&runtime_dir).expect("runtime dir");
+        std::fs::write(runtime_dir.join("node"), "#!/bin/sh\n").expect("write fake node");
+        std::fs::write(runtime_dir.join("bun"), "#!/bin/sh\n").expect("write fake bun");
+
+        let plan = resolve_dispatch_plan_with(
+            &app_dir,
+            DispatchResolutionInputs {
+                configured_hint: "/missing/franken-engine",
+                env_override: None,
+                cli_path: None,
+                config_path: None,
+                candidates: &[PathBuf::from("/missing/auto")],
+            },
+            Some(runtime_dir.as_os_str().to_os_string()),
+            &|path| path.exists(),
+        )
+        .expect("plan");
+
+        assert_eq!(
+            plan,
+            DispatchPlan::RuntimeFallback(RuntimeFallbackPlan {
+                runtime: "bun".to_string(),
+                target: entry,
+                working_dir: app_dir,
+            })
+        );
+    }
+
+    #[test]
+    fn dispatch_plan_rejects_missing_explicit_override() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir");
+        let app = temp_dir.path().join("app.js");
+        std::fs::write(&app, "console.log('hello');").expect("write app");
+        let cli_path = temp_dir.path().join("missing-franken-engine");
+
+        let err = resolve_dispatch_plan_with(
+            &app,
+            DispatchResolutionInputs {
+                configured_hint: "/missing/franken-engine",
+                env_override: None,
+                cli_path: Some(&cli_path),
+                config_path: None,
+                candidates: &[PathBuf::from("/missing/auto")],
+            },
+            None,
+            &|path| path.exists(),
+        )
+        .expect_err("missing explicit engine path must fail");
+
+        assert!(err.to_string().contains("configured franken-engine binary"));
+        assert!(err.to_string().contains(&cli_path.display().to_string()));
     }
 
     #[test]

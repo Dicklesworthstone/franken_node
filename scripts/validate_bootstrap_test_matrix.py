@@ -37,7 +37,7 @@ def load_bead_ids() -> set[str]:
     try:
         result = subprocess.run(
             ["br", "list", "--json"],
-            capture_output=True, text=True, timeout=30,
+            capture_output=True, text=True, timeout=3600,
         )
         beads = json.loads(result.stdout)
         return {b["id"] for b in beads}

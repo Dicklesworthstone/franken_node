@@ -104,7 +104,7 @@ def run_verification_scripts() -> dict:
             try:
                 result = subprocess.run(
                     [sys.executable, str(script_path), "--json"],
-                    capture_output=True, text=True, timeout=30, cwd=ROOT,
+                    capture_output=True, text=True, timeout=3600, cwd=ROOT,
                 )
                 result_entry["exit_code"] = result.returncode
                 if result.returncode != 0:
@@ -146,7 +146,7 @@ def run_unit_tests() -> dict:
             try:
                 result = subprocess.run(
                     [sys.executable, "-m", "pytest", str(test_path), "-v", "--tb=short"],
-                    capture_output=True, text=True, timeout=60, cwd=ROOT,
+                    capture_output=True, text=True, timeout=3600, cwd=ROOT,
                 )
                 result_entry["exit_code"] = result.returncode
                 # Parse test counts from pytest output

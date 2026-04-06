@@ -17,6 +17,13 @@ pub struct LockstepHarness {
 
 impl LockstepHarness {
     const DIRECTORY_ENTRY_CANDIDATES: [&'static str; 3] = ["index.js", "index.mjs", "index.cjs"];
+    const BUN_DIRECTORY_ENTRY_CANDIDATES: [&'static str; 5] = [
+        "index.ts",
+        "index.tsx",
+        "index.js",
+        "index.mjs",
+        "index.cjs",
+    ];
 
     pub fn new(runtimes: Vec<String>) -> Self {
         Self {
@@ -65,6 +72,14 @@ impl LockstepHarness {
         matches!(runtime, "node" | "bun")
     }
 
+    fn directory_entry_candidates(runtime: &str) -> &'static [&'static str] {
+        if runtime == "bun" {
+            &Self::BUN_DIRECTORY_ENTRY_CANDIDATES
+        } else {
+            &Self::DIRECTORY_ENTRY_CANDIDATES
+        }
+    }
+
     fn resolve_runtime_binary(runtime: &str) -> String {
         Self::resolve_runtime_binary_with(runtime, &|configured_hint| {
             crate::ops::engine_dispatcher::resolve_engine_binary_path(configured_hint)
@@ -85,12 +100,12 @@ impl LockstepHarness {
         }
     }
 
-    fn resolve_runtime_target(runtime: &str, app_path: &Path) -> Result<PathBuf> {
+    pub(crate) fn resolve_runtime_target(runtime: &str, app_path: &Path) -> Result<PathBuf> {
         if !Self::runtime_uses_js_entrypoints(runtime) || app_path.is_file() || !app_path.is_dir() {
             return Ok(app_path.to_path_buf());
         }
 
-        Self::resolve_directory_entrypoint(app_path).with_context(|| {
+        Self::resolve_directory_entrypoint(runtime, app_path).with_context(|| {
             format!(
                 "lockstep input `{}` is not directly executable for runtime `{runtime}`",
                 app_path.display()
@@ -98,7 +113,7 @@ impl LockstepHarness {
         })
     }
 
-    fn resolve_directory_entrypoint(project_dir: &Path) -> Result<PathBuf> {
+    fn resolve_directory_entrypoint(runtime: &str, project_dir: &Path) -> Result<PathBuf> {
         let package_json_path = project_dir.join("package.json");
         let mut unresolved_main: Option<String> = None;
         if package_json_path.exists() {
@@ -129,7 +144,7 @@ impl LockstepHarness {
             }
         }
 
-        for candidate in Self::DIRECTORY_ENTRY_CANDIDATES {
+        for candidate in Self::directory_entry_candidates(runtime) {
             let path = project_dir.join(candidate);
             if path.is_file() {
                 return Ok(path);
@@ -140,14 +155,14 @@ impl LockstepHarness {
             anyhow::bail!(
                 "package.json main `{main}` did not resolve under {} and no fallback entrypoint was found ({})",
                 project_dir.display(),
-                Self::DIRECTORY_ENTRY_CANDIDATES.join(", ")
+                Self::directory_entry_candidates(runtime).join(", ")
             );
         }
 
         anyhow::bail!(
             "no executable JS entrypoint found under {} (checked package.json main and {})",
             project_dir.display(),
-            Self::DIRECTORY_ENTRY_CANDIDATES.join(", ")
+            Self::directory_entry_candidates(runtime).join(", ")
         );
     }
 
@@ -850,6 +865,17 @@ mod tests {
     }
 
     #[test]
+    fn resolve_runtime_target_uses_bun_typescript_directory_entrypoint() {
+        let temp_dir = tempfile::tempdir().expect("tempdir");
+        let expected = temp_dir.path().join("index.ts");
+        std::fs::write(&expected, "console.log('entry');").expect("write entry");
+
+        let resolved =
+            LockstepHarness::resolve_runtime_target("bun", temp_dir.path()).expect("resolve");
+        assert_eq!(resolved, expected);
+    }
+
+    #[test]
     fn resolve_runtime_target_keeps_directory_for_custom_runtime() {
         let temp_dir = tempfile::tempdir().expect("tempdir");
         std::fs::write(temp_dir.path().join("index.js"), "console.log('entry');")
@@ -1083,8 +1109,7 @@ mod tests {
         outputs.insert("franken-node".to_string(), b"hello world".to_vec());
 
         let check = oracle
-            .run_cross_check(
-                "check-1", BoundaryScope::IO, b"input", &outputs)
+            .run_cross_check("check-1", BoundaryScope::IO, b"input", &outputs)
             .expect("cross check");
 
         assert!(check.outcome.is_some());

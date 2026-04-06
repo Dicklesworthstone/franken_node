@@ -1183,13 +1183,26 @@ impl StakingLedger {
             stake_record.state = StakeState::Active;
 
             // Find the slash event and restore
+            let mut restore_amount = 0;
             if let Some(slash_event) = self
                 .state
                 .slash_events
                 .iter()
                 .find(|e| e.slash_id == slash_id)
             {
-                let restore_amount = slash_event.slash_amount;
+                restore_amount = slash_event.slash_amount;
+            } else if let Some(account) = self.accounts.get(&record.publisher_id) {
+                let violation_id = format!("slash-{}", slash_id);
+                if let Some(slash_record) = account
+                    .slash_history
+                    .iter()
+                    .find(|e| e.violation_id == violation_id)
+                {
+                    restore_amount = slash_record.amount;
+                }
+            }
+
+            if restore_amount > 0 {
                 stake_record.amount = stake_record.amount.saturating_add(restore_amount);
 
                 if let Some(account) = self.accounts.get_mut(&record.publisher_id) {

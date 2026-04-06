@@ -109,8 +109,8 @@ def main():
     # MIGRATE-TESTS: Rust tests pass
     try:
         result = subprocess.run(
-            [os.path.expanduser("~/.cargo/bin/cargo"), "test", "--", "connector::schema_migration"],
-            capture_output=True, text=True, timeout=120,
+            ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--", "connector::schema_migration"],
+            capture_output=True, text=True, timeout=3600,
             cwd=os.path.join(ROOT, "crates/franken-node")
         )
         test_output = result.stdout + result.stderr

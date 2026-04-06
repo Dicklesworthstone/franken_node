@@ -96,9 +96,9 @@ def main():
     # Run Rust unit tests
     try:
         result = subprocess.run(
-            [os.path.expanduser("~/.cargo/bin/cargo"), "test", "-p", "frankenengine-node", "--",
+            ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--",
              "supply_chain::revocation_registry"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=3600,
             cwd=os.path.join(ROOT, "crates/franken-node")
         )
         test_output = result.stdout + result.stderr

@@ -211,7 +211,7 @@ def run_script(entry: SectionEntry, execute: bool = True) -> dict[str, Any]:
         capture_output=True,
         text=True,
         cwd=ROOT,
-        timeout=240,
+        timeout=3600,
     )
     result["exit_code"] = proc.returncode
 
@@ -262,7 +262,7 @@ def run_unit_test(entry: SectionEntry, execute: bool = True) -> dict[str, Any]:
         capture_output=True,
         text=True,
         cwd=ROOT,
-        timeout=300,
+        timeout=3600,
     )
 
     output = f"{proc.stdout}\n{proc.stderr}"

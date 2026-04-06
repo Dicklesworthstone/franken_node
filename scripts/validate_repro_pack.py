@@ -165,7 +165,7 @@ def generate_example_lock() -> dict:
         import subprocess
         result = subprocess.run(
             ["git", "rev-parse", "HEAD"],
-            capture_output=True, text=True, timeout=5, cwd=ROOT,
+            capture_output=True, text=True, timeout=3600, cwd=ROOT,
         )
         if result.returncode == 0:
             git_commit = result.stdout.strip()

@@ -327,8 +327,7 @@ pub struct CompromiseReductionReport {
 pub fn load_compromise_reduction_report(path: &Path) -> Result<CompromiseReductionReport, String> {
     let raw = std::fs::read_to_string(path)
         .map_err(|err| format!("failed reading {}: {err}", path.display()))?;
-    serde_json::from_str(&raw)
-        .map_err(|err| format!("failed parsing {}: {err}", path.display()))
+    serde_json::from_str(&raw).map_err(|err| format!("failed parsing {}: {err}", path.display()))
 }
 
 /// Contract for the compromise reduction metric.
@@ -934,31 +933,31 @@ fn derive_certification_distribution_metric(
             );
         };
 
-        let level = match certification_registry.get_record(&extension.extension_id, &version.version)
-        {
-            Ok(record) => {
-                if !same_reporting_window(&record.evaluated_at, exported_at) {
-                    return (
-                        BTreeMap::new(),
-                        metric_metadata(
-                            &contract,
-                            DerivedMetricAvailability::StaleUpstream,
-                            contract.authoritative_inputs.clone(),
-                            Some(record.evaluated_at.clone()),
-                            format!(
-                                "certification record is stale for {}@{}",
-                                extension.extension_id, version.version
+        let level =
+            match certification_registry.get_record(&extension.extension_id, &version.version) {
+                Ok(record) => {
+                    if !same_reporting_window(&record.evaluated_at, exported_at) {
+                        return (
+                            BTreeMap::new(),
+                            metric_metadata(
+                                &contract,
+                                DerivedMetricAvailability::StaleUpstream,
+                                contract.authoritative_inputs.clone(),
+                                Some(record.evaluated_at.clone()),
+                                format!(
+                                    "certification record is stale for {}@{}",
+                                    extension.extension_id, version.version
+                                ),
                             ),
-                        ),
-                    );
+                        );
+                    }
+                    record.level
                 }
-                record.level
-            }
-            Err(_) => {
-                missing_certifications = missing_certifications.saturating_add(1);
-                CertificationLevel::Uncertified
-            }
-        };
+                Err(_) => {
+                    missing_certifications = missing_certifications.saturating_add(1);
+                    CertificationLevel::Uncertified
+                }
+            };
 
         if let Some(bucket) = distribution.get_mut(&level.to_string()) {
             *bucket = bucket.saturating_add(1);
@@ -992,9 +991,7 @@ mod tests {
         extension_registry::{
             AdmissionKernel, ExtensionSignature, RegistrationRequest, RegistryConfig, VersionEntry,
         },
-        provenance::{
-            self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole,
-        },
+        provenance::{self as prov, AttestationEnvelopeFormat, AttestationLink, ChainLinkRole},
         reputation::ReputationTier,
         transparency_verifier as tv,
     };
@@ -1127,7 +1124,12 @@ mod tests {
         }
     }
 
-    fn valid_request(name: &str, version: &str, sk: &SigningKey, now_epoch: u64) -> RegistrationRequest {
+    fn valid_request(
+        name: &str,
+        version: &str,
+        sk: &SigningKey,
+        now_epoch: u64,
+    ) -> RegistrationRequest {
         let manifest_bytes = format!("manifest:{name}:{version}").into_bytes();
         let signature_bytes = artifact_signing::sign_bytes(sk, &manifest_bytes);
         let key_id = KeyId::from_verifying_key(&sk.verifying_key());
@@ -1159,7 +1161,8 @@ mod tests {
     fn make_active_extension_registry() -> SignedExtensionRegistry {
         let (sk, vk) = test_keypair();
         let export_epoch = 1_700_000_000_u64;
-        let mut registry = SignedExtensionRegistry::new(RegistryConfig::default(), test_kernel(&vk));
+        let mut registry =
+            SignedExtensionRegistry::new(RegistryConfig::default(), test_kernel(&vk));
 
         let first = registry.register(
             valid_request("ext-a", "1.0.0", &sk, export_epoch),
@@ -1504,7 +1507,8 @@ mod tests {
     fn test_load_compromise_reduction_report_from_artifact() {
         let report_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../artifacts/13/compromise_reduction_report.json");
-        let report = load_compromise_reduction_report(&report_path).expect("load compromise report");
+        let report =
+            load_compromise_reduction_report(&report_path).expect("load compromise report");
         assert_eq!(report.bead_id, "bd-3cpa");
         assert_eq!(report.baseline_compromised, 20);
         assert_eq!(report.hardened_compromised, 2);
@@ -1575,10 +1579,7 @@ mod tests {
             Some(&registry),
             Some(&certification_registry),
         );
-        assert_eq!(
-            export.certification_distribution.get("standard"),
-            Some(&1)
-        );
+        assert_eq!(export.certification_distribution.get("standard"), Some(&1));
         assert_eq!(
             export.certification_distribution.get("uncertified"),
             Some(&1)
@@ -1618,37 +1619,45 @@ mod tests {
             contract.formula,
             "baseline_compromised / hardened_compromised"
         );
-        assert!(contract
-            .authoritative_inputs
-            .iter()
-            .any(|input| input == "artifacts/13/compromise_reduction_report.json"));
-        assert!(contract
-            .missing_data_semantics
-            .contains(&DerivedMetricAvailability::CompleteContainment));
-        assert!(contract
-            .implementation_scope
-            .iter()
-            .any(|item| item.contains("placeholder 1.0")));
+        assert!(
+            contract
+                .authoritative_inputs
+                .iter()
+                .any(|input| input == "artifacts/13/compromise_reduction_report.json")
+        );
+        assert!(
+            contract
+                .missing_data_semantics
+                .contains(&DerivedMetricAvailability::CompleteContainment)
+        );
+        assert!(
+            contract
+                .implementation_scope
+                .iter()
+                .any(|item| item.contains("placeholder 1.0"))
+        );
     }
 
     #[test]
     fn test_certification_distribution_contract_uses_active_registry_and_uncertified_fallback() {
         let contract = certification_distribution_contract();
         assert_eq!(contract.metric_id, "certification_distribution");
-        assert!(contract
-            .authoritative_inputs
-            .iter()
-            .any(|input| input
-                .contains("SignedExtensionRegistry.list(Some(ExtensionStatus::Active))")));
-        assert!(contract
-            .authoritative_inputs
-            .iter()
-            .any(|input| input.contains("CertificationRegistry")));
+        assert!(contract.authoritative_inputs.iter().any(|input| {
+            input.contains("SignedExtensionRegistry.list(Some(ExtensionStatus::Active))")
+        }));
+        assert!(
+            contract
+                .authoritative_inputs
+                .iter()
+                .any(|input| input.contains("CertificationRegistry"))
+        );
         assert!(contract.formula.contains("uncertified"));
-        assert!(contract
-            .implementation_scope
-            .iter()
-            .any(|item| item.contains("trust_card.rs")));
+        assert!(
+            contract
+                .implementation_scope
+                .iter()
+                .any(|item| item.contains("trust_card.rs"))
+        );
     }
 
     #[test]

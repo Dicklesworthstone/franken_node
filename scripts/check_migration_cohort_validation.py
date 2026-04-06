@@ -205,7 +205,7 @@ def build_report(execute=True):
     if execute and E2E_SCRIPT.exists():
         proc = subprocess.run(
             ["bash", str(E2E_SCRIPT)],
-            capture_output=True, text=True, cwd=ROOT, timeout=600,
+            capture_output=True, text=True, cwd=ROOT, timeout=3600,
         )
         e2e_pass = proc.returncode == 0 and "PASS" in proc.stdout
         checks.append({

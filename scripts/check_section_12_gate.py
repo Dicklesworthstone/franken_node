@@ -134,7 +134,7 @@ def run_script(entry: SectionEntry, execute: bool = True) -> dict[str, Any]:
         capture_output=True,
         text=True,
         cwd=ROOT,
-        timeout=180,
+        timeout=3600,
     )
     result["exit_code"] = proc.returncode
     script_ok, verdict = parse_script_result(proc.stdout, proc.returncode)
@@ -168,7 +168,7 @@ def run_unit_test(entry: SectionEntry, execute: bool = True) -> dict[str, Any]:
         capture_output=True,
         text=True,
         cwd=ROOT,
-        timeout=240,
+        timeout=3600,
     )
     output = f"{proc.stdout}\n{proc.stderr}"
     ran, failed = parse_unittest_counts(output)

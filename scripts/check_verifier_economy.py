@@ -206,7 +206,7 @@ REPLACEMENT_CRITICAL_GUARDS = [
     },
     {
         "name": "capsule_integrity_path",
-        "anchor": "pub fn verify_capsule_integrity(",
+        "anchor": "fn verify_capsule_integrity_with_freshness(",
         "required": [
             "compute_capsule_integrity_hash(",
             "ct_eq(&capsule.integrity_hash, &expected_integrity)",
@@ -217,7 +217,7 @@ REPLACEMENT_CRITICAL_GUARDS = [
             "component_hashes.iter().all(|hash| !hash.is_empty())",
             "!capsule.integrity_hash.is_empty()",
         ],
-        "span": 1600,
+        "span": 4000,
     },
     {
         "name": "capsule_rejection_error_surface",

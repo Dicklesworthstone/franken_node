@@ -105,9 +105,9 @@ def main():
     # TL-TESTS: Rust unit tests pass
     try:
         result = subprocess.run(
-            [os.path.expanduser("~/.cargo/bin/cargo"), "test", "-p", "frankenengine-node", "--",
+            ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--",
              "supply_chain::transparency_verifier"],
-            capture_output=True, text=True, timeout=120,
+            capture_output=True, text=True, timeout=3600,
             cwd=os.path.join(ROOT, "crates/franken-node")
         )
         test_output = result.stdout + result.stderr

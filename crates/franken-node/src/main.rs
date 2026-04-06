@@ -69,10 +69,10 @@ use crate::policy::{
     hardening_state_machine::HardeningLevel,
     policy_explainer::{PolicyExplainer, PolicyExplanation, WordingValidation, validate_wording},
 };
-#[cfg(test)]
-use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
 use anyhow::{Context, Result};
 use clap::Parser;
+#[cfg(test)]
+use frankenengine_node::tools::replay_bundle::{fixture_incident_events, generate_replay_bundle};
 use frankenengine_node::{
     config::{self, CliOverrides, Profile},
     ops, runtime,
@@ -183,7 +183,7 @@ struct VerifyContractOutput {
     reason: String,
 }
 
-struct ReceiptSigningMaterial {
+struct Ed25519SigningMaterial {
     path: PathBuf,
     source: &'static str,
     signing_key: ed25519_dalek::SigningKey,
@@ -275,41 +275,47 @@ fn resolve_receipt_signing_key_path(
     Ok(Some((path, source)))
 }
 
+fn load_ed25519_signing_material_from_path(
+    path: &Path,
+    label: &str,
+    source: &'static str,
+) -> Result<Ed25519SigningMaterial> {
+    if !path.is_file() {
+        anyhow::bail!("{label} must point to a file: {}", path.display());
+    }
+
+    let raw = std::fs::read(path)
+        .with_context(|| format!("failed reading {label} {}", path.display()))?;
+    let Some(signing_key) = parse_signing_key_from_blob(&raw) else {
+        anyhow::bail!("failed decoding Ed25519 {label} from {}", path.display());
+    };
+
+    Ok(Ed25519SigningMaterial {
+        path: path.to_path_buf(),
+        source,
+        signing_key,
+    })
+}
+
 fn load_receipt_signing_material(
     cli_override: Option<&Path>,
-) -> Result<Option<ReceiptSigningMaterial>> {
+) -> Result<Option<Ed25519SigningMaterial>> {
     let Some((path, source)) = resolve_receipt_signing_key_path(cli_override)? else {
         return Ok(None);
     };
 
-    if !path.is_file() {
-        anyhow::bail!(
-            "receipt signing key must point to a file: {}",
-            path.display()
-        );
-    }
+    load_ed25519_signing_material_from_path(&path, "receipt signing key", source).map(Some)
+}
 
-    let raw = std::fs::read(&path)
-        .with_context(|| format!("failed reading receipt signing key {}", path.display()))?;
-    let Some(signing_key) = parse_signing_key_from_blob(&raw) else {
-        anyhow::bail!(
-            "failed decoding Ed25519 receipt signing key from {}",
-            path.display()
-        );
-    };
-
-    Ok(Some(ReceiptSigningMaterial {
-        path,
-        source,
-        signing_key,
-    }))
+fn load_registry_publish_signing_material(path: &Path) -> Result<Ed25519SigningMaterial> {
+    load_ed25519_signing_material_from_path(path, "registry publish signing key", "cli")
 }
 
 fn prepare_receipt_signing_material(
     receipt_out: Option<&Path>,
     receipt_summary_out: Option<&Path>,
     cli_override: Option<&Path>,
-) -> Result<Option<ReceiptSigningMaterial>> {
+) -> Result<Option<Ed25519SigningMaterial>> {
     if receipt_out.is_none() && receipt_summary_out.is_none() {
         return Ok(None);
     }
@@ -327,7 +333,7 @@ fn maybe_export_signed_receipts(
     rationale: &str,
     receipt_out: Option<&Path>,
     receipt_summary_out: Option<&Path>,
-    signing_material: Option<&ReceiptSigningMaterial>,
+    signing_material: Option<&Ed25519SigningMaterial>,
 ) -> Result<()> {
     if receipt_out.is_none() && receipt_summary_out.is_none() {
         return Ok(());
@@ -2264,8 +2270,14 @@ mod registry_command_tests {
         let package = temp.path().join("My Extension!.tar.gz");
         std::fs::write(&package, "artifact").expect("write package");
         let hash = "a".repeat(64);
+        let signing_material = Ed25519SigningMaterial {
+            path: temp.path().join("publisher.ed25519"),
+            source: "test",
+            signing_key: ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]),
+        };
 
-        let request = build_registry_publish_request(&package, &hash).expect("publish request");
+        let request = build_registry_publish_request(&package, &hash, &signing_material)
+            .expect("publish request");
         assert!(!request.name.is_empty());
         assert!(request.name.chars().all(|ch| {
             ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_'
@@ -2279,8 +2291,14 @@ mod registry_command_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let package = temp.path().join("demo.tar.gz");
         std::fs::write(&package, "artifact").expect("write package");
+        let signing_material = Ed25519SigningMaterial {
+            path: temp.path().join("publisher.ed25519"),
+            source: "test",
+            signing_key: ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]),
+        };
 
-        let request = build_registry_publish_request(&package, "abc123").expect("publish request");
+        let request = build_registry_publish_request(&package, "abc123", &signing_material)
+            .expect("publish request");
         assert_eq!(request.initial_version.content_hash, "abc123");
         assert_eq!(request.provenance.vcs_commit_sha, "abc123");
     }
@@ -3072,6 +3090,7 @@ fn normalize_registry_name(raw: &str) -> String {
 fn build_registry_publish_request(
     package_path: &Path,
     content_hash: &str,
+    signing_material: &Ed25519SigningMaterial,
 ) -> Result<RegistrationRequest> {
     let inferred_name = package_path
         .file_stem()
@@ -3085,21 +3104,11 @@ fn build_registry_publish_request(
     );
 
     let manifest_bytes = format!("manifest:{}:{}", name, content_hash).into_bytes();
-
-    // Generate a deterministic key from publisher_id for CLI demo
-    let seed_bytes = {
-        use sha2::Digest;
-        let mut h = sha2::Sha256::new();
-        h.update(b"registry_publish_key_v1:");
-        h.update(publisher_id.as_bytes());
-        let d = h.finalize();
-        let mut arr = [0u8; 32];
-        arr.copy_from_slice(&d);
-        arr
-    };
-    let sk = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
-    let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&sk.verifying_key());
-    let signature_bytes = supply_chain::artifact_signing::sign_bytes(&sk, &manifest_bytes);
+    let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(
+        &signing_material.signing_key.verifying_key(),
+    );
+    let signature_bytes =
+        supply_chain::artifact_signing::sign_bytes(&signing_material.signing_key, &manifest_bytes);
 
     let now_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3294,29 +3303,15 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
     let content_hash = hex::encode(sha2::Sha256::digest(
         [b"registry_publish_content_v1:" as &[u8], &package_bytes[..]].concat(),
     ));
-    let request = build_registry_publish_request(&args.package_path, &content_hash)?;
+    let signing_material = load_registry_publish_signing_material(&args.signing_key)?;
+    let request =
+        build_registry_publish_request(&args.package_path, &content_hash, &signing_material)?;
+    let publisher_key_id = request.signature.key_id.clone();
+    let signing_key_source = signing_material.source;
+    let signing_key_path = signing_material.path.display().to_string();
 
     let mut registry = registry_cli_registry()?;
-    // Register the publisher's key in the admission kernel so the signature can be verified
-    {
-        let publisher_id = normalize_registry_name(
-            &std::env::var("USER")
-                .or_else(|_| std::env::var("USERNAME"))
-                .unwrap_or_else(|_| "local-operator".to_string()),
-        );
-        let seed_bytes = {
-            use sha2::Digest;
-            let mut h = sha2::Sha256::new();
-            h.update(b"registry_publish_key_v1:");
-            h.update(publisher_id.as_bytes());
-            let d = h.finalize();
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&d);
-            arr
-        };
-        let sk = ed25519_dalek::SigningKey::from_bytes(&seed_bytes);
-        registry.register_publisher_key(sk.verifying_key());
-    }
+    registry.register_publisher_key(signing_material.signing_key.verifying_key());
     let publish_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -3333,11 +3328,14 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("registry publish stored entry is missing"))?;
 
     println!(
-        "registry publish: extension_id={} name={} status={} content_sha256={}",
+        "registry publish: extension_id={} name={} status={} content_sha256={} publisher_key_id={} signing_key_source={} signing_key_path={}",
         published.extension_id,
         published.name,
         published.status.label(),
-        content_hash
+        content_hash,
+        publisher_key_id,
+        signing_key_source,
+        signing_key_path
     );
     println!(
         "registry state: entries={} revocations={} audit_records={} content_hash={}",
@@ -4567,10 +4565,6 @@ fn main() -> Result<()> {
             .context("failed resolving configuration for run")?;
 
             let dispatcher = ops::engine_dispatcher::EngineDispatcher::new(args.engine_bin);
-            eprintln!(
-                "Dispatching to franken_engine for {}",
-                args.app_path.display()
-            );
             dispatcher.dispatch_run(&args.app_path, &resolved.config, &args.policy)?;
         }
 

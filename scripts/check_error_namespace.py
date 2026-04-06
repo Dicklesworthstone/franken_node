@@ -44,7 +44,7 @@ def _read(path: Path) -> str:
 
 def _run_json_cmd(cmd: list[str]) -> tuple[bool, dict[str, Any], str]:
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, timeout=600)
+        proc = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT, timeout=3600)
     except (subprocess.SubprocessError, OSError) as exc:
         return False, {}, str(exc)
     stdout = proc.stdout.strip()

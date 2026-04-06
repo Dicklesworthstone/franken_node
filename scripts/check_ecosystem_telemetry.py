@@ -10,7 +10,6 @@ from pathlib import Path
 from typing import Any
 
 import sys
-from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
@@ -48,6 +47,19 @@ REQUIRED_SPEC_MARKERS = [
     "trust_card.rs",
 ]
 
+REQUIRED_VALIDATION_MARKERS = [
+    "`bd-2fqyv.9.3` ratchets this surface with a scenario matrix",
+    "`partial_active_set_coverage`",
+    "`missing_inputs`",
+    "`stale_compromise_report`",
+    "`stale_certification_inputs`",
+    "`complete_containment_or_baseline_absent`",
+    "python3 scripts/check_ecosystem_telemetry.py --json",
+    "artifacts/section_10_4/bd-phf/verification_evidence.json",
+    "artifacts/section_10_4/bd-phf/verification_summary.md",
+    "`authoritative_inputs`, `observed_inputs`, `source_timestamp`, and `detail`",
+]
+
 REQUIRED_RUST_SYMBOLS = [
     "pub enum TrustMetricKind",
     "pub enum AdoptionMetricKind",
@@ -64,11 +76,21 @@ REQUIRED_RUST_SYMBOLS = [
     "pub struct TelemetryQueryResult",
     "pub enum DerivedMetricAvailability",
     "pub struct DerivedMetricContract",
+    "pub struct DerivedMetricMetadata",
+    "pub struct CompromiseReductionReport",
+    "pub fn load_compromise_reduction_report(",
     "pub fn compromise_reduction_factor_contract()",
     "pub fn certification_distribution_contract()",
     "pub struct EcosystemHealthExport",
     "pub struct ResourceBudget",
     "pub struct TelemetryPipeline",
+]
+
+REQUIRED_PROVENANCE_FIELDS = [
+    "pub authoritative_inputs: Vec<String>",
+    "pub observed_inputs: Vec<String>",
+    "pub source_timestamp: Option<String>",
+    "pub detail: String",
 ]
 
 REQUIRED_EVENT_CODES = [
@@ -131,6 +153,13 @@ REQUIRED_TESTS = [
     "test_anomaly_detection_publication_volume",
     "test_no_anomaly_within_threshold",
     "test_health_export",
+    "test_load_compromise_reduction_report_from_artifact",
+    "test_health_export_computes_compromise_reduction_from_authoritative_report",
+    "test_health_export_surfaces_complete_containment_instead_of_placeholder_ratio",
+    "test_health_export_surfaces_baseline_absent_for_undefined_compromise_ratio",
+    "test_health_export_surfaces_stale_compromise_report",
+    "test_health_export_counts_active_extensions_using_certification_registry",
+    "test_health_export_marks_stale_certification_distribution_inputs",
     "test_resource_budget_eviction",
     "test_governance_default_opt_in",
     "test_compromise_reduction_contract_declares_complete_containment",
@@ -224,7 +253,11 @@ def run_all_checks() -> dict[str, Any]:
         },
         "spec_invariants": check_content("spec", SPEC_PATH, REQUIRED_INVARIANTS),
         "spec_metric_contracts": check_content("spec", SPEC_PATH, REQUIRED_SPEC_MARKERS),
+        "validation_matrix": check_content("spec", SPEC_PATH, REQUIRED_VALIDATION_MARKERS),
         "rust_symbols": check_content("rust", RUST_IMPL_PATH, REQUIRED_RUST_SYMBOLS),
+        "provenance_metadata_fields": check_content(
+            "rust", RUST_IMPL_PATH, REQUIRED_PROVENANCE_FIELDS
+        ),
         "event_codes": check_content("rust", RUST_IMPL_PATH, REQUIRED_EVENT_CODES),
         "trust_metrics": check_content("rust", RUST_IMPL_PATH, REQUIRED_TRUST_METRICS),
         "adoption_metrics": check_content("rust", RUST_IMPL_PATH, REQUIRED_ADOPTION_METRICS),
@@ -240,7 +273,9 @@ def run_all_checks() -> dict[str, Any]:
     check_results = [
         checks["spec_invariants"],
         checks["spec_metric_contracts"],
+        checks["validation_matrix"],
         checks["rust_symbols"],
+        checks["provenance_metadata_fields"],
         checks["event_codes"],
         checks["trust_metrics"],
         checks["adoption_metrics"],
@@ -265,9 +300,9 @@ def run_all_checks() -> dict[str, Any]:
         "overall_pass": all_pass and file_pass,
         "checks": checks,
         "summary": {
-            "total_checks": 14,
+            "total_checks": 16,
             "passed": passed_count,
-            "failed": 14 - passed_count,
+            "failed": 16 - passed_count,
         },
     }
 
@@ -317,10 +352,10 @@ def self_test() -> bool:
     assert "checks" in evidence
     assert "summary" in evidence
     expected = [
-        "files", "spec_invariants", "spec_metric_contracts", "rust_symbols", "event_codes",
-        "trust_metrics", "adoption_metrics", "anomaly_types",
-        "pipeline_methods", "tests", "mod_registration",
-        "privacy_governance", "anomaly_detection", "resource_budget",
+        "files", "spec_invariants", "spec_metric_contracts", "validation_matrix",
+        "rust_symbols", "provenance_metadata_fields", "event_codes", "trust_metrics",
+        "adoption_metrics", "anomaly_types", "pipeline_methods", "tests",
+        "mod_registration", "privacy_governance", "anomaly_detection", "resource_budget",
     ]
     for cat in expected:
         assert cat in evidence["checks"], f"missing check: {cat}"

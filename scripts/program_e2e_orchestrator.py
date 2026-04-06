@@ -144,7 +144,7 @@ def _stop_test_server(proc: subprocess.Popen) -> None:
     """Stop the test server process."""
     proc.terminate()
     try:
-        proc.wait(timeout=5)
+        proc.wait(timeout=3600)
     except subprocess.TimeoutExpired:
         proc.kill()
         proc.wait()
@@ -153,7 +153,7 @@ def _stop_test_server(proc: subprocess.Popen) -> None:
 
 def _http_get(base: str, path: str) -> dict:
     req = urllib.request.Request(f"{base}{path}")
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=3600) as resp:
         return json.loads(resp.read())
 
 
@@ -164,13 +164,13 @@ def _http_post(base: str, path: str, body: dict | None = None) -> dict:
         headers={"Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=3600) as resp:
         return json.loads(resp.read())
 
 
 def _http_delete(base: str, path: str) -> dict:
     req = urllib.request.Request(f"{base}{path}", method="DELETE")
-    with urllib.request.urlopen(req, timeout=10) as resp:
+    with urllib.request.urlopen(req, timeout=3600) as resp:
         return json.loads(resp.read())
 
 

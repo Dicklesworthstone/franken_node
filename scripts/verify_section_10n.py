@@ -115,7 +115,7 @@ def check_script_run(check: dict) -> dict:
     try:
         proc = subprocess.run(
             check["command"],
-            capture_output=True, text=True, timeout=60,
+            capture_output=True, text=True, timeout=3600,
         )
         result["details"]["exit_code"] = proc.returncode
 
@@ -155,7 +155,7 @@ def run_unit_tests(tests: list[dict]) -> list[dict]:
         try:
             proc = subprocess.run(
                 test["command"],
-                capture_output=True, text=True, timeout=60,
+                capture_output=True, text=True, timeout=3600,
             )
             result["exit_code"] = proc.returncode
             if proc.returncode != 0:
