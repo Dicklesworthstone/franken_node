@@ -120,8 +120,8 @@ def main():
         test_output = result.stdout + result.stderr
         # Count passed tests
         import re
-        match = re.search(r"test result: ok\. (\d+) passed", test_output)
-        rust_tests = int(match.group(1)) if match else 0
+        matches = re.findall(r"test result: ok\. (\d+) passed", test_output)
+        rust_tests = sum(int(m) for m in matches)
         tests_pass = result.returncode == 0 and rust_tests > 0
         all_pass &= check("CRDT-TESTS", "Rust unit tests pass", tests_pass,
                           f"{rust_tests} tests passed")

@@ -3,6 +3,9 @@
 import json
 import os
 import unittest
+from unittest import mock
+
+from scripts import check_degraded_mode_audit
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -128,6 +131,131 @@ class TestDegradedModeConformanceTests(unittest.TestCase):
 
     def test_covers_immutable(self):
         self.assertIn("inv_dm_immutable", self.content)
+
+
+class TestDegradedModeCheckerLogic(unittest.TestCase):
+
+    def test_cargo_harness_wires_conformance_test(self):
+        harness_path = os.path.join(
+            ROOT, "crates/franken-node/tests/degraded_mode_audit_events.rs"
+        )
+        self.assertTrue(os.path.isfile(harness_path))
+        with open(harness_path) as f:
+            content = f.read()
+        self.assertIn("../../../tests/conformance/degraded_mode_audit_events.rs", content)
+
+    def test_parse_rust_test_summary_handles_singular_and_plural(self):
+        output = """
+running 1 test
+test smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+running 4 tests
+test alpha ... ok
+test beta ... ok
+test gamma ... ok
+test delta ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out
+"""
+        summary = check_degraded_mode_audit.parse_rust_test_summary(output)
+        self.assertEqual(summary["running"], 5)
+        self.assertEqual(summary["passed"], 5)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["filtered"], 2)
+
+    def test_parse_rust_test_summary_counts_failed_tests(self):
+        output = """
+running 2 tests
+test alpha ... FAILED
+test beta ... ok
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+        summary = check_degraded_mode_audit.parse_rust_test_summary(output)
+        self.assertEqual(summary["running"], 2)
+        self.assertEqual(summary["passed"], 1)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["filtered"], 0)
+
+    def test_summarize_failure_output_strips_ansi_and_focuses_error(self):
+        output = (
+            "\x1b[32mCompiling\x1b[0m frankenengine-engine\n"
+            "\x1b[31merror[E0753]\x1b[0m: expected outer doc comment\n"
+            " --> /data/projects/franken_engine/crates/franken-engine/src/parser.rs:2:1\n"
+        )
+        summary = check_degraded_mode_audit.summarize_failure_output(output, max_lines=2)
+        self.assertIn("error[E0753]: expected outer doc comment", summary)
+        self.assertNotIn("\x1b", summary)
+
+    def test_select_failure_excerpt_prefers_first_non_empty_excerpt(self):
+        excerpt = check_degraded_mode_audit.select_failure_excerpt(
+            "",
+            "\x1b[31merror[E0004]\x1b[0m: pattern not covered\n",
+        )
+        self.assertIn("error[E0004]: pattern not covered", excerpt)
+
+    @mock.patch("scripts.check_degraded_mode_audit.subprocess.run")
+    def test_run_degraded_mode_unit_tests_uses_rch_and_lib_filter(self, run_mock):
+        run_mock.return_value = mock.Mock(
+            stdout="running 3 tests\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            stderr="",
+            returncode=0,
+        )
+
+        summary, _ = check_degraded_mode_audit.run_degraded_mode_unit_tests()
+
+        run_mock.assert_called_once_with(
+            [
+                "rch",
+                "exec",
+                "--",
+                "cargo",
+                "test",
+                "-p",
+                "frankenengine-node",
+                "--lib",
+                "--",
+                check_degraded_mode_audit.DEGRADED_MODE_UNIT_FILTER,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=check_degraded_mode_audit.DEGRADED_MODE_TEST_TIMEOUT_SECONDS,
+            cwd=check_degraded_mode_audit.ROOT,
+        )
+        self.assertEqual(summary["returncode"], 0)
+        self.assertEqual(summary["passed"], 3)
+
+    @mock.patch("scripts.check_degraded_mode_audit.subprocess.run")
+    def test_run_degraded_mode_conformance_tests_uses_named_target(self, run_mock):
+        run_mock.return_value = mock.Mock(
+            stdout="running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            stderr="",
+            returncode=0,
+        )
+
+        summary, _ = check_degraded_mode_audit.run_degraded_mode_conformance_tests()
+
+        run_mock.assert_called_once_with(
+            [
+                "rch",
+                "exec",
+                "--",
+                "cargo",
+                "test",
+                "-p",
+                "frankenengine-node",
+                "--test",
+                check_degraded_mode_audit.DEGRADED_MODE_CONFORMANCE_TARGET,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=check_degraded_mode_audit.DEGRADED_MODE_TEST_TIMEOUT_SECONDS,
+            cwd=check_degraded_mode_audit.ROOT,
+        )
+        self.assertEqual(summary["returncode"], 0)
+        self.assertEqual(summary["passed"], 1)
 
 
 if __name__ == "__main__":

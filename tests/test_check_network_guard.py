@@ -1,22 +1,14 @@
 """Unit tests for check_network_guard.py verification logic."""
 
-import importlib.util
 import json
 import os
 import unittest
 from pathlib import Path
+from unittest import mock
+
+from scripts import check_network_guard
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
-
-def load_check_network_guard_module():
-    script_path = Path(ROOT) / "scripts" / "check_network_guard.py"
-    spec = importlib.util.spec_from_file_location("check_network_guard", script_path)
-    if spec is None or spec.loader is None:
-        raise RuntimeError(f"failed to load module from {script_path}")
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
 
 
 class TestNetworkGuardFixtures(unittest.TestCase):
@@ -81,7 +73,7 @@ class TestNetworkGuardScriptHelpers(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.module = load_check_network_guard_module()
+        cls.module = check_network_guard
 
     def test_build_guard_test_command_uses_rch_exec(self):
         self.assertEqual(
@@ -99,6 +91,121 @@ class TestNetworkGuardScriptHelpers(unittest.TestCase):
                 self.module.NETWORK_GUARD_TEST_FILTER,
             ],
         )
+
+    def test_build_guard_security_test_command_uses_named_target(self):
+        self.assertEqual(
+            self.module.build_guard_security_test_command(),
+            [
+                "rch",
+                "exec",
+                "--",
+                "cargo",
+                "test",
+                "-p",
+                "frankenengine-node",
+                "--test",
+                self.module.NETWORK_GUARD_SECURITY_TARGET,
+            ],
+        )
+
+    def test_parse_rust_test_summary_handles_singular_and_plural(self):
+        output = """
+running 1 test
+test smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+running 2 tests
+test alpha ... ok
+test beta ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out
+"""
+        summary = self.module.parse_rust_test_summary(output)
+        self.assertEqual(summary["running"], 3)
+        self.assertEqual(summary["passed"], 3)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["filtered"], 1)
+
+    def test_parse_rust_test_summary_counts_failed_tests(self):
+        output = """
+running 3 tests
+test alpha ... ok
+test beta ... FAILED
+test gamma ... ok
+
+test result: FAILED. 2 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+        summary = self.module.parse_rust_test_summary(output)
+        self.assertEqual(summary["running"], 3)
+        self.assertEqual(summary["passed"], 2)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["filtered"], 0)
+
+    def test_summarize_failure_output_strips_ansi_and_focuses_error(self):
+        output = (
+            "\x1b[32mCompiling\x1b[0m frankenengine-engine\n"
+            "\x1b[31merror[E0428]\x1b[0m: the name `foo` is defined multiple times\n"
+            " --> src/lib.rs:12:1\n"
+        )
+        summary = self.module.summarize_failure_output(output, max_lines=2)
+        self.assertIn("error[E0428]: the name `foo` is defined multiple times", summary)
+        self.assertNotIn("\x1b", summary)
+
+    def test_select_failure_excerpt_prefers_first_non_empty_excerpt(self):
+        excerpt = self.module.select_failure_excerpt(
+            "",
+            "\x1b[31merror[E0428]\x1b[0m: duplicate definitions\n",
+        )
+        self.assertIn("error[E0428]: duplicate definitions", excerpt)
+
+    def test_cargo_harness_wires_security_test(self):
+        harness_path = Path(ROOT) / "crates/franken-node/tests/remote_cap_enforcement.rs"
+        self.assertTrue(harness_path.is_file())
+        self.assertIn(
+            "../../../tests/security/remote_cap_enforcement.rs",
+            harness_path.read_text(encoding="utf-8"),
+        )
+
+    @mock.patch("scripts.check_network_guard.subprocess.run")
+    def test_run_guard_unit_tests_uses_rch_and_lib_filter(self, run_mock):
+        run_mock.return_value = mock.Mock(
+            stdout="running 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            stderr="",
+            returncode=0,
+        )
+
+        summary, _ = self.module.run_guard_unit_tests()
+
+        run_mock.assert_called_once_with(
+            self.module.build_guard_test_command(),
+            capture_output=True,
+            text=True,
+            timeout=self.module.GUARD_TEST_TIMEOUT_SECONDS,
+            cwd=self.module.ROOT,
+        )
+        self.assertEqual(summary["returncode"], 0)
+        self.assertEqual(summary["passed"], 2)
+
+    @mock.patch("scripts.check_network_guard.subprocess.run")
+    def test_run_guard_security_tests_uses_named_target(self, run_mock):
+        run_mock.return_value = mock.Mock(
+            stdout="running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            stderr="",
+            returncode=0,
+        )
+
+        summary, _ = self.module.run_guard_security_tests()
+
+        run_mock.assert_called_once_with(
+            self.module.build_guard_security_test_command(),
+            capture_output=True,
+            text=True,
+            timeout=self.module.GUARD_TEST_TIMEOUT_SECONDS,
+            cwd=self.module.ROOT,
+        )
+        self.assertEqual(summary["returncode"], 0)
+        self.assertEqual(summary["passed"], 1)
 
     def test_audit_samples_helper_accepts_current_artifact(self):
         path = Path(ROOT) / "artifacts/section_10_13/bd-2m2b/network_guard_audit_samples.jsonl"

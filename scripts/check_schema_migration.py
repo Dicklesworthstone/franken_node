@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-from pathlib import Path
 """Verification script for bd-b44: State Schema Version Contracts."""
 
 import json
@@ -7,10 +6,15 @@ import os
 import re
 import subprocess
 import sys
+from pathlib import Path
+
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, str(ROOT))
 from scripts.lib.test_logger import configure_test_logging
+
 CHECKS = []
+SCHEMA_MIGRATION_TEST_TARGET = "state_migration_contract"
+ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 
 def check(check_id, description, passed, details=None):
@@ -23,6 +27,64 @@ def check(check_id, description, passed, details=None):
     if details:
         print(f"         {details}")
     return passed
+
+
+def parse_rust_test_summary(output):
+    running = sum(int(m) for m in re.findall(r"running (\d+) test(?:s)?", output))
+    result_matches = re.findall(
+        r"test result: ok\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out",
+        output,
+    )
+    passed = sum(int(match[0]) for match in result_matches)
+    failed = sum(int(match[1]) for match in result_matches)
+    filtered = sum(int(match[4]) for match in result_matches)
+    return {
+        "running": running,
+        "passed": passed,
+        "failed": failed,
+        "filtered": filtered,
+    }
+
+
+def summarize_failure_output(output, max_lines=6):
+    cleaned_lines = [
+        ANSI_ESCAPE_RE.sub("", line).strip() for line in output.splitlines()
+    ]
+    cleaned_lines = [line for line in cleaned_lines if line]
+    error_start = next(
+        (idx for idx, line in enumerate(cleaned_lines) if "error" in line.lower()),
+        None,
+    )
+    snippet = (
+        cleaned_lines[error_start:error_start + max_lines]
+        if error_start is not None
+        else cleaned_lines[:max_lines]
+    )
+    return " | ".join(snippet)
+
+
+def run_schema_migration_tests():
+    result = subprocess.run(
+        [
+            "rch",
+            "exec",
+            "--",
+            "cargo",
+            "test",
+            "-p",
+            "frankenengine-node",
+            "--test",
+            SCHEMA_MIGRATION_TEST_TARGET,
+        ],
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        cwd=ROOT,
+    )
+    output = result.stdout + result.stderr
+    summary = parse_rust_test_summary(output)
+    summary["returncode"] = result.returncode
+    return summary, output
 
 
 def main():
@@ -106,21 +168,47 @@ def main():
     all_pass &= check("MIGRATE-INTEGRATION", "Integration tests with e2e, idempotency, contract checks",
                       integ_exists and has_e2e and has_idemp and has_range)
 
+    # MIGRATE-HARNESS: Cargo integration harness exists
+    harness_path = os.path.join(ROOT, "crates/franken-node/tests/state_migration_contract.rs")
+    harness_exists = os.path.isfile(harness_path)
+    if harness_exists:
+        harness_content = Path(harness_path).read_text()
+        harness_wired = "../../../tests/integration/state_migration_contract.rs" in harness_content
+    else:
+        harness_wired = False
+    all_pass &= check(
+        "MIGRATE-HARNESS",
+        "Cargo harness wires the schema migration integration test target",
+        harness_exists and harness_wired,
+    )
+
     # MIGRATE-TESTS: Rust tests pass
     try:
-        result = subprocess.run(
-            ["rch", "exec", "--", "cargo", "test", "-p", "frankenengine-node", "--", "connector::schema_migration"],
-            capture_output=True, text=True, timeout=3600,
-            cwd=os.path.join(ROOT, "crates/franken-node")
+        summary, output = run_schema_migration_tests()
+        tests_pass = (
+            summary["returncode"] == 0
+            and summary["running"] > 0
+            and summary["passed"] > 0
+            and summary["failed"] == 0
         )
-        test_output = result.stdout + result.stderr
-        match = re.search(r"test result: ok\. (\d+) passed", test_output)
-        rust_tests = int(match.group(1)) if match else 0
-        tests_pass = result.returncode == 0 and rust_tests > 0
-        all_pass &= check("MIGRATE-TESTS", "Rust unit tests pass", tests_pass,
-                          f"{rust_tests} tests passed")
+        details = f"{summary['passed']} passed / {summary['running']} ran / {summary['filtered']} filtered"
+        if not tests_pass:
+            failure_excerpt = summarize_failure_output(output)
+            if failure_excerpt:
+                details = f"{details}; rc={summary['returncode']}; {failure_excerpt}"
+        all_pass &= check(
+            "MIGRATE-TESTS",
+            "Rust schema migration integration tests pass",
+            tests_pass,
+            details,
+        )
     except (subprocess.TimeoutExpired, FileNotFoundError) as e:
-        all_pass &= check("MIGRATE-TESTS", "Rust unit tests pass", False, str(e))
+        all_pass &= check(
+            "MIGRATE-TESTS",
+            "Rust schema migration integration tests pass",
+            False,
+            str(e),
+        )
 
     # MIGRATE-SPEC: Spec contract
     spec_path = os.path.join(ROOT, "docs/specs/section_10_13/bd-b44_contract.md")

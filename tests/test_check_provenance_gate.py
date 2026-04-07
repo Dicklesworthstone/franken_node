@@ -3,6 +3,9 @@
 import json
 import os
 import unittest
+from unittest import mock
+
+from scripts import check_provenance_gate
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -85,6 +88,128 @@ class TestProvenanceImplementation(unittest.TestCase):
         for code in ["PROV_ATTEST_MISSING", "PROV_ASSURANCE_LOW",
                      "PROV_BUILDER_UNTRUSTED", "PROV_POLICY_INVALID"]:
             self.assertIn(code, self.content, f"Missing error code {code}")
+
+
+class TestProvenanceCheckerLogic(unittest.TestCase):
+
+    def test_cargo_harness_wires_security_test(self):
+        harness_path = os.path.join(ROOT, "crates/franken-node/tests/attestation_gate.rs")
+        self.assertTrue(os.path.isfile(harness_path))
+        with open(harness_path) as f:
+            content = f.read()
+        self.assertIn("../../../tests/security/attestation_gate.rs", content)
+
+    def test_parse_rust_test_summary_handles_singular_and_plural(self):
+        output = """
+running 1 test
+test smoke ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+
+running 3 tests
+test alpha ... ok
+test beta ... ok
+test gamma ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out
+"""
+        summary = check_provenance_gate.parse_rust_test_summary(output)
+        self.assertEqual(summary["running"], 4)
+        self.assertEqual(summary["passed"], 4)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["filtered"], 2)
+
+    def test_parse_rust_test_summary_counts_failed_tests(self):
+        output = """
+running 2 tests
+test alpha ... ok
+test beta ... FAILED
+
+test result: FAILED. 1 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out
+"""
+        summary = check_provenance_gate.parse_rust_test_summary(output)
+        self.assertEqual(summary["running"], 2)
+        self.assertEqual(summary["passed"], 1)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(summary["filtered"], 0)
+
+    def test_summarize_failure_output_strips_ansi_and_focuses_error(self):
+        output = (
+            "\x1b[32mCompiling\x1b[0m frankenengine-engine\n"
+            "\x1b[31merror[E0753]\x1b[0m: expected outer doc comment\n"
+            " --> /data/projects/franken_engine/crates/franken-engine/src/parser.rs:2:1\n"
+        )
+        summary = check_provenance_gate.summarize_failure_output(output, max_lines=2)
+        self.assertIn("error[E0753]: expected outer doc comment", summary)
+        self.assertNotIn("\x1b", summary)
+
+    def test_select_failure_excerpt_prefers_first_non_empty_excerpt(self):
+        excerpt = check_provenance_gate.select_failure_excerpt(
+            "",
+            "\x1b[31merror[E0004]\x1b[0m: non-exhaustive patterns\n",
+        )
+        self.assertIn("error[E0004]: non-exhaustive patterns", excerpt)
+
+    @mock.patch("scripts.check_provenance_gate.subprocess.run")
+    def test_run_gate_unit_tests_uses_rch_and_lib_filter(self, run_mock):
+        run_mock.return_value = mock.Mock(
+            stdout="running 2 tests\ntest result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            stderr="",
+            returncode=0,
+        )
+
+        summary, _ = check_provenance_gate.run_gate_unit_tests()
+
+        run_mock.assert_called_once_with(
+            [
+                "rch",
+                "exec",
+                "--",
+                "cargo",
+                "test",
+                "-p",
+                "frankenengine-node",
+                "--lib",
+                "--",
+                check_provenance_gate.PROVENANCE_GATE_UNIT_FILTER,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            cwd=check_provenance_gate.ROOT,
+        )
+        self.assertEqual(summary["returncode"], 0)
+        self.assertEqual(summary["passed"], 2)
+
+    @mock.patch("scripts.check_provenance_gate.subprocess.run")
+    def test_run_gate_security_tests_uses_named_target(self, run_mock):
+        run_mock.return_value = mock.Mock(
+            stdout="running 1 test\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out\n",
+            stderr="",
+            returncode=0,
+        )
+
+        summary, _ = check_provenance_gate.run_gate_security_tests()
+
+        run_mock.assert_called_once_with(
+            [
+                "rch",
+                "exec",
+                "--",
+                "cargo",
+                "test",
+                "-p",
+                "frankenengine-node",
+                "--test",
+                check_provenance_gate.PROVENANCE_GATE_SECURITY_TARGET,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=3600,
+            cwd=check_provenance_gate.ROOT,
+        )
+        self.assertEqual(summary["returncode"], 0)
+        self.assertEqual(summary["passed"], 1)
 
 
 class TestProvenanceSpec(unittest.TestCase):
