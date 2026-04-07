@@ -35,14 +35,19 @@ class TestFuzzImpl(unittest.TestCase):
         with open(self.impl_path) as f:
             self.content = f.read()
 
-    def test_has_fuzz_corpus(self):
-        self.assertIn("struct FuzzCorpus", self.content)
+    def test_has_deterministic_fixture_adapter(self):
+        self.assertIn("struct DeterministicFuzzTestAdapter", self.content)
 
-    def test_has_fuzz_target(self):
-        self.assertIn("struct FuzzTarget", self.content)
+    def test_has_deterministic_fixture_types(self):
+        self.assertIn("struct DeterministicFuzzTarget", self.content)
+        self.assertIn("struct DeterministicFuzzGateReport", self.content)
+        self.assertIn("fn run_fixture_gate", self.content)
+        self.assertIn("synthetic_test_fixture", self.content)
 
-    def test_has_gate_verdict(self):
-        self.assertIn("struct FuzzGateVerdict", self.content)
+    def test_has_truthful_live_gate_types(self):
+        self.assertIn("struct TruthfulFuzzGateReport", self.content)
+        self.assertIn("struct FuzzTargetDescriptor", self.content)
+        self.assertIn("fn run_truthful_fuzz_gate", self.content)
 
     def test_has_all_error_codes(self):
         for code in ["FCG_MISSING_TARGET", "FCG_INSUFFICIENT_CORPUS", "FCG_REGRESSION",
@@ -60,7 +65,7 @@ class TestFuzzSpec(unittest.TestCase):
 
     def test_has_invariants(self):
         for inv in ["INV-FCG-TARGETS", "INV-FCG-CORPUS",
-                    "INV-FCG-TRIAGE", "INV-FCG-GATE"]:
+                    "INV-FCG-TRIAGE", "INV-FCG-GATE", "INV-FCG-FIXTURE-BOUNDARY"]:
             self.assertIn(inv, self.content, f"Missing invariant {inv}")
 
 
@@ -83,6 +88,16 @@ class TestFuzzIntegration(unittest.TestCase):
 
     def test_covers_gate(self):
         self.assertIn("inv_fcg_gate", self.content)
+
+    def test_covers_fixture_boundary(self):
+        self.assertIn("fixture_gate_reports_explicit_test_adapter_marker", self.content)
+
+    def test_covers_truthful_live_gate(self):
+        self.assertIn("truthful_gate_executes_checked_in_targets", self.content)
+        self.assertIn(
+            "truthful_gate_reports_explicit_coverage_and_relative_artifacts",
+            self.content,
+        )
 
 
 if __name__ == "__main__":

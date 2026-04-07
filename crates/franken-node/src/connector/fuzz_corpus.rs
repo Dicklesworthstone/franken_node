@@ -1,11 +1,52 @@
 //! bd-29ct: Adversarial fuzz corpus gates for decode-DoS and replay/splice scenarios.
 //!
 //! Fuzz targets cover parser input, handshake replay/splice, token validation,
-//! and decode-DoS.  A campaign runner triages crashes into reproducible fixtures
+//! and decode-DoS. A campaign runner triages crashes into reproducible fixtures
 //! and a gate enforces minimum health budgets.
+//!
+//! This module now carries two clearly separated surfaces:
+//!
+//! - `run_truthful_fuzz_gate(...)` is the only live evidence-bearing path.
+//! - `DeterministicFuzzTestAdapter::run_fixture_gate()` is an allowlisted
+//!   synthetic fixture adapter for tests and modeling only.
+//!
+//! `PSI-006` in `docs/governance/placeholder_surface_inventory.md` tracks the
+//! synthetic boundary, and `docs/specs/section_10_13/bd-2fqyv_7_1_contract.md`
+//! defines the live adapter/reporting contract.
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+#[allow(dead_code)]
+#[path = "../../../../fuzz/targets/migration_dependency_resolve.rs"]
+mod migration_dependency_resolve_target;
+#[allow(dead_code)]
+#[path = "../../../../fuzz/targets/migration_directory_scan.rs"]
+mod migration_directory_scan_target;
+#[allow(dead_code)]
+#[path = "../../../../fuzz/targets/migration_package_parse.rs"]
+mod migration_package_parse_target;
+#[allow(dead_code)]
+#[path = "../../../../fuzz/targets/shim_api_translation.rs"]
+mod shim_api_translation_target;
+#[allow(dead_code)]
+#[path = "../../../../fuzz/targets/shim_type_coercion.rs"]
+mod shim_type_coercion_target;
+
+const REPORT_SCHEMA_VERSION: &str = "fuzz_gate_truthful_report_v1";
+const LIVE_ADAPTER_KIND: &str = "in_process_checked_fixtures";
+const DEFAULT_LIVE_TIMEOUT_MS: u64 = 1_000;
+const DETERMINISTIC_FIXTURE_ADAPTER_KIND: &str = "deterministic_fixture_test_adapter";
+const DETERMINISTIC_FIXTURE_EXECUTION_MODE: &str = "synthetic_test_fixture";
+const DETERMINISTIC_FIXTURE_RUNNER_DETAIL: &str = "fixture_marker=synthetic_test_fixture crash_classifier=string_trigger coverage_semantics=placeholder_zero";
 
 // ── Fuzz target categories ──────────────────────────────────────────────────
 
@@ -28,19 +69,17 @@ impl fmt::Display for FuzzCategory {
     }
 }
 
-// ── Fuzz target ─────────────────────────────────────────────────────────────
+// ── Deterministic test/modeling adapter boundary ───────────────────────────
 
 #[derive(Debug, Clone)]
-pub struct FuzzTarget {
+pub struct DeterministicFuzzTarget {
     pub name: String,
     pub category: FuzzCategory,
     pub description: String,
 }
 
-// ── Seed & outcome ──────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SeedOutcome {
+pub enum DeterministicSeedOutcome {
     /// The input should be handled without crash.
     Handled,
     /// The input should be rejected (but not crash).
@@ -48,16 +87,14 @@ pub enum SeedOutcome {
 }
 
 #[derive(Debug, Clone)]
-pub struct FuzzSeed {
+pub struct DeterministicFuzzSeed {
     pub target: String,
     pub input_data: String,
-    pub expected: SeedOutcome,
+    pub expected: DeterministicSeedOutcome,
 }
 
-// ── Campaign result ─────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
-pub struct FuzzCampaignResult {
+pub struct DeterministicFuzzCampaignResult {
     pub target: String,
     pub seeds_run: usize,
     pub crashes: usize,
@@ -65,22 +102,21 @@ pub struct FuzzCampaignResult {
     pub coverage_pct: f64,
 }
 
-// ── Triage ──────────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
-pub struct TriagedCrash {
+pub struct DeterministicTriagedCrash {
     pub target: String,
     pub seed_input: String,
     pub error: String,
     pub reproducer: String,
 }
 
-// ── Gate verdict ────────────────────────────────────────────────────────────
-
 #[derive(Debug, Clone)]
-pub struct FuzzGateVerdict {
-    pub target_results: Vec<FuzzCampaignResult>,
-    pub untriaged: Vec<TriagedCrash>,
+pub struct DeterministicFuzzGateReport {
+    pub adapter_kind: String,
+    pub execution_mode: String,
+    pub runner_detail: String,
+    pub target_results: Vec<DeterministicFuzzCampaignResult>,
+    pub triaged_crashes: Vec<DeterministicTriagedCrash>,
     pub verdict: String,
 }
 
@@ -137,16 +173,14 @@ impl fmt::Display for FuzzError {
     }
 }
 
-// ── Corpus registry ─────────────────────────────────────────────────────────
-
 #[derive(Debug)]
-pub struct FuzzCorpus {
-    targets: BTreeMap<String, FuzzTarget>,
-    seeds: BTreeMap<String, Vec<FuzzSeed>>,
+pub struct DeterministicFuzzTestAdapter {
+    targets: BTreeMap<String, DeterministicFuzzTarget>,
+    seeds: BTreeMap<String, Vec<DeterministicFuzzSeed>>,
     min_seeds: usize,
 }
 
-impl FuzzCorpus {
+impl DeterministicFuzzTestAdapter {
     pub fn new(min_seeds: usize) -> Self {
         Self {
             targets: BTreeMap::new(),
@@ -155,13 +189,13 @@ impl FuzzCorpus {
         }
     }
 
-    /// Register a fuzz target.
-    pub fn add_target(&mut self, target: FuzzTarget) {
+    /// Register a deterministic fixture target.
+    pub fn add_target(&mut self, target: DeterministicFuzzTarget) {
         self.targets.insert(target.name.clone(), target);
     }
 
-    /// Add a seed to a target's corpus.
-    pub fn add_seed(&mut self, seed: FuzzSeed) -> Result<(), FuzzError> {
+    /// Add a deterministic fixture seed to a target's corpus.
+    pub fn add_seed(&mut self, seed: DeterministicFuzzSeed) -> Result<(), FuzzError> {
         if !self.targets.contains_key(&seed.target) {
             return Err(FuzzError::MissingTarget(seed.target.clone()));
         }
@@ -172,7 +206,7 @@ impl FuzzCorpus {
         Ok(())
     }
 
-    /// Validate that all required categories have targets with sufficient seeds.
+    /// Validate that all required categories have deterministic fixture coverage.
     pub fn validate(&self) -> Result<(), FuzzError> {
         let required = [
             FuzzCategory::ParserInput,
@@ -202,29 +236,36 @@ impl FuzzCorpus {
         Ok(())
     }
 
-    /// Simulate running all seeds and produce a gate verdict.
-    pub fn run_gate(&self) -> FuzzGateVerdict {
+    /// Execute the allowlisted synthetic fixture adapter.
+    ///
+    /// This must never be confused with real fuzz evidence. The returned
+    /// payload carries explicit markers that the execution was deterministic
+    /// and synthetic.
+    pub fn run_fixture_gate(&self) -> DeterministicFuzzGateReport {
         let mut results = Vec::new();
-        let mut untriaged = Vec::new();
+        let mut triaged_crashes = Vec::new();
 
         for (target_name, seeds) in &self.seeds {
             let mut crashes = 0;
             for seed in seeds {
-                // Simulate: seeds with "crash" in input trigger a crash
+                // The deterministic fixture adapter uses a deliberate
+                // string-trigger convention rather than empirical execution.
                 if seed.input_data.contains("crash") {
                     crashes += 1;
-                    untriaged.push(TriagedCrash {
+                    triaged_crashes.push(DeterministicTriagedCrash {
                         target: target_name.clone(),
                         seed_input: seed.input_data.clone(),
-                        error: "simulated crash".into(),
+                        error: format!(
+                            "simulated crash ({DETERMINISTIC_FIXTURE_EXECUTION_MODE})"
+                        ),
                         reproducer: format!(
-                            "{{\"target\":\"{target_name}\",\"input\":\"{}\"}}",
+                            "{{\"target\":\"{target_name}\",\"input\":\"{}\",\"fixture_mode\":\"{DETERMINISTIC_FIXTURE_EXECUTION_MODE}\"}}",
                             seed.input_data
                         ),
                     });
                 }
             }
-            results.push(FuzzCampaignResult {
+            results.push(DeterministicFuzzCampaignResult {
                 target: target_name.clone(),
                 seeds_run: seeds.len(),
                 crashes,
@@ -233,15 +274,18 @@ impl FuzzCorpus {
             });
         }
 
-        let verdict = if untriaged.is_empty() {
+        let verdict = if triaged_crashes.is_empty() {
             "PASS".to_string()
         } else {
             "FAIL".to_string()
         };
 
-        FuzzGateVerdict {
+        DeterministicFuzzGateReport {
+            adapter_kind: DETERMINISTIC_FIXTURE_ADAPTER_KIND.to_string(),
+            execution_mode: DETERMINISTIC_FIXTURE_EXECUTION_MODE.to_string(),
+            runner_detail: DETERMINISTIC_FIXTURE_RUNNER_DETAIL.to_string(),
             target_results: results,
-            untriaged,
+            triaged_crashes,
             verdict,
         }
     }
@@ -255,30 +299,879 @@ impl FuzzCorpus {
     }
 }
 
+// ── Truthful live adapter/reporting surface ────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FuzzTargetDescriptor {
+    pub target_id: String,
+    pub category: String,
+    pub adapter_kind: String,
+    pub execution_ref: String,
+    pub working_directory: String,
+    pub timeout_policy_ms: u64,
+    pub coverage_mode: String,
+    pub supports_remote_execution: bool,
+    pub supported_artifact_kinds: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FuzzCoverageObservation {
+    pub coverage_pct: Option<f64>,
+    pub coverage_units: String,
+    pub coverage_source: String,
+    pub coverage_scope: String,
+    pub coverage_status: String,
+    pub coverage_detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FuzzArtifactRef {
+    pub artifact_id: String,
+    pub artifact_kind: String,
+    pub artifact_location: String,
+    pub artifact_digest: String,
+    pub produced_by: String,
+    pub created_at: String,
+    pub is_remote: bool,
+    pub retention_hint: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AdapterHealth {
+    pub adapter_kind: String,
+    pub discovered_targets: usize,
+    pub coverage_reports: usize,
+    pub corpus_roots: Vec<String>,
+    pub healthy: bool,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SeedExecutionResult {
+    pub target_id: String,
+    pub seed_id: String,
+    pub seed_digest: String,
+    pub started_at: String,
+    pub completed_at: String,
+    pub duration_ms: u64,
+    pub outcome: String,
+    pub exit_detail: String,
+    pub crash_artifact: Option<FuzzArtifactRef>,
+    pub hang_artifact: Option<FuzzArtifactRef>,
+    pub coverage: Option<FuzzCoverageObservation>,
+    pub artifact_refs: Vec<FuzzArtifactRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FuzzExecutionReport {
+    pub campaign_id: String,
+    pub adapter_kind: String,
+    pub target: FuzzTargetDescriptor,
+    pub seed_results: Vec<SeedExecutionResult>,
+    pub artifact_refs: Vec<FuzzArtifactRef>,
+    pub coverage_summary: Option<FuzzCoverageObservation>,
+    pub health: AdapterHealth,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TriagedFailure {
+    pub target_id: String,
+    pub seed_id: String,
+    pub seed_digest: String,
+    pub outcome: String,
+    pub classifier: String,
+    pub detail: String,
+    pub artifact_refs: Vec<FuzzArtifactRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TargetExecutionSummary {
+    pub target_id: String,
+    pub category: String,
+    pub outcome: String,
+    pub seeds_run: usize,
+    pub crashes: usize,
+    pub hangs: usize,
+    pub coverage: Option<FuzzCoverageObservation>,
+    pub artifact_refs: Vec<FuzzArtifactRef>,
+    pub adapter_detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TruthfulFuzzGateReport {
+    pub report_schema_version: String,
+    pub campaign_id: String,
+    pub adapter_kind: String,
+    pub targets_total: usize,
+    pub targets_executed: usize,
+    pub seeds_total: usize,
+    pub seeds_executed: usize,
+    pub targets: Vec<TargetExecutionSummary>,
+    pub triaged_failures: Vec<TriagedFailure>,
+    pub artifact_refs: Vec<FuzzArtifactRef>,
+    pub coverage_summary: Vec<FuzzCoverageObservation>,
+    pub verdict: String,
+    pub error_detail: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveBudgetConfig {
+    migration: LiveBudgetSection,
+    shim: LiveBudgetSection,
+}
+
+#[derive(Debug, Deserialize)]
+struct LiveBudgetSection {
+    min_seconds_per_target: u64,
+    targets: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CoverageFixture {
+    target: String,
+    corpus_size: usize,
+    lines_covered: usize,
+    lines_total: usize,
+    coverage_pct: f64,
+    new_paths_found: usize,
+    crashes_found: usize,
+    event_code: String,
+    timestamp: String,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedSeed {
+    seed_id: String,
+    seed_digest: String,
+    bytes: Vec<u8>,
+    artifact_ref: FuzzArtifactRef,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedCoverage {
+    observation: FuzzCoverageObservation,
+    artifact_ref: Option<FuzzArtifactRef>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedFuzzCampaign {
+    target: FuzzTargetDescriptor,
+    seeds: Vec<PreparedSeed>,
+    coverage: PreparedCoverage,
+}
+
+struct TargetDispatch {
+    outcome: &'static str,
+    detail: String,
+}
+
+impl TargetDispatch {
+    fn handled(detail: impl Into<String>) -> Self {
+        Self {
+            outcome: "handled",
+            detail: detail.into(),
+        }
+    }
+
+    fn rejected(detail: impl Into<String>) -> Self {
+        Self {
+            outcome: "rejected",
+            detail: detail.into(),
+        }
+    }
+
+    fn crash(detail: impl Into<String>) -> Self {
+        Self {
+            outcome: "crash",
+            detail: detail.into(),
+        }
+    }
+}
+
+impl TruthfulFuzzGateReport {
+    fn discovery_error(detail: impl Into<String>) -> Self {
+        Self {
+            report_schema_version: REPORT_SCHEMA_VERSION.to_string(),
+            campaign_id: "fcg-live-discovery-error".to_string(),
+            adapter_kind: LIVE_ADAPTER_KIND.to_string(),
+            targets_total: 0,
+            targets_executed: 0,
+            seeds_total: 0,
+            seeds_executed: 0,
+            targets: Vec::new(),
+            triaged_failures: Vec::new(),
+            artifact_refs: Vec::new(),
+            coverage_summary: Vec::new(),
+            verdict: "ERROR".to_string(),
+            error_detail: Some(detail.into()),
+        }
+    }
+}
+
+pub fn default_truthful_fuzz_repo_root() -> PathBuf {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    root.canonicalize().unwrap_or(root)
+}
+
+pub fn discover_truthful_fuzz_targets(
+    repo_root: impl AsRef<Path>,
+) -> Result<Vec<FuzzTargetDescriptor>, String> {
+    let repo_root = repo_root.as_ref();
+    let config = load_live_budget_config(repo_root)?;
+    let mut targets = Vec::new();
+
+    for (category, section) in [("migration", &config.migration), ("shim", &config.shim)] {
+        for slug in &section.targets {
+            let target_id = format!("{category}_{slug}");
+            let execution_ref = format!("fuzz/targets/{target_id}.rs");
+            let target_path = repo_root.join(&execution_ref);
+            if !target_path.is_file() {
+                return Err(format!(
+                    "missing target definition `{}`",
+                    execution_ref.replace('\\', "/")
+                ));
+            }
+
+            targets.push(FuzzTargetDescriptor {
+                target_id,
+                category: category.to_string(),
+                adapter_kind: LIVE_ADAPTER_KIND.to_string(),
+                execution_ref,
+                working_directory: "fuzz".to_string(),
+                timeout_policy_ms: DEFAULT_LIVE_TIMEOUT_MS
+                    .max(section.min_seconds_per_target.max(1) * 1_000),
+                coverage_mode: "category_fixture_report".to_string(),
+                supports_remote_execution: false,
+                supported_artifact_kinds: vec![
+                    "corpus_seed".to_string(),
+                    "regression_seed".to_string(),
+                    "coverage_report".to_string(),
+                ],
+            });
+        }
+    }
+
+    targets.sort_by(|left, right| left.target_id.cmp(&right.target_id));
+    if targets.is_empty() {
+        return Err("fuzz/config/fuzz_budget.toml resolved zero active targets".to_string());
+    }
+    Ok(targets)
+}
+
+pub fn run_truthful_fuzz_gate(repo_root: impl AsRef<Path>) -> TruthfulFuzzGateReport {
+    let repo_root = repo_root.as_ref();
+    let targets = match discover_truthful_fuzz_targets(repo_root) {
+        Ok(targets) => targets,
+        Err(error) => return TruthfulFuzzGateReport::discovery_error(error),
+    };
+    let campaign_id = compute_campaign_id(&targets);
+    let health = build_adapter_health(&targets);
+    let mut reports = Vec::new();
+    let mut preparation_errors = Vec::new();
+
+    for target in &targets {
+        match prepare_truthful_campaign(repo_root, target) {
+            Ok(prepared) => {
+                reports.push(execute_truthful_campaign(&campaign_id, &health, prepared))
+            }
+            Err(error) => preparation_errors.push((target.clone(), error)),
+        }
+    }
+
+    aggregate_truthful_reports(
+        &campaign_id,
+        &health,
+        targets.len(),
+        reports,
+        preparation_errors,
+    )
+}
+
+fn load_live_budget_config(repo_root: &Path) -> Result<LiveBudgetConfig, String> {
+    let path = repo_root.join("fuzz/config/fuzz_budget.toml");
+    let content = fs::read_to_string(&path).map_err(|error| {
+        format!(
+            "failed to read {}: {error}",
+            relative_path(repo_root, &path)
+        )
+    })?;
+    toml::from_str(&content).map_err(|error| {
+        format!(
+            "failed to parse {}: {error}",
+            relative_path(repo_root, &path)
+        )
+    })
+}
+
+fn prepare_truthful_campaign(
+    repo_root: &Path,
+    target: &FuzzTargetDescriptor,
+) -> Result<PreparedFuzzCampaign, String> {
+    let mut seeds = read_seed_directory(
+        repo_root,
+        &format!("fuzz/corpus/{}", target.category),
+        "corpus_seed",
+    )?;
+    seeds.extend(read_seed_directory(
+        repo_root,
+        &format!("fuzz/regression/{}", target.category),
+        "regression_seed",
+    )?);
+    seeds.sort_by(|left, right| left.seed_id.cmp(&right.seed_id));
+    if seeds.is_empty() {
+        return Err(format!(
+            "target `{}` has no executable seeds",
+            target.target_id
+        ));
+    }
+
+    Ok(PreparedFuzzCampaign {
+        target: target.clone(),
+        seeds,
+        coverage: load_category_coverage(repo_root, &target.category),
+    })
+}
+
+fn execute_truthful_campaign(
+    campaign_id: &str,
+    health: &AdapterHealth,
+    prepared: PreparedFuzzCampaign,
+) -> FuzzExecutionReport {
+    let mut artifact_refs = BTreeMap::new();
+    let mut seed_results = Vec::new();
+
+    if let Some(coverage_artifact) = prepared.coverage.artifact_ref.clone() {
+        artifact_refs.insert(coverage_artifact.artifact_id.clone(), coverage_artifact);
+    }
+
+    for seed in prepared.seeds {
+        artifact_refs.insert(
+            seed.artifact_ref.artifact_id.clone(),
+            seed.artifact_ref.clone(),
+        );
+
+        let started_at = current_timestamp();
+        let started = Instant::now();
+        let dispatched = catch_unwind(AssertUnwindSafe(|| {
+            dispatch_target(&prepared.target.target_id, &seed.bytes)
+        }));
+        let duration_ms = started.elapsed().as_millis() as u64;
+        let completed_at = current_timestamp();
+
+        let (outcome, exit_detail, crash_artifact, hang_artifact) = match dispatched {
+            Ok(Ok(dispatch)) => {
+                if duration_ms > prepared.target.timeout_policy_ms {
+                    (
+                        "hang".to_string(),
+                        format!(
+                            "duration_ms={duration_ms} exceeded timeout_policy_ms={}",
+                            prepared.target.timeout_policy_ms
+                        ),
+                        None,
+                        Some(seed.artifact_ref.clone()),
+                    )
+                } else {
+                    (dispatch.outcome.to_string(), dispatch.detail, None, None)
+                }
+            }
+            Ok(Err(error)) => ("infra_failed".to_string(), error, None, None),
+            Err(_) => (
+                "crash".to_string(),
+                "panic during in-process target execution".to_string(),
+                Some(seed.artifact_ref.clone()),
+                None,
+            ),
+        };
+
+        let mut per_seed_artifacts = vec![seed.artifact_ref.clone()];
+        if let Some(coverage_artifact) = prepared.coverage.artifact_ref.clone() {
+            per_seed_artifacts.push(coverage_artifact);
+        }
+        if let Some(crash_artifact_ref) = crash_artifact.clone() {
+            per_seed_artifacts.push(crash_artifact_ref);
+        }
+        if let Some(hang_artifact_ref) = hang_artifact.clone() {
+            per_seed_artifacts.push(hang_artifact_ref);
+        }
+
+        seed_results.push(SeedExecutionResult {
+            target_id: prepared.target.target_id.clone(),
+            seed_id: seed.seed_id,
+            seed_digest: seed.seed_digest,
+            started_at,
+            completed_at,
+            duration_ms,
+            outcome,
+            exit_detail,
+            crash_artifact,
+            hang_artifact,
+            coverage: Some(prepared.coverage.observation.clone()),
+            artifact_refs: dedup_artifacts(per_seed_artifacts),
+        });
+    }
+
+    FuzzExecutionReport {
+        campaign_id: campaign_id.to_string(),
+        adapter_kind: LIVE_ADAPTER_KIND.to_string(),
+        target: prepared.target,
+        seed_results,
+        artifact_refs: artifact_refs.into_values().collect(),
+        coverage_summary: Some(prepared.coverage.observation),
+        health: health.clone(),
+    }
+}
+
+fn aggregate_truthful_reports(
+    campaign_id: &str,
+    health: &AdapterHealth,
+    targets_total: usize,
+    reports: Vec<FuzzExecutionReport>,
+    preparation_errors: Vec<(FuzzTargetDescriptor, String)>,
+) -> TruthfulFuzzGateReport {
+    let mut targets = Vec::new();
+    let mut triaged_failures = Vec::new();
+    let mut artifact_refs = BTreeMap::new();
+    let mut coverage_summary = BTreeMap::new();
+    let mut error_details = Vec::new();
+
+    for report in &reports {
+        for artifact in &report.artifact_refs {
+            artifact_refs.insert(artifact.artifact_id.clone(), artifact.clone());
+        }
+        if let Some(coverage) = &report.coverage_summary {
+            coverage_summary
+                .entry(coverage.coverage_scope.clone())
+                .or_insert_with(|| coverage.clone());
+        }
+
+        let crashes = report
+            .seed_results
+            .iter()
+            .filter(|result| result.outcome == "crash")
+            .count();
+        let hangs = report
+            .seed_results
+            .iter()
+            .filter(|result| result.outcome == "hang")
+            .count();
+        let infra_failed = report
+            .seed_results
+            .iter()
+            .any(|result| result.outcome == "infra_failed" || result.outcome == "target_missing");
+        let coverage_unavailable = report
+            .coverage_summary
+            .as_ref()
+            .is_some_and(|coverage| coverage.coverage_status == "unavailable");
+        let outcome = if infra_failed || coverage_unavailable {
+            "error"
+        } else if crashes > 0 || hangs > 0 {
+            "fail"
+        } else {
+            "pass"
+        };
+
+        if outcome == "error" {
+            error_details.push(format!(
+                "{}: {}",
+                report.target.target_id,
+                report
+                    .coverage_summary
+                    .as_ref()
+                    .map(|coverage| coverage.coverage_detail.as_str())
+                    .unwrap_or("execution infrastructure failure")
+            ));
+        }
+
+        for result in report
+            .seed_results
+            .iter()
+            .filter(|result| result.outcome == "crash" || result.outcome == "hang")
+        {
+            triaged_failures.push(TriagedFailure {
+                target_id: result.target_id.clone(),
+                seed_id: result.seed_id.clone(),
+                seed_digest: result.seed_digest.clone(),
+                outcome: result.outcome.clone(),
+                classifier: if result.outcome == "crash" {
+                    "seed_crash".to_string()
+                } else {
+                    "timeout".to_string()
+                },
+                detail: result.exit_detail.clone(),
+                artifact_refs: result.artifact_refs.clone(),
+            });
+        }
+
+        targets.push(TargetExecutionSummary {
+            target_id: report.target.target_id.clone(),
+            category: report.target.category.clone(),
+            outcome: outcome.to_string(),
+            seeds_run: report.seed_results.len(),
+            crashes,
+            hangs,
+            coverage: report.coverage_summary.clone(),
+            artifact_refs: report.artifact_refs.clone(),
+            adapter_detail: format!(
+                "adapter_kind={} healthy={} coverage_status={}",
+                report.adapter_kind,
+                health.healthy,
+                report
+                    .coverage_summary
+                    .as_ref()
+                    .map(|coverage| coverage.coverage_status.as_str())
+                    .unwrap_or("unavailable")
+            ),
+        });
+    }
+
+    for (target, error) in preparation_errors {
+        error_details.push(format!("{}: {error}", target.target_id));
+        targets.push(TargetExecutionSummary {
+            target_id: target.target_id,
+            category: target.category,
+            outcome: "error".to_string(),
+            seeds_run: 0,
+            crashes: 0,
+            hangs: 0,
+            coverage: None,
+            artifact_refs: Vec::new(),
+            adapter_detail: error,
+        });
+    }
+
+    targets.sort_by(|left, right| left.target_id.cmp(&right.target_id));
+    triaged_failures.sort_by(|left, right| {
+        left.target_id
+            .cmp(&right.target_id)
+            .then_with(|| left.seed_id.cmp(&right.seed_id))
+    });
+
+    let any_error = targets.iter().any(|target| target.outcome == "error");
+    let any_fail = targets.iter().any(|target| target.outcome == "fail");
+    let verdict = if any_error {
+        "ERROR"
+    } else if any_fail {
+        "FAIL"
+    } else {
+        "PASS"
+    };
+    let seeds_total: usize = reports.iter().map(|report| report.seed_results.len()).sum();
+    let seeds_executed = reports
+        .iter()
+        .flat_map(|report| report.seed_results.iter())
+        .filter(|result| result.outcome != "target_missing")
+        .count();
+
+    TruthfulFuzzGateReport {
+        report_schema_version: REPORT_SCHEMA_VERSION.to_string(),
+        campaign_id: campaign_id.to_string(),
+        adapter_kind: LIVE_ADAPTER_KIND.to_string(),
+        targets_total,
+        targets_executed: reports.len(),
+        seeds_total,
+        seeds_executed,
+        targets,
+        triaged_failures,
+        artifact_refs: artifact_refs.into_values().collect(),
+        coverage_summary: coverage_summary.into_values().collect(),
+        verdict: verdict.to_string(),
+        error_detail: if error_details.is_empty() {
+            None
+        } else {
+            Some(error_details.join("; "))
+        },
+    }
+}
+
+fn build_adapter_health(targets: &[FuzzTargetDescriptor]) -> AdapterHealth {
+    let mut corpus_roots = targets
+        .iter()
+        .map(|target| format!("fuzz/corpus/{}", target.category))
+        .collect::<Vec<_>>();
+    corpus_roots.sort();
+    corpus_roots.dedup();
+
+    AdapterHealth {
+        adapter_kind: LIVE_ADAPTER_KIND.to_string(),
+        discovered_targets: targets.len(),
+        coverage_reports: 2,
+        corpus_roots,
+        healthy: true,
+        detail: "discovered targets from fuzz/config/fuzz_budget.toml".to_string(),
+    }
+}
+
+fn read_seed_directory(
+    repo_root: &Path,
+    relative_dir: &str,
+    artifact_kind: &str,
+) -> Result<Vec<PreparedSeed>, String> {
+    let dir = repo_root.join(relative_dir);
+    if !dir.is_dir() {
+        return Err(format!(
+            "missing seed directory `{}`",
+            relative_path(repo_root, &dir)
+        ));
+    }
+
+    let mut paths = fs::read_dir(&dir)
+        .map_err(|error| format!("failed to read {}: {error}", relative_path(repo_root, &dir)))?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.is_file())
+        .collect::<Vec<_>>();
+    paths.sort();
+
+    let mut seeds = Vec::new();
+    for path in paths {
+        let bytes = fs::read(&path).map_err(|error| {
+            format!(
+                "failed to read {}: {error}",
+                relative_path(repo_root, &path)
+            )
+        })?;
+        let digest = sha256_hex(&bytes);
+        let rel_path = relative_path(repo_root, &path);
+        seeds.push(PreparedSeed {
+            seed_id: rel_path.clone(),
+            seed_digest: digest.clone(),
+            bytes,
+            artifact_ref: FuzzArtifactRef {
+                artifact_id: format!("{artifact_kind}:{digest}"),
+                artifact_kind: artifact_kind.to_string(),
+                artifact_location: rel_path,
+                artifact_digest: digest,
+                produced_by: "checked_in_fuzz_fixture".to_string(),
+                created_at: file_created_at(&path),
+                is_remote: false,
+                retention_hint: if artifact_kind == "regression_seed" {
+                    "permanent".to_string()
+                } else {
+                    "tracked_fixture".to_string()
+                },
+            },
+        });
+    }
+
+    Ok(seeds)
+}
+
+fn load_category_coverage(repo_root: &Path, category: &str) -> PreparedCoverage {
+    let relative_path_str = format!("fuzz/coverage/latest_{category}.json");
+    let path = repo_root.join(&relative_path_str);
+    let unavailable = |detail: String| PreparedCoverage {
+        observation: FuzzCoverageObservation {
+            coverage_pct: None,
+            coverage_units: "lines".to_string(),
+            coverage_source: "checked_in_fuzz_fixture".to_string(),
+            coverage_scope: format!("category:{category}"),
+            coverage_status: "unavailable".to_string(),
+            coverage_detail: detail,
+        },
+        artifact_ref: None,
+    };
+
+    let content = match fs::read(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            return unavailable(format!(
+                "expected coverage report `{relative_path_str}` is missing or unreadable: {error}"
+            ));
+        }
+    };
+    let report: CoverageFixture = match serde_json::from_slice(&content) {
+        Ok(report) => report,
+        Err(error) => {
+            return unavailable(format!(
+                "coverage report `{relative_path_str}` is invalid JSON: {error}"
+            ));
+        }
+    };
+
+    if report.event_code != "FZT-004" {
+        return unavailable(format!(
+            "coverage report `{relative_path_str}` has unexpected event_code `{}`",
+            report.event_code
+        ));
+    }
+
+    let digest = sha256_hex(&content);
+    PreparedCoverage {
+        observation: FuzzCoverageObservation {
+            coverage_pct: Some(report.coverage_pct),
+            coverage_units: "lines".to_string(),
+            coverage_source: "checked_in_fuzz_fixture".to_string(),
+            coverage_scope: format!("category:{category}"),
+            coverage_status: "measured".to_string(),
+            coverage_detail: format!(
+                "target={} corpus_size={} lines={}/{} new_paths={} crashes_found={} timestamp={}",
+                report.target,
+                report.corpus_size,
+                report.lines_covered,
+                report.lines_total,
+                report.new_paths_found,
+                report.crashes_found,
+                report.timestamp
+            ),
+        },
+        artifact_ref: Some(FuzzArtifactRef {
+            artifact_id: format!("coverage:{category}:{digest}"),
+            artifact_kind: "coverage_report".to_string(),
+            artifact_location: relative_path_str,
+            artifact_digest: digest,
+            produced_by: "checked_in_fuzz_fixture".to_string(),
+            created_at: file_created_at(&path),
+            is_remote: false,
+            retention_hint: "baseline".to_string(),
+        }),
+    }
+}
+
+fn dispatch_target(target_id: &str, bytes: &[u8]) -> Result<TargetDispatch, String> {
+    match target_id {
+        "migration_dependency_resolve" => Ok(
+            match migration_dependency_resolve_target::fuzz_dependency_resolve(bytes) {
+                migration_dependency_resolve_target::FuzzResult::Ok => {
+                    TargetDispatch::handled("ok")
+                }
+                migration_dependency_resolve_target::FuzzResult::InvalidInput => {
+                    TargetDispatch::rejected("invalid_input")
+                }
+                migration_dependency_resolve_target::FuzzResult::Rejected(reason) => {
+                    TargetDispatch::rejected(format!("rejected:{reason}"))
+                }
+                migration_dependency_resolve_target::FuzzResult::Crash(reason) => {
+                    TargetDispatch::crash(reason)
+                }
+            },
+        ),
+        "migration_directory_scan" => Ok(
+            match migration_directory_scan_target::fuzz_directory_scan(bytes) {
+                migration_directory_scan_target::FuzzResult::Ok => TargetDispatch::handled("ok"),
+                migration_directory_scan_target::FuzzResult::InvalidInput => {
+                    TargetDispatch::rejected("invalid_input")
+                }
+                migration_directory_scan_target::FuzzResult::Rejected(reason) => {
+                    TargetDispatch::rejected(format!("rejected:{reason}"))
+                }
+                migration_directory_scan_target::FuzzResult::Crash(reason) => {
+                    TargetDispatch::crash(reason)
+                }
+            },
+        ),
+        "migration_package_parse" => Ok(
+            match migration_package_parse_target::fuzz_package_parse(bytes) {
+                migration_package_parse_target::FuzzResult::Ok => TargetDispatch::handled("ok"),
+                migration_package_parse_target::FuzzResult::InvalidInput => {
+                    TargetDispatch::rejected("invalid_input")
+                }
+                migration_package_parse_target::FuzzResult::Rejected(reason) => {
+                    TargetDispatch::rejected(format!("rejected:{reason}"))
+                }
+                migration_package_parse_target::FuzzResult::Crash(reason) => {
+                    TargetDispatch::crash(reason)
+                }
+            },
+        ),
+        "shim_api_translation" => Ok(
+            match shim_api_translation_target::fuzz_api_translation(bytes) {
+                shim_api_translation_target::FuzzResult::Ok => TargetDispatch::handled("ok"),
+                shim_api_translation_target::FuzzResult::InvalidInput => {
+                    TargetDispatch::rejected("invalid_input")
+                }
+                shim_api_translation_target::FuzzResult::Rejected(reason) => {
+                    TargetDispatch::rejected(format!("rejected:{reason}"))
+                }
+                shim_api_translation_target::FuzzResult::Crash(reason) => {
+                    TargetDispatch::crash(reason)
+                }
+            },
+        ),
+        "shim_type_coercion" => Ok(match shim_type_coercion_target::fuzz_type_coercion(bytes) {
+            shim_type_coercion_target::FuzzResult::Ok => TargetDispatch::handled("ok"),
+            shim_type_coercion_target::FuzzResult::InvalidInput => {
+                TargetDispatch::rejected("invalid_input")
+            }
+            shim_type_coercion_target::FuzzResult::Rejected(reason) => {
+                TargetDispatch::rejected(format!("rejected:{reason}"))
+            }
+            shim_type_coercion_target::FuzzResult::Crash(reason) => TargetDispatch::crash(reason),
+        }),
+        other => Err(format!("unsupported truthful fuzz target `{other}`")),
+    }
+}
+
+fn compute_campaign_id(targets: &[FuzzTargetDescriptor]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(b"truthful_fuzz_gate_v1:");
+    for target in targets {
+        hasher.update(target.target_id.as_bytes());
+        hasher.update([0]);
+    }
+    let digest = sha256_hex(&hasher.finalize());
+    format!("fcg-live-{}", &digest[..12])
+}
+
+fn dedup_artifacts(mut artifacts: Vec<FuzzArtifactRef>) -> Vec<FuzzArtifactRef> {
+    let mut deduped = BTreeMap::new();
+    for artifact in artifacts.drain(..) {
+        deduped.insert(artifact.artifact_id.clone(), artifact);
+    }
+    deduped.into_values().collect()
+}
+
+fn current_timestamp() -> String {
+    Utc::now().to_rfc3339()
+}
+
+fn file_created_at(path: &Path) -> String {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map(|modified| DateTime::<Utc>::from(modified).to_rfc3339())
+        .unwrap_or_else(|_| current_timestamp())
+}
+
+fn relative_path(repo_root: &Path, path: &Path) -> String {
+    path.strip_prefix(repo_root)
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/")
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
+}
+
 // ── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
-    fn make_target(name: &str, cat: FuzzCategory) -> FuzzTarget {
-        FuzzTarget {
+    fn make_target(name: &str, cat: FuzzCategory) -> DeterministicFuzzTarget {
+        DeterministicFuzzTarget {
             name: name.to_string(),
             category: cat,
             description: format!("test target {name}"),
         }
     }
 
-    fn make_seed(target: &str, input: &str, outcome: SeedOutcome) -> FuzzSeed {
-        FuzzSeed {
+    fn make_seed(
+        target: &str,
+        input: &str,
+        outcome: DeterministicSeedOutcome,
+    ) -> DeterministicFuzzSeed {
+        DeterministicFuzzSeed {
             target: target.to_string(),
             input_data: input.to_string(),
             expected: outcome,
         }
     }
 
-    fn populated_corpus() -> FuzzCorpus {
-        let mut c = FuzzCorpus::new(3);
+    fn populated_fixture_adapter() -> DeterministicFuzzTestAdapter {
+        let mut c = DeterministicFuzzTestAdapter::new(3);
         c.add_target(make_target("parser_fuzz", FuzzCategory::ParserInput));
         c.add_target(make_target("handshake_fuzz", FuzzCategory::HandshakeReplay));
         c.add_target(make_target("token_fuzz", FuzzCategory::TokenValidation));
@@ -289,7 +1182,7 @@ mod tests {
                 c.add_seed(make_seed(
                     target,
                     &format!("input_{i}"),
-                    SeedOutcome::Handled,
+                    DeterministicSeedOutcome::Handled,
                 ))
                 .unwrap();
             }
@@ -299,13 +1192,13 @@ mod tests {
 
     #[test]
     fn validate_complete_corpus() {
-        let c = populated_corpus();
+        let c = populated_fixture_adapter();
         c.validate().unwrap();
     }
 
     #[test]
     fn reject_missing_category() {
-        let mut c = FuzzCorpus::new(3);
+        let mut c = DeterministicFuzzTestAdapter::new(3);
         c.add_target(make_target("parser_fuzz", FuzzCategory::ParserInput));
         // Missing 3 categories
         let err = c.validate().unwrap_err();
@@ -314,55 +1207,74 @@ mod tests {
 
     #[test]
     fn reject_insufficient_seeds() {
-        let mut c = FuzzCorpus::new(3);
+        let mut c = DeterministicFuzzTestAdapter::new(3);
         c.add_target(make_target("parser_fuzz", FuzzCategory::ParserInput));
         c.add_target(make_target("handshake_fuzz", FuzzCategory::HandshakeReplay));
         c.add_target(make_target("token_fuzz", FuzzCategory::TokenValidation));
         c.add_target(make_target("dos_fuzz", FuzzCategory::DecodeDos));
         // Only 1 seed for parser_fuzz
-        c.add_seed(make_seed("parser_fuzz", "x", SeedOutcome::Handled))
-            .unwrap();
+        c.add_seed(make_seed(
+            "parser_fuzz",
+            "x",
+            DeterministicSeedOutcome::Handled,
+        ))
+        .unwrap();
         let err = c.validate().unwrap_err();
         assert_eq!(err.code(), "FCG_INSUFFICIENT_CORPUS");
     }
 
     #[test]
     fn seed_to_missing_target() {
-        let c = FuzzCorpus::new(3);
+        let c = DeterministicFuzzTestAdapter::new(3);
         let err = !c.seeds.contains_key("no_such");
         assert!(err);
-        let mut c2 = FuzzCorpus::new(3);
+        let mut c2 = DeterministicFuzzTestAdapter::new(3);
         let err = c2
-            .add_seed(make_seed("no_such", "x", SeedOutcome::Handled))
+            .add_seed(make_seed("no_such", "x", DeterministicSeedOutcome::Handled))
             .unwrap_err();
         assert_eq!(err.code(), "FCG_MISSING_TARGET");
     }
 
     #[test]
-    fn gate_pass_no_crashes() {
-        let c = populated_corpus();
-        let verdict = c.run_gate();
+    fn fixture_gate_pass_no_crashes() {
+        let c = populated_fixture_adapter();
+        let verdict = c.run_fixture_gate();
         assert_eq!(verdict.verdict, "PASS");
-        assert!(verdict.untriaged.is_empty());
+        assert!(verdict.triaged_crashes.is_empty());
     }
 
     #[test]
-    fn gate_fail_with_crash() {
-        let mut c = populated_corpus();
+    fn fixture_gate_fail_with_crash() {
+        let mut c = populated_fixture_adapter();
         c.add_seed(make_seed(
             "parser_fuzz",
             "crash_input",
-            SeedOutcome::Rejected,
+            DeterministicSeedOutcome::Rejected,
         ))
         .unwrap();
-        let verdict = c.run_gate();
+        let verdict = c.run_fixture_gate();
         assert_eq!(verdict.verdict, "FAIL");
-        assert!(!verdict.untriaged.is_empty());
+        assert!(!verdict.triaged_crashes.is_empty());
+    }
+
+    #[test]
+    fn fixture_gate_reports_explicit_synthetic_markers() {
+        let c = populated_fixture_adapter();
+        let verdict = c.run_fixture_gate();
+        assert_eq!(
+            verdict.adapter_kind,
+            DETERMINISTIC_FIXTURE_ADAPTER_KIND.to_string()
+        );
+        assert_eq!(
+            verdict.execution_mode,
+            DETERMINISTIC_FIXTURE_EXECUTION_MODE.to_string()
+        );
+        assert!(verdict.runner_detail.contains("fixture_marker"));
     }
 
     #[test]
     fn target_and_seed_counts() {
-        let c = populated_corpus();
+        let c = populated_fixture_adapter();
         assert_eq!(c.target_count(), 4);
         assert_eq!(c.seed_count("parser_fuzz"), 3);
         assert_eq!(c.seed_count("no_such"), 0);
@@ -417,12 +1329,149 @@ mod tests {
 
     #[test]
     fn triaged_crash_has_reproducer() {
-        let tc = TriagedCrash {
+        let tc = DeterministicTriagedCrash {
             target: "parser_fuzz".into(),
             seed_input: "bad_data".into(),
-            error: "panic".into(),
-            reproducer: "{\"target\":\"parser_fuzz\"}".into(),
+            error: "simulated crash (synthetic_test_fixture)".into(),
+            reproducer: "{\"target\":\"parser_fuzz\",\"fixture_mode\":\"synthetic_test_fixture\"}"
+                .into(),
         };
         assert!(tc.reproducer.contains("parser_fuzz"));
+        assert!(tc.reproducer.contains("synthetic_test_fixture"));
+    }
+
+    fn write_file(path: &Path, content: &[u8]) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("create parent dirs");
+        }
+        fs::write(path, content).expect("write file");
+    }
+
+    fn minimal_truthful_repo() -> tempfile::TempDir {
+        let dir = tempdir().expect("tempdir");
+        write_file(
+            &dir.path().join("fuzz/config/fuzz_budget.toml"),
+            br#"
+[migration]
+min_seconds_per_target = 1
+targets = ["directory_scan"]
+
+[shim]
+min_seconds_per_target = 1
+targets = ["api_translation"]
+"#,
+        );
+        write_file(
+            &dir.path().join("fuzz/targets/migration_directory_scan.rs"),
+            b"// checked by discovery only\n",
+        );
+        write_file(
+            &dir.path().join("fuzz/targets/shim_api_translation.rs"),
+            b"// checked by discovery only\n",
+        );
+        write_file(
+            &dir.path().join("fuzz/corpus/migration/valid_path.txt"),
+            b"src/main.rs",
+        );
+        write_file(
+            &dir.path().join("fuzz/corpus/shim/valid_call.json"),
+            br#"{"method":"getStatus","params":[]}"#,
+        );
+        write_file(
+            &dir.path().join("fuzz/regression/migration/crash_01.bin"),
+            b"src/lib.rs",
+        );
+        write_file(
+            &dir.path().join("fuzz/regression/shim/crash_02.bin"),
+            br#"{"method":"list","params":[]}"#,
+        );
+        dir
+    }
+
+    #[test]
+    fn truthful_discovery_fails_closed_on_missing_target_definition() {
+        let dir = tempdir().expect("tempdir");
+        write_file(
+            &dir.path().join("fuzz/config/fuzz_budget.toml"),
+            br#"
+[migration]
+min_seconds_per_target = 1
+targets = ["directory_scan"]
+
+[shim]
+min_seconds_per_target = 1
+targets = ["api_translation"]
+"#,
+        );
+        write_file(
+            &dir.path().join("fuzz/targets/migration_directory_scan.rs"),
+            b"// present\n",
+        );
+
+        let error = discover_truthful_fuzz_targets(dir.path()).expect_err("must fail closed");
+        assert!(error.contains("missing target definition"));
+        assert!(error.contains("fuzz/targets/shim_api_translation.rs"));
+    }
+
+    #[test]
+    fn truthful_gate_marks_missing_coverage_as_error() {
+        let dir = minimal_truthful_repo();
+        let report = run_truthful_fuzz_gate(dir.path());
+        assert_eq!(report.verdict, "ERROR");
+        assert!(
+            report
+                .error_detail
+                .as_deref()
+                .expect("error detail")
+                .contains("expected coverage report")
+        );
+        assert!(
+            report
+                .targets
+                .iter()
+                .all(|target| target.outcome == "error")
+        );
+    }
+
+    #[test]
+    fn truthful_gate_uses_explicit_measured_coverage_semantics() {
+        let dir = minimal_truthful_repo();
+        write_file(
+            &dir.path().join("fuzz/coverage/latest_migration.json"),
+            br#"{
+  "timestamp": "2026-02-20T12:00:00Z",
+  "target": "migration_directory_scan",
+  "corpus_size": 2,
+  "lines_covered": 19,
+  "lines_total": 24,
+  "coverage_pct": 79.1,
+  "new_paths_found": 1,
+  "crashes_found": 0,
+  "event_code": "FZT-004"
+}"#,
+        );
+        write_file(
+            &dir.path().join("fuzz/coverage/latest_shim.json"),
+            br#"{
+  "timestamp": "2026-02-20T12:00:00Z",
+  "target": "shim_api_translation",
+  "corpus_size": 2,
+  "lines_covered": 13,
+  "lines_total": 18,
+  "coverage_pct": 72.2,
+  "new_paths_found": 2,
+  "crashes_found": 0,
+  "event_code": "FZT-004"
+}"#,
+        );
+
+        let report = run_truthful_fuzz_gate(dir.path());
+        assert_eq!(report.verdict, "PASS");
+        assert_eq!(report.targets_total, 2);
+        assert_eq!(report.targets_executed, 2);
+        assert!(report.triaged_failures.is_empty());
+        assert!(report.coverage_summary.iter().all(|coverage| {
+            coverage.coverage_status == "measured" && coverage.coverage_pct.unwrap_or(0.0) > 0.0
+        }));
     }
 }

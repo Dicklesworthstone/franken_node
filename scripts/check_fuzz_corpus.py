@@ -34,14 +34,34 @@ def main():
     impl_exists = os.path.isfile(impl_path)
     if impl_exists:
         content = Path(impl_path).read_text()
-        has_corpus = "struct FuzzCorpus" in content
-        has_target = "struct FuzzTarget" in content
-        has_verdict = "struct FuzzGateVerdict" in content
-        has_run = "fn run_gate" in content
-        all_types = has_corpus and has_target and has_verdict and has_run
+        has_fixture_adapter = "struct DeterministicFuzzTestAdapter" in content
+        has_fixture_target = "struct DeterministicFuzzTarget" in content
+        has_fixture_report = "struct DeterministicFuzzGateReport" in content
+        has_fixture_run = "fn run_fixture_gate" in content
+        has_fixture_marker = "synthetic_test_fixture" in content
+        all_types = (
+            has_fixture_adapter
+            and has_fixture_target
+            and has_fixture_report
+            and has_fixture_run
+            and has_fixture_marker
+        )
+        has_truthful_report = "struct TruthfulFuzzGateReport" in content
+        has_truthful_target = "struct FuzzTargetDescriptor" in content
+        has_truthful_run = "fn run_truthful_fuzz_gate" in content
     else:
         all_types = False
-    all_pass &= check("FCG-IMPL", "Implementation with all required types", impl_exists and all_types)
+        has_truthful_report = has_truthful_target = has_truthful_run = False
+    all_pass &= check(
+        "FCG-IMPL",
+        "Implementation exposes explicit deterministic fixture adapter types",
+        impl_exists and all_types,
+    )
+    all_pass &= check(
+        "FCG-LIVE-IMPL",
+        "Truthful live gate surface present",
+        impl_exists and has_truthful_report and has_truthful_target and has_truthful_run,
+    )
 
     if impl_exists:
         content = Path(impl_path).read_text()
@@ -71,10 +91,25 @@ def main():
         has_corpus = "inv_fcg_corpus" in content
         has_triage = "inv_fcg_triage" in content
         has_gate = "inv_fcg_gate" in content
+        has_fixture_marker_test = "fixture_gate_reports_explicit_test_adapter_marker" in content
+        has_truthful_exec = "truthful_gate_executes_checked_in_targets" in content
+        has_truthful_artifacts = "truthful_gate_reports_explicit_coverage_and_relative_artifacts" in content
     else:
         has_targets = has_corpus = has_triage = has_gate = False
+        has_fixture_marker_test = False
+        has_truthful_exec = has_truthful_artifacts = False
     all_pass &= check("FCG-INTEG", "Integration tests cover all 4 invariants",
                        integ_exists and has_targets and has_corpus and has_triage and has_gate)
+    all_pass &= check(
+        "FCG-FIXTURE-INTEG",
+        "Integration tests prove the deterministic fixture adapter is explicitly marked",
+        integ_exists and has_fixture_marker_test,
+    )
+    all_pass &= check(
+        "FCG-LIVE-INTEG",
+        "Integration tests cover truthful live gate execution/reporting",
+        integ_exists and has_truthful_exec and has_truthful_artifacts,
+    )
 
     try:
         result = subprocess.run(
@@ -96,7 +131,7 @@ def main():
     if spec_exists:
         content = Path(spec_path).read_text()
         has_invariants = "INV-FCG" in content
-        has_types = "FuzzCorpus" in content or "FuzzTarget" in content
+        has_types = "DeterministicFuzzTestAdapter" in content or "TruthfulFuzzGateReport" in content
     else:
         has_invariants = has_types = False
     all_pass &= check("FCG-SPEC", "Specification with invariants and types",

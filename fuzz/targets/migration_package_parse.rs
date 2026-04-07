@@ -37,10 +37,8 @@ pub fn fuzz_package_parse(data: &[u8]) -> FuzzResult {
 
     // Check dependencies are objects if present
     for dep_key in &["dependencies", "devDependencies", "peerDependencies"] {
-        if let Some(deps) = obj.get(*dep_key) {
-            if !deps.is_object() {
-                return FuzzResult::Rejected("dependencies_not_object");
-            }
+        if obj.get(*dep_key).is_some_and(|deps| !deps.is_object()) {
+            return FuzzResult::Rejected("dependencies_not_object");
         }
     }
 

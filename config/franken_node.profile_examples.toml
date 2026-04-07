@@ -27,6 +27,8 @@ max_replay_capsule_freshness_secs = 3600
 require_signatures = true
 require_provenance = true
 minimum_assurance_level = 3
+# Optional stable identity to stamp onto CLI-published provenance.
+builder_identity = "builder.local"
 
 [fleet]
 convergence_timeout_seconds = 120

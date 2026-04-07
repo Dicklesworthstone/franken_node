@@ -333,6 +333,24 @@ fn write_run_package_manifest(workspace: &Path, dependencies: &[(&str, &str)]) {
     fs::write(workspace.join("index.js"), "console.log('hello');\n").expect("write index.js");
 }
 
+#[cfg(unix)]
+fn write_fake_runtime(runtime_dir: &Path, name: &str, marker: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(runtime_dir).expect("create runtime dir");
+    let script_path = runtime_dir.join(name);
+    fs::write(
+        &script_path,
+        format!(
+            "#!/bin/sh\nprintf 'runtime={marker} target=%s policy=%s\\n' \"$1\" \"$FRANKEN_NODE_REQUESTED_POLICY_MODE\"\n"
+        ),
+    )
+    .expect("write fake runtime");
+    let mut permissions = fs::metadata(&script_path).expect("metadata").permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script_path, permissions).expect("chmod fake runtime");
+}
+
 fn parse_json_stdout(output: &Output, context: &str) -> Value {
     let stdout = String::from_utf8_lossy(&output.stdout);
     serde_json::from_str(&stdout)
@@ -391,6 +409,82 @@ fn run_json_emits_blocked_preflight_verdict_for_revoked_dependency() {
         "run_preflight_trust_gate"
     );
     assert_eq!(payload["receipt"]["decision"], "denied");
+}
+
+#[cfg(unix)]
+#[test]
+fn run_explicit_runtime_missing_returns_127() {
+    let workspace = seeded_fixture_trust_workspace();
+    write_run_package_manifest(workspace.path(), &[]);
+    let empty_path = workspace.path().join("empty-bin");
+    fs::create_dir_all(&empty_path).expect("create empty PATH dir");
+
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["run", "--policy", "balanced", "--runtime", "node", "."],
+        &[
+            ("PATH", empty_path.to_str().expect("utf8 path")),
+            ("FRANKEN_ENGINE_BIN", ""),
+            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
+        ],
+    );
+
+    assert_eq!(output.status.code(), Some(127));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("requested runtime `node` was not found"));
+}
+
+#[cfg(unix)]
+#[test]
+fn run_respects_configured_preferred_runtime_over_bun_heuristics() {
+    let workspace = seeded_fixture_trust_workspace();
+    fs::write(
+        workspace.path().join("package.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "name": "trust-gate-e2e",
+            "version": "1.0.0",
+            "main": "index.ts",
+            "packageManager": "bun@1.2.0",
+            "dependencies": {}
+        }))
+        .expect("manifest"),
+    )
+    .expect("write package.json");
+    fs::write(workspace.path().join("index.ts"), "console.log('hello');\n")
+        .expect("write index.ts");
+    fs::write(workspace.path().join("bun.lockb"), "").expect("write bun.lockb");
+    fs::write(
+        workspace.path().join("franken_node.toml"),
+        r#"
+[runtime]
+preferred = "node"
+"#,
+    )
+    .expect("write config");
+
+    let runtime_dir = workspace.path().join("fake-bin");
+    write_fake_runtime(&runtime_dir, "node", "node");
+    write_fake_runtime(&runtime_dir, "bun", "bun");
+
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["run", "--policy", "balanced", "."],
+        &[
+            ("PATH", runtime_dir.to_str().expect("utf8 path")),
+            ("FRANKEN_ENGINE_BIN", ""),
+            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "run should succeed with configured preferred runtime: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("runtime=node"));
+    assert!(!stdout.contains("runtime=bun"));
+    assert!(stdout.contains("policy=balanced"));
 }
 
 #[test]

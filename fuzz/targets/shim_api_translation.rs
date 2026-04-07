@@ -41,10 +41,11 @@ pub fn fuzz_api_translation(data: &[u8]) -> FuzzResult {
     }
 
     // Validate params is array or object
-    if let Some(params) = obj.get("params") {
-        if !params.is_array() && !params.is_object() {
-            return FuzzResult::Rejected("params_invalid_type");
-        }
+    if obj
+        .get("params")
+        .is_some_and(|params| !params.is_array() && !params.is_object())
+    {
+        return FuzzResult::Rejected("params_invalid_type");
     }
 
     FuzzResult::Ok

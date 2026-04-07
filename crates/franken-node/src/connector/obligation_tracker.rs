@@ -379,6 +379,10 @@ impl TrackerState {
     ) -> Result<ObligationId, String> {
         self.ensure_capacity_for_reserve(now_ms, trace_id)?;
 
+        if self.next_id == u64::MAX {
+            return Err("ERR_OBL_ID_EXHAUSTED: obligation ID counter exhausted".to_string());
+        }
+
         let id = ObligationId(format!("obl-{}", self.next_id));
         self.next_id = self.next_id.saturating_add(1);
 

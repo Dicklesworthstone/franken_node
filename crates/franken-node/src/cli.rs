@@ -133,6 +133,10 @@ pub struct RunArgs {
     #[arg(long)]
     pub config: Option<PathBuf>,
 
+    /// Runtime selection: auto, node, bun, or franken-engine.
+    #[arg(long)]
+    pub runtime: Option<String>,
+
     /// Explicit franken_engine binary path or command name.
     #[arg(long)]
     pub engine_bin: Option<PathBuf>,

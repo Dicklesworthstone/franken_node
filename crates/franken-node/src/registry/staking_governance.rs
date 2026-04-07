@@ -1059,6 +1059,14 @@ impl StakingLedger {
             })?
             .state = StakeState::UnderAppeal;
 
+        if self.state.next_appeal_id == u64::MAX {
+            return Err(StakingError::InvalidTransition {
+                from: StakeState::Slashed,
+                to: StakeState::UnderAppeal,
+                code: "ERR_APPEAL_ID_EXHAUSTED",
+            });
+        }
+
         let appeal = AppealRecord {
             appeal_id: self.state.next_appeal_id,
             stake_id,

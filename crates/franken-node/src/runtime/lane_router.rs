@@ -1021,6 +1021,7 @@ mod tests {
             lane_cfg(4, LaneOverflowPolicy::ShedOldest),
         );
         RuntimeConfig {
+            preferred: crate::config::PreferredRuntime::Auto,
             remote_max_in_flight: 50,
             bulkhead_retry_after_ms: 20,
             lanes,

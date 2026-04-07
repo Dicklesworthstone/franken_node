@@ -394,19 +394,14 @@ pub fn required_downstream_gates(level: ProvenanceLevel) -> DownstreamGateRequir
 }
 
 fn validate_required_fields(attestation: &ProvenanceAttestation, issues: &mut Vec<ChainIssue>) {
-    let required = [
+    let mut required = vec![
         ("schema_version", attestation.schema_version.as_str()),
-        (
-            "source_repository_url",
-            attestation.source_repository_url.as_str(),
-        ),
         (
             "build_system_identifier",
             attestation.build_system_identifier.as_str(),
         ),
         ("builder_identity", attestation.builder_identity.as_str()),
         ("builder_version", attestation.builder_version.as_str()),
-        ("vcs_commit_sha", attestation.vcs_commit_sha.as_str()),
         (
             "reproducibility_hash",
             attestation.reproducibility_hash.as_str(),
@@ -414,6 +409,13 @@ fn validate_required_fields(attestation: &ProvenanceAttestation, issues: &mut Ve
         ("input_hash", attestation.input_hash.as_str()),
         ("output_hash", attestation.output_hash.as_str()),
     ];
+    if attestation.slsa_level_claim > 0 {
+        required.push((
+            "source_repository_url",
+            attestation.source_repository_url.as_str(),
+        ));
+        required.push(("vcs_commit_sha", attestation.vcs_commit_sha.as_str()));
+    }
 
     for (field_name, field_value) in required {
         if field_value.trim().is_empty() {
@@ -1049,6 +1051,42 @@ mod tests {
             report.provenance_level,
             ProvenanceLevel::Level1PublisherSigned
         );
+    }
+
+    #[test]
+    fn inv_pat_dev_profile_allows_level_zero_attestation_without_git_metadata() {
+        let mut attestation = base_attestation();
+        attestation.source_repository_url.clear();
+        attestation.vcs_commit_sha.clear();
+        attestation.links = vec![AttestationLink {
+            role: ChainLinkRole::Publisher,
+            signer_id: "self".to_string(),
+            signer_version: "dev".to_string(),
+            signature: String::new(),
+            signed_payload_hash: attestation.output_hash.clone(),
+            issued_at_epoch: 1_700_000_000,
+            expires_at_epoch: 1_700_100_000,
+            revoked: false,
+        }];
+        attestation.slsa_level_claim = 0;
+        sign_links_in_place(&mut attestation).expect("re-sign degraded links");
+
+        let policy = VerificationPolicy::development_profile();
+        let report = verify_attestation_chain(&attestation, &policy, 1_700_000_050, "trace-6b");
+
+        assert!(report.chain_valid);
+        assert_eq!(
+            report.provenance_level,
+            ProvenanceLevel::Level1PublisherSigned
+        );
+        assert!(!report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationMissingField
+                && issue.message.contains("source_repository_url")
+        }));
+        assert!(!report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationMissingField
+                && issue.message.contains("vcs_commit_sha")
+        }));
     }
 
     #[test]

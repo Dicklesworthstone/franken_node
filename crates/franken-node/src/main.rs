@@ -123,12 +123,14 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::process::{Command as ProcessCommand, Stdio};
+use std::time::{Duration, Instant};
 
 mod migration;
 
 const PROFILE_EXAMPLES_TEMPLATE: &str =
     include_str!("../../../config/franken_node.profile_examples.toml");
+const REGISTRY_GIT_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const VERIFY_MODULE_IDS: &[&str] = &[
     "api",
     "claims",
@@ -784,6 +786,15 @@ fn parse_profile_override(raw: Option<&str>) -> Result<Option<Profile>> {
     raw.map(|value| {
         value
             .parse::<Profile>()
+            .map_err(|err| anyhow::anyhow!(err.to_string()))
+    })
+    .transpose()
+}
+
+fn parse_runtime_override(raw: Option<&str>) -> Result<Option<config::PreferredRuntime>> {
+    raw.map(|value| {
+        value
+            .parse::<config::PreferredRuntime>()
             .map_err(|err| anyhow::anyhow!(err.to_string()))
     })
     .transpose()
@@ -2745,8 +2756,69 @@ mod registry_command_tests {
         assert!(rendered.contains("query=`nomatch`"));
     }
 
+    fn registry_publish_context(
+        builder_identity: &str,
+        source_repository_url: Option<&str>,
+        vcs_commit_sha: Option<&str>,
+        source_dirty: Option<bool>,
+    ) -> RegistryPublishProvenanceContext {
+        RegistryPublishProvenanceContext {
+            git: GitProvenanceContext {
+                source_repository_url: source_repository_url.map(str::to_string),
+                vcs_commit_sha: vcs_commit_sha.map(str::to_string),
+                source_dirty,
+            },
+            builder_identity: builder_identity.to_string(),
+            build_timestamp_epoch: 1_700_000_123,
+        }
+    }
+
+    fn run_git_test_command(workspace: &Path, args: &[&str]) {
+        let status = ProcessCommand::new("git")
+            .current_dir(workspace)
+            .args(args)
+            .status()
+            .unwrap_or_else(|error| panic!("failed running git {}: {error}", args.join(" ")));
+        assert!(status.success(), "git command failed: {}", args.join(" "));
+    }
+
     #[test]
-    fn build_registry_publish_request_derives_stable_metadata() {
+    fn collect_git_provenance_context_reads_real_git_metadata_and_dirty_state() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path();
+        let package = workspace.join("plugin.fnext");
+        std::fs::write(&package, "artifact").expect("write package");
+
+        run_git_test_command(workspace, &["init"]);
+        run_git_test_command(workspace, &["config", "user.email", "test@example.com"]);
+        run_git_test_command(workspace, &["config", "user.name", "Test User"]);
+        run_git_test_command(
+            workspace,
+            &[
+                "remote",
+                "add",
+                "origin",
+                "https://example.com/acme/plugin.git",
+            ],
+        );
+        run_git_test_command(workspace, &["add", "plugin.fnext"]);
+        run_git_test_command(workspace, &["commit", "-m", "initial"]);
+
+        let clean = collect_git_provenance_context(workspace);
+        assert_eq!(
+            clean.source_repository_url.as_deref(),
+            Some("https://example.com/acme/plugin.git")
+        );
+        assert_eq!(clean.source_dirty, Some(false));
+        assert_eq!(clean.vcs_commit_sha.as_ref().map(String::len), Some(40));
+
+        std::fs::write(&package, "artifact-updated").expect("rewrite package");
+        let dirty = collect_git_provenance_context(workspace);
+        assert_eq!(dirty.source_dirty, Some(true));
+    }
+
+    #[test]
+    fn build_registry_publish_request_embeds_real_provenance_claims() {
         let temp = tempfile::tempdir().expect("tempdir");
         let package = temp.path().join("My Extension!.tar.gz");
         std::fs::write(&package, "artifact").expect("write package");
@@ -2757,18 +2829,56 @@ mod registry_command_tests {
             signing_key: ed25519_dalek::SigningKey::from_bytes(&[7_u8; 32]),
         };
 
-        let request = build_registry_publish_request(&package, &hash, &signing_material)
-            .expect("publish request");
+        let request = build_registry_publish_request_with_context(
+            &package,
+            &hash,
+            &signing_material,
+            registry_publish_context(
+                "builder.example.internal",
+                Some("https://example.com/acme/plugin.git"),
+                Some("aabbccddeeff00112233445566778899aabbccdd"),
+                Some(false),
+            ),
+        )
+        .expect("publish request");
         assert!(!request.name.is_empty());
         assert!(request.name.chars().all(|ch| {
             ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-' || ch == '_'
         }));
         assert_eq!(request.initial_version.content_hash, hash);
         assert_eq!(request.signature.signature_bytes.len(), 64);
+        assert_eq!(
+            request.provenance.builder_identity,
+            "builder.example.internal"
+        );
+        assert_eq!(
+            request.provenance.source_repository_url,
+            "https://example.com/acme/plugin.git"
+        );
+        assert_eq!(
+            request.provenance.vcs_commit_sha,
+            "aabbccddeeff00112233445566778899aabbccdd"
+        );
+        assert_eq!(request.provenance.slsa_level_claim, 3);
+        assert_eq!(request.provenance.links.len(), 3);
+        assert_eq!(
+            request.provenance.custom_claims.get("source_dirty"),
+            Some(&"false".to_string())
+        );
+        assert_eq!(
+            request.provenance.custom_claims.get("operator_key_id"),
+            Some(&request.signature.key_id)
+        );
+        assert!(
+            request
+                .provenance
+                .custom_claims
+                .contains_key("operator_provenance_signature")
+        );
     }
 
     #[test]
-    fn build_registry_publish_request_handles_short_hashes_without_panicking() {
+    fn build_registry_publish_request_degrades_gracefully_without_git_metadata() {
         let temp = tempfile::tempdir().expect("tempdir");
         let package = temp.path().join("demo.tar.gz");
         std::fs::write(&package, "artifact").expect("write package");
@@ -2778,10 +2888,18 @@ mod registry_command_tests {
             signing_key: ed25519_dalek::SigningKey::from_bytes(&[9_u8; 32]),
         };
 
-        let request = build_registry_publish_request(&package, "abc123", &signing_material)
-            .expect("publish request");
+        let request = build_registry_publish_request_with_context(
+            &package,
+            "abc123",
+            &signing_material,
+            registry_publish_context("builder-host", None, None, None),
+        )
+        .expect("publish request");
         assert_eq!(request.initial_version.content_hash, "abc123");
-        assert_eq!(request.provenance.vcs_commit_sha, "abc123");
+        assert!(request.provenance.source_repository_url.is_empty());
+        assert!(request.provenance.vcs_commit_sha.is_empty());
+        assert_eq!(request.provenance.slsa_level_claim, 0);
+        assert_eq!(request.provenance.links.len(), 1);
     }
 }
 
@@ -4778,59 +4896,382 @@ fn normalize_registry_name(raw: &str) -> String {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitProvenanceContext {
+    source_repository_url: Option<String>,
+    vcs_commit_sha: Option<String>,
+    source_dirty: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryPublishProvenanceContext {
+    git: GitProvenanceContext,
+    builder_identity: String,
+    build_timestamp_epoch: u64,
+}
+
+impl RegistryPublishProvenanceContext {
+    fn slsa_level_claim(&self) -> u8 {
+        match (
+            self.git.source_repository_url.as_deref(),
+            self.git.vcs_commit_sha.as_deref(),
+            self.git.source_dirty,
+        ) {
+            (Some(_), Some(_), Some(false)) => 3,
+            (Some(_), Some(_), Some(true)) => 2,
+            _ => 0,
+        }
+    }
+}
+
+fn trim_nonempty(raw: impl AsRef<str>) -> Option<String> {
+    let trimmed = raw.as_ref().trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
+}
+
+fn current_epoch_seconds() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default()
+}
+
+fn format_external_command(program: &str, args: &[&str]) -> String {
+    if args.is_empty() {
+        program.to_string()
+    } else {
+        format!("{program} {}", args.join(" "))
+    }
+}
+
+fn run_command_capture_stdout(
+    current_dir: Option<&Path>,
+    program: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> std::result::Result<String, String> {
+    let command_label = format_external_command(program, args);
+    let mut command = ProcessCommand::new(program);
+    command
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if let Some(dir) = current_dir {
+        command.current_dir(dir);
+    }
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("{command_label} failed to start: {error}"))?;
+    let start = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => {
+                let output = child.wait_with_output().map_err(|error| {
+                    format!("{command_label} failed collecting output: {error}")
+                })?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let detail = if stderr.is_empty() { stdout } else { stderr };
+                    if detail.is_empty() {
+                        return Err(format!("{command_label} exited with {}", output.status));
+                    }
+                    return Err(format!("{command_label} failed: {detail}"));
+                }
+                return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+            }
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{command_label} timed out after {}ms",
+                        timeout.as_millis()
+                    ));
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{command_label} wait failed: {error}"));
+            }
+        }
+    }
+}
+
+fn run_git_capture_stdout(workspace: &Path, args: &[&str]) -> std::result::Result<String, String> {
+    run_command_capture_stdout(Some(workspace), "git", args, REGISTRY_GIT_COMMAND_TIMEOUT)
+}
+
+fn resolve_local_hostname() -> Option<String> {
+    std::env::var("HOSTNAME")
+        .ok()
+        .and_then(trim_nonempty)
+        .or_else(|| {
+            run_command_capture_stdout(None, "hostname", &[], REGISTRY_GIT_COMMAND_TIMEOUT)
+                .ok()
+                .and_then(trim_nonempty)
+        })
+}
+
+fn resolve_registry_builder_identity() -> String {
+    if let Some(value) = std::env::var("FRANKEN_NODE_BUILDER_ID")
+        .ok()
+        .and_then(trim_nonempty)
+    {
+        return value;
+    }
+
+    match config::Config::resolve(None, CliOverrides::default()) {
+        Ok(resolved) => {
+            if let Some(value) = resolved
+                .config
+                .registry
+                .builder_identity
+                .and_then(trim_nonempty)
+            {
+                return value;
+            }
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                "registry publish: failed resolving config for builder identity; falling back to hostname"
+            );
+        }
+    }
+
+    if let Some(hostname) = resolve_local_hostname() {
+        return hostname;
+    }
+
+    std::env::var("USER")
+        .ok()
+        .and_then(trim_nonempty)
+        .or_else(|| std::env::var("USERNAME").ok().and_then(trim_nonempty))
+        .unwrap_or_else(|| "local-operator".to_string())
+}
+
+fn collect_git_provenance_context(workspace: &Path) -> GitProvenanceContext {
+    let source_repository_url =
+        match run_git_capture_stdout(workspace, &["remote", "get-url", "origin"]) {
+            Ok(value) => trim_nonempty(value),
+            Err(error) => {
+                tracing::warn!(
+                    workspace = %workspace.display(),
+                    error = %error,
+                    "registry publish: failed reading git origin URL for provenance"
+                );
+                None
+            }
+        };
+
+    let vcs_commit_sha = match run_git_capture_stdout(workspace, &["rev-parse", "HEAD"]) {
+        Ok(value) => trim_nonempty(value),
+        Err(error) => {
+            tracing::warn!(
+                workspace = %workspace.display(),
+                error = %error,
+                "registry publish: failed reading git commit SHA for provenance"
+            );
+            None
+        }
+    };
+
+    let source_dirty = match run_git_capture_stdout(workspace, &["status", "--porcelain"]) {
+        Ok(value) => Some(!value.is_empty()),
+        Err(error) => {
+            tracing::warn!(
+                workspace = %workspace.display(),
+                error = %error,
+                "registry publish: failed reading git dirty status for provenance"
+            );
+            None
+        }
+    };
+
+    if source_repository_url.is_none() || vcs_commit_sha.is_none() || source_dirty.is_none() {
+        tracing::warn!(
+            workspace = %workspace.display(),
+            "registry publish provenance degraded: incomplete git metadata reduced SLSA claim to 0"
+        );
+    }
+
+    GitProvenanceContext {
+        source_repository_url,
+        vcs_commit_sha,
+        source_dirty,
+    }
+}
+
+fn collect_registry_publish_provenance_context(
+    package_path: &Path,
+) -> RegistryPublishProvenanceContext {
+    let workspace = package_path.parent().unwrap_or_else(|| Path::new("."));
+    RegistryPublishProvenanceContext {
+        git: collect_git_provenance_context(workspace),
+        builder_identity: resolve_registry_builder_identity(),
+        build_timestamp_epoch: current_epoch_seconds(),
+    }
+}
+
+fn build_registry_publish_links(
+    operator_key_id: &str,
+    signer_version: &str,
+    content_hash: &str,
+    build_timestamp_epoch: u64,
+    slsa_level_claim: u8,
+) -> Vec<supply_chain::provenance::AttestationLink> {
+    let mut links = vec![supply_chain::provenance::AttestationLink {
+        role: supply_chain::provenance::ChainLinkRole::Publisher,
+        signer_id: operator_key_id.to_string(),
+        signer_version: signer_version.to_string(),
+        signature: String::new(),
+        signed_payload_hash: content_hash.to_string(),
+        issued_at_epoch: build_timestamp_epoch,
+        expires_at_epoch: build_timestamp_epoch.saturating_add(86_400),
+        revoked: false,
+    }];
+
+    if slsa_level_claim >= 2 {
+        links.push(supply_chain::provenance::AttestationLink {
+            role: supply_chain::provenance::ChainLinkRole::BuildSystem,
+            signer_id: operator_key_id.to_string(),
+            signer_version: signer_version.to_string(),
+            signature: String::new(),
+            signed_payload_hash: content_hash.to_string(),
+            issued_at_epoch: build_timestamp_epoch,
+            expires_at_epoch: build_timestamp_epoch.saturating_add(86_400),
+            revoked: false,
+        });
+    }
+
+    if slsa_level_claim >= 3 {
+        links.push(supply_chain::provenance::AttestationLink {
+            role: supply_chain::provenance::ChainLinkRole::SourceVcs,
+            signer_id: operator_key_id.to_string(),
+            signer_version: signer_version.to_string(),
+            signature: String::new(),
+            signed_payload_hash: content_hash.to_string(),
+            issued_at_epoch: build_timestamp_epoch,
+            expires_at_epoch: build_timestamp_epoch.saturating_add(86_400),
+            revoked: false,
+        });
+    }
+
+    links
+}
+
+fn registry_publish_provenance_signature_payload(
+    manifest_bytes: &[u8],
+    provenance: &supply_chain::provenance::ProvenanceAttestation,
+) -> Result<Vec<u8>> {
+    let canonical =
+        supply_chain::provenance::canonical_attestation_json(provenance).map_err(|error| {
+            anyhow::anyhow!("failed canonicalizing registry publish provenance: {error}")
+        })?;
+    let mut payload = Vec::new();
+    payload.extend(b"registry_publish_provenance_v1:");
+    payload.extend((manifest_bytes.len() as u64).to_le_bytes());
+    payload.extend(manifest_bytes);
+    payload.extend((canonical.len() as u64).to_le_bytes());
+    payload.extend(canonical.as_bytes());
+    Ok(payload)
+}
+
 fn build_registry_publish_request(
     package_path: &Path,
     content_hash: &str,
     signing_material: &Ed25519SigningMaterial,
+) -> Result<RegistrationRequest> {
+    let provenance_context = collect_registry_publish_provenance_context(package_path);
+    build_registry_publish_request_with_context(
+        package_path,
+        content_hash,
+        signing_material,
+        provenance_context,
+    )
+}
+
+fn build_registry_publish_request_with_context(
+    package_path: &Path,
+    content_hash: &str,
+    signing_material: &Ed25519SigningMaterial,
+    provenance_context: RegistryPublishProvenanceContext,
 ) -> Result<RegistrationRequest> {
     let inferred_name = package_path
         .file_stem()
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or("extension-artifact");
     let name = normalize_registry_name(inferred_name);
-    let publisher_id = normalize_registry_name(
-        &std::env::var("USER")
-            .or_else(|_| std::env::var("USERNAME"))
-            .unwrap_or_else(|_| "local-operator".to_string()),
-    );
 
     let manifest_bytes = format!("manifest:{}:{}", name, content_hash).into_bytes();
     let key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(
         &signing_material.signing_key.verifying_key(),
     );
+    let key_id_string = key_id.to_string();
     let signature_bytes =
         supply_chain::artifact_signing::sign_bytes(&signing_material.signing_key, &manifest_bytes);
+    let slsa_level_claim = provenance_context.slsa_level_claim();
+    let builder_version = env!("CARGO_PKG_VERSION").to_string();
+    let RegistryPublishProvenanceContext {
+        git:
+            GitProvenanceContext {
+                source_repository_url,
+                vcs_commit_sha,
+                source_dirty,
+            },
+        builder_identity,
+        build_timestamp_epoch,
+    } = provenance_context;
 
-    let now_epoch = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs();
+    let mut custom_claims = std::collections::BTreeMap::new();
+    if let Some(source_dirty) = source_dirty {
+        custom_claims.insert("source_dirty".to_string(), source_dirty.to_string());
+    }
+    custom_claims.insert("operator_key_id".to_string(), key_id_string.clone());
+    custom_claims.insert(
+        "operator_signature_scope".to_string(),
+        "registry_publish_provenance_v1".to_string(),
+    );
 
     let mut provenance = supply_chain::provenance::ProvenanceAttestation {
         schema_version: "1.0".to_string(),
-        source_repository_url: "local://workspace".to_string(),
-        build_system_identifier: "franken-node-cli".to_string(),
-        builder_identity: publisher_id.clone(),
-        builder_version: "1.0.0".to_string(),
-        vcs_commit_sha: provenance_commit_prefix(content_hash),
-        build_timestamp_epoch: now_epoch.saturating_sub(60),
+        source_repository_url: source_repository_url.unwrap_or_default(),
+        build_system_identifier: "franken-node".to_string(),
+        builder_identity,
+        builder_version: builder_version.clone(),
+        vcs_commit_sha: vcs_commit_sha.unwrap_or_default(),
+        build_timestamp_epoch,
         reproducibility_hash: content_hash.to_string(),
         input_hash: content_hash.to_string(),
         output_hash: content_hash.to_string(),
-        slsa_level_claim: 1,
+        slsa_level_claim,
         envelope_format: supply_chain::provenance::AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
-        links: vec![supply_chain::provenance::AttestationLink {
-            role: supply_chain::provenance::ChainLinkRole::Publisher,
-            signer_id: publisher_id,
-            signer_version: "1.0.0".to_string(),
-            signature: String::new(),
-            signed_payload_hash: content_hash.to_string(),
-            issued_at_epoch: now_epoch.saturating_sub(60),
-            expires_at_epoch: now_epoch.saturating_add(86400),
-            revoked: false,
-        }],
-        custom_claims: std::collections::BTreeMap::new(),
+        links: build_registry_publish_links(
+            &key_id_string,
+            &builder_version,
+            content_hash,
+            build_timestamp_epoch,
+            slsa_level_claim,
+        ),
+        custom_claims,
     };
+    let provenance_signature_payload =
+        registry_publish_provenance_signature_payload(&manifest_bytes, &provenance)?;
+    let provenance_signature = supply_chain::artifact_signing::sign_bytes(
+        &signing_material.signing_key,
+        &provenance_signature_payload,
+    );
+    provenance.custom_claims.insert(
+        "operator_provenance_signature".to_string(),
+        hex::encode(provenance_signature),
+    );
     supply_chain::provenance::sign_links_in_place(&mut provenance)
         .map_err(|e| anyhow::anyhow!("failed signing registry publish provenance links: {e}"))?;
 
@@ -4839,7 +5280,7 @@ fn build_registry_publish_request(
         description: format!("CLI-published artifact from {}", package_path.display()),
         publisher_id: provenance.builder_identity.clone(),
         signature: ExtensionSignature {
-            key_id: key_id.to_string(),
+            key_id: key_id_string,
             algorithm: "ed25519".to_string(),
             signature_bytes,
             signed_at: chrono::Utc::now().to_rfc3339(),
@@ -6410,6 +6851,7 @@ fn main() -> Result<()> {
                 policy,
                 json,
                 config,
+                runtime,
                 engine_bin,
             } = args;
 
@@ -6433,7 +6875,10 @@ fn main() -> Result<()> {
                 anyhow::bail!("{}", run_preflight_block_message(&preflight));
             }
 
-            let dispatcher = ops::engine_dispatcher::EngineDispatcher::new(engine_bin);
+            let requested_runtime = parse_runtime_override(runtime.as_deref())?
+                .unwrap_or(resolved.config.runtime.preferred);
+            let dispatcher =
+                ops::engine_dispatcher::EngineDispatcher::new(engine_bin, requested_runtime);
             dispatcher.dispatch_run(&app_path, &resolved.config, &policy)?;
         }
 

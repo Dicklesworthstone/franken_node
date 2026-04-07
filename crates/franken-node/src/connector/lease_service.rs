@@ -195,6 +195,12 @@ impl LeaseService {
             });
         }
 
+        if self.next_id == u64::MAX {
+            return Err(LeaseError::CapacityExceeded {
+                capacity: u64::MAX as usize,
+            });
+        }
+
         let lease_id = format!("lease-{}", self.next_id);
         self.next_id = self.next_id.saturating_add(1);
 

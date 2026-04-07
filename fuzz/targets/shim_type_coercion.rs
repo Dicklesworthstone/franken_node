@@ -32,9 +32,7 @@ pub fn fuzz_type_coercion(data: &[u8]) -> FuzzResult {
 fn nesting_depth(v: &serde_json::Value) -> usize {
     match v {
         serde_json::Value::Array(arr) => 1 + arr.iter().map(nesting_depth).max().unwrap_or(0),
-        serde_json::Value::Object(obj) => {
-            1 + obj.values().map(nesting_depth).max().unwrap_or(0)
-        }
+        serde_json::Value::Object(obj) => 1 + obj.values().map(nesting_depth).max().unwrap_or(0),
         _ => 0,
     }
 }

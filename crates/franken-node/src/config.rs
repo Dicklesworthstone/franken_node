@@ -98,6 +98,7 @@ impl Config {
                     require_signatures: true,
                     require_provenance: true,
                     minimum_assurance_level: 4,
+                    builder_identity: None,
                 },
                 fleet: FleetConfig {
                     convergence_timeout_seconds: 60,
@@ -153,6 +154,7 @@ impl Config {
                     require_signatures: true,
                     require_provenance: true,
                     minimum_assurance_level: 3,
+                    builder_identity: None,
                 },
                 fleet: FleetConfig {
                     convergence_timeout_seconds: 120,
@@ -208,6 +210,7 @@ impl Config {
                     require_signatures: false,
                     require_provenance: false,
                     minimum_assurance_level: 1,
+                    builder_identity: None,
                 },
                 fleet: FleetConfig {
                     convergence_timeout_seconds: 300,
@@ -617,6 +620,14 @@ impl Config {
                     value,
                 ));
             }
+            if let Some(value) = &section.builder_identity {
+                self.registry.builder_identity = Some(value.clone());
+                decisions.push(MergeDecision::new(
+                    stage.clone(),
+                    "registry.builder_identity",
+                    value,
+                ));
+            }
         }
 
         if let Some(section) = &overrides.fleet {
@@ -701,6 +712,14 @@ impl Config {
         }
 
         if let Some(section) = &overrides.runtime {
+            if let Some(value) = section.preferred {
+                self.runtime.preferred = value;
+                decisions.push(MergeDecision::new(
+                    stage.clone(),
+                    "runtime.preferred",
+                    value,
+                ));
+            }
             if let Some(value) = section.remote_max_in_flight {
                 self.runtime.remote_max_in_flight = value;
                 decisions.push(MergeDecision::new(
@@ -1016,6 +1035,22 @@ impl Config {
                 parsed,
             ));
         }
+        if let Some(value) = env_lookup("FRANKEN_NODE_BUILDER_ID") {
+            let trimmed = value.trim();
+            if trimmed.is_empty() {
+                return Err(ConfigError::EnvParseFailed {
+                    key: "FRANKEN_NODE_BUILDER_ID".to_string(),
+                    value,
+                    reason: "value must be non-empty when set".to_string(),
+                });
+            }
+            self.registry.builder_identity = Some(trimmed.to_string());
+            decisions.push(MergeDecision::new(
+                MergeStage::Env,
+                "registry.builder_identity",
+                trimmed,
+            ));
+        }
 
         if let Some(raw) = env_lookup("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS") {
             let parsed = parse_env_u64("FRANKEN_NODE_FLEET_CONVERGENCE_TIMEOUT_SECONDS", &raw)?;
@@ -1113,6 +1148,21 @@ impl Config {
                 parsed,
             ));
         }
+        if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_PREFERRED") {
+            let parsed =
+                raw.parse::<PreferredRuntime>()
+                    .map_err(|_| ConfigError::EnvParseFailed {
+                        key: "FRANKEN_NODE_RUNTIME_PREFERRED".to_string(),
+                        value: raw.clone(),
+                        reason: "expected auto, node, bun, or franken-engine".to_string(),
+                    })?;
+            self.runtime.preferred = parsed;
+            decisions.push(MergeDecision::new(
+                MergeStage::Env,
+                "runtime.preferred",
+                parsed,
+            ));
+        }
         if let Some(raw) = env_lookup("FRANKEN_NODE_RUNTIME_DRAIN_TIMEOUT_MS") {
             let parsed = parse_env_u64("FRANKEN_NODE_RUNTIME_DRAIN_TIMEOUT_MS", &raw)?;
             self.runtime.drain_timeout_ms = Some(parsed);
@@ -1166,6 +1216,13 @@ impl Config {
         if !(1..=5).contains(&self.registry.minimum_assurance_level) {
             return Err(ConfigError::ValidationFailed(
                 "registry.minimum_assurance_level must be within [1,5]".to_string(),
+            ));
+        }
+        if let Some(builder_identity) = &self.registry.builder_identity
+            && builder_identity.trim().is_empty()
+        {
+            return Err(ConfigError::ValidationFailed(
+                "registry.builder_identity must be non-empty when configured".to_string(),
             ));
         }
         if self.fleet.convergence_timeout_seconds == 0 {
@@ -1554,6 +1611,7 @@ struct RegistryOverrides {
     pub require_signatures: Option<bool>,
     pub require_provenance: Option<bool>,
     pub minimum_assurance_level: Option<u8>,
+    pub builder_identity: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -1592,6 +1650,7 @@ struct EngineOverrides {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RuntimeOverrides {
+    pub preferred: Option<PreferredRuntime>,
     pub remote_max_in_flight: Option<usize>,
     pub bulkhead_retry_after_ms: Option<u64>,
     pub lanes: Option<BTreeMap<String, RuntimeLaneOverrides>>,
@@ -1774,6 +1833,9 @@ pub struct RegistryConfig {
     pub require_provenance: bool,
     /// Minimum assurance level (1-5).
     pub minimum_assurance_level: u8,
+    /// Optional stable builder identity for CLI-published provenance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builder_identity: Option<String>,
 }
 
 // -- Fleet --
@@ -1832,8 +1894,52 @@ pub struct EngineConfig {
 
 // -- Runtime --
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PreferredRuntime {
+    #[default]
+    Auto,
+    Node,
+    Bun,
+    FrankenEngine,
+}
+
+impl PreferredRuntime {
+    #[must_use]
+    pub const fn is_auto(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
+impl std::fmt::Display for PreferredRuntime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Auto => write!(f, "auto"),
+            Self::Node => write!(f, "node"),
+            Self::Bun => write!(f, "bun"),
+            Self::FrankenEngine => write!(f, "franken-engine"),
+        }
+    }
+}
+
+impl std::str::FromStr for PreferredRuntime {
+    type Err = ConfigError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match normalize_profile_key(s).as_str() {
+            "auto" => Ok(Self::Auto),
+            "node" => Ok(Self::Node),
+            "bun" => Ok(Self::Bun),
+            "franken-engine" | "frankenengine" => Ok(Self::FrankenEngine),
+            _ => Err(ConfigError::InvalidPreferredRuntime(s.to_string())),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RuntimeConfig {
+    /// Preferred run runtime: auto, node, bun, or franken-engine.
+    pub preferred: PreferredRuntime,
     /// Global max in-flight network-bound operations across all lanes.
     pub remote_max_in_flight: usize,
     /// Retry hint for callers when the global bulkhead is saturated.
@@ -1850,6 +1956,7 @@ impl RuntimeConfig {
     #[must_use]
     pub fn strict_defaults() -> Self {
         Self {
+            preferred: PreferredRuntime::Auto,
             remote_max_in_flight: 32,
             bulkhead_retry_after_ms: 100,
             lanes: default_runtime_lanes(
@@ -1865,6 +1972,7 @@ impl RuntimeConfig {
     #[must_use]
     pub fn balanced_defaults() -> Self {
         Self {
+            preferred: PreferredRuntime::Auto,
             remote_max_in_flight: 50,
             bulkhead_retry_after_ms: 50,
             lanes: default_runtime_lanes(
@@ -1880,6 +1988,7 @@ impl RuntimeConfig {
     #[must_use]
     pub fn legacy_defaults() -> Self {
         Self {
+            preferred: PreferredRuntime::Auto,
             remote_max_in_flight: 100,
             bulkhead_retry_after_ms: 20,
             lanes: default_runtime_lanes(
@@ -2001,6 +2110,9 @@ pub enum ConfigError {
     #[error("invalid compatibility mode: {0} (expected: strict, balanced, legacy-risky)")]
     InvalidCompatibilityMode(String),
 
+    #[error("invalid preferred runtime: {0} (expected: auto, node, bun, franken-engine)")]
+    InvalidPreferredRuntime(String),
+
     #[error("environment override parse error for {key}=`{value}`: {reason}")]
     EnvParseFailed {
         key: String,
@@ -2035,6 +2147,7 @@ mod tests {
         assert_eq!(config.remote.idempotency_ttl_secs, 604_800);
         assert_eq!(config.security.max_degraded_duration_secs, 3_600);
         assert_eq!(config.engine.binary_path, None);
+        assert_eq!(config.runtime.preferred, PreferredRuntime::Auto);
         assert_eq!(config.runtime.remote_max_in_flight, 50);
         assert_eq!(config.runtime.bulkhead_retry_after_ms, 50);
         assert_eq!(config.runtime.lanes.len(), 4);
@@ -2065,10 +2178,15 @@ mod tests {
     fn roundtrip_toml_serialization() {
         let mut config = Config::for_profile(Profile::Balanced);
         config.engine.binary_path = Some(PathBuf::from("/opt/franken-engine"));
+        config.registry.builder_identity = Some("builder.example.internal".to_string());
         let toml_str = config.to_toml().expect("serialize");
         let parsed: Config = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed.profile, Profile::Balanced);
         assert_eq!(parsed.engine.binary_path, config.engine.binary_path);
+        assert_eq!(
+            parsed.registry.builder_identity,
+            config.registry.builder_identity
+        );
         assert_eq!(
             parsed.registry.minimum_assurance_level,
             config.registry.minimum_assurance_level
@@ -2282,6 +2400,7 @@ quarantine_on_high_risk = false
             &path,
             r#"
 [runtime]
+preferred = "bun"
 remote_max_in_flight = 77
 bulkhead_retry_after_ms = 33
 
@@ -2302,6 +2421,7 @@ overflow_policy = "reject"
         )
         .unwrap();
 
+        assert_eq!(resolved.config.runtime.preferred, PreferredRuntime::Bun);
         assert_eq!(resolved.config.runtime.remote_max_in_flight, 77);
         assert_eq!(resolved.config.runtime.bulkhead_retry_after_ms, 33);
         let cancel = resolved.config.runtime.lanes.get("cancel").unwrap();
@@ -2316,6 +2436,10 @@ overflow_policy = "reject"
     fn resolve_applies_runtime_env_overrides() {
         let env = BTreeMap::from([
             (
+                "FRANKEN_NODE_RUNTIME_PREFERRED".to_string(),
+                "node".to_string(),
+            ),
+            (
                 "FRANKEN_NODE_RUNTIME_REMOTE_MAX_IN_FLIGHT".to_string(),
                 "66".to_string(),
             ),
@@ -2328,6 +2452,7 @@ overflow_policy = "reject"
         let resolved =
             Config::resolve_with_env(None, CliOverrides::default(), &map_lookup(env)).unwrap();
 
+        assert_eq!(resolved.config.runtime.preferred, PreferredRuntime::Node);
         assert_eq!(resolved.config.runtime.remote_max_in_flight, 66);
         assert_eq!(resolved.config.runtime.bulkhead_retry_after_ms, 17);
     }
@@ -2442,6 +2567,40 @@ binary_path = "/opt/from-file/franken-engine"
     }
 
     #[test]
+    fn resolve_applies_registry_builder_identity_file_and_env_overrides() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(
+            &path,
+            r#"
+[registry]
+builder_identity = "builder-from-file"
+"#,
+        )
+        .unwrap();
+
+        let env = BTreeMap::from([(
+            "FRANKEN_NODE_BUILDER_ID".to_string(),
+            "builder-from-env".to_string(),
+        )]);
+
+        let resolved =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(env))
+                .unwrap();
+
+        assert_eq!(
+            resolved.config.registry.builder_identity.as_deref(),
+            Some("builder-from-env")
+        );
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "registry.builder_identity" && decision.stage == MergeStage::File
+        }));
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "registry.builder_identity" && decision.stage == MergeStage::Env
+        }));
+    }
+
+    #[test]
     fn validation_rejects_assurance_level_out_of_range() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("franken_node.toml");
@@ -2483,6 +2642,28 @@ binary_path = ""
         )
         .unwrap_err();
         assert!(err.to_string().contains("engine.binary_path"));
+    }
+
+    #[test]
+    fn validation_rejects_empty_registry_builder_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        std::fs::write(
+            &path,
+            r#"
+[registry]
+builder_identity = "   "
+"#,
+        )
+        .unwrap();
+
+        let err = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::new()),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("registry.builder_identity"));
     }
 
     #[test]

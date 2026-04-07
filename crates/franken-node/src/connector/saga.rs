@@ -258,6 +258,12 @@ impl SagaExecutor {
         steps: Vec<SagaStepDef>,
         trace_id: &str,
     ) -> Result<String, String> {
+        if self.next_saga_id == u64::MAX {
+            return Err(format!(
+                "{ERR_SAGA_CAPACITY_EXCEEDED}: saga ID counter exhausted"
+            ));
+        }
+
         let saga_id = format!("saga-{}", self.next_saga_id);
 
         if self.sagas.contains_key(&saga_id) {

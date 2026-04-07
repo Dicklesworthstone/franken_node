@@ -36,6 +36,7 @@ tracing = { workspace = true }
 subtle = "2.6.1"
 tempfile = "3.15"
 ureq = "2"
+which = "8.0.2"
 
 [dev-dependencies]
 syn = { version = "2.0", features = ["full"] }
