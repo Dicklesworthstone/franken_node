@@ -199,6 +199,10 @@ pub enum RemoteCapError {
     InvalidTtl {
         ttl_secs: u64,
     },
+    NotYetValid {
+        now_epoch_secs: u64,
+        issued_at_epoch_secs: u64,
+    },
     Expired {
         now_epoch_secs: u64,
         expires_at_epoch_secs: u64,
@@ -231,6 +235,7 @@ impl RemoteCapError {
             Self::Missing => "REMOTECAP_MISSING",
             Self::OperatorAuthorizationRequired => "REMOTECAP_OPERATOR_AUTH_REQUIRED",
             Self::InvalidTtl { .. } => "REMOTECAP_TTL_INVALID",
+            Self::NotYetValid { .. } => "REMOTECAP_NOT_YET_VALID",
             Self::Expired { .. } => "REMOTECAP_EXPIRED",
             Self::InvalidSignature => "REMOTECAP_INVALID",
             Self::ScopeDenied { .. } => "REMOTECAP_SCOPE_DENIED",
@@ -263,6 +268,14 @@ impl fmt::Display for RemoteCapError {
             Self::InvalidTtl { ttl_secs } => {
                 write!(f, "{}: ttl must be > 0 (got {ttl_secs})", self.code())
             }
+            Self::NotYetValid {
+                now_epoch_secs,
+                issued_at_epoch_secs,
+            } => write!(
+                f,
+                "{}: token not yet valid (now={now_epoch_secs}, issued={issued_at_epoch_secs})",
+                self.code()
+            ),
             Self::Expired {
                 now_epoch_secs,
                 expires_at_epoch_secs,
@@ -605,6 +618,26 @@ impl CapabilityGate {
             return Err(err);
         }
 
+        if now_epoch_secs < cap.issued_at_epoch_secs {
+            let err = RemoteCapError::NotYetValid {
+                now_epoch_secs,
+                issued_at_epoch_secs: cap.issued_at_epoch_secs,
+            };
+            self.push_audit(build_audit_event(
+                "REMOTECAP_DENIED",
+                "RC_CHECK_DENIED",
+                Some(cap.token_id.clone()),
+                Some(cap.issuer_identity.clone()),
+                Some(operation),
+                Some(endpoint.to_string()),
+                trace_id.to_string(),
+                now_epoch_secs,
+                false,
+                Some(err.code().to_string()),
+            ));
+            return Err(err);
+        }
+
         // Expiry is fail-closed at the exact boundary: once `now` reaches
         // `expires_at`, the capability is no longer valid.
         if now_epoch_secs >= cap.expires_at_epoch_secs {
@@ -863,6 +896,34 @@ mod tests {
             )
             .expect_err("expired token must fail");
         assert_eq!(err.code(), "REMOTECAP_EXPIRED");
+    }
+
+    #[test]
+    fn token_is_denied_before_its_issue_timestamp() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                10,
+                true,
+                false,
+                "trace-3b",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_699_999_999,
+                "trace-3c",
+            )
+            .expect_err("future-issued token must fail before it becomes valid");
+        assert_eq!(err.code(), "REMOTECAP_NOT_YET_VALID");
     }
 
     #[test]

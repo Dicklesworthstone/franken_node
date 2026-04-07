@@ -119,6 +119,32 @@ fn inv_pat_broken_signature_marks_specific_link() {
 }
 
 #[test]
+fn inv_pat_same_signer_source_link_is_downgraded_to_level_two() {
+    let mut attestation = valid_attestation();
+    attestation.links[2].signer_id = attestation.links[1].signer_id.clone();
+    sign_links_in_place(&mut attestation).expect("re-sign duplicated source signer");
+
+    let policy = VerificationPolicy::production_default();
+    let report = verify_attestation_chain(&attestation, &policy, 1_700_000_500, "trace-c2");
+
+    assert!(report.chain_valid);
+    assert_eq!(
+        report.provenance_level,
+        ProvenanceLevel::Level2SignedReproducible
+    );
+    assert!(
+        report
+            .events
+            .contains(&ProvenanceEventCode::ProvenanceDegradedModeEntered)
+    );
+    assert!(
+        report
+            .events
+            .contains(&ProvenanceEventCode::AttestationVerified)
+    );
+}
+
+#[test]
 fn inv_pat_cached_window_allows_soft_stale_but_emits_event() {
     let mut attestation = valid_attestation();
     attestation.build_timestamp_epoch = 960;

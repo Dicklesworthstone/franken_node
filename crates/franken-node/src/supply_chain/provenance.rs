@@ -281,6 +281,7 @@ pub fn verify_attestation_chain(
     trace_id: &str,
 ) -> ChainValidityReport {
     let mut issues = Vec::new();
+    let claimed_level = claimed_provenance_level(attestation);
 
     validate_required_fields(attestation, &mut issues);
     validate_chain_depth(attestation, policy, &mut issues);
@@ -323,7 +324,7 @@ pub fn verify_attestation_chain(
         events: Vec::new(),
         trace_id: trace_id.to_string(),
     };
-    report.events = classify_events(&report);
+    report.events = classify_events(&report, claimed_level);
     report
 }
 
@@ -625,6 +626,7 @@ fn derive_level(attestation: &ProvenanceAttestation, issues: &[ChainIssue]) -> P
         && attestation.slsa_level_claim >= 2;
     let source_ok = role_is_clean(attestation, issues, ChainLinkRole::SourceVcs)
         && !attestation.vcs_commit_sha.trim().is_empty()
+        && source_vcs_signer_is_independent(attestation)
         && attestation.slsa_level_claim >= 3;
 
     if publisher_ok && build_ok && source_ok {
@@ -636,6 +638,37 @@ fn derive_level(attestation: &ProvenanceAttestation, issues: &[ChainIssue]) -> P
     } else {
         ProvenanceLevel::Level0Unsigned
     }
+}
+
+fn claimed_provenance_level(attestation: &ProvenanceAttestation) -> ProvenanceLevel {
+    match attestation.slsa_level_claim {
+        0 => ProvenanceLevel::Level0Unsigned,
+        1 => ProvenanceLevel::Level1PublisherSigned,
+        2 => ProvenanceLevel::Level2SignedReproducible,
+        _ => ProvenanceLevel::Level3IndependentReproduced,
+    }
+}
+
+fn source_vcs_signer_is_independent(attestation: &ProvenanceAttestation) -> bool {
+    let Some(source_signer) = role_signer_id(attestation, ChainLinkRole::SourceVcs) else {
+        return false;
+    };
+
+    [ChainLinkRole::Publisher, ChainLinkRole::BuildSystem]
+        .into_iter()
+        .filter_map(|role| role_signer_id(attestation, role))
+        .all(|signer| signer != source_signer)
+}
+
+fn role_signer_id(
+    attestation: &ProvenanceAttestation,
+    role: ChainLinkRole,
+) -> Option<&str> {
+    attestation
+        .links
+        .iter()
+        .find(|link| link.role == role)
+        .map(|link| link.signer_id.as_str())
 }
 
 fn role_is_clean(
@@ -672,8 +705,12 @@ fn chain_valid(policy: &VerificationPolicy, issues: &[ChainIssue]) -> bool {
     }
 }
 
-fn classify_events(report: &ChainValidityReport) -> Vec<ProvenanceEventCode> {
+fn classify_events(
+    report: &ChainValidityReport,
+    claimed_level: ProvenanceLevel,
+) -> Vec<ProvenanceEventCode> {
     let mut events = Vec::new();
+    let downgrade_detected = report.provenance_level.rank() < claimed_level.rank();
 
     push_unique_event(&mut events, ProvenanceEventCode::ProvenanceLevelAssigned);
 
@@ -694,7 +731,7 @@ fn classify_events(report: &ChainValidityReport) -> Vec<ProvenanceEventCode> {
     }
 
     if report.chain_valid {
-        if !report.issues.is_empty() {
+        if !report.issues.is_empty() || downgrade_detected {
             push_unique_event(
                 &mut events,
                 ProvenanceEventCode::ProvenanceDegradedModeEntered,
@@ -1087,6 +1124,32 @@ mod tests {
             issue.code == VerificationErrorCode::AttestationMissingField
                 && issue.message.contains("vcs_commit_sha")
         }));
+    }
+
+    #[test]
+    fn inv_pat_same_signer_source_link_cannot_claim_independent_reproduction() {
+        let mut attestation = base_attestation();
+        attestation.links[2].signer_id = attestation.links[1].signer_id.clone();
+        sign_links_in_place(&mut attestation).expect("re-sign duplicated source signer");
+
+        let policy = VerificationPolicy::production_default();
+        let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "trace-6c");
+
+        assert!(report.chain_valid);
+        assert_eq!(
+            report.provenance_level,
+            ProvenanceLevel::Level2SignedReproducible
+        );
+        assert!(
+            report
+                .events
+                .contains(&ProvenanceEventCode::ProvenanceDegradedModeEntered)
+        );
+        assert!(
+            report
+                .events
+                .contains(&ProvenanceEventCode::AttestationVerified)
+        );
     }
 
     #[test]

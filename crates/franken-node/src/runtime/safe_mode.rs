@@ -452,6 +452,62 @@ pub struct SafeModeEntryReceipt {
     pub pass: bool,
 }
 
+fn entry_reason_anomalies(reason: &SafeModeEntryReason) -> Vec<AnomalyClassification> {
+    match reason {
+        SafeModeEntryReason::CrashLoop {
+            crash_count,
+            window_secs,
+        } => {
+            vec![AnomalyClassification::CrashLoopDetected {
+                crash_count: *crash_count,
+                window_secs: *window_secs,
+            }]
+        }
+        SafeModeEntryReason::EpochMismatch {
+            local_epoch,
+            peer_epoch,
+        } => {
+            vec![AnomalyClassification::EpochMismatch {
+                local_epoch: *local_epoch,
+                peer_epoch: *peer_epoch,
+            }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn entry_reason_fallback_disposition(reason: &SafeModeEntryReason) -> Option<DegradedDisposition> {
+    match reason {
+        SafeModeEntryReason::TrustCorruption => Some(DegradedDisposition::FailClosed),
+        SafeModeEntryReason::CrashLoop { .. } | SafeModeEntryReason::EpochMismatch { .. } => {
+            Some(DegradedDisposition::WidenUncertainty)
+        }
+        SafeModeEntryReason::ExplicitFlag
+        | SafeModeEntryReason::EnvironmentVariable
+        | SafeModeEntryReason::ConfigField => None,
+    }
+}
+
+fn derive_receipt_disposition(
+    entry_reason: &SafeModeEntryReason,
+    inconsistencies: &[String],
+    anomalies: &[AnomalyClassification],
+) -> DegradedDisposition {
+    if anomalies.iter().any(|a| {
+        matches!(
+            a,
+            AnomalyClassification::TrustHashMismatch { .. }
+                | AnomalyClassification::EvidenceIntegrityFailure { .. }
+        )
+    }) {
+        DegradedDisposition::FailClosed
+    } else if !anomalies.is_empty() || !inconsistencies.is_empty() {
+        DegradedDisposition::WidenUncertainty
+    } else {
+        entry_reason_fallback_disposition(entry_reason).unwrap_or(DegradedDisposition::Normal)
+    }
+}
+
 impl SafeModeEntryReceipt {
     /// Create a new entry receipt with anomaly classifications and disposition.
     pub fn new(
@@ -461,20 +517,8 @@ impl SafeModeEntryReceipt {
         inconsistencies: Vec<String>,
         anomalies: Vec<AnomalyClassification>,
     ) -> Self {
-        let pass = inconsistencies.is_empty() && anomalies.is_empty();
-        let disposition = if anomalies.is_empty() {
-            DegradedDisposition::Normal
-        } else if anomalies.iter().any(|a| {
-            matches!(
-                a,
-                AnomalyClassification::TrustHashMismatch { .. }
-                    | AnomalyClassification::EvidenceIntegrityFailure { .. }
-            )
-        }) {
-            DegradedDisposition::FailClosed
-        } else {
-            DegradedDisposition::WidenUncertainty
-        };
+        let disposition = derive_receipt_disposition(&entry_reason, &inconsistencies, &anomalies);
+        let pass = disposition == DegradedDisposition::Normal;
 
         // Compute trust proof digest over state + anomalies.
         let trust_proof_digest =
@@ -692,6 +736,7 @@ impl SafeModeController {
                 });
             }
         }
+        anomalies.extend(entry_reason_anomalies(&reason));
         let receipt = SafeModeEntryReceipt::new(
             timestamp,
             reason.clone(),
@@ -1080,27 +1125,7 @@ impl SafeModeController {
         }
 
         // 6. Classify entry-reason-specific anomalies.
-        match &input.entry_reason {
-            SafeModeEntryReason::CrashLoop {
-                crash_count,
-                window_secs,
-            } => {
-                anomalies.push(AnomalyClassification::CrashLoopDetected {
-                    crash_count: *crash_count,
-                    window_secs: *window_secs,
-                });
-            }
-            SafeModeEntryReason::EpochMismatch {
-                local_epoch,
-                peer_epoch,
-            } => {
-                anomalies.push(AnomalyClassification::EpochMismatch {
-                    local_epoch: *local_epoch,
-                    peer_epoch: *peer_epoch,
-                });
-            }
-            _ => {}
-        }
+        anomalies.extend(entry_reason_anomalies(&input.entry_reason));
 
         SafeModeEntryReceipt::new(
             &input.timestamp,
@@ -1955,6 +1980,17 @@ mod tests {
                 .iter()
                 .any(|e| e.code == SMO_004_DEGRADED_STATE_ENTERED)
         );
+        let receipt = ctrl
+            .entry_receipt()
+            .expect("degraded entry should emit receipt");
+        assert!(!receipt.pass);
+        assert_eq!(receipt.disposition, DegradedDisposition::WidenUncertainty);
+        assert!(
+            receipt
+                .anomalies
+                .iter()
+                .any(|a| matches!(a, AnomalyClassification::CrashLoopDetected { .. }))
+        );
     }
 
     // -- Trigger evaluation tests -------------------------------------------
@@ -2455,6 +2491,17 @@ mod tests {
         } else {
             unreachable!("expected epoch mismatch reason");
         }
+        let receipt = ctrl
+            .entry_receipt()
+            .expect("epoch mismatch should emit receipt");
+        assert!(!receipt.pass);
+        assert_eq!(receipt.disposition, DegradedDisposition::WidenUncertainty);
+        assert!(
+            receipt
+                .anomalies
+                .iter()
+                .any(|a| matches!(a, AnomalyClassification::EpochMismatch { .. }))
+        );
     }
 
     #[test]
@@ -2562,6 +2609,32 @@ mod tests {
             }],
         );
         assert_eq!(receipt.disposition, DegradedDisposition::WidenUncertainty);
+    }
+
+    #[test]
+    fn test_disposition_widen_uncertainty_on_unclassified_inconsistency() {
+        let receipt = SafeModeEntryReceipt::new(
+            "2026-02-20T00:00:00Z",
+            SafeModeEntryReason::ExplicitFlag,
+            "sha256:abc",
+            vec!["unexpected mismatch".to_string()],
+            Vec::new(),
+        );
+        assert!(!receipt.pass);
+        assert_eq!(receipt.disposition, DegradedDisposition::WidenUncertainty);
+    }
+
+    #[test]
+    fn test_disposition_fail_closed_on_trust_corruption_reason_without_details() {
+        let receipt = SafeModeEntryReceipt::new(
+            "2026-02-20T00:00:00Z",
+            SafeModeEntryReason::TrustCorruption,
+            "sha256:abc",
+            Vec::new(),
+            Vec::new(),
+        );
+        assert!(!receipt.pass);
+        assert_eq!(receipt.disposition, DegradedDisposition::FailClosed);
     }
 
     // -- Trust proof digest tests --------------------------------------------

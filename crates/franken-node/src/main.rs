@@ -2859,8 +2859,16 @@ mod registry_command_tests {
             request.provenance.vcs_commit_sha,
             "aabbccddeeff00112233445566778899aabbccdd"
         );
-        assert_eq!(request.provenance.slsa_level_claim, 3);
-        assert_eq!(request.provenance.links.len(), 3);
+        assert_eq!(request.provenance.slsa_level_claim, 2);
+        assert_eq!(request.provenance.links.len(), 2);
+        assert_eq!(
+            request.provenance.links[0].role,
+            supply_chain::provenance::ChainLinkRole::Publisher
+        );
+        assert_eq!(
+            request.provenance.links[1].role,
+            supply_chain::provenance::ChainLinkRole::BuildSystem
+        );
         assert_eq!(
             request.provenance.custom_claims.get("source_dirty"),
             Some(&"false".to_string())
@@ -2900,6 +2908,10 @@ mod registry_command_tests {
         assert!(request.provenance.vcs_commit_sha.is_empty());
         assert_eq!(request.provenance.slsa_level_claim, 0);
         assert_eq!(request.provenance.links.len(), 1);
+        assert_eq!(
+            request.provenance.links[0].role,
+            supply_chain::provenance::ChainLinkRole::Publisher
+        );
     }
 }
 
@@ -4917,8 +4929,9 @@ impl RegistryPublishProvenanceContext {
             self.git.vcs_commit_sha.as_deref(),
             self.git.source_dirty,
         ) {
-            (Some(_), Some(_), Some(false)) => 3,
-            (Some(_), Some(_), Some(true)) => 2,
+            // Local publish can prove source metadata plus a signed build, but
+            // it cannot mint an independent source-vcs attestation chain.
+            (Some(_), Some(_), Some(_)) => 2,
             _ => 0,
         }
     }
