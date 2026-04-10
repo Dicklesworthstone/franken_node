@@ -631,29 +631,18 @@ pub fn execute_plan(
         );
     }
 
+    let replay_prefix_len = replay_proven_prefix_len(state, &normalized);
+
     if state.schema_version == plan.to_version {
-        if plan_replay_proven(state, &normalized) {
+        if replay_prefix_len == total {
             let journal_record_ids = normalized
                 .iter()
                 .map(|step| step.step_id.clone())
                 .collect::<Vec<_>>();
             let step_results = normalized
                 .iter()
-                .map(|step| MigrationStepResult {
-                    step_id: step.step_id.clone(),
-                    from_version: step.from_version.clone(),
-                    to_version: step.to_version.clone(),
-                    status: MigrationStepStatus::AlreadyApplied,
-                    step_idempotency_key: compute_step_idempotency_key(
-                        &plan_idempotency_key,
-                        &step.step_id,
-                        &state.state_hash,
-                    ),
-                    pre_state_hash: state.state_hash.clone(),
-                    post_state_hash: state.state_hash.clone(),
-                    checkpoint_ref: format!("checkpoint:{}", state.state_hash),
-                    journal_record_id: Some(step.step_id.clone()),
-                    error_detail: None,
+                .map(|step| {
+                    already_applied_step_result(step, &plan_idempotency_key, &state.state_hash)
                 })
                 .collect::<Vec<_>>();
             return applied_receipt(
@@ -699,7 +688,7 @@ pub fn execute_plan(
         );
     }
 
-    if state.schema_version != plan.from_version {
+    if replay_prefix_len == 0 && state.schema_version != plan.from_version {
         return failed_receipt(
             plan,
             plan_id,
@@ -725,37 +714,21 @@ pub fn execute_plan(
     }
 
     let mut steps_applied = 0;
-    let mut steps_already_applied = 0;
-    let mut step_results = Vec::new();
-    let mut journal_record_ids = Vec::new();
+    let steps_already_applied = replay_prefix_len;
+    let mut step_results = normalized[..replay_prefix_len]
+        .iter()
+        .map(|step| already_applied_step_result(step, &plan_idempotency_key, &state.state_hash))
+        .collect::<Vec<_>>();
+    let mut journal_record_ids = normalized[..replay_prefix_len]
+        .iter()
+        .map(|step| step.step_id.clone())
+        .collect::<Vec<_>>();
 
-    for step in &normalized {
+    for step in &normalized[replay_prefix_len..] {
         let checkpoint_ref = format!("checkpoint:{}", state.state_hash);
         let pre_state_hash = state.state_hash.clone();
         let step_idempotency_key =
             compute_step_idempotency_key(&plan_idempotency_key, &step.step_id, &pre_state_hash);
-
-        if step_already_applied(state, step) {
-            steps_already_applied += 1;
-            push_bounded(
-                &mut step_results,
-                MigrationStepResult {
-                    step_id: step.step_id.clone(),
-                    from_version: step.from_version.clone(),
-                    to_version: step.to_version.clone(),
-                    status: MigrationStepStatus::AlreadyApplied,
-                    step_idempotency_key,
-                    pre_state_hash: pre_state_hash.clone(),
-                    post_state_hash: pre_state_hash.clone(),
-                    checkpoint_ref,
-                    journal_record_id: Some(step.step_id.clone()),
-                    error_detail: None,
-                },
-                MAX_STEP_RESULTS,
-            );
-            journal_record_ids.push(step.step_id.clone());
-            continue;
-        }
 
         if state.schema_version != step.from_version {
             push_bounded(
@@ -1227,36 +1200,64 @@ fn compute_receipt_id(
     )
 }
 
-fn plan_replay_proven(state: &ConnectorState, steps: &[ExecutableMigrationStep]) -> bool {
-    let Some(suffix_start) = state.migration_journal.len().checked_sub(steps.len()) else {
-        return false;
-    };
-    let suffix = &state.migration_journal[suffix_start..];
+fn replay_proven_prefix_len(state: &ConnectorState, steps: &[ExecutableMigrationStep]) -> usize {
+    for prefix_len in (1..=steps.len()).rev() {
+        let step = &steps[prefix_len - 1];
+        if !step.idempotent || state.schema_version != step.to_version {
+            continue;
+        }
+        let Some(suffix_start) = state.migration_journal.len().checked_sub(prefix_len) else {
+            continue;
+        };
+        let suffix = &state.migration_journal[suffix_start..];
+        let prefix = &steps[..prefix_len];
+        if !suffix
+            .iter()
+            .zip(prefix)
+            .all(|(record, step)| step_matches_record(record, step))
+        {
+            continue;
+        }
 
-    if !suffix.iter().zip(steps).all(|(record, step)| {
-        record.migration_id == step.step_id
-            && record.version_from == step.from_version.to_string()
-            && record.version_to == step.to_version.to_string()
-    }) {
-        return false;
+        if suffix
+            .last()
+            .is_some_and(|record| record.checksum == state.state_hash)
+        {
+            return prefix_len;
+        }
     }
 
-    suffix
-        .last()
-        .is_some_and(|record| record.checksum == state.state_hash)
+    0
 }
 
-fn step_already_applied(state: &ConnectorState, step: &ExecutableMigrationStep) -> bool {
-    if !step.idempotent || state.schema_version != step.to_version {
-        return false;
+fn already_applied_step_result(
+    step: &ExecutableMigrationStep,
+    plan_idempotency_key: &str,
+    state_hash: &str,
+) -> MigrationStepResult {
+    MigrationStepResult {
+        step_id: step.step_id.clone(),
+        from_version: step.from_version.clone(),
+        to_version: step.to_version.clone(),
+        status: MigrationStepStatus::AlreadyApplied,
+        step_idempotency_key: compute_step_idempotency_key(
+            plan_idempotency_key,
+            &step.step_id,
+            state_hash,
+        ),
+        pre_state_hash: state_hash.to_string(),
+        post_state_hash: state_hash.to_string(),
+        checkpoint_ref: format!("checkpoint:{state_hash}"),
+        journal_record_id: Some(step.step_id.clone()),
+        error_detail: None,
     }
+}
 
-    state.migration_journal.last().is_some_and(|record| {
-        record.migration_id == step.step_id
-            && record.version_from == step.from_version.to_string()
-            && record.version_to == step.to_version.to_string()
-            && record.checksum == state.state_hash
-    })
+fn step_matches_record(record: &SchemaMigrationRecord, step: &ExecutableMigrationStep) -> bool {
+    step.idempotent
+        && record.migration_id == step.step_id
+        && record.version_from == step.from_version.to_string()
+        && record.version_to == step.to_version.to_string()
 }
 
 fn apply_executable_step(
@@ -1976,6 +1977,79 @@ mod tests {
                 .iter()
                 .all(|journal_id| journal_id != "legacy-history")
         );
+    }
+
+    #[test]
+    fn partially_applied_plan_resumes_from_proven_prefix() {
+        let reg = sample_registry();
+        let prefix_plan = reg.build_plan("conn-1", &v(1, 0, 0), &v(1, 1, 0)).unwrap();
+        let full_plan = reg.build_plan("conn-1", &v(1, 0, 0), &v(2, 0, 0)).unwrap();
+        let mut state = sample_state();
+
+        let first = execute_plan(&prefix_plan, &mut state, "2026-01-01T00:00:00Z");
+        assert_eq!(first.outcome, MigrationOutcome::Applied);
+        assert_eq!(state.schema_version, v(1, 1, 0));
+
+        let resumed = execute_plan(&full_plan, &mut state, "2026-01-01T00:00:02Z");
+        assert_eq!(resumed.outcome, MigrationOutcome::Applied);
+        assert_eq!(resumed.steps_total, 3);
+        assert_eq!(resumed.steps_applied, 2);
+        assert_eq!(resumed.steps_already_applied, 1);
+        assert_eq!(resumed.steps_rolled_back, 0);
+        assert_eq!(resumed.journal_record_ids.len(), 3);
+        assert_eq!(resumed.step_results.len(), 3);
+        assert_eq!(
+            resumed.step_results[0].status,
+            MigrationStepStatus::AlreadyApplied
+        );
+        assert!(
+            resumed.step_results[1..]
+                .iter()
+                .all(|result| result.status == MigrationStepStatus::Applied)
+        );
+        assert_eq!(state.schema_version, v(2, 0, 0));
+        assert_eq!(
+            state.canonical_state.get("full_name"),
+            Some(&json!("Ada Lovelace"))
+        );
+        assert_eq!(state.canonical_state.get("name"), None);
+        assert_eq!(
+            state.canonical_state.get("email"),
+            Some(&json!("unknown@example.invalid"))
+        );
+        assert_eq!(
+            state.canonical_state.get("profile_version"),
+            Some(&json!(2))
+        );
+        assert_eq!(state.migration_journal.len(), 3);
+    }
+
+    #[test]
+    fn intermediate_version_without_prefix_journal_proof_fails_closed() {
+        let reg = sample_registry();
+        let plan = reg.build_plan("conn-1", &v(1, 0, 0), &v(2, 0, 0)).unwrap();
+        let mut state = ConnectorState::new(
+            "conn-1",
+            v(1, 1, 0),
+            BTreeMap::from([
+                ("email".to_string(), json!("unknown@example.invalid")),
+                ("name".to_string(), json!("Ada Lovelace")),
+                ("profile_version".to_string(), json!(1)),
+            ]),
+        )
+        .unwrap();
+
+        let receipt = execute_plan(&plan, &mut state, "2026-01-01T00:00:02Z");
+        assert!(matches!(receipt.outcome, MigrationOutcome::Failed { .. }));
+        assert_eq!(
+            receipt.error_code.as_deref(),
+            Some("MIGRATION_STATE_CONFLICT")
+        );
+        assert_eq!(receipt.steps_applied, 0);
+        assert_eq!(receipt.steps_already_applied, 0);
+        assert_eq!(receipt.steps_rolled_back, 0);
+        assert!(receipt.journal_record_ids.is_empty());
+        assert!(receipt.step_results.is_empty());
     }
 
     #[test]

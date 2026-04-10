@@ -721,6 +721,16 @@ impl Config {
                 value.display(),
             ));
         }
+        if let Some(section) = &overrides.security
+            && let Some(value) = &section.authorized_api_keys
+        {
+            self.security.authorized_api_keys = value.clone();
+            decisions.push(MergeDecision::new(
+                stage.clone(),
+                "security.authorized_api_keys",
+                format!("{value:?}"),
+            ));
+        }
 
         if let Some(section) = &overrides.engine
             && let Some(value) = &section.binary_path
@@ -1701,6 +1711,7 @@ struct RemoteOverrides {
 struct SecurityOverrides {
     pub max_degraded_duration_secs: Option<u64>,
     pub decision_receipt_signing_key_path: Option<PathBuf>,
+    pub authorized_api_keys: Option<BTreeSet<String>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -2249,6 +2260,8 @@ mod tests {
         config.engine.binary_path = Some(PathBuf::from("/opt/franken-engine"));
         config.fleet.state_dir = Some(PathBuf::from(".franken-node/state/fleet"));
         config.registry.builder_identity = Some("builder.example.internal".to_string());
+        config.security.authorized_api_keys =
+            BTreeSet::from(["alpha-key".to_string(), "beta-key".to_string()]);
         let toml_str = config.to_toml().expect("serialize");
         let parsed: Config = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed.profile, Profile::Balanced);
@@ -2277,6 +2290,10 @@ mod tests {
         assert_eq!(
             parsed.security.max_degraded_duration_secs,
             config.security.max_degraded_duration_secs
+        );
+        assert_eq!(
+            parsed.security.authorized_api_keys,
+            config.security.authorized_api_keys
         );
     }
 
@@ -2600,6 +2617,28 @@ max_degraded_duration_secs = 900
         assert_eq!(resolved.config.security.max_degraded_duration_secs, 900);
         assert!(resolved.decisions.iter().any(|decision| {
             decision.field == "remote.idempotency_ttl_secs" && decision.stage == MergeStage::Env
+        }));
+    }
+
+    #[test]
+    fn resolve_accepts_serialized_security_authorized_api_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("franken_node.toml");
+        let mut config = Config::for_profile(Profile::Balanced);
+        config.security.authorized_api_keys =
+            BTreeSet::from(["alpha-key".to_string(), "beta-key".to_string()]);
+        std::fs::write(&path, config.to_toml().unwrap()).unwrap();
+
+        let resolved =
+            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(BTreeMap::new()))
+                .unwrap();
+
+        assert_eq!(
+            resolved.config.security.authorized_api_keys,
+            config.security.authorized_api_keys
+        );
+        assert!(resolved.decisions.iter().any(|decision| {
+            decision.field == "security.authorized_api_keys" && decision.stage == MergeStage::File
         }));
     }
 

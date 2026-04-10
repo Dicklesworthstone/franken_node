@@ -6144,12 +6144,12 @@ impl BuildContext {
         if let Ok(url) = std::env::var("CI_REPOSITORY_URL") {
             // Strip credentials from URL if present (format: https://user:token@host/path)
             // Simple approach: find @ and reconstruct without credentials
-            if let Some(at_pos) = url.find('@') {
-                if let Some(scheme_end) = url.find("://") {
-                    let scheme = &url[..scheme_end + 3];
-                    let rest = &url[at_pos + 1..];
-                    return Some(format!("{scheme}{rest}"));
-                }
+            if let Some(at_pos) = url.find('@')
+                && let Some(scheme_end) = url.find("://")
+            {
+                let scheme = &url[..scheme_end + 3];
+                let rest = &url[at_pos + 1..];
+                return Some(format!("{scheme}{rest}"));
             }
             return Some(url);
         }
