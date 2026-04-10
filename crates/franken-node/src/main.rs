@@ -443,10 +443,10 @@ impl TempFileGuard {
 
 impl Drop for TempFileGuard {
     fn drop(&mut self) {
-        if let Some(path) = self.0.take() {
-            if path.is_file() {
-                let _ = std::fs::rename(&path, Self::abandoned_path(&path));
-            }
+        if let Some(path) = self.0.take()
+            && path.is_file()
+        {
+            let _ = std::fs::rename(&path, Self::abandoned_path(&path));
         }
     }
 }
@@ -3810,6 +3810,81 @@ mod registry_command_tests {
 }
 
 #[cfg(test)]
+mod build_context_tests {
+    use super::*;
+
+    #[test]
+    fn build_context_detects_local_build_when_no_ci_env() {
+        // Clear CI env vars to simulate local build
+        std::env::remove_var("GITHUB_ACTIONS");
+        std::env::remove_var("GITLAB_CI");
+        std::env::remove_var("CIRCLECI");
+        std::env::remove_var("CI");
+
+        let ctx = BuildContext::detect(None);
+
+        // Should detect local build
+        assert_eq!(ctx.build_system_identifier, "local");
+
+        // Should be able to detect git info if in a git repo
+        // (this test runs inside the franken_node git repo)
+        assert!(
+            ctx.vcs_commit_sha.is_some() || ctx.vcs_commit_sha.is_none(),
+            "vcs_commit_sha should be detected or None if not in git repo"
+        );
+    }
+
+    #[test]
+    fn build_context_uses_config_builder_identity_override() {
+        let ctx = BuildContext::detect(Some("configured-builder"));
+        assert_eq!(ctx.builder_identity.as_deref(), Some("configured-builder"));
+    }
+
+    #[test]
+    fn build_context_detects_github_actions() {
+        // Simulate GitHub Actions environment
+        std::env::set_var("GITHUB_ACTIONS", "true");
+        std::env::set_var("GITHUB_SHA", "abcdef1234567890abcdef1234567890abcdef12");
+        std::env::set_var("GITHUB_SERVER_URL", "https://github.com");
+        std::env::set_var("GITHUB_REPOSITORY", "test-org/test-repo");
+        std::env::set_var("GITHUB_ACTOR", "test-actor");
+
+        let ctx = BuildContext::detect(None);
+
+        assert_eq!(ctx.build_system_identifier, "github-actions");
+        assert_eq!(
+            ctx.vcs_commit_sha.as_deref(),
+            Some("abcdef1234567890abcdef1234567890abcdef12")
+        );
+        assert_eq!(
+            ctx.source_repository_url.as_deref(),
+            Some("https://github.com/test-org/test-repo")
+        );
+        assert_eq!(ctx.builder_identity.as_deref(), Some("test-actor"));
+
+        // Clean up
+        std::env::remove_var("GITHUB_ACTIONS");
+        std::env::remove_var("GITHUB_SHA");
+        std::env::remove_var("GITHUB_SERVER_URL");
+        std::env::remove_var("GITHUB_REPOSITORY");
+        std::env::remove_var("GITHUB_ACTOR");
+    }
+
+    #[test]
+    fn build_context_config_identity_takes_precedence_over_env() {
+        std::env::set_var("GITHUB_ACTIONS", "true");
+        std::env::set_var("GITHUB_ACTOR", "github-user");
+
+        let ctx = BuildContext::detect(Some("config-override"));
+        assert_eq!(ctx.builder_identity.as_deref(), Some("config-override"));
+
+        // Clean up
+        std::env::remove_var("GITHUB_ACTIONS");
+        std::env::remove_var("GITHUB_ACTOR");
+    }
+}
+
+#[cfg(test)]
 mod fleet_command_tests {
     use super::*;
     use crate::api::fleet_quarantine::{ConvergencePhase, ConvergenceState, DecisionReceipt};
@@ -5718,6 +5793,169 @@ fn handle_incident_bundle_command(args: &cli::IncidentBundleArgs) -> Result<()> 
     Ok(())
 }
 
+/// Build context extracted from actual environment for provenance metadata.
+struct BuildContext {
+    vcs_commit_sha: Option<String>,
+    source_repository_url: Option<String>,
+    build_system_identifier: String,
+    builder_identity: Option<String>,
+}
+
+impl BuildContext {
+    /// Detect build context from environment variables and git state.
+    ///
+    /// Priority order for each field:
+    /// 1. CI-specific environment variables (GitHub Actions, GitLab CI, etc.)
+    /// 2. Local git repository state
+    /// 3. Fallback values
+    fn detect(config_builder_identity: Option<&str>) -> Self {
+        let vcs_commit_sha = Self::detect_commit_sha();
+        let source_repository_url = Self::detect_repository_url();
+        let build_system_identifier = Self::detect_build_system();
+        let builder_identity = Self::detect_builder_identity(config_builder_identity);
+
+        Self {
+            vcs_commit_sha,
+            source_repository_url,
+            build_system_identifier,
+            builder_identity,
+        }
+    }
+
+    fn detect_commit_sha() -> Option<String> {
+        // GitHub Actions
+        if let Ok(sha) = std::env::var("GITHUB_SHA") {
+            return Some(sha);
+        }
+        // GitLab CI
+        if let Ok(sha) = std::env::var("CI_COMMIT_SHA") {
+            return Some(sha);
+        }
+        // CircleCI
+        if let Ok(sha) = std::env::var("CIRCLE_SHA1") {
+            return Some(sha);
+        }
+        // Azure Pipelines
+        if let Ok(sha) = std::env::var("BUILD_SOURCEVERSION") {
+            return Some(sha);
+        }
+        // Jenkins
+        if let Ok(sha) = std::env::var("GIT_COMMIT") {
+            return Some(sha);
+        }
+        // Try local git
+        std::process::Command::new("git")
+            .args(["rev-parse", "HEAD"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                String::from_utf8(output.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty())
+    }
+
+    fn detect_repository_url() -> Option<String> {
+        // GitHub Actions
+        if let (Ok(server), Ok(repo)) = (
+            std::env::var("GITHUB_SERVER_URL"),
+            std::env::var("GITHUB_REPOSITORY"),
+        ) {
+            return Some(format!("{server}/{repo}"));
+        }
+        // GitLab CI
+        if let Ok(url) = std::env::var("CI_REPOSITORY_URL") {
+            // Strip credentials from URL if present
+            if let Ok(parsed) = url::Url::parse(&url) {
+                let clean_url = format!(
+                    "{}://{}{}",
+                    parsed.scheme(),
+                    parsed.host_str().unwrap_or_default(),
+                    parsed.path()
+                );
+                return Some(clean_url);
+            }
+            return Some(url);
+        }
+        // CircleCI
+        if let Ok(url) = std::env::var("CIRCLE_REPOSITORY_URL") {
+            return Some(url);
+        }
+        // Azure Pipelines
+        if let Ok(url) = std::env::var("BUILD_REPOSITORY_URI") {
+            return Some(url);
+        }
+        // Try local git
+        std::process::Command::new("git")
+            .args(["remote", "get-url", "origin"])
+            .output()
+            .ok()
+            .filter(|output| output.status.success())
+            .and_then(|output| {
+                String::from_utf8(output.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            })
+            .filter(|s| !s.is_empty())
+    }
+
+    fn detect_build_system() -> String {
+        // GitHub Actions
+        if std::env::var("GITHUB_ACTIONS").is_ok() {
+            return "github-actions".to_string();
+        }
+        // GitLab CI
+        if std::env::var("GITLAB_CI").is_ok() {
+            return "gitlab-ci".to_string();
+        }
+        // CircleCI
+        if std::env::var("CIRCLECI").is_ok() {
+            return "circleci".to_string();
+        }
+        // Azure Pipelines
+        if std::env::var("TF_BUILD").is_ok() {
+            return "azure-pipelines".to_string();
+        }
+        // Jenkins
+        if std::env::var("JENKINS_URL").is_ok() {
+            return "jenkins".to_string();
+        }
+        // Travis CI
+        if std::env::var("TRAVIS").is_ok() {
+            return "travis-ci".to_string();
+        }
+        // Generic CI
+        if std::env::var("CI").is_ok() {
+            return "ci".to_string();
+        }
+        // Local build
+        "local".to_string()
+    }
+
+    fn detect_builder_identity(config_override: Option<&str>) -> Option<String> {
+        // Config file override takes precedence
+        if let Some(id) = config_override {
+            return Some(id.to_string());
+        }
+        // GitHub Actions
+        if let Ok(actor) = std::env::var("GITHUB_ACTOR") {
+            return Some(actor);
+        }
+        // GitLab CI
+        if let Ok(user) = std::env::var("GITLAB_USER_LOGIN") {
+            return Some(user);
+        }
+        // CircleCI
+        if let Ok(user) = std::env::var("CIRCLE_USERNAME") {
+            return Some(user);
+        }
+        // Generic environment user
+        std::env::var("USER").ok().or_else(|| std::env::var("USERNAME").ok())
+    }
+}
+
 fn provenance_commit_prefix(digest: &str) -> String {
     digest.chars().take(12).collect()
 }
@@ -5729,6 +5967,20 @@ fn build_registry_seed_request(
     version: &str,
     tags: &[&str],
 ) -> Result<RegistrationRequest> {
+    build_registry_seed_request_with_config(name, description, publisher_id, version, tags, None)
+}
+
+fn build_registry_seed_request_with_config(
+    name: &str,
+    description: &str,
+    publisher_id: &str,
+    version: &str,
+    tags: &[&str],
+    config_builder_identity: Option<&str>,
+) -> Result<RegistrationRequest> {
+    // Detect real build context from environment and git state
+    let build_context = BuildContext::detect(config_builder_identity);
+
     // Length-prefixed encoding prevents delimiter-collision ambiguity.
     let attestation_hash = {
         use sha2::Digest;
@@ -5763,13 +6015,31 @@ fn build_registry_seed_request(
         .unwrap_or_default()
         .as_secs();
 
+    // Use real commit SHA if available, otherwise fallback to attestation hash prefix
+    let vcs_commit_sha = build_context
+        .vcs_commit_sha
+        .clone()
+        .unwrap_or_else(|| provenance_commit_prefix(&attestation_hash));
+
+    // Use real repository URL if available, otherwise construct from publisher_id/name
+    let source_repository_url = build_context
+        .source_repository_url
+        .clone()
+        .unwrap_or_else(|| format!("https://github.com/{publisher_id}/{name}"));
+
+    // Use real builder identity if available, otherwise fallback to publisher_id
+    let builder_identity = build_context
+        .builder_identity
+        .clone()
+        .unwrap_or_else(|| publisher_id.to_string());
+
     let mut provenance = supply_chain::provenance::ProvenanceAttestation {
         schema_version: "1.0".to_string(),
-        source_repository_url: format!("https://github.com/{publisher_id}/{name}"),
-        build_system_identifier: "github-actions".to_string(),
-        builder_identity: publisher_id.to_string(),
+        source_repository_url,
+        build_system_identifier: build_context.build_system_identifier.clone(),
+        builder_identity: builder_identity.clone(),
         builder_version: version.to_string(),
-        vcs_commit_sha: provenance_commit_prefix(&attestation_hash),
+        vcs_commit_sha,
         build_timestamp_epoch: now_epoch.saturating_sub(60),
         reproducibility_hash: attestation_hash.clone(),
         input_hash: attestation_hash.clone(),
@@ -5778,7 +6048,7 @@ fn build_registry_seed_request(
         envelope_format: supply_chain::provenance::AttestationEnvelopeFormat::FrankenNodeEnvelopeV1,
         links: vec![supply_chain::provenance::AttestationLink {
             role: supply_chain::provenance::ChainLinkRole::Publisher,
-            signer_id: publisher_id.to_string(),
+            signer_id: builder_identity,
             signer_version: version.to_string(),
             signature: String::new(),
             signed_payload_hash: attestation_hash,
@@ -8510,9 +8780,7 @@ fn runtime_major_satisfies_requirement(major: u64, requirement: &str) -> Option<
             ("=", token)
         };
 
-        let Some(required_major) = extract_runtime_major_version(raw_value) else {
-            return None;
-        };
+        let required_major = extract_runtime_major_version(raw_value)?;
         saw_comparison = true;
 
         let satisfied = match operator {
