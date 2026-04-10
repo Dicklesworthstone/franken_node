@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -16,6 +16,8 @@ use frankenengine_node::supply_chain::trust_card::{
 use serde_json::Value;
 
 const FIXTURE_RECEIPT_KEY_ID: &str = "72416df9f1dcd9b3";
+
+static TEST_TRACING_INIT: Once = Once::new();
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -360,6 +362,188 @@ fn parse_json_stdout(output: &Output, context: &str) -> Value {
         .unwrap_or_else(|err| panic!("{context} should emit valid JSON: {err}\nstdout:\n{stdout}"))
 }
 
+fn parse_json_stderr(output: &Output, context: &str) -> Value {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    serde_json::from_str(&stderr)
+        .unwrap_or_else(|err| panic!("{context} should emit valid JSON: {err}\nstderr:\n{stderr}"))
+}
+
+fn init_test_tracing() {
+    TEST_TRACING_INIT.call_once(|| {
+        let _ = tracing_subscriber::fmt().with_test_writer().try_init();
+    });
+}
+
+fn log_pipeline_step(step_number: usize, step_name: &str, expected_outcome: &str) {
+    init_test_tracing();
+    tracing::info!(step_number, step_name, expected_outcome);
+}
+
+fn manifest_dependency_map(entries: &[(&str, &str)]) -> serde_json::Map<String, Value> {
+    entries
+        .iter()
+        .map(|(name, version)| ((*name).to_string(), Value::String((*version).to_string())))
+        .collect()
+}
+
+fn write_pipeline_package_manifest(
+    workspace: &Path,
+    dependencies: &[(&str, &str)],
+    dev_dependencies: &[(&str, &str)],
+    optional_dependencies: &[(&str, &str)],
+) {
+    let manifest = serde_json::json!({
+        "name": "full-pipeline-e2e",
+        "version": "1.0.0",
+        "main": "index.js",
+        "dependencies": manifest_dependency_map(dependencies),
+        "devDependencies": manifest_dependency_map(dev_dependencies),
+        "optionalDependencies": manifest_dependency_map(optional_dependencies),
+    });
+    fs::write(
+        workspace.join("package.json"),
+        serde_json::to_string_pretty(&manifest).expect("manifest"),
+    )
+    .expect("write package.json");
+    fs::write(workspace.join("index.js"), "console.log('pipeline ok');\n").expect("write index.js");
+}
+
+fn write_pipeline_lockfile(workspace: &Path) {
+    fs::write(
+        workspace.join("package-lock.json"),
+        r#"{
+  "name": "full-pipeline-e2e",
+  "lockfileVersion": 3,
+  "packages": {
+    "": {
+      "name": "full-pipeline-e2e",
+      "version": "1.0.0"
+    },
+    "node_modules/react": {
+      "version": "19.2.4",
+      "integrity": "sha512-AQIDBA=="
+    },
+    "node_modules/typescript": {
+      "version": "5.8.3",
+      "integrity": "sha512-BQYHCA=="
+    },
+    "node_modules/@types/node": {
+      "version": "24.9.2",
+      "integrity": "sha512-CQoLDA=="
+    }
+  }
+}
+"#,
+    )
+    .expect("write package lockfile");
+}
+
+fn collect_workspace_entries(root: &Path, current: &Path, entries: &mut Vec<String>) {
+    let mut children = fs::read_dir(current)
+        .unwrap_or_else(|err| panic!("read_dir {}: {err}", current.display()))
+        .map(|entry| entry.expect("dir entry").path())
+        .collect::<Vec<_>>();
+    children.sort();
+
+    for child in children {
+        let relative = child
+            .strip_prefix(root)
+            .expect("child under root")
+            .display()
+            .to_string();
+        if child.is_dir() {
+            entries.push(format!("{relative}/"));
+            collect_workspace_entries(root, &child, entries);
+        } else {
+            entries.push(relative);
+        }
+    }
+}
+
+fn collect_state_file_dumps(root: &Path, current: &Path, dumps: &mut Vec<String>) {
+    let mut children = fs::read_dir(current)
+        .unwrap_or_else(|err| panic!("read_dir {}: {err}", current.display()))
+        .map(|entry| entry.expect("dir entry").path())
+        .collect::<Vec<_>>();
+    children.sort();
+
+    for child in children {
+        if child.is_dir() {
+            collect_state_file_dumps(root, &child, dumps);
+            continue;
+        }
+
+        let relative = child
+            .strip_prefix(root)
+            .expect("state file under root")
+            .display()
+            .to_string();
+        let raw = fs::read(&child).unwrap_or_else(|err| panic!("read {}: {err}", child.display()));
+        dumps.push(format!(
+            "-- {relative} --\n{}",
+            if raw.len() > 4_096 {
+                format!("{}...\n<truncated>", String::from_utf8_lossy(&raw[..4_096]))
+            } else {
+                String::from_utf8_lossy(&raw).into_owned()
+            }
+        ));
+    }
+}
+
+fn workspace_diagnostics(workspace: &Path) -> String {
+    let mut entries = Vec::new();
+    collect_workspace_entries(workspace, workspace, &mut entries);
+    let listing = if entries.is_empty() {
+        "<empty>".to_string()
+    } else {
+        entries.join("\n")
+    };
+
+    let state_root = workspace.join(".franken-node/state");
+    let state_dump = if state_root.is_dir() {
+        let mut dumps = Vec::new();
+        collect_state_file_dumps(workspace, &state_root, &mut dumps);
+        if dumps.is_empty() {
+            "<state dir empty>".to_string()
+        } else {
+            dumps.join("\n")
+        }
+    } else {
+        "<state dir missing>".to_string()
+    };
+
+    format!("workspace files:\n{listing}\n\nstate files:\n{state_dump}")
+}
+
+fn panic_with_command_diagnostics(
+    context: &str,
+    workspace: &Path,
+    args: &[&str],
+    output: &Output,
+) -> ! {
+    panic!(
+        "{context} failed\ncommand: franken-node {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}\n{}",
+        args.join(" "),
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        workspace_diagnostics(workspace),
+    );
+}
+
+fn ensure_command_success(context: &str, workspace: &Path, args: &[&str], output: &Output) {
+    if !output.status.success() {
+        panic_with_command_diagnostics(context, workspace, args, output);
+    }
+}
+
+fn read_json_file(path: &Path, context: &str) -> Value {
+    let raw = fs::read_to_string(path)
+        .unwrap_or_else(|err| panic!("failed reading {context} {}: {err}", path.display()));
+    serde_json::from_str(&raw)
+        .unwrap_or_else(|err| panic!("failed parsing {context} {} as json: {err}", path.display()))
+}
+
 fn shared_fleet_transport(shared_state_dir: &Path) -> FileFleetTransport {
     let mut transport = FileFleetTransport::new(shared_state_dir);
     transport.initialize().expect("initialize fleet transport");
@@ -387,6 +571,34 @@ fn trust_card_displays_known_extension_details() {
     assert!(stdout.contains("extension: npm:@acme/auth-guard@1.4.2"));
     assert!(stdout.contains("publisher: Acme Security"));
     assert!(stdout.contains("risk: Low"));
+}
+
+#[cfg(unix)]
+#[test]
+fn run_missing_registry_suggests_init_scan() {
+    let workspace = config_only_workspace();
+    write_run_package_manifest(workspace.path(), &[("@acme/auth-guard", "^1.4.2")]);
+    let runtime_dir = workspace.path().join("fake-bin");
+    write_fake_runtime(&runtime_dir, "node", "node");
+
+    let output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &["run", "--policy", "strict", "--runtime", "node", "."],
+        &[
+            ("PATH", runtime_dir.to_str().expect("utf8 path")),
+            ("FRANKEN_ENGINE_BIN", ""),
+            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
+        ],
+    );
+
+    assert!(
+        output.status.success(),
+        "run should succeed when the registry is missing but the runtime exists: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("authoritative trust registry missing"));
+    assert!(stderr.contains("fix_command=franken-node init --profile strict --scan"));
 }
 
 #[test]
@@ -420,6 +632,22 @@ fn run_json_emits_blocked_preflight_verdict_for_revoked_dependency() {
     assert_eq!(payload["receipt"]["decision"], "denied");
 }
 
+#[test]
+fn run_blocked_preflight_error_suggests_trust_list() {
+    let workspace = seeded_fixture_trust_workspace();
+    write_run_package_manifest(workspace.path(), &[("@beta/telemetry-bridge", "^0.9.1")]);
+
+    let output = run_cli_in_workspace(workspace.path(), &["run", "--policy", "strict", "."]);
+    assert!(
+        !output.status.success(),
+        "run should block on revoked dependency"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("run blocked by trust preflight"));
+    assert!(stderr.contains("fix_command=franken-node trust list --revoked true"));
+}
+
 #[cfg(unix)]
 #[test]
 fn run_explicit_runtime_missing_returns_127() {
@@ -441,6 +669,9 @@ fn run_explicit_runtime_missing_returns_127() {
     assert_eq!(output.status.code(), Some(127));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("requested runtime `node` was not found"));
+    assert!(stderr.contains("fix_command=franken-node run --runtime auto ."));
+    assert!(stderr.contains("help_url=https://nodejs.org/en/download"));
+    assert!(stderr.contains("help_url=https://bun.sh/docs/installation"));
 }
 
 #[cfg(unix)]
@@ -595,6 +826,7 @@ fn trust_revoke_fails_for_unknown_extension() {
     );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("trust card not found"));
+    assert!(stderr.contains("fix_command=franken-node trust scan ."));
 }
 
 #[test]
@@ -798,6 +1030,7 @@ fn trust_revoke_receipt_export_fails_before_mutation_when_key_missing() {
 
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("receipt export requested but no signing key was configured"));
+    assert!(stderr.contains("fix_command=mkdir -p .franken-node/keys && openssl rand -hex 32 > .franken-node/keys/receipt-signing.key"));
     assert!(
         !receipt_out.exists(),
         "receipt export should not be written on failure"
@@ -855,6 +1088,35 @@ fn trust_revoke_receipt_export_succeeds_with_cli_signing_key() {
     let summary = fs::read_to_string(&receipt_summary_out).expect("read summary export");
     assert!(summary.contains("Signed Decision Receipts"));
     assert!(summary.contains("Key ID"));
+}
+
+#[test]
+fn trust_quarantine_receipt_export_fails_before_mutation_when_key_missing() {
+    let workspace = seeded_fixture_trust_workspace();
+    let receipt_out = workspace.path().join("artifacts/quarantine-receipts.json");
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "trust",
+            "quarantine",
+            "--artifact",
+            "sha256:deadbeef",
+            "--receipt-out",
+            receipt_out.to_str().expect("utf8 receipt path"),
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "expected receipt export without a key to fail"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("receipt export requested but no signing key was configured"));
+    assert!(stderr.contains("fix_command=mkdir -p .franken-node/keys && openssl rand -hex 32 > .franken-node/keys/receipt-signing.key"));
+    assert!(
+        !receipt_out.exists(),
+        "receipt export should not be written on failure"
+    );
 }
 
 #[test]
@@ -1135,6 +1397,292 @@ fn init_scan_populates_trust_registry() {
     let registry = fs::read_to_string(&registry_path).expect("read trust registry");
     assert!(registry.contains("npm:react"));
     assert!(registry.contains("19.2.4"));
+}
+
+#[cfg(unix)]
+#[test]
+fn full_init_to_run_pipeline_empty_registry_warns_on_untracked_dependency_json() {
+    let started = Instant::now();
+    let workspace = tempfile::tempdir().expect("tempdir");
+    write_run_package_manifest(workspace.path(), &[("left-pad", "^1.3.0")]);
+
+    log_pipeline_step(
+        1,
+        "init_without_scan",
+        "init bootstraps config and an empty trust registry",
+    );
+    let init_args = ["init", "--json", "--out-dir", "."];
+    let init_output = run_cli_in_workspace(workspace.path(), &init_args);
+    ensure_command_success(
+        "init without scan",
+        workspace.path(),
+        &init_args,
+        &init_output,
+    );
+
+    let init_payload = parse_json_stdout(&init_output, "init --json full pipeline empty registry");
+    assert2::assert!(init_payload["command"] == "init");
+    assert2::assert!(init_payload["trust_scan"].is_null());
+    assert2::assert!(
+        workspace
+            .path()
+            .join(".franken-node/state/trust-card-registry.v1.json")
+            .is_file()
+    );
+
+    log_pipeline_step(
+        2,
+        "run_with_empty_registry",
+        "run succeeds and surfaces an untracked dependency warning in JSON",
+    );
+    let runtime_dir = workspace.path().join("fake-bin");
+    write_fake_runtime(&runtime_dir, "node", "node");
+    let runtime_path = runtime_dir.to_str().expect("utf8 path").to_string();
+    let run_args = [
+        "run",
+        "--policy",
+        "balanced",
+        "--runtime",
+        "node",
+        "--json",
+        ".",
+    ];
+    let run_output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &run_args,
+        &[
+            ("PATH", runtime_path.as_str()),
+            ("FRANKEN_ENGINE_BIN", ""),
+            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
+        ],
+    );
+    ensure_command_success(
+        "run with empty registry",
+        workspace.path(),
+        &run_args,
+        &run_output,
+    );
+
+    let preflight_payload =
+        parse_json_stderr(&run_output, "run --json preflight empty registry pipeline");
+    let run_payload = parse_json_stdout(&run_output, "run --json completion empty registry");
+    let results = run_payload["preflight"]["verdict"]["results"]
+        .as_array()
+        .expect("results array");
+    let warnings = run_payload["preflight"]["verdict"]["warnings"]
+        .as_array()
+        .expect("warnings array");
+    let receipt_path = PathBuf::from(
+        run_payload["receipt_path"]
+            .as_str()
+            .expect("receipt path string"),
+    );
+
+    assert2::assert!(preflight_payload["verdict"]["status"] == "passed");
+    assert2::assert!(run_payload["success"].as_bool() == Some(true));
+    assert2::assert!(run_payload["dispatch"]["runtime"] == "node");
+    assert2::assert!(
+        run_payload["dispatch"]["captured_output"]["stdout"]
+            .as_str()
+            .expect("captured stdout")
+            .contains("runtime=node")
+    );
+    assert2::assert!(warnings.len() == 1);
+    assert2::assert!(results.len() == 1);
+    assert2::assert!(results[0]["status"] == "untracked");
+    assert2::assert!(results[0]["extension_id"] == "npm:left-pad");
+    assert2::assert!(receipt_path.is_file());
+
+    let receipt_payload = read_json_file(&receipt_path, "run receipt");
+    assert2::assert!(receipt_payload["receipt_id"] == run_payload["receipt"]["receipt_id"]);
+    assert2::assert!(receipt_payload["preflight_verdict"]["status"] == "passed");
+    assert2::assert!(started.elapsed() < Duration::from_secs(30));
+}
+
+#[cfg(unix)]
+#[test]
+fn full_init_to_run_pipeline_with_trust_data_reports_trusted_extensions_json() {
+    let started = Instant::now();
+    let workspace = tempfile::tempdir().expect("tempdir");
+    write_pipeline_package_manifest(
+        workspace.path(),
+        &[("react", "^19.2.0")],
+        &[("typescript", "^5.8.3")],
+        &[("@types/node", "^24.9.2")],
+    );
+    write_pipeline_lockfile(workspace.path());
+
+    log_pipeline_step(
+        1,
+        "init_with_scan",
+        "init bootstraps state and populates trust cards",
+    );
+    let init_args = ["init", "--json", "--out-dir", ".", "--scan"];
+    let init_output = run_cli_in_workspace(workspace.path(), &init_args);
+    ensure_command_success("init with scan", workspace.path(), &init_args, &init_output);
+
+    let init_payload = parse_json_stdout(&init_output, "init --json full pipeline trust data");
+    let trust_scan = init_payload["trust_scan"]
+        .as_object()
+        .expect("trust_scan object");
+    let scan_items = trust_scan["items"].as_array().expect("trust scan items");
+    assert2::assert!(init_payload["command"] == "init");
+    assert2::assert!(trust_scan["created_cards"] == 3);
+    assert2::assert!(scan_items.len() == 3);
+
+    log_pipeline_step(
+        2,
+        "run_with_scanned_registry",
+        "run succeeds and reports trusted per-extension JSON results",
+    );
+    let runtime_dir = workspace.path().join("fake-bin");
+    write_fake_runtime(&runtime_dir, "node", "node");
+    let runtime_path = runtime_dir.to_str().expect("utf8 path").to_string();
+    let run_args = [
+        "run",
+        "--policy",
+        "balanced",
+        "--runtime",
+        "node",
+        "--json",
+        ".",
+    ];
+    let run_output = run_cli_in_workspace_with_env(
+        workspace.path(),
+        &run_args,
+        &[
+            ("PATH", runtime_path.as_str()),
+            ("FRANKEN_ENGINE_BIN", ""),
+            ("FRANKEN_NODE_ENGINE_BINARY_PATH", ""),
+        ],
+    );
+    ensure_command_success(
+        "run with populated trust registry",
+        workspace.path(),
+        &run_args,
+        &run_output,
+    );
+
+    let preflight_payload = parse_json_stderr(
+        &run_output,
+        "run --json preflight populated registry pipeline",
+    );
+    let run_payload = parse_json_stdout(&run_output, "run --json completion populated registry");
+    let results = run_payload["preflight"]["verdict"]["results"]
+        .as_array()
+        .expect("results array");
+    let receipt_path = PathBuf::from(
+        run_payload["receipt_path"]
+            .as_str()
+            .expect("receipt path string"),
+    );
+
+    assert2::assert!(preflight_payload["verdict"]["status"] == "passed");
+    assert2::assert!(run_payload["success"].as_bool() == Some(true));
+    assert2::assert!(
+        run_payload["preflight"]["verdict"]["warnings"]
+            .as_array()
+            .expect("warnings array")
+            .is_empty()
+    );
+    assert2::assert!(results.len() == 3);
+    assert2::assert!(results.iter().all(|result| result["status"] == "trusted"));
+    assert2::assert!(
+        results
+            .iter()
+            .any(|result| result["extension_id"] == "npm:react")
+    );
+    assert2::assert!(
+        results
+            .iter()
+            .any(|result| result["extension_id"] == "npm:typescript")
+    );
+    assert2::assert!(
+        results
+            .iter()
+            .any(|result| result["extension_id"] == "npm:@types/node")
+    );
+    assert2::assert!(run_payload["receipt"]["violation_count"] == 0);
+    assert2::assert!(receipt_path.is_file());
+    assert2::assert!(started.elapsed() < Duration::from_secs(30));
+}
+
+#[test]
+fn full_init_to_run_pipeline_revoked_extension_blocks_in_strict_json() {
+    let started = Instant::now();
+    let workspace = tempfile::tempdir().expect("tempdir");
+    write_run_package_manifest(workspace.path(), &[("@beta/telemetry-bridge", "^0.9.1")]);
+
+    log_pipeline_step(
+        1,
+        "init_with_scan",
+        "init bootstraps state and seeds the dependency trust card",
+    );
+    let init_args = ["init", "--json", "--out-dir", ".", "--scan"];
+    let init_output = run_cli_in_workspace(workspace.path(), &init_args);
+    ensure_command_success(
+        "init with scan before revoke",
+        workspace.path(),
+        &init_args,
+        &init_output,
+    );
+    let init_payload = parse_json_stdout(&init_output, "init --json revoke pipeline");
+    assert2::assert!(init_payload["trust_scan"]["created_cards"] == 1);
+
+    log_pipeline_step(
+        2,
+        "revoke_dependency",
+        "trust revoke marks the scanned dependency as revoked",
+    );
+    let revoke_args = ["trust", "revoke", "npm:@beta/telemetry-bridge"];
+    let revoke_output = run_cli_in_workspace(workspace.path(), &revoke_args);
+    ensure_command_success(
+        "trust revoke after init scan",
+        workspace.path(),
+        &revoke_args,
+        &revoke_output,
+    );
+    let revoke_stdout = String::from_utf8_lossy(&revoke_output.stdout);
+    assert2::assert!(revoke_stdout.contains("revocation: revoked"));
+
+    log_pipeline_step(
+        3,
+        "strict_run_blocked",
+        "run --policy strict blocks and emits a revoked violation JSON payload",
+    );
+    let run_args = ["run", "--policy", "strict", "--json", "."];
+    let run_output = run_cli_in_workspace(workspace.path(), &run_args);
+    if run_output.status.success() {
+        panic_with_command_diagnostics(
+            "strict run should have been blocked",
+            workspace.path(),
+            &run_args,
+            &run_output,
+        );
+    }
+
+    let run_payload = parse_json_stdout(&run_output, "run --json strict blocked pipeline");
+    let violations = run_payload["verdict"]["violations"]
+        .as_array()
+        .expect("violations array");
+    let results = run_payload["verdict"]["results"]
+        .as_array()
+        .expect("results array");
+
+    assert2::assert!(run_payload["verdict"]["status"] == "blocked");
+    assert2::assert!(run_payload["receipt"]["decision"] == "denied");
+    assert2::assert!(
+        violations
+            .iter()
+            .any(|violation| violation["kind"] == "revoked")
+    );
+    assert2::assert!(results.iter().any(|result| result["status"] == "revoked"));
+    assert2::assert!(
+        results
+            .iter()
+            .any(|result| result["extension_id"] == "npm:@beta/telemetry-bridge")
+    );
+    assert2::assert!(started.elapsed() < Duration::from_secs(30));
 }
 
 #[test]

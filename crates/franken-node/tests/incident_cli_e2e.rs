@@ -316,6 +316,52 @@ fn incident_bundle_fails_closed_when_authoritative_evidence_is_missing() {
 }
 
 #[test]
+fn incident_bundle_receipt_export_fails_when_signing_key_missing() {
+    let workspace = config_only_workspace();
+    let evidence_path = workspace
+        .path()
+        .join("fixtures/incidents/INC-E2E-NOSIGN-001/evidence.v1.json");
+    write_dense_fixture_incident_evidence(&evidence_path, "INC-E2E-NOSIGN-001", 3);
+    let evidence_arg = evidence_path.to_string_lossy().to_string();
+    let receipt_out = workspace.path().join("receipts/bundle-receipt.json");
+
+    let output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "incident",
+            "bundle",
+            "--id",
+            "INC-E2E-NOSIGN-001",
+            "--evidence-path",
+            &evidence_arg,
+            "--receipt-out",
+            receipt_out.to_str().expect("utf8 receipt path"),
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "expected receipt export without a key to fail"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("receipt export requested but no signing key was configured"));
+    assert!(stderr.contains(
+        "fix_command=mkdir -p .franken-node/keys && openssl rand -hex 32 > .franken-node/keys/receipt-signing.key"
+    ));
+    assert!(
+        !receipt_out.exists(),
+        "receipt export should not be written on failure"
+    );
+    assert!(
+        !workspace
+            .path()
+            .join("INC-E2E-NOSIGN-001.fnbundle")
+            .exists(),
+        "bundle should not be written when receipt export fails"
+    );
+}
+
+#[test]
 fn incident_replay_counterfactual_pipeline_is_deterministic_and_fail_closed() {
     let workspace = config_only_workspace();
     let evidence_path = workspace
