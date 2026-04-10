@@ -583,6 +583,41 @@ impl EngineDispatcher {
                     .env("FRANKEN_NODE_FALLBACK_RUNTIME", &plan.runtime)
                     .env("FRANKEN_NODE_FALLBACK_REASON", "franken_engine_unavailable");
             }
+
+            // Wire network policy to fallback runtime (bd-3pogm).
+            // Even fallback runtimes should receive policy hints for best-effort enforcement.
+            let network_policy = &config.security.network_policy;
+            command
+                .env(
+                    "FRANKEN_NODE_NETWORK_SSRF_PROTECTION_ENABLED",
+                    if network_policy.ssrf_protection_enabled {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                )
+                .env(
+                    "FRANKEN_NODE_NETWORK_BLOCK_CLOUD_METADATA",
+                    if network_policy.block_cloud_metadata {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                )
+                .env(
+                    "FRANKEN_NODE_NETWORK_AUDIT_BLOCKED",
+                    if network_policy.audit_blocked_requests {
+                        "1"
+                    } else {
+                        "0"
+                    },
+                );
+            if !network_policy.allowlist.is_empty() {
+                let allowlist_json = serde_json::to_string(&network_policy.allowlist)
+                    .unwrap_or_else(|_| "[]".to_string());
+                command.env("FRANKEN_NODE_NETWORK_ALLOWLIST", allowlist_json);
+            }
+
             let output = command.output().with_context(|| {
                 format!(
                     "failed launching runtime `{}` for {}",
@@ -637,6 +672,42 @@ impl EngineDispatcher {
                 "FRANKEN_ENGINE_TELEMETRY_SOCKET",
                 telemetry_handle.socket_path().to_string_lossy().as_ref(),
             );
+
+        // Wire network policy enforcement to spawned engine process (bd-3pogm).
+        // These env vars provide a fast path for the engine to read policy without
+        // parsing the full TOML config payload.
+        let network_policy = &config.security.network_policy;
+        cmd.env(
+            "FRANKEN_ENGINE_NETWORK_SSRF_PROTECTION_ENABLED",
+            if network_policy.ssrf_protection_enabled {
+                "1"
+            } else {
+                "0"
+            },
+        )
+        .env(
+            "FRANKEN_ENGINE_NETWORK_BLOCK_CLOUD_METADATA",
+            if network_policy.block_cloud_metadata {
+                "1"
+            } else {
+                "0"
+            },
+        )
+        .env(
+            "FRANKEN_ENGINE_NETWORK_AUDIT_BLOCKED",
+            if network_policy.audit_blocked_requests {
+                "1"
+            } else {
+                "0"
+            },
+        );
+
+        // Serialize allowlist as JSON for structured parsing by the engine.
+        if !network_policy.allowlist.is_empty() {
+            let allowlist_json = serde_json::to_string(&network_policy.allowlist)
+                .unwrap_or_else(|_| "[]".to_string());
+            cmd.env("FRANKEN_ENGINE_NETWORK_ALLOWLIST", allowlist_json);
+        }
 
         let (output, report) = Self::run_engine_process(&mut cmd, telemetry_handle)
             .map_err(|err| anyhow::anyhow!("{err}"))?;

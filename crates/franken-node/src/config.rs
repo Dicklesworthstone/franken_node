@@ -1,7 +1,7 @@
 #![allow(clippy::doc_markdown)]
 
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
@@ -1961,6 +1961,57 @@ pub struct SecurityConfig {
     /// List of authorized API keys for control-plane access.
     #[serde(default)]
     pub authorized_api_keys: std::collections::BTreeSet<String>,
+
+    /// Network egress policy enforcement mode.
+    #[serde(default)]
+    pub network_policy: NetworkPolicyConfig,
+}
+
+/// Network egress policy configuration for spawned runtime processes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkPolicyConfig {
+    /// Whether to enforce SSRF protection (block private/internal IPs).
+    #[serde(default = "default_true")]
+    pub ssrf_protection_enabled: bool,
+
+    /// Whether to block cloud metadata endpoints (169.254.169.254, etc.).
+    #[serde(default = "default_true")]
+    pub block_cloud_metadata: bool,
+
+    /// Explicit allowlist of hosts that bypass SSRF checks.
+    #[serde(default)]
+    pub allowlist: Vec<NetworkAllowlistEntry>,
+
+    /// Whether to log blocked requests (always true in strict mode).
+    #[serde(default = "default_true")]
+    pub audit_blocked_requests: bool,
+}
+
+/// An entry in the network allowlist.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NetworkAllowlistEntry {
+    /// Host pattern (exact match or *.example.com wildcard).
+    pub host: String,
+    /// Optional port restriction.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
+    /// Reason for the allowlist entry (for audit trail).
+    pub reason: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for NetworkPolicyConfig {
+    fn default() -> Self {
+        Self {
+            ssrf_protection_enabled: true,
+            block_cloud_metadata: true,
+            allowlist: Vec::new(),
+            audit_blocked_requests: true,
+        }
+    }
 }
 
 // -- Engine --
@@ -2629,9 +2680,12 @@ max_degraded_duration_secs = 900
             BTreeSet::from(["alpha-key".to_string(), "beta-key".to_string()]);
         std::fs::write(&path, config.to_toml().unwrap()).unwrap();
 
-        let resolved =
-            Config::resolve_with_env(Some(&path), CliOverrides::default(), &map_lookup(BTreeMap::new()))
-                .unwrap();
+        let resolved = Config::resolve_with_env(
+            Some(&path),
+            CliOverrides::default(),
+            &map_lookup(BTreeMap::new()),
+        )
+        .unwrap();
 
         assert_eq!(
             resolved.config.security.authorized_api_keys,

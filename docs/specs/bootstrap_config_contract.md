@@ -104,3 +104,41 @@ Resolver emits merge decisions as structured entries:
 - `value`: applied value
 
 `init` and `doctor` both consume the same resolver so parsing/precedence behavior is not duplicated.
+
+## Runtime Environment Variables (bd-3pogm)
+
+When `franken-node run` spawns an engine or fallback runtime process, it propagates network policy settings via environment variables. These are **output** variables set by franken-node for the spawned process to consume, not **input** variables that configure franken-node itself.
+
+### Engine-bound variables (`FRANKEN_ENGINE_*`)
+
+Set when spawning the franken-engine binary:
+
+- `FRANKEN_ENGINE_POLICY_PAYLOAD`: Full config serialized as TOML
+- `FRANKEN_ENGINE_TELEMETRY_SOCKET`: Path to telemetry bridge socket
+- `FRANKEN_ENGINE_NETWORK_SSRF_PROTECTION_ENABLED`: `1` if SSRF protection is enabled, `0` otherwise
+- `FRANKEN_ENGINE_NETWORK_BLOCK_CLOUD_METADATA`: `1` if cloud metadata endpoints are blocked, `0` otherwise
+- `FRANKEN_ENGINE_NETWORK_AUDIT_BLOCKED`: `1` if blocked requests should be logged, `0` otherwise
+- `FRANKEN_ENGINE_NETWORK_ALLOWLIST`: JSON array of allowed hosts (only set if allowlist is non-empty)
+
+### Fallback runtime variables (`FRANKEN_NODE_*`)
+
+Set when spawning node/bun as a fallback runtime:
+
+- `FRANKEN_NODE_REQUESTED_POLICY_MODE`: Policy mode string
+- `FRANKEN_NODE_FALLBACK_RUNTIME`: Runtime name (`node` or `bun`) when falling back
+- `FRANKEN_NODE_FALLBACK_REASON`: Reason for fallback (e.g., `franken_engine_unavailable`)
+- `FRANKEN_NODE_NETWORK_SSRF_PROTECTION_ENABLED`: `1` if SSRF protection is enabled, `0` otherwise
+- `FRANKEN_NODE_NETWORK_BLOCK_CLOUD_METADATA`: `1` if cloud metadata endpoints are blocked, `0` otherwise
+- `FRANKEN_NODE_NETWORK_AUDIT_BLOCKED`: `1` if blocked requests should be logged, `0` otherwise
+- `FRANKEN_NODE_NETWORK_ALLOWLIST`: JSON array of allowed hosts (only set if allowlist is non-empty)
+
+### Allowlist JSON schema
+
+```json
+[
+  {"host": "api.example.com", "port": 443, "reason": "Primary API endpoint"},
+  {"host": "*.cdn.example.com", "port": null, "reason": "CDN hosts"}
+]
+```
+
+Spawned processes should use these environment variables to enforce network egress policy, blocking requests to private/internal IPs and cloud metadata endpoints unless explicitly allowlisted.
