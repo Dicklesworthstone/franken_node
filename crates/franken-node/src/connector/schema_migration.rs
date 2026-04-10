@@ -2053,6 +2053,35 @@ mod tests {
     }
 
     #[test]
+    fn intermediate_version_with_prefix_journal_but_hash_divergence_fails_closed() {
+        let reg = sample_registry();
+        let prefix_plan = reg.build_plan("conn-1", &v(1, 0, 0), &v(1, 1, 0)).unwrap();
+        let full_plan = reg.build_plan("conn-1", &v(1, 0, 0), &v(2, 0, 0)).unwrap();
+        let mut state = sample_state();
+
+        let first = execute_plan(&prefix_plan, &mut state, "2026-01-01T00:00:00Z");
+        assert_eq!(first.outcome, MigrationOutcome::Applied);
+        assert_eq!(state.schema_version, v(1, 1, 0));
+
+        state
+            .canonical_state
+            .insert("tampered".to_string(), json!(true));
+        state.refresh_state_hash().unwrap();
+
+        let receipt = execute_plan(&full_plan, &mut state, "2026-01-01T00:00:02Z");
+        assert!(matches!(receipt.outcome, MigrationOutcome::Failed { .. }));
+        assert_eq!(
+            receipt.error_code.as_deref(),
+            Some("MIGRATION_STATE_CONFLICT")
+        );
+        assert_eq!(receipt.steps_applied, 0);
+        assert_eq!(receipt.steps_already_applied, 0);
+        assert_eq!(receipt.steps_rolled_back, 0);
+        assert!(receipt.journal_record_ids.is_empty());
+        assert!(receipt.step_results.is_empty());
+    }
+
+    #[test]
     fn idempotent_hint_already_applied() {
         let hint = MigrationHint {
             from_version: v(1, 0, 0),

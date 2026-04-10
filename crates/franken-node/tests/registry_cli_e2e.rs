@@ -224,6 +224,31 @@ fn registry_publish_persists_artifact_and_search_reports_integrity() {
     assert_eq!(manifests.len(), 1, "expected one active manifest");
     assert_eq!(manifests[0], manifest_path);
 
+    let manifest_raw = fs::read_to_string(&manifest_path).expect("read manifest");
+    let manifest: serde_json::Value = serde_json::from_str(&manifest_raw).expect("parse manifest");
+    let expected_hash = {
+        use sha2::Digest;
+        format!(
+            "sha256:{:x}",
+            sha2::Sha256::digest(fs::read(&artifact_path).expect("read stored artifact"))
+        )
+    };
+    assert_eq!(
+        manifest["artifact_sha256"],
+        serde_json::Value::String(expected_hash)
+    );
+
+    let verify_output =
+        run_cli_in_workspace(workspace.path(), &["registry", "verify", &extension_id]);
+    assert!(
+        verify_output.status.success(),
+        "registry verify failed: {}",
+        String::from_utf8_lossy(&verify_output.stderr)
+    );
+    let verify_stdout = String::from_utf8_lossy(&verify_output.stdout);
+    assert!(verify_stdout.contains("integrity=verified"));
+    assert!(verify_stdout.contains("manifest_path=.franken-node/state/registry/artifacts/"));
+
     let search_output = run_cli_in_workspace(workspace.path(), &["registry", "search", "plugin"]);
     assert!(
         search_output.status.success(),
@@ -319,6 +344,48 @@ fn registry_search_reports_hash_mismatch_for_corrupted_local_artifact() {
     assert!(search_stdout.contains(&extension_id));
     assert!(search_stdout.contains(".franken-node/state/registry/artifacts/"));
     assert!(search_stdout.contains("hash-mismatch"));
+}
+
+#[test]
+fn registry_search_reports_invalid_signature_for_tampered_manifest() {
+    let workspace = registry_workspace();
+    let signing_key_path = workspace.path().join("keys/publisher.ed25519");
+    write_signing_key(&signing_key_path);
+    let signing_key_arg = signing_key_path.to_string_lossy().to_string();
+
+    let publish_output = run_cli_in_workspace(
+        workspace.path(),
+        &[
+            "registry",
+            "publish",
+            "plugin.fnext",
+            "--signing-key",
+            &signing_key_arg,
+        ],
+    );
+    assert!(
+        publish_output.status.success(),
+        "registry publish failed: {}",
+        String::from_utf8_lossy(&publish_output.stderr)
+    );
+    let publish_stdout = String::from_utf8_lossy(&publish_output.stdout);
+    let extension_id = publish_field(&publish_stdout, "extension_id");
+    let manifest_path = workspace
+        .path()
+        .join(publish_field(&publish_stdout, "manifest_path"));
+
+    tamper_manifest_signature(&manifest_path);
+
+    let search_output = run_cli_in_workspace(workspace.path(), &["registry", "search", "plugin"]);
+    assert!(
+        search_output.status.success(),
+        "registry search failed: {}",
+        String::from_utf8_lossy(&search_output.stderr)
+    );
+    let search_stdout = String::from_utf8_lossy(&search_output.stdout);
+    assert!(search_stdout.contains(&extension_id));
+    assert!(search_stdout.contains(".franken-node/state/registry/artifacts/"));
+    assert!(search_stdout.contains("invalid-signature"));
 }
 
 #[test]
