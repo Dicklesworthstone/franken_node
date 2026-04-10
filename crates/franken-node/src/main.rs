@@ -179,6 +179,9 @@ const VERIFY_CORPUS_SEARCH_ROOTS: &[&str] = &["fixtures", "vectors"];
 const TRUST_CARD_REGISTRY_STATE_RELATIVE_PATH: &str =
     ".franken-node/state/trust-card-registry.v1.json";
 const INCIDENT_EVIDENCE_RELATIVE_DIR: &str = ".franken-node/state/incidents";
+const REGISTRY_LOCAL_ARTIFACT_MANIFEST_SCHEMA_VERSION: &str =
+    "franken-node/local-registry-artifact-manifest/v1";
+const REGISTRY_LOCAL_ARTIFACT_MANIFEST_FILE_NAME: &str = "artifact.manifest.json";
 const INCIDENT_EVIDENCE_FILE_NAME: &str = "evidence.v1.json";
 const RUN_EXECUTION_RECEIPT_SCHEMA_VERSION: &str = "franken-node/run-execution-receipt/v1";
 const RUN_EXECUTION_RECEIPT_ID_PLACEHOLDER: &str = "pending";
@@ -419,6 +422,82 @@ struct RunCommandOutput {
     dispatch: ops::engine_dispatcher::RunDispatchReport,
     receipt: RunExecutionReceipt,
     receipt_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+struct LocalRegistryArtifactManifest {
+    schema_version: String,
+    stored_at_utc: String,
+    artifact_file_name: String,
+    artifact_sha256: String,
+    artifact_size_bytes: u64,
+    manifest_bytes_b64: String,
+    publisher_public_key_hex: String,
+    extension: SignedExtension,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct StoredRegistryArtifact {
+    manifest_path: PathBuf,
+    archived: bool,
+    manifest: LocalRegistryArtifactManifest,
+}
+
+impl StoredRegistryArtifact {
+    fn entry_dir(&self) -> &Path {
+        self.manifest_path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+    }
+
+    fn artifact_path(&self) -> PathBuf {
+        self.entry_dir().join(&self.manifest.artifact_file_name)
+    }
+
+    fn stored_at_sort_key(&self) -> i64 {
+        DateTime::parse_from_rfc3339(&self.manifest.stored_at_utc)
+            .map(|timestamp| timestamp.timestamp_millis())
+            .unwrap_or(i64::MIN)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RegistryArtifactIntegrityStatus {
+    Verified,
+    HashMismatch,
+    MissingArtifact,
+    InvalidSignature,
+    InvalidMetadata,
+}
+
+impl RegistryArtifactIntegrityStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Verified => "verified",
+            Self::HashMismatch => "hash-mismatch",
+            Self::MissingArtifact => "missing-artifact",
+            Self::InvalidSignature => "invalid-signature",
+            Self::InvalidMetadata => "invalid-metadata",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistryArtifactVerification {
+    status: RegistryArtifactIntegrityStatus,
+    detail: String,
+    artifact_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RegistrySearchDisplayRow {
+    assurance: u8,
+    extension_id: String,
+    name: String,
+    publisher: String,
+    status: String,
+    artifact_path: String,
+    integrity_status: String,
 }
 
 struct TempFileGuard(Option<PathBuf>);
@@ -1177,6 +1256,7 @@ const STATE_BOOTSTRAP_SUBDIRS: &[&str] = &[
     "state/execution-receipts",
     "state/registry",
     "state/registry/artifacts",
+    "state/registry/archive",
     "state/fleet",
     "state/migrations",
     "keys",
@@ -3807,6 +3887,157 @@ mod registry_command_tests {
             supply_chain::provenance::ChainLinkRole::Publisher
         );
     }
+
+    fn persist_registry_artifact_fixture(
+        project_root: &Path,
+        file_name: &str,
+        payload: &[u8],
+    ) -> StoredRegistryArtifact {
+        let package_path = project_root.join(file_name);
+        std::fs::write(&package_path, payload).expect("write package");
+        let signing_material = Ed25519SigningMaterial {
+            path: project_root.join("publisher.ed25519"),
+            source: "test",
+            signing_key: ed25519_dalek::SigningKey::from_bytes(&[11_u8; 32]),
+        };
+        let content_hash = compute_registry_artifact_sha256(payload);
+        let request = build_registry_publish_request_with_context(
+            &package_path,
+            &content_hash,
+            &signing_material,
+            registry_publish_context(
+                "builder.example.internal",
+                Some("https://example.com/acme/plugin.git"),
+                Some("11223344556677889900aabbccddeeff00112233"),
+                Some(false),
+            ),
+        )
+        .expect("publish request");
+
+        let mut registry = registry_cli_registry().expect("registry");
+        registry.register_publisher_key(signing_material.signing_key.verifying_key());
+        let result = registry.register(request.clone(), "trace-registry-test", 1_700_000_999);
+        assert!(
+            result.success,
+            "registry register failed: {}",
+            result.detail
+        );
+        let extension_id = result.extension_id.expect("extension id");
+        let published = registry
+            .query(&extension_id)
+            .expect("published entry")
+            .clone();
+
+        persist_local_registry_artifact(
+            project_root,
+            &package_path,
+            payload,
+            &request,
+            &published,
+            &signing_material.signing_key.verifying_key(),
+        )
+        .expect("persist local artifact")
+    }
+
+    #[test]
+    fn inspect_local_registry_artifact_detects_tampering() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stored =
+            persist_registry_artifact_fixture(temp.path(), "plugin.fnext", b"artifact payload");
+        let baseline = inspect_local_registry_artifact(&stored);
+        assert_eq!(baseline.status, RegistryArtifactIntegrityStatus::Verified);
+
+        std::fs::write(stored.artifact_path(), b"tampered payload").expect("tamper artifact");
+        let tampered = inspect_local_registry_artifact(&stored);
+        assert_eq!(
+            tampered.status,
+            RegistryArtifactIntegrityStatus::HashMismatch
+        );
+        assert!(tampered.detail.contains("artifact hash mismatch"));
+    }
+
+    #[test]
+    fn inspect_local_registry_artifact_detects_invalid_manifest_signature() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stored =
+            persist_registry_artifact_fixture(temp.path(), "plugin.fnext", b"artifact payload");
+
+        let raw = std::fs::read_to_string(&stored.manifest_path).expect("read manifest");
+        let mut manifest: LocalRegistryArtifactManifest =
+            serde_json::from_str(&raw).expect("parse manifest");
+        let tampered_manifest_bytes =
+            format!("tampered:{}:{}", manifest.extension.name, manifest.artifact_sha256);
+        manifest.manifest_bytes_b64 = BASE64_STANDARD.encode(tampered_manifest_bytes.as_bytes());
+        std::fs::write(
+            &stored.manifest_path,
+            serde_json::to_vec_pretty(&manifest).expect("serialize manifest"),
+        )
+        .expect("write tampered manifest");
+
+        let reloaded =
+            load_local_registry_artifact_manifest(&stored.manifest_path, false).expect("reload");
+        let verification = inspect_local_registry_artifact(&reloaded);
+        assert_eq!(
+            verification.status,
+            RegistryArtifactIntegrityStatus::InvalidSignature
+        );
+        assert!(
+            verification
+                .detail
+                .contains("manifest signature verification failed")
+        );
+    }
+
+    #[test]
+    fn archived_registry_artifacts_remain_discoverable_by_extension_id() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stored =
+            persist_registry_artifact_fixture(temp.path(), "plugin.fnext", b"artifact payload");
+        let archived_dir =
+            archive_local_registry_artifact(temp.path(), &stored).expect("archive artifact");
+        assert!(
+            archived_dir.is_dir(),
+            "archived entry directory should exist"
+        );
+
+        let active = collect_local_registry_artifacts(temp.path(), false).expect("active list");
+        assert!(active.is_empty(), "active artifact set should be empty");
+
+        let archived = collect_local_registry_artifacts(temp.path(), true).expect("all list");
+        assert_eq!(archived.len(), 1);
+        assert!(archived[0].archived);
+        assert!(
+            archived[0]
+                .manifest_path
+                .starts_with(registry_archive_root(temp.path()))
+        );
+
+        let found =
+            find_local_registry_artifact(temp.path(), &stored.manifest.extension.extension_id)
+                .expect("find archived artifact");
+        assert!(found.archived);
+        assert_eq!(
+            found.manifest.extension.extension_id,
+            stored.manifest.extension.extension_id
+        );
+    }
+
+    #[test]
+    fn local_registry_search_rows_report_verified_artifact_metadata() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let stored =
+            persist_registry_artifact_fixture(temp.path(), "plugin.fnext", b"artifact payload");
+
+        let rows = local_registry_search_rows(temp.path(), "plugin", None).expect("search rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].extension_id, stored.manifest.extension.extension_id);
+        assert_eq!(rows[0].integrity_status, "verified");
+        assert!(
+            rows[0]
+                .artifact_path
+                .contains(".franken-node/state/registry/artifacts/")
+        );
+    }
 }
 
 #[cfg(test)]
@@ -5867,15 +6098,14 @@ impl BuildContext {
         }
         // GitLab CI
         if let Ok(url) = std::env::var("CI_REPOSITORY_URL") {
-            // Strip credentials from URL if present
-            if let Ok(parsed) = url::Url::parse(&url) {
-                let clean_url = format!(
-                    "{}://{}{}",
-                    parsed.scheme(),
-                    parsed.host_str().unwrap_or_default(),
-                    parsed.path()
-                );
-                return Some(clean_url);
+            // Strip credentials from URL if present (format: https://user:token@host/path)
+            // Simple approach: find @ and reconstruct without credentials
+            if let Some(at_pos) = url.find('@') {
+                if let Some(scheme_end) = url.find("://") {
+                    let scheme = &url[..scheme_end + 3];
+                    let rest = &url[at_pos + 1..];
+                    return Some(format!("{scheme}{rest}"));
+                }
             }
             return Some(url);
         }
@@ -5952,7 +6182,9 @@ impl BuildContext {
             return Some(user);
         }
         // Generic environment user
-        std::env::var("USER").ok().or_else(|| std::env::var("USERNAME").ok())
+        std::env::var("USER")
+            .ok()
+            .or_else(|| std::env::var("USERNAME").ok())
     }
 }
 
@@ -6206,6 +6438,416 @@ fn normalize_registry_name(raw: &str) -> String {
     } else {
         normalized
     }
+}
+
+fn registry_storage_root(project_root: &Path) -> PathBuf {
+    project_root.join(".franken-node/state/registry")
+}
+
+fn registry_active_artifacts_root(project_root: &Path) -> PathBuf {
+    registry_storage_root(project_root).join("artifacts")
+}
+
+fn registry_archive_root(project_root: &Path) -> PathBuf {
+    registry_storage_root(project_root).join("archive")
+}
+
+fn ensure_registry_storage_root(project_root: &Path) -> Result<PathBuf> {
+    ensure_state_dir(project_root)?;
+    let root = registry_storage_root(project_root);
+    for path in [&root, &root.join("artifacts"), &root.join("archive")] {
+        std::fs::create_dir_all(path)
+            .with_context(|| format!("failed creating {}", path.display()))?;
+    }
+    Ok(root)
+}
+
+fn compute_registry_artifact_sha256(bytes: &[u8]) -> String {
+    format!("sha256:{:x}", sha2::Sha256::digest(bytes))
+}
+
+fn registry_entry_directory_name(stored_at_utc: &str, extension_id: &str) -> String {
+    let prefix = DateTime::parse_from_rfc3339(stored_at_utc)
+        .map(|timestamp| timestamp.format("%Y%m%dT%H%M%S%.3fZ").to_string())
+        .unwrap_or_else(|_| "unknown".to_string());
+    format!("{prefix}-{extension_id}")
+}
+
+fn registry_relative_display_path(path: &Path, project_root: &Path) -> String {
+    path.strip_prefix(project_root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+fn write_bytes_atomically(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("missing parent directory for {}", path.display()))?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("failed creating {}", parent.display()))?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| anyhow::anyhow!("failed deriving file name for {}", path.display()))?;
+    let temp_path = path.with_file_name(format!("{file_name}.tmp"));
+    let mut temp_guard = TempFileGuard::new(temp_path.clone());
+    std::fs::write(&temp_path, bytes)
+        .with_context(|| format!("failed writing {}", temp_path.display()))?;
+    std::fs::rename(&temp_path, path).with_context(|| {
+        format!(
+            "failed promoting temporary artifact {} -> {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+    temp_guard.defuse();
+    Ok(())
+}
+
+fn persist_local_registry_artifact(
+    project_root: &Path,
+    package_path: &Path,
+    package_bytes: &[u8],
+    request: &RegistrationRequest,
+    published: &SignedExtension,
+    verifying_key: &ed25519_dalek::VerifyingKey,
+) -> Result<StoredRegistryArtifact> {
+    ensure_registry_storage_root(project_root)?;
+    let expected_hash = compute_registry_artifact_sha256(package_bytes);
+    anyhow::ensure!(
+        request.initial_version.content_hash == expected_hash,
+        "registry publish artifact hash mismatch: request={} actual={expected_hash}",
+        request.initial_version.content_hash
+    );
+
+    let lineage_root = registry_active_artifacts_root(project_root)
+        .join(normalize_registry_name(&published.publisher_id))
+        .join(normalize_registry_name(&published.name));
+    let entry_dir = lineage_root.join(registry_entry_directory_name(
+        &published.registered_at,
+        &published.extension_id,
+    ));
+    std::fs::create_dir_all(&entry_dir)
+        .with_context(|| format!("failed creating {}", entry_dir.display()))?;
+
+    let artifact_file_name = package_path
+        .file_name()
+        .and_then(std::ffi::OsStr::to_str)
+        .ok_or_else(|| {
+            anyhow::anyhow!("package path missing file name: {}", package_path.display())
+        })?
+        .to_string();
+    let artifact_path = entry_dir.join(&artifact_file_name);
+    let manifest_path = entry_dir.join(REGISTRY_LOCAL_ARTIFACT_MANIFEST_FILE_NAME);
+    let manifest = LocalRegistryArtifactManifest {
+        schema_version: REGISTRY_LOCAL_ARTIFACT_MANIFEST_SCHEMA_VERSION.to_string(),
+        stored_at_utc: published.registered_at.clone(),
+        artifact_file_name,
+        artifact_sha256: expected_hash,
+        artifact_size_bytes: package_bytes.len() as u64,
+        manifest_bytes_b64: BASE64_STANDARD.encode(&request.manifest_bytes),
+        publisher_public_key_hex: hex::encode(verifying_key.as_bytes()),
+        extension: published.clone(),
+    };
+
+    write_bytes_atomically(&artifact_path, package_bytes)?;
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .context("failed serializing local registry artifact manifest")?;
+    write_bytes_atomically(&manifest_path, &manifest_bytes)?;
+
+    Ok(StoredRegistryArtifact {
+        manifest_path,
+        archived: false,
+        manifest,
+    })
+}
+
+fn load_local_registry_artifact_manifest(
+    manifest_path: &Path,
+    archived: bool,
+) -> Result<StoredRegistryArtifact> {
+    let raw = std::fs::read_to_string(manifest_path)
+        .with_context(|| format!("failed reading {}", manifest_path.display()))?;
+    let manifest = serde_json::from_str::<LocalRegistryArtifactManifest>(&raw)
+        .with_context(|| format!("failed parsing {}", manifest_path.display()))?;
+    anyhow::ensure!(
+        manifest.schema_version == REGISTRY_LOCAL_ARTIFACT_MANIFEST_SCHEMA_VERSION,
+        "unsupported registry artifact manifest schema at {}: {}",
+        manifest_path.display(),
+        manifest.schema_version
+    );
+    Ok(StoredRegistryArtifact {
+        manifest_path: manifest_path.to_path_buf(),
+        archived,
+        manifest,
+    })
+}
+
+fn collect_local_registry_artifacts_in(
+    root: &Path,
+    archived: bool,
+) -> Result<Vec<StoredRegistryArtifact>> {
+    if !root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut artifacts = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        for entry in
+            std::fs::read_dir(&dir).with_context(|| format!("failed listing {}", dir.display()))?
+        {
+            let entry = entry.with_context(|| format!("failed reading {}", dir.display()))?;
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed reading file type for {}", path.display()))?;
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if file_type.is_file()
+                && entry.file_name()
+                    == std::ffi::OsStr::new(REGISTRY_LOCAL_ARTIFACT_MANIFEST_FILE_NAME)
+            {
+                artifacts.push(load_local_registry_artifact_manifest(&path, archived)?);
+            }
+        }
+    }
+
+    Ok(artifacts)
+}
+
+fn collect_local_registry_artifacts(
+    project_root: &Path,
+    include_archived: bool,
+) -> Result<Vec<StoredRegistryArtifact>> {
+    let mut artifacts =
+        collect_local_registry_artifacts_in(&registry_active_artifacts_root(project_root), false)?;
+    if include_archived {
+        artifacts.extend(collect_local_registry_artifacts_in(
+            &registry_archive_root(project_root),
+            true,
+        )?);
+    }
+    Ok(artifacts)
+}
+
+fn find_local_registry_artifact(
+    project_root: &Path,
+    extension_id: &str,
+) -> Result<StoredRegistryArtifact> {
+    let matches = collect_local_registry_artifacts(project_root, true)?
+        .into_iter()
+        .filter(|artifact| artifact.manifest.extension.extension_id == extension_id)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => anyhow::bail!("registry artifact not found for extension_id={extension_id}"),
+        [artifact] => Ok(artifact.clone()),
+        _ => anyhow::bail!(
+            "multiple registry artifacts found for extension_id={extension_id}; storage is inconsistent"
+        ),
+    }
+}
+
+fn inspect_local_registry_artifact(
+    artifact: &StoredRegistryArtifact,
+) -> RegistryArtifactVerification {
+    let artifact_path = artifact.artifact_path();
+    let Some(version_hash) = artifact
+        .manifest
+        .extension
+        .versions
+        .last()
+        .map(|version| version.content_hash.as_str())
+    else {
+        return RegistryArtifactVerification {
+            status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+            detail: "extension has no registered version lineage".to_string(),
+            artifact_path,
+        };
+    };
+
+    if version_hash != artifact.manifest.artifact_sha256 {
+        return RegistryArtifactVerification {
+            status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+            detail: format!(
+                "manifest hash {} does not match version lineage hash {}",
+                artifact.manifest.artifact_sha256, version_hash
+            ),
+            artifact_path,
+        };
+    }
+
+    let package_bytes = match std::fs::read(&artifact_path) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return RegistryArtifactVerification {
+                status: RegistryArtifactIntegrityStatus::MissingArtifact,
+                detail: format!("failed reading artifact: {error}"),
+                artifact_path,
+            };
+        }
+    };
+    let actual_hash = compute_registry_artifact_sha256(&package_bytes);
+    if actual_hash != artifact.manifest.artifact_sha256 {
+        return RegistryArtifactVerification {
+            status: RegistryArtifactIntegrityStatus::HashMismatch,
+            detail: format!(
+                "artifact hash mismatch: expected {} got {}",
+                artifact.manifest.artifact_sha256, actual_hash
+            ),
+            artifact_path,
+        };
+    }
+
+    let manifest_bytes = match BASE64_STANDARD.decode(&artifact.manifest.manifest_bytes_b64) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return RegistryArtifactVerification {
+                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+                detail: format!("failed decoding manifest bytes: {error}"),
+                artifact_path,
+            };
+        }
+    };
+    let public_key_bytes = match hex::decode(&artifact.manifest.publisher_public_key_hex) {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            return RegistryArtifactVerification {
+                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+                detail: format!("failed decoding publisher key hex: {error}"),
+                artifact_path,
+            };
+        }
+    };
+    let public_key_array = match <[u8; 32]>::try_from(public_key_bytes.as_slice()) {
+        Ok(bytes) => bytes,
+        Err(_) => {
+            return RegistryArtifactVerification {
+                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+                detail: "publisher public key was not 32 bytes".to_string(),
+                artifact_path,
+            };
+        }
+    };
+    let verifying_key = match ed25519_dalek::VerifyingKey::from_bytes(&public_key_array) {
+        Ok(key) => key,
+        Err(error) => {
+            return RegistryArtifactVerification {
+                status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+                detail: format!("failed constructing verifying key: {error}"),
+                artifact_path,
+            };
+        }
+    };
+    let derived_key_id = supply_chain::artifact_signing::KeyId::from_verifying_key(&verifying_key);
+    if derived_key_id.to_string() != artifact.manifest.extension.signature.key_id {
+        return RegistryArtifactVerification {
+            status: RegistryArtifactIntegrityStatus::InvalidMetadata,
+            detail: format!(
+                "publisher key id mismatch: manifest={} derived={}",
+                artifact.manifest.extension.signature.key_id, derived_key_id
+            ),
+            artifact_path,
+        };
+    }
+    if let Err(error) = supply_chain::artifact_signing::verify_signature(
+        &verifying_key,
+        &manifest_bytes,
+        &artifact.manifest.extension.signature.signature_bytes,
+    ) {
+        return RegistryArtifactVerification {
+            status: RegistryArtifactIntegrityStatus::InvalidSignature,
+            detail: format!("manifest signature verification failed: {error}"),
+            artifact_path,
+        };
+    }
+
+    RegistryArtifactVerification {
+        status: RegistryArtifactIntegrityStatus::Verified,
+        detail: "artifact hash and manifest signature verified".to_string(),
+        artifact_path,
+    }
+}
+
+fn local_registry_search_rows(
+    project_root: &Path,
+    query: &str,
+    min_assurance: Option<u8>,
+) -> Result<Vec<RegistrySearchDisplayRow>> {
+    let mut rows = collect_local_registry_artifacts(project_root, false)?
+        .into_iter()
+        .filter_map(|artifact| {
+            let extension = &artifact.manifest.extension;
+            let assurance = extension_assurance_level(extension);
+            if !extension_matches_query(extension, query)
+                || min_assurance.is_some_and(|minimum| assurance < minimum)
+            {
+                return None;
+            }
+            let verification = inspect_local_registry_artifact(&artifact);
+            Some(RegistrySearchDisplayRow {
+                assurance,
+                extension_id: extension.extension_id.clone(),
+                name: extension.name.clone(),
+                publisher: extension.publisher_id.clone(),
+                status: extension.status.label().to_string(),
+                artifact_path: registry_relative_display_path(
+                    &artifact.artifact_path(),
+                    project_root,
+                ),
+                integrity_status: verification.status.label().to_string(),
+            })
+        })
+        .collect::<Vec<_>>();
+    rows.sort_by(|left, right| {
+        right
+            .assurance
+            .cmp(&left.assurance)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.extension_id.cmp(&right.extension_id))
+    });
+    Ok(rows)
+}
+
+fn archive_local_registry_artifact(
+    project_root: &Path,
+    artifact: &StoredRegistryArtifact,
+) -> Result<PathBuf> {
+    let active_root = registry_active_artifacts_root(project_root);
+    let archive_root = registry_archive_root(project_root);
+    let entry_dir = artifact.entry_dir().to_path_buf();
+    let relative = entry_dir.strip_prefix(&active_root).with_context(|| {
+        format!(
+            "failed deriving active artifact relative path {} from {}",
+            entry_dir.display(),
+            active_root.display()
+        )
+    })?;
+
+    let mut archive_path = archive_root.join(relative);
+    if archive_path.exists() {
+        let base_name = archive_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("artifact-entry");
+        archive_path = archive_path.with_file_name(format!("{base_name}-{}", Uuid::now_v7()));
+    }
+    if let Some(parent) = archive_path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("failed creating {}", parent.display()))?;
+    }
+    std::fs::rename(&entry_dir, &archive_path).with_context(|| {
+        format!(
+            "failed archiving registry artifact {} -> {}",
+            entry_dir.display(),
+            archive_path.display()
+        )
+    })?;
+    Ok(archive_path)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -6697,8 +7339,24 @@ fn search_registry_entries<'a>(
     results
 }
 
+fn baseline_registry_search_rows(
+    rows: Vec<(u8, &SignedExtension)>,
+) -> Vec<RegistrySearchDisplayRow> {
+    rows.into_iter()
+        .map(|(assurance, extension)| RegistrySearchDisplayRow {
+            assurance,
+            extension_id: extension.extension_id.clone(),
+            name: extension.name.clone(),
+            publisher: extension.publisher_id.clone(),
+            status: extension.status.label().to_string(),
+            artifact_path: "-".to_string(),
+            integrity_status: "seed-only".to_string(),
+        })
+        .collect()
+}
+
 fn render_registry_search_results(
-    rows: &[(u8, &SignedExtension)],
+    rows: &[RegistrySearchDisplayRow],
     query: &str,
     min_assurance: Option<u8>,
 ) -> String {
@@ -6714,22 +7372,32 @@ fn render_registry_search_results(
         "registry search: query=`{query}` min_assurance={}",
         min_assurance.map_or_else(|| "none".to_string(), |value| value.to_string())
     ));
-    lines.push("extension_id | name | publisher | status | assurance".to_string());
-    lines.push("------------ | ---- | --------- | ------ | ---------".to_string());
-    for (assurance, extension) in rows {
+    lines.push(
+        "extension_id | name | publisher | status | assurance | artifact_path | integrity"
+            .to_string(),
+    );
+    lines.push(
+        "------------ | ---- | --------- | ------ | --------- | ------------- | ---------"
+            .to_string(),
+    );
+    for row in rows {
         lines.push(format!(
-            "{} | {} | {} | {} | {}",
-            extension.extension_id,
-            extension.name,
-            extension.publisher_id,
-            extension.status.label(),
-            assurance
+            "{} | {} | {} | {} | {} | {} | {}",
+            row.extension_id,
+            row.name,
+            row.publisher,
+            row.status,
+            row.assurance,
+            row.artifact_path,
+            row.integrity_status
         ));
     }
     lines.join("\n")
 }
 
 fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
+    let project_root = std::env::current_dir()
+        .context("failed resolving current directory for registry publish")?;
     if !args.package_path.exists() {
         anyhow::bail!(
             "registry publish target does not exist: {}",
@@ -6745,12 +7413,11 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
 
     let package_bytes = std::fs::read(&args.package_path)
         .with_context(|| format!("failed reading package {}", args.package_path.display()))?;
-    let content_hash = hex::encode(sha2::Sha256::digest(
-        [b"registry_publish_content_v1:" as &[u8], &package_bytes[..]].concat(),
-    ));
+    let content_hash = compute_registry_artifact_sha256(&package_bytes);
     let signing_material = load_registry_publish_signing_material(&args.signing_key)?;
     let request =
         build_registry_publish_request(&args.package_path, &content_hash, &signing_material)?;
+    let request_for_storage = request.clone();
     let publisher_key_id = request.signature.key_id.clone();
     let signing_key_source = signing_material.source;
     let signing_key_path = signing_material.path.display().to_string();
@@ -6770,17 +7437,37 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("registry publish returned no extension id"))?;
     let published = registry
         .query(&extension_id)
-        .ok_or_else(|| anyhow::anyhow!("registry publish stored entry is missing"))?;
+        .ok_or_else(|| anyhow::anyhow!("registry publish stored entry is missing"))?
+        .clone();
+    let stored = persist_local_registry_artifact(
+        &project_root,
+        &args.package_path,
+        &package_bytes,
+        &request_for_storage,
+        &published,
+        &signing_material.signing_key.verifying_key(),
+    )?;
+    let verification = inspect_local_registry_artifact(&stored);
+    anyhow::ensure!(
+        verification.status == RegistryArtifactIntegrityStatus::Verified,
+        "registry publish stored an unverifiable artifact: {}",
+        verification.detail
+    );
+    let artifact_path = registry_relative_display_path(&stored.artifact_path(), &project_root);
+    let manifest_path = registry_relative_display_path(&stored.manifest_path, &project_root);
 
     println!(
-        "registry publish: extension_id={} name={} status={} content_sha256={} publisher_key_id={} signing_key_source={} signing_key_path={}",
+        "registry publish: extension_id={} name={} status={} content_sha256={} publisher_key_id={} signing_key_source={} signing_key_path={} artifact_path={} manifest_path={} integrity={}",
         published.extension_id,
         published.name,
         published.status.label(),
         content_hash,
         publisher_key_id,
         signing_key_source,
-        signing_key_path
+        signing_key_path,
+        artifact_path,
+        manifest_path,
+        verification.status.label()
     );
     println!(
         "registry state: entries={} revocations={} audit_records={} content_hash={}",
@@ -6794,12 +7481,106 @@ fn handle_registry_publish(args: &cli::RegistryPublishArgs) -> Result<()> {
 }
 
 fn handle_registry_search(args: &cli::RegistrySearchArgs) -> Result<()> {
+    let project_root = std::env::current_dir()
+        .context("failed resolving current directory for registry search")?;
     let min_assurance = parse_min_assurance(args.min_assurance)?;
     let registry = registry_cli_registry()?;
-    let rows = search_registry_entries(&registry, &args.query, min_assurance);
+    let mut rows = baseline_registry_search_rows(search_registry_entries(
+        &registry,
+        &args.query,
+        min_assurance,
+    ));
+    rows.extend(local_registry_search_rows(
+        &project_root,
+        &args.query,
+        min_assurance,
+    )?);
+    rows.sort_by(|left, right| {
+        right
+            .assurance
+            .cmp(&left.assurance)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.extension_id.cmp(&right.extension_id))
+    });
     println!(
         "{}",
         render_registry_search_results(&rows, &args.query, min_assurance)
+    );
+    Ok(())
+}
+
+fn handle_registry_verify(args: &cli::RegistryVerifyArgs) -> Result<()> {
+    let project_root = std::env::current_dir()
+        .context("failed resolving current directory for registry verify")?;
+    let artifact = find_local_registry_artifact(&project_root, &args.extension_id)?;
+    let verification = inspect_local_registry_artifact(&artifact);
+    let artifact_path = registry_relative_display_path(&verification.artifact_path, &project_root);
+    if verification.status != RegistryArtifactIntegrityStatus::Verified {
+        anyhow::bail!(
+            "registry verify failed: extension_id={} integrity={} archived={} artifact_path={} detail={}",
+            artifact.manifest.extension.extension_id,
+            verification.status.label(),
+            artifact.archived,
+            artifact_path,
+            verification.detail
+        );
+    }
+
+    println!(
+        "registry verify: extension_id={} integrity={} archived={} artifact_path={} detail={}",
+        artifact.manifest.extension.extension_id,
+        verification.status.label(),
+        artifact.archived,
+        artifact_path,
+        verification.detail
+    );
+    Ok(())
+}
+
+fn handle_registry_gc(args: &cli::RegistryGcArgs) -> Result<()> {
+    let project_root =
+        std::env::current_dir().context("failed resolving current directory for registry gc")?;
+    ensure_registry_storage_root(&project_root)?;
+
+    let mut by_lineage: BTreeMap<(String, String), Vec<StoredRegistryArtifact>> = BTreeMap::new();
+    for artifact in collect_local_registry_artifacts(&project_root, false)? {
+        by_lineage
+            .entry((
+                artifact.manifest.extension.publisher_id.clone(),
+                artifact.manifest.extension.name.clone(),
+            ))
+            .or_default()
+            .push(artifact);
+    }
+
+    let mut archived = 0usize;
+    let mut active = 0usize;
+    for artifacts in by_lineage.values_mut() {
+        artifacts.sort_by(|left, right| {
+            right
+                .stored_at_sort_key()
+                .cmp(&left.stored_at_sort_key())
+                .then_with(|| {
+                    left.manifest
+                        .extension
+                        .extension_id
+                        .cmp(&right.manifest.extension.extension_id)
+                })
+        });
+        active += artifacts.len().min(args.keep);
+        for artifact in artifacts.iter().skip(args.keep) {
+            archive_local_registry_artifact(&project_root, artifact)?;
+            archived += 1;
+        }
+    }
+
+    println!(
+        "registry gc: keep={} lineages={} active={} archived={} archive_root={}",
+        args.keep,
+        by_lineage.len(),
+        active,
+        archived,
+        registry_relative_display_path(&registry_archive_root(&project_root), &project_root)
     );
     Ok(())
 }
@@ -10112,6 +10893,12 @@ fn main() -> Result<()> {
             }
             RegistryCommand::Search(args) => {
                 handle_registry_search(&args)?;
+            }
+            RegistryCommand::Verify(args) => {
+                handle_registry_verify(&args)?;
+            }
+            RegistryCommand::Gc(args) => {
+                handle_registry_gc(&args)?;
             }
         },
 
