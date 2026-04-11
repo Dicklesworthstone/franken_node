@@ -13,7 +13,7 @@
       "allowed_simulation_label": "fixture_registry(...)",
       "allowlist_escape_count": 0,
       "allowlist_escapes": [],
-      "allowlisted_occurrence_count": 30,
+      "allowlisted_occurrence_count": 33,
       "allowlisted_occurrences": [
         {
           "context": "test",
@@ -80,22 +80,43 @@
         },
         {
           "context": "test",
-          "line": 2131,
+          "line": 3124,
+          "line_text": "supply_chain::trust_card::fixture_registry(1_000).expect(\"fixture trust registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/main.rs"
+        },
+        {
+          "context": "test",
+          "line": 3160,
+          "line_text": "supply_chain::trust_card::fixture_registry(now_secs).expect(\"fixture trust registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/main.rs"
+        },
+        {
+          "context": "test",
+          "line": 3659,
           "line_text": "supply_chain::trust_card::fixture_registry(now_unix_secs()).expect(\"fixture registry\");",
           "marker": "fixture_registry(",
           "path": "crates/franken-node/src/main.rs"
         },
         {
           "context": "test",
-          "line": 2165,
+          "line": 3693,
           "line_text": "supply_chain::trust_card::fixture_registry(now_secs).expect(\"fixture registry\");",
           "marker": "fixture_registry(",
           "path": "crates/franken-node/src/main.rs"
         },
         {
           "context": "test",
-          "line": 2182,
+          "line": 3710,
           "line_text": "supply_chain::trust_card::fixture_registry(now_secs).expect(\"fixture registry\");",
+          "marker": "fixture_registry(",
+          "path": "crates/franken-node/src/main.rs"
+        },
+        {
+          "context": "test",
+          "line": 11176,
+          "line_text": "let registry = fixture_registry(1_000).expect(\"fixture registry\");",
           "marker": "fixture_registry(",
           "path": "crates/franken-node/src/main.rs"
         },
@@ -220,8 +241,8 @@
         },
         {
           "context": "test",
-          "line": 54,
-          "line_text": "let registry = fixture_registry(1_000).expect(\"fixture registry\");",
+          "line": 191,
+          "line_text": "let registry = fixture_registry(now_secs).expect(\"fixture registry\");",
           "marker": "fixture_registry(",
           "path": "crates/franken-node/tests/trust_cli_e2e.rs"
         }
@@ -349,14 +370,14 @@
         },
         {
           "context": "test",
-          "line": 48,
+          "line": 59,
           "line_text": "let signing_key = demo_signing_key();",
           "marker": "demo_signing_key(",
           "path": "crates/franken-node/tests/verify_release_cli_e2e.rs"
         },
         {
           "context": "test",
-          "line": 88,
+          "line": 99,
           "line_text": "let correct_key = demo_signing_key();",
           "marker": "demo_signing_key(",
           "path": "crates/franken-node/tests/verify_release_cli_e2e.rs"
@@ -431,7 +452,7 @@
       "allowlisted_occurrences": [
         {
           "context": "test",
-          "line": 2394,
+          "line": 4415,
           "line_text": "let mut events = fixture_incident_events(incident_id);",
           "marker": "fixture_incident_events(",
           "path": "crates/franken-node/src/main.rs"
@@ -482,7 +503,7 @@
       "allowlisted_occurrence_count": 0,
       "allowlisted_occurrences": [],
       "classification": "deferred_skeleton",
-      "documented_occurrence_count": 9,
+      "documented_occurrence_count": 15,
       "documented_occurrences": [
         {
           "context": "production",
@@ -500,22 +521,15 @@
         },
         {
           "context": "production",
-          "line": 228,
+          "line": 246,
           "line_text": "status: PerformanceBaselineStatus::UnavailablePendingTransport,",
           "marker": "UnavailablePendingTransport",
           "path": "crates/franken-node/src/api/service.rs"
         },
         {
-          "context": "test",
-          "line": 410,
-          "line_text": "TransportBoundaryKind::InProcessCatalog",
-          "marker": "TransportBoundaryKind::InProcessCatalog",
-          "path": "crates/franken-node/src/api/service.rs"
-        },
-        {
-          "context": "test",
-          "line": 415,
-          "line_text": "baseline.status == PerformanceBaselineStatus::UnavailablePendingTransport",
+          "context": "production",
+          "line": 372,
+          "line_text": "perf_baseline_status: PerformanceBaselineStatus::UnavailablePendingTransport,",
           "marker": "UnavailablePendingTransport",
           "path": "crates/franken-node/src/api/service.rs"
         },
@@ -528,23 +542,72 @@
         },
         {
           "context": "test",
-          "line": 476,
+          "line": 473,
+          "line_text": "baseline.status == PerformanceBaselineStatus::UnavailablePendingTransport",
+          "marker": "UnavailablePendingTransport",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 526,
+          "line_text": "TransportBoundaryKind::InProcessCatalog",
+          "marker": "TransportBoundaryKind::InProcessCatalog",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 534,
           "line_text": "== PerformanceBaselineStatus::UnavailablePendingTransport)",
           "marker": "UnavailablePendingTransport",
           "path": "crates/franken-node/src/api/service.rs"
         },
         {
           "context": "test",
-          "line": 626,
+          "line": 582,
+          "line_text": "TransportBoundaryKind::InProcessCatalog",
+          "marker": "TransportBoundaryKind::InProcessCatalog",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 586,
+          "line_text": "PerformanceBaselineStatus::UnavailablePendingTransport",
+          "marker": "UnavailablePendingTransport",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 600,
+          "line_text": "TransportBoundaryKind::InProcessCatalog",
+          "marker": "TransportBoundaryKind::InProcessCatalog",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 607,
+          "line_text": "PerformanceBaselineStatus::UnavailablePendingTransport",
+          "marker": "UnavailablePendingTransport",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 741,
           "line_text": "fn synthetic_bearer_admin_route() -> RouteMetadata {",
           "marker": "synthetic_bearer_admin_route(",
           "path": "crates/franken-node/src/api/service.rs"
         },
         {
           "context": "test",
-          "line": 766,
+          "line": 881,
           "line_text": "let route = synthetic_bearer_admin_route();",
           "marker": "synthetic_bearer_admin_route(",
+          "path": "crates/franken-node/src/api/service.rs"
+        },
+        {
+          "context": "test",
+          "line": 1500,
+          "line_text": "PerformanceBaselineStatus::UnavailablePendingTransport,",
+          "marker": "UnavailablePendingTransport",
           "path": "crates/franken-node/src/api/service.rs"
         }
       ],
@@ -588,20 +651,48 @@
       "allowlisted_occurrence_count": 0,
       "allowlisted_occurrences": [],
       "classification": "allowlisted_simulation",
-      "documented_occurrence_count": 2,
+      "documented_occurrence_count": 6,
       "documented_occurrences": [
         {
           "context": "production",
-          "line": 219,
-          "line_text": "error: \"simulated crash\".into(),",
-          "marker": "simulated crash",
+          "line": 48,
+          "line_text": "const DETERMINISTIC_FIXTURE_EXECUTION_MODE: &str = \"synthetic_test_fixture\";",
+          "marker": "synthetic_test_fixture",
           "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
         },
         {
           "context": "production",
-          "line": 232,
+          "line": 49,
+          "line_text": "const DETERMINISTIC_FIXTURE_RUNNER_DETAIL: &str = \"fixture_marker=synthetic_test_fixture crash_classifier=string_trigger coverage_semantics=placeholder_zero\";",
+          "marker": "synthetic_test_fixture",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "context": "production",
+          "line": 273,
           "line_text": "coverage_pct: 0.0,",
           "marker": "coverage_pct: 0.0",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "context": "test",
+          "line": 1335,
+          "line_text": "error: \"simulated crash (synthetic_test_fixture)\".into(),",
+          "marker": "synthetic_test_fixture",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "context": "test",
+          "line": 1336,
+          "line_text": "reproducer: \"{\\\"target\\\":\\\"parser_fuzz\\\",\\\"fixture_mode\\\":\\\"synthetic_test_fixture\\\"}\"",
+          "marker": "synthetic_test_fixture",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "context": "test",
+          "line": 1340,
+          "line_text": "assert!(tc.reproducer.contains(\"synthetic_test_fixture\"));",
+          "marker": "synthetic_test_fixture",
           "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
         }
       ],
@@ -615,7 +706,7 @@
       ],
       "remediation_bead": "bd-2fqyv.7",
       "rule_id": "fuzz_gate_simulation_confinement",
-      "surface": "fuzz gate simulation remains confined to its modeling surface",
+      "surface": "deterministic fuzz fixture adapter remains confined to its modeling surface",
       "unexpected_occurrence_count": 0,
       "unexpected_occurrences": []
     },
@@ -623,34 +714,48 @@
       "allowed_simulation_label": null,
       "allowlist_escape_count": 0,
       "allowlist_escapes": [],
-      "allowlisted_occurrence_count": 4,
+      "allowlisted_occurrence_count": 6,
       "allowlisted_occurrences": [
         {
           "context": "test",
-          "line": 344,
-          "line_text": "let verdict = c.run_gate();",
-          "marker": ".run_gate(",
+          "line": 1241,
+          "line_text": "let verdict = c.run_fixture_gate();",
+          "marker": ".run_fixture_gate(",
           "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
         },
         {
           "context": "test",
-          "line": 358,
-          "line_text": "let verdict = c.run_gate();",
-          "marker": ".run_gate(",
+          "line": 1255,
+          "line_text": "let verdict = c.run_fixture_gate();",
+          "marker": ".run_fixture_gate(",
           "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
         },
         {
           "context": "test",
-          "line": 65,
-          "line_text": "let verdict = c.run_gate();",
-          "marker": ".run_gate(",
+          "line": 1263,
+          "line_text": "let verdict = c.run_fixture_gate();",
+          "marker": ".run_fixture_gate(",
+          "path": "crates/franken-node/src/connector/fuzz_corpus.rs"
+        },
+        {
+          "context": "test",
+          "line": 69,
+          "line_text": "let verdict = c.run_fixture_gate();",
+          "marker": ".run_fixture_gate(",
           "path": "tests/integration/fuzz_corpus_gates.rs"
         },
         {
           "context": "test",
-          "line": 74,
-          "line_text": "let verdict = c.run_gate();",
-          "marker": ".run_gate(",
+          "line": 82,
+          "line_text": "let verdict = c.run_fixture_gate();",
+          "marker": ".run_fixture_gate(",
+          "path": "tests/integration/fuzz_corpus_gates.rs"
+        },
+        {
+          "context": "test",
+          "line": 90,
+          "line_text": "let verdict = c.run_fixture_gate();",
+          "marker": ".run_fixture_gate(",
           "path": "tests/integration/fuzz_corpus_gates.rs"
         }
       ],
@@ -667,7 +772,7 @@
       ],
       "remediation_bead": "bd-2fqyv.7",
       "rule_id": "fuzz_gate_callsite_boundary",
-      "surface": "fuzz gate callsites remain confined to fixture and verification paths",
+      "surface": "deterministic fuzz fixture callsites remain confined to fixture and verification paths",
       "unexpected_occurrence_count": 0,
       "unexpected_occurrences": []
     },
@@ -699,23 +804,8 @@
       "allowlisted_occurrence_count": 0,
       "allowlisted_occurrences": [],
       "classification": "truthful_partial_surface",
-      "documented_occurrence_count": 2,
-      "documented_occurrences": [
-        {
-          "context": "production",
-          "line": 611,
-          "line_text": "compromise_reduction_factor: 1.0, // Placeholder \u2014 computed from external benchmark.",
-          "marker": "compromise_reduction_factor: 1.0",
-          "path": "crates/franken-node/src/supply_chain/ecosystem_telemetry.rs"
-        },
-        {
-          "context": "production",
-          "line": 614,
-          "line_text": "certification_distribution: BTreeMap::new(), // Populated from live data.",
-          "marker": "certification_distribution: BTreeMap::new()",
-          "path": "crates/franken-node/src/supply_chain/ecosystem_telemetry.rs"
-        }
-      ],
+      "documented_occurrence_count": 0,
+      "documented_occurrences": [],
       "inventory_alignment_failures": [],
       "inventory_id": "PSI-008",
       "missing_anchor_markers": [],
@@ -724,7 +814,7 @@
       "related_checkers": [],
       "remediation_bead": "bd-2fqyv.9",
       "rule_id": "ecosystem_health_placeholder_metrics",
-      "surface": "ecosystem health export placeholder metrics stay explicitly documented",
+      "surface": "ecosystem health export keeps explicit availability/provenance markers for derived metrics",
       "unexpected_occurrence_count": 0,
       "unexpected_occurrences": []
     },
@@ -775,8 +865,8 @@
   "summary": {
     "allowed_simulation_count": 5,
     "allowlist_escapes": 0,
-    "allowlisted_occurrences": 57,
-    "documented_occurrences": 13,
+    "allowlisted_occurrences": 62,
+    "documented_occurrences": 21,
     "inventory_drift_failures": 0,
     "inventory_entry_count": 9,
     "missing_anchor_markers": 0,
