@@ -34,6 +34,20 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 }
 
+fn invalid_policy_id_reason(policy_id: &str) -> Option<String> {
+    let trimmed = policy_id.trim();
+    if trimmed.is_empty() {
+        return Some("policy_id must be non-empty".to_string());
+    }
+    if trimmed == RESERVED_POLICY_ID {
+        return Some(format!("policy_id is reserved: {:?}", policy_id));
+    }
+    if trimmed != policy_id {
+        return Some("policy_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
 // ── Schema version ──────────────────────────────────────────────────────────
 
 /// Schema version for the VEF constraint compiler output format.
@@ -41,6 +55,7 @@ pub const SCHEMA_VERSION: &str = "vef-constraints-v1.0";
 
 /// Compiler contract version.
 pub const COMPILER_VERSION: &str = "1.0.0";
+const RESERVED_POLICY_ID: &str = "<unknown>";
 
 // ── Invariant constants ─────────────────────────────────────────────────────
 
@@ -387,6 +402,22 @@ impl ConstraintCompiler {
             events.drain(0..overflow);
         }
 
+        if let Some(reason) = invalid_policy_id_reason(&policy.policy_id) {
+            errors.push(CompileError {
+                code: error_codes::ERR_VEF_INVALID_SYNTAX.to_string(),
+                event_code: event_codes::VEF_COMPILE_ERR_SYNTAX.to_string(),
+                message: reason,
+                source_rule_id: None,
+            });
+            return CompileResult {
+                success: false,
+                predicate_set: None,
+                errors,
+                events,
+                warning_count: 0,
+            };
+        }
+
         // Validate: empty policy
         if policy.rules.is_empty() {
             errors.push(CompileError {
@@ -407,7 +438,26 @@ impl ConstraintCompiler {
         // Validate: duplicate rule IDs
         let mut seen_ids = std::collections::BTreeSet::new();
         for rule in &policy.rules {
-            if !seen_ids.insert(&rule.rule_id) {
+            let trimmed = rule.rule_id.trim();
+            if trimmed.is_empty() {
+                errors.push(CompileError {
+                    code: error_codes::ERR_VEF_INVALID_SYNTAX.to_string(),
+                    event_code: event_codes::VEF_COMPILE_ERR_SYNTAX.to_string(),
+                    message: "Rule identifier must be non-empty".to_string(),
+                    source_rule_id: Some(rule.rule_id.clone()),
+                });
+                continue;
+            }
+            if trimmed != rule.rule_id {
+                errors.push(CompileError {
+                    code: error_codes::ERR_VEF_INVALID_SYNTAX.to_string(),
+                    event_code: event_codes::VEF_COMPILE_ERR_SYNTAX.to_string(),
+                    message: "Rule identifier contains leading or trailing whitespace".to_string(),
+                    source_rule_id: Some(rule.rule_id.clone()),
+                });
+                continue;
+            }
+            if !seen_ids.insert(rule.rule_id.clone()) {
                 errors.push(CompileError {
                     code: error_codes::ERR_VEF_DUPLICATE_RULE.to_string(),
                     event_code: event_codes::VEF_COMPILE_ERR_DUPLICATE.to_string(),
@@ -432,12 +482,47 @@ impl ConstraintCompiler {
         // Validate: empty field or value in conditions
         for rule in &policy.rules {
             for condition in &rule.conditions {
-                if condition.field.trim().is_empty() {
+                let trimmed_field = condition.field.trim();
+                if trimmed_field.is_empty() {
                     errors.push(CompileError {
                         code: error_codes::ERR_VEF_INVALID_PREDICATE.to_string(),
                         event_code: event_codes::VEF_COMPILE_ERR_PREDICATE.to_string(),
                         message: format!(
                             "Rule '{}' has a condition with an empty field",
+                            rule.rule_id
+                        ),
+                        source_rule_id: Some(rule.rule_id.clone()),
+                    });
+                }
+                if trimmed_field != condition.field {
+                    errors.push(CompileError {
+                        code: error_codes::ERR_VEF_INVALID_PREDICATE.to_string(),
+                        event_code: event_codes::VEF_COMPILE_ERR_PREDICATE.to_string(),
+                        message: format!(
+                            "Rule '{}' has a condition with a field that contains leading or trailing whitespace",
+                            rule.rule_id
+                        ),
+                        source_rule_id: Some(rule.rule_id.clone()),
+                    });
+                }
+                let trimmed_value = condition.value.trim();
+                if trimmed_value.is_empty() {
+                    errors.push(CompileError {
+                        code: error_codes::ERR_VEF_INVALID_PREDICATE.to_string(),
+                        event_code: event_codes::VEF_COMPILE_ERR_PREDICATE.to_string(),
+                        message: format!(
+                            "Rule '{}' has a condition with an empty value",
+                            rule.rule_id
+                        ),
+                        source_rule_id: Some(rule.rule_id.clone()),
+                    });
+                }
+                if trimmed_value != condition.value {
+                    errors.push(CompileError {
+                        code: error_codes::ERR_VEF_INVALID_PREDICATE.to_string(),
+                        event_code: event_codes::VEF_COMPILE_ERR_PREDICATE.to_string(),
+                        message: format!(
+                            "Rule '{}' has a condition with a value that contains leading or trailing whitespace",
                             rule.rule_id
                         ),
                         source_rule_id: Some(rule.rule_id.clone()),
@@ -837,6 +922,46 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_compile_empty_policy_id_error() {
+        let compiler = test_compiler();
+        let mut policy = minimal_policy();
+        policy.policy_id.clear();
+        let result = compiler.compile(&policy);
+        assert!(!result.success);
+        assert!(result.predicate_set.is_none());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].code, error_codes::ERR_VEF_INVALID_SYNTAX);
+        assert_eq!(
+            result.errors[0].event_code,
+            event_codes::VEF_COMPILE_ERR_SYNTAX
+        );
+    }
+
+    #[test]
+    fn test_compile_reserved_policy_id_error() {
+        let compiler = test_compiler();
+        let mut policy = minimal_policy();
+        policy.policy_id = RESERVED_POLICY_ID.to_string();
+        let result = compiler.compile(&policy);
+        assert!(!result.success);
+        assert!(result.predicate_set.is_none());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].code, error_codes::ERR_VEF_INVALID_SYNTAX);
+    }
+
+    #[test]
+    fn test_compile_whitespace_policy_id_error() {
+        let compiler = test_compiler();
+        let mut policy = minimal_policy();
+        policy.policy_id = " test-policy ".to_string();
+        let result = compiler.compile(&policy);
+        assert!(!result.success);
+        assert!(result.predicate_set.is_none());
+        assert_eq!(result.errors.len(), 1);
+        assert_eq!(result.errors[0].code, error_codes::ERR_VEF_INVALID_SYNTAX);
+    }
+
     // ── 3. Duplicate rule IDs produce error ──
 
     #[test]
@@ -858,6 +983,41 @@ mod tests {
                 .errors
                 .iter()
                 .any(|e| e.code == error_codes::ERR_VEF_DUPLICATE_RULE)
+        );
+    }
+
+    #[test]
+    fn test_compile_empty_rule_id_error() {
+        let compiler = test_compiler();
+        let policy =
+            PolicyDefinition::new("empty-rule", "EmptyRule", "1.0.0").with_rule(
+                PolicyRule::new("", ActionClass::Network, "empty", PolicyEffect::Allow)
+                    .with_condition("f", ComparisonOp::Equals, "v"),
+            );
+        let result = compiler.compile(&policy);
+        assert!(!result.success);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == error_codes::ERR_VEF_INVALID_SYNTAX)
+        );
+    }
+
+    #[test]
+    fn test_compile_whitespace_rule_id_error() {
+        let compiler = test_compiler();
+        let policy = PolicyDefinition::new("ws-rule", "WsRule", "1.0.0").with_rule(
+            PolicyRule::new(" r1 ", ActionClass::Network, "ws", PolicyEffect::Allow)
+                .with_condition("f", ComparisonOp::Equals, "v"),
+        );
+        let result = compiler.compile(&policy);
+        assert!(!result.success);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == error_codes::ERR_VEF_INVALID_SYNTAX)
         );
     }
 
@@ -892,6 +1052,60 @@ mod tests {
             PolicyDefinition::new("bad-field", "BadField", "1.0.0").with_rule(
                 PolicyRule::new("r1", ActionClass::Network, "bad", PolicyEffect::Deny)
                     .with_condition("", ComparisonOp::Equals, "x"),
+            );
+        let result = compiler.compile(&policy);
+        assert!(!result.success);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == error_codes::ERR_VEF_INVALID_PREDICATE)
+        );
+    }
+
+    #[test]
+    fn test_compile_empty_value_condition() {
+        let compiler = test_compiler();
+        let policy =
+            PolicyDefinition::new("bad-value", "BadValue", "1.0.0").with_rule(
+                PolicyRule::new("r1", ActionClass::Network, "bad", PolicyEffect::Deny)
+                    .with_condition("field", ComparisonOp::Equals, "   "),
+            );
+        let result = compiler.compile(&policy);
+        assert!(!result.success);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == error_codes::ERR_VEF_INVALID_PREDICATE)
+        );
+    }
+
+    #[test]
+    fn test_compile_whitespace_field_condition() {
+        let compiler = test_compiler();
+        let policy =
+            PolicyDefinition::new("bad-field-ws", "BadFieldWs", "1.0.0").with_rule(
+                PolicyRule::new("r1", ActionClass::Network, "bad", PolicyEffect::Deny)
+                    .with_condition(" field ", ComparisonOp::Equals, "value"),
+            );
+        let result = compiler.compile(&policy);
+        assert!(!result.success);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == error_codes::ERR_VEF_INVALID_PREDICATE)
+        );
+    }
+
+    #[test]
+    fn test_compile_whitespace_value_condition() {
+        let compiler = test_compiler();
+        let policy =
+            PolicyDefinition::new("bad-value-ws", "BadValueWs", "1.0.0").with_rule(
+                PolicyRule::new("r1", ActionClass::Network, "bad", PolicyEffect::Deny)
+                    .with_condition("field", ComparisonOp::Equals, " value "),
             );
         let result = compiler.compile(&policy);
         assert!(!result.success);

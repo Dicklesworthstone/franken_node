@@ -30,6 +30,7 @@ use std::fmt;
 
 /// Maximum transition history entries before oldest-first eviction.
 const MAX_TRANSITIONS: usize = 4096;
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
 /// Stable event codes for structured logging.
 pub mod event_codes {
@@ -250,6 +251,7 @@ impl ValidityWindowPolicy {
 /// Why an artifact epoch was rejected.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum EpochRejectionReason {
+    InvalidArtifactId,
     FutureEpoch,
     ExpiredEpoch,
 }
@@ -267,6 +269,7 @@ pub struct EpochRejection {
 impl EpochRejection {
     pub fn code(&self) -> &'static str {
         match self.rejection_reason {
+            EpochRejectionReason::InvalidArtifactId => "EPOCH_REJECT_INVALID_ARTIFACT_ID",
             EpochRejectionReason::FutureEpoch => "EPOCH_REJECT_FUTURE",
             EpochRejectionReason::ExpiredEpoch => "EPOCH_REJECT_EXPIRED",
         }
@@ -323,8 +326,9 @@ impl EpochArtifactEvent {
 /// `[current_epoch - max_lookback, current_epoch]`.
 ///
 /// Rejection order is fail-closed:
-/// 1. Future epoch rejection
-/// 2. Expired epoch rejection
+/// 1. Invalid artifact_id rejection
+/// 2. Future epoch rejection
+/// 3. Expired epoch rejection
 pub fn check_artifact_epoch(
     artifact_id: &str,
     artifact_epoch: ControlEpoch,
@@ -332,6 +336,16 @@ pub fn check_artifact_epoch(
     trace_id: &str,
 ) -> Result<(), EpochRejection> {
     let current = policy.current_epoch();
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() || trimmed == RESERVED_ARTIFACT_ID || trimmed != artifact_id {
+        return Err(EpochRejection {
+            artifact_id: artifact_id.to_string(),
+            artifact_epoch,
+            current_epoch: current,
+            rejection_reason: EpochRejectionReason::InvalidArtifactId,
+            trace_id: trace_id.to_string(),
+        });
+    }
     if artifact_epoch > current {
         return Err(EpochRejection {
             artifact_id: artifact_id.to_string(),
@@ -875,6 +889,54 @@ mod tests {
     // ---- bd-2xv8: validity window checks ----
 
     #[test]
+    fn validity_window_rejects_empty_artifact_id() {
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(10), 1);
+        let err = check_artifact_epoch("", ControlEpoch::new(10), &policy, "trace-empty")
+            .expect_err("empty artifact_id must be rejected");
+
+        assert_eq!(
+            err.rejection_reason,
+            EpochRejectionReason::InvalidArtifactId
+        );
+        assert_eq!(err.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+        assert_eq!(err.artifact_id, "");
+        assert_eq!(err.current_epoch, ControlEpoch::new(10));
+    }
+
+    #[test]
+    fn validity_window_rejects_reserved_artifact_id() {
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(10), 1);
+        let err = check_artifact_epoch(
+            &format!(" {RESERVED_ARTIFACT_ID} "),
+            ControlEpoch::new(10),
+            &policy,
+            "trace-reserved",
+        )
+        .expect_err("reserved artifact_id must be rejected");
+
+        assert_eq!(
+            err.rejection_reason,
+            EpochRejectionReason::InvalidArtifactId
+        );
+        assert_eq!(err.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+        assert_eq!(err.current_epoch, ControlEpoch::new(10));
+    }
+
+    #[test]
+    fn validity_window_rejects_artifact_id_whitespace() {
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(10), 1);
+        let err = check_artifact_epoch(" artifact-ok ", ControlEpoch::new(10), &policy, "trace-ws")
+            .expect_err("artifact_id whitespace must be rejected");
+
+        assert_eq!(
+            err.rejection_reason,
+            EpochRejectionReason::InvalidArtifactId
+        );
+        assert_eq!(err.code(), "EPOCH_REJECT_INVALID_ARTIFACT_ID");
+        assert_eq!(err.current_epoch, ControlEpoch::new(10));
+    }
+
+    #[test]
     fn validity_window_accepts_current_epoch() {
         let policy = ValidityWindowPolicy::new(ControlEpoch::new(10), 1);
         let result = check_artifact_epoch(
@@ -1007,5 +1069,28 @@ mod tests {
             Some(EpochRejectionReason::FutureEpoch)
         );
         assert_eq!(event.trace_id, "trace-reject");
+    }
+
+    #[test]
+    fn rejection_event_supports_invalid_artifact_id() {
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(10), 1);
+        let rejection = check_artifact_epoch(
+            " artifact-bad ",
+            ControlEpoch::new(10),
+            &policy,
+            "trace-invalid",
+        )
+        .expect_err("invalid artifact_id must be rejected");
+
+        let event = rejection.to_rejected_event();
+        assert_eq!(event.event_code, event_codes::EPOCH_ARTIFACT_REJECTED);
+        assert_eq!(event.artifact_id, " artifact-bad ");
+        assert_eq!(event.artifact_epoch, ControlEpoch::new(10));
+        assert_eq!(event.current_epoch, ControlEpoch::new(10));
+        assert_eq!(
+            event.rejection_reason,
+            Some(EpochRejectionReason::InvalidArtifactId)
+        );
+        assert_eq!(event.trace_id, "trace-invalid");
     }
 }

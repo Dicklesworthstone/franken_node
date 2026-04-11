@@ -20,6 +20,7 @@ use std::fmt;
 pub const LANGUAGE_VERSION: &str = "vef-policy-lang-v1";
 pub const COMPILER_VERSION: &str = "vef-constraint-compiler-v1";
 pub const COMPILED_SCHEMA_VERSION: &str = "vef-policy-constraints-v1";
+const RESERVED_POLICY_ID: &str = "<unknown>";
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -270,6 +271,20 @@ struct NormalizedRule {
     constraints: BTreeMap<String, String>,
 }
 
+fn invalid_policy_id_reason(policy_id: &str) -> Option<String> {
+    let trimmed = policy_id.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed == RESERVED_POLICY_ID {
+        return Some(format!("policy_id is reserved: {:?}", policy_id));
+    }
+    if trimmed != policy_id {
+        return Some("policy_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
 fn normalize_policy(
     policy: &RuntimePolicy,
     trace_id: &str,
@@ -289,6 +304,14 @@ fn normalize_policy(
         return Err(ConstraintCompileError::new(
             event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT,
             "policy_id must be non-empty",
+            trace_id,
+            None,
+        ));
+    }
+    if let Some(reason) = invalid_policy_id_reason(&policy.policy_id) {
+        return Err(ConstraintCompileError::new(
+            event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT,
+            reason,
             trace_id,
             None,
         ));
@@ -338,7 +361,16 @@ fn normalize_policy(
                     Some(rule_id),
                 ));
             }
-            constraints.insert(key.to_string(), value.trim().to_string());
+            let trimmed_value = value.trim();
+            if trimmed_value.is_empty() {
+                return Err(ConstraintCompileError::new(
+                    event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
+                    "constraint value must be non-empty",
+                    trace_id,
+                    Some(rule_id),
+                ));
+            }
+            constraints.insert(key.to_string(), trimmed_value.to_string());
         }
 
         if matches!(rule.effect, RuleEffect::Require)
@@ -774,6 +806,22 @@ mod tests {
     }
 
     #[test]
+    fn policy_id_reserved_fails() {
+        let mut policy = full_policy();
+        policy.policy_id = RESERVED_POLICY_ID.to_string();
+        let err = compile_policy(&policy, "trace-reserved").unwrap_err();
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT);
+    }
+
+    #[test]
+    fn policy_id_whitespace_fails() {
+        let mut policy = full_policy();
+        policy.policy_id = " policy-full ".to_string();
+        let err = compile_policy(&policy, "trace-ws").unwrap_err();
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT);
+    }
+
+    #[test]
     fn empty_rule_id_fails() {
         let mut policy = full_policy();
         policy.rules[0].rule_id = "".to_string();
@@ -805,6 +853,29 @@ mod tests {
         };
 
         let err = compile_policy(&policy, "trace-require").unwrap_err();
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
+    }
+
+    #[test]
+    fn constraint_value_must_be_non_empty() {
+        let policy = RuntimePolicy {
+            schema_version: LANGUAGE_VERSION.to_string(),
+            policy_id: "policy-constraint-empty".to_string(),
+            require_full_action_coverage: false,
+            rules: vec![PolicyRule {
+                rule_id: "rule-1".to_string(),
+                action_class: ActionClass::NetworkAccess,
+                effect: RuleEffect::Allow,
+                required_capabilities: vec![],
+                constraints: {
+                    let mut map = BTreeMap::new();
+                    map.insert("scope".to_string(), "  ".to_string());
+                    map
+                },
+            }],
+        };
+
+        let err = compile_policy(&policy, "trace-empty-constraint").unwrap_err();
         assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
     }
 

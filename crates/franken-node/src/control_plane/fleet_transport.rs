@@ -645,13 +645,18 @@ impl FleetTransport for FileFleetTransport {
 }
 
 pub fn validate_zone_id(zone_id: &str) -> Result<&str, FleetTransportError> {
-    let zone_id = zone_id.trim();
-    if zone_id.is_empty() {
+    let trimmed = zone_id.trim();
+    if trimmed.is_empty() {
         return Err(FleetTransportError::serialization(
             "zone_id must not be empty",
         ));
     }
-    Ok(zone_id)
+    if trimmed != zone_id {
+        return Err(FleetTransportError::serialization(
+            "zone_id must not include leading or trailing whitespace",
+        ));
+    }
+    Ok(trimmed)
 }
 
 pub fn validate_node_id(node_id: &str) -> Result<&str, FleetTransportError> {
@@ -1019,6 +1024,8 @@ mod tests {
     fn validate_zone_id_rejects_blank_values() {
         assert!(validate_zone_id("").is_err());
         assert!(validate_zone_id("   ").is_err());
+        assert!(validate_zone_id(" prod").is_err());
+        assert!(validate_zone_id("prod ").is_err());
     }
 
     #[test]

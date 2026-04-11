@@ -20,6 +20,22 @@ pub mod epoch_event_codes {
     pub const EPOCH_SCOPE_LOGGED: &str = "EPV-004";
 }
 
+const RESERVED_POLICY_ID: &str = "<unknown>";
+
+fn invalid_policy_id_reason(policy_id: &str) -> Option<String> {
+    let trimmed = policy_id.trim();
+    if trimmed.is_empty() {
+        return Some("policy_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_POLICY_ID {
+        return Some(format!("policy_id is reserved: {:?}", policy_id));
+    }
+    if trimmed != policy_id {
+        return Some("policy_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
 /// A single health check result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthCheck {
@@ -170,42 +186,55 @@ pub enum EpochHealthGateError {
     FutureEpochRejected { rejection: EpochRejection },
     #[serde(rename = "EPV-003")]
     StaleEpochRejected { rejection: EpochRejection },
+    #[serde(rename = "EPV-006")]
+    InvalidArtifactId { rejection: EpochRejection },
+    #[serde(rename = "EPV-005")]
+    InvalidPolicyId { reason: String },
 }
 
 impl EpochHealthGateError {
     fn from_rejection(rejection: EpochRejection) -> Self {
         match rejection.rejection_reason {
+            EpochRejectionReason::InvalidArtifactId => Self::InvalidArtifactId { rejection },
             EpochRejectionReason::FutureEpoch => Self::FutureEpochRejected { rejection },
             EpochRejectionReason::ExpiredEpoch => Self::StaleEpochRejected { rejection },
         }
     }
 
     #[must_use]
-    pub fn rejection(&self) -> &EpochRejection {
+    pub fn rejection(&self) -> Option<&EpochRejection> {
         match self {
-            Self::FutureEpochRejected { rejection } | Self::StaleEpochRejected { rejection } => {
-                rejection
-            }
+            Self::FutureEpochRejected { rejection }
+            | Self::StaleEpochRejected { rejection }
+            | Self::InvalidArtifactId { rejection } => Some(rejection),
+            Self::InvalidPolicyId { .. } => None,
         }
     }
 }
 
 impl fmt::Display for EpochHealthGateError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let rejection = self.rejection();
-        let reason = match rejection.rejection_reason {
-            EpochRejectionReason::FutureEpoch => "future_epoch",
-            EpochRejectionReason::ExpiredEpoch => "expired_epoch",
-        };
-        write!(
-            f,
-            "{}: artifact={} artifact_epoch={} current_epoch={} reason={}",
-            rejection.code(),
-            rejection.artifact_id,
-            rejection.artifact_epoch.value(),
-            rejection.current_epoch.value(),
-            reason
-        )
+        match self {
+            Self::InvalidPolicyId { reason } => write!(f, "EPV_INVALID_POLICY_ID: {reason}"),
+            Self::FutureEpochRejected { rejection }
+            | Self::StaleEpochRejected { rejection }
+            | Self::InvalidArtifactId { rejection } => {
+                let reason = match rejection.rejection_reason {
+                    EpochRejectionReason::InvalidArtifactId => "invalid_artifact_id",
+                    EpochRejectionReason::FutureEpoch => "future_epoch",
+                    EpochRejectionReason::ExpiredEpoch => "expired_epoch",
+                };
+                write!(
+                    f,
+                    "{}: artifact={} artifact_epoch={} current_epoch={} reason={}",
+                    rejection.code(),
+                    rejection.artifact_id,
+                    rejection.artifact_epoch.value(),
+                    rejection.current_epoch.value(),
+                    reason
+                )
+            }
+        }
     }
 }
 
@@ -216,6 +245,9 @@ pub fn evaluate_epoch_scoped_policy(
     policy: &EpochScopedHealthPolicy,
     validity_policy: &ValidityWindowPolicy,
 ) -> Result<EpochScopedHealthResult, EpochHealthGateError> {
+    if let Some(reason) = invalid_policy_id_reason(&policy.policy_id) {
+        return Err(EpochHealthGateError::InvalidPolicyId { reason });
+    }
     check_artifact_epoch(
         &policy.policy_id,
         policy.policy_epoch,
@@ -397,6 +429,50 @@ mod tests {
     }
 
     #[test]
+    fn epoch_scoped_policy_rejects_empty_policy_id() {
+        let policy = EpochScopedHealthPolicy::new(
+            "".to_string(),
+            ControlEpoch::new(7),
+            standard_checks(true, true, true, true),
+            "trace-hg-empty".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = evaluate_epoch_scoped_policy(&policy, &validity).unwrap_err();
+        assert!(matches!(err, EpochHealthGateError::InvalidPolicyId { .. }));
+    }
+
+    #[test]
+    fn epoch_scoped_policy_rejects_reserved_policy_id() {
+        let policy = EpochScopedHealthPolicy::new(
+            RESERVED_POLICY_ID.to_string(),
+            ControlEpoch::new(7),
+            standard_checks(true, true, true, true),
+            "trace-hg-reserved".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = evaluate_epoch_scoped_policy(&policy, &validity).unwrap_err();
+        assert!(matches!(err, EpochHealthGateError::InvalidPolicyId { .. }));
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn epoch_scoped_policy_rejects_whitespace_policy_id() {
+        let policy = EpochScopedHealthPolicy::new(
+            " health-policy-1 ".to_string(),
+            ControlEpoch::new(7),
+            standard_checks(true, true, true, true),
+            "trace-hg-whitespace".to_string(),
+        );
+        let validity = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = evaluate_epoch_scoped_policy(&policy, &validity).unwrap_err();
+        assert!(matches!(err, EpochHealthGateError::InvalidPolicyId { .. }));
+        assert!(err.to_string().contains("leading or trailing whitespace"));
+    }
+
+    #[test]
     fn epoch_health_gate_error_display_uses_reason_label() {
         let err = EpochHealthGateError::from_rejection(EpochRejection {
             artifact_id: "health-policy-future".to_string(),
@@ -409,6 +485,21 @@ mod tests {
         let rendered = err.to_string();
         assert!(rendered.contains("EPOCH_REJECT_FUTURE"));
         assert!(rendered.contains("reason=future_epoch"));
+    }
+
+    #[test]
+    fn epoch_health_gate_error_display_handles_invalid_artifact_id() {
+        let err = EpochHealthGateError::from_rejection(EpochRejection {
+            artifact_id: " health-policy-bad ".to_string(),
+            artifact_epoch: ControlEpoch::new(7),
+            current_epoch: ControlEpoch::new(7),
+            rejection_reason: EpochRejectionReason::InvalidArtifactId,
+            trace_id: "trace-hg-invalid".to_string(),
+        });
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("EPOCH_REJECT_INVALID_ARTIFACT_ID"));
+        assert!(rendered.contains("reason=invalid_artifact_id"));
     }
 
     #[test]

@@ -22,6 +22,24 @@ pub mod event_codes {
     pub const HARDEN_STATE_REPLAYED: &str = "EVD-HARDEN-004";
 }
 
+#[cfg(any(test, feature = "extended-surfaces"))]
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
+#[cfg(any(test, feature = "extended-surfaces"))]
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
 /// Hardening levels ordered from weakest to strongest.
 ///
 /// Total ordering: Baseline < Standard < Enhanced < Maximum < Critical
@@ -109,10 +127,8 @@ pub struct GovernanceRollbackArtifact {
 impl GovernanceRollbackArtifact {
     /// Validate the artifact has all required fields populated.
     pub fn validate(&self) -> Result<(), HardeningError> {
-        if self.artifact_id.is_empty() {
-            return Err(HardeningError::InvalidRollbackArtifact {
-                reason: "artifact_id must not be empty".into(),
-            });
+        if let Some(reason) = invalid_artifact_id_reason(&self.artifact_id) {
+            return Err(HardeningError::InvalidRollbackArtifact { reason });
         }
         if self.approver_id.is_empty() {
             return Err(HardeningError::InvalidRollbackArtifact {
@@ -580,6 +596,30 @@ mod tests {
             .governance_rollback(HardeningLevel::Standard, &artifact, 2000, &tid(1))
             .unwrap_err();
         assert_eq!(err.code(), "HARDEN_INVALID_ARTIFACT");
+    }
+
+    #[test]
+    fn governance_rollback_reserved_artifact_id() {
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Enhanced);
+        let mut artifact = valid_artifact();
+        artifact.artifact_id = RESERVED_ARTIFACT_ID.to_string();
+        let err = sm
+            .governance_rollback(HardeningLevel::Standard, &artifact, 2000, &tid(1))
+            .unwrap_err();
+        assert_eq!(err.code(), "HARDEN_INVALID_ARTIFACT");
+        assert!(format!("{err}").contains("reserved"));
+    }
+
+    #[test]
+    fn governance_rollback_whitespace_artifact_id() {
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Enhanced);
+        let mut artifact = valid_artifact();
+        artifact.artifact_id = " GOV-2026-001 ".to_string();
+        let err = sm
+            .governance_rollback(HardeningLevel::Standard, &artifact, 2000, &tid(1))
+            .unwrap_err();
+        assert_eq!(err.code(), "HARDEN_INVALID_ARTIFACT");
+        assert!(format!("{err}").contains("leading or trailing whitespace"));
     }
 
     #[test]

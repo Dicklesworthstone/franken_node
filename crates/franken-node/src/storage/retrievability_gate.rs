@@ -46,6 +46,10 @@ pub const ERR_HASH_MISMATCH: &str = "ERR_HASH_MISMATCH";
 pub const ERR_LATENCY_EXCEEDED: &str = "ERR_LATENCY_EXCEEDED";
 pub const ERR_TARGET_UNREACHABLE: &str = "ERR_TARGET_UNREACHABLE";
 pub const ERR_EVICTION_BLOCKED: &str = "ERR_EVICTION_BLOCKED";
+pub const ERR_INVALID_ARTIFACT_ID: &str = "ERR_INVALID_ARTIFACT_ID";
+pub const ERR_INVALID_SEGMENT_ID: &str = "ERR_INVALID_SEGMENT_ID";
+
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -101,6 +105,8 @@ pub enum ProofFailureReason {
     HashMismatch { expected: String, actual: String },
     LatencyExceeded { limit_ms: u64, actual_ms: u64 },
     TargetUnreachable { detail: String },
+    InvalidArtifactId { detail: String },
+    InvalidSegmentId { detail: String },
 }
 
 impl ProofFailureReason {
@@ -109,6 +115,8 @@ impl ProofFailureReason {
             Self::HashMismatch { .. } => ERR_HASH_MISMATCH,
             Self::LatencyExceeded { .. } => ERR_LATENCY_EXCEEDED,
             Self::TargetUnreachable { .. } => ERR_TARGET_UNREACHABLE,
+            Self::InvalidArtifactId { .. } => ERR_INVALID_ARTIFACT_ID,
+            Self::InvalidSegmentId { .. } => ERR_INVALID_SEGMENT_ID,
         }
     }
 
@@ -117,6 +125,8 @@ impl ProofFailureReason {
             Self::HashMismatch { .. } => "hash_mismatch",
             Self::LatencyExceeded { .. } => "latency_exceeded",
             Self::TargetUnreachable { .. } => "target_unreachable",
+            Self::InvalidArtifactId { .. } => "invalid_artifact_id",
+            Self::InvalidSegmentId { .. } => "invalid_segment_id",
         }
     }
 }
@@ -140,8 +150,41 @@ impl fmt::Display for ProofFailureReason {
             Self::TargetUnreachable { detail } => {
                 write!(f, "target unreachable: {}", detail)
             }
+            Self::InvalidArtifactId { detail } => {
+                write!(f, "invalid artifact id: {}", detail)
+            }
+            Self::InvalidSegmentId { detail } => {
+                write!(f, "invalid segment id: {}", detail)
+            }
         }
     }
+}
+
+fn invalid_artifact_id_reason(artifact_id: &ArtifactId) -> Option<String> {
+    let raw = artifact_id.0.as_str();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", raw));
+    }
+    if trimmed != raw {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
+fn invalid_segment_id_reason(segment_id: &SegmentId) -> Option<String> {
+    let raw = segment_id.0.as_str();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some("segment_id must not be empty".to_string());
+    }
+    if trimmed != raw {
+        return Some("segment_id contains leading or trailing whitespace".to_string());
+    }
+    None
 }
 
 /// A successful retrievability proof.
@@ -300,6 +343,50 @@ impl RetrievabilityGate {
     ) -> Result<RetrievabilityProof, RetrievabilityError> {
         self.timestamp_counter = self.timestamp_counter.saturating_add(1);
         let ts = self.timestamp_counter;
+
+        if let Some(detail) = invalid_artifact_id_reason(artifact_id) {
+            let reason = ProofFailureReason::InvalidArtifactId { detail };
+            let err = RetrievabilityError {
+                code: ERR_INVALID_ARTIFACT_ID.to_string(),
+                reason: reason.clone(),
+                artifact_id: artifact_id.clone(),
+                segment_id: segment_id.clone(),
+                target_tier,
+            };
+            self.record_failure(
+                artifact_id,
+                segment_id,
+                source_tier,
+                target_tier,
+                None,
+                ts,
+                &reason,
+                0,
+            );
+            return Err(err);
+        }
+
+        if let Some(detail) = invalid_segment_id_reason(segment_id) {
+            let reason = ProofFailureReason::InvalidSegmentId { detail };
+            let err = RetrievabilityError {
+                code: ERR_INVALID_SEGMENT_ID.to_string(),
+                reason: reason.clone(),
+                artifact_id: artifact_id.clone(),
+                segment_id: segment_id.clone(),
+                target_tier,
+            };
+            self.record_failure(
+                artifact_id,
+                segment_id,
+                source_tier,
+                target_tier,
+                None,
+                ts,
+                &reason,
+                0,
+            );
+            return Err(err);
+        }
 
         let key = (
             artifact_id.0.clone(),
@@ -971,6 +1058,58 @@ mod tests {
         assert_eq!(proof.latency_ms, 4999);
     }
 
+    // -- Invalid identifiers --
+
+    #[test]
+    fn test_invalid_artifact_id_rejected() {
+        let mut gate = make_gate();
+        let err = gate
+            .check_retrievability(
+                &aid(""),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "abc",
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
+        assert!(err.reason.to_string().contains("artifact_id"));
+        assert_eq!(gate.receipts().len(), 1);
+        assert!(!gate.receipts()[0].passed);
+    }
+
+    #[test]
+    fn test_reserved_artifact_id_rejected() {
+        let mut gate = make_gate();
+        let err = gate
+            .check_retrievability(
+                &aid(RESERVED_ARTIFACT_ID),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "abc",
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
+        assert!(err.reason.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn test_invalid_segment_id_rejected() {
+        let mut gate = make_gate();
+        let err = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid(" s1 "),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "abc",
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_SEGMENT_ID);
+        assert!(err.reason.to_string().contains("segment_id"));
+    }
+
     // -- Target unreachable --
 
     #[test]
@@ -1337,6 +1476,10 @@ mod tests {
         assert_eq!(le.error_code(), ERR_LATENCY_EXCEEDED);
         let tu = ProofFailureReason::TargetUnreachable { detail: "x".into() };
         assert_eq!(tu.error_code(), ERR_TARGET_UNREACHABLE);
+        let ia = ProofFailureReason::InvalidArtifactId { detail: "x".into() };
+        assert_eq!(ia.error_code(), ERR_INVALID_ARTIFACT_ID);
+        let iseg = ProofFailureReason::InvalidSegmentId { detail: "x".into() };
+        assert_eq!(iseg.error_code(), ERR_INVALID_SEGMENT_ID);
     }
 
     #[test]
@@ -1353,6 +1496,10 @@ mod tests {
         assert_eq!(le.label(), "latency_exceeded");
         let tu = ProofFailureReason::TargetUnreachable { detail: "x".into() };
         assert_eq!(tu.label(), "target_unreachable");
+        let ia = ProofFailureReason::InvalidArtifactId { detail: "x".into() };
+        assert_eq!(ia.label(), "invalid_artifact_id");
+        let iseg = ProofFailureReason::InvalidSegmentId { detail: "x".into() };
+        assert_eq!(iseg.label(), "invalid_segment_id");
     }
 
     // -- Error display --

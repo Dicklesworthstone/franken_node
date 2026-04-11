@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 const MAX_SPANS_PER_TRACE: usize = 4096;
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if items.len() >= cap {
@@ -71,6 +72,20 @@ impl TraceContext {
 
 fn is_hex(s: &str, expected_len: usize) -> bool {
     s.len() == expected_len && s.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
 }
 
 // ── Traced artifact ─────────────────────────────────────────────────────────
@@ -186,6 +201,14 @@ impl TraceStore {
         let mut valid_contexts = Vec::new();
 
         for art in artifacts {
+            if let Some(reason) = invalid_artifact_id_reason(&art.artifact_id) {
+                violations.push(TraceViolation {
+                    artifact_id: art.artifact_id.clone(),
+                    reason,
+                });
+                continue;
+            }
+
             match &art.trace_context {
                 None => violations.push(TraceViolation {
                     artifact_id: art.artifact_id.clone(),
@@ -371,6 +394,50 @@ mod tests {
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.violations.len(), 1);
         assert_eq!(report.violations[0].artifact_id, "a1");
+    }
+
+    #[test]
+    fn conformance_fail_invalid_artifact_id() {
+        let arts = vec![TracedArtifact {
+            artifact_id: " art-1 ".into(),
+            artifact_type: "invoke".into(),
+            trace_context: Some(ctx(None)),
+        }];
+        let report = TraceStore::check_conformance(&arts);
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.violations.len(), 1);
+        assert_eq!(report.violations[0].artifact_id, " art-1 ");
+        assert!(
+            report.violations[0]
+                .reason
+                .contains("leading or trailing whitespace")
+        );
+    }
+
+    #[test]
+    fn conformance_fail_empty_artifact_id() {
+        let arts = vec![TracedArtifact {
+            artifact_id: "   ".into(),
+            artifact_type: "invoke".into(),
+            trace_context: Some(ctx(None)),
+        }];
+        let report = TraceStore::check_conformance(&arts);
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.violations[0].reason.contains("must not be empty"));
+    }
+
+    #[test]
+    fn conformance_fail_reserved_artifact_id() {
+        let arts = vec![TracedArtifact {
+            artifact_id: RESERVED_ARTIFACT_ID.to_string(),
+            artifact_type: "invoke".into(),
+            trace_context: Some(ctx(None)),
+        }];
+        let report = TraceStore::check_conformance(&arts);
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.violations[0].reason.contains("reserved"));
     }
 
     #[test]

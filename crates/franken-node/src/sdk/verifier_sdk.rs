@@ -47,6 +47,8 @@ pub const API_VERSION: &str = "1.0.0";
 /// Schema tag embedded in every verification report.
 pub const SCHEMA_TAG: &str = "vsk-v1.0";
 
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
 /// Stable posture marker for this structural verifier SDK surface.
 ///
 /// Replacement-critical verifier work must use the stronger connector and
@@ -241,7 +243,7 @@ fn deterministic_hash_fields(fields: &[&str]) -> String {
 
 fn artifact_binding_hash(request: &VerificationRequest) -> String {
     let mut fields = Vec::with_capacity(2 + request.claims.len());
-    fields.push(request.artifact_id.as_str());
+    fields.push(request.artifact_id.trim());
     fields.push(request.artifact_hash.as_str());
     fields.extend(request.claims.iter().map(String::as_str));
     deterministic_hash_fields(&fields)
@@ -290,9 +292,21 @@ impl VerifierSdk {
         &self,
         request: &VerificationRequest,
     ) -> Result<VerificationReport, SdkError> {
-        if request.artifact_id.is_empty() {
+        let artifact_id = request.artifact_id.trim();
+        if artifact_id.is_empty() {
             return Err(SdkError::InvalidArtifact(
                 "artifact_id is empty".to_string(),
+            ));
+        }
+        if artifact_id == RESERVED_ARTIFACT_ID {
+            return Err(SdkError::InvalidArtifact(format!(
+                "artifact_id is reserved: {:?}",
+                request.artifact_id
+            )));
+        }
+        if request.artifact_id != artifact_id {
+            return Err(SdkError::InvalidArtifact(
+                "artifact_id contains leading or trailing whitespace".to_string(),
             ));
         }
         if request.artifact_hash.is_empty() {
@@ -307,7 +321,7 @@ impl VerifierSdk {
         evidence.push(EvidenceEntry {
             check_name: "artifact_id_present".to_string(),
             passed: true,
-            detail: format!("artifact_id={}", request.artifact_id),
+            detail: format!("artifact_id={artifact_id}"),
         });
 
         // Check artifact_hash format (expect 64 hex chars)
@@ -350,7 +364,7 @@ impl VerifierSdk {
         }
 
         // Hash match check (compare artifact_hash to self-computed hash of artifact_id)
-        let computed = deterministic_hash(&request.artifact_id);
+        let computed = deterministic_hash(artifact_id);
         let hash_match = if self.config.require_hash_match {
             crate::security::constant_time::ct_eq(&computed, &request.artifact_hash)
         } else {
@@ -382,7 +396,7 @@ impl VerifierSdk {
         let binding_hash = artifact_binding_hash(request);
 
         Ok(VerificationReport {
-            request_id: format!("vreq-{}", &deterministic_hash(&request.artifact_id)[..24]),
+            request_id: format!("vreq-{}", &deterministic_hash(artifact_id)[..24]),
             verdict,
             evidence,
             trace_id: format!("vtrc-{}", &binding_hash[..24]),
@@ -814,6 +828,30 @@ mod tests {
         let sdk = test_sdk();
         let req = VerificationRequest {
             artifact_id: String::new(),
+            artifact_hash: "a".repeat(64),
+            claims: vec!["c".to_string()],
+        };
+        let err = sdk.verify_artifact(&req).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidArtifact(_)));
+    }
+
+    #[test]
+    fn test_verify_artifact_reserved_id() {
+        let sdk = test_sdk();
+        let req = VerificationRequest {
+            artifact_id: RESERVED_ARTIFACT_ID.to_string(),
+            artifact_hash: "a".repeat(64),
+            claims: vec!["c".to_string()],
+        };
+        let err = sdk.verify_artifact(&req).unwrap_err();
+        assert!(matches!(err, SdkError::InvalidArtifact(_)));
+    }
+
+    #[test]
+    fn test_verify_artifact_whitespace_id() {
+        let sdk = test_sdk();
+        let req = VerificationRequest {
+            artifact_id: " art-1 ".to_string(),
             artifact_hash: "a".repeat(64),
             claims: vec!["c".to_string()],
         };

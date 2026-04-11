@@ -604,17 +604,302 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
 
     let mut candidates = vec![trimmed.to_string()];
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        let parse_byte_array = |values: &[serde_json::Value]| -> Option<Vec<u8>> {
+        fn parse_byte_array(values: &[serde_json::Value]) -> Option<Vec<u8>> {
             if values.len() != 32 && values.len() != 64 {
                 return None;
             }
             let mut bytes = Vec::with_capacity(values.len());
             for value in values {
-                let byte = value.as_u64().and_then(|value| u8::try_from(value).ok())?;
+                let byte = match value {
+                    serde_json::Value::Number(number) => {
+                        number.as_u64().and_then(|value| u8::try_from(value).ok())?
+                    }
+                    serde_json::Value::String(text) => {
+                        let text = text.trim();
+                        if text.is_empty() {
+                            return None;
+                        }
+                        if let Some(hex) =
+                            text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                        {
+                            u8::from_str_radix(hex, 16).ok()?
+                        } else if text
+                            .chars()
+                            .any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_alphabetic())
+                        {
+                            u8::from_str_radix(text, 16).ok()?
+                        } else {
+                            text.parse::<u8>().ok()?
+                        }
+                    }
+                    _ => return None,
+                };
                 bytes.push(byte);
             }
             Some(bytes)
-        };
+        }
+        fn extract_signing_key_candidates_from_object(
+            obj: &serde_json::Map<String, serde_json::Value>,
+        ) -> (Option<ed25519_dalek::SigningKey>, Vec<String>) {
+            let mut local_candidates = Vec::new();
+            for field in [
+                "private_key",
+                "signing_key",
+                "secret_key",
+                "ed25519_private_key",
+                "private-key",
+                "signing-key",
+                "secret-key",
+                "ed25519-private-key",
+                "privateKey",
+                "signingKey",
+                "secretKey",
+                "ed25519PrivateKey",
+                "bytes",
+                "hex",
+                "base64",
+                "b64",
+                "base64url",
+                "b64url",
+                "base64Url",
+                "b64Url",
+                "base64URL",
+                "b64URL",
+                "base64-url",
+                "b64-url",
+                "base64_url",
+                "b64_url",
+                "seed",
+                "signing_seed",
+                "signing-seed",
+                "signingSeed",
+                "private_key_seed",
+                "private-key-seed",
+                "privateKeySeed",
+            ] {
+                if let Some(entry) = obj.get(field) {
+                    if let Some(bytes) =
+                        entry.as_array().and_then(|values| parse_byte_array(values))
+                        && let Some(signing_key) = signing_key_from_bytes(&bytes)
+                    {
+                        return (Some(signing_key), local_candidates);
+                    }
+                    if let Some(entry) = entry.as_str() {
+                        local_candidates.push(entry.to_string());
+                    }
+                    if let Some(nested) = entry.as_object() {
+                        let (maybe_key, extras) =
+                            extract_signing_key_candidates_from_object(nested);
+                        if let Some(signing_key) = maybe_key {
+                            return (Some(signing_key), local_candidates);
+                        }
+                        local_candidates.extend(extras);
+                    }
+                }
+            }
+            if let Some(value) = obj.get("value") {
+                if let serde_json::Value::Array(entries) = value {
+                    if let Some(bytes) = parse_byte_array(entries)
+                        && let Some(signing_key) = signing_key_from_bytes(&bytes)
+                    {
+                        return (Some(signing_key), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_byte_array(values)
+                                    && let Some(signing_key) = signing_key_from_bytes(&bytes)
+                                {
+                                    return (Some(signing_key), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_key, extras) =
+                                    extract_signing_key_candidates_from_object(nested);
+                                if let Some(signing_key) = maybe_key {
+                                    return (Some(signing_key), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = value.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|value| value.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = value.as_object() {
+                    let (maybe_key, extras) = extract_signing_key_candidates_from_object(nested);
+                    if let Some(signing_key) = maybe_key {
+                        return (Some(signing_key), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
+            if let Some(data) = obj.get("data") {
+                if let serde_json::Value::Array(entries) = data {
+                    if let Some(bytes) = parse_byte_array(entries)
+                        && let Some(signing_key) = signing_key_from_bytes(&bytes)
+                    {
+                        return (Some(signing_key), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_byte_array(values)
+                                    && let Some(signing_key) = signing_key_from_bytes(&bytes)
+                                {
+                                    return (Some(signing_key), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_key, extras) =
+                                    extract_signing_key_candidates_from_object(nested);
+                                if let Some(signing_key) = maybe_key {
+                                    return (Some(signing_key), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = data.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|value| value.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = data.as_object() {
+                    let (maybe_key, extras) = extract_signing_key_candidates_from_object(nested);
+                    if let Some(signing_key) = maybe_key {
+                        return (Some(signing_key), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
+            if let Some(payload) = obj.get("payload") {
+                if let serde_json::Value::Array(entries) = payload {
+                    if let Some(bytes) = parse_byte_array(entries)
+                        && let Some(signing_key) = signing_key_from_bytes(&bytes)
+                    {
+                        return (Some(signing_key), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_byte_array(values)
+                                    && let Some(signing_key) = signing_key_from_bytes(&bytes)
+                                {
+                                    return (Some(signing_key), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_key, extras) =
+                                    extract_signing_key_candidates_from_object(nested);
+                                if let Some(signing_key) = maybe_key {
+                                    return (Some(signing_key), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = payload.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|value| value.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = payload.as_object() {
+                    let (maybe_key, extras) = extract_signing_key_candidates_from_object(nested);
+                    if let Some(signing_key) = maybe_key {
+                        return (Some(signing_key), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
+            (None, local_candidates)
+        }
 
         match value {
             serde_json::Value::String(value) => candidates.push(value),
@@ -625,38 +910,33 @@ fn parse_signing_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::SigningKey> 
                     return Some(signing_key);
                 }
                 for entry in values {
-                    if let serde_json::Value::String(value) = entry {
-                        candidates.push(value);
+                    match entry {
+                        serde_json::Value::String(value) => candidates.push(value),
+                        serde_json::Value::Array(values) => {
+                            if let Some(bytes) = parse_byte_array(&values)
+                                && let Some(signing_key) = signing_key_from_bytes(&bytes)
+                            {
+                                return Some(signing_key);
+                            }
+                        }
+                        serde_json::Value::Object(value) => {
+                            let (maybe_key, extras) =
+                                extract_signing_key_candidates_from_object(&value);
+                            if let Some(signing_key) = maybe_key {
+                                return Some(signing_key);
+                            }
+                            candidates.extend(extras);
+                        }
+                        _ => {}
                     }
                 }
             }
             serde_json::Value::Object(value) => {
-                for field in [
-                    "private_key",
-                    "signing_key",
-                    "secret_key",
-                    "ed25519_private_key",
-                    "private-key",
-                    "signing-key",
-                    "secret-key",
-                    "ed25519-private-key",
-                    "privateKey",
-                    "signingKey",
-                    "secretKey",
-                    "ed25519PrivateKey",
-                ] {
-                    if let Some(entry) = value.get(field) {
-                        if let Some(bytes) =
-                            entry.as_array().and_then(|values| parse_byte_array(values))
-                            && let Some(signing_key) = signing_key_from_bytes(&bytes)
-                        {
-                            return Some(signing_key);
-                        }
-                        if let Some(entry) = entry.as_str() {
-                            candidates.push(entry.to_string());
-                        }
-                    }
+                let (maybe_key, extras) = extract_signing_key_candidates_from_object(&value);
+                if let Some(signing_key) = maybe_key {
+                    return Some(signing_key);
                 }
+                candidates.extend(extras);
             }
             _ => {}
         }
@@ -1017,6 +1297,258 @@ mod signing_key_parsing_tests {
     }
 
     #[test]
+    fn parse_signing_key_accepts_json_nested_hex_key() {
+        let bytes = [210_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"signingKey":{{"hex":"{encoded}"}}}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_array_object_key() {
+        let bytes = [211_u8; 32];
+        let payload = format!(
+            r#"[{{"signingKey":[{}]}}]"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json array");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_value_hex_encoding() {
+        let bytes = [212_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":"{encoded}","encoding":"hex"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_value_array_hex() {
+        let bytes = [222_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":["{encoded}"]}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_value_array_object_hex() {
+        let bytes = [223_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":[{{"hex":"{encoded}"}}]}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_value_base64url_encoding() {
+        let bytes = [213_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","encoding":"base64-url-no-pad"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_data_hex_encoding() {
+        let bytes = [214_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":"{encoded}","encoding":"hex"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_data_array_hex() {
+        let bytes = [219_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":["{encoded}"]}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_data_array_object_hex() {
+        let bytes = [220_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":[{{"hex":"{encoded}"}}]}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_data_byte_array() {
+        let bytes = [217_u8; 32];
+        let payload = format!(
+            r#"{{"data":[{}]}}"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_payload_hex_encoding() {
+        let bytes = [215_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":"{encoded}","encoding":"hex"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_payload_array_hex() {
+        let bytes = [218_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":["{encoded}"]}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_payload_array_object_hex() {
+        let bytes = [221_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":[{{"hex":"{encoded}"}}]}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_base64url_field() {
+        let bytes = [224_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64url":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_base64url_camel_field() {
+        let bytes = [225_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64Url":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_b64url_camel_field() {
+        let bytes = [226_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64Url":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_base64url_upper_field() {
+        let bytes = [231_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64URL":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_b64url_upper_field() {
+        let bytes = [232_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64URL":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_base64_url_field() {
+        let bytes = [227_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64_url":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_b64_url_field() {
+        let bytes = [228_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64_url":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_base64_dash_url_field() {
+        let bytes = [229_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64-url":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_b64_dash_url_field() {
+        let bytes = [230_u8; 32];
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64-url":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_seed_hex() {
+        let bytes = [216_u8; 32];
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"seed":"{encoded}"}}"#);
+        let parsed = parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
     fn parse_signing_key_accepts_json_byte_array() {
         let bytes = [204_u8; 32];
         let payload = format!(
@@ -1024,6 +1556,54 @@ mod signing_key_parsing_tests {
             bytes
                 .iter()
                 .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed =
+            parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json byte array");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_byte_array_string_values() {
+        let bytes = [226_u8; 32];
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""{value}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed =
+            parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json byte array");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_byte_array_hex_string_values() {
+        let bytes = [238_u8; 32];
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""{value:02x}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed =
+            parse_signing_key_from_blob(payload.as_bytes()).expect("parsed json byte array");
+        assert_eq!(key_id_for(&parsed), key_id_from_bytes(&bytes));
+    }
+
+    #[test]
+    fn parse_signing_key_accepts_json_byte_array_hex_prefixed_string_values() {
+        let bytes = [238_u8; 32];
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""0x{value:02x}""#))
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -1046,6 +1626,20 @@ mod verifying_key_parsing_tests {
     fn verifying_key_bytes(seed: [u8; 32]) -> [u8; 32] {
         let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
         signing_key.verifying_key().to_bytes()
+    }
+
+    fn seed_with_hex_letters() -> [u8; 32] {
+        for value in 0_u8..=255 {
+            let candidate = [value; 32];
+            let bytes = verifying_key_bytes(candidate);
+            let has_hex_letters = bytes
+                .iter()
+                .any(|byte| (byte >> 4) >= 10 || (byte & 0x0f) >= 10);
+            if has_hex_letters {
+                return candidate;
+            }
+        }
+        panic!("expected at least one seed to yield hex letter bytes");
     }
 
     fn ssh_ed25519_public_key_line(bytes: [u8; 32]) -> String {
@@ -1229,6 +1823,18 @@ mod verifying_key_parsing_tests {
     }
 
     #[test]
+    fn parse_verifying_key_accepts_json_nested_hex_key() {
+        let bytes = verifying_key_bytes([130_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"publicKey":{{"hex":"{encoded}"}}}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
     fn parse_verifying_key_accepts_json_wrapped_byte_array() {
         let bytes = verifying_key_bytes([111_u8; 32]);
         let payload = format!(
@@ -1240,6 +1846,249 @@ mod verifying_key_parsing_tests {
                 .join(",")
         );
         let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_value_byte_array() {
+        let bytes = verifying_key_bytes([126_u8; 32]);
+        let payload = format!(
+            r#"{{"value":[{}]}}"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_value_hex_encoding() {
+        let bytes = verifying_key_bytes([127_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":"{encoded}","encoding":"hex"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_value_array_hex() {
+        let bytes = verifying_key_bytes([137_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":["{encoded}"]}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_value_array_object_hex() {
+        let bytes = verifying_key_bytes([138_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":[{{"hex":"{encoded}"}}]}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_value_base64url_encoding() {
+        let bytes = verifying_key_bytes([128_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","encoding":"base64-url-no-pad"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_data_hex_encoding() {
+        let bytes = verifying_key_bytes([129_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":"{encoded}","encoding":"hex"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_data_array_hex() {
+        let bytes = verifying_key_bytes([133_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":["{encoded}"]}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_data_array_object_hex() {
+        let bytes = verifying_key_bytes([135_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":[{{"hex":"{encoded}"}}]}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_data_byte_array() {
+        let bytes = verifying_key_bytes([132_u8; 32]);
+        let payload = format!(
+            r#"{{"data":[{}]}}"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_payload_hex_encoding() {
+        let bytes = verifying_key_bytes([131_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":"{encoded}","encoding":"hex"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_payload_array_hex() {
+        let bytes = verifying_key_bytes([134_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":["{encoded}"]}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_payload_array_object_hex() {
+        let bytes = verifying_key_bytes([136_u8; 32]);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":[{{"hex":"{encoded}"}}]}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_base64url_field() {
+        let bytes = verifying_key_bytes([139_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64url":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_base64url_camel_field() {
+        let bytes = verifying_key_bytes([141_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64Url":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_b64url_camel_field() {
+        let bytes = verifying_key_bytes([142_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64Url":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_b64url_upper_field() {
+        let bytes = verifying_key_bytes([147_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64URL":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_base64url_upper_field() {
+        let bytes = verifying_key_bytes([148_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64URL":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_base64_url_field() {
+        let bytes = verifying_key_bytes([143_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64_url":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_b64_url_field() {
+        let bytes = verifying_key_bytes([144_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64_url":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_base64_dash_url_field() {
+        let bytes = verifying_key_bytes([145_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64-url":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_b64_dash_url_field() {
+        let bytes = verifying_key_bytes([146_u8; 32]);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64-url":"{encoded}"}}"#);
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_array_object_key() {
+        let bytes = verifying_key_bytes([125_u8; 32]);
+        let payload = format!(
+            r#"[{{"publicKey":[{}]}}]"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed = parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json array");
         assert_eq!(parsed.to_bytes(), bytes);
     }
 
@@ -1260,6 +2109,56 @@ mod verifying_key_parsing_tests {
             bytes
                 .iter()
                 .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed =
+            parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json byte array");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_byte_array_string_values() {
+        let bytes = verifying_key_bytes([140_u8; 32]);
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""{value}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed =
+            parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json byte array");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_byte_array_hex_string_values() {
+        let seed = seed_with_hex_letters();
+        let bytes = verifying_key_bytes(seed);
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""{value:02x}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let parsed =
+            parse_verifying_key_from_blob(payload.as_bytes()).expect("parsed json byte array");
+        assert_eq!(parsed.to_bytes(), bytes);
+    }
+
+    #[test]
+    fn parse_verifying_key_accepts_json_byte_array_hex_prefixed_string_values() {
+        let seed = seed_with_hex_letters();
+        let bytes = verifying_key_bytes(seed);
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""0x{value:02x}""#))
                 .collect::<Vec<_>>()
                 .join(",")
         );
@@ -1387,6 +2286,66 @@ mod signature_blob_tests {
     }
 
     #[test]
+    fn decode_signature_blob_accepts_json_byte_array_string_values() {
+        let bytes = signature_bytes(86);
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""{value}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_byte_array_hex_string_values() {
+        let bytes = [238_u8; 64];
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""{value:02x}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_byte_array_hex_prefixed_string_values() {
+        let bytes = [238_u8; 64];
+        let payload = format!(
+            "[{}]",
+            bytes
+                .iter()
+                .map(|value| format!(r#""0x{value:02x}""#))
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_array_object_bytes() {
+        let bytes = signature_bytes(75);
+        let payload = format!(
+            r#"[{{"bytes":[{}]}}]"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
     fn decode_signature_blob_accepts_json_object_ed25519_signature_field() {
         let bytes = signature_bytes(38);
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -1490,6 +2449,519 @@ mod signature_blob_tests {
         let bytes = signature_bytes(47);
         let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
         let payload = format!(r#"{{"signature":{{"base64":"{encoded}"}}}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_nested_bytes() {
+        let bytes = signature_bytes(48);
+        let payload = format!(
+            r#"{{"signature":{{"bytes":[{}]}}}}"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_nested_hex() {
+        let bytes = signature_bytes(49);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"signature":{{"hex":"{encoded}"}}}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_top_level_base64() {
+        let bytes = signature_bytes(50);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = format!(r#"{{"base64":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_encoding() {
+        let bytes = signature_bytes(51);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":"{encoded}","encoding":"hex"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_array_hex() {
+        let bytes = signature_bytes(83);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":["{encoded}"]}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_array_object_hex() {
+        let bytes = signature_bytes(84);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":[{{"hex":"{encoded}"}}]}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_data_with_hex_encoding() {
+        let bytes = signature_bytes(76);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":"{encoded}","encoding":"hex"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_data_array_hex() {
+        let bytes = signature_bytes(80);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":["{encoded}"]}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_data_array_object_hex() {
+        let bytes = signature_bytes(81);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"data":[{{"hex":"{encoded}"}}]}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_data_byte_array() {
+        let bytes = signature_bytes(78);
+        let payload = format!(
+            r#"{{"data":[{}]}}"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_payload_with_hex_encoding() {
+        let bytes = signature_bytes(77);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":"{encoded}","encoding":"hex"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_payload_array_hex() {
+        let bytes = signature_bytes(79);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":["{encoded}"]}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_payload_array_object_hex() {
+        let bytes = signature_bytes(82);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"payload":[{{"hex":"{encoded}"}}]}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_base64url_field() {
+        let bytes = signature_bytes(85);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_base64url_camel_field() {
+        let bytes = signature_bytes(86);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64Url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_b64url_camel_field() {
+        let bytes = signature_bytes(84);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64Url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_base64_url_field() {
+        let bytes = signature_bytes(83);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64_url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_b64_url_field() {
+        let bytes = signature_bytes(81);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64_url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_base64_dash_url_field() {
+        let bytes = signature_bytes(80);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"base64-url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_b64_dash_url_field() {
+        let bytes = signature_bytes(78);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"b64-url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_signature_base64url_camel_field() {
+        let bytes = signature_bytes(87);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"signatureBase64Url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_signature_b64url_camel_field() {
+        let bytes = signature_bytes(93);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"signatureB64Url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_signature_base64url_upper_field() {
+        let bytes = signature_bytes(91);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"signatureBase64URL":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_sig_base64url_upper_field() {
+        let bytes = signature_bytes(94);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"sigBase64URL":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_sig_b64url_upper_field() {
+        let bytes = signature_bytes(92);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"sigB64URL":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_signature_base64_url_field() {
+        let bytes = signature_bytes(89);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"signature_base64_url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_sig_b64url_camel_field() {
+        let bytes = signature_bytes(88);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"sigB64Url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_sig_base64_url_kebab_field() {
+        let bytes = signature_bytes(90);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"sig-base64-url":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_base64url_encoding() {
+        let bytes = signature_bytes(52);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","encoding":"base64-url"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_base64url_underscore_encoding() {
+        let bytes = signature_bytes(54);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","encoding":"base64_url"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_base64url_no_pad_encoding() {
+        let bytes = signature_bytes(56);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","encoding":"base64url-no-pad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_hex() {
+        let bytes = signature_bytes(57);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"value":"{encoded}","format":"hex"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64() {
+        let bytes = signature_bytes(58);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_b64() {
+        let bytes = signature_bytes(59);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"b64"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64url() {
+        let bytes = signature_bytes(60);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64url"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_b64url() {
+        let bytes = signature_bytes(61);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"b64url"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64url_no_pad() {
+        let bytes = signature_bytes(63);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64url_no_pad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_b64url_no_pad() {
+        let bytes = signature_bytes(64);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"b64url_no_pad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64url_nopad() {
+        let bytes = signature_bytes(65);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64urlnopad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64urlpad() {
+        let bytes = signature_bytes(71);
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64urlpad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_b64urlpad() {
+        let bytes = signature_bytes(72);
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"b64urlpad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64_url_pad() {
+        let bytes = signature_bytes(73);
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64-url-pad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64url_padded() {
+        let bytes = signature_bytes(74);
+        let encoded = base64::engine::general_purpose::URL_SAFE.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64url_padded"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_b64urlnopad() {
+        let bytes = signature_bytes(67);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"b64urlnopad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_b64_url_nopad() {
+        let bytes = signature_bytes(68);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"b64-url-nopad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_b64_url_no_pad() {
+        let bytes = signature_bytes(69);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"b64-url-no-pad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64_url_no_pad() {
+        let bytes = signature_bytes(70);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64-url-no-pad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64_url_nopad() {
+        let bytes = signature_bytes(66);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64-url-nopad"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_value_with_format_base64_url() {
+        let bytes = signature_bytes(62);
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+        let payload = format!(r#"{{"value":"{encoded}","format":"base64_url"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_top_level_bytes() {
+        let bytes = signature_bytes(55);
+        let payload = format!(
+            r#"{{"bytes":[{}]}}"#,
+            bytes
+                .iter()
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+                .join(",")
+        );
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_top_level_hex() {
+        let bytes = signature_bytes(53);
+        let encoded = bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let payload = format!(r#"{{"hex":"{encoded}"}}"#);
         let decoded = decode_signature_blob(payload.as_bytes());
         assert_eq!(decoded, bytes);
     }
@@ -10242,20 +11714,43 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
 
     let mut candidates = vec![trimmed.to_string()];
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        let parse_signature_byte_array = |values: &[serde_json::Value]| -> Option<Vec<u8>> {
+        fn parse_signature_byte_array(values: &[serde_json::Value]) -> Option<Vec<u8>> {
             if values.len() != 64 {
                 return None;
             }
             let mut bytes = Vec::with_capacity(values.len());
             for value in values {
-                let byte = value.as_u64().and_then(|value| u8::try_from(value).ok())?;
+                let byte = match value {
+                    serde_json::Value::Number(number) => {
+                        number.as_u64().and_then(|value| u8::try_from(value).ok())?
+                    }
+                    serde_json::Value::String(text) => {
+                        let text = text.trim();
+                        if text.is_empty() {
+                            return None;
+                        }
+                        if let Some(hex) =
+                            text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                        {
+                            u8::from_str_radix(hex, 16).ok()?
+                        } else if text
+                            .chars()
+                            .any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_alphabetic())
+                        {
+                            u8::from_str_radix(text, 16).ok()?
+                        } else {
+                            text.parse::<u8>().ok()?
+                        }
+                    }
+                    _ => return None,
+                };
                 bytes.push(byte);
             }
             Some(bytes)
-        };
-        let extract_signature_candidates_from_object = |
+        }
+        fn extract_signature_candidates_from_object(
             obj: &serde_json::Map<String, serde_json::Value>,
-        | -> (Option<Vec<u8>>, Vec<String>) {
+        ) -> (Option<Vec<u8>>, Vec<String>) {
             let mut local_candidates = Vec::new();
             for nested in [
                 "bytes",
@@ -10274,22 +11769,57 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                 "sigHex",
                 "base64",
                 "b64",
+                "base64url",
+                "b64url",
+                "base64Url",
+                "b64Url",
+                "base64URL",
+                "b64URL",
+                "base64-url",
+                "b64-url",
+                "base64_url",
+                "b64_url",
                 "signature_base64",
                 "signature-base64",
                 "signatureBase64",
                 "signatureB64",
                 "signature-b64",
+                "signature_base64url",
+                "signature_base64_url",
+                "signature-base64url",
+                "signature-base64-url",
+                "signatureBase64url",
+                "signatureBase64Url",
+                "signatureBase64URL",
+                "signatureB64url",
+                "signatureB64Url",
+                "signatureB64URL",
+                "signature-b64url",
+                "signature-b64-url",
                 "sig_base64",
                 "sig-base64",
                 "sigBase64",
                 "sigB64",
                 "sig-b64",
+                "sig_base64url",
+                "sig_base64_url",
+                "sig-base64url",
+                "sig-base64-url",
+                "sigBase64url",
+                "sigBase64Url",
+                "sigBase64URL",
+                "sigB64url",
+                "sigB64Url",
+                "sigB64URL",
+                "sig-b64url",
+                "sig-b64-url",
                 "signature",
                 "sig",
             ] {
                 if let Some(nested) = obj.get(nested) {
-                    if let Some(bytes) =
-                        nested.as_array().and_then(|values| parse_signature_byte_array(values))
+                    if let Some(bytes) = nested
+                        .as_array()
+                        .and_then(|values| parse_signature_byte_array(values))
                     {
                         return (Some(bytes), local_candidates);
                     }
@@ -10298,8 +11828,197 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                     }
                 }
             }
+            if let Some(value) = obj.get("value") {
+                if let serde_json::Value::Array(entries) = value {
+                    if let Some(bytes) = parse_signature_byte_array(entries) {
+                        return (Some(bytes), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_signature_byte_array(values) {
+                                    return (Some(bytes), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_bytes, extras) =
+                                    extract_signature_candidates_from_object(nested);
+                                if let Some(bytes) = maybe_bytes {
+                                    return (Some(bytes), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = value.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = value.as_object() {
+                    let (maybe_bytes, extras) = extract_signature_candidates_from_object(nested);
+                    if let Some(bytes) = maybe_bytes {
+                        return (Some(bytes), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
+            if let Some(data) = obj.get("data") {
+                if let serde_json::Value::Array(entries) = data {
+                    if let Some(bytes) = parse_signature_byte_array(entries) {
+                        return (Some(bytes), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_signature_byte_array(values) {
+                                    return (Some(bytes), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_bytes, extras) =
+                                    extract_signature_candidates_from_object(nested);
+                                if let Some(bytes) = maybe_bytes {
+                                    return (Some(bytes), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = data.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = data.as_object() {
+                    let (maybe_bytes, extras) = extract_signature_candidates_from_object(nested);
+                    if let Some(bytes) = maybe_bytes {
+                        return (Some(bytes), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
+            if let Some(payload) = obj.get("payload") {
+                if let serde_json::Value::Array(entries) = payload {
+                    if let Some(bytes) = parse_signature_byte_array(entries) {
+                        return (Some(bytes), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_signature_byte_array(values) {
+                                    return (Some(bytes), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_bytes, extras) =
+                                    extract_signature_candidates_from_object(nested);
+                                if let Some(bytes) = maybe_bytes {
+                                    return (Some(bytes), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = payload.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|v| v.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = payload.as_object() {
+                    let (maybe_bytes, extras) = extract_signature_candidates_from_object(nested);
+                    if let Some(bytes) = maybe_bytes {
+                        return (Some(bytes), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
             (None, local_candidates)
-        };
+        }
 
         match value {
             serde_json::Value::String(value) => candidates.push(value),
@@ -10308,12 +12027,31 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                     return bytes;
                 }
                 for entry in values {
-                    if let serde_json::Value::String(value) = entry {
-                        candidates.push(value);
+                    match entry {
+                        serde_json::Value::String(value) => candidates.push(value),
+                        serde_json::Value::Array(values) => {
+                            if let Some(bytes) = parse_signature_byte_array(&values) {
+                                return bytes;
+                            }
+                        }
+                        serde_json::Value::Object(value) => {
+                            let (maybe_bytes, extras) =
+                                extract_signature_candidates_from_object(&value);
+                            if let Some(bytes) = maybe_bytes {
+                                return bytes;
+                            }
+                            candidates.extend(extras);
+                        }
+                        _ => {}
                     }
                 }
             }
             serde_json::Value::Object(value) => {
+                let (maybe_bytes, extras) = extract_signature_candidates_from_object(&value);
+                if let Some(bytes) = maybe_bytes {
+                    return bytes;
+                }
+                candidates.extend(extras);
                 for field in [
                     "signature",
                     "sig",
@@ -10346,8 +12084,9 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                     "sigBytes",
                 ] {
                     if let Some(entry) = value.get(field) {
-                        if let Some(bytes) =
-                            entry.as_array().and_then(|values| parse_signature_byte_array(values))
+                        if let Some(bytes) = entry
+                            .as_array()
+                            .and_then(|values| parse_signature_byte_array(values))
                         {
                             return bytes;
                         }
@@ -10364,7 +12103,6 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                             candidates.extend(extras);
                         }
                     }
-                }
                 }
             }
             _ => {}
@@ -10542,17 +12280,288 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
 
     let mut candidates = vec![trimmed.to_string()];
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        let parse_byte_array = |values: &[serde_json::Value]| -> Option<Vec<u8>> {
+        fn parse_byte_array(values: &[serde_json::Value]) -> Option<Vec<u8>> {
             if values.len() != 32 && values.len() != 64 {
                 return None;
             }
             let mut bytes = Vec::with_capacity(values.len());
             for value in values {
-                let byte = value.as_u64().and_then(|value| u8::try_from(value).ok())?;
+                let byte = match value {
+                    serde_json::Value::Number(number) => {
+                        number.as_u64().and_then(|value| u8::try_from(value).ok())?
+                    }
+                    serde_json::Value::String(text) => {
+                        let text = text.trim();
+                        if text.is_empty() {
+                            return None;
+                        }
+                        if let Some(hex) =
+                            text.strip_prefix("0x").or_else(|| text.strip_prefix("0X"))
+                        {
+                            u8::from_str_radix(hex, 16).ok()?
+                        } else if text
+                            .chars()
+                            .any(|ch| ch.is_ascii_hexdigit() && ch.is_ascii_alphabetic())
+                        {
+                            u8::from_str_radix(text, 16).ok()?
+                        } else {
+                            text.parse::<u8>().ok()?
+                        }
+                    }
+                    _ => return None,
+                };
                 bytes.push(byte);
             }
             Some(bytes)
-        };
+        }
+        fn extract_key_candidates_from_object(
+            obj: &serde_json::Map<String, serde_json::Value>,
+        ) -> (Option<ed25519_dalek::VerifyingKey>, Vec<String>) {
+            let mut local_candidates = Vec::new();
+            for field in [
+                "public_key",
+                "verifying_key",
+                "key",
+                "ed25519_public_key",
+                "public-key",
+                "verifying-key",
+                "ed25519-public-key",
+                "publicKey",
+                "verifyingKey",
+                "ed25519PublicKey",
+                "bytes",
+                "hex",
+                "base64",
+                "b64",
+                "base64url",
+                "b64url",
+                "base64-url",
+                "b64-url",
+                "base64_url",
+                "b64_url",
+            ] {
+                if let Some(entry) = obj.get(field) {
+                    if let Some(bytes) =
+                        entry.as_array().and_then(|values| parse_byte_array(values))
+                        && let Some(key) = verifying_key_from_bytes(&bytes)
+                    {
+                        return (Some(key), local_candidates);
+                    }
+                    if let Some(entry) = entry.as_str() {
+                        local_candidates.push(entry.to_string());
+                    }
+                    if let Some(nested) = entry.as_object() {
+                        let (maybe_key, extras) = extract_key_candidates_from_object(nested);
+                        if let Some(key) = maybe_key {
+                            return (Some(key), local_candidates);
+                        }
+                        local_candidates.extend(extras);
+                    }
+                }
+            }
+            if let Some(value) = obj.get("value") {
+                if let serde_json::Value::Array(entries) = value {
+                    if let Some(bytes) = parse_byte_array(entries)
+                        && let Some(key) = verifying_key_from_bytes(&bytes)
+                    {
+                        return (Some(key), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_byte_array(values)
+                                    && let Some(key) = verifying_key_from_bytes(&bytes)
+                                {
+                                    return (Some(key), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_key, extras) =
+                                    extract_key_candidates_from_object(nested);
+                                if let Some(key) = maybe_key {
+                                    return (Some(key), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = value.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|value| value.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = value.as_object() {
+                    let (maybe_key, extras) = extract_key_candidates_from_object(nested);
+                    if let Some(key) = maybe_key {
+                        return (Some(key), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
+            if let Some(data) = obj.get("data") {
+                if let serde_json::Value::Array(entries) = data {
+                    if let Some(bytes) = parse_byte_array(entries)
+                        && let Some(key) = verifying_key_from_bytes(&bytes)
+                    {
+                        return (Some(key), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_byte_array(values)
+                                    && let Some(key) = verifying_key_from_bytes(&bytes)
+                                {
+                                    return (Some(key), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_key, extras) =
+                                    extract_key_candidates_from_object(nested);
+                                if let Some(key) = maybe_key {
+                                    return (Some(key), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = data.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|value| value.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = data.as_object() {
+                    let (maybe_key, extras) = extract_key_candidates_from_object(nested);
+                    if let Some(key) = maybe_key {
+                        return (Some(key), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
+            if let Some(payload) = obj.get("payload") {
+                if let serde_json::Value::Array(entries) = payload {
+                    if let Some(bytes) = parse_byte_array(entries)
+                        && let Some(key) = verifying_key_from_bytes(&bytes)
+                    {
+                        return (Some(key), local_candidates);
+                    }
+                    for entry in entries {
+                        match entry {
+                            serde_json::Value::String(text) => {
+                                local_candidates.push(text.to_string());
+                            }
+                            serde_json::Value::Array(values) => {
+                                if let Some(bytes) = parse_byte_array(values)
+                                    && let Some(key) = verifying_key_from_bytes(&bytes)
+                                {
+                                    return (Some(key), local_candidates);
+                                }
+                            }
+                            serde_json::Value::Object(nested) => {
+                                let (maybe_key, extras) =
+                                    extract_key_candidates_from_object(nested);
+                                if let Some(key) = maybe_key {
+                                    return (Some(key), local_candidates);
+                                }
+                                local_candidates.extend(extras);
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if let Some(text) = payload.as_str() {
+                    if let Some(encoding) = obj
+                        .get("encoding")
+                        .or_else(|| obj.get("format"))
+                        .and_then(|value| value.as_str())
+                    {
+                        let encoding = encoding.trim().to_ascii_lowercase();
+                        let prefix = match encoding.as_str() {
+                            "base64" | "b64" => Some("base64"),
+                            "base64url" | "b64url" | "base64-url" | "b64-url" | "base64_url"
+                            | "b64_url" | "base64url-nopad" | "base64url_no_pad"
+                            | "base64urlnopad" | "base64-url-nopad" | "base64-url-no-pad"
+                            | "b64url-nopad" | "b64url_no_pad" | "b64urlnopad"
+                            | "b64-url-nopad" | "b64-url-no-pad" | "base64urlpad"
+                            | "base64url_pad" | "base64url-padded" | "base64url_padded"
+                            | "base64-url-pad" | "base64-url-padded" | "b64urlpad"
+                            | "b64url_pad" | "b64url-padded" | "b64url_padded" | "b64-url-pad"
+                            | "b64-url-padded" => Some("base64url"),
+                            "hex" => Some("hex"),
+                            _ => None,
+                        };
+                        if let Some(prefix) = prefix {
+                            local_candidates.push(format!("{prefix}:{text}"));
+                        } else {
+                            local_candidates.push(text.to_string());
+                        }
+                    } else {
+                        local_candidates.push(text.to_string());
+                    }
+                } else if let Some(nested) = payload.as_object() {
+                    let (maybe_key, extras) = extract_key_candidates_from_object(nested);
+                    if let Some(key) = maybe_key {
+                        return (Some(key), local_candidates);
+                    }
+                    local_candidates.extend(extras);
+                }
+            }
+            (None, local_candidates)
+        }
 
         match value {
             serde_json::Value::String(value) => candidates.push(value),
@@ -10563,36 +12572,32 @@ fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingK
                     return Some(key);
                 }
                 for entry in values {
-                    if let serde_json::Value::String(value) = entry {
-                        candidates.push(value);
+                    match entry {
+                        serde_json::Value::String(value) => candidates.push(value),
+                        serde_json::Value::Array(values) => {
+                            if let Some(bytes) = parse_byte_array(&values)
+                                && let Some(key) = verifying_key_from_bytes(&bytes)
+                            {
+                                return Some(key);
+                            }
+                        }
+                        serde_json::Value::Object(value) => {
+                            let (maybe_key, extras) = extract_key_candidates_from_object(&value);
+                            if let Some(key) = maybe_key {
+                                return Some(key);
+                            }
+                            candidates.extend(extras);
+                        }
+                        _ => {}
                     }
                 }
             }
             serde_json::Value::Object(value) => {
-                for field in [
-                    "public_key",
-                    "verifying_key",
-                    "key",
-                    "ed25519_public_key",
-                    "public-key",
-                    "verifying-key",
-                    "ed25519-public-key",
-                    "publicKey",
-                    "verifyingKey",
-                    "ed25519PublicKey",
-                ] {
-                    if let Some(entry) = value.get(field) {
-                        if let Some(bytes) =
-                            entry.as_array().and_then(|values| parse_byte_array(values))
-                            && let Some(key) = verifying_key_from_bytes(&bytes)
-                        {
-                            return Some(key);
-                        }
-                        if let Some(entry) = entry.as_str() {
-                            candidates.push(entry.to_string());
-                        }
-                    }
+                let (maybe_key, extras) = extract_key_candidates_from_object(&value);
+                if let Some(key) = maybe_key {
+                    return Some(key);
                 }
+                candidates.extend(extras);
             }
             _ => {}
         }

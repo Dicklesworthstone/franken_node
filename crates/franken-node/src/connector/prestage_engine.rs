@@ -131,8 +131,18 @@ pub fn evaluate_candidates(
     // Sort deterministically: probability descending, then artifact_id ascending
     let mut sorted: Vec<&ArtifactCandidate> = candidates.iter().collect();
     sorted.sort_by(|a, b| {
-        b.predicted_probability
-            .partial_cmp(&a.predicted_probability)
+        let a_prob = if a.predicted_probability.is_finite() {
+            a.predicted_probability
+        } else {
+            f64::NEG_INFINITY
+        };
+        let b_prob = if b.predicted_probability.is_finite() {
+            b.predicted_probability
+        } else {
+            f64::NEG_INFINITY
+        };
+        b_prob
+            .partial_cmp(&a_prob)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then(a.artifact_id.cmp(&b.artifact_id))
     });
@@ -214,13 +224,15 @@ pub fn evaluate_candidates(
 ///
 /// INV-PSE-QUALITY: precision and recall are computed and reported.
 pub fn measure_quality(decisions: &[PrestageDecision], actual_needed: &[String]) -> QualityMetrics {
-    let staged: Vec<&str> = decisions
+    let staged: std::collections::BTreeSet<&str> = decisions
         .iter()
         .filter(|d| d.staged)
         .map(|d| d.artifact_id.as_str())
         .collect();
+    let actual: std::collections::BTreeSet<&str> =
+        actual_needed.iter().map(|id| id.as_str()).collect();
 
-    if staged.is_empty() && actual_needed.is_empty() {
+    if staged.is_empty() && actual.is_empty() {
         return QualityMetrics {
             precision: 1.0,
             recall: 1.0,
@@ -228,10 +240,7 @@ pub fn measure_quality(decisions: &[PrestageDecision], actual_needed: &[String])
         };
     }
 
-    let true_positives = staged
-        .iter()
-        .filter(|id| actual_needed.contains(&id.to_string()))
-        .count() as f64;
+    let true_positives = staged.intersection(&actual).count() as f64;
 
     let precision = if staged.is_empty() {
         0.0
@@ -239,10 +248,10 @@ pub fn measure_quality(decisions: &[PrestageDecision], actual_needed: &[String])
         true_positives / staged.len() as f64
     };
 
-    let recall = if actual_needed.is_empty() {
+    let recall = if actual.is_empty() {
         1.0
     } else {
-        true_positives / actual_needed.len() as f64
+        true_positives / actual.len() as f64
     };
 
     let f1_score = if precision + recall > 0.0 {
@@ -347,6 +356,19 @@ mod tests {
     }
 
     #[test]
+    fn non_finite_probabilities_sorted_last() {
+        let candidates = vec![
+            cand("nan", 100, f64::NAN),
+            cand("high", 100, 0.9),
+            cand("mid", 100, 0.8),
+            cand("inf", 100, f64::INFINITY),
+        ];
+        let (decisions, _) = evaluate_candidates(&candidates, &config(), "tr", "ts").unwrap();
+        let ids: Vec<&str> = decisions.iter().map(|d| d.artifact_id.as_str()).collect();
+        assert_eq!(ids, vec!["high", "mid", "inf", "nan"]);
+    }
+
+    #[test]
     fn no_candidates_error() {
         let err = evaluate_candidates(&[], &config(), "tr", "ts").unwrap_err();
         assert_eq!(err.code(), "PSE_NO_CANDIDATES");
@@ -430,6 +452,42 @@ mod tests {
         let q = measure_quality(&decisions, &actual);
         assert!((q.precision - 0.5).abs() < 1e-10); // 1/2 staged were needed
         assert!((q.recall - 0.5).abs() < 1e-10); // 1/2 needed were staged
+    }
+
+    #[test]
+    fn quality_duplicate_decisions() {
+        let decisions = vec![
+            PrestageDecision {
+                artifact_id: "a1".into(),
+                staged: true,
+                reason: "".into(),
+                budget_remaining: 0,
+            },
+            PrestageDecision {
+                artifact_id: "a1".into(),
+                staged: true,
+                reason: "".into(),
+                budget_remaining: 0,
+            },
+        ];
+        let actual = vec!["a1".to_string()];
+        let q = measure_quality(&decisions, &actual);
+        assert!((q.precision - 1.0).abs() < 1e-10);
+        assert!((q.recall - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn quality_duplicate_actuals() {
+        let decisions = vec![PrestageDecision {
+            artifact_id: "a1".into(),
+            staged: true,
+            reason: "".into(),
+            budget_remaining: 0,
+        }];
+        let actual = vec!["a1".to_string(), "a1".to_string()];
+        let q = measure_quality(&decisions, &actual);
+        assert!((q.precision - 1.0).abs() < 1e-10);
+        assert!((q.recall - 1.0).abs() < 1e-10);
     }
 
     #[test]

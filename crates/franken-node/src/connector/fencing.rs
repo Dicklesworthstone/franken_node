@@ -18,6 +18,7 @@ pub mod epoch_event_codes {
     pub const FUTURE_EPOCH_REJECTED: &str = "EPV-002";
     pub const STALE_EPOCH_REJECTED: &str = "EPV-003";
     pub const EPOCH_SCOPE_LOGGED: &str = "EPV-004";
+    pub const INVALID_ARTIFACT_ID_REJECTED: &str = "EPV-006";
 }
 
 /// A lease that grants write permission to a specific state object.
@@ -65,6 +66,9 @@ impl FencingError {
     pub fn epoch_event_code(&self) -> Option<&'static str> {
         match self {
             Self::EpochRejected { rejection } => Some(match rejection.rejection_reason {
+                EpochRejectionReason::InvalidArtifactId => {
+                    epoch_event_codes::INVALID_ARTIFACT_ID_REJECTED
+                }
                 EpochRejectionReason::FutureEpoch => epoch_event_codes::FUTURE_EPOCH_REJECTED,
                 EpochRejectionReason::ExpiredEpoch => epoch_event_codes::STALE_EPOCH_REJECTED,
             }),
@@ -526,6 +530,46 @@ mod tests {
             }
             _ => unreachable!("expected epoch rejection"),
         }
+    }
+
+    #[test]
+    fn epoch_scoped_validation_rejects_invalid_artifact_id() {
+        let mut fs = FenceState::new(" obj-epoch-invalid ".into());
+        let lease = fs.acquire_lease_with_epoch(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+            ControlEpoch::new(5),
+        );
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: " obj-epoch-invalid ".into(),
+            payload: json!({"ok": true}),
+        };
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(5), 2);
+
+        let err = fs
+            .validate_write_epoch_scoped(
+                &write,
+                &lease,
+                "2026-06-01T00:00:00Z",
+                &policy,
+                "t-invalid",
+            )
+            .unwrap_err();
+        match &err {
+            FencingError::EpochRejected { rejection } => {
+                assert_eq!(
+                    rejection.rejection_reason,
+                    EpochRejectionReason::InvalidArtifactId
+                );
+            }
+            _ => unreachable!("expected epoch rejection"),
+        }
+        assert_eq!(
+            err.epoch_event_code(),
+            Some(epoch_event_codes::INVALID_ARTIFACT_ID_REJECTED)
+        );
     }
 
     #[test]

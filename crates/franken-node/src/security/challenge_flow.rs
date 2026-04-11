@@ -40,6 +40,9 @@ pub const CHALLENGE_PROMOTED: &str = "CHALLENGE_PROMOTED";
 pub const ERR_INVALID_TRANSITION: &str = "ERR_INVALID_TRANSITION";
 pub const ERR_CHALLENGE_ACTIVE: &str = "ERR_CHALLENGE_ACTIVE";
 pub const ERR_NO_ACTIVE_CHALLENGE: &str = "ERR_NO_ACTIVE_CHALLENGE";
+pub const ERR_INVALID_ARTIFACT_ID: &str = "ERR_INVALID_ARTIFACT_ID";
+
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
 // ---------------------------------------------------------------------------
 // Invariant tags
@@ -96,6 +99,21 @@ impl std::fmt::Display for ArtifactId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+fn invalid_artifact_id_reason(artifact_id: &ArtifactId) -> Option<String> {
+    let raw = artifact_id.as_str();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", raw));
+    }
+    if trimmed != raw {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
 }
 
 /// Reason an artifact was flagged as suspicious.
@@ -373,6 +391,10 @@ impl ChallengeFlowController {
         actor_id: &str,
         timestamp_ms: u64,
     ) -> Result<ChallengeId, ChallengeError> {
+        if let Some(reason) = invalid_artifact_id_reason(&artifact_id) {
+            return Err(ChallengeError::new(ERR_INVALID_ARTIFACT_ID, reason));
+        }
+
         // Check for existing active challenge on same artifact.
         for ch in self.challenges.values() {
             if ch.artifact_id == artifact_id && !ch.state.is_terminal() {
@@ -841,6 +863,54 @@ mod tests {
         let ch = ctrl.get_challenge(&cid).unwrap();
         assert_eq!(ch.state, ChallengeState::ChallengeIssued);
         assert_eq!(ch.artifact_id, ArtifactId::new("art-1"));
+    }
+
+    #[test]
+    fn test_issue_rejects_empty_artifact_id() {
+        let mut ctrl = make_controller();
+        let err = ctrl
+            .issue_challenge(
+                ArtifactId::new(""),
+                SuspicionReason::AgeAnomaly,
+                vec![],
+                "op",
+                1000,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
+        assert!(err.message.contains("empty"));
+    }
+
+    #[test]
+    fn test_issue_rejects_reserved_artifact_id() {
+        let mut ctrl = make_controller();
+        let err = ctrl
+            .issue_challenge(
+                ArtifactId::new(RESERVED_ARTIFACT_ID),
+                SuspicionReason::AgeAnomaly,
+                vec![],
+                "op",
+                1000,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
+        assert!(err.message.contains("reserved"));
+    }
+
+    #[test]
+    fn test_issue_rejects_whitespace_artifact_id() {
+        let mut ctrl = make_controller();
+        let err = ctrl
+            .issue_challenge(
+                ArtifactId::new(" art-1 "),
+                SuspicionReason::AgeAnomaly,
+                vec![],
+                "op",
+                1000,
+            )
+            .unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
+        assert!(err.message.contains("whitespace"));
     }
 
     #[test]

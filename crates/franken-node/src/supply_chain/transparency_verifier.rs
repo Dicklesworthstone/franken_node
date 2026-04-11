@@ -10,6 +10,8 @@ use std::fmt;
 
 use crate::security::constant_time::ct_eq;
 
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
 // ── Hash helper ─────────────────────────────────────────────────────
 
 /// Compute a deterministic hash of two hex strings combined.
@@ -93,6 +95,8 @@ pub enum ProofFailure {
     RootNotPinned { root_hash: String },
     PathInvalid { computed: String, expected: String },
     LeafMismatch { expected: String, actual: String },
+    InvalidArtifactId { reason: String },
+    InvalidConnectorId { reason: String },
 }
 
 impl fmt::Display for ProofFailure {
@@ -113,6 +117,12 @@ impl fmt::Display for ProofFailure {
                     f,
                     "TLOG_LEAF_MISMATCH: expected={expected}, actual={actual}"
                 )
+            }
+            Self::InvalidArtifactId { reason } => {
+                write!(f, "TLOG_ARTIFACT_INVALID: {reason}")
+            }
+            Self::InvalidConnectorId { reason } => {
+                write!(f, "TLOG_CONNECTOR_INVALID: {reason}")
             }
         }
     }
@@ -150,6 +160,32 @@ pub fn verify_inclusion(
     trace_id: &str,
     timestamp: &str,
 ) -> ProofReceipt {
+    if let Some(reason) = invalid_artifact_id_reason(artifact_id) {
+        return ProofReceipt {
+            connector_id: connector_id.into(),
+            artifact_id: artifact_id.into(),
+            verified: false,
+            log_root_matched: false,
+            proof_valid: false,
+            failure_reason: Some(ProofFailure::InvalidArtifactId { reason }),
+            trace_id: trace_id.into(),
+            timestamp: timestamp.into(),
+        };
+    }
+
+    if let Some(reason) = invalid_connector_id_reason(connector_id) {
+        return ProofReceipt {
+            connector_id: connector_id.into(),
+            artifact_id: artifact_id.into(),
+            verified: false,
+            log_root_matched: false,
+            proof_valid: false,
+            failure_reason: Some(ProofFailure::InvalidConnectorId { reason }),
+            trace_id: trace_id.into(),
+            timestamp: timestamp.into(),
+        };
+    }
+
     // Check if proof is provided
     let proof = match proof {
         Some(p) => p,
@@ -247,6 +283,34 @@ pub fn verify_inclusion(
         trace_id: trace_id.into(),
         timestamp: timestamp.into(),
     }
+}
+
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id is empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
+fn invalid_connector_id_reason(connector_id: &str) -> Option<String> {
+    let trimmed = connector_id.trim();
+    if trimmed.is_empty() {
+        return Some("connector_id is empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("connector_id is reserved: {:?}", connector_id));
+    }
+    if trimmed != connector_id {
+        return Some("connector_id contains leading or trailing whitespace".to_string());
+    }
+    None
 }
 
 // ── Errors ──────────────────────────────────────────────────────────
@@ -460,6 +524,46 @@ mod tests {
         };
         let receipt = verify_inclusion(&policy, None, "hash", "conn-1", "art-1", "t3", "ts");
         assert!(receipt.verified);
+    }
+
+    #[test]
+    fn invalid_artifact_id_rejected() {
+        let (root, proofs) = build_test_tree(&["a"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "",
+            "t3a",
+            "ts",
+        );
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_connector_id_rejected() {
+        let (root, proofs) = build_test_tree(&["a"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            " conn-1 ",
+            "art-1",
+            "t3b",
+            "ts",
+        );
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidConnectorId { .. })
+        ));
     }
 
     #[test]
@@ -715,5 +819,13 @@ mod tests {
             root_hash: "x".into(),
         };
         assert!(f.to_string().contains("TLOG_ROOT_NOT_PINNED"));
+        let f2 = ProofFailure::InvalidArtifactId {
+            reason: "bad".into(),
+        };
+        assert!(f2.to_string().contains("TLOG_ARTIFACT_INVALID"));
+        let f3 = ProofFailure::InvalidConnectorId {
+            reason: "bad".into(),
+        };
+        assert!(f3.to_string().contains("TLOG_CONNECTOR_INVALID"));
     }
 }

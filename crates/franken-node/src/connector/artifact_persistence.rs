@@ -10,6 +10,22 @@ use crate::control_plane::control_epoch::{
 };
 use crate::security::constant_time::ct_eq;
 
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
 /// Required artifact types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ArtifactType {
@@ -220,10 +236,8 @@ impl ArtifactStore {
         check_artifact_epoch(artifact_id, artifact_epoch, &self.validity_policy, trace_id)
             .map_err(|rejection| PersistenceError::EpochRejected { rejection })?;
 
-        if artifact_id.is_empty() {
-            return Err(PersistenceError::InvalidArtifact {
-                reason: "artifact_id must not be empty".into(),
-            });
+        if let Some(reason) = invalid_artifact_id_reason(artifact_id) {
+            return Err(PersistenceError::InvalidArtifact { reason });
         }
         if payload_hash.is_empty() {
             return Err(PersistenceError::InvalidArtifact {
@@ -597,6 +611,40 @@ mod tests {
             )
             .unwrap_err();
         assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
+    }
+
+    #[test]
+    fn invalid_reserved_id() {
+        let mut store = ArtifactStore::new();
+        let err = store
+            .persist(
+                RESERVED_ARTIFACT_ID,
+                ArtifactType::Invoke,
+                current_epoch(),
+                "hash",
+                "tr",
+                1000,
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn invalid_whitespace_id() {
+        let mut store = ArtifactStore::new();
+        let err = store
+            .persist(
+                " art-1 ",
+                ArtifactType::Invoke,
+                current_epoch(),
+                "hash",
+                "tr",
+                1000,
+            )
+            .unwrap_err();
+        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
+        assert!(err.to_string().contains("leading or trailing whitespace"));
     }
 
     #[test]

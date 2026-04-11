@@ -22,6 +22,23 @@ pub const FUTURE_EPOCH_REJECTED: &str = "FUTURE_EPOCH_REJECTED";
 pub const EPOCH_UNAVAILABLE: &str = "EPOCH_UNAVAILABLE";
 pub const EPOCH_SIGNATURE_VERIFIED: &str = "EPOCH_SIGNATURE_VERIFIED";
 pub const EPOCH_SIGNATURE_REJECTED: &str = "EPOCH_SIGNATURE_REJECTED";
+pub const EPOCH_ARTIFACT_ID_REJECTED: &str = "EPOCH_ARTIFACT_ID_REJECTED";
+
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EpochGuardEvent {
@@ -46,6 +63,9 @@ pub enum EpochGuardError {
         presented_epoch: ControlEpoch,
         current_epoch: ControlEpoch,
     },
+    InvalidArtifactId {
+        reason: String,
+    },
     ArtifactRejected(EpochRejection),
     SignatureRejected {
         reason: String,
@@ -59,7 +79,9 @@ impl EpochGuardError {
             Self::EpochUnavailable { .. } => EPOCH_UNAVAILABLE,
             Self::EpochMismatch { .. } => STALE_EPOCH_REJECTED,
             Self::FutureEpochRejected { .. } => FUTURE_EPOCH_REJECTED,
+            Self::InvalidArtifactId { .. } => EPOCH_ARTIFACT_ID_REJECTED,
             Self::ArtifactRejected(rejection) => match rejection.rejection_reason {
+                EpochRejectionReason::InvalidArtifactId => EPOCH_ARTIFACT_ID_REJECTED,
                 EpochRejectionReason::FutureEpoch => FUTURE_EPOCH_REJECTED,
                 EpochRejectionReason::ExpiredEpoch => STALE_EPOCH_REJECTED,
             },
@@ -94,6 +116,9 @@ impl fmt::Display for EpochGuardError {
                 presented_epoch.value(),
                 current_epoch.value()
             ),
+            Self::InvalidArtifactId { reason } => {
+                write!(f, "{}: {reason}", self.code())
+            }
             Self::ArtifactRejected(rejection) => write!(
                 f,
                 "{}: artifact={} artifact_epoch={} current_epoch={}",
@@ -192,6 +217,9 @@ impl EpochTaggedArtifact {
         payload: Vec<u8>,
         root_secret: &RootSecret,
     ) -> Result<Self, EpochGuardError> {
+        if let Some(reason) = invalid_artifact_id_reason(artifact_id) {
+            return Err(EpochGuardError::InvalidArtifactId { reason });
+        }
         let signature = sign_epoch_artifact(&payload, creation_epoch, domain, root_secret)?;
         Ok(Self {
             artifact_id: artifact_id.to_string(),
@@ -280,6 +308,9 @@ impl EpochGuard {
         source: &S,
         trace_id: &str,
     ) -> Result<EpochArtifactEvent, EpochGuardError> {
+        if let Some(reason) = invalid_artifact_id_reason(artifact_id) {
+            return Err(EpochGuardError::InvalidArtifactId { reason });
+        }
         let current = source.current_epoch()?;
         let policy = ValidityWindowPolicy::new(current, self.max_lookback);
         check_artifact_epoch(artifact_id, artifact_epoch, &policy, trace_id)
@@ -457,6 +488,60 @@ mod tests {
         )
         .unwrap();
         assert_eq!(artifact.creation_epoch(), ControlEpoch::new(9));
+    }
+
+    #[test]
+    fn tagged_artifact_rejects_empty_id() {
+        let root = root_secret();
+        let err = EpochTaggedArtifact::new_signed(
+            "",
+            ControlEpoch::new(9),
+            "trust",
+            b"hello".to_vec(),
+            &root,
+        )
+        .expect_err("empty artifact_id should reject");
+        assert_eq!(err.code(), EPOCH_ARTIFACT_ID_REJECTED);
+    }
+
+    #[test]
+    fn tagged_artifact_rejects_reserved_id() {
+        let root = root_secret();
+        let err = EpochTaggedArtifact::new_signed(
+            RESERVED_ARTIFACT_ID,
+            ControlEpoch::new(9),
+            "trust",
+            b"hello".to_vec(),
+            &root,
+        )
+        .expect_err("reserved artifact_id should reject");
+        assert_eq!(err.code(), EPOCH_ARTIFACT_ID_REJECTED);
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn tagged_artifact_rejects_whitespace_id() {
+        let root = root_secret();
+        let err = EpochTaggedArtifact::new_signed(
+            " artifact-1 ",
+            ControlEpoch::new(9),
+            "trust",
+            b"hello".to_vec(),
+            &root,
+        )
+        .expect_err("whitespace artifact_id should reject");
+        assert_eq!(err.code(), EPOCH_ARTIFACT_ID_REJECTED);
+        assert!(err.to_string().contains("leading or trailing whitespace"));
+    }
+
+    #[test]
+    fn validate_artifact_epoch_rejects_invalid_id() {
+        let guard = EpochGuard::new(1);
+        let source = StaticEpochSource::available(ControlEpoch::new(10));
+        let err = guard
+            .validate_artifact_epoch(" ", ControlEpoch::new(10), &source, "trace-bad-id")
+            .expect_err("invalid artifact_id should reject");
+        assert_eq!(err.code(), EPOCH_ARTIFACT_ID_REJECTED);
     }
 
     #[test]

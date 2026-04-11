@@ -4,6 +4,8 @@
 
 use std::collections::BTreeMap;
 
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
 /// SLO target definition.
 #[derive(Debug, Clone)]
 pub struct SloTarget {
@@ -94,7 +96,20 @@ impl std::fmt::Display for CoverageError {
                 actual,
                 threshold,
             } => {
-                write!(f, "OCT_SLO_BREACH: {slo_name} {actual:.2} < {threshold:.2}")
+                let is_repair_debt = slo_name == "repair_debt";
+                let (actual_fmt, threshold_fmt) = if is_repair_debt {
+                    (format!("{actual:.0}"), format!("{threshold:.0}"))
+                } else {
+                    (
+                        format!("{:.2}%", actual * 100.0),
+                        format!("{:.2}%", threshold * 100.0),
+                    )
+                };
+                let comparator = if is_repair_debt { ">" } else { "<" };
+                write!(
+                    f,
+                    "OCT_SLO_BREACH: {slo_name} {actual_fmt} {comparator} {threshold_fmt}"
+                )
             }
             Self::InvalidEvent { reason } => write!(f, "OCT_INVALID_EVENT: {reason}"),
             Self::NoEvents { scope } => write!(f, "OCT_NO_EVENTS: {scope}"),
@@ -108,14 +123,31 @@ impl std::fmt::Display for CoverageError {
 
 /// Validate a coverage event.
 fn validate_event(event: &CoverageEvent) -> Result<(), CoverageError> {
-    if event.artifact_id.is_empty() {
+    let artifact_id = event.artifact_id.trim();
+    if artifact_id.is_empty() {
         return Err(CoverageError::InvalidEvent {
             reason: "empty artifact_id".into(),
         });
     }
-    if event.scope.is_empty() {
+    if artifact_id == RESERVED_ARTIFACT_ID {
+        return Err(CoverageError::InvalidEvent {
+            reason: format!("artifact_id is reserved: {:?}", event.artifact_id),
+        });
+    }
+    if event.artifact_id != artifact_id {
+        return Err(CoverageError::InvalidEvent {
+            reason: "artifact_id contains leading or trailing whitespace".into(),
+        });
+    }
+    let scope = event.scope.trim();
+    if scope.is_empty() {
         return Err(CoverageError::InvalidEvent {
             reason: "empty scope".into(),
+        });
+    }
+    if event.scope != scope {
+        return Err(CoverageError::InvalidEvent {
+            reason: "scope contains leading or trailing whitespace".into(),
         });
     }
     Ok(())
@@ -446,6 +478,29 @@ mod tests {
     }
 
     #[test]
+    fn invalid_event_reserved_id() {
+        let mut t = OfflineCoverageTracker::new();
+        let err = t
+            .record_event(ev("<unknown>", true, 100, "prod"))
+            .unwrap_err();
+        assert_eq!(err.code(), "OCT_INVALID_EVENT");
+    }
+
+    #[test]
+    fn invalid_event_whitespace_id() {
+        let mut t = OfflineCoverageTracker::new();
+        let err = t.record_event(ev("   ", true, 100, "prod")).unwrap_err();
+        assert_eq!(err.code(), "OCT_INVALID_EVENT");
+    }
+
+    #[test]
+    fn invalid_event_whitespace_scope() {
+        let mut t = OfflineCoverageTracker::new();
+        let err = t.record_event(ev("a1", true, 100, "   ")).unwrap_err();
+        assert_eq!(err.code(), "OCT_INVALID_EVENT");
+    }
+
+    #[test]
     fn invalid_event_empty_scope() {
         let mut t = OfflineCoverageTracker::new();
         let err = t.record_event(ev("a1", true, 100, "")).unwrap_err();
@@ -591,5 +646,33 @@ mod tests {
         let t = OfflineCoverageTracker::new();
         let snap = t.dashboard_snapshot("trace-x", "2026-01-01");
         assert_eq!(snap.trace_id, "trace-x");
+    }
+
+    #[test]
+    fn slo_breach_display_formats_percentages() {
+        let err = CoverageError::SloBreach {
+            slo_name: "coverage".into(),
+            actual: 0.5,
+            threshold: 0.9,
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("50.00%"));
+        assert!(rendered.contains("90.00%"));
+        assert!(rendered.contains(" < "));
+    }
+
+    #[test]
+    fn slo_breach_display_formats_repair_debt_as_count() {
+        let err = CoverageError::SloBreach {
+            slo_name: "repair_debt".into(),
+            actual: 3.0,
+            threshold: 2.0,
+        };
+        let rendered = err.to_string();
+        assert!(rendered.contains("3"));
+        assert!(rendered.contains("2"));
+        assert!(!rendered.contains('%'));
+        assert!(rendered.contains(" > "));
+        assert!(!rendered.contains(" < "));
     }
 }

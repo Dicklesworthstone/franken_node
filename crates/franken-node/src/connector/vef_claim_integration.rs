@@ -16,6 +16,10 @@ fn canonical_digest_f64(value: f64) -> f64 {
     if value.is_finite() { value } else { 0.0 }
 }
 
+fn to_pct(value: f64) -> f64 {
+    value * 100.0
+}
+
 fn push_length_prefixed_str(hasher: &mut Sha256, value: &str) {
     hasher.update((value.len() as u64).to_le_bytes());
     hasher.update(value.as_bytes());
@@ -119,13 +123,17 @@ impl std::fmt::Display for VefClaimError {
             Self::CoverageLow { actual, required } => {
                 write!(
                     f,
-                    "{ERR_VEF_CLAIM_COVERAGE_LOW}: {actual:.2}% < {required:.2}%"
+                    "{ERR_VEF_CLAIM_COVERAGE_LOW}: {:.2}% < {:.2}%",
+                    to_pct(*actual),
+                    to_pct(*required)
                 )
             }
             Self::ValidityLow { actual, required } => {
                 write!(
                     f,
-                    "{ERR_VEF_CLAIM_VALIDITY_LOW}: {actual:.2} < {required:.2}"
+                    "{ERR_VEF_CLAIM_VALIDITY_LOW}: {:.2}% < {:.2}%",
+                    to_pct(*actual),
+                    to_pct(*required)
                 )
             }
             Self::ProofStale { age_secs, max_secs } => {
@@ -333,14 +341,16 @@ impl VefClaimIntegration {
             let mut reasons = Vec::new();
             if !coverage_ok {
                 reasons.push(format!(
-                    "coverage {:.2} < required {:.2}",
-                    metrics.coverage_pct, claim.min_coverage
+                    "coverage {:.2}% < required {:.2}%",
+                    to_pct(metrics.coverage_pct),
+                    to_pct(claim.min_coverage)
                 ));
             }
             if !validity_ok {
                 reasons.push(format!(
-                    "validity {:.2} < required {:.2}",
-                    metrics.validity_rate, claim.min_validity
+                    "validity {:.2}% < required {:.2}%",
+                    to_pct(metrics.validity_rate),
+                    to_pct(claim.min_validity)
                 ));
             }
             if !gaps.is_empty() {

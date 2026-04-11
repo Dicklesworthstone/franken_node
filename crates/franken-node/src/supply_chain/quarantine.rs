@@ -5,7 +5,7 @@
 //! nodes. Integrates with revocation propagation for signal delivery and trust cards
 //! for status visibility.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::security::constant_time::ct_eq;
 
@@ -988,8 +988,15 @@ impl QuarantineRegistry {
         self.records
             .get(order_id)
             .map(|r| {
-                let confirmed = r.recall_receipts.iter().filter(|rr| rr.removed).count() as f64;
-                (confirmed / total_nodes as f64) * 100.0
+                let confirmed_nodes: BTreeSet<&str> = r
+                    .recall_receipts
+                    .iter()
+                    .filter(|rr| rr.removed)
+                    .map(|rr| rr.node_id.as_str())
+                    .collect();
+                let confirmed = confirmed_nodes.len() as u64;
+                let capped = confirmed.min(total_nodes) as f64;
+                (capped / total_nodes as f64) * 100.0
             })
             .unwrap_or(0.0)
     }
@@ -1261,6 +1268,21 @@ mod tests {
         }
     }
 
+    fn setup_recall_registry(order_id: &str) -> QuarantineRegistry {
+        let mut reg = QuarantineRegistry::new();
+        let order = make_order(order_id, QuarantineSeverity::High, QuarantineMode::Hard);
+        reg.initiate_quarantine(order).expect("should succeed");
+        reg.enforce_quarantine(order_id, "2026-01-15T00:02:00Z")
+            .expect("should succeed");
+        reg.start_drain(order_id, "2026-01-15T00:03:00Z")
+            .expect("should succeed");
+        reg.complete_drain(order_id, "2026-01-15T00:04:00Z")
+            .expect("should succeed");
+        reg.trigger_recall(make_recall(order_id))
+            .expect("should succeed");
+        reg
+    }
+
     #[test]
     fn test_initiate_soft_quarantine() {
         let mut reg = QuarantineRegistry::new();
@@ -1483,17 +1505,7 @@ mod tests {
 
     #[test]
     fn test_recall_completion_percentage() {
-        let mut reg = QuarantineRegistry::new();
-        let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
-        reg.initiate_quarantine(order).expect("should succeed");
-        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
-            .expect("should succeed");
-        reg.start_drain("q-001", "2026-01-15T00:03:00Z")
-            .expect("should succeed");
-        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
-            .expect("should succeed");
-        reg.trigger_recall(make_recall("q-001"))
-            .expect("should succeed");
+        let mut reg = setup_recall_registry("q-001");
 
         // 1 of 3 nodes confirmed.
         let receipt = RecallReceipt {
@@ -1509,6 +1521,46 @@ mod tests {
 
         let pct = reg.recall_completion_pct("q-001", 3);
         assert!((pct - 33.333).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_recall_completion_pct_dedupes_nodes() {
+        let mut reg = setup_recall_registry("q-002");
+        let receipt = RecallReceipt {
+            node_id: "node-1".to_owned(),
+            recall_id: "recall-001".to_owned(),
+            removed: true,
+            removal_method: "file_delete".to_owned(),
+            removed_at: "2026-01-16T13:00:00Z".to_owned(),
+            artifact_hash: "abc".to_owned(),
+        };
+        reg.record_recall_receipt("q-002", receipt.clone())
+            .expect("should succeed");
+        reg.record_recall_receipt("q-002", receipt)
+            .expect("should succeed");
+
+        let pct = reg.recall_completion_pct("q-002", 3);
+        assert!((pct - 33.333).abs() < 1.0);
+    }
+
+    #[test]
+    fn test_recall_completion_pct_caps_at_100() {
+        let mut reg = setup_recall_registry("q-003");
+        for node_id in ["node-1", "node-2", "node-3"] {
+            let receipt = RecallReceipt {
+                node_id: node_id.to_owned(),
+                recall_id: "recall-001".to_owned(),
+                removed: true,
+                removal_method: "file_delete".to_owned(),
+                removed_at: "2026-01-16T13:00:00Z".to_owned(),
+                artifact_hash: "abc".to_owned(),
+            };
+            reg.record_recall_receipt("q-003", receipt)
+                .expect("should succeed");
+        }
+
+        let pct = reg.recall_completion_pct("q-003", 2);
+        assert!((pct - 100.0).abs() < 1e-6);
     }
 
     #[test]

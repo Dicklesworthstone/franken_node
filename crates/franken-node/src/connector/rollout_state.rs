@@ -27,6 +27,22 @@ pub mod epoch_event_codes {
     pub const EPOCH_SCOPE_LOGGED: &str = "EPV-004";
 }
 
+const RESERVED_CONNECTOR_ID: &str = "<unknown>";
+
+fn invalid_connector_id_reason(connector_id: &str) -> Option<String> {
+    let trimmed = connector_id.trim();
+    if trimmed.is_empty() {
+        return Some("connector_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_CONNECTOR_ID {
+        return Some(format!("connector_id is reserved: {:?}", connector_id));
+    }
+    if trimmed != connector_id {
+        return Some("connector_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
 /// Rollout phases for gradual traffic migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -233,6 +249,10 @@ pub enum EpochPersistError {
     FutureEpochRejected { rejection: EpochRejection },
     #[serde(rename = "EPV-003")]
     StaleEpochRejected { rejection: EpochRejection },
+    #[serde(rename = "EPV-006")]
+    InvalidArtifactId { rejection: EpochRejection },
+    #[serde(rename = "EPV-005")]
+    InvalidConnectorId { reason: String },
     #[serde(rename = "PERSIST_ERROR")]
     Persist { source: PersistError },
 }
@@ -240,6 +260,7 @@ pub enum EpochPersistError {
 impl EpochPersistError {
     fn from_rejection(rejection: EpochRejection) -> Self {
         match rejection.rejection_reason {
+            EpochRejectionReason::InvalidArtifactId => Self::InvalidArtifactId { rejection },
             EpochRejectionReason::FutureEpoch => Self::FutureEpochRejected { rejection },
             EpochRejectionReason::ExpiredEpoch => Self::StaleEpochRejected { rejection },
         }
@@ -249,7 +270,17 @@ impl EpochPersistError {
 impl fmt::Display for EpochPersistError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::FutureEpochRejected { rejection } | Self::StaleEpochRejected { rejection } => {
+            Self::InvalidConnectorId { reason } => {
+                write!(f, "EPV_INVALID_CONNECTOR_ID: {reason}")
+            }
+            Self::FutureEpochRejected { rejection }
+            | Self::StaleEpochRejected { rejection }
+            | Self::InvalidArtifactId { rejection } => {
+                let reason = match rejection.rejection_reason {
+                    EpochRejectionReason::InvalidArtifactId => "invalid_artifact_id",
+                    EpochRejectionReason::FutureEpoch => "future_epoch",
+                    EpochRejectionReason::ExpiredEpoch => "expired_epoch",
+                };
                 write!(
                     f,
                     "{}: artifact={} artifact_epoch={} current_epoch={} reason={}",
@@ -257,7 +288,7 @@ impl fmt::Display for EpochPersistError {
                     rejection.artifact_id,
                     rejection.artifact_epoch.value(),
                     rejection.current_epoch.value(),
-                    rejection.code()
+                    reason
                 )
             }
             Self::Persist { source } => write!(f, "{source}"),
@@ -274,6 +305,9 @@ pub fn persist_epoch_scoped(
     validity_policy: &ValidityWindowPolicy,
     trace_id: &str,
 ) -> Result<EpochScopedPersistResult, EpochPersistError> {
+    if let Some(reason) = invalid_connector_id_reason(&state.connector_id) {
+        return Err(EpochPersistError::InvalidConnectorId { reason });
+    }
     let artifact_id = format!("rollout-plan:{}", state.connector_id);
     check_artifact_epoch(&artifact_id, state.rollout_epoch, validity_policy, trace_id)
         .map_err(EpochPersistError::from_rejection)?;
@@ -754,5 +788,61 @@ mod tests {
         let err = persist_epoch_scoped(&state, &path, &policy, "trace-rollout-expired")
             .expect_err("stale epoch must be rejected");
         assert!(matches!(err, EpochPersistError::StaleEpochRejected { .. }));
+    }
+
+    #[test]
+    fn epoch_persist_error_display_handles_invalid_artifact_id() {
+        let err = EpochPersistError::from_rejection(EpochRejection {
+            artifact_id: " rollout-plan:bad ".to_string(),
+            artifact_epoch: ControlEpoch::new(7),
+            current_epoch: ControlEpoch::new(7),
+            rejection_reason: EpochRejectionReason::InvalidArtifactId,
+            trace_id: "trace-rollout-invalid".to_string(),
+        });
+
+        let rendered = err.to_string();
+        assert!(rendered.contains("EPOCH_REJECT_INVALID_ARTIFACT_ID"));
+        assert!(rendered.contains("reason=invalid_artifact_id"));
+    }
+
+    #[test]
+    fn persist_epoch_scoped_rejects_empty_connector_id() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state-epoch-empty.json");
+        let mut state = sample_state();
+        state.connector_id.clear();
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = persist_epoch_scoped(&state, &path, &policy, "trace-rollout-empty")
+            .expect_err("empty connector_id must be rejected");
+        assert!(matches!(err, EpochPersistError::InvalidConnectorId { .. }));
+    }
+
+    #[test]
+    fn persist_epoch_scoped_rejects_reserved_connector_id() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state-epoch-reserved.json");
+        let mut state = sample_state();
+        state.connector_id = RESERVED_CONNECTOR_ID.to_string();
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = persist_epoch_scoped(&state, &path, &policy, "trace-rollout-reserved")
+            .expect_err("reserved connector_id must be rejected");
+        assert!(matches!(err, EpochPersistError::InvalidConnectorId { .. }));
+        assert!(err.to_string().contains("reserved"));
+    }
+
+    #[test]
+    fn persist_epoch_scoped_rejects_whitespace_connector_id() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("state-epoch-whitespace.json");
+        let mut state = sample_state();
+        state.connector_id = " connector-1 ".to_string();
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(7), 2);
+
+        let err = persist_epoch_scoped(&state, &path, &policy, "trace-rollout-whitespace")
+            .expect_err("whitespace connector_id must be rejected");
+        assert!(matches!(err, EpochPersistError::InvalidConnectorId { .. }));
+        assert!(err.to_string().contains("leading or trailing whitespace"));
     }
 }

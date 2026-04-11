@@ -7,6 +7,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
 // ── Types ───────────────────────────────────────────────────────────
 
 /// Supported attestation types.
@@ -124,6 +126,9 @@ pub enum GateFailure {
     UntrustedBuilder {
         builder_id: String,
     },
+    InvalidArtifactId {
+        reason: String,
+    },
     PolicyInvalid {
         reason: String,
     },
@@ -140,6 +145,9 @@ impl fmt::Display for GateFailure {
             }
             Self::UntrustedBuilder { builder_id } => {
                 write!(f, "PROV_BUILDER_UNTRUSTED: {builder_id}")
+            }
+            Self::InvalidArtifactId { reason } => {
+                write!(f, "PROV_ARTIFACT_INVALID: {reason}")
             }
             Self::PolicyInvalid { reason } => {
                 write!(f, "PROV_POLICY_INVALID: {reason}")
@@ -182,6 +190,19 @@ pub fn evaluate_gate(
         };
     }
 
+    if let Some(reason) = invalid_artifact_id_reason(&provenance.artifact_id) {
+        return GateDecision {
+            artifact_id: provenance.artifact_id.clone(),
+            passed: false,
+            missing_attestations: missing,
+            assurance_ok,
+            builder_trusted,
+            failure_reason: Some(GateFailure::InvalidArtifactId { reason }),
+            trace_id: trace_id.to_string(),
+            timestamp: timestamp.to_string(),
+        };
+    }
+
     let passed = missing.is_empty() && assurance_ok && builder_trusted;
 
     let failure_reason = if passed {
@@ -211,6 +232,20 @@ pub fn evaluate_gate(
         trace_id: trace_id.to_string(),
         timestamp: timestamp.to_string(),
     }
+}
+
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id is empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
 }
 
 // ── Errors ──────────────────────────────────────────────────────────
@@ -344,6 +379,42 @@ mod tests {
     }
 
     #[test]
+    fn invalid_artifact_id_blocks() {
+        let mut prov = good_provenance();
+        prov.artifact_id.clear();
+        let result = evaluate_gate(&test_policy(), &prov, "t-invalid-art", "ts");
+        assert!(!result.passed);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
+    fn reserved_artifact_id_blocks() {
+        let mut prov = good_provenance();
+        prov.artifact_id = RESERVED_ARTIFACT_ID.to_string();
+        let result = evaluate_gate(&test_policy(), &prov, "t-reserved-art", "ts");
+        assert!(!result.passed);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
+    fn whitespace_artifact_id_blocks() {
+        let mut prov = good_provenance();
+        prov.artifact_id = " art-1 ".to_string();
+        let result = evaluate_gate(&test_policy(), &prov, "t-ws-art", "ts");
+        assert!(!result.passed);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
     fn gate_has_trace_id() {
         let result = evaluate_gate(&test_policy(), &good_provenance(), "trace-xyz", "ts");
         assert_eq!(result.trace_id, "trace-xyz");
@@ -418,10 +489,15 @@ mod tests {
         };
         assert!(f3.to_string().contains("PROV_BUILDER_UNTRUSTED"));
 
-        let f4 = GateFailure::PolicyInvalid {
+        let f4 = GateFailure::InvalidArtifactId {
             reason: "bad".into(),
         };
-        assert!(f4.to_string().contains("PROV_POLICY_INVALID"));
+        assert!(f4.to_string().contains("PROV_ARTIFACT_INVALID"));
+
+        let f5 = GateFailure::PolicyInvalid {
+            reason: "bad".into(),
+        };
+        assert!(f5.to_string().contains("PROV_POLICY_INVALID"));
     }
 
     // === Serde ===

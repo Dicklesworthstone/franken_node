@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 pub const RECEIPT_SCHEMA_VERSION: &str = "vef-execution-receipt-v1";
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
 pub mod event_codes {
     /// Receipt object created in-memory.
@@ -143,6 +144,17 @@ fn is_sha256_prefixed(value: &str) -> bool {
     hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+fn invalid_artifact_identity_reason(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_identity is reserved: {:?}", value));
+    }
+    if trimmed != value {
+        return Some("artifact_identity contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
 pub fn validate_receipt(receipt: &ExecutionReceipt) -> Result<(), ExecutionReceiptError> {
     if receipt.schema_version != RECEIPT_SCHEMA_VERSION {
         return Err(ExecutionReceiptError::new(
@@ -163,6 +175,12 @@ pub fn validate_receipt(receipt: &ExecutionReceipt) -> Result<(), ExecutionRecei
         return Err(ExecutionReceiptError::new(
             error_codes::ERR_VEF_RECEIPT_MISSING_FIELD,
             "artifact_identity must be non-empty",
+        ));
+    }
+    if let Some(reason) = invalid_artifact_identity_reason(&receipt.artifact_identity) {
+        return Err(ExecutionReceiptError::new(
+            error_codes::ERR_VEF_RECEIPT_INVALID_VALUE,
+            reason,
         ));
     }
     if receipt.trace_id.trim().is_empty() {
@@ -325,6 +343,30 @@ mod tests {
     fn test_validate_rejects_bad_policy_hash() {
         let mut receipt = make_receipt();
         receipt.policy_snapshot_hash = "sha256:not-hex".to_string();
+        let err = validate_receipt(&receipt).unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
+    }
+
+    #[test]
+    fn test_validate_rejects_missing_artifact_identity() {
+        let mut receipt = make_receipt();
+        receipt.artifact_identity.clear();
+        let err = validate_receipt(&receipt).unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_MISSING_FIELD);
+    }
+
+    #[test]
+    fn test_validate_rejects_reserved_artifact_identity() {
+        let mut receipt = make_receipt();
+        receipt.artifact_identity = RESERVED_ARTIFACT_ID.to_string();
+        let err = validate_receipt(&receipt).unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
+    }
+
+    #[test]
+    fn test_validate_rejects_whitespace_artifact_identity() {
+        let mut receipt = make_receipt();
+        receipt.artifact_identity = " artifact:ext:franken-node-core ".to_string();
         let err = validate_receipt(&receipt).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
     }

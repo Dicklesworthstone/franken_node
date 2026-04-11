@@ -23,7 +23,23 @@ pub const SCHEMA_VERSION: &str = "es-v1.0";
 pub const DEFAULT_MAX_AUDIT_RECORDS: usize = 4_096;
 pub const DEFAULT_MAX_TRANSITIONS_PER_SAGA: usize = 512;
 use crate::capacity_defaults::aliases::MAX_SAGAS;
+const ERR_INVALID_ARTIFACT_ID: &str = "ERR_INVALID_ARTIFACT_ID";
 const ERR_SAGA_ID_REUSED: &str = "ERR_SAGA_ID_REUSED";
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
 
 fn default_audit_log_capacity() -> usize {
     DEFAULT_MAX_AUDIT_RECORDS
@@ -311,6 +327,9 @@ impl EvictionSagaManager {
         has_remote_cap: bool,
         trace_id: &str,
     ) -> Result<String, String> {
+        if let Some(reason) = invalid_artifact_id_reason(artifact_id) {
+            return Err(format!("{ERR_INVALID_ARTIFACT_ID}: {reason}"));
+        }
         if !has_remote_cap {
             return Err("RemoteCap required for upload phase".to_string());
         }
@@ -927,6 +946,32 @@ mod tests {
         let mut mgr = EvictionSagaManager::new();
         let err = mgr.start_saga("a", false, "t1").unwrap_err();
         assert!(err.contains("RemoteCap"));
+    }
+
+    #[test]
+    fn test_start_rejects_empty_artifact_id() {
+        let mut mgr = EvictionSagaManager::new();
+        let err = mgr.start_saga("", true, "t1").unwrap_err();
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("artifact_id must not be empty"));
+    }
+
+    #[test]
+    fn test_start_rejects_reserved_artifact_id() {
+        let mut mgr = EvictionSagaManager::new();
+        let err = mgr
+            .start_saga(&format!(" {RESERVED_ARTIFACT_ID} "), true, "t1")
+            .unwrap_err();
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("artifact_id is reserved"));
+    }
+
+    #[test]
+    fn test_start_rejects_artifact_id_whitespace() {
+        let mut mgr = EvictionSagaManager::new();
+        let err = mgr.start_saga(" artifact-a ", true, "t1").unwrap_err();
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("leading or trailing whitespace"));
     }
 
     #[test]

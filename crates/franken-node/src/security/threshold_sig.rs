@@ -12,6 +12,8 @@ use std::fmt;
 
 // ── Types ───────────────────────────────────────────────────────────
 
+const RESERVED_ARTIFACT_ID: &str = "<unknown>";
+
 /// Threshold configuration: k-of-n quorum.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ThresholdConfig {
@@ -111,6 +113,8 @@ pub enum FailureReason {
     InvalidSignature { signer_id: String },
     DuplicateSigner { signer_id: String },
     ConfigInvalid { reason: String },
+    InvalidArtifactId { reason: String },
+    InvalidConnectorId { reason: String },
 }
 
 impl fmt::Display for FailureReason {
@@ -130,6 +134,12 @@ impl fmt::Display for FailureReason {
             }
             Self::ConfigInvalid { reason } => {
                 write!(f, "THRESH_CONFIG_INVALID: {reason}")
+            }
+            Self::InvalidArtifactId { reason } => {
+                write!(f, "THRESH_INVALID_ARTIFACT_ID: {reason}")
+            }
+            Self::InvalidConnectorId { reason } => {
+                write!(f, "THRESH_INVALID_CONNECTOR_ID: {reason}")
             }
         }
     }
@@ -153,6 +163,34 @@ fn build_signing_message(content_hash: &str) -> Vec<u8> {
     msg.extend_from_slice(&(content_hash.len() as u64).to_le_bytes());
     msg.extend_from_slice(content_hash.as_bytes());
     msg
+}
+
+fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
+    let trimmed = artifact_id.trim();
+    if trimmed.is_empty() {
+        return Some("artifact_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if trimmed != artifact_id {
+        return Some("artifact_id contains leading or trailing whitespace".to_string());
+    }
+    None
+}
+
+fn invalid_connector_id_reason(connector_id: &str) -> Option<String> {
+    let trimmed = connector_id.trim();
+    if trimmed.is_empty() {
+        return Some("connector_id must not be empty".to_string());
+    }
+    if trimmed == RESERVED_ARTIFACT_ID {
+        return Some(format!("connector_id is reserved: {:?}", connector_id));
+    }
+    if trimmed != connector_id {
+        return Some("connector_id contains leading or trailing whitespace".to_string());
+    }
+    None
 }
 
 /// Verify a partial signature using Ed25519.
@@ -219,6 +257,30 @@ pub fn verify_threshold(
             valid_signatures: 0,
             threshold: config.threshold,
             failure_reason: Some(FailureReason::ConfigInvalid { reason }),
+            trace_id: trace_id.to_string(),
+            timestamp: timestamp.to_string(),
+        };
+    }
+
+    if let Some(reason) = invalid_artifact_id_reason(&artifact.artifact_id) {
+        return VerificationResult {
+            artifact_id: artifact.artifact_id.clone(),
+            verified: false,
+            valid_signatures: 0,
+            threshold: config.threshold,
+            failure_reason: Some(FailureReason::InvalidArtifactId { reason }),
+            trace_id: trace_id.to_string(),
+            timestamp: timestamp.to_string(),
+        };
+    }
+
+    if let Some(reason) = invalid_connector_id_reason(&artifact.connector_id) {
+        return VerificationResult {
+            artifact_id: artifact.artifact_id.clone(),
+            verified: false,
+            valid_signatures: 0,
+            threshold: config.threshold,
+            failure_reason: Some(FailureReason::InvalidConnectorId { reason }),
             trace_id: trace_id.to_string(),
             timestamp: timestamp.to_string(),
         };
@@ -520,6 +582,34 @@ mod tests {
                 reason: "threshold must be > 0".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn invalid_artifact_id_rejected() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.artifact_id = String::new();
+        let result = verify_threshold(&config, &artifact, "t4-bad-art", "ts");
+        assert!(!result.verified);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidArtifactId {
+                reason: "artifact_id must not be empty".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_connector_id_rejected() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.connector_id = RESERVED_ARTIFACT_ID.to_string();
+        let result = verify_threshold(&config, &artifact, "t4-bad-conn", "ts");
+        assert!(!result.verified);
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::InvalidConnectorId { .. })
+        ));
     }
 
     #[test]
