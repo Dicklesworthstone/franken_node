@@ -254,6 +254,43 @@ idempotency_ttl_secs = 604800
 [security]
 # Maximum degraded-mode duration before suspension
 max_degraded_duration_secs = 3600
+
+[security.network_policy]
+# Network egress policy enforcement mode
+mode = "enforced"
+
+[engine]
+# Optional path override for the franken_engine binary
+# binary_path = "/usr/local/bin/franken-engine"
+
+[runtime]
+# Preferred runtime: auto | node | bun | franken-engine
+preferred = "auto"
+# Global max in-flight network-bound operations
+remote_max_in_flight = 50
+# Retry hint when bulkhead saturated
+bulkhead_retry_after_ms = 50
+
+[runtime.lanes.cancel]
+max_concurrent = 12
+priority_weight = 100
+queue_limit = 24
+enqueue_timeout_ms = 25
+overflow_policy = "reject"
+
+[runtime.lanes.realtime]
+max_concurrent = 24
+priority_weight = 60
+queue_limit = 48
+enqueue_timeout_ms = 75
+overflow_policy = "enqueue-with-timeout"
+
+[thresholds]
+# Algorithmic/statistical thresholds (all optional with safe defaults)
+max_failure_rate = 0.05
+min_quality_score = 0.8
+max_variance_pct = 5.0
+regression_threshold_pct = 10.0
 ```
 
 ## Architecture
@@ -302,7 +339,9 @@ max_degraded_duration_secs = 3600
 - Strict trust profiles can block extensions that have weak provenance metadata.
 - Migration rewrites target high-value patterns first; niche framework macros may need manual edits.
 - Fleet-wide controls depend on healthy control-plane connectivity and correct clock discipline.
+- Single-node mode stores fleet state locally; multi-node coordination requires external transport configuration.
 - Counterfactual simulations depend on available telemetry completeness for the incident window.
+- Runtime execution delegates to Node/Bun; franken_engine integration is still evolving.
 
 ## FAQ
 
