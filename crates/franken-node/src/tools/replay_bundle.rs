@@ -402,6 +402,7 @@ pub fn validate_incident_evidence_package(
         .map(String::as_str)
         .collect::<BTreeSet<_>>();
     let mut event_ids = BTreeSet::new();
+    let mut previous_timestamp: Option<(usize, i64)> = None;
     for (idx, event) in package.events.iter().enumerate() {
         validate_nonempty_field(&format!("events[{idx}].event_id"), &event.event_id)?;
         validate_nonempty_field(
@@ -414,7 +415,17 @@ pub fn validate_incident_evidence_package(
             });
         }
 
-        normalize_timestamp(&event.timestamp)?;
+        let (_, timestamp_micros) = normalize_timestamp(&event.timestamp)?;
+        if let Some((previous_index, previous_micros)) = previous_timestamp
+            && timestamp_micros < previous_micros
+        {
+            return Err(ReplayBundleError::EvidenceEventsUnsorted {
+                previous_index,
+                next_index: idx,
+            });
+        }
+        previous_timestamp = Some((idx, timestamp_micros));
+
         canonicalize_value(&event.payload, &format!("$.events[{idx}].payload"))?;
         if let Some(snapshot) = &event.state_snapshot {
             canonicalize_value(snapshot, &format!("$.events[{idx}].state_snapshot"))?;
@@ -1480,6 +1491,25 @@ mod tests {
             err,
             ReplayBundleError::EvidenceUnknownProvenanceRef { .. }
         ));
+    }
+
+    #[test]
+    fn evidence_package_rejects_unsorted_events() {
+        let mut package = fixture_evidence_package("INC-EVID-VAL-003");
+        package.events.swap(0, 1);
+
+        let err = validate_incident_evidence_package(&package, Some("INC-EVID-VAL-003"))
+            .expect_err("must fail");
+        match err {
+            ReplayBundleError::EvidenceEventsUnsorted {
+                previous_index,
+                next_index,
+            } => {
+                assert_eq!(previous_index, 0);
+                assert_eq!(next_index, 1);
+            }
+            _ => panic!("expected EvidenceEventsUnsorted"),
+        }
     }
 
     #[test]

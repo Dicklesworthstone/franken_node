@@ -1465,6 +1465,15 @@ mod signature_blob_tests {
     }
 
     #[test]
+    fn decode_signature_blob_accepts_json_object_sig_b64() {
+        let bytes = signature_bytes(46);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = format!(r#"{{"sigB64":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
     fn decode_signature_blob_accepts_json_object_sig_hex() {
         let bytes = signature_bytes(44);
         let encoded = bytes
@@ -1472,6 +1481,15 @@ mod signature_blob_tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let payload = format!(r#"{{"sigHex":"{encoded}"}}"#);
+        let decoded = decode_signature_blob(payload.as_bytes());
+        assert_eq!(decoded, bytes);
+    }
+
+    #[test]
+    fn decode_signature_blob_accepts_json_object_nested_base64() {
+        let bytes = signature_bytes(47);
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        let payload = format!(r#"{{"signature":{{"base64":"{encoded}"}}}}"#);
         let decoded = decode_signature_blob(payload.as_bytes());
         assert_eq!(decoded, bytes);
     }
@@ -10224,7 +10242,7 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
 
     let mut candidates = vec![trimmed.to_string()];
     if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
-        let parse_byte_array = |values: &[serde_json::Value]| -> Option<Vec<u8>> {
+        let parse_signature_byte_array = |values: &[serde_json::Value]| -> Option<Vec<u8>> {
             if values.len() != 64 {
                 return None;
             }
@@ -10235,11 +10253,58 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
             }
             Some(bytes)
         };
+        let extract_signature_candidates_from_object = |
+            obj: &serde_json::Map<String, serde_json::Value>,
+        | -> (Option<Vec<u8>>, Vec<String>) {
+            let mut local_candidates = Vec::new();
+            for nested in [
+                "bytes",
+                "signature_bytes",
+                "signature-bytes",
+                "signatureBytes",
+                "sig_bytes",
+                "sig-bytes",
+                "sigBytes",
+                "hex",
+                "signature_hex",
+                "signature-hex",
+                "signatureHex",
+                "sig_hex",
+                "sig-hex",
+                "sigHex",
+                "base64",
+                "b64",
+                "signature_base64",
+                "signature-base64",
+                "signatureBase64",
+                "signatureB64",
+                "signature-b64",
+                "sig_base64",
+                "sig-base64",
+                "sigBase64",
+                "sigB64",
+                "sig-b64",
+                "signature",
+                "sig",
+            ] {
+                if let Some(nested) = obj.get(nested) {
+                    if let Some(bytes) =
+                        nested.as_array().and_then(|values| parse_signature_byte_array(values))
+                    {
+                        return (Some(bytes), local_candidates);
+                    }
+                    if let Some(text) = nested.as_str() {
+                        local_candidates.push(text.to_string());
+                    }
+                }
+            }
+            (None, local_candidates)
+        };
 
         match value {
             serde_json::Value::String(value) => candidates.push(value),
             serde_json::Value::Array(values) => {
-                if let Some(bytes) = parse_byte_array(&values) {
+                if let Some(bytes) = parse_signature_byte_array(&values) {
                     return bytes;
                 }
                 for entry in values {
@@ -10282,14 +10347,24 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
                 ] {
                     if let Some(entry) = value.get(field) {
                         if let Some(bytes) =
-                            entry.as_array().and_then(|values| parse_byte_array(values))
+                            entry.as_array().and_then(|values| parse_signature_byte_array(values))
                         {
                             return bytes;
                         }
                         if let Some(entry) = entry.as_str() {
                             candidates.push(entry.to_string());
+                            continue;
+                        }
+                        if let Some(obj) = entry.as_object() {
+                            let (maybe_bytes, extras) =
+                                extract_signature_candidates_from_object(obj);
+                            if let Some(bytes) = maybe_bytes {
+                                return bytes;
+                            }
+                            candidates.extend(extras);
                         }
                     }
+                }
                 }
             }
             _ => {}
