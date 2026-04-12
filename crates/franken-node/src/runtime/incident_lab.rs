@@ -560,7 +560,6 @@ impl IncidentLab {
             prev_seq = Some(ev.seq);
             prev_timestamp = Some(ev.timestamp_ms);
         }
-        }
         let computed = Self::compute_trace_digest(trace);
         if !crate::security::constant_time::ct_eq_bytes(&computed, &provided_hash) {
             return Err(LabError {
