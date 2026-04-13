@@ -19,11 +19,11 @@ const MAX_JOURNAL_RECORDS: usize = 4096;
 const RECEIPT_SCHEMA_VERSION: &str = "franken-node/schema-migration-receipt/v1";
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 /// A semantic version (major.minor.patch).

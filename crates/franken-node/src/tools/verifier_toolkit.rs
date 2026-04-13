@@ -71,11 +71,11 @@ fn current_year_base() -> i64 {
 const DETERMINISTIC_TIME_WINDOW_SECONDS: u64 = 365 * 24 * 60 * 60;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 fn deterministic_digest(domain: &[u8], fields: &[&str]) -> [u8; 32] {

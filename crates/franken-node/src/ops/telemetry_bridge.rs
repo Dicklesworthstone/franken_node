@@ -22,11 +22,11 @@ const CONNECTION_READ_TIMEOUT_MS: u64 = 500;
 const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 5000;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 /// Lifecycle state for the telemetry bridge runtime.

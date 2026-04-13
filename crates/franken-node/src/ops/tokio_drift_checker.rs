@@ -375,9 +375,15 @@ fn collect_source_files_recursive(dir: &Path, files: &mut Vec<PathBuf>) {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             collect_source_files_recursive(&path, files);
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
+        } else if file_type.is_file() && path.extension().is_some_and(|ext| ext == "rs") {
             files.push(path);
         }
     }

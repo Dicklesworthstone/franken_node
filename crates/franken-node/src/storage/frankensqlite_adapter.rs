@@ -47,11 +47,11 @@ pub mod event_codes {
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS, MAX_SCHEMA_VERSIONS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 pub const INV_FSA_TIER1_DURABLE: &str = "INV-FSA-TIER1-DURABLE";

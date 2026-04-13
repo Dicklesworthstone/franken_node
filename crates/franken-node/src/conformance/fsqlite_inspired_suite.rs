@@ -282,11 +282,11 @@ const MAX_CONFORMANCE_RESULTS: usize = 4096;
 const MAX_CONFORMANCE_AUDIT_LOG: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 /// The conformance suite runner.

@@ -914,11 +914,27 @@ fn read_seed_directory(
         ));
     }
 
-    let mut paths = fs::read_dir(&dir)
+    let mut paths = Vec::new();
+    for entry in fs::read_dir(&dir)
         .map_err(|error| format!("failed to read {}: {error}", relative_path(repo_root, &dir)))?
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+    {
+        let entry = entry.map_err(|error| {
+            format!("failed to read {}: {error}", relative_path(repo_root, &dir))
+        })?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|error| {
+            format!(
+                "failed to read {}: {error}",
+                relative_path(repo_root, &path)
+            )
+        })?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_file() {
+            paths.push(path);
+        }
+    }
     paths.sort();
 
     let mut seeds = Vec::new();

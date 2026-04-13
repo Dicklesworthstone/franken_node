@@ -740,12 +740,12 @@ impl ChallengeFlowController {
             prev_hash,
         };
 
-        self.audit_log.push(entry);
-        if self.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
+        if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES + 1;
             self.chain_anchor_hash = Some(self.audit_log[overflow - 1].hash());
             self.audit_log.drain(0..overflow);
         }
+        self.audit_log.push(entry);
     }
 }
 

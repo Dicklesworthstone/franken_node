@@ -619,6 +619,15 @@ impl FleetTransport for FileFleetTransport {
                 ))
             })?;
             let path = entry.path();
+            let file_type = entry.file_type().map_err(|err| {
+                FleetTransportError::io(format!(
+                    "failed reading fleet nodes directory entry type {}: {err}",
+                    path.display()
+                ))
+            })?;
+            if file_type.is_symlink() || !file_type.is_file() {
+                continue;
+            }
             if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
                 continue;
             }

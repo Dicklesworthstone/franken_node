@@ -491,11 +491,11 @@ const MAX_TOKENS: usize = 4096;
 const MAX_NONCES: usize = 65_536;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 /// Insert a nonce into a bounded set, evicting the oldest entry when at capacity.
@@ -508,12 +508,12 @@ fn insert_nonce_bounded(
     cap: usize,
 ) {
     if set.insert(nonce.clone()) {
-        queue.push_back(nonce);
-        while queue.len() > cap {
+        while queue.len() >= cap {
             if let Some(oldest) = queue.pop_front() {
                 set.remove(&oldest);
             }
         }
+        queue.push_back(nonce);
     }
 }
 

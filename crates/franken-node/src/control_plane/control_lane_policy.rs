@@ -729,11 +729,11 @@ impl ControlLanePolicy {
     }
 
     fn push_bounded<T>(entries: &mut Vec<T>, value: T, max_entries: usize) {
-        entries.push(value);
-        if entries.len() > max_entries {
-            let overflow = entries.len() - max_entries;
+        if entries.len() >= max_entries {
+            let overflow = entries.len() - max_entries + 1;
             entries.drain(0..overflow);
         }
+        entries.push(value);
     }
 }
 

@@ -679,30 +679,6 @@ impl CapabilityStakeGate {
             ),
         )
     }
-
-    #[test]
-    fn test_appeal_resolution_after_slash_event_evicted() {
-        let mut ledger = StakingLedger::new();
-        let stake_id = ledger
-            .deposit("alice", 1000, RiskTier::Critical, 0)
-            .unwrap();
-
-        let ev = SlashEvidence::new(ViolationType::PolicyViolation, "desc", "payload", "col", 1);
-        let slash_event = ledger.slash(stake_id, ev, 2).unwrap();
-        let slash_id = slash_event.slash_id;
-
-        ledger.file_appeal(stake_id, slash_id, "reason", 3).unwrap();
-
-        // Evict slash events
-        ledger.state.slash_events.clear();
-
-        // Resolve appeal (reversed)
-        ledger.resolve_appeal(1, false, 4).unwrap();
-
-        let restored = ledger.get_stake(stake_id).unwrap();
-        assert_eq!(restored.state, StakeState::Active);
-        assert_eq!(restored.amount, 1000); // Fails if amount is not restored
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1521,11 +1497,11 @@ impl StakingLedger {
             invariants_checked,
         };
         self.state.next_audit_id = self.state.next_audit_id.saturating_add(1);
-        self.state.audit_log.push(entry);
-        if self.state.audit_log.len() > MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.state.audit_log.len() - MAX_AUDIT_LOG_ENTRIES;
+        if self.state.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
+            let overflow = self.state.audit_log.len() - MAX_AUDIT_LOG_ENTRIES + 1;
             self.state.audit_log.drain(0..overflow);
         }
+        self.state.audit_log.push(entry);
     }
 }
 
@@ -2231,6 +2207,30 @@ mod tests {
             ViolationType::FalseAttestation.to_string(),
             "false_attestation"
         );
+    }
+
+    #[test]
+    fn test_appeal_resolution_after_slash_event_evicted() {
+        let mut ledger = StakingLedger::new();
+        let stake_id = ledger
+            .deposit("alice", 1000, RiskTier::Critical, 0)
+            .unwrap();
+
+        let ev = SlashEvidence::new(ViolationType::PolicyViolation, "desc", "payload", "col", 1);
+        let slash_event = ledger.slash(stake_id, ev, 2).unwrap();
+        let slash_id = slash_event.slash_id;
+
+        ledger.file_appeal(stake_id, slash_id, "reason", 3).unwrap();
+
+        // Evict slash events
+        ledger.state.slash_events.clear();
+
+        // Resolve appeal (reversed)
+        ledger.resolve_appeal(1, false, 4).unwrap();
+
+        let restored = ledger.get_stake(stake_id).unwrap();
+        assert_eq!(restored.state, StakeState::Active);
+        assert_eq!(restored.amount, 1000); // Fails if amount is not restored
     }
 }
 

@@ -102,15 +102,14 @@ impl VerifierRouteState {
     fn store_check(&mut self, check_id: String, evidence: EvidenceArtifact) {
         self.checks
             .insert(check_id.clone(), StoredVerifierCheck { evidence });
-        self.check_order.push_back(check_id);
-
-        while self.checks.len() > MAX_STORED_CONFORMANCE_CHECKS {
+        while self.checks.len() >= MAX_STORED_CONFORMANCE_CHECKS {
             if let Some(evicted_check_id) = self.check_order.pop_front() {
                 self.checks.remove(&evicted_check_id);
             } else {
                 break;
             }
         }
+        self.check_order.push_back(check_id);
     }
 
     fn next_audit_entry_id(&mut self, trace_id: &str) -> Result<String, ApiError> {
@@ -139,6 +138,10 @@ impl VerifierRouteState {
         outcome: &str,
         trace_id: &str,
     ) {
+        if self.audit_log.len() >= MAX_VERIFIER_AUDIT_LOG_ENTRIES {
+            let overflow = self.audit_log.len() - MAX_VERIFIER_AUDIT_LOG_ENTRIES + 1;
+            self.audit_log.drain(0..overflow);
+        }
         self.audit_log.push(AuditLogEntry {
             entry_id,
             timestamp: chrono::Utc::now().to_rfc3339(),
@@ -148,11 +151,6 @@ impl VerifierRouteState {
             outcome: outcome.to_string(),
             trace_id: trace_id.to_string(),
         });
-
-        if self.audit_log.len() > MAX_VERIFIER_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_VERIFIER_AUDIT_LOG_ENTRIES;
-            self.audit_log.drain(0..overflow);
-        }
     }
 
     fn append_audit(

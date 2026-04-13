@@ -403,12 +403,12 @@ impl MarkerStream {
             trace_id: trace_id.to_string(),
         };
 
-        self.markers.push(marker);
-        if self.markers.len() > MAX_MARKERS {
-            let overflow = self.markers.len() - MAX_MARKERS;
+        if self.markers.len() >= MAX_MARKERS {
+            let overflow = self.markers.len() - MAX_MARKERS + 1;
             self.chain_anchor_hash = Some(self.markers[overflow - 1].marker_hash.clone());
             self.markers.drain(0..overflow);
         }
+        self.markers.push(marker);
         self.total_appended = self.total_appended.saturating_add(1);
         self.markers
             .last()

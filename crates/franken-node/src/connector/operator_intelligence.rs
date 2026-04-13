@@ -520,13 +520,12 @@ impl RecommendationEngine {
         let recommendation_id = entry.recommendation_id.clone();
         self.closed_audit_entries
             .insert(recommendation_id.clone(), entry);
-        self.closed_audit_order.push_back(recommendation_id);
-
-        while self.closed_audit_order.len() > MAX_AUDIT_TRAIL_ENTRIES {
+        while self.closed_audit_order.len() >= MAX_AUDIT_TRAIL_ENTRIES {
             if let Some(oldest) = self.closed_audit_order.pop_front() {
                 self.closed_audit_entries.remove(&oldest);
             }
         }
+        self.closed_audit_order.push_back(recommendation_id);
     }
 
     /// Generate recommendations for the given context.
@@ -939,11 +938,11 @@ impl RecommendationEngine {
 // ---------------------------------------------------------------------------
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 // ---------------------------------------------------------------------------

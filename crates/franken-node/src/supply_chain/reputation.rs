@@ -755,12 +755,12 @@ impl ReputationRegistry {
             event,
         };
         entry.entry_hash = compute_entry_hash(&entry);
-        self.audit_trail.push(entry);
-        if self.audit_trail.len() > MAX_AUDIT_TRAIL {
-            let overflow = self.audit_trail.len() - MAX_AUDIT_TRAIL;
+        if self.audit_trail.len() >= MAX_AUDIT_TRAIL {
+            let overflow = self.audit_trail.len() - MAX_AUDIT_TRAIL + 1;
             self.chain_anchor_hash = Some(self.audit_trail[overflow - 1].entry_hash.clone());
             self.audit_trail.drain(0..overflow);
         }
+        self.audit_trail.push(entry);
     }
 }
 

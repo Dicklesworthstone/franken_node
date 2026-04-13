@@ -747,11 +747,11 @@ fn classify_events(
 
 fn push_unique_event(events: &mut Vec<ProvenanceEventCode>, event: ProvenanceEventCode) {
     if !events.contains(&event) {
-        events.push(event);
-        if events.len() > MAX_EVENTS {
-            let overflow = events.len() - MAX_EVENTS;
+        if events.len() >= MAX_EVENTS {
+            let overflow = events.len() - MAX_EVENTS + 1;
             events.drain(0..overflow);
         }
+        events.push(event);
     }
 }
 

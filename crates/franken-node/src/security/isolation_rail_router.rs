@@ -468,7 +468,11 @@ impl RailRouter {
         );
 
         // Atomic transition (INV-ISO-ATOMIC-TRANSITION): single write
-        let entry = self.classifications.get_mut(workload_id).unwrap();
+        let entry = self.classifications.get_mut(workload_id).ok_or_else(|| {
+            RailRouterError::WorkloadNotFound {
+                workload_id: workload_id.to_string(),
+            }
+        })?;
         entry.rail = target_rail;
 
         let trace_id = self.next_trace_id();

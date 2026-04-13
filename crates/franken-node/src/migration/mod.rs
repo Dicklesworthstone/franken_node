@@ -623,12 +623,18 @@ fn collect_project_files(root: &Path) -> anyhow::Result<Vec<PathBuf>> {
                 anyhow::anyhow!("failed to read directory entry in {}: {err}", dir.display())
             })?;
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry.file_type().map_err(|err| {
+                anyhow::anyhow!("failed to read file type for {}: {err}", path.display())
+            })?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 if should_skip_dir(&path) {
                     continue;
                 }
                 pending.push(path);
-            } else if path.is_file() {
+            } else if file_type.is_file() {
                 files.push(path);
             }
         }

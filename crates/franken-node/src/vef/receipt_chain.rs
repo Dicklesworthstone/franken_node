@@ -44,11 +44,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 use frankenengine_node::capacity_defaults::aliases::{MAX_CHAIN_ENTRIES, MAX_CHECKPOINTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 /// Stable schema version for chain serialization and hash material.

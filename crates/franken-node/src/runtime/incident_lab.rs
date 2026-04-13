@@ -335,15 +335,18 @@ impl IncidentLab {
         if integrity_hash.is_empty() {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
-                message: format!("Incident integrity_hash is empty: {}", trace.integrity_hash),
+                message: format!(
+                    "Incident integrity_hash is empty: {} (trace_id={})",
+                    trace.integrity_hash, trace.trace_id
+                ),
             });
         }
         if trace.integrity_hash != integrity_hash {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
                 message: format!(
-                    "Incident integrity_hash contains leading or trailing whitespace: {}",
-                    trace.integrity_hash
+                    "Incident integrity_hash contains leading or trailing whitespace: {} (trace_id={})",
+                    trace.integrity_hash, trace.trace_id
                 ),
             });
         }
@@ -351,8 +354,8 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
                 message: format!(
-                    "Incident integrity_hash contains whitespace: {}",
-                    trace.integrity_hash
+                    "Incident integrity_hash contains whitespace: {} (trace_id={})",
+                    trace.integrity_hash, trace.trace_id
                 ),
             });
         }
@@ -360,25 +363,26 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
                 message: format!(
-                    "Incident integrity_hash must be lowercase: {}",
-                    trace.integrity_hash
+                    "Incident integrity_hash must be lowercase: {} (trace_id={})",
+                    trace.integrity_hash, trace.trace_id
                 ),
             });
         }
         let provided_hash = hex::decode(integrity_hash).map_err(|_| LabError {
             code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
             message: format!(
-                "Incident integrity_hash is not valid hex: {}",
-                trace.integrity_hash
+                "Incident integrity_hash is not valid hex: {} (trace_id={})",
+                trace.integrity_hash, trace.trace_id
             ),
         })?;
         if provided_hash.len() != 32 {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
                 message: format!(
-                    "Incident integrity_hash has invalid length: {} (value={})",
+                    "Incident integrity_hash has invalid length: {} (value={}, trace_id={})",
                     provided_hash.len(),
-                    trace.integrity_hash
+                    trace.integrity_hash,
+                    trace.trace_id
                 ),
             });
         }
@@ -387,56 +391,76 @@ impl IncidentLab {
             if key_trimmed.is_empty() {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
-                    message: format!(
-                        "Incident trace metadata key is empty: key={}, value={}",
-                        key, value
-                    ),
+                    message: "Incident trace metadata key is empty: key=".to_string()
+                        + key
+                        + ", value="
+                        + value
+                        + " (trace_id="
+                        + &trace.trace_id
+                        + ")",
                 });
             }
             if key != key_trimmed {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
-                    message: format!(
-                        "Incident trace metadata key has leading/trailing whitespace: key={}, value={}",
-                        key, value
-                    ),
+                    message: "Incident trace metadata key has leading/trailing whitespace: key="
+                        .to_string()
+                        + key
+                        + ", value="
+                        + value
+                        + " (trace_id="
+                        + &trace.trace_id
+                        + ")",
                 });
             }
-            if key.chars().any(char::is_whitespace) {
+            if key_trimmed.chars().any(char::is_whitespace) {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
-                    message: format!(
-                        "Incident trace metadata key contains whitespace: key={}, value={}",
-                        key, value
-                    ),
+                    message: "Incident trace metadata key contains whitespace: key=".to_string()
+                        + key
+                        + ", value="
+                        + value
+                        + " (trace_id="
+                        + &trace.trace_id
+                        + ")",
                 });
             }
             let value_trimmed = value.trim();
             if value_trimmed.is_empty() {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
-                    message: format!(
-                        "Incident trace metadata value is empty: key={}, value={}",
-                        key, value
-                    ),
+                    message: "Incident trace metadata value is empty: key=".to_string()
+                        + key
+                        + ", value="
+                        + value
+                        + " (trace_id="
+                        + &trace.trace_id
+                        + ")",
                 });
             }
             if value != value_trimmed {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
-                    message: format!(
-                        "Incident trace metadata value has leading/trailing whitespace: key={}, value={}",
-                        key, value
-                    ),
+                    message: "Incident trace metadata value has leading/trailing whitespace: key="
+                        .to_string()
+                        + key
+                        + ", value="
+                        + value
+                        + " (trace_id="
+                        + &trace.trace_id
+                        + ")",
                 });
             }
             if value_trimmed.chars().any(char::is_whitespace) {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_TRACE_INVALID.to_string(),
-                    message: format!(
-                        "Incident trace metadata value contains whitespace: key={}, value={}",
-                        key, value
-                    ),
+                    message: "Incident trace metadata value contains whitespace: key=".to_string()
+                        + key
+                        + ", value="
+                        + value
+                        + " (trace_id="
+                        + &trace.trace_id
+                        + ")",
                 });
             }
         }
@@ -466,8 +490,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event label is empty at seq={}, label={}",
-                        ev.seq, ev.label
+                        "Incident trace event label is empty at seq={}, label={} (trace_id={})",
+                        ev.seq, ev.label, trace.trace_id
                     ),
                 });
             }
@@ -475,8 +499,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event label has leading/trailing whitespace at seq={}, label={}",
-                        ev.seq, ev.label
+                        "Incident trace event label has leading/trailing whitespace at seq={}, label={} (trace_id={})",
+                        ev.seq, ev.label, trace.trace_id
                     ),
                 });
             }
@@ -484,8 +508,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event label contains whitespace at seq={}, label={}",
-                        ev.seq, ev.label
+                        "Incident trace event label contains whitespace at seq={}, label={} (trace_id={})",
+                        ev.seq, ev.label, trace.trace_id
                     ),
                 });
             }
@@ -494,8 +518,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event payload_hex is empty at seq={}, payload={}",
-                        ev.seq, ev.payload_hex
+                        "Incident trace event payload_hex is empty at seq={}, payload={} (trace_id={})",
+                        ev.seq, ev.payload_hex, trace.trace_id
                     ),
                 });
             }
@@ -503,8 +527,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event payload_hex has leading/trailing whitespace at seq={}, payload={}",
-                        ev.seq, ev.payload_hex
+                        "Incident trace event payload_hex has leading/trailing whitespace at seq={}, payload={} (trace_id={})",
+                        ev.seq, ev.payload_hex, trace.trace_id
                     ),
                 });
             }
@@ -512,8 +536,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event payload_hex contains whitespace at seq={}, payload={}",
-                        ev.seq, ev.payload_hex
+                        "Incident trace event payload_hex contains whitespace at seq={}, payload={} (trace_id={})",
+                        ev.seq, ev.payload_hex, trace.trace_id
                     ),
                 });
             }
@@ -521,8 +545,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event payload_hex must be lowercase at seq={}, payload={}",
-                        ev.seq, ev.payload_hex
+                        "Incident trace event payload_hex must be lowercase at seq={}, payload={} (trace_id={})",
+                        ev.seq, ev.payload_hex, trace.trace_id
                     ),
                 });
             }
@@ -530,8 +554,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event payload_hex is invalid hex at seq={}, payload={}",
-                        ev.seq, ev.payload_hex
+                        "Incident trace event payload_hex is invalid hex at seq={}, payload={} (trace_id={})",
+                        ev.seq, ev.payload_hex, trace.trace_id
                     ),
                 });
             }
@@ -541,8 +565,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_TRACE_ORDER.to_string(),
                     message: format!(
-                        "Incident trace events must be strictly increasing seq: prev={}, curr={}",
-                        prev, ev.seq
+                        "Incident trace events must be strictly increasing seq: prev={}, curr={} (trace_id={})",
+                        prev, ev.seq, trace.trace_id
                     ),
                 });
             }
@@ -552,8 +576,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_EVENT_INVALID.to_string(),
                     message: format!(
-                        "Incident trace event timestamp_ms must be non-decreasing at seq={}, prev_ts={}, curr_ts={}",
-                        ev.seq, prev_ts, ev.timestamp_ms
+                        "Incident trace event timestamp_ms must be non-decreasing at seq={}, prev_ts={}, curr_ts={} (trace_id={})",
+                        ev.seq, prev_ts, ev.timestamp_ms, trace.trace_id
                     ),
                 });
             }
@@ -565,9 +589,10 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_TRACE_CORRUPT.to_string(),
                 message: format!(
-                    "Integrity hash mismatch: expected={}, computed={}",
+                    "Integrity hash mismatch: expected={}, computed={} (trace_id={})",
                     trace.integrity_hash,
                     hex::encode(computed),
+                    trace.trace_id
                 ),
             });
         }
@@ -605,15 +630,18 @@ impl IncidentLab {
         if description_trimmed.is_empty() {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
-                message: format!("MitigationPlan description is empty: {}", plan.description),
+                message: format!(
+                    "MitigationPlan description is empty: {} (plan_id={})",
+                    plan.description, plan.plan_id
+                ),
             });
         }
         if plan.description != description_trimmed {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
                 message: format!(
-                    "MitigationPlan description has leading or trailing whitespace: {}",
-                    plan.description
+                    "MitigationPlan description has leading or trailing whitespace: {} (plan_id={})",
+                    plan.description, plan.plan_id
                 ),
             });
         }
@@ -629,8 +657,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
                     message: format!(
-                        "MitigationPlan step is empty at index={}, step={}",
-                        index, step
+                        "MitigationPlan step is empty at index={}, step={} (plan_id={})",
+                        index, step, plan.plan_id
                     ),
                 });
             }
@@ -638,8 +666,8 @@ impl IncidentLab {
                 return Err(LabError {
                     code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
                     message: format!(
-                        "MitigationPlan step has leading or trailing whitespace at index={}, step={}",
-                        index, step
+                        "MitigationPlan step has leading or trailing whitespace at index={}, step={} (plan_id={})",
+                        index, step, plan.plan_id
                     ),
                 });
             }
@@ -648,15 +676,18 @@ impl IncidentLab {
         if signer_trimmed.is_empty() {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
-                message: format!("MitigationPlan signer_id is empty: {}", plan.signer_id),
+                message: format!(
+                    "MitigationPlan signer_id is empty: {} (plan_id={})",
+                    plan.signer_id, plan.plan_id
+                ),
             });
         }
         if plan.signer_id != signer_trimmed {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
                 message: format!(
-                    "MitigationPlan signer_id has leading or trailing whitespace: {}",
-                    plan.signer_id
+                    "MitigationPlan signer_id has leading or trailing whitespace: {} (plan_id={})",
+                    plan.signer_id, plan.plan_id
                 ),
             });
         }
@@ -664,8 +695,8 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
                 message: format!(
-                    "MitigationPlan signer_id contains whitespace: {}",
-                    plan.signer_id
+                    "MitigationPlan signer_id contains whitespace: {} (plan_id={})",
+                    plan.signer_id, plan.plan_id
                 ),
             });
         }
@@ -673,8 +704,8 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
                 message: format!(
-                    "expected_loss_reduction must be in [0.0, 1.0], got {}",
-                    plan.expected_loss_reduction,
+                    "expected_loss_reduction must be in [0.0, 1.0], got {} (plan_id={})",
+                    plan.expected_loss_reduction, plan.plan_id
                 ),
             });
         }
@@ -687,7 +718,10 @@ impl IncidentLab {
         {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_MITIGATION_INVALID.to_string(),
-                message: format!("Signer '{}' not in accepted signers", plan.signer_id),
+                message: format!(
+                    "Signer '{}' not in accepted signers (plan_id={})",
+                    plan.signer_id, plan.plan_id
+                ),
             });
         }
         Ok(())
@@ -703,8 +737,11 @@ impl IncidentLab {
         hasher.update((trace.events.len() as u64).to_le_bytes());
         for ev in &trace.events {
             hasher.update(ev.seq.to_le_bytes());
+            hasher.update((ev.label.len() as u64).to_le_bytes());
+            hasher.update(ev.label.as_bytes());
             hasher.update((ev.payload_hex.len() as u64).to_le_bytes());
             hasher.update(ev.payload_hex.as_bytes());
+            hasher.update(ev.timestamp_ms.to_le_bytes());
         }
         let replay_digest = hex::encode(hasher.finalize());
 
@@ -729,8 +766,8 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_SCENARIO_INVALID.to_string(),
                 message: format!(
-                    "baseline_loss must be finite and non-negative: {}",
-                    scenario.baseline_loss
+                    "baseline_loss must be finite and non-negative: {} (trace_id={}, plan_id={})",
+                    scenario.baseline_loss, scenario.trace.trace_id, scenario.mitigation.plan_id
                 ),
             });
         }
@@ -738,8 +775,10 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_SCENARIO_INVALID.to_string(),
                 message: format!(
-                    "promotion_threshold must be finite and non-negative: {}",
-                    scenario.promotion_threshold
+                    "promotion_threshold must be finite and non-negative: {} (trace_id={}, plan_id={})",
+                    scenario.promotion_threshold,
+                    scenario.trace.trace_id,
+                    scenario.mitigation.plan_id
                 ),
             });
         }
@@ -747,8 +786,10 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_SCENARIO_INVALID.to_string(),
                 message: format!(
-                    "lab promotion_threshold must be finite and non-negative: {}",
-                    self.config.promotion_threshold
+                    "lab promotion_threshold must be finite and non-negative: {} (trace_id={}, plan_id={})",
+                    self.config.promotion_threshold,
+                    scenario.trace.trace_id,
+                    scenario.mitigation.plan_id
                 ),
             });
         }
@@ -756,8 +797,11 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_SCENARIO_INVALID.to_string(),
                 message: format!(
-                    "promotion_threshold below lab minimum: {} < {}",
-                    scenario.promotion_threshold, self.config.promotion_threshold
+                    "promotion_threshold below lab minimum: {} < {} (trace_id={}, plan_id={})",
+                    scenario.promotion_threshold,
+                    self.config.promotion_threshold,
+                    scenario.trace.trace_id,
+                    scenario.mitigation.plan_id
                 ),
             });
         }
@@ -769,7 +813,10 @@ impl IncidentLab {
         if !delta.is_finite() || delta < 0.0 {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_DELTA_NEGATIVE.to_string(),
-                message: format!("Mitigation worsens expected loss: delta={delta}"),
+                message: format!(
+                    "Mitigation worsens expected loss: delta={delta} (trace_id={}, plan_id={})",
+                    scenario.trace.trace_id, scenario.mitigation.plan_id
+                ),
             });
         }
 
@@ -801,7 +848,10 @@ impl IncidentLab {
         if !synthesis.promoted {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_CONTRACT_UNSIGNED.to_string(),
-                message: "Cannot generate rollout contract for non-promoted mitigation".to_string(),
+                message: format!(
+                    "Cannot generate rollout contract for non-promoted mitigation (plan_id={})",
+                    synthesis.plan_id
+                ),
             });
         }
 
@@ -819,7 +869,10 @@ impl IncidentLab {
         if self.config.rollback_window_secs == 0 {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_ROLLBACK_INVALID.to_string(),
-                message: "Rollback window must be greater than zero".to_string(),
+                message: format!(
+                    "Rollback window must be greater than zero (plan_id={})",
+                    plan.plan_id
+                ),
             });
         }
         let contract_id = format!("rollout-{}", plan.plan_id);
@@ -872,8 +925,8 @@ impl IncidentLab {
             return Err(LabError {
                 code: error_codes::ERR_ILAB_REPLAY_DIVERGENCE.to_string(),
                 message: format!(
-                    "Non-deterministic replay: {} vs {}",
-                    replay_a.replay_digest, replay_b.replay_digest,
+                    "Non-deterministic replay: {} vs {} (trace_id={})",
+                    replay_a.replay_digest, replay_b.replay_digest, trace.trace_id
                 ),
             });
         }
@@ -895,65 +948,65 @@ impl IncidentLab {
 }
 
 // ---------------------------------------------------------------------------
-// Test helpers
-// ---------------------------------------------------------------------------
-
-/// Build a valid incident trace for testing.
-pub fn make_test_trace(trace_id: &str, n_events: usize) -> IncidentTrace {
-    let events: Vec<TraceEvent> = (0..n_events)
-        .map(|i| TraceEvent {
-            seq: i as u64,
-            label: format!("event_{i}"),
-            payload_hex: hex::encode(format!("payload_{i}")),
-            timestamp_ms: 1_000_000 + (i as u64) * 1000,
-        })
-        .collect();
-    let mut trace = IncidentTrace {
-        trace_id: trace_id.to_string(),
-        events,
-        integrity_hash: String::new(),
-        metadata: BTreeMap::new(),
-    };
-    trace.integrity_hash = IncidentLab::compute_trace_hash(&trace);
-    trace
-}
-
-/// Build a valid mitigation plan for testing.
-pub fn make_test_plan(plan_id: &str, signer_id: &str, reduction: f64) -> MitigationPlan {
-    MitigationPlan {
-        plan_id: plan_id.to_string(),
-        description: format!("Test mitigation {plan_id}"),
-        expected_loss_reduction: reduction,
-        severity: Severity::High,
-        steps: vec!["Step 1: analyse".to_string(), "Step 2: fix".to_string()],
-        signer_id: signer_id.to_string(),
-    }
-}
-
-/// Build a counterfactual scenario for testing.
-pub fn make_test_scenario(
-    trace_id: &str,
-    plan_id: &str,
-    signer_id: &str,
-    reduction: f64,
-    baseline_loss: f64,
-    promotion_threshold: f64,
-) -> CounterfactualScenario {
-    CounterfactualScenario {
-        trace: make_test_trace(trace_id, 5),
-        mitigation: make_test_plan(plan_id, signer_id, reduction),
-        baseline_loss,
-        promotion_threshold,
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Unit tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Test helpers
+    // ---------------------------------------------------------------------------
+
+    /// Build a valid incident trace for testing.
+    pub fn make_test_trace(trace_id: &str, n_events: usize) -> IncidentTrace {
+        let events: Vec<TraceEvent> = (0..n_events)
+            .map(|i| TraceEvent {
+                seq: i as u64,
+                label: format!("event_{i}"),
+                payload_hex: hex::encode(format!("payload_{i}")),
+                timestamp_ms: 1_000_000 + (i as u64) * 1000,
+            })
+            .collect();
+        let mut trace = IncidentTrace {
+            trace_id: trace_id.to_string(),
+            events,
+            integrity_hash: String::new(),
+            metadata: BTreeMap::new(),
+        };
+        trace.integrity_hash = IncidentLab::compute_trace_hash(&trace);
+        trace
+    }
+
+    /// Build a valid mitigation plan for testing.
+    pub fn make_test_plan(plan_id: &str, signer_id: &str, reduction: f64) -> MitigationPlan {
+        MitigationPlan {
+            plan_id: plan_id.to_string(),
+            description: format!("Test mitigation {plan_id}"),
+            expected_loss_reduction: reduction,
+            severity: Severity::High,
+            steps: vec!["Step 1: analyse".to_string(), "Step 2: fix".to_string()],
+            signer_id: signer_id.to_string(),
+        }
+    }
+
+    /// Build a counterfactual scenario for testing.
+    pub fn make_test_scenario(
+        trace_id: &str,
+        plan_id: &str,
+        signer_id: &str,
+        reduction: f64,
+        baseline_loss: f64,
+        promotion_threshold: f64,
+    ) -> CounterfactualScenario {
+        CounterfactualScenario {
+            trace: make_test_trace(trace_id, 5),
+            mitigation: make_test_plan(plan_id, signer_id, reduction),
+            baseline_loss,
+            promotion_threshold,
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Unit tests
+    // ---------------------------------------------------------------------------
 
     fn lab() -> IncidentLab {
         let config = LabConfig::default()
@@ -1432,10 +1485,29 @@ mod tests {
     }
 
     #[test]
+    fn test_replay_digest_changes_with_label_or_timestamp() {
+        let lab = lab();
+        let trace = make_test_trace("t-digest-change", 2);
+        let replay_base = lab.replay_trace(&trace).expect("should succeed");
+
+        let mut label_trace = trace.clone();
+        label_trace.events[0].label = "event_mut".to_string();
+        label_trace.integrity_hash = IncidentLab::compute_trace_hash(&label_trace);
+        let replay_label = lab.replay_trace(&label_trace).expect("should succeed");
+        assert_ne!(replay_base.replay_digest, replay_label.replay_digest);
+
+        let mut ts_trace = trace.clone();
+        ts_trace.events[0].timestamp_ms += 1;
+        ts_trace.integrity_hash = IncidentLab::compute_trace_hash(&ts_trace);
+        let replay_ts = lab.replay_trace(&ts_trace).expect("should succeed");
+        assert_ne!(replay_base.replay_digest, replay_ts.replay_digest);
+    }
+
+    #[test]
     fn test_replay_emits_correct_event_code() {
         let lab = lab();
         let trace = make_test_trace("t-code", 3);
-        let replay = lab.replay_trace(&trace).unwrap();
+        let replay = lab.replay_trace(&trace).expect("replay should succeed");
         assert_eq!(replay.event_code, event_codes::ILAB_002);
     }
 
@@ -1443,10 +1515,11 @@ mod tests {
     fn test_verify_deterministic_replay() {
         let lab = lab();
         let trace = make_test_trace("t-verify", 5);
-        assert!(lab.verify_deterministic_replay(&trace).unwrap());
+        assert!(
+            lab.verify_deterministic_replay(&trace)
+                .expect("deterministic replay should verify")
+        );
     }
-
-    // -- Synthesis / delta tests --
 
     #[test]
     fn test_delta_computed_correctly() {
@@ -1653,6 +1726,8 @@ mod tests {
             error_codes::ERR_ILAB_TRACE_EMPTY,
             error_codes::ERR_ILAB_TRACE_INVALID,
             error_codes::ERR_ILAB_TRACE_TOO_LARGE,
+            error_codes::ERR_ILAB_EVENT_INVALID,
+            error_codes::ERR_ILAB_TRACE_ORDER,
             error_codes::ERR_ILAB_TRACE_CORRUPT,
             error_codes::ERR_ILAB_REPLAY_DIVERGENCE,
             error_codes::ERR_ILAB_MITIGATION_INVALID,

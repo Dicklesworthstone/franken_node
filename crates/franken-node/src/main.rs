@@ -4956,14 +4956,20 @@ fn collect_incident_bundle_paths(root: &Path) -> Result<Vec<PathBuf>> {
             let entry =
                 entry.with_context(|| format!("failed reading entry in {}", dir.display()))?;
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed reading file type for {}", path.display()))?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 if should_skip_bundle_scan_dir(&path) {
                     continue;
                 }
                 pending.push(path);
                 continue;
             }
-            if path.is_file()
+            if file_type.is_file()
                 && path
                     .extension()
                     .and_then(std::ffi::OsStr::to_str)
@@ -11026,6 +11032,9 @@ fn collect_local_registry_artifacts_in(
             let file_type = entry
                 .file_type()
                 .with_context(|| format!("failed reading file type for {}", path.display()))?;
+            if file_type.is_symlink() {
+                continue;
+            }
             if file_type.is_dir() {
                 if registry_should_skip_dir(&path) {
                     continue;
@@ -11339,6 +11348,30 @@ fn run_command_capture_stdout(
     args: &[&str],
     timeout: Duration,
 ) -> std::result::Result<String, String> {
+    fn spawn_reader<R: std::io::Read + Send + 'static>(
+        mut reader: R,
+        label: &'static str,
+    ) -> std::thread::JoinHandle<std::result::Result<Vec<u8>, String>> {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            reader
+                .read_to_end(&mut buf)
+                .map_err(|err| format!("{label} read error: {err}"))?;
+            Ok(buf)
+        })
+    }
+
+    fn join_reader(
+        handle: std::thread::JoinHandle<std::result::Result<Vec<u8>, String>>,
+        label: &'static str,
+    ) -> std::result::Result<Vec<u8>, String> {
+        match handle.join() {
+            Ok(Ok(buf)) => Ok(buf),
+            Ok(Err(err)) => Err(err),
+            Err(_) => Err(format!("{label} reader thread panicked")),
+        }
+    }
+
     let command_label = format_external_command(program, args);
     let mut command = ProcessCommand::new(program);
     command
@@ -11353,23 +11386,25 @@ fn run_command_capture_stdout(
     let mut child = command
         .spawn()
         .map_err(|error| format!("{command_label} failed to start: {error}"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| format!("{command_label} stdout pipe unavailable"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| format!("{command_label} stderr pipe unavailable"))?;
+    let stdout_reader = spawn_reader(stdout, "stdout");
+    let stderr_reader = spawn_reader(stderr, "stderr");
     let start = Instant::now();
 
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                let mut stdout = Vec::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    pipe.read_to_end(&mut stdout).map_err(|error| {
-                        format!("{command_label} failed collecting output: {error}")
-                    })?;
-                }
-                let mut stderr = Vec::new();
-                if let Some(mut pipe) = child.stderr.take() {
-                    pipe.read_to_end(&mut stderr).map_err(|error| {
-                        format!("{command_label} failed collecting output: {error}")
-                    })?;
-                }
+                let stdout = join_reader(stdout_reader, "stdout")
+                    .map_err(|err| format!("{command_label} failed collecting stdout: {err}"))?;
+                let stderr = join_reader(stderr_reader, "stderr")
+                    .map_err(|err| format!("{command_label} failed collecting stderr: {err}"))?;
                 if !status.success() {
                     let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
                     let stdout = String::from_utf8_lossy(&stdout).trim().to_string();
@@ -11385,6 +11420,8 @@ fn run_command_capture_stdout(
                 if start.elapsed() >= timeout {
                     let _ = child.kill();
                     let _ = child.wait();
+                    let _ = join_reader(stdout_reader, "stdout");
+                    let _ = join_reader(stderr_reader, "stderr");
                     return Err(format!(
                         "{command_label} timed out after {}ms",
                         timeout.as_millis()
@@ -11395,6 +11432,8 @@ fn run_command_capture_stdout(
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = join_reader(stdout_reader, "stdout");
+                let _ = join_reader(stderr_reader, "stderr");
                 return Err(format!("{command_label} wait failed: {error}"));
             }
         }
@@ -13403,6 +13442,8 @@ struct ReleaseVerificationContext {
     detached_signatures: BTreeMap<String, Vec<u8>>,
     key_ring: supply_chain::artifact_signing::KeyRing,
     unlisted_artifacts: Vec<String>,
+    blocked_artifacts: BTreeMap<String, String>,
+    blocked_signatures: BTreeMap<String, String>,
 }
 
 fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
@@ -13854,6 +13895,60 @@ fn decode_signature_blob(raw: &[u8]) -> Vec<u8> {
     }
 
     raw.to_vec()
+}
+
+enum ReleaseEntryState {
+    Missing,
+    File,
+    Blocked(String),
+}
+
+fn inspect_release_entry_path(root: &Path, path: &Path) -> Result<ReleaseEntryState> {
+    let relative = path.strip_prefix(root).with_context(|| {
+        format!(
+            "release entry {} is outside of {}",
+            path.display(),
+            root.display()
+        )
+    })?;
+    let mut current = root.to_path_buf();
+    let mut last_meta = None;
+    for component in relative.components() {
+        current.push(component);
+        match std::fs::symlink_metadata(&current) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    return Ok(ReleaseEntryState::Blocked(format!(
+                        "release entry contains symlink component: {}",
+                        current.display()
+                    )));
+                }
+                last_meta = Some(meta);
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ReleaseEntryState::Missing);
+            }
+            Err(err) => {
+                return Err(anyhow::anyhow!(
+                    "failed reading {}: {err}",
+                    current.display()
+                ));
+            }
+        }
+    }
+
+    let Some(meta) = last_meta else {
+        return Ok(ReleaseEntryState::Missing);
+    };
+
+    if meta.is_file() {
+        Ok(ReleaseEntryState::File)
+    } else {
+        Ok(ReleaseEntryState::Blocked(format!(
+            "release entry is not a file: {}",
+            path.display()
+        )))
+    }
 }
 
 fn parse_verifying_key_from_blob(raw: &[u8]) -> Option<ed25519_dalek::VerifyingKey> {
@@ -14323,11 +14418,22 @@ fn load_verifying_keys(key_dir: &Path) -> Result<Vec<ed25519_dalek::VerifyingKey
         anyhow::bail!("--key-dir must point to a directory: {}", key_dir.display());
     }
 
-    let mut paths = std::fs::read_dir(key_dir)?
-        .filter_map(Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file())
-        .collect::<Vec<_>>();
+    let mut paths = Vec::new();
+    for entry in std::fs::read_dir(key_dir)
+        .with_context(|| format!("failed reading {}", key_dir.display()))?
+    {
+        let entry = entry.with_context(|| format!("failed reading {}", key_dir.display()))?;
+        let path = entry.path();
+        let file_type = entry
+            .file_type()
+            .with_context(|| format!("failed reading file type for {}", path.display()))?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_file() {
+            paths.push(path);
+        }
+    }
     paths.sort();
 
     let mut keys = Vec::new();
@@ -14353,25 +14459,45 @@ fn collect_release_files(root: &Path) -> Result<Vec<String>> {
     let mut stack = vec![root.to_path_buf()];
 
     while let Some(current) = stack.pop() {
-        let mut entries = std::fs::read_dir(&current)?
-            .filter_map(Result::ok)
-            .map(|entry| entry.path())
-            .collect::<Vec<_>>();
-        entries.sort();
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(&current)
+            .with_context(|| format!("failed reading directory {}", current.display()))?
+        {
+            let entry =
+                entry.with_context(|| format!("failed reading entry in {}", current.display()))?;
+            entries.push(entry);
+        }
+        entries.sort_by_key(|entry| entry.file_name());
 
-        for path in entries {
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.is_file() {
-                let relative = path
-                    .strip_prefix(root)
-                    .with_context(|| {
-                        format!("failed deriving relative path for {}", path.display())
-                    })?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                files.push(relative);
+        for entry in entries {
+            let path = entry.path();
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed reading file type for {}", path.display()))?;
+            if file_type.is_symlink() {
+                anyhow::bail!(
+                    "release verification does not allow symlinks: {}",
+                    path.display()
+                );
             }
+            if file_type.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !file_type.is_file() {
+                anyhow::bail!(
+                    "release verification encountered unsupported entry type: {}",
+                    path.display()
+                );
+            }
+            let relative = path
+                .strip_prefix(root)
+                .with_context(|| {
+                    format!("failed deriving relative path for {}", path.display())
+                })?
+                .to_string_lossy()
+                .replace('\\', "/");
+            files.push(relative);
         }
     }
 
@@ -14413,6 +14539,15 @@ fn load_release_verification_context(
     }
 
     let manifest_path = release_dir.join(RELEASE_MANIFEST_FILE);
+    match inspect_release_entry_path(release_dir, &manifest_path)? {
+        ReleaseEntryState::File => {}
+        ReleaseEntryState::Missing => {
+            anyhow::bail!("manifest {} is missing", manifest_path.display());
+        }
+        ReleaseEntryState::Blocked(reason) => {
+            anyhow::bail!("{reason}");
+        }
+    }
     let manifest_raw = std::fs::read_to_string(&manifest_path)
         .with_context(|| format!("failed reading {}", manifest_path.display()))?;
     let parsed_entries = ChecksumManifest::parse_canonical(&manifest_raw);
@@ -14426,6 +14561,18 @@ fn load_release_verification_context(
     }
 
     let manifest_signature_path = release_dir.join(RELEASE_MANIFEST_SIGNATURE_FILE);
+    match inspect_release_entry_path(release_dir, &manifest_signature_path)? {
+        ReleaseEntryState::File => {}
+        ReleaseEntryState::Missing => {
+            anyhow::bail!(
+                "manifest signature {} is missing",
+                manifest_signature_path.display()
+            );
+        }
+        ReleaseEntryState::Blocked(reason) => {
+            anyhow::bail!("{reason}");
+        }
+    }
     let manifest_signature_raw = std::fs::read(&manifest_signature_path)
         .with_context(|| format!("failed reading {}", manifest_signature_path.display()))?;
     let manifest_signature = decode_signature_blob(&manifest_signature_raw);
@@ -14463,22 +14610,36 @@ fn load_release_verification_context(
 
     let mut artifacts = BTreeMap::new();
     let mut detached_signatures = BTreeMap::new();
+    let mut blocked_artifacts = BTreeMap::new();
+    let mut blocked_signatures = BTreeMap::new();
     for artifact_name in manifest.entries.keys() {
         let artifact_path = release_dir.join(artifact_name);
-        if artifact_path.is_file() {
-            let artifact_bytes = std::fs::read(&artifact_path)
-                .with_context(|| format!("failed reading {}", artifact_path.display()))?;
-            artifacts.insert(artifact_name.clone(), artifact_bytes);
+        match inspect_release_entry_path(release_dir, &artifact_path)? {
+            ReleaseEntryState::File => {
+                let artifact_bytes = std::fs::read(&artifact_path)
+                    .with_context(|| format!("failed reading {}", artifact_path.display()))?;
+                artifacts.insert(artifact_name.clone(), artifact_bytes);
+            }
+            ReleaseEntryState::Missing => {}
+            ReleaseEntryState::Blocked(reason) => {
+                blocked_artifacts.insert(artifact_name.clone(), reason);
+            }
         }
 
         let signature_path = release_dir.join(format!("{artifact_name}.sig"));
-        if signature_path.is_file() {
-            let detached_bytes = std::fs::read(&signature_path)
-                .with_context(|| format!("failed reading {}", signature_path.display()))?;
-            detached_signatures.insert(
-                artifact_name.clone(),
-                decode_signature_blob(&detached_bytes),
-            );
+        match inspect_release_entry_path(release_dir, &signature_path)? {
+            ReleaseEntryState::File => {
+                let detached_bytes = std::fs::read(&signature_path)
+                    .with_context(|| format!("failed reading {}", signature_path.display()))?;
+                detached_signatures.insert(
+                    artifact_name.clone(),
+                    decode_signature_blob(&detached_bytes),
+                );
+            }
+            ReleaseEntryState::Missing => {}
+            ReleaseEntryState::Blocked(reason) => {
+                blocked_signatures.insert(artifact_name.clone(), reason);
+            }
         }
     }
 
@@ -14490,6 +14651,8 @@ fn load_release_verification_context(
         detached_signatures,
         key_ring,
         unlisted_artifacts,
+        blocked_artifacts,
+        blocked_signatures,
     })
 }
 
@@ -14515,6 +14678,22 @@ fn handle_verify_release(args: &VerifyReleaseArgs) -> Result<()> {
             key_id: context.manifest.key_id.0.clone(),
             failure_reason: Some("artifact present but not listed in SHA256SUMS".to_string()),
         });
+    }
+
+    for row in &mut report.results {
+        if let Some(reason) = context.blocked_artifacts.get(&row.artifact_name)
+            && matches!(row.failure_reason.as_deref(), Some("artifact missing"))
+        {
+            row.failure_reason = Some(reason.clone());
+        }
+        if let Some(reason) = context.blocked_signatures.get(&row.artifact_name)
+            && matches!(
+                row.failure_reason.as_deref(),
+                Some("detached signature missing")
+            )
+        {
+            row.failure_reason = Some(reason.clone());
+        }
     }
 
     report
@@ -15664,7 +15843,13 @@ fn collect_corpus_matches(
                 )
             })?;
             let path = entry.path();
-            if path.is_dir() {
+            let file_type = entry
+                .file_type()
+                .with_context(|| format!("failed reading file type for {}", path.display()))?;
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
                 if should_skip_bundle_scan_dir(&path) {
                     continue;
                 }
@@ -15672,7 +15857,7 @@ fn collect_corpus_matches(
                 continue;
             }
 
-            if !path.is_file() {
+            if !file_type.is_file() {
                 continue;
             }
 

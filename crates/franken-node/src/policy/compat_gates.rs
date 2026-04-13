@@ -1032,11 +1032,11 @@ impl std::error::Error for CompatGateError {}
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_ENTRIES, MAX_RECEIPTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    items.push(item);
-    if items.len() > cap {
-        let overflow = items.len() - cap;
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
+    items.push(item);
 }
 
 /// The compatibility gate evaluator. Central entry point for gate checks,

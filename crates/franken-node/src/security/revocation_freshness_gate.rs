@@ -286,12 +286,12 @@ impl RevocationFreshnessGate {
     fn consume_nonce(&mut self, nonce: &str) {
         // Consume nonce with bounded eviction to prevent unbounded memory growth.
         if self.consumed_nonces.insert(nonce.to_string()) {
-            self.consumed_nonces_queue.push_back(nonce.to_string());
-            while self.consumed_nonces_queue.len() > MAX_CONSUMED_NONCES {
+            while self.consumed_nonces_queue.len() >= MAX_CONSUMED_NONCES {
                 if let Some(oldest) = self.consumed_nonces_queue.pop_front() {
                     self.consumed_nonces.remove(&oldest);
                 }
             }
+            self.consumed_nonces_queue.push_back(nonce.to_string());
         }
     }
 

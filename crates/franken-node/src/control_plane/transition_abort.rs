@@ -523,11 +523,11 @@ impl Default for TransitionAbortManager {
 }
 
 fn push_bounded<T>(entries: &mut Vec<T>, entry: T, max_entries: usize) {
-    entries.push(entry);
-    if entries.len() > max_entries {
-        let overflow = entries.len() - max_entries;
+    if entries.len() >= max_entries {
+        let overflow = entries.len() - max_entries + 1;
         entries.drain(0..overflow);
     }
+    entries.push(entry);
 }
 
 #[cfg(test)]

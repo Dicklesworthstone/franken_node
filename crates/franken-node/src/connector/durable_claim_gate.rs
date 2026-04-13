@@ -480,11 +480,11 @@ fn hash_witnesses(proof_hashes: &[String]) -> String {
 
 /// Push an item to a bounded Vec, evicting oldest entries if at capacity.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
-    vec.push(item);
-    if vec.len() > max {
-        let overflow = vec.len() - max;
+    if vec.len() >= max {
+        let overflow = vec.len() - max + 1;
         vec.drain(0..overflow);
     }
+    vec.push(item);
 }
 
 #[cfg(test)]

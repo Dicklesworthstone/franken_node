@@ -740,11 +740,11 @@ impl VefPerfBudgetGate {
         details: BTreeMap<String, serde_json::Value>,
     ) {
         let event = VefPerfEvent::new(code, op, mode, corr_id, details);
-        self.audit_log.push(event);
-        if self.audit_log.len() > MAX_AUDIT_LOG {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG;
+        if self.audit_log.len() >= MAX_AUDIT_LOG {
+            let overflow = self.audit_log.len() - MAX_AUDIT_LOG + 1;
             self.audit_log.drain(0..overflow);
         }
+        self.audit_log.push(event);
     }
 }
 
