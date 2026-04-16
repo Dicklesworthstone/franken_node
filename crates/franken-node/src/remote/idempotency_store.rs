@@ -39,7 +39,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
 }
 
 fn hash_len_prefixed_bytes(hasher: &mut Sha256, bytes: &[u8]) {
-    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update((u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_le_bytes());
     hasher.update(bytes);
 }
 

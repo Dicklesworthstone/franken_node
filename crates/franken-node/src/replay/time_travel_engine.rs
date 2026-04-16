@@ -405,11 +405,11 @@ impl TraceStep {
     pub fn side_effects_digest(&self) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"replay_step_effects_v1:");
-        hasher.update((self.side_effects.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(self.side_effects.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for effect in &self.side_effects {
-            hasher.update((effect.kind.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(effect.kind.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(effect.kind.as_bytes());
-            hasher.update((effect.payload.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(effect.payload.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(&effect.payload);
         }
         hex::encode(hasher.finalize())
@@ -439,18 +439,18 @@ impl WorkflowTrace {
     pub fn compute_digest(steps: &[TraceStep]) -> String {
         let mut hasher = Sha256::new();
         hasher.update(b"replay_trace_digest_v1:");
-        hasher.update((steps.len() as u64).to_le_bytes());
+        hasher.update((u64::try_from(steps.len()).unwrap_or(u64::MAX)).to_le_bytes());
         for step in steps {
             hasher.update(step.seq.to_le_bytes());
-            hasher.update((step.input.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(step.input.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(&step.input);
-            hasher.update((step.output.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(step.output.len()).unwrap_or(u64::MAX)).to_le_bytes());
             hasher.update(&step.output);
-            hasher.update((step.side_effects.len() as u64).to_le_bytes());
+            hasher.update((u64::try_from(step.side_effects.len()).unwrap_or(u64::MAX)).to_le_bytes());
             for effect in &step.side_effects {
-                hasher.update((effect.kind.len() as u64).to_le_bytes());
+                hasher.update((u64::try_from(effect.kind.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 hasher.update(effect.kind.as_bytes());
-                hasher.update((effect.payload.len() as u64).to_le_bytes());
+                hasher.update((u64::try_from(effect.payload.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 hasher.update(&effect.payload);
             }
         }
@@ -468,7 +468,7 @@ impl WorkflowTrace {
 
         // INV-TTR-STEP-ORDER: verify strict sequential ordering
         for (i, step) in self.steps.iter().enumerate() {
-            let expected_seq = i as u64;
+            let expected_seq = u64::try_from(i).unwrap_or(u64::MAX);
             if step.seq != expected_seq {
                 return Err(TimeTravelError::SequenceGap {
                     trace_id: self.trace_id.clone(),
@@ -861,11 +861,11 @@ impl ReplayEngine {
             let replayed_effects_digest = {
                 let mut hasher = Sha256::new();
                 hasher.update(b"replay_step_effects_v1:");
-                hasher.update((replayed_effects.len() as u64).to_le_bytes());
+                hasher.update((u64::try_from(replayed_effects.len()).unwrap_or(u64::MAX)).to_le_bytes());
                 for effect in &replayed_effects {
-                    hasher.update((effect.kind.len() as u64).to_le_bytes());
+                    hasher.update((u64::try_from(effect.kind.len()).unwrap_or(u64::MAX)).to_le_bytes());
                     hasher.update(effect.kind.as_bytes());
-                    hasher.update((effect.payload.len() as u64).to_le_bytes());
+                    hasher.update((u64::try_from(effect.payload.len()).unwrap_or(u64::MAX)).to_le_bytes());
                     hasher.update(&effect.payload);
                 }
                 hex::encode(hasher.finalize())
@@ -941,7 +941,7 @@ impl ReplayEngine {
             trace_id: trace_id.to_string(),
             divergences,
             verdict,
-            steps_replayed: trace.steps.len() as u64,
+            steps_replayed: u64::try_from(trace.steps.len()).unwrap_or(u64::MAX),
             replay_duration_ns,
             schema_version: SCHEMA_VERSION.to_string(),
         })
@@ -998,12 +998,14 @@ pub fn build_demo_trace(trace_id: &str, workflow_name: &str, step_count: usize) 
         let input = format!("input-{i}").into_bytes();
         let output = format!("output-{i}").into_bytes();
         let effects = vec![SideEffect::new("log", format!("effect-{i}").into_bytes())];
+        let seq = u64::try_from(i).unwrap_or(u64::MAX);
+        let timestamp = seq.saturating_add(1).saturating_mul(1000);
         steps.push(TraceStep::new(
-            i as u64,
+            seq,
             input,
             output,
             effects,
-            (i as u64 + 1) * 1000,
+            timestamp,
         ));
     }
 

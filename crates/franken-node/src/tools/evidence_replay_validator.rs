@@ -260,6 +260,11 @@ fn replay_decision(context: &ReplayContext) -> Option<(DecisionKind, String)> {
     }
 
     for candidate in &context.candidates {
+        // Skip candidates with non-finite scores
+        if !candidate.score.is_finite() {
+            continue;
+        }
+
         match &best {
             None => best = Some((candidate, candidate.score)),
             Some((_, best_score)) => {

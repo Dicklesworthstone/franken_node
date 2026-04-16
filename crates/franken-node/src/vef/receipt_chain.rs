@@ -240,7 +240,7 @@ impl ReceiptChain {
         let trace_id = trace_id.into();
         let receipt_hash = receipt_hash_sha256(&receipt)
             .map_err(|err| ChainError::internal(format!("receipt hash failed: {err}")))?;
-        let index = self.entries.len() as u64;
+        let index = u64::try_from(self.entries.len()).unwrap_or(u64::MAX);
         let prev_chain_hash = self.entries.last().map_or_else(
             || GENESIS_PREV_HASH.to_string(),
             |entry| entry.chain_hash.clone(),
@@ -316,7 +316,7 @@ impl ReceiptChain {
         checkpoints: &[ReceiptCheckpoint],
     ) -> Result<(), ChainError> {
         for (idx, entry) in entries.iter().enumerate() {
-            let expected_index = idx as u64;
+            let expected_index = u64::try_from(idx).unwrap_or(u64::MAX);
             if entry.index != expected_index {
                 return Err(ChainError::sequence(format!(
                     "entry index mismatch at offset {idx}: got {}, expected {expected_index}",
@@ -357,7 +357,7 @@ impl ReceiptChain {
 
         let mut last_checkpoint_end: Option<u64> = None;
         for (idx, checkpoint) in checkpoints.iter().enumerate() {
-            if checkpoint.checkpoint_id != idx as u64 {
+            if checkpoint.checkpoint_id != u64::try_from(idx).unwrap_or(u64::MAX) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint_id mismatch at offset {idx}: got {}, expected {}",
                     checkpoint.checkpoint_id, idx
@@ -369,7 +369,7 @@ impl ReceiptChain {
                     checkpoint.start_index, checkpoint.end_index
                 )));
             }
-            if checkpoint.end_index as usize >= entries.len() {
+            if checkpoint.end_index >= u64::try_from(entries.len()).unwrap_or(u64::MAX) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} end index {} out of bounds for {} entries",
                     checkpoint.checkpoint_id,
@@ -392,7 +392,7 @@ impl ReceiptChain {
                     checkpoint.checkpoint_id
                 )));
             }
-            let chain_head = entries[checkpoint.end_index as usize].chain_hash.as_str();
+            let chain_head = entries[usize::try_from(checkpoint.end_index).unwrap_or(usize::MAX.min(entries.len().saturating_sub(1)))].chain_hash.as_str();
             if !ct_eq_inline(&checkpoint.chain_head_hash, chain_head) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} chain head mismatch",
@@ -426,7 +426,7 @@ impl ReceiptChain {
         Self::verify_entries_and_checkpoints(&entries, &checkpoints)?;
         let last_checkpoint_entry = checkpoints
             .last()
-            .map(|checkpoint| (checkpoint.end_index as usize).saturating_add(1))
+            .map(|checkpoint| usize::try_from(checkpoint.end_index).unwrap_or(usize::MAX).saturating_add(1))
             .unwrap_or(0);
         let next_checkpoint_id = checkpoints
             .iter()

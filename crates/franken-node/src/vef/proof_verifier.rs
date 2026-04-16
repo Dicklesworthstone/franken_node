@@ -323,7 +323,7 @@ impl ProofVerifier {
         let mut deny_reasons: Vec<String> = Vec::new();
         let mut degrade_level: u8 = 0;
 
-        // Check 1: Proof expiration
+        // Check 1: Proof expiration (fail-closed: < ensures expiry at exact boundary)
         let expiry_satisfied = now_millis < proof.expires_at_millis;
         if !expiry_satisfied {
             deny_reasons.push(format!(

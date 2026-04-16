@@ -396,7 +396,7 @@ impl RemoteBulkhead {
         if self.next_permit_id == u64::MAX {
             self.permit_ids_exhausted = true;
         } else {
-            self.next_permit_id += 1;
+            self.next_permit_id = self.next_permit_id.saturating_add(1);
         }
         self.outstanding_permits
             .insert(permit.permit_id, request_id.to_string());
@@ -747,7 +747,7 @@ impl RemoteBulkhead {
             .collect::<Vec<_>>();
         values.sort_unstable();
         let len = values.len();
-        let rank = (99usize.saturating_mul(len)).div_ceil(100).max(1) - 1;
+        let rank = (99usize.saturating_mul(len)).div_ceil(100).max(1).saturating_sub(1);
         Some(values[rank])
     }
 

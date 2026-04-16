@@ -537,7 +537,13 @@ pub fn mean(values: &[f64]) -> f64 {
     if values.is_empty() {
         return 0.0;
     }
-    values.iter().sum::<f64>() / values.len() as f64
+    let len_f64 = u32::try_from(values.len()).unwrap_or(u32::MAX) as f64;
+    let result = values.iter().sum::<f64>() / len_f64;
+    if result.is_finite() {
+        result
+    } else {
+        0.0
+    }
 }
 
 /// Compute sample standard deviation.
@@ -546,8 +552,14 @@ pub fn std_dev(values: &[f64]) -> f64 {
         return 0.0;
     }
     let m = mean(values);
-    let variance = values.iter().map(|v| (v - m).powi(2)).sum::<f64>() / (values.len() - 1) as f64;
-    variance.sqrt()
+    let len_minus_one = u32::try_from(values.len().saturating_sub(1)).unwrap_or(u32::MAX) as f64;
+    let variance = values.iter().map(|v| (v - m).powi(2)).sum::<f64>() / len_minus_one;
+    let result = variance.sqrt();
+    if result.is_finite() {
+        result
+    } else {
+        0.0
+    }
 }
 
 /// Compute coefficient of variation as a percentage.
@@ -556,7 +568,12 @@ pub fn coefficient_of_variation(values: &[f64]) -> f64 {
     if m.abs() < f64::EPSILON {
         return 0.0;
     }
-    (std_dev(values) / m.abs()) * 100.0
+    let result = (std_dev(values) / m.abs()) * 100.0;
+    if result.is_finite() {
+        result
+    } else {
+        0.0
+    }
 }
 
 /// Compute 95% confidence interval using t-distribution approximation.
@@ -577,7 +594,7 @@ pub fn confidence_interval_95(values: &[f64]) -> ConfidenceInterval {
 
     let m = mean(values);
     let sd = std_dev(values);
-    let n = values.len() as f64;
+    let n = u32::try_from(values.len()).unwrap_or(u32::MAX) as f64;
 
     // t-value lookup for common sample sizes at 95% confidence
     let t_value = match values.len() {

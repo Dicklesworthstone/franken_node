@@ -19,6 +19,9 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 const MAX_BUNDLE_BYTES: usize = 10 * 1024 * 1024;
+const MAX_CHUNKS_PER_BUNDLE: usize = 1000; // Hardening: prevent unbounded chunk growth
+const MAX_EVENT_LOG: usize = 50000; // Hardening: prevent unbounded event log growth
+const MAX_PREPARED_EVENTS: usize = 50000; // Hardening: prevent unbounded prepared events
 const DEFAULT_POLICY_VERSION: &str = "0.1.0";
 const DEFAULT_CREATED_AT: &str = "1970-01-01T00:00:00.000000Z";
 pub const INCIDENT_EVIDENCE_SCHEMA: &str = "franken-node/incident-evidence-source/v1";
@@ -508,7 +511,7 @@ pub fn generate_replay_bundle_from_evidence(
         .map(|(idx, (_, event))| {
             (
                 event.event_id.clone(),
-                u64::try_from(idx + 1).unwrap_or(u64::MAX),
+                u64::try_from(idx.saturating_add(1)).unwrap_or(u64::MAX),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -527,7 +530,7 @@ pub fn generate_replay_bundle_from_evidence(
                         parent_event_id: parent_event_id.clone(),
                     }
                 })?;
-                let current_index = u64::try_from(event_log.len() + 1).unwrap_or(u64::MAX);
+                let current_index = u64::try_from(event_log.len().saturating_add(1)).unwrap_or(u64::MAX);
                 if causal_parent >= current_index {
                     return Err(ReplayBundleError::EvidenceCausalParentInvalid {
                         event_id: event.event_id.clone(),
@@ -538,14 +541,14 @@ pub fn generate_replay_bundle_from_evidence(
             }
             None => None,
         };
-        event_log.push(RawEvent {
+        push_bounded(&mut event_log, RawEvent {
             timestamp: event.timestamp,
             event_type: event.event_type,
             payload: event.payload,
             causal_parent,
             state_snapshot: event.state_snapshot,
             policy_version: None,
-        });
+        }, MAX_EVENT_LOG);
     }
 
     if let Some(first) = event_log.first_mut() {
@@ -582,7 +585,7 @@ pub fn generate_replay_bundle(
             Some(snapshot) => Some(canonicalize_value(snapshot, "$.state_snapshot")?),
             None => None,
         };
-        prepared.push(PreparedEvent {
+        push_bounded(&mut prepared, PreparedEvent {
             normalized_timestamp,
             timestamp_micros,
             event_type: event.event_type,
@@ -592,7 +595,7 @@ pub fn generate_replay_bundle(
             state_snapshot,
             policy_version: event.policy_version.clone(),
             original_index: idx,
-        });
+        }, MAX_PREPARED_EVENTS);
     }
 
     prepared.sort_by(|left, right| {
@@ -603,17 +606,19 @@ pub fn generate_replay_bundle(
 
     let mut original_to_new = vec![0_u64; event_log.len()];
     for (new_index, event) in prepared.iter().enumerate() {
-        original_to_new[event.original_index] = u64::try_from(new_index + 1).unwrap_or(u64::MAX);
+        original_to_new[event.original_index] = u64::try_from(new_index.saturating_add(1)).unwrap_or(u64::MAX);
     }
 
     let timeline: Vec<TimelineEvent> = prepared
         .iter()
         .enumerate()
         .map(|(index, event)| {
-            let sequence_number = u64::try_from(index + 1).unwrap_or(u64::MAX);
+            let sequence_number = u64::try_from(index.saturating_add(1)).unwrap_or(u64::MAX);
             let mapped_parent = event.causal_parent.and_then(|p| {
-                if p > 0 && (p as usize) <= event_log.len() {
-                    Some(original_to_new[(p - 1) as usize])
+                let p_usize = usize::try_from(p).ok()?;
+                if p > 0 && p_usize < event_log.len() {
+                    let index = usize::try_from(p.saturating_sub(1)).ok()?;
+                    original_to_new.get(index).copied()
                 } else {
                     None
                 }
@@ -995,7 +1000,7 @@ fn chunk_timeline(
     for event in timeline {
         let event_json = canonicalize_value(&serde_json::to_value(event)?, "$.timeline_event")?;
         let event_size = canonical_json_bytes(&event_json)?.len();
-        if event_size > max_event_size {
+        if event_size >= max_event_size {
             return Err(ReplayBundleError::OversizedEvent {
                 sequence_number: event.sequence_number,
                 size_bytes: event_size,
@@ -1010,7 +1015,7 @@ fn chunk_timeline(
                 .saturating_add(event_size)
                 > MAX_BUNDLE_BYTES
         {
-            buckets.push(current_bucket);
+            push_bounded(&mut buckets, current_bucket, MAX_CHUNKS_PER_BUNDLE);
             current_bucket = Vec::new();
             current_size = 2;
         }
@@ -1023,7 +1028,7 @@ fn chunk_timeline(
     }
 
     if !current_bucket.is_empty() {
-        buckets.push(current_bucket);
+        push_bounded(&mut buckets, current_bucket, MAX_CHUNKS_PER_BUNDLE);
     }
 
     let total_chunks = u32::try_from(buckets.len()).unwrap_or(u32::MAX);
@@ -1034,7 +1039,7 @@ fn chunk_timeline(
         let chunk_bytes = canonical_json_bytes(&chunk_value)?;
         let first_sequence_number = events.first().map_or(0, |event| event.sequence_number);
         let last_sequence_number = events.last().map_or(0, |event| event.sequence_number);
-        chunks.push(BundleChunk {
+        push_bounded(&mut chunks, BundleChunk {
             bundle_id,
             chunk_index: u32::try_from(idx).unwrap_or(u32::MAX),
             total_chunks,
@@ -1044,7 +1049,7 @@ fn chunk_timeline(
             compressed_size_bytes: gzip_size_bytes(&chunk_bytes)?,
             chunk_hash: sha256_hex(&chunk_bytes),
             events,
-        });
+        }, MAX_CHUNKS_PER_BUNDLE);
     }
 
     Ok(chunks)
@@ -1099,6 +1104,15 @@ fn canonicalize_value(value: &Value, path: &str) -> Result<Value, ReplayBundleEr
             Ok(Value::Object(out))
         }
     }
+}
+
+/// Hardening: bounded push to prevent unbounded growth of struct-field Vecs
+fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if items.len() >= cap {
+        let overflow = items.len() - cap + 1;
+        items.drain(0..overflow);
+    }
+    items.push(item);
 }
 
 #[cfg(test)]
@@ -1460,6 +1474,57 @@ mod tests {
         let first = fixture_incident_events("INC-STABLE-001");
         let second = fixture_incident_events("INC-STABLE-001");
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn push_bounded_prevents_unbounded_growth() {
+        let mut vec = Vec::new();
+        let max_cap = 3;
+
+        // Push up to capacity
+        for i in 0..max_cap {
+            super::push_bounded(&mut vec, i, max_cap);
+        }
+        assert_eq!(vec.len(), 3);
+        assert_eq!(vec, vec![0, 1, 2]);
+
+        // Push beyond capacity should evict oldest items
+        super::push_bounded(&mut vec, 3, max_cap);
+        assert_eq!(vec.len(), 3);
+        assert_eq!(vec, vec![1, 2, 3]);
+
+        super::push_bounded(&mut vec, 4, max_cap);
+        assert_eq!(vec.len(), 3);
+        assert_eq!(vec, vec![2, 3, 4]);
+
+        // Push multiple items beyond capacity
+        super::push_bounded(&mut vec, 5, max_cap);
+        super::push_bounded(&mut vec, 6, max_cap);
+        assert_eq!(vec.len(), 3);
+        assert_eq!(vec, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn chunked_bundle_respects_max_chunks_limit() {
+        // Create events that would generate many chunks
+        let large_payload = "x".repeat(5_000_000); // 5MB each to force chunking
+        let mut events = Vec::new();
+
+        // Create enough events to test chunk limiting
+        for i in 0..10 {
+            events.push(RawEvent::new(
+                &format!("2026-01-01T00:00:00.{:06}Z", i),
+                EventType::StateChange,
+                serde_json::json!({"data": format!("{}{}", large_payload, i)}),
+            ));
+        }
+
+        let bundle = generate_replay_bundle("INC-CHUNK-LIMIT-TEST", &events).unwrap();
+
+        // Should have created chunks but not exceed our limit
+        assert!(bundle.manifest.chunk_count > 1);
+        assert!(bundle.manifest.chunk_count as usize <= super::MAX_CHUNKS_PER_BUNDLE);
+        assert_eq!(bundle.chunks.len(), bundle.manifest.chunk_count as usize);
     }
 
     #[test]

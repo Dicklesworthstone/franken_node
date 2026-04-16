@@ -215,7 +215,11 @@ impl FaultSchedule {
             rng_state ^= rng_state >> 7;
             rng_state ^= rng_state << 17;
 
-            let roll = (rng_state % 10000) as f64 / 10000.0;
+            let random_value = rng_state % 10000;
+            let roll = f64::from(u16::try_from(random_value).unwrap_or(0)) / 10000.0;
+            if !roll.is_finite() {
+                continue; // Skip this iteration if conversion produced non-finite value
+            }
 
             if roll < config.drop_probability {
                 faults.push(ScheduledFault {
@@ -224,7 +228,8 @@ impl FaultSchedule {
                 });
                 fault_count += 1;
             } else if roll < config.drop_probability + config.reorder_probability {
-                let depth = ((rng_state % config.reorder_max_depth.max(1) as u64) + 1) as usize;
+                let depth = usize::try_from((rng_state % config.reorder_max_depth.max(1) as u64).saturating_add(1))
+                    .unwrap_or(usize::MAX);
                 faults.push(ScheduledFault {
                     message_index: msg_idx,
                     fault: FaultClass::Reorder { depth },
@@ -238,7 +243,7 @@ impl FaultSchedule {
                     rng_state ^= rng_state << 13;
                     rng_state ^= rng_state >> 7;
                     rng_state ^= rng_state << 17;
-                    bits.push((rng_state % 256) as usize + i);
+                    bits.push(usize::try_from(rng_state % 256).unwrap_or(usize::MAX).saturating_add(i));
                 }
                 faults.push(ScheduledFault {
                     message_index: msg_idx,
@@ -527,7 +532,7 @@ impl VirtualTransportFaultHarness {
 
         let mut delivered_payload_hashes = Vec::with_capacity(total_messages);
         for msg_idx in 0..total_messages {
-            let message_id = msg_idx as u64 + 1;
+            let message_id = u64::try_from(msg_idx).unwrap_or(u64::MAX).saturating_add(1);
             if let Some(scheduled_fault) = schedule.fault_at(msg_idx) {
                 self.log_audit(
                     event_codes::FAULT_INJECTED,
@@ -556,9 +561,9 @@ impl VirtualTransportFaultHarness {
             .unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = Sha256::new();
         hasher.update(b"virtual_transport_faults_content_v1:");
-        hasher.update((schedule_json.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(schedule_json.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(schedule_json.as_bytes());
-        hasher.update((delivered_json.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(delivered_json.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(delivered_json.as_bytes());
         let content_hash = format!("{:x}", hasher.finalize());
 

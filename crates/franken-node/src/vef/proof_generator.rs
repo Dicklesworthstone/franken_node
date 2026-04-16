@@ -239,9 +239,9 @@ impl TestProofBackend {
         let mut hasher = Sha256::new();
         hasher.update(b"proof_generator_hash_v1:");
         hasher.update(b"proof-backend-v1:");
-        hasher.update((entries.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(entries.len()).unwrap_or(u64::MAX).to_le_bytes());
         for entry in entries {
-            hasher.update((entry.chain_hash.len() as u64).to_le_bytes());
+            hasher.update(u64::try_from(entry.chain_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
             hasher.update(entry.chain_hash.as_bytes());
         }
         hasher.finalize().to_vec()
@@ -614,7 +614,8 @@ impl ProofGenerator {
                 ProofStatus::Complete => "complete",
                 ProofStatus::Failed => "failed",
             };
-            *counts.entry(key.to_string()).or_default() += 1;
+            *counts.entry(key.to_string()).or_default() =
+                counts.entry(key.to_string()).or_default().saturating_add(1);
         }
         counts
     }

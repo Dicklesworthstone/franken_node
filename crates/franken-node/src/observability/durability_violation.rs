@@ -452,28 +452,28 @@ pub fn generate_bundle(context: &ViolationContext) -> ViolationBundle {
     hasher.update(b"durability_violation_bundle_v1:");
     hasher.update(context.epoch_id.to_le_bytes());
     hasher.update(context.timestamp_ms.to_le_bytes());
-    hasher.update((context.hardening_level.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(context.hardening_level.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(context.hardening_level.as_bytes());
     for event in &context.events {
         let label = event.event_type.label();
-        hasher.update((label.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(label.as_bytes());
         hasher.update(event.timestamp_ms.to_le_bytes());
         let desc = event.description.as_bytes();
-        hasher.update((desc.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(desc.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(desc);
         let eref = event.evidence_ref.as_deref().unwrap_or("");
-        hasher.update((eref.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(eref.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(eref.as_bytes());
     }
     for artifact in &context.artifacts {
-        hasher.update((artifact.artifact_path.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(artifact.artifact_path.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(artifact.artifact_path.as_bytes());
-        hasher.update((artifact.expected_hash.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(artifact.expected_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(artifact.expected_hash.as_bytes());
-        hasher.update((artifact.actual_hash.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(artifact.actual_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(artifact.actual_hash.as_bytes());
-        hasher.update((artifact.failure_reason.len() as u64).to_le_bytes());
+        hasher.update(u64::try_from(artifact.failure_reason.len()).unwrap_or(u64::MAX).to_le_bytes());
         hasher.update(artifact.failure_reason.as_bytes());
     }
     let digest = hasher.finalize();

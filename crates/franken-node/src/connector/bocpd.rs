@@ -208,7 +208,7 @@ impl GaussianSuffStats {
             self.n = f64::MAX;
         }
         let delta = x - self.mean;
-        self.mean += delta / self.n;
+        self.mean = self.mean.saturating_add(delta / self.n);
         if !self.mean.is_finite() {
             self.mean = 0.0;
         }
@@ -287,7 +287,7 @@ fn ln_gamma(x: f64) -> f64 {
     let mut a = coefficients[0];
     let t = x + 7.5;
     for (i, &coeff) in coefficients.iter().enumerate().skip(1) {
-        a += coeff / (x + i as f64);
+        a = a.saturating_add(coeff / (x + i as f64));
     }
     0.5 * (2.0 * PI).ln() + (t).ln() * (x + 0.5) - t + a.ln()
 }
@@ -536,7 +536,7 @@ impl BocpdDetector {
             let h = self.hazard.evaluate(r);
             let joint = self.run_length_probs[r] * pred_probs[r];
             growth_probs[r + 1] = joint * (1.0 - h);
-            changepoint_mass += joint * h;
+            changepoint_mass = changepoint_mass.saturating_add(joint * h);
         }
         growth_probs[0] = changepoint_mass;
 
@@ -935,7 +935,7 @@ mod tests {
         let mut shifts = 0;
         for i in 0..100 {
             if det.observe(10.0, 1000 + i as u64).is_some() {
-                shifts += 1;
+                shifts = shifts.saturating_add(1);
             }
         }
         // In a perfectly stable stream, no changepoints should be detected.
@@ -1000,7 +1000,7 @@ mod tests {
                 .observe(if i < 10 { 0.0 } else { 100.0 }, i as u64)
                 .is_some()
             {
-                shifts += 1;
+                shifts = shifts.saturating_add(1);
             }
         }
         assert_eq!(shifts, 0, "min_run_length should suppress all signals");

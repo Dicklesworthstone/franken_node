@@ -167,7 +167,7 @@ impl IdempotencyKeyDeriver {
     }
 
     fn append_len_prefixed_field(output: &mut Vec<u8>, bytes: &[u8]) {
-        output.extend_from_slice(&(bytes.len() as u64).to_be_bytes());
+        output.extend_from_slice(&(u64::try_from(bytes.len()).unwrap_or(u64::MAX)).to_be_bytes());
         output.extend_from_slice(bytes);
     }
 
