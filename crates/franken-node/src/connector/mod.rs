@@ -94,3 +94,6 @@ pub mod vef_perf_budget;
 pub mod vef_policy_constraints;
 #[cfg(any(test, feature = "extended-surfaces"))]
 pub mod verifier_sdk;
+
+#[cfg(test)]
+mod bocpd_conformance_tests;
