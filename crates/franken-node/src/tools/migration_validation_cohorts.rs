@@ -59,8 +59,12 @@ pub const MIN_DETERMINISM_RATE: f64 = 0.99;
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_PROJECTS_PER_COHORT, MAX_RUNS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -171,13 +175,32 @@ impl MigrationValidationCohorts {
         mut cohort: ProjectCohort,
         trace_id: &str,
     ) -> Result<String, String> {
-        if cohort.name.is_empty() {
+        if cohort.cohort_id.trim().is_empty() {
+            self.log(
+                event_codes::MVC_ERR_INVALID_COHORT,
+                trace_id,
+                serde_json::json!({"reason": "empty cohort_id"}),
+            );
+            return Err("cohort id must not be empty".to_string());
+        }
+        if cohort.name.trim().is_empty() {
             self.log(
                 event_codes::MVC_ERR_INVALID_COHORT,
                 trace_id,
                 serde_json::json!({"reason": "empty name"}),
             );
             return Err("cohort name must not be empty".to_string());
+        }
+        if self.cohorts.contains_key(&cohort.cohort_id) {
+            self.log(
+                event_codes::MVC_ERR_INVALID_COHORT,
+                trace_id,
+                serde_json::json!({
+                    "cohort_id": &cohort.cohort_id,
+                    "reason": "duplicate cohort_id",
+                }),
+            );
+            return Err(format!("cohort already exists: {}", cohort.cohort_id));
         }
         cohort.created_at = Utc::now().to_rfc3339();
         let cid = cohort.cohort_id.clone();
@@ -196,6 +219,14 @@ impl MigrationValidationCohorts {
         project_id: &str,
         trace_id: &str,
     ) -> Result<(), String> {
+        if project_id.trim().is_empty() {
+            self.log(
+                event_codes::MVC_ERR_INVALID_COHORT,
+                trace_id,
+                serde_json::json!({"cohort_id": cohort_id, "reason": "empty project_id"}),
+            );
+            return Err("project id must not be empty".to_string());
+        }
         let cohort = self
             .cohorts
             .get_mut(cohort_id)
@@ -222,6 +253,14 @@ impl MigrationValidationCohorts {
         if !self.cohorts.contains_key(cohort_id) {
             return Err(format!("cohort not found: {cohort_id}"));
         }
+        if reproduction_command.trim().is_empty() {
+            self.log(
+                event_codes::MVC_ERR_INVALID_COHORT,
+                trace_id,
+                serde_json::json!({"cohort_id": cohort_id, "reason": "empty reproduction_command"}),
+            );
+            return Err("reproduction command must not be empty".to_string());
+        }
         let rid = Uuid::now_v7().to_string();
         let run = ValidationRun {
             run_id: rid.clone(),
@@ -247,6 +286,14 @@ impl MigrationValidationCohorts {
         outcome_hash: &str,
         trace_id: &str,
     ) -> Result<(), String> {
+        if outcome_hash.trim().is_empty() {
+            self.log(
+                event_codes::MVC_ERR_NONDETERMINISM,
+                trace_id,
+                serde_json::json!({"run_id": run_id, "reason": "empty outcome_hash"}),
+            );
+            return Err("outcome hash must not be empty".to_string());
+        }
         let run = self
             .runs
             .iter_mut()
@@ -474,6 +521,48 @@ mod tests {
     }
 
     #[test]
+    fn create_empty_cohort_id_fails_without_insert() {
+        let mut e = MigrationValidationCohorts::default();
+        let c = sample_cohort("", CohortCategory::NodeMinimal);
+        let err = e.create_cohort(c, "trace-empty-id").unwrap_err();
+
+        assert!(err.contains("cohort id"));
+        assert!(e.cohorts().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert_eq!(
+            e.audit_log()[0].event_code,
+            event_codes::MVC_ERR_INVALID_COHORT
+        );
+        assert_eq!(e.audit_log()[0].details["reason"], "empty cohort_id");
+    }
+
+    #[test]
+    fn create_duplicate_cohort_id_rejected_without_overwrite() {
+        let mut e = MigrationValidationCohorts::default();
+        e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
+        e.add_project("c1", "project-original", &trace()).unwrap();
+        let duplicate = ProjectCohort {
+            name: "Replacement".to_string(),
+            category: CohortCategory::BunComplex,
+            ..sample_cohort("c1", CohortCategory::BunComplex)
+        };
+        let err = e.create_cohort(duplicate, "trace-duplicate").unwrap_err();
+
+        assert!(err.contains("already exists"));
+        assert_eq!(e.cohorts().len(), 1);
+        assert_eq!(e.cohorts()["c1"].category, CohortCategory::NodeMinimal);
+        assert_eq!(e.cohorts()["c1"].name, "Cohort c1");
+        assert_eq!(
+            e.cohorts()["c1"].project_ids,
+            vec!["project-original".to_string()]
+        );
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::MVC_ERR_INVALID_COHORT
+            && record.details["reason"] == "duplicate cohort_id"));
+    }
+
+    #[test]
     fn create_sets_timestamp() {
         let mut e = MigrationValidationCohorts::default();
         e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
@@ -497,6 +586,35 @@ mod tests {
     }
 
     #[test]
+    fn add_empty_project_id_rejected_without_mutating_cohort() {
+        let mut e = MigrationValidationCohorts::default();
+        e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
+        let err = e.add_project("c1", "", "trace-empty-project").unwrap_err();
+
+        assert!(err.contains("project id"));
+        assert!(e.cohorts()["c1"].project_ids.is_empty());
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::MVC_ERR_INVALID_COHORT
+            && record.details["reason"] == "empty project_id"));
+        assert!(
+            !e.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::MVC_PROJECT_ADDED
+                    && record.details["project_id"] == "")
+        );
+    }
+
+    #[test]
+    fn add_project_missing_cohort_does_not_emit_success_audit() {
+        let mut e = MigrationValidationCohorts::default();
+        assert!(e.add_project("missing", "proj-1", "trace-missing").is_err());
+
+        assert!(e.cohorts().is_empty());
+        assert!(e.audit_log().is_empty());
+    }
+
+    #[test]
     fn start_run_ok() {
         let mut e = MigrationValidationCohorts::default();
         e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
@@ -508,6 +626,37 @@ mod tests {
     fn start_run_missing_cohort() {
         let mut e = MigrationValidationCohorts::default();
         assert!(e.start_run("missing", "cmd", &trace()).is_err());
+    }
+
+    #[test]
+    fn start_run_empty_reproduction_command_rejected_without_run() {
+        let mut e = MigrationValidationCohorts::default();
+        e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
+        let err = e.start_run("c1", "", "trace-empty-command").unwrap_err();
+
+        assert!(err.contains("reproduction command"));
+        assert!(e.runs().is_empty());
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::MVC_ERR_INVALID_COHORT
+            && record.details["reason"] == "empty reproduction_command"));
+        assert!(
+            !e.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::MVC_RUN_STARTED)
+        );
+    }
+
+    #[test]
+    fn start_run_missing_cohort_does_not_create_run_or_audit() {
+        let mut e = MigrationValidationCohorts::default();
+        assert!(
+            e.start_run("missing", "make validate", "trace-missing-run")
+                .is_err()
+        );
+
+        assert!(e.runs().is_empty());
+        assert!(e.audit_log().is_empty());
     }
 
     #[test]
@@ -638,6 +787,148 @@ mod tests {
     fn complete_run_missing_fails() {
         let mut e = MigrationValidationCohorts::default();
         assert!(e.complete_run("missing", "hash", &trace()).is_err());
+    }
+
+    #[test]
+    fn complete_run_empty_outcome_hash_rejected_without_completion() {
+        let mut e = MigrationValidationCohorts::default();
+        e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
+        let rid = e.start_run("c1", "cmd", &trace()).unwrap();
+        let err = e.complete_run(&rid, "", "trace-empty-hash").unwrap_err();
+
+        assert!(err.contains("outcome hash"));
+        assert!(e.runs()[0].completed_at.is_none());
+        assert!(!e.runs()[0].deterministic);
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::MVC_ERR_NONDETERMINISM
+            && matches!(
+                record.details["reason"].as_str(),
+                Some("empty outcome_hash")
+            )));
+        assert!(
+            !e.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::MVC_RUN_COMPLETED)
+        );
+    }
+
+    #[test]
+    fn complete_run_missing_id_does_not_emit_audit() {
+        let mut e = MigrationValidationCohorts::default();
+        assert!(
+            e.complete_run("missing", "hash-present", "trace-missing-complete")
+                .is_err()
+        );
+
+        assert!(e.audit_log().is_empty());
+        assert!(e.runs().is_empty());
+    }
+
+    #[test]
+    fn create_whitespace_cohort_id_fails_without_insert() {
+        let mut e = MigrationValidationCohorts::default();
+        let mut c = sample_cohort("space-id", CohortCategory::NodeMinimal);
+        c.cohort_id = "   ".to_string();
+
+        let err = e.create_cohort(c, "trace-space-id").unwrap_err();
+
+        assert!(err.contains("cohort id"));
+        assert!(e.cohorts().is_empty());
+        assert_eq!(e.audit_log()[0].details["reason"], "empty cohort_id");
+    }
+
+    #[test]
+    fn create_whitespace_name_fails_without_insert() {
+        let mut e = MigrationValidationCohorts::default();
+        let mut c = sample_cohort("c-space-name", CohortCategory::BunMinimal);
+        c.name = "\n\t".to_string();
+
+        let err = e.create_cohort(c, "trace-space-name").unwrap_err();
+
+        assert!(err.contains("cohort name"));
+        assert!(e.cohorts().is_empty());
+        assert_eq!(e.audit_log()[0].details["reason"], "empty name");
+    }
+
+    #[test]
+    fn add_whitespace_project_id_rejected_without_mutating_cohort() {
+        let mut e = MigrationValidationCohorts::default();
+        e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
+
+        let err = e.add_project("c1", "  ", "trace-space-project").unwrap_err();
+
+        assert!(err.contains("project id"));
+        assert!(e.cohorts()["c1"].project_ids.is_empty());
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::MVC_ERR_INVALID_COHORT
+            && record.details["reason"] == "empty project_id"));
+    }
+
+    #[test]
+    fn start_run_whitespace_command_rejected_without_run() {
+        let mut e = MigrationValidationCohorts::default();
+        e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
+
+        let err = e.start_run("c1", " \t", "trace-space-command").unwrap_err();
+
+        assert!(err.contains("reproduction command"));
+        assert!(e.runs().is_empty());
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::MVC_ERR_INVALID_COHORT
+            && record.details["reason"] == "empty reproduction_command"));
+    }
+
+    #[test]
+    fn complete_run_whitespace_hash_rejected_without_completion() {
+        let mut e = MigrationValidationCohorts::default();
+        e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
+        let rid = e.start_run("c1", "cmd", &trace()).unwrap();
+
+        let err = e
+            .complete_run(&rid, " \n", "trace-space-hash")
+            .unwrap_err();
+
+        assert!(err.contains("outcome hash"));
+        assert!(e.runs()[0].completed_at.is_none());
+        assert!(!e.runs()[0].deterministic);
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::MVC_ERR_NONDETERMINISM
+            && matches!(
+                record.details["reason"].as_str(),
+                Some("empty outcome_hash")
+            )));
+    }
+
+    #[test]
+    fn whitespace_hash_rejection_preserves_prior_completed_run() {
+        let mut e = MigrationValidationCohorts::default();
+        e.create_cohort(sample_cohort("c1", CohortCategory::NodeMinimal), &trace())
+            .unwrap();
+        let completed = e.start_run("c1", "cmd", &trace()).unwrap();
+        e.complete_run(&completed, "hash-abc", &trace()).unwrap();
+        let rejected = e.start_run("c1", "cmd", &trace()).unwrap();
+
+        let err = e
+            .complete_run(&rejected, "\t", "trace-space-hash-kept")
+            .unwrap_err();
+
+        assert!(err.contains("outcome hash"));
+        assert!(e.runs()[0].deterministic);
+        assert!(e.runs()[0].completed_at.is_some());
+        assert!(e.runs()[1].completed_at.is_none());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_without_panic() {
+        let mut items = vec![1_u8, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
     }
 
     // === bd-2ccjl: report hash coverage regression ===

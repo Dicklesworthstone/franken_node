@@ -46,6 +46,8 @@ pub mod event_codes {
     pub const BMP_ARCHIVE_TRIGGERED: &str = "BMP-010";
     pub const BMP_ERR_MISSING_SECTION: &str = "BMP-ERR-001";
     pub const BMP_ERR_INVALID_TRANSITION: &str = "BMP-ERR-002";
+    pub const BMP_ERR_INVALID_PUBLICATION: &str = "BMP-ERR-003";
+    pub const BMP_ERR_INVALID_CITATION: &str = "BMP-ERR-004";
 }
 
 pub mod invariants {
@@ -63,8 +65,13 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_CITATIONS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len().saturating_add(1).saturating_sub(cap);
+    if overflow > 0 {
         items.drain(0..overflow);
     }
     items.push(item);
@@ -286,19 +293,103 @@ impl BenchmarkMethodology {
         mut pub_entry: Publication,
         trace_id: &str,
     ) -> Result<String, String> {
+        if pub_entry.pub_id.trim().is_empty() {
+            self.log(
+                event_codes::BMP_ERR_INVALID_PUBLICATION,
+                trace_id,
+                serde_json::json!({"reason": "empty pub_id"}),
+            );
+            return Err("publication id must not be empty".to_string());
+        }
+        if self.publications.contains_key(&pub_entry.pub_id) {
+            self.log(
+                event_codes::BMP_ERR_INVALID_PUBLICATION,
+                trace_id,
+                serde_json::json!({"pub_id": &pub_entry.pub_id, "reason": "duplicate pub_id"}),
+            );
+            return Err(format!("duplicate publication: {}", pub_entry.pub_id));
+        }
+        if pub_entry.title.trim().is_empty() {
+            self.log(
+                event_codes::BMP_ERR_INVALID_PUBLICATION,
+                trace_id,
+                serde_json::json!({"pub_id": &pub_entry.pub_id, "reason": "empty title"}),
+            );
+            return Err("publication title must not be empty".to_string());
+        }
+        if pub_entry.authors.is_empty()
+            || pub_entry
+                .authors
+                .iter()
+                .any(|author| author.trim().is_empty())
+        {
+            self.log(
+                event_codes::BMP_ERR_INVALID_PUBLICATION,
+                trace_id,
+                serde_json::json!({"pub_id": &pub_entry.pub_id, "reason": "invalid authors"}),
+            );
+            return Err("publication authors must not be empty".to_string());
+        }
+
         // Validate required sections
         for sec in REQUIRED_SECTIONS {
-            if !pub_entry.sections.contains_key(*sec) {
-                self.log(
-                    event_codes::BMP_ERR_MISSING_SECTION,
-                    trace_id,
-                    serde_json::json!({
-                        "pub_id": &pub_entry.pub_id,
-                        "missing_section": sec,
-                    }),
-                );
-                return Err(format!("Missing required section: {}", sec));
+            match pub_entry.sections.get(*sec) {
+                Some(content) if !content.trim().is_empty() => {}
+                _ => {
+                    self.log(
+                        event_codes::BMP_ERR_MISSING_SECTION,
+                        trace_id,
+                        serde_json::json!({
+                            "pub_id": &pub_entry.pub_id,
+                            "missing_section": sec,
+                        }),
+                    );
+                    return Err(format!("Missing required section: {}", sec));
+                }
             }
+        }
+
+        // Validate reproducibility checklist
+        if pub_entry.reproducibility_checklist.is_empty() {
+            self.log(
+                event_codes::BMP_ERR_INVALID_PUBLICATION,
+                trace_id,
+                serde_json::json!({
+                    "pub_id": &pub_entry.pub_id,
+                    "reason": "empty reproducibility_checklist",
+                }),
+            );
+            return Err("Reproducibility checklist must not be empty".to_string());
+        }
+        if pub_entry
+            .reproducibility_checklist
+            .iter()
+            .any(|item| item.item.trim().is_empty())
+        {
+            self.log(
+                event_codes::BMP_ERR_INVALID_PUBLICATION,
+                trace_id,
+                serde_json::json!({
+                    "pub_id": &pub_entry.pub_id,
+                    "reason": "empty checklist item",
+                }),
+            );
+            return Err("reproducibility checklist items must not be empty".to_string());
+        }
+        if pub_entry
+            .reproducibility_checklist
+            .iter()
+            .any(|item| !item.verified)
+        {
+            self.log(
+                event_codes::BMP_ERR_INVALID_PUBLICATION,
+                trace_id,
+                serde_json::json!({
+                    "pub_id": &pub_entry.pub_id,
+                    "reason": "unverified checklist item",
+                }),
+            );
+            return Err("all reproducibility checklist items must be verified".to_string());
         }
 
         self.log(
@@ -309,11 +400,6 @@ impl BenchmarkMethodology {
                 "sections": pub_entry.sections.len(),
             }),
         );
-
-        // Validate reproducibility checklist
-        if pub_entry.reproducibility_checklist.is_empty() {
-            return Err("Reproducibility checklist must not be empty".to_string());
-        }
 
         self.log(
             event_codes::BMP_CHECKLIST_VERIFIED,
@@ -427,6 +513,60 @@ impl BenchmarkMethodology {
     ) -> Result<(), String> {
         if !self.publications.contains_key(pub_id) {
             return Err(format!("Publication {} not found", pub_id));
+        }
+        if citation.cite_id.trim().is_empty() {
+            self.log(
+                event_codes::BMP_ERR_INVALID_CITATION,
+                trace_id,
+                serde_json::json!({"pub_id": pub_id, "reason": "empty cite_id"}),
+            );
+            return Err("citation id must not be empty".to_string());
+        }
+        if citation.title.trim().is_empty() {
+            self.log(
+                event_codes::BMP_ERR_INVALID_CITATION,
+                trace_id,
+                serde_json::json!({
+                    "pub_id": pub_id,
+                    "cite_id": &citation.cite_id,
+                    "reason": "empty title",
+                }),
+            );
+            return Err("citation title must not be empty".to_string());
+        }
+        if citation.authors.is_empty()
+            || citation
+                .authors
+                .iter()
+                .any(|author| author.trim().is_empty())
+        {
+            self.log(
+                event_codes::BMP_ERR_INVALID_CITATION,
+                trace_id,
+                serde_json::json!({
+                    "pub_id": pub_id,
+                    "cite_id": &citation.cite_id,
+                    "reason": "invalid authors",
+                }),
+            );
+            return Err("citation authors must not be empty".to_string());
+        }
+        if self.publications.get(pub_id).is_some_and(|pub_entry| {
+            pub_entry
+                .citations
+                .iter()
+                .any(|existing| existing.cite_id == citation.cite_id)
+        }) {
+            self.log(
+                event_codes::BMP_ERR_INVALID_CITATION,
+                trace_id,
+                serde_json::json!({
+                    "pub_id": pub_id,
+                    "cite_id": &citation.cite_id,
+                    "reason": "duplicate cite_id",
+                }),
+            );
+            return Err(format!("duplicate citation: {}", citation.cite_id));
         }
 
         let cite_id = citation.cite_id.clone();
@@ -573,6 +713,34 @@ mod tests {
         }
     }
 
+    fn sample_citation(id: &str) -> Citation {
+        Citation {
+            cite_id: id.to_string(),
+            title: "Test Paper".to_string(),
+            authors: vec!["Author B".to_string()],
+            year: 2025,
+            url: Some("https://example.com".to_string()),
+        }
+    }
+
+    #[test]
+    fn push_bounded_zero_cap_drops_item_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_preexisting_overflow_keeps_newest_item() {
+        let mut items = vec![1, 2, 3, 4];
+
+        push_bounded(&mut items, 5, 3);
+
+        assert_eq!(items, vec![3, 4, 5]);
+    }
+
     // === Topics ===
 
     #[test]
@@ -684,6 +852,267 @@ mod tests {
         assert!(engine.create_publication(p, &trace()).is_err());
     }
 
+    #[test]
+    fn create_empty_pub_id_rejected_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let err = engine
+            .create_publication(
+                sample_pub("", MethodologyTopic::BenchmarkDesign),
+                "trace-empty-id",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("publication id"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(engine.audit_log().len(), 1);
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::BMP_ERR_INVALID_PUBLICATION
+        );
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("empty pub_id")
+        );
+    }
+
+    #[test]
+    fn create_whitespace_pub_id_rejected_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let err = engine
+            .create_publication(
+                sample_pub(" \t ", MethodologyTopic::BenchmarkDesign),
+                "trace-whitespace-id",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("publication id"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("empty pub_id")
+        );
+    }
+
+    #[test]
+    fn create_duplicate_pub_id_rejected_without_overwrite() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        let original_hash = engine.publications()["pub-1"].content_hash.clone();
+        let mut replacement = sample_pub("pub-1", MethodologyTopic::ThreatModeling);
+        replacement.title = "Replacement".to_string();
+        replacement.authors = vec!["Replacement Author".to_string()];
+        let err = engine
+            .create_publication(replacement, "trace-duplicate")
+            .unwrap_err();
+
+        assert!(err.contains("duplicate"));
+        assert_eq!(engine.publications().len(), 1);
+        assert_eq!(
+            engine.publications()["pub-1"].topic,
+            MethodologyTopic::BenchmarkDesign
+        );
+        assert!(crate::security::constant_time::ct_eq_bytes(
+            engine.publications()["pub-1"].content_hash.as_bytes(),
+            original_hash.as_bytes()
+        ));
+    }
+
+    #[test]
+    fn create_empty_title_rejected_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub("pub-empty-title", MethodologyTopic::BenchmarkDesign);
+        p.title.clear();
+        let err = engine
+            .create_publication(p, "trace-empty-title")
+            .unwrap_err();
+
+        assert!(err.contains("title"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("empty title")
+        );
+    }
+
+    #[test]
+    fn create_whitespace_title_rejected_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub("pub-whitespace-title", MethodologyTopic::BenchmarkDesign);
+        p.title = " \n\t ".to_string();
+        let err = engine
+            .create_publication(p, "trace-whitespace-title")
+            .unwrap_err();
+
+        assert!(err.contains("title"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("empty title")
+        );
+    }
+
+    #[test]
+    fn create_empty_author_rejected_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub("pub-empty-author", MethodologyTopic::BenchmarkDesign);
+        p.authors = vec![String::new()];
+        let err = engine
+            .create_publication(p, "trace-empty-author")
+            .unwrap_err();
+
+        assert!(err.contains("authors"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("invalid authors")
+        );
+    }
+
+    #[test]
+    fn create_whitespace_author_rejected_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub("pub-whitespace-author", MethodologyTopic::BenchmarkDesign);
+        p.authors = vec![" \t ".to_string()];
+        let err = engine
+            .create_publication(p, "trace-whitespace-author")
+            .unwrap_err();
+
+        assert!(err.contains("authors"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("invalid authors")
+        );
+    }
+
+    #[test]
+    fn create_empty_authors_vec_rejected_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub("pub-no-authors", MethodologyTopic::BenchmarkDesign);
+        p.authors.clear();
+        let err = engine
+            .create_publication(p, "trace-no-authors")
+            .unwrap_err();
+
+        assert!(err.contains("authors"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(engine.audit_log().len(), 1);
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("invalid authors")
+        );
+    }
+
+    #[test]
+    fn create_empty_required_section_content_fails_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub("pub-empty-section", MethodologyTopic::BenchmarkDesign);
+        p.sections.insert("methodology".to_string(), String::new());
+        let err = engine
+            .create_publication(p, "trace-empty-section")
+            .unwrap_err();
+
+        assert!(err.contains("methodology"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::BMP_ERR_MISSING_SECTION
+        );
+        assert_eq!(
+            engine.audit_log()[0].details["missing_section"].as_str(),
+            Some("methodology")
+        );
+    }
+
+    #[test]
+    fn create_whitespace_required_section_content_fails_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub("pub-whitespace-section", MethodologyTopic::BenchmarkDesign);
+        p.sections
+            .insert("methodology".to_string(), " \n\t ".to_string());
+        let err = engine
+            .create_publication(p, "trace-whitespace-section")
+            .unwrap_err();
+
+        assert!(err.contains("methodology"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::BMP_ERR_MISSING_SECTION
+        );
+        assert_eq!(
+            engine.audit_log()[0].details["missing_section"].as_str(),
+            Some("methodology")
+        );
+    }
+
+    #[test]
+    fn create_unverified_checklist_item_fails_without_success_audit() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub("pub-unverified", MethodologyTopic::BenchmarkDesign);
+        p.reproducibility_checklist[0].verified = false;
+        let err = engine
+            .create_publication(p, "trace-unverified")
+            .unwrap_err();
+
+        assert!(err.contains("verified"));
+        assert!(engine.publications().is_empty());
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_PUBLICATION
+            && record.details["reason"].as_str() == Some("unverified checklist item")));
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::BMP_PUBLICATION_CREATED)
+        );
+    }
+
+    #[test]
+    fn create_empty_checklist_item_fails_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub(
+            "pub-empty-checklist-item",
+            MethodologyTopic::BenchmarkDesign,
+        );
+        p.reproducibility_checklist[0].item.clear();
+        let err = engine
+            .create_publication(p, "trace-empty-checklist-item")
+            .unwrap_err();
+
+        assert!(err.contains("checklist"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("empty checklist item")
+        );
+    }
+
+    #[test]
+    fn create_whitespace_checklist_item_fails_without_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut p = sample_pub(
+            "pub-whitespace-checklist-item",
+            MethodologyTopic::BenchmarkDesign,
+        );
+        p.reproducibility_checklist[0].item = " \n\t ".to_string();
+        let err = engine
+            .create_publication(p, "trace-whitespace-checklist-item")
+            .unwrap_err();
+
+        assert!(err.contains("checklist"));
+        assert!(engine.publications().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("empty checklist item")
+        );
+    }
+
     // === Status transitions ===
 
     #[test]
@@ -787,6 +1216,84 @@ mod tests {
         assert_ne!(before, stored.content_hash);
     }
 
+    #[test]
+    fn transition_missing_publication_does_not_audit() {
+        let mut engine = BenchmarkMethodology::default();
+
+        let err = engine
+            .transition_status("missing-pub", PubStatus::Review, "trace-missing-transition")
+            .unwrap_err();
+
+        assert!(err.contains("not found"));
+        assert!(engine.publications().is_empty());
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn review_to_review_rejected_without_status_or_hash_change() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-review-loop", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .transition_status("pub-review-loop", PubStatus::Review, &trace())
+            .unwrap();
+        let before = engine.publications()["pub-review-loop"]
+            .content_hash
+            .clone();
+
+        let err = engine
+            .transition_status("pub-review-loop", PubStatus::Review, "trace-review-loop")
+            .unwrap_err();
+
+        assert!(err.contains("Cannot transition"));
+        let stored = &engine.publications()["pub-review-loop"];
+        assert_eq!(stored.status, PubStatus::Review);
+        assert!(crate::security::constant_time::ct_eq_bytes(
+            stored.content_hash.as_bytes(),
+            before.as_bytes()
+        ));
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_TRANSITION
+            && record.details["from"].as_str() == Some("review")
+            && record.details["to"].as_str() == Some("review")));
+    }
+
+    #[test]
+    fn published_to_draft_rejected_without_downgrade() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-no-downgrade", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .transition_status("pub-no-downgrade", PubStatus::Review, &trace())
+            .unwrap();
+        engine
+            .transition_status("pub-no-downgrade", PubStatus::Published, &trace())
+            .unwrap();
+        let before = engine.publications()["pub-no-downgrade"]
+            .content_hash
+            .clone();
+
+        let err = engine
+            .transition_status("pub-no-downgrade", PubStatus::Draft, "trace-no-downgrade")
+            .unwrap_err();
+
+        assert!(err.contains("Cannot transition"));
+        let stored = &engine.publications()["pub-no-downgrade"];
+        assert_eq!(stored.status, PubStatus::Published);
+        assert!(crate::security::constant_time::ct_eq_bytes(
+            stored.content_hash.as_bytes(),
+            before.as_bytes()
+        ));
+    }
+
     // === Citations ===
 
     #[test]
@@ -845,6 +1352,226 @@ mod tests {
         let stored = engine.publications().get("pub-1").unwrap();
         assert_eq!(stored.citations.len(), 1);
         assert_ne!(before, stored.content_hash);
+    }
+
+    #[test]
+    fn add_citation_missing_publication_does_not_audit() {
+        let mut engine = BenchmarkMethodology::default();
+        let err = engine
+            .add_citation("missing", sample_citation("cite-1"), "trace-missing-pub")
+            .unwrap_err();
+
+        assert!(err.contains("not found"));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn add_citation_missing_publication_takes_precedence_over_bad_citation() {
+        let mut engine = BenchmarkMethodology::default();
+        let mut bad_citation = sample_citation("");
+        bad_citation.title.clear();
+        bad_citation.authors.clear();
+
+        let err = engine
+            .add_citation("missing", bad_citation, "trace-missing-bad-cite")
+            .unwrap_err();
+
+        assert!(err.contains("not found"));
+        assert!(engine.publications().is_empty());
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn add_empty_citation_id_rejected_without_mutation() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        let before_hash = engine.publications()["pub-1"].content_hash.clone();
+        let err = engine
+            .add_citation("pub-1", sample_citation(""), "trace-empty-cite")
+            .unwrap_err();
+
+        assert!(err.contains("citation id"));
+        assert!(engine.publications()["pub-1"].citations.is_empty());
+        assert!(crate::security::constant_time::ct_eq_bytes(
+            engine.publications()["pub-1"].content_hash.as_bytes(),
+            before_hash.as_bytes()
+        ));
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_CITATION
+            && record.details["reason"].as_str() == Some("empty cite_id")));
+    }
+
+    #[test]
+    fn add_whitespace_citation_id_rejected_without_mutation() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        let before_hash = engine.publications()["pub-1"].content_hash.clone();
+        let err = engine
+            .add_citation("pub-1", sample_citation(" \t "), "trace-blank-cite")
+            .unwrap_err();
+
+        assert!(err.contains("citation id"));
+        assert!(engine.publications()["pub-1"].citations.is_empty());
+        assert!(crate::security::constant_time::ct_eq_bytes(
+            engine.publications()["pub-1"].content_hash.as_bytes(),
+            before_hash.as_bytes()
+        ));
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_CITATION
+            && record.details["reason"].as_str() == Some("empty cite_id")));
+    }
+
+    #[test]
+    fn add_empty_citation_title_rejected_without_mutation() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        let mut citation = sample_citation("cite-empty-title");
+        citation.title.clear();
+        let err = engine
+            .add_citation("pub-1", citation, "trace-empty-cite-title")
+            .unwrap_err();
+
+        assert!(err.contains("title"));
+        assert!(engine.publications()["pub-1"].citations.is_empty());
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_CITATION
+            && record.details["reason"].as_str() == Some("empty title")));
+    }
+
+    #[test]
+    fn add_whitespace_citation_title_rejected_without_mutation() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        let mut citation = sample_citation("cite-whitespace-title");
+        citation.title = " \n\t ".to_string();
+        let err = engine
+            .add_citation("pub-1", citation, "trace-whitespace-cite-title")
+            .unwrap_err();
+
+        assert!(err.contains("title"));
+        assert!(engine.publications()["pub-1"].citations.is_empty());
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_CITATION
+            && record.details["reason"].as_str() == Some("empty title")));
+    }
+
+    #[test]
+    fn add_empty_citation_author_rejected_without_mutation() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        let mut citation = sample_citation("cite-empty-author");
+        citation.authors = vec![String::new()];
+        let err = engine
+            .add_citation("pub-1", citation, "trace-empty-cite-author")
+            .unwrap_err();
+
+        assert!(err.contains("authors"));
+        assert!(engine.publications()["pub-1"].citations.is_empty());
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_CITATION
+            && record.details["reason"].as_str() == Some("invalid authors")));
+    }
+
+    #[test]
+    fn add_whitespace_citation_author_rejected_without_mutation() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        let mut citation = sample_citation("cite-whitespace-author");
+        citation.authors = vec![" \t ".to_string()];
+        let err = engine
+            .add_citation("pub-1", citation, "trace-whitespace-cite-author")
+            .unwrap_err();
+
+        assert!(err.contains("authors"));
+        assert!(engine.publications()["pub-1"].citations.is_empty());
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_CITATION
+            && record.details["reason"].as_str() == Some("invalid authors")));
+    }
+
+    #[test]
+    fn add_empty_citation_authors_vec_rejected_without_mutation() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        let before_hash = engine.publications()["pub-1"].content_hash.clone();
+        let mut citation = sample_citation("cite-no-authors");
+        citation.authors.clear();
+        let err = engine
+            .add_citation("pub-1", citation, "trace-cite-no-authors")
+            .unwrap_err();
+
+        assert!(err.contains("authors"));
+        assert!(engine.publications()["pub-1"].citations.is_empty());
+        assert!(crate::security::constant_time::ct_eq_bytes(
+            engine.publications()["pub-1"].content_hash.as_bytes(),
+            before_hash.as_bytes()
+        ));
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_CITATION
+            && record.details["reason"].as_str() == Some("invalid authors")));
+    }
+
+    #[test]
+    fn add_duplicate_citation_id_rejected_without_second_insert() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::BenchmarkDesign),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .add_citation("pub-1", sample_citation("cite-1"), &trace())
+            .unwrap();
+        let before_hash = engine.publications()["pub-1"].content_hash.clone();
+        let err = engine
+            .add_citation("pub-1", sample_citation("cite-1"), "trace-dupe-cite")
+            .unwrap_err();
+
+        assert!(err.contains("duplicate"));
+        assert_eq!(engine.publications()["pub-1"].citations.len(), 1);
+        assert!(crate::security::constant_time::ct_eq_bytes(
+            engine.publications()["pub-1"].content_hash.as_bytes(),
+            before_hash.as_bytes()
+        ));
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BMP_ERR_INVALID_CITATION
+            && record.details["reason"].as_str() == Some("duplicate cite_id")));
     }
 
     // === Catalog ===
@@ -911,6 +1638,23 @@ mod tests {
             .unwrap();
         let results = engine.search_by_topic(MethodologyTopic::BenchmarkDesign);
         assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn search_by_topic_without_matches_returns_empty_and_does_not_audit() {
+        let mut engine = BenchmarkMethodology::default();
+        engine
+            .create_publication(
+                sample_pub("pub-1", MethodologyTopic::VerifierArchitecture),
+                &trace(),
+            )
+            .unwrap();
+        let before_audit_len = engine.audit_log().len();
+
+        let results = engine.search_by_topic(MethodologyTopic::ThreatModeling);
+
+        assert!(results.is_empty());
+        assert_eq!(engine.audit_log().len(), before_audit_len);
     }
 
     // === Status tracking ===
@@ -982,5 +1726,14 @@ mod tests {
         let jsonl = engine.export_audit_log_jsonl().unwrap();
         let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert!(first["event_code"].is_string());
+    }
+
+    #[test]
+    fn export_empty_audit_log_is_empty_string() {
+        let engine = BenchmarkMethodology::default();
+
+        let jsonl = engine.export_audit_log_jsonl().unwrap();
+
+        assert!(jsonl.is_empty());
     }
 }

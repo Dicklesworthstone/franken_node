@@ -35,8 +35,13 @@ use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_RUNS};
 const MAX_COMPARISONS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -556,6 +561,19 @@ mod tests {
         }
     }
 
+    fn sample_run_with_artifacts(id: &str, hash: &str, artifacts: &[(&str, &str)]) -> ReplayRun {
+        ReplayRun {
+            run_id: id.to_string(),
+            operation: "test_op".to_string(),
+            output_hash: hash.to_string(),
+            artifact_hashes: artifacts
+                .iter()
+                .map(|(name, artifact_hash)| (name.to_string(), artifact_hash.to_string()))
+                .collect(),
+            timestamp: Utc::now().to_rfc3339(),
+        }
+    }
+
     // === Categories ===
 
     #[test]
@@ -624,6 +642,119 @@ mod tests {
     }
 
     #[test]
+    fn compare_missing_original_run_fails_without_storing_comparison() {
+        let mut engine = ReplayDeterminismMetrics::default();
+        engine.record_run(sample_run("replay", "hash"), &trace());
+
+        let err = engine
+            .compare_runs("missing-original", "replay", &trace())
+            .expect_err("missing original run should fail");
+
+        assert!(err.contains("Original run not found"));
+        assert!(engine.comparisons().is_empty());
+    }
+
+    #[test]
+    fn compare_missing_replay_run_fails_without_storing_comparison() {
+        let mut engine = ReplayDeterminismMetrics::default();
+        engine.record_run(sample_run("original", "hash"), &trace());
+
+        let err = engine
+            .compare_runs("original", "missing-replay", &trace())
+            .expect_err("missing replay run should fail");
+
+        assert!(err.contains("Replay run not found"));
+        assert!(engine.comparisons().is_empty());
+    }
+
+    #[test]
+    fn missing_replay_artifact_is_counted_as_divergence() {
+        let mut engine = ReplayDeterminismMetrics::default();
+        engine.record_run(sample_run("original", "hash"), &trace());
+        let mut replay = sample_run("replay", "hash");
+        replay.artifact_hashes.remove("spec");
+        engine.record_run(replay, &trace());
+
+        let result = engine.compare_runs("original", "replay", &trace()).unwrap();
+
+        assert!(result.output_match);
+        assert_eq!(result.divergence_count, 1);
+        assert_eq!(result.severity, DivergenceSeverity::Minor);
+        assert!(!result.artifact_matches["spec"]);
+    }
+
+    #[test]
+    fn artifact_hash_mismatch_is_divergence_even_when_output_matches() {
+        let mut engine = ReplayDeterminismMetrics::default();
+        engine.record_run(sample_run("original", "hash"), &trace());
+        let mut replay = sample_run("replay", "hash");
+        replay
+            .artifact_hashes
+            .insert("evidence".to_string(), "different".to_string());
+        engine.record_run(replay, &trace());
+
+        let result = engine.compare_runs("original", "replay", &trace()).unwrap();
+
+        assert!(result.output_match);
+        assert_eq!(result.divergence_count, 1);
+        assert!(!result.artifact_matches["evidence"]);
+    }
+
+    #[test]
+    fn output_and_multiple_artifact_divergences_are_critical() {
+        let mut engine = ReplayDeterminismMetrics::default();
+        engine.record_run(
+            sample_run_with_artifacts(
+                "original",
+                "hash-a",
+                &[
+                    ("evidence", "a1"),
+                    ("spec", "a2"),
+                    ("gate", "a3"),
+                    ("report", "a4"),
+                ],
+            ),
+            &trace(),
+        );
+        engine.record_run(
+            sample_run_with_artifacts(
+                "replay",
+                "hash-b",
+                &[
+                    ("evidence", "b1"),
+                    ("spec", "b2"),
+                    ("gate", "b3"),
+                    ("report", "b4"),
+                ],
+            ),
+            &trace(),
+        );
+
+        let result = engine.compare_runs("original", "replay", &trace()).unwrap();
+
+        assert!(!result.output_match);
+        assert_eq!(result.divergence_count, 5);
+        assert_eq!(result.severity, DivergenceSeverity::Critical);
+    }
+
+    #[test]
+    fn divergence_logs_error_event() {
+        let mut engine = ReplayDeterminismMetrics::default();
+        engine.record_run(sample_run("original", "hash-a"), &trace());
+        engine.record_run(sample_run("replay", "hash-b"), &trace());
+
+        engine.compare_runs("original", "replay", &trace()).unwrap();
+        let codes: Vec<&str> = engine
+            .audit_log()
+            .iter()
+            .map(|record| record.event_code.as_str())
+            .collect();
+
+        assert!(codes.contains(&event_codes::RDM_DIVERGENCE_DETECTED));
+        assert!(codes.contains(&event_codes::RDM_ERR_DIVERGENCE));
+    }
+
+    #[test]
     fn severity_classification() {
         let mut engine = ReplayDeterminismMetrics::default();
         engine.record_run(sample_run("r1", "h1"), &trace());
@@ -651,6 +782,23 @@ mod tests {
             .map(|r| r.event_code.as_str())
             .collect();
         assert!(codes.contains(&event_codes::RDM_ERR_INCOMPLETE));
+    }
+
+    #[test]
+    fn incomplete_artifact_tracking_fails_strict_gate() {
+        let mut engine = ReplayDeterminismMetrics::default();
+        engine.track_artifact(ArtifactCategory::VerificationEvidence, 2, 1, &trace());
+
+        let report = engine.generate_report(&trace());
+
+        assert_eq!(report.gate_verdict, GateVerdict::Fail);
+        assert!(report.overall_completeness_pct < 100.0);
+        let evidence = report
+            .artifact_completeness
+            .iter()
+            .find(|entry| entry.category == ArtifactCategory::VerificationEvidence)
+            .expect("verification evidence entry should exist");
+        assert!(!evidence.complete);
     }
 
     // === Report generation ===
@@ -803,5 +951,107 @@ mod tests {
     fn two_gate_verdicts() {
         let v = [GateVerdict::Pass, GateVerdict::Fail];
         assert_eq!(v.len(), 2);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_runs() {
+        let mut items = vec![sample_run("old", "h1")];
+
+        push_bounded(&mut items, sample_run("new", "h2"), 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_keeps_latest_runs() {
+        let mut items = vec![
+            sample_run("old", "h1"),
+            sample_run("middle", "h2"),
+            sample_run("latest", "h3"),
+        ];
+
+        push_bounded(&mut items, sample_run("new", "h4"), 2);
+
+        assert_eq!(items[0].run_id, "latest");
+        assert_eq!(items[1].run_id, "new");
+    }
+
+    #[test]
+    fn artifact_category_deserialize_rejects_unknown_variant() {
+        let result: Result<ArtifactCategory, _> = serde_json::from_str(r#""coverage_report""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn divergence_severity_deserialize_rejects_wrong_case() {
+        let result: Result<DivergenceSeverity, _> = serde_json::from_str(r#""Critical""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn replay_run_deserialize_rejects_missing_output_hash() {
+        let raw = serde_json::json!({
+            "run_id": "missing-output",
+            "operation": "test_op",
+            "artifact_hashes": {},
+            "timestamp": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ReplayRun, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn comparison_result_deserialize_rejects_scalar_artifact_matches() {
+        let raw = serde_json::json!({
+            "comparison_id": "cmp-1",
+            "original_run_id": "original",
+            "replay_run_id": "replay",
+            "output_match": false,
+            "artifact_matches": "not-a-map",
+            "divergence_count": 1_usize,
+            "severity": "minor",
+            "timestamp": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ComparisonResult, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rdm_config_deserialize_rejects_string_threshold() {
+        let raw = serde_json::json!({
+            "metric_version": METRIC_VERSION,
+            "min_determinism_rate": "1.0",
+            "min_completeness_pct": 100.0
+        });
+
+        let result: Result<RdmConfig, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn determinism_report_deserialize_rejects_missing_content_hash() {
+        let raw = serde_json::json!({
+            "report_id": "report-1",
+            "timestamp": "2026-04-17T00:00:00Z",
+            "metric_version": METRIC_VERSION,
+            "total_comparisons": 0_usize,
+            "matches": 0_usize,
+            "divergences": 0_usize,
+            "determinism_rate": 1.0,
+            "artifact_completeness": [],
+            "overall_completeness_pct": 100.0,
+            "gate_verdict": "pass"
+        });
+
+        let result: Result<DeterminismReport, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
     }
 }

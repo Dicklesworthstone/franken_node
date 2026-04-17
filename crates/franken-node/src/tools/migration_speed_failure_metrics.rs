@@ -58,8 +58,13 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_RECORDS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -236,6 +241,30 @@ impl MigrationSpeedFailureMetrics {
         mut record: MigrationRecord,
         trace_id: &str,
     ) -> Result<String, String> {
+        if record.record_id.trim().is_empty() {
+            self.log(
+                event_codes::MSF_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "empty record_id"}),
+            );
+            return Err("record_id must be non-empty".to_string());
+        }
+        if record.project_id.trim().is_empty() {
+            self.log(
+                event_codes::MSF_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "empty project_id"}),
+            );
+            return Err("project_id must be non-empty".to_string());
+        }
+        if record.window_id.trim().is_empty() {
+            self.log(
+                event_codes::MSF_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "empty window_id"}),
+            );
+            return Err("window_id must be non-empty".to_string());
+        }
         if record.phase_durations.is_empty() {
             self.log(
                 event_codes::MSF_ERR_INVALID_METRIC,
@@ -244,6 +273,33 @@ impl MigrationSpeedFailureMetrics {
             );
             return Err("phase_durations must not be empty".to_string());
         }
+        let mut seen_phases = std::collections::BTreeSet::new();
+        for duration in &record.phase_durations {
+            if !seen_phases.insert(duration.phase) {
+                self.log(
+                    event_codes::MSF_ERR_INVALID_METRIC,
+                    trace_id,
+                    serde_json::json!({
+                        "reason": "duplicate phase duration",
+                        "phase": duration.phase.label(),
+                    }),
+                );
+                return Err("phase_durations must not contain duplicate phases".to_string());
+            }
+        }
+        for phase in MigrationPhase::all() {
+            if !seen_phases.contains(phase) {
+                self.log(
+                    event_codes::MSF_ERR_INVALID_METRIC,
+                    trace_id,
+                    serde_json::json!({
+                        "reason": "missing phase duration",
+                        "phase": phase.label(),
+                    }),
+                );
+                return Err("phase_durations must cover every migration phase".to_string());
+            }
+        }
         if !record.succeeded && record.failure_type.is_none() {
             self.log(
                 event_codes::MSF_ERR_INVALID_METRIC,
@@ -251,6 +307,22 @@ impl MigrationSpeedFailureMetrics {
                 serde_json::json!({"reason": "failed without type"}),
             );
             return Err("failed migrations must specify failure_type".to_string());
+        }
+        if !record.succeeded && record.failure_phase.is_none() {
+            self.log(
+                event_codes::MSF_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "failed without phase"}),
+            );
+            return Err("failed migrations must specify failure_phase".to_string());
+        }
+        if record.succeeded && (record.failure_type.is_some() || record.failure_phase.is_some()) {
+            self.log(
+                event_codes::MSF_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "successful record with failure metadata"}),
+            );
+            return Err("successful migrations must not include failure metadata".to_string());
         }
 
         record.timestamp = Utc::now().to_rfc3339();
@@ -528,6 +600,17 @@ mod tests {
         )
     }
 
+    fn has_invalid_reason(e: &MigrationSpeedFailureMetrics, reason: &str) -> bool {
+        e.audit_log().iter().any(|entry| {
+            entry.event_code == event_codes::MSF_ERR_INVALID_METRIC
+                && entry
+                    .details
+                    .get("reason")
+                    .and_then(serde_json::Value::as_str)
+                    == Some(reason)
+        })
+    }
+
     #[test]
     fn five_migration_phases() {
         assert_eq!(MigrationPhase::all().len(), 5);
@@ -587,6 +670,236 @@ mod tests {
         let mut r = sample_record("r1", false);
         r.failure_type = None;
         assert!(e.record_migration(r, &trace()).is_err());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_existing_and_new_items() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn empty_phase_record_is_rejected_without_storage() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("bad-empty", true);
+        r.phase_durations.clear();
+
+        let err = e.record_migration(r, "trace-empty").unwrap_err();
+
+        assert!(err.contains("phase_durations"));
+        assert!(e.records().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert!(has_invalid_reason(&e, "no phase durations"));
+    }
+
+    #[test]
+    fn failed_record_without_type_is_rejected_before_storage() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("bad-no-type", false);
+        r.failure_type = None;
+        r.failure_phase = None;
+
+        let err = e.record_migration(r, "trace-no-type").unwrap_err();
+
+        assert!(err.contains("failure_type"));
+        assert!(e.records().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert!(has_invalid_reason(&e, "failed without type"));
+        assert!(!has_invalid_reason(&e, "failed without phase"));
+    }
+
+    #[test]
+    fn failed_record_without_phase_is_rejected_before_storage() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("bad-no-phase", false);
+        r.failure_phase = None;
+
+        let err = e.record_migration(r, "trace-no-phase").unwrap_err();
+
+        assert!(err.contains("failure_phase"));
+        assert!(e.records().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert!(has_invalid_reason(&e, "failed without phase"));
+    }
+
+    #[test]
+    fn successful_record_with_failure_type_is_rejected() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("bad-success-type", true);
+        r.failure_type = Some(FailureType::RuntimeError);
+
+        let err = e.record_migration(r, "trace-success-type").unwrap_err();
+
+        assert!(err.contains("failure metadata"));
+        assert!(e.records().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert!(has_invalid_reason(
+            &e,
+            "successful record with failure metadata"
+        ));
+    }
+
+    #[test]
+    fn successful_record_with_failure_phase_is_rejected() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("bad-success-phase", true);
+        r.failure_phase = Some(MigrationPhase::Deployment);
+
+        let err = e.record_migration(r, "trace-success-phase").unwrap_err();
+
+        assert!(err.contains("failure metadata"));
+        assert!(e.records().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert!(has_invalid_reason(
+            &e,
+            "successful record with failure metadata"
+        ));
+    }
+
+    #[test]
+    fn total_from_phases_saturates_on_overflow() {
+        let mut r = sample_record("overflow", true);
+        r.phase_durations = vec![
+            PhaseDuration {
+                phase: MigrationPhase::Assessment,
+                duration_ms: u64::MAX,
+            },
+            PhaseDuration {
+                phase: MigrationPhase::Deployment,
+                duration_ms: 10,
+            },
+        ];
+
+        assert_eq!(r.total_from_phases(), u64::MAX);
+    }
+
+    #[test]
+    fn failure_rate_equal_to_threshold_is_not_exceeded() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        for i in 0..19 {
+            e.record_migration(sample_record(&format!("s{i}"), true), &trace())
+                .unwrap();
+        }
+        e.record_migration(sample_record("f-threshold", false), &trace())
+            .unwrap();
+
+        let r = e.generate_report(&trace());
+
+        assert_eq!(r.total_migrations, 20);
+        assert_eq!(r.failure_count, 1);
+        assert!(!r.exceeds_threshold);
+        assert!(
+            !e.audit_log()
+                .iter()
+                .any(|entry| entry.event_code == event_codes::MSF_ERR_THRESHOLD_EXCEEDED)
+        );
+    }
+
+    #[test]
+    fn empty_audit_log_exports_empty_jsonl() {
+        let e = MigrationSpeedFailureMetrics::default();
+
+        assert_eq!(e.export_audit_log_jsonl().unwrap(), "");
+    }
+
+    #[test]
+    fn blank_record_id_is_rejected_without_storage() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("blank-record", true);
+        r.record_id.clear();
+
+        let err = e.record_migration(r, "trace-blank-record").unwrap_err();
+
+        assert!(err.contains("record_id"));
+        assert!(e.records().is_empty());
+        assert!(has_invalid_reason(&e, "empty record_id"));
+    }
+
+    #[test]
+    fn whitespace_project_id_is_rejected_without_storage() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("blank-project", true);
+        r.project_id = "   ".to_string();
+
+        let err = e.record_migration(r, "trace-blank-project").unwrap_err();
+
+        assert!(err.contains("project_id"));
+        assert!(e.records().is_empty());
+        assert!(has_invalid_reason(&e, "empty project_id"));
+    }
+
+    #[test]
+    fn blank_window_id_is_rejected_without_storage() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("blank-window", true);
+        r.window_id = "\t".to_string();
+
+        let err = e.record_migration(r, "trace-blank-window").unwrap_err();
+
+        assert!(err.contains("window_id"));
+        assert!(e.records().is_empty());
+        assert!(has_invalid_reason(&e, "empty window_id"));
+    }
+
+    #[test]
+    fn duplicate_phase_duration_is_rejected() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("duplicate-phase", true);
+        r.phase_durations[1].phase = r.phase_durations[0].phase;
+
+        let err = e.record_migration(r, "trace-duplicate-phase").unwrap_err();
+
+        assert!(err.contains("duplicate"));
+        assert!(e.records().is_empty());
+        assert!(has_invalid_reason(&e, "duplicate phase duration"));
+    }
+
+    #[test]
+    fn missing_phase_duration_is_rejected() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("missing-phase", true);
+        r.phase_durations.pop();
+
+        let err = e.record_migration(r, "trace-missing-phase").unwrap_err();
+
+        assert!(err.contains("cover every migration phase"));
+        assert!(e.records().is_empty());
+        assert!(has_invalid_reason(&e, "missing phase duration"));
+    }
+
+    #[test]
+    fn rejected_missing_phase_preserves_existing_records() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        e.record_migration(sample_record("kept", true), &trace())
+            .unwrap();
+        let mut rejected = sample_record("missing-after-kept", true);
+        rejected.phase_durations.pop();
+
+        let err = e
+            .record_migration(rejected, &trace())
+            .expect_err("missing phase should fail");
+
+        assert!(err.contains("cover every migration phase"));
+        assert_eq!(e.records().len(), 1);
+        assert_eq!(e.records()[0].record_id, "kept");
+    }
+
+    #[test]
+    fn invalid_identifier_takes_precedence_over_phase_validation() {
+        let mut e = MigrationSpeedFailureMetrics::default();
+        let mut r = sample_record("precedence", true);
+        r.record_id.clear();
+        r.phase_durations.clear();
+
+        let err = e.record_migration(r, "trace-precedence").unwrap_err();
+
+        assert!(err.contains("record_id"));
+        assert_eq!(e.audit_log().len(), 1);
+        assert!(has_invalid_reason(&e, "empty record_id"));
+        assert!(!has_invalid_reason(&e, "no phase durations"));
     }
 
     #[test]

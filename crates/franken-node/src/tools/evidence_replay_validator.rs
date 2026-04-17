@@ -860,6 +860,135 @@ mod tests {
         assert_eq!(v.mismatch_count(), 1);
     }
 
+    #[test]
+    fn validate_unsatisfied_constraint_mismatches_for_admit() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-constraint", DecisionKind::Admit, 7);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-constraint".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "must-pass".into(),
+                description: "required constraint".into(),
+                satisfied: false,
+            }],
+            7,
+            "snap-constraint",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_mismatch());
+        assert_eq!(v.mismatch_count(), 1);
+        if let ReplayResult::Mismatch { diff, got, .. } = result {
+            assert_eq!(got.decision_kind, "none");
+            assert!(diff.to_string().contains("no candidate selected"));
+        }
+    }
+
+    #[test]
+    fn validate_all_non_finite_candidate_scores_mismatch_for_admit() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-nonfinite", DecisionKind::Admit, 3);
+        let c = ReplayContext::new(
+            vec![
+                Candidate {
+                    id: "DEC-nonfinite".into(),
+                    decision_kind: DecisionKind::Admit,
+                    score: f64::NAN,
+                    metadata: serde_json::json!({}),
+                },
+                Candidate {
+                    id: "DEC-other".into(),
+                    decision_kind: DecisionKind::Admit,
+                    score: f64::INFINITY,
+                    metadata: serde_json::json!({}),
+                },
+            ],
+            vec![Constraint {
+                id: "ok".into(),
+                description: "satisfied".into(),
+                satisfied: true,
+            }],
+            3,
+            "snap-nonfinite",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_mismatch());
+        assert_eq!(v.mismatch_count(), 1);
+    }
+
+    #[test]
+    fn validate_nan_expected_candidate_score_is_skipped() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-nan", DecisionKind::Release, 4);
+        let c = ReplayContext::new(
+            vec![
+                Candidate {
+                    id: "DEC-nan".into(),
+                    decision_kind: DecisionKind::Release,
+                    score: f64::NAN,
+                    metadata: serde_json::json!({}),
+                },
+                Candidate {
+                    id: "DEC-selected".into(),
+                    decision_kind: DecisionKind::Release,
+                    score: 0.1,
+                    metadata: serde_json::json!({}),
+                },
+            ],
+            vec![Constraint {
+                id: "ok".into(),
+                description: "satisfied".into(),
+                satisfied: true,
+            }],
+            4,
+            "snap-nan",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_mismatch());
+        if let ReplayResult::Mismatch { diff, got, .. } = result {
+            assert_eq!(got.decision_id, "DEC-selected");
+            assert!(diff.to_string().contains("decision_id"));
+        }
+    }
+
+    #[test]
+    fn validate_deny_with_selected_candidate_is_mismatch() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-deny", DecisionKind::Deny, 5);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-deny".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "ok".into(),
+                description: "satisfied".into(),
+                satisfied: true,
+            }],
+            5,
+            "snap-deny",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_mismatch());
+        if let ReplayResult::Mismatch { diff, .. } = result {
+            assert!(diff.to_string().contains("decision_kind"));
+        }
+    }
+
     // ── Unresolvable cases ──
 
     #[test]
@@ -887,6 +1016,101 @@ mod tests {
             "snap-001",
         );
         assert!(v.validate(&e, &c).is_unresolvable());
+    }
+
+    #[test]
+    fn validate_empty_policy_snapshot_unresolvable() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-empty-snapshot", DecisionKind::Admit, 1);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-empty-snapshot".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![],
+            1,
+            "",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(v.unresolvable_count(), 1);
+        assert_eq!(v.results().len(), 1);
+    }
+
+    #[test]
+    fn validate_epoch_mismatch_records_unresolvable_result() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-epoch-log", DecisionKind::Admit, 10);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-epoch-log".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![],
+            11,
+            "snap-epoch-log",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(v.unresolvable_count(), 1);
+        assert_eq!(v.results()[0].0, "DEC-epoch-log");
+    }
+
+    #[test]
+    fn validate_invalid_context_precedes_epoch_mismatch() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-invalid-first", DecisionKind::Admit, 41);
+        let c = ReplayContext::new(vec![], vec![], 42, "");
+
+        let result = v.validate(&e, &c);
+
+        assert!(matches!(
+            result,
+            ReplayResult::Unresolvable { reason }
+                if reason.contains("invalid context") && !reason.contains("epoch mismatch")
+        ));
+        assert_eq!(v.unresolvable_count(), 1);
+        assert_eq!(v.mismatch_count(), 0);
+    }
+
+    #[test]
+    fn validate_release_with_unsatisfied_constraint_is_mismatch() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-release-blocked", DecisionKind::Release, 43);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-release-blocked".into(),
+                decision_kind: DecisionKind::Release,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "release-gate".into(),
+                description: "release gate denied".into(),
+                satisfied: false,
+            }],
+            43,
+            "snap-release-blocked",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(matches!(
+            result,
+            ReplayResult::Mismatch { got, diff, .. }
+                if got.decision_id == "none"
+                    && got.decision_kind == "none"
+                    && diff.to_string().contains("no candidate selected")
+        ));
+        assert_eq!(v.mismatch_count(), 1);
     }
 
     // ── Determinism ──
@@ -936,6 +1160,64 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert!(results.iter().all(|r| r.is_match()));
         assert_eq!(v.total_validations(), 2);
+    }
+
+    #[test]
+    fn validate_empty_batch_keeps_counters_at_zero() {
+        let mut v = EvidenceReplayValidator::new();
+
+        let results = v.validate_batch(&[]);
+        let summary = v.summary_report();
+
+        assert!(results.is_empty());
+        assert!(v.results().is_empty());
+        assert_eq!(summary.total, 0);
+        assert_eq!(summary.matches, 0);
+        assert_eq!(summary.mismatches, 0);
+        assert_eq!(summary.unresolvable, 0);
+        assert!(!summary.all_match());
+    }
+
+    #[test]
+    fn validate_batch_mixed_negative_paths_counts_each_failure_class() {
+        let mismatch_entry = test_replay_entry("DEC-batch-mismatch", DecisionKind::Admit, 51);
+        let unresolved_entry =
+            test_replay_entry("DEC-batch-unresolvable", DecisionKind::Quarantine, 52);
+        let entries = vec![
+            (
+                mismatch_entry.clone(),
+                ReplayContext::new(
+                    vec![Candidate {
+                        id: "DEC-batch-other".into(),
+                        decision_kind: DecisionKind::Admit,
+                        score: 1.0,
+                        metadata: serde_json::json!({}),
+                    }],
+                    vec![Constraint {
+                        id: "ok".into(),
+                        description: "satisfied".into(),
+                        satisfied: true,
+                    }],
+                    51,
+                    "snap-batch",
+                ),
+            ),
+            (
+                unresolved_entry.clone(),
+                ReplayContext::new(vec![], vec![], 52, "snap-batch"),
+            ),
+        ];
+        let mut v = EvidenceReplayValidator::new();
+
+        let results = v.validate_batch(&entries);
+        let summary = v.summary_report();
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_mismatch());
+        assert!(results[1].is_unresolvable());
+        assert_eq!(summary.mismatches, 1);
+        assert_eq!(summary.unresolvable, 1);
+        assert!(!summary.all_match());
     }
 
     // ── Summary ──
@@ -1063,5 +1345,46 @@ mod tests {
             v.results().len(),
             MAX_RESULTS,
         );
+    }
+
+    #[test]
+    fn replay_diff_bounded_overflow_drops_oldest_fields() {
+        let mut diff = ReplayDiff::new();
+
+        for index in 0..(MAX_FIELDS + 2) {
+            diff.add(
+                format!("field-{index}"),
+                format!("expected-{index}"),
+                format!("actual-{index}"),
+            );
+        }
+        let rendered = diff.to_string();
+
+        assert_eq!(diff.field_count(), MAX_FIELDS);
+        assert!(!rendered.contains("field-0 expected=expected-0"));
+        assert!(!rendered.contains("field-1 expected=expected-1"));
+        assert!(rendered.contains(&format!(
+            "field-{} expected=expected-{}",
+            MAX_FIELDS + 1,
+            MAX_FIELDS + 1
+        )));
+    }
+
+    #[test]
+    fn results_bounded_on_unresolvable_path() {
+        let mut v = EvidenceReplayValidator::new();
+        let replay_count = MAX_RESULTS.saturating_add(7);
+        let expected_total = u64::try_from(replay_count).unwrap_or(u64::MAX);
+
+        for i in 0..replay_count {
+            let e = test_replay_entry(&format!("DEC-invalid-{i:05}"), DecisionKind::Admit, 1);
+            let c = ReplayContext::new(vec![], vec![], 1, "snap-invalid");
+            v.validate(&e, &c);
+        }
+
+        assert_eq!(v.total_validations(), expected_total);
+        assert_eq!(v.unresolvable_count(), expected_total);
+        assert_eq!(v.results().len(), MAX_RESULTS);
+        assert_eq!(v.results()[0].0, "DEC-invalid-00007");
     }
 }

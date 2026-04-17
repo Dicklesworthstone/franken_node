@@ -33,8 +33,13 @@ const MAX_DEPLOYMENTS: usize = 4096;
 const MAX_OUTCOMES: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len().saturating_add(1).saturating_sub(cap);
+    if overflow > 0 {
         items.drain(0..overflow);
     }
     items.push(item);
@@ -193,6 +198,15 @@ impl PartnerLighthousePrograms {
         mut partner: Partner,
         trace_id: &str,
     ) -> Result<String, String> {
+        if partner.partner_id.trim().is_empty() {
+            return Err("partner id must not be empty".to_string());
+        }
+        if partner.partner_id.trim() != partner.partner_id {
+            return Err("partner id must not include surrounding whitespace".to_string());
+        }
+        if partner.name.trim().is_empty() {
+            return Err("partner name must not be empty".to_string());
+        }
         if self.partners.contains_key(&partner.partner_id) {
             self.log(
                 event_codes::PLP_ERR_DUPLICATE_PARTNER,
@@ -219,6 +233,15 @@ impl PartnerLighthousePrograms {
         mut dep: LighthouseDeployment,
         trace_id: &str,
     ) -> Result<String, String> {
+        if dep.deployment_id.trim().is_empty() {
+            return Err("deployment id must not be empty".to_string());
+        }
+        if dep.deployment_id.trim() != dep.deployment_id {
+            return Err("deployment id must not include surrounding whitespace".to_string());
+        }
+        if dep.description.trim().is_empty() {
+            return Err("deployment description must not be empty".to_string());
+        }
         if self
             .deployments
             .iter()
@@ -255,6 +278,18 @@ impl PartnerLighthousePrograms {
         mut outcome: OutcomeRecord,
         trace_id: &str,
     ) -> Result<String, String> {
+        if outcome.outcome_id.trim().is_empty() {
+            return Err("outcome id must not be empty".to_string());
+        }
+        if outcome.outcome_id.trim() != outcome.outcome_id {
+            return Err("outcome id must not include surrounding whitespace".to_string());
+        }
+        if outcome.metric_name.trim().is_empty() {
+            return Err("outcome metric name must not be empty".to_string());
+        }
+        if outcome.evidence_ref.trim().is_empty() {
+            return Err("outcome evidence ref must not be empty".to_string());
+        }
         if self
             .outcomes
             .iter()
@@ -315,9 +350,15 @@ impl PartnerLighthousePrograms {
             .outcome_count;
 
         if outcome_count < MIN_OUTCOMES_FOR_PROMOTION {
-            self.log(event_codes::PLP_ERR_INSUFFICIENT_OUTCOMES, trace_id, serde_json::json!({
-                "partner_id": partner_id, "outcomes": outcome_count, "required": MIN_OUTCOMES_FOR_PROMOTION,
-            }));
+            self.log(
+                event_codes::PLP_ERR_INSUFFICIENT_OUTCOMES,
+                trace_id,
+                serde_json::json!({
+                    "partner_id": partner_id,
+                    "outcomes": outcome_count,
+                    "required": MIN_OUTCOMES_FOR_PROMOTION,
+                }),
+            );
             return Err(format!(
                 "insufficient outcomes: {outcome_count} < {MIN_OUTCOMES_FOR_PROMOTION}"
             ));
@@ -518,6 +559,71 @@ mod tests {
     }
 
     #[test]
+    fn enroll_empty_partner_id_rejected_without_audit() {
+        let mut e = PartnerLighthousePrograms::default();
+
+        let err = e
+            .enroll_partner(sample_partner(""), "trace-empty-partner")
+            .expect_err("empty partner id should be rejected");
+
+        assert!(err.contains("partner id"));
+        assert!(e.partners().is_empty());
+        assert!(e.audit_log().is_empty());
+    }
+
+    #[test]
+    fn enroll_trim_required_partner_id_rejected_without_insert() {
+        let mut e = PartnerLighthousePrograms::default();
+
+        let err = e
+            .enroll_partner(sample_partner(" p1"), "trace-space-partner")
+            .expect_err("partner id with surrounding whitespace should be rejected");
+
+        assert!(err.contains("surrounding whitespace"));
+        assert!(e.partners().is_empty());
+        assert!(e.audit_log().is_empty());
+    }
+
+    #[test]
+    fn enroll_whitespace_partner_name_rejected_without_insert() {
+        let mut e = PartnerLighthousePrograms::default();
+        let mut partner = sample_partner("p-blank-name");
+        partner.name = " \n\t ".to_string();
+
+        let err = e
+            .enroll_partner(partner, "trace-blank-partner-name")
+            .expect_err("blank partner name should be rejected");
+
+        assert!(err.contains("partner name"));
+        assert!(e.partners().is_empty());
+        assert!(e.audit_log().is_empty());
+    }
+
+    #[test]
+    fn duplicate_partner_rejection_preserves_original_partner() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p1"), &trace()).unwrap();
+        let before_audit_len = e.audit_log().len();
+        let mut replacement = sample_partner("p1");
+        replacement.name = "Replacement".to_string();
+        replacement.tier = PartnerTier::Flagship;
+        replacement.deployment_count = 99;
+        replacement.outcome_count = 99;
+
+        let err = e
+            .enroll_partner(replacement, "trace-duplicate-partner")
+            .expect_err("duplicate partner should be rejected");
+
+        assert!(err.contains("duplicate partner"));
+        assert_eq!(e.partners().len(), 1);
+        assert_eq!(e.partners()["p1"].name, "Partner p1");
+        assert_eq!(e.partners()["p1"].tier, PartnerTier::Prospect);
+        assert_eq!(e.partners()["p1"].deployment_count, 0);
+        assert_eq!(e.partners()["p1"].outcome_count, 0);
+        assert_eq!(e.audit_log().len(), before_audit_len.saturating_add(1));
+    }
+
+    #[test]
     fn create_deployment_ok() {
         let mut e = PartnerLighthousePrograms::default();
         e.enroll_partner(sample_partner("p1"), &trace()).unwrap();
@@ -543,6 +649,40 @@ mod tests {
             e.create_deployment(sample_deployment("d1", "missing"), &trace())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn create_empty_deployment_id_rejected_without_count_drift() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p1"), &trace()).unwrap();
+        let before_audit_len = e.audit_log().len();
+
+        let err = e
+            .create_deployment(sample_deployment("", "p1"), "trace-empty-deployment")
+            .expect_err("empty deployment id should be rejected");
+
+        assert!(err.contains("deployment id"));
+        assert!(e.deployments().is_empty());
+        assert_eq!(e.partners()["p1"].deployment_count, 0);
+        assert_eq!(e.audit_log().len(), before_audit_len);
+    }
+
+    #[test]
+    fn create_whitespace_deployment_description_rejected_without_count_drift() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p1"), &trace()).unwrap();
+        let before_audit_len = e.audit_log().len();
+        let mut deployment = sample_deployment("d-blank-description", "p1");
+        deployment.description = " \n\t ".to_string();
+
+        let err = e
+            .create_deployment(deployment, "trace-blank-deployment-description")
+            .expect_err("blank deployment description should be rejected");
+
+        assert!(err.contains("description"));
+        assert!(e.deployments().is_empty());
+        assert_eq!(e.partners()["p1"].deployment_count, 0);
+        assert_eq!(e.audit_log().len(), before_audit_len);
     }
 
     #[test]
@@ -586,6 +726,64 @@ mod tests {
             e.record_outcome(sample_outcome("o1", "missing"), &trace())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn record_empty_outcome_id_rejected_without_audit() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p1"), &trace()).unwrap();
+        e.create_deployment(sample_deployment("d1", "p1"), &trace())
+            .unwrap();
+        let before_audit_len = e.audit_log().len();
+
+        let err = e
+            .record_outcome(sample_outcome("", "d1"), "trace-empty-outcome")
+            .expect_err("empty outcome id should be rejected");
+
+        assert!(err.contains("outcome id"));
+        assert!(e.outcomes().is_empty());
+        assert_eq!(e.partners()["p1"].outcome_count, 0);
+        assert_eq!(e.audit_log().len(), before_audit_len);
+    }
+
+    #[test]
+    fn record_whitespace_metric_name_rejected_without_count_drift() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p1"), &trace()).unwrap();
+        e.create_deployment(sample_deployment("d1", "p1"), &trace())
+            .unwrap();
+        let before_audit_len = e.audit_log().len();
+        let mut outcome = sample_outcome("o-blank-metric", "d1");
+        outcome.metric_name = " \n\t ".to_string();
+
+        let err = e
+            .record_outcome(outcome, "trace-blank-metric")
+            .expect_err("blank metric name should be rejected");
+
+        assert!(err.contains("metric name"));
+        assert!(e.outcomes().is_empty());
+        assert_eq!(e.partners()["p1"].outcome_count, 0);
+        assert_eq!(e.audit_log().len(), before_audit_len);
+    }
+
+    #[test]
+    fn record_whitespace_evidence_ref_rejected_without_count_drift() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p1"), &trace()).unwrap();
+        e.create_deployment(sample_deployment("d1", "p1"), &trace())
+            .unwrap();
+        let before_audit_len = e.audit_log().len();
+        let mut outcome = sample_outcome("o-blank-evidence", "d1");
+        outcome.evidence_ref = " \n\t ".to_string();
+
+        let err = e
+            .record_outcome(outcome, "trace-blank-evidence-ref")
+            .expect_err("blank evidence ref should be rejected");
+
+        assert!(err.contains("evidence ref"));
+        assert!(e.outcomes().is_empty());
+        assert_eq!(e.partners()["p1"].outcome_count, 0);
+        assert_eq!(e.audit_log().len(), before_audit_len);
     }
 
     #[test]
@@ -730,5 +928,151 @@ mod tests {
             f1.content_hash, f2.content_hash,
             "Different tier distributions must produce different funnel hash"
         );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_stale_entries() {
+        let mut items = vec!["old-deployment", "old-outcome"];
+
+        push_bounded(&mut items, "new-entry", 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity bounded buffers must not retain stale program records"
+        );
+    }
+
+    #[test]
+    fn missing_partner_deployment_does_not_emit_audit_or_store_deployment() {
+        let mut e = PartnerLighthousePrograms::default();
+
+        let err = e
+            .create_deployment(sample_deployment("d-missing", "missing-partner"), &trace())
+            .expect_err("deployment for missing partner must fail");
+
+        assert!(err.contains("missing-partner"));
+        assert!(e.deployments().is_empty());
+        assert!(
+            e.audit_log().is_empty(),
+            "missing partner should fail before deployment audit records"
+        );
+    }
+
+    #[test]
+    fn nan_metric_value_rejected_without_recording_outcome() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p-nan"), &trace()).unwrap();
+        e.create_deployment(sample_deployment("d-nan", "p-nan"), &trace())
+            .unwrap();
+        let audit_count_before = e.audit_log().len();
+        let mut outcome = sample_outcome("o-nan", "d-nan");
+        outcome.metric_value = f64::NAN;
+
+        let err = e
+            .record_outcome(outcome, &trace())
+            .expect_err("NaN metrics must be rejected");
+
+        assert!(err.contains("finite"));
+        assert!(e.outcomes().is_empty());
+        assert_eq!(e.partners()["p-nan"].outcome_count, 0);
+        assert_eq!(
+            e.audit_log().len(),
+            audit_count_before,
+            "non-finite metrics must not append outcome audit records"
+        );
+    }
+
+    #[test]
+    fn infinite_metric_value_rejected_without_partner_count_drift() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p-inf"), &trace()).unwrap();
+        e.create_deployment(sample_deployment("d-inf", "p-inf"), &trace())
+            .unwrap();
+        let mut outcome = sample_outcome("o-inf", "d-inf");
+        outcome.metric_value = f64::INFINITY;
+
+        let err = e
+            .record_outcome(outcome, &trace())
+            .expect_err("infinite metrics must be rejected");
+
+        assert!(err.contains("finite"));
+        assert_eq!(e.partners()["p-inf"].outcome_count, 0);
+        assert!(
+            e.audit_log()
+                .iter()
+                .all(|record| record.event_code != event_codes::PLP_OUTCOME_RECORDED),
+            "rejected infinite metrics must not be reported as recorded"
+        );
+    }
+
+    #[test]
+    fn missing_deployment_outcome_does_not_update_partner_counts() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p-no-dep"), &trace())
+            .unwrap();
+        let audit_count_before = e.audit_log().len();
+
+        let err = e
+            .record_outcome(sample_outcome("o-no-dep", "missing-deployment"), &trace())
+            .expect_err("missing deployment must reject outcomes");
+
+        assert!(err.contains("missing-deployment"));
+        assert!(e.outcomes().is_empty());
+        assert_eq!(e.partners()["p-no-dep"].outcome_count, 0);
+        assert_eq!(e.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn promote_missing_partner_does_not_log_insufficient_outcomes() {
+        let mut e = PartnerLighthousePrograms::default();
+
+        let err = e
+            .promote_partner("missing-partner", &trace())
+            .expect_err("missing partner must fail");
+
+        assert!(err.contains("missing-partner"));
+        assert!(
+            e.audit_log().is_empty(),
+            "missing partner must fail before insufficient-outcome audit logging"
+        );
+    }
+
+    #[test]
+    fn flagship_partner_with_enough_outcomes_cannot_promote() {
+        let mut e = PartnerLighthousePrograms::default();
+        e.enroll_partner(sample_partner("p-flagship"), &trace())
+            .unwrap();
+        {
+            let partner = e
+                .partners
+                .get_mut("p-flagship")
+                .expect("partner should exist");
+            partner.tier = PartnerTier::Flagship;
+            partner.outcome_count = MIN_OUTCOMES_FOR_PROMOTION;
+        }
+
+        let err = e
+            .promote_partner("p-flagship", &trace())
+            .expect_err("flagship is already the final tier");
+
+        assert!(err.contains("highest tier"));
+        assert_eq!(e.partners()["p-flagship"].tier, PartnerTier::Flagship);
+        assert_eq!(
+            e.partners()["p-flagship"].outcome_count,
+            MIN_OUTCOMES_FOR_PROMOTION
+        );
+        assert!(
+            e.audit_log()
+                .iter()
+                .all(|record| record.event_code != event_codes::PLP_TIER_PROMOTED),
+            "failed final-tier promotion must not emit promotion audit records"
+        );
+    }
+
+    #[test]
+    fn empty_audit_log_exports_empty_jsonl() {
+        let e = PartnerLighthousePrograms::default();
+
+        assert_eq!(e.export_audit_log_jsonl().unwrap(), "");
     }
 }

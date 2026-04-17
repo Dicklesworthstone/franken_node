@@ -59,8 +59,13 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_STEPS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -767,5 +772,237 @@ mod tests {
             r1.content_hash, r2.content_hash,
             "Different per-phase gate pass rates must produce different report hash"
         );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_stale_entries() {
+        let mut items = vec!["stale-install", "stale-configure"];
+
+        push_bounded(&mut items, "new-step", 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity bounded buffers must not retain stale onboarding entries"
+        );
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_keeps_latest_entries() {
+        let mut items = vec!["install", "configure", "validate"];
+
+        push_bounded(&mut items, "activate", 2);
+
+        assert_eq!(items, vec!["validate", "activate"]);
+    }
+
+    #[test]
+    fn skipped_gate_does_not_emit_pass_or_failure_events() {
+        let mut e = SafeExtensionOnboarding::new();
+        let mut step = sample_step("skip-validate", "sess-skip", OnboardingPhase::Validate);
+        step.gate_result = GateResult::Skipped;
+
+        e.record_step(step);
+
+        let codes: Vec<&str> = e.audit_log.iter().map(|r| r.event_code.as_str()).collect();
+        assert!(codes.contains(&event_codes::SEO_STEP_COMPLETED));
+        assert!(!codes.contains(&event_codes::SEO_GATE_PASSED));
+        assert!(!codes.contains(&event_codes::SEO_GATE_FAILED));
+        assert!(!codes.contains(&event_codes::SEO_ERR_STEP_BLOCKED));
+    }
+
+    #[test]
+    fn failed_activate_gate_does_not_activate_extension_or_complete_session() {
+        let mut e = SafeExtensionOnboarding::new();
+        let mut step = sample_step("activate-failed", "sess-failed", OnboardingPhase::Activate);
+        step.gate_result = GateResult::Failed;
+
+        e.record_step(step);
+        let report = e.generate_report();
+
+        assert_eq!(report.completed_sessions, 0);
+        assert_eq!(report.completion_rate, 0.0);
+        assert!(
+            e.audit_log
+                .iter()
+                .all(|record| record.event_code != event_codes::SEO_EXTENSION_ACTIVATED),
+            "failed activation gates must not emit extension activation events"
+        );
+    }
+
+    #[test]
+    fn monitor_only_session_does_not_count_as_completed() {
+        let mut e = SafeExtensionOnboarding::new();
+        let mut step = sample_step("monitor-only", "sess-monitor", OnboardingPhase::Monitor);
+        step.duration_seconds = TARGET_TTFE_SECONDS.saturating_add(1);
+        e.record_step(step);
+
+        let report = e.generate_report();
+
+        assert_eq!(report.total_sessions, 1);
+        assert_eq!(report.completed_sessions, 0);
+        assert!(!report.meets_ttfe_target);
+    }
+
+    #[test]
+    fn session_ttfe_saturates_on_extreme_durations() {
+        let mut e = SafeExtensionOnboarding::new();
+        let mut first = sample_step("huge-1", "sess-huge", OnboardingPhase::Install);
+        first.duration_seconds = u64::MAX;
+        let mut second = sample_step("huge-2", "sess-huge", OnboardingPhase::Configure);
+        second.duration_seconds = 42;
+
+        e.record_step(first);
+        e.record_step(second);
+
+        assert_eq!(e.session_ttfe("sess-huge"), Some(u64::MAX));
+    }
+
+    #[test]
+    fn failed_gate_has_zero_pass_rate_for_phase() {
+        let mut e = SafeExtensionOnboarding::new();
+        let mut step = sample_step(
+            "failed-configure",
+            "sess-config",
+            OnboardingPhase::Configure,
+        );
+        step.automated = false;
+        step.gate_result = GateResult::Failed;
+        step.manual_interventions = 2;
+
+        e.record_step(step);
+        let report = e.generate_report();
+
+        let configure = report
+            .phase_stats
+            .iter()
+            .find(|stats| stats.phase == OnboardingPhase::Configure)
+            .expect("configure stats should be present");
+        assert_eq!(configure.gate_pass_rate, 0.0);
+        assert!(
+            report.bottleneck_phases.contains(&"configure".to_string()),
+            "failed gates should be visible as onboarding bottlenecks"
+        );
+    }
+
+    #[test]
+    fn empty_audit_log_exports_empty_jsonl() {
+        let e = SafeExtensionOnboarding::new();
+
+        assert_eq!(e.export_audit_log_jsonl(), "");
+    }
+
+    #[test]
+    fn report_generation_on_empty_engine_keeps_bottlenecks_empty() {
+        let mut e = SafeExtensionOnboarding::new();
+
+        let report = e.generate_report();
+
+        assert_eq!(report.total_sessions, 0);
+        assert_eq!(report.completed_sessions, 0);
+        assert!(report.phase_stats.is_empty());
+        assert!(report.bottleneck_phases.is_empty());
+        assert!(!report.meets_ttfe_target);
+    }
+
+    #[test]
+    fn onboarding_phase_deserialize_rejects_unknown_variant() {
+        let result: Result<OnboardingPhase, _> = serde_json::from_str(r#""rollback""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn gate_result_deserialize_rejects_lowercase_variant() {
+        let result: Result<GateResult, _> = serde_json::from_str(r#""passed""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn onboarding_step_deserialize_rejects_missing_phase() {
+        let raw = serde_json::json!({
+            "step_id": "missing-phase",
+            "session_id": "sess-missing-phase",
+            "duration_seconds": 30,
+            "automated": true,
+            "gate_result": "Passed",
+            "manual_interventions": 0,
+            "recorded_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<OnboardingStep, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn onboarding_step_deserialize_rejects_manual_intervention_overflow() {
+        let raw = serde_json::json!({
+            "step_id": "overflow-manual",
+            "session_id": "sess-overflow-manual",
+            "phase": "Configure",
+            "duration_seconds": 30,
+            "automated": false,
+            "gate_result": "Failed",
+            "manual_interventions": 4_294_967_296_u64,
+            "recorded_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<OnboardingStep, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn onboarding_step_deserialize_rejects_string_duration() {
+        let raw = serde_json::json!({
+            "step_id": "string-duration",
+            "session_id": "sess-string-duration",
+            "phase": "Install",
+            "duration_seconds": "30",
+            "automated": true,
+            "gate_result": "Passed",
+            "manual_interventions": 0,
+            "recorded_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<OnboardingStep, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn onboarding_report_deserialize_rejects_missing_content_hash() {
+        let raw = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "total_sessions": 0,
+            "completed_sessions": 0,
+            "completion_rate": 0.0,
+            "mean_ttfe_seconds": 0.0,
+            "meets_ttfe_target": false,
+            "overall_automation_rate": 0.0,
+            "overall_friction_score": 0.0,
+            "phase_stats": [],
+            "bottleneck_phases": [],
+            "generated_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<OnboardingReport, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audit_record_deserialize_rejects_missing_trace_id() {
+        let raw = serde_json::json!({
+            "event_code": event_codes::SEO_STEP_COMPLETED,
+            "entity_id": "step-without-trace",
+            "detail": "missing trace id",
+            "timestamp": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<SeoAuditRecord, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
     }
 }

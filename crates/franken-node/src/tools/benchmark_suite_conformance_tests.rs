@@ -161,8 +161,8 @@ mod benchmark_suite_edge_cases {
 
         // Should handle the epsilon check
         assert_eq!(config.score(100.0), 100); // At ideal
-        assert_eq!(config.score(200.0), 0);   // Above ideal
-        assert_eq!(config.score(50.0), 100);  // Below ideal
+        assert_eq!(config.score(200.0), 0); // Above ideal
+        assert_eq!(config.score(50.0), 100); // Below ideal
     }
 
     #[test]
@@ -189,7 +189,7 @@ mod benchmark_suite_edge_cases {
     fn test_scoring_config_infinity_input() {
         let config = ScoringConfig::lower_is_better(100.0, 500.0);
 
-        assert_eq!(config.score(f64::INFINITY), 0);    // Infinity is worst for lower-is-better
+        assert_eq!(config.score(f64::INFINITY), 0); // Infinity is worst for lower-is-better
         assert_eq!(config.score(f64::NEG_INFINITY), 100); // Negative infinity is best
     }
 
@@ -197,9 +197,9 @@ mod benchmark_suite_edge_cases {
     fn test_scoring_config_higher_is_better_edge_cases() {
         let config = ScoringConfig::higher_is_better(1000.0, 100.0);
 
-        assert_eq!(config.score(f64::INFINITY), 100);      // Infinity is best for higher-is-better
-        assert_eq!(config.score(f64::NEG_INFINITY), 0);    // Negative infinity is worst
-        assert_eq!(config.score(0.0), 0);                  // Below threshold
+        assert_eq!(config.score(f64::INFINITY), 100); // Infinity is best for higher-is-better
+        assert_eq!(config.score(f64::NEG_INFINITY), 0); // Negative infinity is worst
+        assert_eq!(config.score(0.0), 0); // Below threshold
     }
 
     // -------------------------------------------------------------------------
@@ -267,7 +267,10 @@ mod benchmark_suite_edge_cases {
         let config = SuiteConfig::with_defaults();
         let mut suite = BenchmarkSuite::new(config);
 
-        suite.add_scenario(create_test_scenario("test", BenchmarkDimension::PerformanceUnderHardening));
+        suite.add_scenario(create_test_scenario(
+            "test",
+            BenchmarkDimension::PerformanceUnderHardening,
+        ));
 
         let measurements = BTreeMap::new(); // Empty measurements
         let result = suite.run(&measurements);
@@ -287,12 +290,18 @@ mod benchmark_suite_edge_cases {
         // Test with NaN measurement
         let result = suite.execute_scenario(&scenario, &[1.0, f64::NAN, 3.0]);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BenchRunError::NonFiniteMeasurement { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            BenchRunError::NonFiniteMeasurement { .. }
+        ));
 
         // Test with infinity measurement
         let result = suite.execute_scenario(&scenario, &[1.0, f64::INFINITY, 3.0]);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BenchRunError::NonFiniteMeasurement { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            BenchRunError::NonFiniteMeasurement { .. }
+        ));
     }
 
     #[test]
@@ -318,7 +327,9 @@ mod benchmark_suite_edge_cases {
             measurements.insert(format!("test_{}", i), vec![1.0]); // Perfect scores
         }
 
-        let report = suite.run(&measurements).expect("should handle many scenarios");
+        let report = suite
+            .run(&measurements)
+            .expect("should handle many scenarios");
         assert_eq!(report.aggregate_score, 100); // Should average to 100, not overflow
     }
 
@@ -402,7 +413,10 @@ mod benchmark_suite_edge_cases {
 
         let result = to_canonical_json(&report);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), BenchRunError::NonFiniteReportValue { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            BenchRunError::NonFiniteReportValue { .. }
+        ));
     }
 
     // -------------------------------------------------------------------------
@@ -415,8 +429,12 @@ mod benchmark_suite_edge_cases {
         let mut suite = BenchmarkSuite::new(config);
 
         // Add more scenarios than MAX_SCENARIOS to test capacity bounds
-        for i in 0..5000 { // Exceeds MAX_SCENARIOS = 4096
-            suite.add_scenario(create_test_scenario(&format!("test_{}", i), BenchmarkDimension::PerformanceUnderHardening));
+        for i in 0..5000 {
+            // Exceeds MAX_SCENARIOS = 4096
+            suite.add_scenario(create_test_scenario(
+                &format!("test_{}", i),
+                BenchmarkDimension::PerformanceUnderHardening,
+            ));
         }
 
         // Should be bounded at MAX_SCENARIOS
@@ -430,7 +448,10 @@ mod benchmark_suite_edge_cases {
 
         // Generate many scenarios to create many events
         for i in 0..1000 {
-            suite.add_scenario(create_test_scenario(&format!("test_{}", i), BenchmarkDimension::PerformanceUnderHardening));
+            suite.add_scenario(create_test_scenario(
+                &format!("test_{}", i),
+                BenchmarkDimension::PerformanceUnderHardening,
+            ));
         }
 
         let mut measurements = BTreeMap::new();
@@ -438,10 +459,113 @@ mod benchmark_suite_edge_cases {
             measurements.insert(format!("test_{}", i), vec![100.0; 5]);
         }
 
-        let _report = suite.run(&measurements).expect("should handle many scenarios");
+        let _report = suite
+            .run(&measurements)
+            .expect("should handle many scenarios");
 
         // Events should be bounded by MAX_EVENTS
         assert!(suite.events().len() <= crate::capacity_defaults::aliases::MAX_EVENTS);
+    }
+
+    // -------------------------------------------------------------------------
+    // NEGATIVE-PATH REGRESSION TESTS
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn negative_suite_run_rejects_empty_measurement_vector() {
+        let config = SuiteConfig::with_defaults();
+        let mut suite = BenchmarkSuite::new(config);
+        let scenario = create_test_scenario(
+            "negative_empty",
+            BenchmarkDimension::PerformanceUnderHardening,
+        );
+        suite.add_scenario(scenario);
+
+        let mut measurements = BTreeMap::new();
+        measurements.insert("negative_empty".to_string(), Vec::new());
+
+        let err = suite.run(&measurements).unwrap_err();
+        assert!(matches!(
+            err,
+            BenchRunError::EmptyMeasurements { ref scenario }
+                if scenario == "negative_empty"
+        ));
+    }
+
+    #[test]
+    fn negative_suite_run_rejects_nan_measurement() {
+        let config = SuiteConfig::with_defaults();
+        let mut suite = BenchmarkSuite::new(config);
+        let scenario = create_test_scenario(
+            "negative_nan",
+            BenchmarkDimension::PerformanceUnderHardening,
+        );
+        suite.add_scenario(scenario);
+
+        let mut measurements = BTreeMap::new();
+        measurements.insert("negative_nan".to_string(), vec![1.0, f64::NAN, 2.0]);
+
+        let err = suite.run(&measurements).unwrap_err();
+        assert!(matches!(
+            err,
+            BenchRunError::NonFiniteMeasurement { ref scenario }
+                if scenario == "negative_nan"
+        ));
+    }
+
+    #[test]
+    fn negative_execute_scenario_rejects_negative_infinity_measurement() {
+        let config = SuiteConfig::with_defaults();
+        let mut suite = BenchmarkSuite::new(config);
+        let scenario =
+            create_test_scenario("negative_infinity", BenchmarkDimension::ResourceEfficiency);
+
+        let err = suite
+            .execute_scenario(&scenario, &[1.0, f64::NEG_INFINITY, 3.0])
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BenchRunError::NonFiniteMeasurement { ref scenario }
+                if scenario == "negative_infinity"
+        ));
+    }
+
+    #[test]
+    fn negative_canonical_json_rejects_non_finite_confidence_upper() {
+        let mut report = create_simple_test_report();
+        report.scenarios[0].confidence_interval.upper = f64::INFINITY;
+
+        let err = to_canonical_json(&report).unwrap_err();
+        assert!(matches!(err, BenchRunError::NonFiniteReportValue { .. }));
+        assert!(err.to_string().contains("confidence_interval.upper"));
+    }
+
+    #[test]
+    fn negative_canonical_json_rejects_non_finite_variance() {
+        let mut report = create_simple_test_report();
+        report.scenarios[0].variance_pct = f64::NEG_INFINITY;
+
+        let err = to_canonical_json(&report).unwrap_err();
+        assert!(matches!(err, BenchRunError::NonFiniteReportValue { .. }));
+        assert!(err.to_string().contains("variance_pct"));
+    }
+
+    #[test]
+    fn negative_from_json_rejects_malformed_payload() {
+        let err = from_json("{not-valid-json").unwrap_err();
+
+        assert!(err.is_syntax() || err.is_eof());
+    }
+
+    #[test]
+    fn negative_regression_detection_ignores_missing_baseline_scenario() {
+        let baseline = create_test_report(vec![("only-baseline", 100.0)]);
+        let current = create_test_report(vec![("only-current", 10_000.0)]);
+
+        let findings = detect_regressions(&baseline, &current, 0.0);
+
+        assert!(findings.is_empty());
     }
 
     // -------------------------------------------------------------------------

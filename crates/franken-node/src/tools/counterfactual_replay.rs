@@ -1046,6 +1046,249 @@ mod tests {
         ));
     }
 
+    fn assert_invalid_policy(err: CounterfactualReplayError, expected: &str) {
+        match err {
+            CounterfactualReplayError::InvalidPolicyOverride { message } => {
+                assert!(
+                    message.contains(expected),
+                    "expected `{message}` to mention `{expected}`"
+                );
+            }
+            _ => unreachable!("expected invalid policy override error"),
+        }
+    }
+
+    #[test]
+    fn validation_rejects_quarantine_threshold_above_cap() {
+        let policy = PolicyConfig {
+            quarantine_threshold: 101,
+            ..PolicyConfig::default()
+        };
+
+        let err = policy.validate().expect_err("quarantine cap must fail");
+
+        assert_invalid_policy(err, "quarantine_threshold");
+    }
+
+    #[test]
+    fn validation_rejects_observe_threshold_above_cap() {
+        let policy = PolicyConfig {
+            observe_threshold: 101,
+            ..PolicyConfig::default()
+        };
+
+        let err = policy.validate().expect_err("observe cap must fail");
+
+        assert_invalid_policy(err, "observe_threshold");
+    }
+
+    #[test]
+    fn validation_rejects_observe_threshold_above_quarantine_threshold() {
+        let policy = PolicyConfig {
+            quarantine_threshold: 40,
+            observe_threshold: 41,
+            ..PolicyConfig::default()
+        };
+
+        let err = policy
+            .validate()
+            .expect_err("inverted thresholds must fail");
+
+        assert_invalid_policy(err, "observe_threshold cannot exceed");
+    }
+
+    #[test]
+    fn cli_spec_rejects_unknown_policy_profile() {
+        let baseline = PolicyConfig::default();
+
+        let err = PolicyConfig::from_cli_spec("unknown-profile", &baseline)
+            .expect_err("unknown profile must fail");
+
+        assert_invalid_policy(err, "unsupported policy profile");
+    }
+
+    #[test]
+    fn cli_spec_rejects_override_segment_without_equals() {
+        let baseline = PolicyConfig::default();
+
+        let err = PolicyConfig::from_cli_spec("quarantine_threshold=70,badsegment", &baseline)
+            .expect_err("malformed override segment must fail");
+
+        assert_invalid_policy(err, "invalid override segment");
+    }
+
+    #[test]
+    fn cli_spec_rejects_empty_policy_name_override() {
+        let baseline = PolicyConfig::default();
+
+        let err =
+            PolicyConfig::from_cli_spec("policy_name=   ", &baseline).expect_err("empty name");
+
+        assert_invalid_policy(err, "policy name cannot be empty");
+    }
+
+    #[test]
+    fn cli_spec_rejects_non_numeric_threshold_override() {
+        let baseline = PolicyConfig::default();
+
+        let err = PolicyConfig::from_cli_spec("observe_threshold=not-a-number", &baseline)
+            .expect_err("non numeric threshold must fail");
+
+        assert_invalid_policy(err, "failed parsing `observe_threshold` as u64");
+    }
+
+    #[test]
+    fn sweep_spec_rejects_missing_parameter_name() {
+        let baseline = PolicyConfig::default();
+
+        let err = PolicyConfig::from_cli_spec("sweep:=40|50", &baseline)
+            .expect_err("missing sweep parameter must fail");
+
+        assert_invalid_policy(err, "sweep parameter cannot be empty");
+    }
+
+    #[test]
+    fn sweep_spec_rejects_blank_value_list() {
+        let baseline = PolicyConfig::default();
+
+        let err = PolicyConfig::from_cli_spec("sweep:observe_threshold= | ", &baseline)
+            .expect_err("blank sweep values must fail");
+
+        assert!(matches!(
+            err,
+            CounterfactualReplayError::InvalidSweepCardinality { count: 0 }
+        ));
+    }
+
+    #[test]
+    fn numeric_parameter_rejects_negative_unsigned_threshold() {
+        let baseline = PolicyConfig::default();
+
+        let err = baseline
+            .with_numeric_parameter("quarantine_threshold", -1)
+            .expect_err("negative unsigned threshold must fail");
+
+        assert_invalid_policy(err, "must be non-negative");
+    }
+
+    #[test]
+    fn numeric_parameter_rejects_unsupported_parameter() {
+        let baseline = PolicyConfig::default();
+
+        let err = baseline
+            .with_numeric_parameter("unsupported_threshold", 1)
+            .expect_err("unsupported parameter must fail");
+
+        assert!(matches!(
+            err,
+            CounterfactualReplayError::UnsupportedSweepParameter { parameter }
+                if parameter == "unsupported_threshold"
+        ));
+    }
+
+    #[test]
+    fn cli_spec_rejects_unsupported_override_key() {
+        let baseline = PolicyConfig::default();
+
+        let err = PolicyConfig::from_cli_spec("unsupported_threshold=90", &baseline)
+            .expect_err("unsupported override key must fail");
+
+        assert_invalid_policy(err, "unsupported override key `unsupported_threshold`");
+    }
+
+    #[test]
+    fn cli_spec_rejects_negative_unsigned_threshold_override() {
+        let baseline = PolicyConfig::default();
+
+        let err = PolicyConfig::from_cli_spec("quarantine_threshold=-1", &baseline)
+            .expect_err("negative threshold override must fail");
+
+        assert_invalid_policy(err, "failed parsing `quarantine_threshold` as u64");
+    }
+
+    #[test]
+    fn sweep_spec_rejects_missing_equals_separator() {
+        let baseline = PolicyConfig::default();
+
+        let err = PolicyConfig::from_cli_spec("sweep:quarantine_threshold", &baseline)
+            .expect_err("sweep spec without equals must fail");
+
+        assert_invalid_policy(err, "sweep spec must be");
+    }
+
+    #[test]
+    fn direct_sweep_mode_rejects_empty_values() {
+        let bundle = fixture_bundle();
+        let baseline = PolicyConfig::from_bundle(&bundle);
+        let engine = CounterfactualReplayEngine::default();
+
+        let err = engine
+            .simulate(
+                &bundle,
+                &baseline,
+                SimulationMode::ParameterSweep {
+                    parameter: "observe_threshold".to_string(),
+                    values: vec![],
+                    template_policy: baseline.clone(),
+                },
+            )
+            .expect_err("empty sweep values must fail");
+
+        assert!(matches!(
+            err,
+            CounterfactualReplayError::InvalidSweepCardinality { count: 0 }
+        ));
+    }
+
+    #[test]
+    fn direct_sweep_mode_rejects_too_many_values() {
+        let bundle = fixture_bundle();
+        let baseline = PolicyConfig::from_bundle(&bundle);
+        let engine = CounterfactualReplayEngine::default();
+        let values = (0..=MAX_SWEEP_VALUES)
+            .map(|value| i64::try_from(value).unwrap_or(i64::MAX))
+            .collect::<Vec<_>>();
+
+        let err = engine
+            .simulate(
+                &bundle,
+                &baseline,
+                SimulationMode::ParameterSweep {
+                    parameter: "degraded_mode_bias".to_string(),
+                    values,
+                    template_policy: baseline.clone(),
+                },
+            )
+            .expect_err("oversized sweep values must fail");
+
+        assert!(matches!(
+            err,
+            CounterfactualReplayError::InvalidSweepCardinality { count }
+                if count == MAX_SWEEP_VALUES + 1
+        ));
+    }
+
+    #[test]
+    fn direct_sweep_mode_rejects_negative_unsigned_parameter_value() {
+        let bundle = fixture_bundle();
+        let baseline = PolicyConfig::from_bundle(&bundle);
+        let engine = CounterfactualReplayEngine::default();
+
+        let err = engine
+            .simulate(
+                &bundle,
+                &baseline,
+                SimulationMode::ParameterSweep {
+                    parameter: "observe_threshold".to_string(),
+                    values: vec![-1],
+                    template_policy: baseline.clone(),
+                },
+            )
+            .expect_err("negative unsigned sweep value must fail");
+
+        assert_invalid_policy(err, "observe_threshold must be non-negative");
+    }
+
     #[test]
     fn summarize_output_works_for_single() {
         let bundle = fixture_bundle();

@@ -208,10 +208,18 @@ pub struct MetricMeasurement {
 
 impl MetricMeasurement {
     pub fn is_valid(&self) -> bool {
-        self.score >= 0.0
+        self.score.is_finite()
+            && self.score >= 0.0
             && self.score <= 1.0
+            && self.confidence_interval.lower.is_finite()
+            && self.confidence_interval.upper.is_finite()
             && self.confidence_interval.lower <= self.score
             && self.confidence_interval.upper >= self.score
+            && self.confidence_interval.confidence_level.is_finite()
+            && self.confidence_interval.confidence_level > 0.0
+            && self.confidence_interval.confidence_level <= 1.0
+            && self.sample_count > 0
+            && !self.formula_version.trim().is_empty()
     }
 }
 
@@ -478,6 +486,20 @@ impl CoMetricEngine {
         measurement: &MetricMeasurement,
         threshold: &MetricThreshold,
     ) -> MetricGateResult {
+        if !measurement.is_valid() {
+            return MetricGateResult {
+                metric_id: measurement.metric_id.clone(),
+                score: measurement.score,
+                threshold: threshold.pass_threshold,
+                passed: false,
+                warning: false,
+                detail: format!(
+                    "{} invalid metric measurement rejected before threshold check",
+                    measurement.metric_id
+                ),
+            };
+        }
+
         let passed = measurement.score >= threshold.pass_threshold;
         let warning = measurement.score >= threshold.pass_threshold
             && measurement.score < threshold.warn_threshold;
@@ -573,6 +595,21 @@ mod tests {
         }
     }
 
+    fn make_measurement_with_score(metric_id: &str, score: f64) -> MetricMeasurement {
+        MetricMeasurement {
+            metric_id: metric_id.to_string(),
+            score,
+            confidence_interval: ConfidenceInterval {
+                lower: score - 0.05,
+                upper: score + 0.05,
+                confidence_level: 0.95,
+            },
+            sample_count: 25,
+            formula_version: SCORING_FORMULA_VERSION.to_string(),
+            raw_data: BTreeMap::from([("score".to_string(), score)]),
+        }
+    }
+
     // === Category coverage ===
 
     #[test]
@@ -626,6 +663,166 @@ mod tests {
             raw_data: BTreeMap::new(),
         };
         assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn negative_measurement_score_fails_validation() {
+        let m = make_measurement_with_score("negative-score", -0.01);
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn nan_measurement_score_fails_validation() {
+        let mut m = make_measurement_with_score("nan-score", 0.5);
+        m.score = f64::NAN;
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn confidence_interval_below_score_fails_validation() {
+        let mut m = make_measurement_with_score("bad-ci-low", 0.5);
+        m.confidence_interval.lower = 0.6;
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn confidence_interval_above_score_fails_validation() {
+        let mut m = make_measurement_with_score("bad-ci-high", 0.5);
+        m.confidence_interval.upper = 0.4;
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn nan_confidence_lower_fails_validation() {
+        let mut m = make_measurement_with_score("nan-ci-lower", 0.5);
+        m.confidence_interval.lower = f64::NAN;
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn infinite_confidence_upper_fails_validation() {
+        let mut m = make_measurement_with_score("inf-ci-upper", 0.5);
+        m.confidence_interval.upper = f64::INFINITY;
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn zero_confidence_level_fails_validation() {
+        let mut m = make_measurement_with_score("zero-confidence", 0.5);
+        m.confidence_interval.confidence_level = 0.0;
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn confidence_level_above_one_fails_validation() {
+        let mut m = make_measurement_with_score("high-confidence", 0.5);
+        m.confidence_interval.confidence_level = 1.01;
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn zero_sample_count_fails_validation() {
+        let mut m = make_measurement_with_score("zero-samples", 0.5);
+        m.sample_count = 0;
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn blank_formula_version_fails_validation() {
+        let mut m = make_measurement_with_score("blank-formula", 0.5);
+        m.formula_version = " \t ".to_string();
+
+        assert!(!m.is_valid());
+    }
+
+    #[test]
+    fn invalid_high_security_measurement_blocks_gate() {
+        let mut engine = CoMetricEngine::default();
+        let mut sec = make_passing_security_measurements();
+        sec[0].score = f64::INFINITY;
+        sec[0].raw_data.insert("score".to_string(), f64::INFINITY);
+
+        let report = engine.evaluate(
+            sec,
+            make_passing_trust_measurements(),
+            "invalid-security",
+            "2026-02-20T00:00:00Z",
+        );
+
+        assert!(!report.overall_pass);
+        let gate = report
+            .gate_results
+            .iter()
+            .find(|gate| gate.metric_id == "SECM-SANDBOX")
+            .expect("sandbox gate result");
+        assert!(!gate.passed);
+        assert!(!gate.warning);
+        assert!(gate.detail.contains("invalid metric measurement"));
+    }
+
+    #[test]
+    fn unknown_security_metric_does_not_create_gate_and_fails_coverage() {
+        let mut engine = CoMetricEngine::default();
+        let report = engine.evaluate(
+            vec![make_measurement_with_score("SECM-UNKNOWN", 0.99)],
+            make_passing_trust_measurements(),
+            "unknown-security",
+            "2026-02-20T00:00:00Z",
+        );
+
+        assert!(!report.overall_pass);
+        assert!(
+            report
+                .gate_results
+                .iter()
+                .all(|g| g.metric_id != "SECM-UNKNOWN")
+        );
+        assert!(report.security_coverage < 1.0);
+    }
+
+    #[test]
+    fn missing_trust_measurements_fail_required_coverage() {
+        let mut engine = CoMetricEngine::default();
+        let report = engine.evaluate(
+            make_passing_security_measurements(),
+            Vec::new(),
+            "missing-trust",
+            "2026-02-20T00:00:00Z",
+        );
+
+        assert!(!report.overall_pass);
+        assert_eq!(report.trust_coverage, 0.0);
+    }
+
+    #[test]
+    fn failing_trust_metric_blocks_release() {
+        let mut engine = CoMetricEngine::default();
+        let mut trust = make_passing_trust_measurements();
+        trust[0] = make_failing_measurement("TRUSTM-CARD");
+
+        let report = engine.evaluate(
+            make_passing_security_measurements(),
+            trust,
+            "failing-trust",
+            "2026-02-20T00:00:00Z",
+        );
+
+        assert!(!report.overall_pass);
+        let card_gate = report
+            .gate_results
+            .iter()
+            .find(|g| g.metric_id == "TRUSTM-CARD")
+            .expect("trust card gate should exist");
+        assert!(!card_gate.passed);
     }
 
     // === Full evaluation pass (INV-SECM-GATED) ===

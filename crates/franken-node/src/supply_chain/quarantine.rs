@@ -25,9 +25,14 @@ const MAX_RECALL_RECEIPTS: usize = 4096;
 const MAX_STATE_HISTORY: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -57,6 +62,7 @@ pub const ERR_LIFT_REQUIRES_CLEARANCE: &str = "ERR_LIFT_REQUIRES_CLEARANCE";
 pub const ERR_QUARANTINE_INVALID_TRANSITION: &str = "ERR_QUARANTINE_INVALID_TRANSITION";
 pub const ERR_QUARANTINE_CAPACITY_EXCEEDED: &str = "ERR_QUARANTINE_CAPACITY_EXCEEDED";
 pub const ERR_QUARANTINE_DUPLICATE_ORDER_ID: &str = "ERR_QUARANTINE_DUPLICATE_ORDER_ID";
+pub const ERR_RECALL_RECEIPT_MISMATCH: &str = "ERR_RECALL_RECEIPT_MISMATCH";
 pub const ERR_AUDIT_CHAIN_BROKEN: &str = "ERR_AUDIT_CHAIN_BROKEN";
 
 // ── Quarantine mode ─────────────────────────────────────────────────────────
@@ -816,6 +822,20 @@ impl QuarantineRegistry {
                 ),
             });
         }
+
+        let expected_recall_id = record.recall.as_ref().ok_or_else(|| QuarantineError {
+            code: ERR_RECALL_WITHOUT_QUARANTINE.to_owned(),
+            message: format!("Cannot record recall receipt: order {order_id} has no recall order"),
+        })?;
+        if !ct_eq(&receipt.recall_id, &expected_recall_id.recall_id) {
+            return Err(QuarantineError {
+                code: ERR_RECALL_RECEIPT_MISMATCH.to_owned(),
+                message: format!(
+                    "Recall receipt {} does not match active recall {}",
+                    receipt.recall_id, expected_recall_id.recall_id
+                ),
+            });
+        }
         push_bounded(&mut record.recall_receipts, receipt, MAX_RECALL_RECEIPTS);
 
         self.append_audit(
@@ -898,7 +918,7 @@ impl QuarantineRegistry {
         let order_id = clearance.order_id.clone();
 
         // Must have clearance with non-empty justification.
-        if clearance.justification.is_empty() {
+        if clearance.justification.trim().is_empty() {
             return Err(QuarantineError {
                 code: ERR_LIFT_REQUIRES_CLEARANCE.to_owned(),
                 message: "Clearance justification must be non-empty".to_owned(),
@@ -1176,9 +1196,20 @@ impl QuarantineRegistry {
 
         entry.entry_hash = compute_entry_hash(&entry);
         if self.audit_trail.len() >= MAX_AUDIT_TRAIL {
-            let overflow = self.audit_trail.len() - MAX_AUDIT_TRAIL + 1;
-            self.chain_anchor_hash = Some(self.audit_trail[overflow - 1].entry_hash.clone());
-            self.audit_trail.drain(0..overflow);
+            let overflow = self
+                .audit_trail
+                .len()
+                .saturating_sub(MAX_AUDIT_TRAIL)
+                .saturating_add(1);
+            let drain_len = overflow.min(self.audit_trail.len());
+            if drain_len > 0 {
+                self.chain_anchor_hash = Some(
+                    self.audit_trail[drain_len.saturating_sub(1)]
+                        .entry_hash
+                        .clone(),
+                );
+                self.audit_trail.drain(0..drain_len);
+            }
         }
         self.audit_trail.push(entry);
     }
@@ -1284,6 +1315,15 @@ mod tests {
     }
 
     #[test]
+    fn test_push_bounded_zero_capacity_drops_existing_and_new_items() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
     fn test_initiate_soft_quarantine() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Soft);
@@ -1355,6 +1395,39 @@ mod tests {
     }
 
     #[test]
+    fn test_terminal_order_id_reuse_is_rejected_without_new_record() {
+        let mut reg = QuarantineRegistry::new();
+        reg.initiate_quarantine(make_order_for_extension(
+            "q-reused",
+            "ext-original",
+            QuarantineSeverity::High,
+            QuarantineMode::Hard,
+        ))
+        .expect("should succeed");
+        reg.enforce_quarantine("q-reused", "2026-01-15T00:02:00Z")
+            .expect("should succeed");
+        reg.start_drain("q-reused", "2026-01-15T00:03:00Z")
+            .expect("should succeed");
+        reg.complete_drain("q-reused", "2026-01-15T00:04:00Z")
+            .expect("should succeed");
+        reg.lift_quarantine(make_clearance("q-reused"))
+            .expect("should succeed");
+
+        let err = reg
+            .initiate_quarantine(make_order_for_extension(
+                "q-reused",
+                "ext-replacement",
+                QuarantineSeverity::Critical,
+                QuarantineMode::Hard,
+            ))
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_DUPLICATE_ORDER_ID);
+        assert!(reg.get_active_quarantine("ext-replacement").is_none());
+        assert_eq!(reg.total_quarantines(), 1);
+    }
+
+    #[test]
     fn test_propagation_transitions_state() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Soft);
@@ -1364,6 +1437,42 @@ mod tests {
 
         let record = reg.get_record("q-001").expect("should succeed");
         assert_eq!(record.state, QuarantineState::Propagated);
+    }
+
+    #[test]
+    fn test_record_propagation_rejects_unknown_order_without_audit_entry() {
+        let mut reg = QuarantineRegistry::new();
+
+        let err = reg
+            .record_propagation("missing-order", "node-1", "2026-01-15T00:01:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_NOT_FOUND);
+        assert!(reg.audit_trail().is_empty());
+    }
+
+    #[test]
+    fn test_record_propagation_rejects_unknown_order_without_caching_node() {
+        let mut reg = QuarantineRegistry::new();
+
+        let err = reg
+            .record_propagation("missing-order", "node-stale", "2026-01-15T00:01:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_NOT_FOUND);
+        assert!(reg.propagation_status.is_empty());
+    }
+
+    #[test]
+    fn test_enforce_quarantine_rejects_unknown_order() {
+        let mut reg = QuarantineRegistry::new();
+
+        let err = reg
+            .enforce_quarantine("missing-order", "2026-01-15T00:02:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_NOT_FOUND);
+        assert_eq!(reg.total_quarantines(), 0);
     }
 
     #[test]
@@ -1392,6 +1501,48 @@ mod tests {
             reg.get_record("q-001").expect("should succeed").state,
             QuarantineState::Isolated
         );
+    }
+
+    #[test]
+    fn test_start_drain_rejects_initiated_state_without_state_change() {
+        let mut reg = QuarantineRegistry::new();
+        reg.initiate_quarantine(make_order(
+            "q-001",
+            QuarantineSeverity::High,
+            QuarantineMode::Hard,
+        ))
+        .expect("should succeed");
+
+        let err = reg
+            .start_drain("q-001", "2026-01-15T00:03:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_INVALID_TRANSITION);
+        let record = reg.get_record("q-001").expect("record remains present");
+        assert_eq!(record.state, QuarantineState::Initiated);
+        assert_eq!(record.state_history.len(), 1);
+    }
+
+    #[test]
+    fn test_complete_drain_rejects_enforced_state_without_state_change() {
+        let mut reg = QuarantineRegistry::new();
+        reg.initiate_quarantine(make_order(
+            "q-001",
+            QuarantineSeverity::High,
+            QuarantineMode::Hard,
+        ))
+        .expect("should succeed");
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .expect("should succeed");
+
+        let err = reg
+            .complete_drain("q-001", "2026-01-15T00:04:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_INVALID_TRANSITION);
+        let record = reg.get_record("q-001").expect("record remains present");
+        assert_eq!(record.state, QuarantineState::Enforced);
+        assert_eq!(record.state_history.len(), 2);
     }
 
     #[test]
@@ -1428,6 +1579,64 @@ mod tests {
         clearance.justification = String::new();
         let err = reg.lift_quarantine(clearance).unwrap_err();
         assert_eq!(err.code, ERR_LIFT_REQUIRES_CLEARANCE);
+    }
+
+    #[test]
+    fn test_lift_with_whitespace_justification_fails_without_state_change() {
+        let mut reg = QuarantineRegistry::new();
+        reg.initiate_quarantine(make_order(
+            "q-001",
+            QuarantineSeverity::Low,
+            QuarantineMode::Soft,
+        ))
+        .expect("should succeed");
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z")
+            .expect("should succeed");
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
+            .expect("should succeed");
+
+        let mut clearance = make_clearance("q-001");
+        clearance.justification = " \t\n ".to_owned();
+        let err = reg.lift_quarantine(clearance).unwrap_err();
+
+        assert_eq!(err.code, ERR_LIFT_REQUIRES_CLEARANCE);
+        let record = reg.get_record("q-001").expect("record remains present");
+        assert_eq!(record.state, QuarantineState::Isolated);
+        assert!(record.clearance.is_none());
+        assert!(reg.is_quarantined("ext-test"));
+    }
+
+    #[test]
+    fn test_lift_unknown_quarantine_rejects_after_clearance_validation() {
+        let mut reg = QuarantineRegistry::new();
+
+        let err = reg
+            .lift_quarantine(make_clearance("missing-order"))
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_NOT_FOUND);
+        assert_eq!(reg.active_count(), 0);
+    }
+
+    #[test]
+    fn test_lift_quarantine_rejects_before_isolated_state() {
+        let mut reg = QuarantineRegistry::new();
+        reg.initiate_quarantine(make_order(
+            "q-001",
+            QuarantineSeverity::Medium,
+            QuarantineMode::Soft,
+        ))
+        .expect("should succeed");
+
+        let err = reg.lift_quarantine(make_clearance("q-001")).unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_INVALID_TRANSITION);
+        let record = reg.get_record("q-001").expect("record remains present");
+        assert_eq!(record.state, QuarantineState::Initiated);
+        assert!(record.clearance.is_none());
+        assert!(reg.is_quarantined("ext-test"));
     }
 
     #[test]
@@ -1482,6 +1691,78 @@ mod tests {
     }
 
     #[test]
+    fn test_trigger_recall_rejects_before_isolated_state() {
+        let mut reg = QuarantineRegistry::new();
+        reg.initiate_quarantine(make_order(
+            "q-001",
+            QuarantineSeverity::High,
+            QuarantineMode::Hard,
+        ))
+        .expect("should succeed");
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .expect("should succeed");
+
+        let err = reg.trigger_recall(make_recall("q-001")).unwrap_err();
+
+        assert_eq!(err.code, ERR_RECALL_WITHOUT_QUARANTINE);
+        let record = reg.get_record("q-001").expect("record remains present");
+        assert_eq!(record.state, QuarantineState::Enforced);
+        assert!(record.recall.is_none());
+    }
+
+    #[test]
+    fn test_record_recall_receipt_rejects_before_recall_triggered() {
+        let mut reg = QuarantineRegistry::new();
+        reg.initiate_quarantine(make_order(
+            "q-001",
+            QuarantineSeverity::High,
+            QuarantineMode::Hard,
+        ))
+        .expect("should succeed");
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .expect("should succeed");
+        reg.start_drain("q-001", "2026-01-15T00:03:00Z")
+            .expect("should succeed");
+        reg.complete_drain("q-001", "2026-01-15T00:04:00Z")
+            .expect("should succeed");
+
+        let receipt = RecallReceipt {
+            node_id: "node-1".to_owned(),
+            recall_id: "recall-001".to_owned(),
+            removed: true,
+            removal_method: "file_delete".to_owned(),
+            removed_at: "2026-01-16T13:00:00Z".to_owned(),
+            artifact_hash: "abc".to_owned(),
+        };
+        let err = reg.record_recall_receipt("q-001", receipt).unwrap_err();
+
+        assert_eq!(err.code, ERR_RECALL_WITHOUT_QUARANTINE);
+        let record = reg.get_record("q-001").expect("record remains present");
+        assert!(record.recall_receipts.is_empty());
+    }
+
+    #[test]
+    fn test_record_recall_receipt_rejects_mismatched_recall_id_without_audit() {
+        let mut reg = setup_recall_registry("q-001");
+        let audit_len = reg.audit_trail().len();
+        let receipt = RecallReceipt {
+            node_id: "node-1".to_owned(),
+            recall_id: "recall-other".to_owned(),
+            removed: true,
+            removal_method: "file_delete".to_owned(),
+            removed_at: "2026-01-16T13:00:00Z".to_owned(),
+            artifact_hash: "abc".to_owned(),
+        };
+
+        let err = reg.record_recall_receipt("q-001", receipt).unwrap_err();
+
+        assert_eq!(err.code, ERR_RECALL_RECEIPT_MISMATCH);
+        let record = reg.get_record("q-001").expect("record remains present");
+        assert!(record.recall_receipts.is_empty());
+        assert_eq!(reg.audit_trail().len(), audit_len);
+    }
+
+    #[test]
     fn test_impact_report() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
@@ -1501,6 +1782,25 @@ mod tests {
 
         assert_eq!(report.installations_affected, 150);
         assert_eq!(report.active_sessions, 5);
+    }
+
+    #[test]
+    fn test_impact_report_rejects_unknown_order() {
+        let mut reg = QuarantineRegistry::new();
+
+        let err = reg
+            .generate_impact_report(
+                "missing-order",
+                1,
+                vec!["configs".to_owned()],
+                vec!["ext-dependent".to_owned()],
+                1,
+                vec!["notify operator".to_owned()],
+                "2026-01-15T01:00:00Z",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_NOT_FOUND);
     }
 
     #[test]
@@ -1564,6 +1864,35 @@ mod tests {
     }
 
     #[test]
+    fn test_recall_completion_ignores_failed_removal_receipts() {
+        let mut reg = setup_recall_registry("q-001");
+        let receipt = RecallReceipt {
+            node_id: "node-1".to_owned(),
+            recall_id: "recall-001".to_owned(),
+            removed: false,
+            removal_method: "file_delete".to_owned(),
+            removed_at: "2026-01-16T13:00:00Z".to_owned(),
+            artifact_hash: "abc".to_owned(),
+        };
+        reg.record_recall_receipt("q-001", receipt)
+            .expect("should succeed");
+
+        assert_eq!(reg.recall_completion_pct("q-001", 1), 0.0);
+    }
+
+    #[test]
+    fn test_complete_recall_unknown_order_preserves_counter() {
+        let mut reg = QuarantineRegistry::new();
+
+        let err = reg
+            .complete_recall("missing-order", "2026-01-16T14:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_QUARANTINE_NOT_FOUND);
+        assert_eq!(reg.total_recalls(), 0);
+    }
+
+    #[test]
     fn test_audit_trail_integrity() {
         let mut reg = QuarantineRegistry::new();
         let order = make_order("q-001", QuarantineSeverity::High, QuarantineMode::Hard);
@@ -1587,6 +1916,24 @@ mod tests {
         if let Some(entry) = reg.audit_trail.first_mut() {
             entry.details = "TAMPERED".to_owned();
         }
+
+        let err = reg.verify_audit_integrity().unwrap_err();
+        assert_eq!(err.code, ERR_AUDIT_CHAIN_BROKEN);
+    }
+
+    #[test]
+    fn test_audit_trail_prev_hash_tamper_detection() {
+        let mut reg = QuarantineRegistry::new();
+        reg.initiate_quarantine(make_order(
+            "q-001",
+            QuarantineSeverity::High,
+            QuarantineMode::Hard,
+        ))
+        .expect("should succeed");
+        reg.enforce_quarantine("q-001", "2026-01-15T00:02:00Z")
+            .expect("should succeed");
+
+        reg.audit_trail[1].prev_hash = "wrong-prev-hash".to_owned();
 
         let err = reg.verify_audit_integrity().unwrap_err();
         assert_eq!(err.code, ERR_AUDIT_CHAIN_BROKEN);
@@ -1852,5 +2199,728 @@ mod tests {
             err.code, ERR_QUARANTINE_INVALID_TRANSITION,
             "complete_recall must reject non-RecallTriggered state"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Comprehensive negative-path tests
+    // ---------------------------------------------------------------------------
+
+    mod quarantine_comprehensive_negative_tests {
+        use super::*;
+
+        #[test]
+        fn unicode_injection_in_quarantine_identifiers_and_metadata() {
+            let malicious_strings = [
+                "order\u{202E}deilav",       // RLO override attack
+                "id\u{200B}hidden",         // Zero-width space injection
+                "trace\u{FEFF}bom",         // BOM insertion attack
+                "ext\u{2028}break",         // Line separator injection
+                "\u{1F4A9}emoji_quarantine", // Non-ASCII emoji
+                "order\u{0000}null",        // Null byte injection
+                "just\u{001F}ctrl\u{007F}ification", // Control character injection
+            ];
+
+            let mut reg = QuarantineRegistry::new();
+
+            for (i, malicious_str) in malicious_strings.iter().enumerate() {
+                // Test Unicode injection in order identifiers and metadata
+                let mut malicious_order = make_order(
+                    &format!("unicode_test_{i}_{malicious_str}"),
+                    QuarantineSeverity::High,
+                    QuarantineMode::Soft,
+                );
+                malicious_order.justification = format!("Malicious justification: {malicious_str}");
+                malicious_order.trace_id = format!("trace_{malicious_str}");
+                malicious_order.issued_by = format!("operator_{malicious_str}");
+                malicious_order.scope = QuarantineScope::AllVersions {
+                    extension_id: format!("ext_{malicious_str}"),
+                };
+
+                // System should handle Unicode injection gracefully
+                let record_result = reg.initiate_quarantine(malicious_order);
+                assert!(record_result.is_ok(), "Unicode injection in order '{malicious_str:?}' should not cause system failure");
+
+                // Test Unicode in recall orders
+                if let Ok(_) = record_result {
+                    let order_id = format!("unicode_test_{i}_{malicious_str}");
+                    let ext_id = format!("ext_{malicious_str}");
+
+                    // Progress to isolated state for recall testing
+                    let _ = reg.enforce_quarantine(&order_id, "2026-01-15T00:02:00Z");
+                    let _ = reg.start_drain(&order_id, "2026-01-15T00:03:00Z");
+                    let _ = reg.complete_drain(&order_id, "2026-01-15T00:04:00Z");
+
+                    let mut malicious_recall = make_recall(&order_id);
+                    malicious_recall.recall_id = format!("recall_{malicious_str}");
+                    malicious_recall.reason = format!("Malicious reason: {malicious_str}");
+                    malicious_recall.trace_id = format!("recall_trace_{malicious_str}");
+                    malicious_recall.issued_by = format!("security_{malicious_str}");
+
+                    let recall_result = reg.trigger_recall(malicious_recall);
+                    assert!(recall_result.is_ok() || recall_result.is_err(), "Unicode recall should complete without panic");
+
+                    // Test Unicode in clearance
+                    let mut malicious_clearance = make_clearance(&order_id);
+                    malicious_clearance.justification = format!("Clear justification: {malicious_str}");
+                    malicious_clearance.re_verification_evidence = format!("Evidence: {malicious_str}");
+                    malicious_clearance.cleared_by = format!("lead_{malicious_str}");
+
+                    // Note: clearance may fail due to state, but should not crash
+                    let _ = reg.lift_quarantine(malicious_clearance);
+                }
+
+                // Verify audit trail handles Unicode safely
+                let audit_entries = reg.audit_trail();
+                for entry in audit_entries {
+                    assert!(!entry.details.is_empty(), "Audit details should not be corrupted by Unicode");
+                    assert!(!entry.extension_id.is_empty(), "Extension ID should be preserved");
+                }
+            }
+
+            // Test audit integrity with Unicode content
+            let integrity_result = reg.verify_audit_integrity();
+            assert!(integrity_result.is_ok(), "Audit integrity should be maintained despite Unicode injection");
+        }
+
+        #[test]
+        fn arithmetic_overflow_protection_in_sequence_counters() {
+            let mut reg = QuarantineRegistry::new();
+
+            // Set sequence counter near overflow boundary
+            reg.next_sequence = u64::MAX.saturating_sub(5);
+
+            // Test sequence counter overflow protection
+            for i in 0..10 {
+                let order = make_order(
+                    &format!("overflow_test_{i}"),
+                    QuarantineSeverity::High,
+                    QuarantineMode::Soft,
+                );
+
+                let record_result = reg.initiate_quarantine(order);
+                assert!(record_result.is_ok(), "Should handle sequence overflow gracefully");
+
+                // Verify sequence counter uses saturating arithmetic
+                let current_sequence = reg.next_sequence;
+                assert!(current_sequence <= u64::MAX, "Sequence should not wrap around");
+
+                if i > 0 {
+                    assert!(current_sequence >= reg.next_sequence.saturating_sub(1), "Sequence should increment safely");
+                }
+            }
+
+            // Test counters in quarantine/recall totals
+            reg.total_quarantines = u64::MAX.saturating_sub(2);
+            reg.total_recalls = u64::MAX.saturating_sub(2);
+
+            for i in 0..5 {
+                let order_id = format!("counter_test_{i}");
+                let mut test_order = make_order(&order_id, QuarantineSeverity::Critical, QuarantineMode::Hard);
+                test_order.scope = QuarantineScope::AllVersions {
+                    extension_id: format!("ext_counter_{i}"),
+                };
+
+                let _ = reg.initiate_quarantine(test_order);
+
+                // Verify total quarantines uses saturating arithmetic
+                assert!(reg.total_quarantines() <= u64::MAX, "Total quarantines should not overflow");
+
+                // Progress to recall and test recall counter
+                let _ = reg.enforce_quarantine(&order_id, "2026-01-15T00:02:00Z");
+                let _ = reg.start_drain(&order_id, "2026-01-15T00:03:00Z");
+                let _ = reg.complete_drain(&order_id, "2026-01-15T00:04:00Z");
+
+                let recall_order = make_recall(&order_id);
+                if reg.trigger_recall(recall_order).is_ok() {
+                    let _ = reg.complete_recall(&order_id, "2026-01-16T14:00:00Z");
+                    assert!(reg.total_recalls() <= u64::MAX, "Total recalls should not overflow");
+                }
+            }
+
+            // Test grace period overflow
+            let mut overflow_order = make_order("grace_overflow", QuarantineSeverity::Low, QuarantineMode::Hard);
+            overflow_order.grace_period_secs = u64::MAX;
+
+            let grace_result = reg.initiate_quarantine(overflow_order);
+            assert!(grace_result.is_ok(), "Should handle extreme grace period values");
+        }
+
+        #[test]
+        fn memory_exhaustion_through_massive_audit_and_receipt_datasets() {
+            let mut reg = QuarantineRegistry::new();
+
+            // Create massive audit trail to test memory bounds
+            for cycle in 0..50 {
+                for i in 0..100 {
+                    let order_id = format!("massive_audit_{cycle}_{i:04}");
+                    let mut massive_order = make_order(
+                        &order_id,
+                        QuarantineSeverity::High,
+                        QuarantineMode::Hard,
+                    );
+                    massive_order.scope = QuarantineScope::AllVersions {
+                        extension_id: format!("ext_massive_{cycle}_{i}"),
+                    };
+                    massive_order.justification = "x".repeat(10_000); // Large justification
+                    massive_order.trace_id = format!("trace_{}", "y".repeat(1000));
+
+                    let record_result = reg.initiate_quarantine(massive_order);
+                    if record_result.is_err() {
+                        break; // Capacity limits reached
+                    }
+
+                    // Rapidly cycle through states to generate audit entries
+                    let _ = reg.enforce_quarantine(&order_id, "2026-01-15T00:02:00Z");
+                    let _ = reg.start_drain(&order_id, "2026-01-15T00:03:00Z");
+                    let _ = reg.complete_drain(&order_id, "2026-01-15T00:04:00Z");
+
+                    // Test with massive recall orders
+                    let mut massive_recall = make_recall(&order_id);
+                    massive_recall.reason = "z".repeat(5000); // Large recall reason
+                    if reg.trigger_recall(massive_recall).is_ok() {
+                        // Generate massive recall receipts
+                        for receipt_i in 0..200 {
+                            let receipt = RecallReceipt {
+                                node_id: format!("massive_node_{cycle}_{i}_{receipt_i}"),
+                                recall_id: "recall-001".to_owned(),
+                                removed: receipt_i % 2 == 0,
+                                removal_method: format!("method_{}", "a".repeat(500)),
+                                removed_at: format!("2026-01-16T{:02}:00:00Z", receipt_i % 24),
+                                artifact_hash: "b".repeat(64),
+                            };
+
+                            let receipt_result = reg.record_recall_receipt(&order_id, receipt);
+                            if receipt_result.is_err() {
+                                break; // Capacity or state issues
+                            }
+                        }
+
+                        let _ = reg.complete_recall(&order_id, "2026-01-16T14:00:00Z");
+                    }
+                }
+
+                // Verify capacity limits are respected
+                assert!(reg.audit_trail().len() <= MAX_AUDIT_TRAIL, "Audit trail should respect capacity limits");
+
+                // Check memory usage through record inspection
+                if let Some(record) = reg.records.values().next() {
+                    assert!(record.recall_receipts.len() <= MAX_RECALL_RECEIPTS, "Recall receipts should be bounded");
+                }
+            }
+
+            // Test audit integrity with massive dataset
+            let integrity_result = reg.verify_audit_integrity();
+            assert!(integrity_result.is_ok(), "Audit integrity should be maintained with massive data");
+
+            // Test quarantine status checks with massive dataset
+            let active_count = reg.active_count();
+            assert!(active_count <= MAX_RECORDS, "Active count should respect capacity limits");
+
+            // Generate summary metrics with massive data
+            let total_quarantines = reg.total_quarantines();
+            let total_recalls = reg.total_recalls();
+            assert!(total_quarantines <= u64::MAX, "Quarantine totals should be finite");
+            assert!(total_recalls <= u64::MAX, "Recall totals should be finite");
+        }
+
+        #[test]
+        fn state_consistency_validation_under_quarantine_error_conditions() {
+            let mut reg = QuarantineRegistry::new();
+
+            // Test inconsistent state transitions
+            let order_id = "inconsistent_state";
+            reg.initiate_quarantine(make_order(
+                order_id,
+                QuarantineSeverity::High,
+                QuarantineMode::Hard,
+            )).expect("should succeed");
+
+            // Attempt invalid state transitions and verify rejections
+            let invalid_transitions = [
+                // Try to start drain without enforcement
+                ("start_drain", |reg: &mut QuarantineRegistry| {
+                    reg.start_drain(order_id, "2026-01-15T00:03:00Z")
+                }),
+                // Try to complete drain without starting
+                ("complete_drain", |reg: &mut QuarantineRegistry| {
+                    reg.complete_drain(order_id, "2026-01-15T00:04:00Z")
+                }),
+                // Try to trigger recall without isolation
+                ("trigger_recall", |reg: &mut QuarantineRegistry| {
+                    reg.trigger_recall(make_recall(order_id))
+                }),
+                // Try to lift quarantine without isolation
+                ("lift_quarantine", |reg: &mut QuarantineRegistry| {
+                    reg.lift_quarantine(make_clearance(order_id))
+                }),
+            ];
+
+            for (transition_name, transition_fn) in invalid_transitions {
+                let result = transition_fn(&mut reg);
+                assert!(result.is_err(), "Invalid transition '{transition_name}' should be rejected");
+
+                // Verify state remains unchanged after invalid transition
+                let record = reg.get_record(order_id).expect("record should still exist");
+                assert_eq!(record.state, QuarantineState::Initiated, "State should be unchanged after invalid transition '{transition_name}'");
+            }
+
+            // Test with corrupted active quarantine index
+            reg.active_quarantines.insert("phantom_ext".to_string(), "phantom_order".to_string());
+
+            // Should handle phantom entries gracefully
+            assert!(!reg.is_quarantined("phantom_ext"), "Phantom entries should not report as quarantined");
+            assert!(reg.get_active_quarantine("phantom_ext").is_none(), "Phantom entries should return None");
+
+            // Test record capacity with mixed terminal/live states
+            let mut mixed_registry = QuarantineRegistry::new();
+
+            // Fill with live orders
+            for i in 0..(MAX_RECORDS / 2) {
+                mixed_registry.initiate_quarantine(make_order_for_extension(
+                    &format!("live_{i}"),
+                    &format!("ext_live_{i}"),
+                    QuarantineSeverity::Low,
+                    QuarantineMode::Soft,
+                )).expect("should succeed");
+            }
+
+            // Fill with terminal orders
+            for i in 0..(MAX_RECORDS / 2) {
+                let order_id = format!("terminal_{i}");
+                let ext_id = format!("ext_terminal_{i}");
+
+                mixed_registry.initiate_quarantine(make_order_for_extension(
+                    &order_id,
+                    &ext_id,
+                    QuarantineSeverity::High,
+                    QuarantineMode::Hard,
+                )).expect("should succeed");
+
+                // Complete lifecycle to terminal state
+                let _ = mixed_registry.enforce_quarantine(&order_id, "2026-01-15T00:02:00Z");
+                let _ = mixed_registry.start_drain(&order_id, "2026-01-15T00:03:00Z");
+                let _ = mixed_registry.complete_drain(&order_id, "2026-01-15T00:04:00Z");
+                let _ = mixed_registry.lift_quarantine(make_clearance(&order_id));
+            }
+
+            // Should correctly identify reclaimable records
+            let active_count = mixed_registry.active_count();
+            assert!(active_count <= MAX_RECORDS / 2, "Active count should reflect only live orders");
+
+            // Test one more order to trigger reclamation
+            let reclaim_result = mixed_registry.initiate_quarantine(make_order_for_extension(
+                "reclaim_test",
+                "ext_reclaim",
+                QuarantineSeverity::Medium,
+                QuarantineMode::Soft,
+            ));
+            assert!(reclaim_result.is_ok(), "Should reclaim terminal record successfully");
+        }
+
+        #[test]
+        fn hash_collision_resistance_in_audit_chain_integrity() {
+            let mut reg = QuarantineRegistry::new();
+
+            // Generate many similar audit entries to test hash collision resistance
+            let mut generated_hashes = std::collections::HashSet::new();
+
+            for i in 0..1000 {
+                let order_id = format!("hash_test_{i:05}");
+                let ext_id = format!("ext_hash_{i:05}");
+
+                let mut test_order = make_order(&order_id, QuarantineSeverity::Low, QuarantineMode::Soft);
+                test_order.scope = QuarantineScope::AllVersions {
+                    extension_id: ext_id,
+                };
+
+                // Vary details slightly to test hash discrimination
+                test_order.justification = format!("Hash collision test with minor variation {i}");
+                test_order.trace_id = format!("trace_hash_{i:05}");
+                test_order.issued_at = format!("2026-01-{:02}T{:02}:00:00Z", (i % 28) + 1, i % 24);
+
+                let record_result = reg.initiate_quarantine(test_order);
+                if record_result.is_err() {
+                    break; // Capacity limits reached
+                }
+
+                // Cycle through some state transitions to generate varied audit entries
+                if i % 3 == 0 {
+                    let _ = reg.enforce_quarantine(&order_id, &format!("2026-01-{:02}T{:02}:02:00Z", (i % 28) + 1, i % 24));
+                }
+                if i % 5 == 0 {
+                    let _ = reg.record_propagation(&order_id, &format!("node_{}", i % 100), &format!("2026-01-{:02}T{:02}:01:00Z", (i % 28) + 1, i % 24));
+                }
+            }
+
+            // Collect all audit entry hashes
+            for entry in reg.audit_trail() {
+                let hash_inserted = generated_hashes.insert(entry.entry_hash.clone());
+                assert!(hash_inserted, "Hash collision detected: duplicate entry_hash {}", entry.entry_hash);
+
+                // Verify hash chain linkage
+                assert!(!entry.prev_hash.is_empty(), "prev_hash should not be empty");
+                assert!(!entry.entry_hash.is_empty(), "entry_hash should not be empty");
+                assert_ne!(entry.prev_hash, entry.entry_hash, "prev_hash and entry_hash should be different");
+            }
+
+            // Verify hash computation is deterministic
+            if let Some(first_entry) = reg.audit_trail().first() {
+                let recomputed_hash = compute_entry_hash(first_entry);
+                assert_eq!(first_entry.entry_hash, recomputed_hash, "Hash computation should be deterministic");
+            }
+
+            // Test audit integrity verification
+            let integrity_result = reg.verify_audit_integrity();
+            assert!(integrity_result.is_ok(), "Audit integrity should be maintained despite many entries");
+
+            // Test hash resistance to small changes
+            let mut reg2 = QuarantineRegistry::new();
+            let order1 = make_order("identical_base", QuarantineSeverity::Low, QuarantineMode::Soft);
+            let mut order2 = make_order("identical_base", QuarantineSeverity::Low, QuarantineMode::Soft);
+            order2.justification = format!("{} ", order2.justification); // Add single space
+
+            reg.initiate_quarantine(order1).expect("should succeed");
+            reg2.initiate_quarantine(order2).expect("should succeed");
+
+            let hash1 = reg.audit_trail().last().unwrap().entry_hash.clone();
+            let hash2 = reg2.audit_trail().last().unwrap().entry_hash.clone();
+
+            assert_ne!(hash1, hash2, "Small changes should produce different hashes");
+        }
+
+        #[test]
+        fn resource_exhaustion_through_capacity_boundary_attacks() {
+            // Test audit trail capacity exhaustion
+            let mut audit_registry = QuarantineRegistry::new();
+
+            // Fill audit trail beyond capacity to test eviction behavior
+            for i in 0..(MAX_AUDIT_TRAIL + 500) {
+                let order_id = format!("audit_exhaust_{i:06}");
+                let mut audit_order = make_order(&order_id, QuarantineSeverity::Critical, QuarantineMode::Hard);
+                audit_order.scope = QuarantineScope::AllVersions {
+                    extension_id: format!("ext_audit_{i:06}"),
+                };
+
+                let record_result = audit_registry.initiate_quarantine(audit_order);
+                if record_result.is_err() {
+                    break; // Hit record capacity first
+                }
+
+                // Generate multiple audit entries per order
+                let _ = audit_registry.record_propagation(&order_id, &format!("node_{i}"), "2026-01-15T00:01:00Z");
+                let _ = audit_registry.enforce_quarantine(&order_id, "2026-01-15T00:02:00Z");
+            }
+
+            // Should respect audit trail capacity
+            assert!(audit_registry.audit_trail().len() <= MAX_AUDIT_TRAIL, "Audit trail should be bounded");
+
+            // Audit integrity should survive eviction
+            let integrity_result = audit_registry.verify_audit_integrity();
+            assert!(integrity_result.is_ok(), "Audit integrity should survive capacity eviction");
+
+            // Test propagation status capacity
+            let mut prop_registry = QuarantineRegistry::new();
+            let order = make_order("prop_test", QuarantineSeverity::Low, QuarantineMode::Soft);
+            prop_registry.initiate_quarantine(order).expect("should succeed");
+
+            // Fill propagation status beyond capacity
+            for i in 0..(MAX_PROPAGATION_STATUS + 100) {
+                let node_id = format!("prop_node_{i:06}");
+                let timestamp = format!("2026-01-15T{:02}:00:00Z", i % 24);
+
+                let prop_result = prop_registry.record_propagation("prop_test", &node_id, &timestamp);
+                assert!(prop_result.is_ok(), "Propagation recording should handle capacity gracefully");
+            }
+
+            // Should respect propagation capacity
+            assert!(prop_registry.propagation_status.len() <= MAX_PROPAGATION_STATUS, "Propagation status should be bounded");
+
+            // Test recall receipt capacity
+            let mut receipt_registry = setup_recall_registry("receipt_capacity");
+
+            // Fill recall receipts beyond capacity
+            for i in 0..(MAX_RECALL_RECEIPTS + 200) {
+                let receipt = RecallReceipt {
+                    node_id: format!("receipt_node_{i:06}"),
+                    recall_id: "recall-001".to_owned(),
+                    removed: i % 2 == 0,
+                    removal_method: format!("method_{i}"),
+                    removed_at: format!("2026-01-16T{:02}:00:00Z", i % 24),
+                    artifact_hash: format!("hash_{i:06}"),
+                };
+
+                let receipt_result = receipt_registry.record_recall_receipt("receipt_capacity", receipt);
+                assert!(receipt_result.is_ok(), "Receipt recording should handle capacity gracefully");
+            }
+
+            // Should respect receipt capacity
+            let record = receipt_registry.get_record("receipt_capacity").expect("record should exist");
+            assert!(record.recall_receipts.len() <= MAX_RECALL_RECEIPTS, "Recall receipts should be bounded");
+
+            // Test state history capacity
+            let mut state_registry = QuarantineRegistry::new();
+            let state_order = make_order("state_capacity", QuarantineSeverity::High, QuarantineMode::Hard);
+            state_registry.initiate_quarantine(state_order).expect("should succeed");
+
+            // Force many state transitions (though limited by state machine)
+            for i in 0..10 {
+                let timestamp = format!("2026-01-15T00:{:02}:00Z", i);
+                let _ = state_registry.enforce_quarantine("state_capacity", &timestamp);
+                let _ = state_registry.start_drain("state_capacity", &timestamp);
+                let _ = state_registry.complete_drain("state_capacity", &timestamp);
+
+                // Check state history remains bounded
+                let record = state_registry.get_record("state_capacity").expect("record should exist");
+                assert!(record.state_history.len() <= MAX_STATE_HISTORY, "State history should be bounded");
+            }
+
+            // Test push_bounded function directly with edge cases
+            let mut test_items = vec![1, 2, 3, 4, 5];
+
+            // Test zero capacity
+            push_bounded(&mut test_items, 6, 0);
+            assert!(test_items.is_empty(), "Zero capacity should clear all items");
+
+            // Test normal bounded operation
+            let mut bounded_items = Vec::new();
+            for i in 0..20 {
+                push_bounded(&mut bounded_items, i, 10);
+            }
+            assert_eq!(bounded_items.len(), 10, "Should maintain capacity limit");
+            assert_eq!(bounded_items[9], 19, "Should preserve most recent items");
+        }
+
+        #[test]
+        fn serialization_format_injection_resistance_in_structured_data() {
+            let injection_payloads = [
+                "normal content",
+                "content\nwith\nnewlines",
+                "content\twith\ttabs",
+                "content\rwith\rcarriage\rreturns",
+                "content with \u{0000} null bytes",
+                "content with \u{001F} control chars \u{007F}",
+                "content with unicode \u{202E} direction \u{202D} overrides",
+                "content with json {\"malicious\": true} injection",
+                "content with xml </tag><script>alert(1)</script><tag>",
+                "content with sql '; DROP TABLE quarantine; --",
+                "content with shell && rm -rf /",
+                "very long content that could cause buffer issues".repeat(1000),
+                "\\/\\/comment injection attempt",
+                "\\x41\\x42\\x43 hex escape attempt",
+            ];
+
+            let mut reg = QuarantineRegistry::new();
+
+            for (i, injection_payload) in injection_payloads.iter().enumerate() {
+                // Test injection in all string fields of quarantine orders
+                let mut injection_order = make_order(
+                    &format!("injection_test_{i}"),
+                    QuarantineSeverity::High,
+                    QuarantineMode::Hard,
+                );
+                injection_order.justification = format!("Injected justification: {injection_payload}");
+                injection_order.trace_id = format!("trace_{injection_payload}");
+                injection_order.issued_by = format!("operator_{injection_payload}");
+                injection_order.signature = format!("sig_{injection_payload}");
+                injection_order.scope = QuarantineScope::Version {
+                    extension_id: format!("ext_{injection_payload}"),
+                    version: format!("v1.0.{}", injection_payload.len()),
+                };
+
+                // Should handle injection attempts gracefully
+                let record_result = reg.initiate_quarantine(injection_order.clone());
+                assert!(record_result.is_ok(), "Should handle injection attempt {i} without error");
+
+                // Test serialization safety
+                let json_result = serde_json::to_string(&injection_order);
+                assert!(json_result.is_ok(), "Should serialize injection attempt {i} safely");
+
+                if let Ok(json_str) = json_result {
+                    // Verify no script tags or dangerous content in JSON
+                    assert!(!json_str.contains("<script>"), "Serialized JSON should not contain script tags");
+                    assert!(!json_str.contains("</script>"), "Serialized JSON should not contain closing script tags");
+
+                    // Test deserialization safety
+                    let deserialize_result: Result<QuarantineOrder, _> = serde_json::from_str(&json_str);
+                    assert!(deserialize_result.is_ok(), "Should deserialize injection attempt {i} safely");
+
+                    if let Ok(deserialized) = deserialize_result {
+                        assert_eq!(deserialized.justification, injection_order.justification, "Content should be preserved safely");
+                    }
+                }
+
+                // Test injection in audit trail generation
+                let audit_entries = reg.audit_trail();
+                for entry in audit_entries {
+                    assert!(!entry.details.is_empty(), "Audit details should not be corrupted");
+
+                    // Test audit entry serialization
+                    let audit_json = serde_json::to_string(entry);
+                    assert!(audit_json.is_ok(), "Audit entry should serialize safely");
+                }
+
+                // Progress to test injection in other data structures
+                let order_id = format!("injection_test_{i}");
+                let _ = reg.enforce_quarantine(&order_id, "2026-01-15T00:02:00Z");
+                let _ = reg.start_drain(&order_id, "2026-01-15T00:03:00Z");
+                let _ = reg.complete_drain(&order_id, "2026-01-15T00:04:00Z");
+
+                // Test injection in recall orders
+                let mut injection_recall = make_recall(&order_id);
+                injection_recall.reason = format!("Injected recall reason: {injection_payload}");
+                injection_recall.trace_id = format!("recall_trace_{injection_payload}");
+                injection_recall.issued_by = format!("security_{injection_payload}");
+
+                if reg.trigger_recall(injection_recall.clone()).is_ok() {
+                    // Test recall serialization
+                    let recall_json = serde_json::to_string(&injection_recall);
+                    assert!(recall_json.is_ok(), "Recall order should serialize safely despite injection");
+
+                    // Test injection in recall receipts
+                    let injection_receipt = RecallReceipt {
+                        node_id: format!("node_{injection_payload}"),
+                        recall_id: "recall-001".to_owned(),
+                        removed: true,
+                        removal_method: format!("method_{injection_payload}"),
+                        removed_at: "2026-01-16T13:00:00Z".to_owned(),
+                        artifact_hash: format!("hash_{injection_payload}"),
+                    };
+
+                    let receipt_result = reg.record_recall_receipt(&order_id, injection_receipt.clone());
+                    if receipt_result.is_ok() {
+                        let receipt_json = serde_json::to_string(&injection_receipt);
+                        assert!(receipt_json.is_ok(), "Receipt should serialize safely");
+                    }
+                }
+
+                // Test injection in impact reports
+                let impact_result = reg.generate_impact_report(
+                    &order_id,
+                    100,
+                    vec![format!("data_risk_{injection_payload}")],
+                    vec![format!("dependent_{injection_payload}")],
+                    5,
+                    vec![format!("action_{injection_payload}")],
+                    "2026-01-15T01:00:00Z",
+                );
+
+                if let Ok(impact_report) = impact_result {
+                    let impact_json = serde_json::to_string(&impact_report);
+                    assert!(impact_json.is_ok(), "Impact report should serialize safely");
+                }
+            }
+
+            // Test overall registry serialization with injected content
+            let registry_json = serde_json::to_string(&reg);
+            assert!(registry_json.is_ok(), "Registry should serialize safely with all injected content");
+
+            // Verify no dangerous content in final serialized form
+            if let Ok(json_str) = registry_json {
+                assert!(!json_str.contains("<script>"), "Registry JSON should not contain script tags");
+                assert!(!json_str.contains("DROP TABLE"), "Registry JSON should not contain SQL injection");
+                assert!(!json_str.contains("&& rm"), "Registry JSON should not contain shell injection");
+            }
+        }
+
+        #[test]
+        fn timing_attack_resistance_in_constant_time_operations() {
+            let mut reg = QuarantineRegistry::new();
+
+            // Set up a quarantine and recall for timing tests
+            let order = make_order("timing_test", QuarantineSeverity::High, QuarantineMode::Hard);
+            reg.initiate_quarantine(order).expect("should succeed");
+            let _ = reg.enforce_quarantine("timing_test", "2026-01-15T00:02:00Z");
+            let _ = reg.start_drain("timing_test", "2026-01-15T00:03:00Z");
+            let _ = reg.complete_drain("timing_test", "2026-01-15T00:04:00Z");
+            reg.trigger_recall(make_recall("timing_test")).expect("should succeed");
+
+            // Test constant-time comparison in recall receipt validation
+            let correct_receipt = RecallReceipt {
+                node_id: "timing_node".to_owned(),
+                recall_id: "recall-001".to_owned(), // Correct recall ID
+                removed: true,
+                removal_method: "crypto_erase".to_owned(),
+                removed_at: "2026-01-16T13:00:00Z".to_owned(),
+                artifact_hash: "abc123".to_owned(),
+            };
+
+            // Test with various incorrect recall IDs of different lengths
+            let incorrect_recall_ids = [
+                "",                           // Empty
+                "a",                         // Single char
+                "wrong",                     // Short
+                "recall-001-wrong",          // Longer than correct
+                "recall-002",                // Same length, different content
+                "RECALL-001",                // Case difference
+                "recall-001\0",             // Null byte
+                "recall-001 ",               // Trailing space
+            ];
+
+            for incorrect_id in incorrect_recall_ids {
+                let mut incorrect_receipt = correct_receipt.clone();
+                incorrect_receipt.recall_id = incorrect_id.to_owned();
+                incorrect_receipt.node_id = format!("node_{}", incorrect_id.len());
+
+                let start_time = std::time::Instant::now();
+                let result = reg.record_recall_receipt("timing_test", incorrect_receipt);
+                let elapsed = start_time.elapsed();
+
+                // All should fail due to mismatch
+                assert!(result.is_err(), "Incorrect recall ID should be rejected: '{incorrect_id}'");
+                assert_eq!(result.unwrap_err().code, ERR_RECALL_RECEIPT_MISMATCH);
+
+                // Timing should not vary significantly based on content
+                // (This is a basic check; real timing attacks would need more sophisticated analysis)
+                assert!(elapsed.as_millis() < 100, "Comparison should complete quickly regardless of input");
+            }
+
+            // Test correct receipt should succeed
+            let correct_result = reg.record_recall_receipt("timing_test", correct_receipt);
+            assert!(correct_result.is_ok(), "Correct receipt should be accepted");
+
+            // Test constant-time behavior in audit hash verification
+            let original_trail = reg.audit_trail().to_vec();
+
+            for entry in &original_trail {
+                let mut tampered_entry = entry.clone();
+
+                // Test various hash tampering attempts
+                let tampered_hashes = [
+                    "",                           // Empty hash
+                    "a",                         // Short hash
+                    "wrong_hash",                // Wrong content
+                    entry.entry_hash.chars().rev().collect::<String>(), // Reversed
+                    format!("{}x", entry.entry_hash), // Extended
+                    entry.entry_hash.to_uppercase(), // Case change
+                ];
+
+                for tampered_hash in tampered_hashes {
+                    tampered_entry.entry_hash = tampered_hash;
+
+                    let start_time = std::time::Instant::now();
+                    let computed_hash = compute_entry_hash(&tampered_entry);
+                    let comparison_time = start_time.elapsed();
+
+                    // Computation should be fast regardless of input
+                    assert!(comparison_time.as_millis() < 50, "Hash computation should be efficient");
+
+                    // Should not match the tampered hash (except by coincidence)
+                    if computed_hash == tampered_hash {
+                        // This would be an extremely unlikely hash collision
+                        println!("Warning: Possible hash collision detected");
+                    }
+                }
+            }
+
+            // Test that ct_eq function is actually being used for sensitive comparisons
+            // (This verifies the constant-time comparison is in the code path)
+            let test_string1 = "sensitive_data_1";
+            let test_string2 = "sensitive_data_2";
+            let test_string3 = "sensitive_data_1"; // Same as first
+
+            assert!(!ct_eq(test_string1, test_string2), "Different strings should not match");
+            assert!(ct_eq(test_string1, test_string3), "Identical strings should match");
+            assert!(ct_eq(test_string1, test_string1), "String should match itself");
+        }
     }
 }

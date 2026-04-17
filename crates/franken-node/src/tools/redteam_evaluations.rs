@@ -62,8 +62,13 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_FINDINGS_PER_ENGAGEMENT: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -242,7 +247,27 @@ impl RedTeamEvaluations {
         mut engagement: Engagement,
         trace_id: &str,
     ) -> Result<String, String> {
-        if engagement.scope.is_empty() {
+        if engagement.engagement_id.trim().is_empty() {
+            return Err("Engagement id must not be empty".to_string());
+        }
+
+        if self.engagements.contains_key(&engagement.engagement_id) {
+            return Err(format!(
+                "Engagement {} already exists",
+                engagement.engagement_id
+            ));
+        }
+
+        if engagement.title.trim().is_empty() {
+            return Err("Engagement title must not be empty".to_string());
+        }
+
+        if engagement.evaluator.trim().is_empty() {
+            return Err("Evaluator must not be empty".to_string());
+        }
+
+        if engagement.scope.is_empty() || engagement.scope.iter().any(|item| item.trim().is_empty())
+        {
             self.log(
                 event_codes::RTE_ERR_MISSING_SCOPE,
                 trace_id,
@@ -253,7 +278,7 @@ impl RedTeamEvaluations {
             return Err("Engagement must have at least one scope item".to_string());
         }
 
-        if engagement.rules_of_engagement.is_empty() {
+        if engagement.rules_of_engagement.trim().is_empty() {
             return Err("Rules of engagement must not be empty".to_string());
         }
 
@@ -313,6 +338,41 @@ impl RedTeamEvaluations {
     ) -> Result<(), String> {
         if !self.engagements.contains_key(engagement_id) {
             return Err(format!("Engagement {} not found", engagement_id));
+        }
+
+        if finding.finding_id.trim().is_empty() {
+            return Err("Finding id must not be empty".to_string());
+        }
+
+        if finding.title.trim().is_empty() {
+            return Err("Finding title must not be empty".to_string());
+        }
+
+        if finding.description.trim().is_empty() {
+            return Err("Finding description must not be empty".to_string());
+        }
+
+        if finding.affected_components.is_empty()
+            || finding
+                .affected_components
+                .iter()
+                .any(|component| component.trim().is_empty())
+        {
+            return Err("Finding must have at least one affected component".to_string());
+        }
+
+        {
+            let engagement = self
+                .engagements
+                .get(engagement_id)
+                .ok_or_else(|| format!("Engagement {engagement_id} not found"))?;
+            if engagement
+                .findings
+                .iter()
+                .any(|existing| existing.finding_id == finding.finding_id)
+            {
+                return Err(format!("Finding {} already exists", finding.finding_id));
+            }
         }
 
         let finding_id = finding.finding_id.clone();
@@ -881,5 +941,391 @@ mod tests {
             serde_json::from_str(jsonl.lines().next().expect("should have at least one line"))
                 .expect("json parse should succeed");
         assert!(first["event_code"].is_string());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_existing_items() {
+        let mut items = vec!["old-a", "old-b"];
+
+        push_bounded(&mut items, "new", 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity buffers must not retain stale findings or audit entries"
+        );
+    }
+
+    #[test]
+    fn push_bounded_overfull_buffer_drops_oldest_items() {
+        let mut items = vec!["one", "two", "three"];
+
+        push_bounded(&mut items, "four", 2);
+
+        assert_eq!(items, vec!["three", "four"]);
+    }
+
+    #[test]
+    fn empty_engagement_id_rejected_without_audit_or_insert() {
+        let mut engine = RedTeamEvaluations::default();
+
+        let err = engine
+            .create_engagement(sample_engagement(""), &trace())
+            .expect_err("empty engagement id must be rejected");
+
+        assert!(err.contains("Engagement id"));
+        assert!(engine.engagements().is_empty());
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn whitespace_engagement_title_rejected_without_audit_or_insert() {
+        let mut engine = RedTeamEvaluations::default();
+        let mut engagement = sample_engagement("blank-title");
+        engagement.title = " \t ".to_string();
+
+        let err = engine
+            .create_engagement(engagement, &trace())
+            .expect_err("blank title must be rejected");
+
+        assert!(err.contains("title"));
+        assert!(!engine.engagements().contains_key("blank-title"));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn whitespace_evaluator_rejected_without_audit_or_insert() {
+        let mut engine = RedTeamEvaluations::default();
+        let mut engagement = sample_engagement("blank-evaluator");
+        engagement.evaluator = "\n ".to_string();
+
+        let err = engine
+            .create_engagement(engagement, &trace())
+            .expect_err("blank evaluator must be rejected");
+
+        assert!(err.contains("Evaluator"));
+        assert!(!engine.engagements().contains_key("blank-evaluator"));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn whitespace_scope_item_rejected_without_storing_engagement() {
+        let mut engine = RedTeamEvaluations::default();
+        let mut engagement = sample_engagement("blank-scope");
+        engagement.scope = vec!["API".to_string(), " \t ".to_string()];
+
+        let err = engine
+            .create_engagement(engagement, "trace-blank-scope")
+            .expect_err("blank scope items must be rejected");
+
+        assert!(err.contains("scope"));
+        assert!(!engine.engagements().contains_key("blank-scope"));
+        assert_eq!(engine.audit_log().len(), 1);
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::RTE_ERR_MISSING_SCOPE
+        );
+    }
+
+    #[test]
+    fn duplicate_engagement_rejected_without_overwrite() {
+        let mut engine = RedTeamEvaluations::default();
+        engine
+            .create_engagement(sample_engagement("dupe-eng"), &trace())
+            .expect("first engagement should be accepted");
+        let original_title = engine.engagements()["dupe-eng"].title.clone();
+        let original_created_at = engine.engagements()["dupe-eng"].created_at.clone();
+        let mut duplicate = sample_engagement("dupe-eng");
+        duplicate.title = "Replacement title".to_string();
+
+        let err = engine
+            .create_engagement(duplicate, &trace())
+            .expect_err("duplicate engagement ids must be rejected");
+
+        assert!(err.contains("already exists"));
+        assert_eq!(engine.engagements()["dupe-eng"].title, original_title);
+        assert_eq!(
+            engine.engagements()["dupe-eng"].created_at,
+            original_created_at
+        );
+    }
+
+    #[test]
+    fn empty_finding_id_rejected_without_submission_audit() {
+        let mut engine = RedTeamEvaluations::default();
+        engine
+            .create_engagement(sample_engagement("eng-empty-finding"), &trace())
+            .expect("engagement should be created");
+        let audit_count_before = engine.audit_log().len();
+
+        let err = engine
+            .add_finding(
+                "eng-empty-finding",
+                sample_finding("", FindingSeverity::Low),
+                &trace(),
+            )
+            .expect_err("empty finding id must be rejected");
+
+        assert!(err.contains("Finding id"));
+        assert!(engine.engagements()["eng-empty-finding"].findings.is_empty());
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn whitespace_finding_description_rejected_without_submission_audit() {
+        let mut engine = RedTeamEvaluations::default();
+        engine
+            .create_engagement(sample_engagement("eng-blank-description"), &trace())
+            .expect("engagement should be created");
+        let audit_count_before = engine.audit_log().len();
+        let mut finding = sample_finding("f-blank-description", FindingSeverity::Medium);
+        finding.description = " \n ".to_string();
+
+        let err = engine
+            .add_finding("eng-blank-description", finding, &trace())
+            .expect_err("blank finding descriptions must be rejected");
+
+        assert!(err.contains("description"));
+        assert!(engine.engagements()["eng-blank-description"]
+            .findings
+            .is_empty());
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn blank_affected_component_rejected_without_submission_audit() {
+        let mut engine = RedTeamEvaluations::default();
+        engine
+            .create_engagement(sample_engagement("eng-blank-component"), &trace())
+            .expect("engagement should be created");
+        let audit_count_before = engine.audit_log().len();
+        let mut finding = sample_finding("f-blank-component", FindingSeverity::High);
+        finding.affected_components = vec!["api".to_string(), "\t ".to_string()];
+
+        let err = engine
+            .add_finding("eng-blank-component", finding, &trace())
+            .expect_err("blank affected components must be rejected");
+
+        assert!(err.contains("affected component"));
+        assert!(engine.engagements()["eng-blank-component"]
+            .findings
+            .is_empty());
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn duplicate_finding_rejected_without_overwrite_or_extra_submission_audit() {
+        let mut engine = RedTeamEvaluations::default();
+        engine
+            .create_engagement(sample_engagement("eng-dupe-finding"), &trace())
+            .expect("engagement should be created");
+        engine
+            .add_finding(
+                "eng-dupe-finding",
+                sample_finding("f-dupe", FindingSeverity::Low),
+                &trace(),
+            )
+            .expect("first finding should be accepted");
+        let audit_count_before = engine.audit_log().len();
+        let mut duplicate = sample_finding("f-dupe", FindingSeverity::Critical);
+        duplicate.title = "Replacement finding".to_string();
+
+        let err = engine
+            .add_finding("eng-dupe-finding", duplicate, &trace())
+            .expect_err("duplicate finding ids must be rejected");
+
+        assert!(err.contains("already exists"));
+        let findings = &engine.engagements()["eng-dupe-finding"].findings;
+        assert_eq!(findings.len(), 1);
+        assert_eq!(findings[0].severity, FindingSeverity::Low);
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn nan_confidence_rejected_without_storing_engagement() {
+        let mut engine = RedTeamEvaluations::default();
+        let mut engagement = sample_engagement("nan-confidence");
+        engagement.confidence_score = f64::NAN;
+
+        let err = engine
+            .create_engagement(engagement, &trace())
+            .expect_err("NaN confidence must be rejected");
+
+        assert!(err.contains("Confidence score"));
+        assert!(!engine.engagements().contains_key("nan-confidence"));
+        assert!(
+            engine
+                .audit_log()
+                .iter()
+                .all(|record| record.event_code != event_codes::RTE_ENGAGEMENT_CREATED),
+            "invalid confidence must not emit an engagement-created audit record"
+        );
+    }
+
+    #[test]
+    fn infinite_confidence_rejected_before_confidence_audit() {
+        let mut engine = RedTeamEvaluations::default();
+        let mut engagement = sample_engagement("inf-confidence");
+        engagement.confidence_score = f64::INFINITY;
+
+        let err = engine
+            .create_engagement(engagement, &trace())
+            .expect_err("infinite confidence must be rejected");
+
+        assert!(err.contains("Confidence score"));
+        assert!(!engine.engagements().contains_key("inf-confidence"));
+        assert!(
+            engine
+                .audit_log()
+                .iter()
+                .all(|record| record.event_code != event_codes::RTE_CONFIDENCE_SCORED),
+            "out-of-range confidence must not emit a confidence-scored record"
+        );
+    }
+
+    #[test]
+    fn empty_rules_rejected_without_scope_or_created_audit() {
+        let mut engine = RedTeamEvaluations::default();
+        let mut engagement = sample_engagement("empty-rules");
+        engagement.rules_of_engagement.clear();
+
+        let err = engine
+            .create_engagement(engagement, &trace())
+            .expect_err("empty rules must be rejected");
+
+        assert!(err.contains("Rules of engagement"));
+        assert!(engine.audit_log().is_empty());
+        assert!(!engine.engagements().contains_key("empty-rules"));
+    }
+
+    #[test]
+    fn add_finding_missing_engagement_does_not_emit_audit_records() {
+        let mut engine = RedTeamEvaluations::default();
+
+        let err = engine
+            .add_finding(
+                "missing-engagement",
+                sample_finding("f-missing", FindingSeverity::High),
+                &trace(),
+            )
+            .expect_err("missing engagement must fail");
+
+        assert!(err.contains("missing-engagement"));
+        assert!(
+            engine.audit_log().is_empty(),
+            "missing engagement must fail before finding submission audit records"
+        );
+    }
+
+    #[test]
+    fn update_missing_finding_does_not_change_existing_finding() {
+        let mut engine = RedTeamEvaluations::default();
+        engine
+            .create_engagement(sample_engagement("eng-missing-finding"), &trace())
+            .expect("engagement should be created");
+        engine
+            .add_finding(
+                "eng-missing-finding",
+                sample_finding("f-existing", FindingSeverity::Medium),
+                &trace(),
+            )
+            .expect("finding should be added");
+        let audit_count_before = engine.audit_log().len();
+
+        let err = engine
+            .update_remediation(
+                "eng-missing-finding",
+                "f-absent",
+                RemediationStatus::InProgress,
+                &trace(),
+            )
+            .expect_err("missing finding must fail");
+
+        assert!(err.contains("f-absent"));
+        let finding = &engine.engagements()["eng-missing-finding"].findings[0];
+        assert_eq!(finding.remediation_status, RemediationStatus::Open);
+        assert_eq!(
+            engine.audit_log().len(),
+            audit_count_before,
+            "missing finding lookup must not append remediation audit records"
+        );
+    }
+
+    #[test]
+    fn update_missing_engagement_does_not_log_invalid_transition() {
+        let mut engine = RedTeamEvaluations::default();
+
+        let err = engine
+            .update_remediation(
+                "missing-engagement",
+                "f-1",
+                RemediationStatus::Verified,
+                &trace(),
+            )
+            .expect_err("missing engagement must fail");
+
+        assert!(err.contains("missing-engagement"));
+        assert!(
+            engine.audit_log().is_empty(),
+            "missing engagement must fail before transition validation"
+        );
+    }
+
+    #[test]
+    fn verified_finding_cannot_reopen_and_status_is_preserved() {
+        let mut engine = RedTeamEvaluations::default();
+        engine
+            .create_engagement(sample_engagement("eng-verified"), &trace())
+            .expect("engagement should be created");
+        engine
+            .add_finding(
+                "eng-verified",
+                sample_finding("f-verified", FindingSeverity::Critical),
+                &trace(),
+            )
+            .expect("finding should be added");
+        engine
+            .update_remediation(
+                "eng-verified",
+                "f-verified",
+                RemediationStatus::InProgress,
+                &trace(),
+            )
+            .expect("open -> in progress should succeed");
+        engine
+            .update_remediation(
+                "eng-verified",
+                "f-verified",
+                RemediationStatus::Resolved,
+                &trace(),
+            )
+            .expect("in progress -> resolved should succeed");
+        engine
+            .update_remediation(
+                "eng-verified",
+                "f-verified",
+                RemediationStatus::Verified,
+                &trace(),
+            )
+            .expect("resolved -> verified should succeed");
+
+        let err = engine
+            .update_remediation(
+                "eng-verified",
+                "f-verified",
+                RemediationStatus::Open,
+                &trace(),
+            )
+            .expect_err("verified findings must not reopen directly");
+
+        assert!(err.contains("Cannot transition"));
+        let finding = &engine.engagements()["eng-verified"].findings[0];
+        assert_eq!(finding.remediation_status, RemediationStatus::Verified);
+        assert!(
+            engine
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::RTE_ERR_INVALID_TRANSITION),
+            "invalid verified->open transition should be auditable"
+        );
     }
 }

@@ -32,8 +32,12 @@ const MAX_REPLICATIONS: usize = 4096;
 const MAX_EVIDENCE_REFS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -181,13 +185,37 @@ impl ExternalReplicationClaims {
         mut claim: HighImpactClaim,
         trace_id: &str,
     ) -> Result<String, String> {
-        if claim.title.is_empty() {
+        if claim.claim_id.trim().is_empty() {
+            self.log(
+                event_codes::ERC_ERR_INVALID_CLAIM,
+                trace_id,
+                serde_json::json!({"reason": "empty claim_id"}),
+            );
+            return Err("claim id must not be empty".to_string());
+        }
+        if self.claims.contains_key(&claim.claim_id) {
+            self.log(
+                event_codes::ERC_ERR_INVALID_CLAIM,
+                trace_id,
+                serde_json::json!({"claim_id": &claim.claim_id, "reason": "duplicate claim_id"}),
+            );
+            return Err(format!("duplicate claim: {}", claim.claim_id));
+        }
+        if claim.title.trim().is_empty() {
             self.log(
                 event_codes::ERC_ERR_INVALID_CLAIM,
                 trace_id,
                 serde_json::json!({"reason": "empty title"}),
             );
             return Err("claim title must not be empty".to_string());
+        }
+        if claim.description.trim().is_empty() {
+            self.log(
+                event_codes::ERC_ERR_INVALID_CLAIM,
+                trace_id,
+                serde_json::json!({"claim_id": &claim.claim_id, "reason": "empty description"}),
+            );
+            return Err("claim description must not be empty".to_string());
         }
         claim.created_at = Utc::now().to_rfc3339();
         claim.published = false;
@@ -209,6 +237,14 @@ impl ExternalReplicationClaims {
     ) -> Result<String, String> {
         if !self.claims.contains_key(claim_id) {
             return Err(format!("claim not found: {claim_id}"));
+        }
+        if replicator.trim().is_empty() {
+            self.log(
+                event_codes::ERC_ERR_INVALID_CLAIM,
+                trace_id,
+                serde_json::json!({"claim_id": claim_id, "reason": "empty replicator"}),
+            );
+            return Err("replicator must not be empty".to_string());
         }
         let rid = Uuid::now_v7().to_string();
         let rec = ReplicationRecord {
@@ -236,6 +272,18 @@ impl ExternalReplicationClaims {
         findings: &str,
         trace_id: &str,
     ) -> Result<(), String> {
+        if matches!(
+            status,
+            ReplicationStatus::Completed | ReplicationStatus::Verified
+        ) && findings.trim().is_empty()
+        {
+            self.log(
+                event_codes::ERC_ERR_INVALID_CLAIM,
+                trace_id,
+                serde_json::json!({"replication_id": replication_id, "reason": "empty findings"}),
+            );
+            return Err("completed replications must include findings".to_string());
+        }
         let rec = self
             .replications
             .iter_mut()
@@ -265,6 +313,14 @@ impl ExternalReplicationClaims {
         evidence_ref: &str,
         trace_id: &str,
     ) -> Result<(), String> {
+        if evidence_ref.trim().is_empty() {
+            self.log(
+                event_codes::ERC_ERR_INVALID_CLAIM,
+                trace_id,
+                serde_json::json!({"claim_id": claim_id, "reason": "empty evidence_ref"}),
+            );
+            return Err("evidence reference must not be empty".to_string());
+        }
         let claim = self
             .claims
             .get_mut(claim_id)
@@ -300,6 +356,9 @@ impl ExternalReplicationClaims {
     }
 
     pub fn publish_claim(&mut self, claim_id: &str, trace_id: &str) -> Result<(), String> {
+        if !self.claims.contains_key(claim_id) {
+            return Err(format!("claim not found: {claim_id}"));
+        }
         let count = self.replication_count(claim_id);
         if count < MIN_REPLICATIONS {
             self.log(
@@ -439,6 +498,24 @@ mod tests {
     }
 
     #[test]
+    fn push_bounded_zero_capacity_clears_without_append() {
+        let mut values = vec![1, 2, 3];
+
+        push_bounded(&mut values, 4, 0);
+
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_overfull_vector_drops_oldest_entries() {
+        let mut values = vec![1, 2, 3, 4];
+
+        push_bounded(&mut values, 5, 2);
+
+        assert_eq!(values, vec![4, 5]);
+    }
+
+    #[test]
     fn five_categories() {
         assert_eq!(ClaimCategory::all().len(), 5);
     }
@@ -468,6 +545,164 @@ mod tests {
         let mut c = sample_claim("c1", ClaimCategory::SecurityGuarantee);
         c.title.clear();
         assert!(e.create_claim(c, &trace()).is_err());
+    }
+
+    #[test]
+    fn create_empty_claim_id_rejected_without_insert() {
+        let mut e = ExternalReplicationClaims::default();
+        let err = e
+            .create_claim(
+                sample_claim("", ClaimCategory::SecurityGuarantee),
+                "trace-empty-claim",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("claim id"));
+        assert!(e.claims().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert_eq!(
+            e.audit_log()[0].event_code,
+            event_codes::ERC_ERR_INVALID_CLAIM
+        );
+        assert_eq!(
+            e.audit_log()[0].details["reason"].as_str(),
+            Some("empty claim_id")
+        );
+    }
+
+    #[test]
+    fn create_whitespace_claim_id_rejected_without_insert() {
+        let mut e = ExternalReplicationClaims::default();
+        let err = e
+            .create_claim(
+                sample_claim("   ", ClaimCategory::SecurityGuarantee),
+                "trace-whitespace-claim",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("claim id"));
+        assert!(e.claims().is_empty());
+        assert_eq!(
+            e.audit_log()[0].details["reason"].as_str(),
+            Some("empty claim_id")
+        );
+    }
+
+    #[test]
+    fn create_whitespace_title_rejected_without_insert() {
+        let mut e = ExternalReplicationClaims::default();
+        let mut claim = sample_claim("c-whitespace-title", ClaimCategory::PrivacyAssurance);
+        claim.title = " \t ".to_string();
+
+        let err = e.create_claim(claim, "trace-whitespace-title").unwrap_err();
+
+        assert!(err.contains("title"));
+        assert!(e.claims().is_empty());
+        assert_eq!(
+            e.audit_log()[0].details["reason"].as_str(),
+            Some("empty title")
+        );
+    }
+
+    #[test]
+    fn create_duplicate_claim_id_rejected_without_overwrite() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+        let original_created_at = e.claims()["c1"].created_at.clone();
+        let mut replacement = sample_claim("c1", ClaimCategory::PrivacyAssurance);
+        replacement.title = "Replacement".to_string();
+        replacement.description = "Replacement description".to_string();
+        let err = e.create_claim(replacement, "trace-duplicate").unwrap_err();
+
+        assert!(err.contains("duplicate"));
+        assert_eq!(e.claims().len(), 1);
+        assert_eq!(e.claims()["c1"].category, ClaimCategory::SecurityGuarantee);
+        assert_eq!(e.claims()["c1"].title, "Claim c1");
+        assert_eq!(e.claims()["c1"].created_at, original_created_at);
+    }
+
+    #[test]
+    fn create_empty_description_rejected_without_insert() {
+        let mut e = ExternalReplicationClaims::default();
+        let mut c = sample_claim("c-empty-description", ClaimCategory::ReliabilityMetric);
+        c.description.clear();
+        let err = e.create_claim(c, "trace-empty-description").unwrap_err();
+
+        assert!(err.contains("description"));
+        assert!(e.claims().is_empty());
+        assert_eq!(
+            e.audit_log()[0].details["reason"].as_str(),
+            Some("empty description")
+        );
+    }
+
+    #[test]
+    fn create_whitespace_description_rejected_without_insert() {
+        let mut e = ExternalReplicationClaims::default();
+        let mut claim = sample_claim("c-whitespace-description", ClaimCategory::ReliabilityMetric);
+        claim.description = "\n\t ".to_string();
+
+        let err = e
+            .create_claim(claim, "trace-whitespace-description")
+            .unwrap_err();
+
+        assert!(err.contains("description"));
+        assert!(e.claims().is_empty());
+        assert_eq!(
+            e.audit_log()[0].details["reason"].as_str(),
+            Some("empty description")
+        );
+    }
+
+    #[test]
+    fn create_empty_claim_id_takes_precedence_over_other_empty_fields() {
+        let mut e = ExternalReplicationClaims::default();
+        let mut claim = sample_claim("", ClaimCategory::SecurityGuarantee);
+        claim.title.clear();
+        claim.description.clear();
+
+        let err = e
+            .create_claim(claim, "trace-empty-id-precedence")
+            .unwrap_err();
+
+        assert!(err.contains("claim id"));
+        assert!(e.claims().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert_eq!(
+            e.audit_log()[0].details["reason"].as_str(),
+            Some("empty claim_id")
+        );
+    }
+
+    #[test]
+    fn create_duplicate_claim_id_takes_precedence_over_replacement_validation() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c-duplicate-precedence", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+        let mut replacement = sample_claim(
+            "c-duplicate-precedence",
+            ClaimCategory::PerformanceBenchmark,
+        );
+        replacement.title.clear();
+        replacement.description.clear();
+
+        let err = e
+            .create_claim(replacement, "trace-duplicate-precedence")
+            .unwrap_err();
+
+        assert!(err.contains("duplicate"));
+        assert_eq!(e.claims().len(), 1);
+        assert_eq!(
+            e.audit_log().last().unwrap().details["reason"].as_str(),
+            Some("duplicate claim_id")
+        );
     }
 
     #[test]
@@ -502,6 +737,75 @@ mod tests {
     }
 
     #[test]
+    fn request_replication_empty_replicator_rejected_without_record() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+        let err = e
+            .request_replication("c1", "", "trace-empty-replicator")
+            .unwrap_err();
+
+        assert!(err.contains("replicator"));
+        assert!(e.replications().is_empty());
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::ERC_ERR_INVALID_CLAIM
+            && record.details["reason"].as_str() == Some("empty replicator")));
+        assert!(
+            !e.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::ERC_REPLICATION_REQUESTED)
+        );
+    }
+
+    #[test]
+    fn request_replication_whitespace_replicator_rejected_without_record() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+
+        let err = e
+            .request_replication("c1", " \n ", "trace-whitespace-replicator")
+            .unwrap_err();
+
+        assert!(err.contains("replicator"));
+        assert!(e.replications().is_empty());
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::ERC_ERR_INVALID_CLAIM
+            && record.details["reason"].as_str() == Some("empty replicator")));
+    }
+
+    #[test]
+    fn request_replication_missing_claim_does_not_audit() {
+        let mut e = ExternalReplicationClaims::default();
+        assert!(
+            e.request_replication("missing", "lab", "trace-missing")
+                .is_err()
+        );
+
+        assert!(e.replications().is_empty());
+        assert!(e.audit_log().is_empty());
+    }
+
+    #[test]
+    fn request_missing_claim_with_empty_replicator_does_not_audit() {
+        let mut e = ExternalReplicationClaims::default();
+
+        let err = e
+            .request_replication("missing", "", "trace-missing-empty-replicator")
+            .unwrap_err();
+
+        assert!(err.contains("not found"));
+        assert!(e.replications().is_empty());
+        assert!(e.audit_log().is_empty());
+    }
+
+    #[test]
     fn update_replication_lifecycle() {
         let mut e = ExternalReplicationClaims::default();
         e.create_claim(
@@ -518,6 +822,122 @@ mod tests {
     }
 
     #[test]
+    fn complete_replication_empty_findings_rejected_without_status_change() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+        let rid = e.request_replication("c1", "lab", &trace()).unwrap();
+        let err = e
+            .update_replication(
+                &rid,
+                ReplicationStatus::Completed,
+                "",
+                "trace-empty-findings",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("findings"));
+        assert_eq!(e.replications()[0].status, ReplicationStatus::Requested);
+        assert!(e.replications()[0].completed_at.is_none());
+        assert_eq!(e.replication_count("c1"), 0);
+    }
+
+    #[test]
+    fn verified_replication_empty_findings_rejected_without_completion() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+        let rid = e.request_replication("c1", "lab", &trace()).unwrap();
+        let err = e
+            .update_replication(
+                &rid,
+                ReplicationStatus::Verified,
+                "",
+                "trace-empty-verified",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("findings"));
+        assert_eq!(e.replications()[0].status, ReplicationStatus::Requested);
+        assert!(e.replications()[0].completed_at.is_none());
+        assert!(
+            !e.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::ERC_CLAIM_VERIFIED)
+        );
+    }
+
+    #[test]
+    fn complete_replication_whitespace_findings_rejected_without_status_change() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+        let rid = e.request_replication("c1", "lab", &trace()).unwrap();
+
+        let err = e
+            .update_replication(
+                &rid,
+                ReplicationStatus::Completed,
+                " \n ",
+                "trace-whitespace-findings",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("findings"));
+        assert_eq!(e.replications()[0].status, ReplicationStatus::Requested);
+        assert!(e.replications()[0].completed_at.is_none());
+        assert_eq!(e.replication_count("c1"), 0);
+    }
+
+    #[test]
+    fn update_missing_replication_does_not_audit() {
+        let mut e = ExternalReplicationClaims::default();
+        assert!(
+            e.update_replication(
+                "missing-replication",
+                ReplicationStatus::InProgress,
+                "",
+                "trace-missing-replication",
+            )
+            .is_err()
+        );
+
+        assert!(e.audit_log().is_empty());
+        assert!(e.replications().is_empty());
+    }
+
+    #[test]
+    fn update_missing_completed_replication_with_empty_findings_logs_invalid_first() {
+        let mut e = ExternalReplicationClaims::default();
+
+        let err = e
+            .update_replication(
+                "missing-completed",
+                ReplicationStatus::Completed,
+                "",
+                "trace-missing-empty-findings",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("findings"));
+        assert!(e.replications().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert_eq!(
+            e.audit_log()[0].details["reason"].as_str(),
+            Some("empty findings")
+        );
+    }
+
+    #[test]
     fn publish_requires_replications() {
         let mut e = ExternalReplicationClaims::default();
         e.create_claim(
@@ -526,6 +946,53 @@ mod tests {
         )
         .unwrap();
         assert!(e.publish_claim("c1", &trace()).is_err());
+    }
+
+    #[test]
+    fn publish_rejects_one_short_of_replication_threshold() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+        for i in 0..MIN_REPLICATIONS.saturating_sub(1) {
+            let rid = e
+                .request_replication("c1", &format!("lab-{i}"), &trace())
+                .unwrap();
+            e.update_replication(&rid, ReplicationStatus::Completed, "ok", &trace())
+                .unwrap();
+        }
+
+        let err = e
+            .publish_claim("c1", "trace-one-short-threshold")
+            .unwrap_err();
+
+        assert!(err.contains("insufficient"));
+        assert!(!e.claims()["c1"].published);
+        assert_eq!(e.replication_count("c1"), MIN_REPLICATIONS - 1);
+    }
+
+    #[test]
+    fn publish_with_only_requested_replications_fails_without_publishing() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c-requested-only", ClaimCategory::ReliabilityMetric),
+            &trace(),
+        )
+        .unwrap();
+        for i in 0..MIN_REPLICATIONS {
+            e.request_replication("c-requested-only", &format!("lab-{i}"), &trace())
+                .unwrap();
+        }
+
+        let err = e
+            .publish_claim("c-requested-only", "trace-requested-only")
+            .unwrap_err();
+
+        assert!(err.contains("insufficient"));
+        assert!(!e.claims()["c-requested-only"].published);
+        assert_eq!(e.replication_count("c-requested-only"), 0);
     }
 
     #[test]
@@ -574,6 +1041,78 @@ mod tests {
     fn link_evidence_missing_claim() {
         let mut e = ExternalReplicationClaims::default();
         assert!(e.link_evidence("missing", "ref", &trace()).is_err());
+    }
+
+    #[test]
+    fn link_empty_evidence_ref_for_missing_claim_logs_invalid_ref_first() {
+        let mut e = ExternalReplicationClaims::default();
+
+        let err = e
+            .link_evidence("missing", " ", "trace-missing-empty-evidence")
+            .unwrap_err();
+
+        assert!(err.contains("evidence"));
+        assert!(e.claims().is_empty());
+        assert_eq!(e.audit_log().len(), 1);
+        assert_eq!(
+            e.audit_log()[0].details["reason"].as_str(),
+            Some("empty evidence_ref")
+        );
+    }
+
+    #[test]
+    fn link_empty_evidence_ref_rejected_without_mutation() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+        let err = e
+            .link_evidence("c1", "", "trace-empty-evidence")
+            .unwrap_err();
+
+        assert!(err.contains("evidence"));
+        assert!(e.claims()["c1"].evidence_refs.is_empty());
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::ERC_ERR_INVALID_CLAIM
+            && record.details["reason"].as_str() == Some("empty evidence_ref")));
+        assert!(
+            !e.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::ERC_EVIDENCE_LINKED)
+        );
+    }
+
+    #[test]
+    fn link_whitespace_evidence_ref_rejected_without_mutation() {
+        let mut e = ExternalReplicationClaims::default();
+        e.create_claim(
+            sample_claim("c1", ClaimCategory::SecurityGuarantee),
+            &trace(),
+        )
+        .unwrap();
+
+        let err = e
+            .link_evidence("c1", " \t ", "trace-whitespace-evidence")
+            .unwrap_err();
+
+        assert!(err.contains("evidence"));
+        assert!(e.claims()["c1"].evidence_refs.is_empty());
+        assert!(e.audit_log().iter().any(|record| record.event_code
+            == event_codes::ERC_ERR_INVALID_CLAIM
+            && record.details["reason"].as_str() == Some("empty evidence_ref")));
+    }
+
+    #[test]
+    fn publish_missing_claim_does_not_log_threshold_failure() {
+        let mut e = ExternalReplicationClaims::default();
+        let err = e
+            .publish_claim("missing", "trace-publish-missing")
+            .unwrap_err();
+
+        assert!(err.contains("not found"));
+        assert!(e.audit_log().is_empty());
     }
 
     #[test]
@@ -715,6 +1254,15 @@ mod tests {
         let jsonl = e.export_audit_log_jsonl().unwrap();
         let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert!(first["event_code"].is_string());
+    }
+
+    #[test]
+    fn export_empty_audit_log_is_empty_string() {
+        let e = ExternalReplicationClaims::default();
+
+        let jsonl = e.export_audit_log_jsonl().unwrap();
+
+        assert!(jsonl.is_empty());
     }
 
     #[test]

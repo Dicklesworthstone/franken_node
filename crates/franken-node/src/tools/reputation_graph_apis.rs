@@ -40,6 +40,8 @@ pub mod event_codes {
     pub const RGA_SUBGRAPH_EXTRACTED: &str = "RGA-010";
     pub const RGA_ERR_DUPLICATE_NODE: &str = "RGA-ERR-001";
     pub const RGA_ERR_MISSING_NODE: &str = "RGA-ERR-002";
+    pub const RGA_ERR_INVALID_NODE: &str = "RGA-ERR-003";
+    pub const RGA_ERR_INVALID_EDGE: &str = "RGA-ERR-004";
 }
 
 pub mod invariants {
@@ -58,8 +60,13 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_EDGES: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len().saturating_add(1).saturating_sub(cap);
+    if overflow > 0 {
         items.drain(0..overflow);
     }
     items.push(item);
@@ -171,6 +178,38 @@ impl Default for ReputationGraphApis {
 
 impl ReputationGraphApis {
     pub fn add_node(&mut self, node: ReputationNode, trace_id: &str) -> Result<String, String> {
+        if node.node_id.trim().is_empty() {
+            self.log(
+                event_codes::RGA_ERR_INVALID_NODE,
+                trace_id,
+                serde_json::json!({"reason": "empty node_id"}),
+            );
+            return Err("node id must not be empty".to_string());
+        }
+        if node.node_id.trim() != node.node_id {
+            self.log(
+                event_codes::RGA_ERR_INVALID_NODE,
+                trace_id,
+                serde_json::json!({"node_id": &node.node_id, "reason": "malformed node_id"}),
+            );
+            return Err("node id must not include surrounding whitespace".to_string());
+        }
+        if node.display_name.trim().is_empty() {
+            self.log(
+                event_codes::RGA_ERR_INVALID_NODE,
+                trace_id,
+                serde_json::json!({"node_id": &node.node_id, "reason": "empty display_name"}),
+            );
+            return Err("display name must not be empty".to_string());
+        }
+        if !node.base_score.is_finite() {
+            self.log(
+                event_codes::RGA_ERR_INVALID_NODE,
+                trace_id,
+                serde_json::json!({"node_id": &node.node_id, "reason": "non-finite base_score"}),
+            );
+            return Err("base score must be finite".to_string());
+        }
         if self.nodes.contains_key(&node.node_id) {
             self.log(
                 event_codes::RGA_ERR_DUPLICATE_NODE,
@@ -195,6 +234,14 @@ impl ReputationGraphApis {
         new_score: f64,
         trace_id: &str,
     ) -> Result<(), String> {
+        if !new_score.is_finite() {
+            self.log(
+                event_codes::RGA_ERR_INVALID_NODE,
+                trace_id,
+                serde_json::json!({"node_id": node_id, "reason": "non-finite base_score"}),
+            );
+            return Err("base score must be finite".to_string());
+        }
         let node = self
             .nodes
             .get_mut(node_id)
@@ -209,6 +256,58 @@ impl ReputationGraphApis {
     }
 
     pub fn add_edge(&mut self, mut edge: ReputationEdge, trace_id: &str) -> Result<String, String> {
+        if edge.edge_id.trim().is_empty() {
+            self.log(
+                event_codes::RGA_ERR_INVALID_EDGE,
+                trace_id,
+                serde_json::json!({"reason": "empty edge_id"}),
+            );
+            return Err("edge id must not be empty".to_string());
+        }
+        if edge.edge_id.trim() != edge.edge_id {
+            self.log(
+                event_codes::RGA_ERR_INVALID_EDGE,
+                trace_id,
+                serde_json::json!({"edge_id": &edge.edge_id, "reason": "malformed edge_id"}),
+            );
+            return Err("edge id must not include surrounding whitespace".to_string());
+        }
+        if self
+            .edges
+            .iter()
+            .any(|existing| existing.edge_id == edge.edge_id)
+        {
+            self.log(
+                event_codes::RGA_ERR_INVALID_EDGE,
+                trace_id,
+                serde_json::json!({"edge_id": &edge.edge_id, "reason": "duplicate edge_id"}),
+            );
+            return Err(format!("duplicate edge: {}", edge.edge_id));
+        }
+        if edge.source == edge.target {
+            self.log(
+                event_codes::RGA_ERR_INVALID_EDGE,
+                trace_id,
+                serde_json::json!({"edge_id": &edge.edge_id, "reason": "self loop"}),
+            );
+            return Err("edge source and target must be different".to_string());
+        }
+        if !edge.weight.is_finite() {
+            self.log(
+                event_codes::RGA_ERR_INVALID_EDGE,
+                trace_id,
+                serde_json::json!({"edge_id": &edge.edge_id, "reason": "non-finite weight"}),
+            );
+            return Err("edge weight must be finite".to_string());
+        }
+        if edge.evidence.trim().is_empty() {
+            self.log(
+                event_codes::RGA_ERR_INVALID_EDGE,
+                trace_id,
+                serde_json::json!({"edge_id": &edge.edge_id, "reason": "empty evidence"}),
+            );
+            return Err("edge evidence must not be empty".to_string());
+        }
         if !self.nodes.contains_key(&edge.source) {
             self.log(
                 event_codes::RGA_ERR_MISSING_NODE,
@@ -445,6 +544,24 @@ mod tests {
     }
 
     #[test]
+    fn push_bounded_zero_capacity_drops_existing_and_new_items() {
+        let mut items = vec!["old-1", "old-2"];
+
+        push_bounded(&mut items, "new", 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_preexisting_overflow_keeps_newest_items() {
+        let mut items = vec!["old-1", "old-2", "old-3", "old-4"];
+
+        push_bounded(&mut items, "new", 3);
+
+        assert_eq!(items, vec!["old-3", "old-4", "new"]);
+    }
+
+    #[test]
     fn five_node_types() {
         assert_eq!(NodeType::all().len(), 5);
     }
@@ -474,6 +591,119 @@ mod tests {
             g.add_node(sample_node("n1", NodeType::Verifier), &trace())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn add_empty_node_id_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        let err = g
+            .add_node(sample_node("", NodeType::Operator), "trace-empty-node")
+            .unwrap_err();
+
+        assert!(err.contains("node id"));
+        assert!(g.nodes().is_empty());
+        assert_eq!(g.audit_log().len(), 1);
+        assert_eq!(
+            g.audit_log()[0].event_code,
+            event_codes::RGA_ERR_INVALID_NODE
+        );
+        assert_eq!(
+            g.audit_log()[0].details["reason"].as_str(),
+            Some("empty node_id")
+        );
+    }
+
+    #[test]
+    fn add_empty_display_name_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        let mut node = sample_node("n-empty-name", NodeType::Verifier);
+        node.display_name.clear();
+        let err = g.add_node(node, "trace-empty-name").unwrap_err();
+
+        assert!(err.contains("display name"));
+        assert!(g.nodes().is_empty());
+        assert_eq!(
+            g.audit_log()[0].event_code,
+            event_codes::RGA_ERR_INVALID_NODE
+        );
+        assert_eq!(
+            g.audit_log()[0].details["reason"].as_str(),
+            Some("empty display_name")
+        );
+    }
+
+    #[test]
+    fn add_nan_base_score_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        let mut node = sample_node("n-nan", NodeType::DataSource);
+        node.base_score = f64::NAN;
+        let err = g.add_node(node, "trace-nan-node").unwrap_err();
+
+        assert!(err.contains("base score"));
+        assert!(g.nodes().is_empty());
+        assert_eq!(
+            g.audit_log()[0].details["reason"].as_str(),
+            Some("non-finite base_score")
+        );
+    }
+
+    #[test]
+    fn duplicate_node_rejection_preserves_original_node() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        let mut replacement = sample_node("n1", NodeType::Verifier);
+        replacement.display_name = "replacement".to_string();
+        replacement.base_score = 0.1;
+        let err = g.add_node(replacement, "trace-duplicate").unwrap_err();
+
+        assert!(err.contains("duplicate"));
+        assert_eq!(g.nodes().len(), 1);
+        assert_eq!(g.nodes()["n1"].node_type, NodeType::Operator);
+        assert_eq!(g.nodes()["n1"].display_name, "n1");
+        assert!((g.nodes()["n1"].base_score - 0.8).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn add_whitespace_node_id_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        let err = g
+            .add_node(sample_node(" \t ", NodeType::Operator), "trace-space-node")
+            .unwrap_err();
+
+        assert!(err.contains("node id"));
+        assert!(g.nodes().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("empty node_id")));
+    }
+
+    #[test]
+    fn add_trim_required_node_id_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        let err = g
+            .add_node(sample_node(" n1", NodeType::Operator), "trace-trim-node")
+            .unwrap_err();
+
+        assert!(err.contains("surrounding whitespace"));
+        assert!(g.nodes().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("malformed node_id")));
+    }
+
+    #[test]
+    fn add_whitespace_display_name_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        let mut node = sample_node("n-space-name", NodeType::Verifier);
+        node.display_name = " \n ".to_string();
+        let err = g.add_node(node, "trace-space-name").unwrap_err();
+
+        assert!(err.contains("display name"));
+        assert!(g.nodes().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("empty display_name")));
     }
 
     #[test]
@@ -512,6 +742,177 @@ mod tests {
     }
 
     #[test]
+    fn add_empty_edge_id_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+        let err = g
+            .add_edge(sample_edge("", "n1", "n2", 0.5), "trace-empty-edge")
+            .unwrap_err();
+
+        assert!(err.contains("edge id"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("empty edge_id")));
+    }
+
+    #[test]
+    fn add_whitespace_edge_id_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+        let err = g
+            .add_edge(sample_edge("\t ", "n1", "n2", 0.5), "trace-space-edge")
+            .unwrap_err();
+
+        assert!(err.contains("edge id"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("empty edge_id")));
+    }
+
+    #[test]
+    fn add_trim_required_edge_id_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+        let err = g
+            .add_edge(sample_edge(" e-trim", "n1", "n2", 0.5), "trace-trim-edge")
+            .unwrap_err();
+
+        assert!(err.contains("surrounding whitespace"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("malformed edge_id")));
+    }
+
+    #[test]
+    fn add_self_loop_edge_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        let err = g
+            .add_edge(sample_edge("e-self", "n1", "n1", 0.5), "trace-self-loop")
+            .unwrap_err();
+
+        assert!(err.contains("different"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("self loop")));
+    }
+
+    #[test]
+    fn add_nonfinite_edge_weight_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+        let err = g
+            .add_edge(
+                sample_edge("e-inf", "n1", "n2", f64::INFINITY),
+                "trace-inf-edge",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("weight"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("non-finite weight")));
+    }
+
+    #[test]
+    fn add_empty_evidence_edge_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+        let mut edge = sample_edge("e-empty-evidence", "n1", "n2", 0.5);
+        edge.evidence.clear();
+        let err = g.add_edge(edge, "trace-empty-evidence").unwrap_err();
+
+        assert!(err.contains("evidence"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("empty evidence")));
+    }
+
+    #[test]
+    fn add_whitespace_evidence_edge_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+        let mut edge = sample_edge("e-space-evidence", "n1", "n2", 0.5);
+        edge.evidence = " \r\n ".to_string();
+        let err = g.add_edge(edge, "trace-space-evidence").unwrap_err();
+
+        assert!(err.contains("evidence"));
+        assert!(g.edges().is_empty());
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("empty evidence")));
+    }
+
+    #[test]
+    fn duplicate_edge_id_rejected_without_insert() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+        g.add_node(sample_node("n3", NodeType::Verifier), &trace())
+            .unwrap();
+        g.add_edge(sample_edge("e-duplicate", "n1", "n2", 0.5), &trace())
+            .unwrap();
+        let err = g
+            .add_edge(
+                sample_edge("e-duplicate", "n2", "n3", 0.7),
+                "trace-duplicate-edge",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("duplicate edge"));
+        assert_eq!(g.edges().len(), 1);
+        assert_eq!(g.edges()[0].edge_id, "e-duplicate");
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_EDGE
+            && record.details["reason"].as_str() == Some("duplicate edge_id")));
+    }
+
+    #[test]
+    fn missing_target_edge_rejection_preserves_existing_edges() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        g.add_node(sample_node("n2", NodeType::Extension), &trace())
+            .unwrap();
+        g.add_edge(sample_edge("e-good", "n1", "n2", 0.5), &trace())
+            .unwrap();
+        let err = g
+            .add_edge(sample_edge("e-bad", "n1", "missing", 0.7), "trace-missing")
+            .unwrap_err();
+
+        assert!(err.contains("target node"));
+        assert_eq!(g.edges().len(), 1);
+        assert_eq!(g.edges()[0].edge_id, "e-good");
+    }
+
+    #[test]
     fn compute_score_no_edges() {
         let mut g = ReputationGraphApis::default();
         g.add_node(sample_node("n1", NodeType::Operator), &trace())
@@ -539,6 +940,20 @@ mod tests {
     fn compute_score_missing_node() {
         let mut g = ReputationGraphApis::default();
         assert!(g.compute_score("missing", &trace()).is_err());
+    }
+
+    #[test]
+    fn compute_score_missing_node_does_not_emit_success_audit() {
+        let mut g = ReputationGraphApis::default();
+        let err = g
+            .compute_score("missing", "trace-missing-score")
+            .unwrap_err();
+
+        assert!(err.contains("node not found"));
+        assert!(g.audit_log().iter().all(|record| {
+            record.event_code != event_codes::RGA_SCORE_COMPUTED
+                && record.event_code != event_codes::RGA_THRESHOLD_CHECKED
+        }));
     }
 
     #[test]
@@ -594,6 +1009,35 @@ mod tests {
     }
 
     #[test]
+    fn neighbors_missing_node_returns_empty_result() {
+        let mut g = ReputationGraphApis::default();
+
+        let neighbors = g.neighbors("missing", "trace-missing-neighbors");
+
+        assert!(neighbors.is_empty());
+        assert!(g.audit_log().iter().any(|record| {
+            record.event_code == event_codes::RGA_QUERY_EXECUTED
+                && record.details["query"].as_str() == Some("neighbors")
+                && record.details["node"].as_str() == Some("missing")
+        }));
+    }
+
+    #[test]
+    fn subgraph_unknown_nodes_returns_empty_result() {
+        let mut g = ReputationGraphApis::default();
+
+        let (nodes, edges) = g.subgraph(&["missing-a", "missing-b"], "trace-missing-subgraph");
+
+        assert!(nodes.is_empty());
+        assert!(edges.is_empty());
+        assert!(g.audit_log().iter().any(|record| {
+            record.event_code == event_codes::RGA_SUBGRAPH_EXTRACTED
+                && record.details["nodes"].as_u64() == Some(0)
+                && record.details["edges"].as_u64() == Some(0)
+        }));
+    }
+
+    #[test]
     fn export_snapshot() {
         let mut g = ReputationGraphApis::default();
         g.add_node(sample_node("n1", NodeType::Operator), &trace())
@@ -617,6 +1061,55 @@ mod tests {
     fn update_missing_node_fails() {
         let mut g = ReputationGraphApis::default();
         assert!(g.update_node_score("missing", 0.5, &trace()).is_err());
+    }
+
+    #[test]
+    fn update_missing_node_score_does_not_emit_success_audit() {
+        let mut g = ReputationGraphApis::default();
+        let err = g
+            .update_node_score("missing", 0.5, "trace-missing-update")
+            .unwrap_err();
+
+        assert!(err.contains("node not found"));
+        assert!(g.audit_log().is_empty());
+    }
+
+    #[test]
+    fn update_node_score_infinity_rejected_without_mutation() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        let before_score = g.nodes()["n1"].base_score;
+        let err = g
+            .update_node_score("n1", f64::INFINITY, "trace-update-inf")
+            .unwrap_err();
+
+        assert!(err.contains("base score"));
+        assert!((g.nodes()["n1"].base_score - before_score).abs() < f64::EPSILON);
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("non-finite base_score")));
+    }
+
+    #[test]
+    fn update_node_score_nan_rejected_without_mutation() {
+        let mut g = ReputationGraphApis::default();
+        g.add_node(sample_node("n1", NodeType::Operator), &trace())
+            .unwrap();
+        let err = g
+            .update_node_score("n1", f64::NAN, "trace-update-nan")
+            .unwrap_err();
+
+        assert!(err.contains("base score"));
+        assert!((g.nodes()["n1"].base_score - 0.8).abs() < f64::EPSILON);
+        assert!(g.audit_log().iter().any(|record| record.event_code
+            == event_codes::RGA_ERR_INVALID_NODE
+            && record.details["reason"].as_str() == Some("non-finite base_score")));
+        assert!(
+            !g.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::RGA_NODE_UPDATED)
+        );
     }
 
     #[test]
@@ -662,6 +1155,13 @@ mod tests {
         let jsonl = g.export_audit_log_jsonl().unwrap();
         let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert!(first["event_code"].is_string());
+    }
+
+    #[test]
+    fn export_empty_audit_log_is_empty_string() {
+        let g = ReputationGraphApis::default();
+
+        assert_eq!(g.export_audit_log_jsonl().unwrap(), "");
     }
 
     #[test]

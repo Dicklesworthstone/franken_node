@@ -58,8 +58,12 @@ pub const MIN_RESILIENCE_SCORE: f64 = 0.7;
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_METRICS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -192,6 +196,22 @@ impl AdversarialResilienceMetrics {
         mut metric: ResilienceMetric,
         trace_id: &str,
     ) -> Result<String, String> {
+        if metric.metric_id.trim().is_empty() {
+            self.log(
+                event_codes::ARM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "empty metric_id"}),
+            );
+            return Err("metric_id must be non-empty".to_string());
+        }
+        if metric.corpus_version.trim().is_empty() {
+            self.log(
+                event_codes::ARM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "empty corpus_version"}),
+            );
+            return Err("corpus_version must be non-empty".to_string());
+        }
         if metric.total_attacks == 0 {
             self.log(
                 event_codes::ARM_ERR_INVALID_METRIC,
@@ -209,6 +229,22 @@ impl AdversarialResilienceMetrics {
                 serde_json::json!({"reason": "detected/blocked > total"}),
             );
             return Err("detected/blocked cannot exceed total_attacks".to_string());
+        }
+        if !metric.mean_response_ms.is_finite() || metric.mean_response_ms < 0.0 {
+            self.log(
+                event_codes::ARM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "invalid mean_response_ms"}),
+            );
+            return Err("mean_response_ms must be finite and non-negative".to_string());
+        }
+        if metric.techniques_tested == 0 {
+            self.log(
+                event_codes::ARM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({"reason": "zero techniques_tested"}),
+            );
+            return Err("techniques_tested must be > 0".to_string());
         }
         metric.timestamp = Utc::now().to_rfc3339();
         let mid = metric.metric_id.clone();
@@ -386,6 +422,14 @@ mod tests {
         }
     }
 
+    fn weak_metric(id: &str, ct: CampaignType) -> ResilienceMetric {
+        let mut metric = sample(id, ct);
+        metric.detected_attacks = 100;
+        metric.blocked_attacks = 50;
+        metric.mean_response_ms = 9000.0;
+        metric
+    }
+
     #[test]
     fn five_campaign_types() {
         assert_eq!(CampaignType::all().len(), 5);
@@ -439,6 +483,220 @@ mod tests {
         let mut m = sample("m1", CampaignType::BruteForce);
         m.detected_attacks = 2000;
         assert!(e.submit_metric(m, &trace()).is_err());
+    }
+    #[test]
+    fn submit_zero_attacks_does_not_store_metric() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-zero", CampaignType::BruteForce);
+        m.total_attacks = 0;
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("zero attacks should be rejected");
+
+        assert!(err.contains("total_attacks"));
+        assert!(e.metrics().is_empty());
+    }
+    #[test]
+    fn submit_detected_exceeds_total_does_not_store_metric() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-detected-too-high", CampaignType::Evasion);
+        m.detected_attacks = m.total_attacks + 1;
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("detected attacks above total should be rejected");
+
+        assert!(err.contains("detected/blocked"));
+        assert!(e.metrics().is_empty());
+    }
+    #[test]
+    fn submit_blocked_exceeds_total_does_not_store_metric() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-blocked-too-high", CampaignType::PrivilegeEscalation);
+        m.blocked_attacks = m.total_attacks + 1;
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("blocked attacks above total should be rejected");
+
+        assert!(err.contains("detected/blocked"));
+        assert!(e.metrics().is_empty());
+    }
+    #[test]
+    fn invalid_metric_submission_logs_invalid_metric_event() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-invalid-event", CampaignType::DataExfiltration);
+        m.total_attacks = 0;
+
+        let result = e.submit_metric(m, &trace());
+
+        assert!(result.is_err());
+        assert_eq!(
+            e.audit_log()[0].event_code,
+            event_codes::ARM_ERR_INVALID_METRIC
+        );
+    }
+    #[test]
+    fn below_threshold_metric_is_stored_and_logged() {
+        let mut e = AdversarialResilienceMetrics::default();
+
+        e.submit_metric(weak_metric("m-weak", CampaignType::SupplyChain), &trace())
+            .expect("below-threshold metrics are accepted for reporting");
+        let codes: Vec<&str> = e
+            .audit_log()
+            .iter()
+            .map(|record| record.event_code.as_str())
+            .collect();
+
+        assert_eq!(e.metrics().len(), 1);
+        assert!(codes.contains(&event_codes::ARM_ERR_BELOW_THRESHOLD));
+    }
+    #[test]
+    fn below_threshold_campaign_is_flagged_in_report() {
+        let mut e = AdversarialResilienceMetrics::default();
+        e.submit_metric(weak_metric("m-weak", CampaignType::Evasion), &trace())
+            .expect("below-threshold metrics are accepted for reporting");
+
+        let report = e.generate_report(&trace());
+
+        assert!(report.flagged_campaigns.contains(&CampaignType::Evasion));
+        let campaign = report
+            .campaigns
+            .iter()
+            .find(|campaign| campaign.campaign_type == CampaignType::Evasion)
+            .expect("evasion campaign should be present");
+        assert!(!campaign.meets_threshold);
+    }
+    #[test]
+    fn weak_campaign_keeps_overall_resilience_below_threshold() {
+        let mut e = AdversarialResilienceMetrics::default();
+        e.submit_metric(
+            weak_metric("m-weak-1", CampaignType::PrivilegeEscalation),
+            &trace(),
+        )
+        .expect("below-threshold metrics are accepted for reporting");
+        e.submit_metric(
+            weak_metric("m-weak-2", CampaignType::PrivilegeEscalation),
+            &trace(),
+        )
+        .expect("below-threshold metrics are accepted for reporting");
+
+        let report = e.generate_report(&trace());
+
+        assert!(report.overall_resilience < MIN_RESILIENCE_SCORE);
+        assert!(
+            report
+                .flagged_campaigns
+                .contains(&CampaignType::PrivilegeEscalation)
+        );
+    }
+    #[test]
+    fn submit_empty_metric_id_does_not_store_metric() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-empty-id", CampaignType::BruteForce);
+        m.metric_id = "   ".to_string();
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("blank metric id should be rejected");
+
+        assert!(err.contains("metric_id"));
+        assert!(e.metrics().is_empty());
+    }
+    #[test]
+    fn submit_empty_corpus_version_does_not_store_metric() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-empty-corpus", CampaignType::Evasion);
+        m.corpus_version.clear();
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("blank corpus version should be rejected");
+
+        assert!(err.contains("corpus_version"));
+        assert!(e.metrics().is_empty());
+    }
+    #[test]
+    fn submit_nan_response_does_not_store_metric() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-nan-response", CampaignType::PrivilegeEscalation);
+        m.mean_response_ms = f64::NAN;
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("nan response should be rejected");
+
+        assert!(err.contains("mean_response_ms"));
+        assert!(e.metrics().is_empty());
+    }
+    #[test]
+    fn submit_negative_response_does_not_store_metric() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-negative-response", CampaignType::DataExfiltration);
+        m.mean_response_ms = -1.0;
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("negative response should be rejected");
+
+        assert!(err.contains("mean_response_ms"));
+        assert!(e.metrics().is_empty());
+    }
+    #[test]
+    fn submit_zero_techniques_does_not_store_metric() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-zero-techniques", CampaignType::SupplyChain);
+        m.techniques_tested = 0;
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("zero techniques should be rejected");
+
+        assert!(err.contains("techniques_tested"));
+        assert!(e.metrics().is_empty());
+    }
+    #[test]
+    fn invalid_response_metric_logs_invalid_metric_reason() {
+        let mut e = AdversarialResilienceMetrics::default();
+        let mut m = sample("m-invalid-response", CampaignType::BruteForce);
+        m.mean_response_ms = f64::INFINITY;
+
+        let result = e.submit_metric(m, "trace-invalid-response");
+
+        assert!(result.is_err());
+        assert_eq!(
+            e.audit_log()[0].event_code,
+            event_codes::ARM_ERR_INVALID_METRIC
+        );
+        assert_eq!(
+            e.audit_log()[0].details["reason"],
+            "invalid mean_response_ms"
+        );
+    }
+    #[test]
+    fn rejected_invalid_metric_preserves_existing_metrics() {
+        let mut e = AdversarialResilienceMetrics::default();
+        e.submit_metric(sample("m-kept", CampaignType::BruteForce), &trace())
+            .unwrap();
+        let mut m = sample("m-invalid-after-kept", CampaignType::Evasion);
+        m.techniques_tested = 0;
+
+        let err = e
+            .submit_metric(m, &trace())
+            .expect_err("invalid metric should fail");
+
+        assert!(err.contains("techniques_tested"));
+        assert_eq!(e.metrics().len(), 1);
+        assert_eq!(e.metrics()[0].metric_id, "m-kept");
+    }
+    #[test]
+    fn push_bounded_zero_capacity_discards_without_panic() {
+        let mut items = vec![1_u8, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
     }
     #[test]
     fn submit_sets_timestamp() {

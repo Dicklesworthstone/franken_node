@@ -163,7 +163,11 @@ impl ScoringConfig {
             }
             100.0 * (1.0 - (self.ideal - measured) / (self.ideal - self.threshold))
         };
-        raw.clamp(0.0, 100.0).round() as u32
+        if raw.is_finite() {
+            raw.clamp(0.0, 100.0).round() as u32
+        } else {
+            0
+        }
     }
 }
 
@@ -539,11 +543,7 @@ pub fn mean(values: &[f64]) -> f64 {
     }
     let len_f64 = u32::try_from(values.len()).unwrap_or(u32::MAX) as f64;
     let result = values.iter().sum::<f64>() / len_f64;
-    if result.is_finite() {
-        result
-    } else {
-        0.0
-    }
+    if result.is_finite() { result } else { 0.0 }
 }
 
 /// Compute sample standard deviation.
@@ -555,11 +555,7 @@ pub fn std_dev(values: &[f64]) -> f64 {
     let len_minus_one = u32::try_from(values.len().saturating_sub(1)).unwrap_or(u32::MAX) as f64;
     let variance = values.iter().map(|v| (v - m).powi(2)).sum::<f64>() / len_minus_one;
     let result = variance.sqrt();
-    if result.is_finite() {
-        result
-    } else {
-        0.0
-    }
+    if result.is_finite() { result } else { 0.0 }
 }
 
 /// Compute coefficient of variation as a percentage.
@@ -569,11 +565,7 @@ pub fn coefficient_of_variation(values: &[f64]) -> f64 {
         return 0.0;
     }
     let result = (std_dev(values) / m.abs()) * 100.0;
-    if result.is_finite() {
-        result
-    } else {
-        0.0
-    }
+    if result.is_finite() { result } else { 0.0 }
 }
 
 /// Compute 95% confidence interval using t-distribution approximation.
@@ -611,9 +603,13 @@ pub fn confidence_interval_95(values: &[f64]) -> ConfidenceInterval {
     };
 
     let margin = t_value * sd / n.sqrt();
-    ConfidenceInterval {
-        lower: m - margin,
-        upper: m + margin,
+    if margin.is_finite() {
+        ConfidenceInterval {
+            lower: m - margin,
+            upper: m + margin,
+        }
+    } else {
+        ConfidenceInterval { lower: m, upper: m }
     }
 }
 
@@ -1765,5 +1761,600 @@ mod tests {
         assert!(summary.contains("benchmark suite:"));
         assert!(summary.contains("cold_start_latency"));
         assert!(summary.contains("provenance_hash="));
+    }
+
+    // ── Edge case tests for mathematical functions with is_finite guards ──
+
+    #[test]
+    fn test_score_handles_nan_infinity_inputs() {
+        let config = ScoringConfig::lower_is_better(100.0, 200.0);
+
+        // Test NaN input
+        assert_eq!(config.score(f64::NAN), 0);
+
+        // Test infinity inputs
+        assert_eq!(config.score(f64::INFINITY), 0);
+        assert_eq!(config.score(f64::NEG_INFINITY), 100);
+
+        // Test normal inputs still work
+        assert_eq!(config.score(100.0), 100);
+        assert_eq!(config.score(150.0), 50);
+        assert_eq!(config.score(200.0), 0);
+    }
+
+    #[test]
+    fn test_score_handles_extreme_config_values() {
+        // Test with extreme ideal/threshold values that might cause overflow
+        let config = ScoringConfig::lower_is_better(f64::MAX / 2.0, f64::MAX);
+        assert_eq!(config.score(f64::MAX), 0);
+
+        // Test division by zero scenario (ideal == threshold)
+        let config = ScoringConfig::lower_is_better(100.0, 100.0);
+        assert_eq!(config.score(99.0), 100);
+        assert_eq!(config.score(101.0), 0);
+    }
+
+    #[test]
+    fn test_confidence_interval_handles_nan_infinity() {
+        // Test with NaN values in input
+        let values_with_nan = vec![1.0, 2.0, f64::NAN, 4.0, 5.0];
+        let ci = confidence_interval_95(&values_with_nan);
+        // Should handle gracefully (mean() and std_dev() have their own guards)
+        assert!(ci.lower.is_finite() || ci.lower == 0.0);
+        assert!(ci.upper.is_finite() || ci.upper == 0.0);
+
+        // Test with infinity values
+        let values_with_inf = vec![1.0, 2.0, f64::INFINITY, 4.0, 5.0];
+        let ci = confidence_interval_95(&values_with_inf);
+        // Should fallback to mean when margin is not finite
+        assert!(ci.lower.is_finite() || ci.lower == 0.0);
+        assert!(ci.upper.is_finite() || ci.upper == 0.0);
+
+        // Test with very small values that might cause precision issues
+        let tiny_values = vec![1e-300, 2e-300, 3e-300];
+        let ci = confidence_interval_95(&tiny_values);
+        assert!(ci.lower.is_finite());
+        assert!(ci.upper.is_finite());
+    }
+
+    #[test]
+    fn test_mean_handles_extreme_values() {
+        // Test with very large values that might overflow
+        let large_values = vec![f64::MAX / 2.0, f64::MAX / 2.0];
+        let result = mean(&large_values);
+        assert!(result.is_finite());
+
+        // Test with mix of large and small values
+        let mixed_values = vec![f64::MAX / 4.0, 1.0, f64::MAX / 4.0];
+        let result = mean(&mixed_values);
+        assert!(result.is_finite() || result == 0.0);
+    }
+
+    #[test]
+    fn test_std_dev_handles_extreme_values() {
+        // Test with identical large values (should have zero std dev)
+        let identical_large = vec![f64::MAX / 4.0; 5];
+        let result = std_dev(&identical_large);
+        assert!(result.is_finite());
+        assert!(result.abs() < f64::EPSILON);
+
+        // Test with very spread out values
+        let spread_values = vec![f64::MIN_POSITIVE, f64::MAX / 2.0];
+        let result = std_dev(&spread_values);
+        assert!(result.is_finite() || result == 0.0);
+    }
+
+    #[test]
+    fn test_coefficient_of_variation_handles_zero_mean() {
+        // Test when mean is zero
+        let zero_mean = vec![-1.0, 0.0, 1.0];
+        let result = coefficient_of_variation(&zero_mean);
+        assert!(result.is_finite());
+        assert_eq!(result, 0.0);
+
+        // Test when mean is very close to zero
+        let near_zero_mean = vec![1e-15, -1e-15, 0.0];
+        let result = coefficient_of_variation(&near_zero_mean);
+        assert!(result.is_finite());
+        assert_eq!(result, 0.0);
+    }
+
+    fn hash_matches(left: &str, right: &str) -> bool {
+        crate::security::constant_time::ct_eq_bytes(left.as_bytes(), right.as_bytes())
+    }
+
+    fn signed_report_fixture() -> BenchmarkReport {
+        let mut report = BenchmarkReport {
+            suite_version: SUITE_VERSION.to_string(),
+            scoring_formula_version: SCORING_FORMULA_VERSION.to_string(),
+            timestamp_utc: "2026-02-21T00:00:00Z".to_string(),
+            hardware_profile: HardwareProfile {
+                cpu: "fixture-cpu".to_string(),
+                memory_mb: 16_384,
+                os: "linux".to_string(),
+            },
+            runtime_versions: RuntimeVersions {
+                franken_node: "0.1.0".to_string(),
+                node: Some("22.0.0".to_string()),
+                bun: Some("1.1.0".to_string()),
+            },
+            scenarios: vec![ScenarioResult {
+                dimension: BenchmarkDimension::PerformanceUnderHardening,
+                name: "cold_start_latency".to_string(),
+                raw_value: 125.0,
+                unit: "ms".to_string(),
+                confidence_interval: ConfidenceInterval {
+                    lower: 123.0,
+                    upper: 127.0,
+                },
+                score: 94,
+                iterations: 5,
+                variance_pct: 1.1,
+            }],
+            aggregate_score: 94,
+            provenance_hash: String::new(),
+        };
+        report.provenance_hash = report.compute_provenance_hash();
+        report
+    }
+
+    #[test]
+    fn test_deterministic_measurements_zero_iterations_still_repeat() {
+        let scenario = ScenarioDefinition {
+            dimension: BenchmarkDimension::ReplayDeterminism,
+            name: "zero_iteration_replay".to_string(),
+            unit: "percent".to_string(),
+            iterations: 0,
+            warmup_iterations: 0,
+            sandbox_required: false,
+            scoring: ScoringConfig::higher_is_better(100.0, 90.0),
+        };
+
+        let first = deterministic_measurements_for_scenario(&scenario);
+        let second = deterministic_measurements_for_scenario(&scenario);
+
+        assert_eq!(first, second);
+        assert_eq!(first.len(), 1);
+        assert!(first.iter().all(|value| value.is_finite()));
+    }
+
+    #[test]
+    fn test_deterministic_measurements_are_bound_to_scenario_name() {
+        let mut scenario = ScenarioDefinition {
+            dimension: BenchmarkDimension::ReplayDeterminism,
+            name: "replay_bit_identity_rate".to_string(),
+            unit: "percent".to_string(),
+            iterations: 5,
+            warmup_iterations: 0,
+            sandbox_required: false,
+            scoring: ScoringConfig::higher_is_better(100.0, 90.0),
+        };
+        let replay_measurements = deterministic_measurements_for_scenario(&scenario);
+
+        scenario.name = "adversarial_pass_rate".to_string();
+        let adversarial_measurements = deterministic_measurements_for_scenario(&scenario);
+
+        assert_ne!(replay_measurements, adversarial_measurements);
+        assert!(replay_measurements.iter().all(|value| value.is_finite()));
+        assert!(
+            adversarial_measurements
+                .iter()
+                .all(|value| value.is_finite())
+        );
+    }
+
+    #[test]
+    fn test_default_suite_duplicate_filter_is_deterministic() {
+        let config = SuiteConfig::with_defaults();
+        let first = run_default_suite_with_config(
+            config.clone(),
+            Some("cold_start_latency,cold_start_latency"),
+        )
+        .expect("duplicate filter should dedupe");
+        let second =
+            run_default_suite_with_config(config, Some("cold_start_latency,cold_start_latency"))
+                .expect("duplicate filter should dedupe deterministically");
+
+        assert_eq!(first.scenarios.len(), 1);
+        assert_eq!(second.scenarios.len(), 1);
+        assert_eq!(first.scenarios, second.scenarios);
+        assert!(hash_matches(
+            &first.provenance_hash,
+            &second.provenance_hash
+        ));
+    }
+
+    #[test]
+    fn test_execute_scenario_rejects_positive_infinity_measurement() {
+        let config = SuiteConfig::with_defaults();
+        let mut suite = BenchmarkSuite::new(config);
+        let scenario = ScenarioDefinition {
+            dimension: BenchmarkDimension::ContainmentLatency,
+            name: "quarantine_propagation_latency".to_string(),
+            unit: "ms".to_string(),
+            iterations: 3,
+            warmup_iterations: 0,
+            sandbox_required: true,
+            scoring: ScoringConfig::lower_is_better(100.0, 2000.0),
+        };
+
+        let err = suite
+            .execute_scenario(&scenario, &[100.0, f64::INFINITY, 101.0])
+            .expect_err("infinite input must fail closed");
+
+        assert!(matches!(err, BenchRunError::NonFiniteMeasurement { .. }));
+    }
+
+    #[test]
+    fn test_to_canonical_json_rejects_non_finite_confidence_upper() {
+        let mut report = signed_report_fixture();
+        report.scenarios[0].confidence_interval.upper = f64::INFINITY;
+        report.provenance_hash = report.compute_provenance_hash();
+
+        let err = to_canonical_json(&report).expect_err("infinite CI upper must fail closed");
+
+        assert!(matches!(
+            err,
+            BenchRunError::NonFiniteReportValue { detail } if detail.contains("confidence_interval.upper")
+        ));
+    }
+
+    #[test]
+    fn test_to_canonical_json_rejects_non_finite_variance() {
+        let mut report = signed_report_fixture();
+        report.scenarios[0].variance_pct = f64::NAN;
+        report.provenance_hash = report.compute_provenance_hash();
+
+        let err = to_canonical_json(&report).expect_err("NaN variance must fail closed");
+
+        assert!(matches!(
+            err,
+            BenchRunError::NonFiniteReportValue { detail } if detail.contains("variance_pct")
+        ));
+    }
+
+    #[test]
+    fn test_signed_report_hash_matches_canonical_content() {
+        let report = signed_report_fixture();
+        let recomputed = report.compute_provenance_hash();
+        let json = to_canonical_json(&report).expect("signed report should serialize");
+
+        assert!(hash_matches(&report.provenance_hash, &recomputed));
+        assert!(json.contains("\"provenance_hash\""));
+        assert!(json.contains(&report.provenance_hash));
+    }
+
+    #[test]
+    fn test_signed_report_integrity_detects_raw_value_tamper() {
+        let report = signed_report_fixture();
+        let mut tampered = report.clone();
+        tampered.scenarios[0].raw_value = tampered.scenarios[0].raw_value + 1.0;
+
+        let recomputed = tampered.compute_provenance_hash();
+
+        assert!(!hash_matches(&report.provenance_hash, &recomputed));
+    }
+
+    #[test]
+    fn test_signed_report_integrity_detects_runtime_version_tamper() {
+        let report = signed_report_fixture();
+        let mut tampered = report.clone();
+        tampered.runtime_versions.node = Some("23.0.0".to_string());
+
+        let recomputed = tampered.compute_provenance_hash();
+
+        assert!(!hash_matches(&report.provenance_hash, &recomputed));
+    }
+
+    #[test]
+    fn test_signed_report_hash_field_is_not_self_referential() {
+        let report = signed_report_fixture();
+        let mut resigned = report.clone();
+        resigned.provenance_hash = "sha256:previous-signature-placeholder".to_string();
+
+        let original_recomputed = report.compute_provenance_hash();
+        let resigned_recomputed = resigned.compute_provenance_hash();
+
+        assert!(hash_matches(&original_recomputed, &resigned_recomputed));
+    }
+
+    // ── Negative-path tests for edge cases and invalid inputs ──────────
+
+    #[test]
+    fn negative_scoring_config_with_nan_and_infinite_values_handles_safely() {
+        // Test ScoringConfig with NaN values
+        let nan_config = ScoringConfig {
+            ideal: f64::NAN,
+            threshold: 100.0,
+            lower_is_better: true,
+        };
+
+        // Scoring with NaN should return 0 (safe fallback)
+        assert_eq!(nan_config.score(50.0), 0);
+        assert_eq!(nan_config.score(f64::NAN), 0);
+
+        // Test with infinite values
+        let inf_config = ScoringConfig {
+            ideal: 10.0,
+            threshold: f64::INFINITY,
+            lower_is_better: true,
+        };
+
+        // Should handle infinite threshold gracefully
+        let score = inf_config.score(50.0);
+        assert!(score <= 100, "Score should be bounded: {}", score);
+
+        // Test with negative infinity
+        let neg_inf_config = ScoringConfig {
+            ideal: f64::NEG_INFINITY,
+            threshold: 100.0,
+            lower_is_better: false,
+        };
+
+        assert_eq!(neg_inf_config.score(50.0), 0, "Negative infinity should result in 0 score");
+    }
+
+    #[test]
+    fn negative_scoring_config_with_identical_ideal_and_threshold_boundary_cases() {
+        // Test when ideal equals threshold (division by zero case)
+        let identical_config = ScoringConfig {
+            ideal: 50.0,
+            threshold: 50.0,
+            lower_is_better: true,
+        };
+
+        // Should handle division by zero case
+        assert_eq!(identical_config.score(50.0), 100, "At ideal value should score 100");
+        assert_eq!(identical_config.score(49.0), 100, "Below ideal should score 100");
+        assert_eq!(identical_config.score(51.0), 0, "Above ideal should score 0");
+
+        // Test higher-is-better with identical values
+        let identical_higher_config = ScoringConfig {
+            ideal: 100.0,
+            threshold: 100.0,
+            lower_is_better: false,
+        };
+
+        assert_eq!(identical_higher_config.score(100.0), 100);
+        assert_eq!(identical_higher_config.score(99.0), 0);
+        assert_eq!(identical_higher_config.score(101.0), 100);
+    }
+
+    #[test]
+    fn negative_benchmark_dimension_serialization_with_malformed_json() {
+        // Test BenchmarkDimension deserialization with invalid JSON
+        let invalid_json_cases = vec![
+            "null",                           // Wrong type
+            "\"unknown_dimension\"",          // Unknown variant
+            "\"COMPATIBILITY_CORRECTNESS\"",  // Wrong case
+            "\"compatibility-correctness\"",  // Wrong delimiter
+            "42",                            // Numeric instead of string
+            "\"\"",                          // Empty string
+        ];
+
+        for invalid_json in invalid_json_cases {
+            let result: Result<BenchmarkDimension, _> = serde_json::from_str(invalid_json);
+            assert!(result.is_err(), "Should reject invalid JSON: {}", invalid_json);
+        }
+
+        // Test that valid serialization still works
+        let dimension = BenchmarkDimension::CompatibilityCorrectness;
+        let serialized = serde_json::to_string(&dimension).unwrap();
+        assert_eq!(serialized, "\"compatibility_correctness\"");
+
+        let deserialized: BenchmarkDimension = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(deserialized, dimension);
+    }
+
+    #[test]
+    fn negative_default_scoring_with_problematic_scenario_names() {
+        // Test default_scoring with various problematic input strings
+        let problematic_names = vec![
+            "",                               // Empty string
+            "   ",                           // Whitespace only
+            "\0null_terminated",             // Null byte
+            "scenario\nwith\nnewlines",      // Multiline
+            "🚀emoji_scenario🔥",             // Unicode emoji
+            "\u{FFFF}max_unicode",           // Max BMP character
+            "very_".to_string() + &"long_".repeat(1000) + "scenario", // Very long name
+            "../../../etc/passwd",           // Path traversal
+            "<script>alert('xss')</script>", // XSS attempt
+            "{\"json\": \"injection\"}",     // JSON injection
+        ];
+
+        for name in problematic_names {
+            let result = default_scoring(&name);
+            // Should return None for unknown scenarios without panicking
+            assert!(result.is_none(), "Should return None for unknown scenario: {}", name);
+        }
+
+        // Verify that known scenarios still work correctly
+        assert!(default_scoring("cold_start_latency").is_some());
+        assert!(default_scoring("p99_request_latency").is_some());
+    }
+
+    #[test]
+    fn negative_push_bounded_with_extreme_capacity_and_overflow_scenarios() {
+        // Test push_bounded with zero capacity
+        let mut items = vec![1, 2, 3];
+        push_bounded(&mut items, 4, 0);
+        assert_eq!(items, vec![4], "Zero capacity should keep only new item");
+
+        // Test with capacity 1
+        push_bounded(&mut items, 5, 1);
+        assert_eq!(items, vec![5], "Capacity 1 should keep only new item");
+
+        // Test with massive overflow
+        let mut large_vec: Vec<u32> = (0..10000).collect();
+        let original_len = large_vec.len();
+        push_bounded(&mut large_vec, 99999, 3);
+        assert_eq!(large_vec.len(), 3);
+        assert_eq!(*large_vec.last().unwrap(), 99999);
+
+        // Test capacity larger than current size
+        let mut small_vec = vec![10, 20];
+        push_bounded(&mut small_vec, 30, 100);
+        assert_eq!(small_vec, vec![10, 20, 30], "Should not drain when under capacity");
+
+        // Test edge case: capacity equals current size
+        let mut exact_vec = vec![1, 2, 3];
+        push_bounded(&mut exact_vec, 4, 3);
+        assert_eq!(exact_vec.len(), 3);
+        assert!(exact_vec.contains(&4), "Should contain new item");
+    }
+
+    #[test]
+    fn negative_hardware_profile_with_unicode_and_control_characters() {
+        // Test HardwareProfile with problematic hardware descriptions
+        let problematic_profiles = vec![
+            HardwareProfile {
+                cpu: "\0Intel\x01Core\x7fi7".to_string(),
+                memory_gb: 32,
+                disk_type: "control\nchars".to_string(),
+            },
+            HardwareProfile {
+                cpu: "🚀Quantum🔥Processor💀".to_string(),
+                memory_gb: 128,
+                disk_type: "\u{FFFF}\u{10FFFF}".to_string(),
+            },
+            HardwareProfile {
+                cpu: "".to_string(), // Empty CPU
+                memory_gb: 0,        // Zero memory
+                disk_type: "   ".to_string(), // Whitespace disk type
+            },
+            HardwareProfile {
+                cpu: "../../../proc/cpuinfo".to_string(), // Path traversal
+                memory_gb: u32::MAX, // Maximum memory
+                disk_type: "<script>alert('hardware')</script>".to_string(), // XSS
+            },
+        ];
+
+        for profile in problematic_profiles {
+            // Serialization should handle problematic data without panicking
+            let serialized = serde_json::to_string(&profile);
+            assert!(serialized.is_ok(), "Serialization should not panic");
+
+            if let Ok(json) = serialized {
+                // Deserialization should round-trip correctly
+                let deserialized: Result<HardwareProfile, _> = serde_json::from_str(&json);
+                match deserialized {
+                    Ok(restored) => {
+                        assert_eq!(restored.cpu, profile.cpu);
+                        assert_eq!(restored.memory_gb, profile.memory_gb);
+                        assert_eq!(restored.disk_type, profile.disk_type);
+                    }
+                    Err(_) => {
+                        // Some characters might not survive JSON round-trip, which is acceptable
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_scoring_config_score_computation_with_extreme_floating_point_values() {
+        // Test scoring with various floating point edge cases
+        let config = ScoringConfig::lower_is_better(100.0, 200.0);
+
+        let extreme_values = vec![
+            (f64::EPSILON, "epsilon"),
+            (f64::MIN, "minimum finite"),
+            (f64::MAX, "maximum finite"),
+            (f64::MIN_POSITIVE, "minimum positive"),
+            (1e-308, "very small"),
+            (1e308, "very large"),
+            (-0.0, "negative zero"),
+            (0.0, "positive zero"),
+        ];
+
+        for (value, description) in extreme_values {
+            let score = config.score(value);
+            assert!(
+                score <= 100,
+                "Score should be bounded [0,100] for {}: {} -> {}",
+                description, value, score
+            );
+
+            // Score computation should not panic or produce invalid results
+            assert!(!score.to_string().contains("NaN"));
+            assert!(!score.to_string().contains("inf"));
+        }
+
+        // Test with values that could cause overflow in intermediate calculations
+        let overflow_config = ScoringConfig {
+            ideal: 1e100,
+            threshold: 1e200,
+            lower_is_better: true,
+        };
+
+        let overflow_score = overflow_config.score(1.5e150);
+        assert!(overflow_score <= 100, "Overflow case should be bounded");
+    }
+
+    #[test]
+    fn negative_benchmark_dimension_display_and_ordering_consistency() {
+        // Test that Display implementation is consistent with serialization
+        for dimension in BenchmarkDimension::all() {
+            let display_str = format!("{}", dimension);
+            let serde_str = serde_json::to_string(dimension).unwrap();
+            let serde_unquoted = serde_str.trim_matches('"');
+
+            assert_eq!(
+                display_str, serde_unquoted,
+                "Display and serde representation should match for {:?}",
+                dimension
+            );
+
+            // Display string should be valid identifier-like
+            assert!(!display_str.is_empty());
+            assert!(!display_str.contains(' '));
+            assert!(display_str.chars().all(|c| c.is_ascii_lowercase() || c == '_'));
+        }
+
+        // Test ordering consistency
+        let mut dimensions = BenchmarkDimension::all().to_vec();
+        dimensions.sort();
+
+        // Should maintain consistent ordering
+        for i in 1..dimensions.len() {
+            assert!(
+                dimensions[i-1] <= dimensions[i],
+                "Ordering should be consistent: {:?} <= {:?}",
+                dimensions[i-1], dimensions[i]
+            );
+        }
+
+        // Test that all() returns all expected dimensions
+        assert_eq!(dimensions.len(), 6, "Should have exactly 6 dimensions");
+
+        // Verify no duplicates
+        let mut unique_set = BTreeSet::new();
+        for dimension in BenchmarkDimension::all() {
+            assert!(unique_set.insert(*dimension), "Dimensions should be unique");
+        }
+    }
+
+    #[test]
+    fn negative_scoring_formula_constants_validation() {
+        // Test that scoring formula constants are well-formed
+        assert!(!SCORING_FORMULA_VERSION.is_empty());
+        assert!(!SUITE_VERSION.is_empty());
+
+        assert!(SCORING_FORMULA_VERSION.starts_with("sf-"));
+        assert!(SUITE_VERSION.chars().any(|c| c.is_ascii_digit()));
+
+        // Test variance and regression thresholds are reasonable
+        assert!(MAX_VARIANCE_PCT > 0.0 && MAX_VARIANCE_PCT < 100.0);
+        assert!(DEFAULT_REGRESSION_THRESHOLD_PCT > 0.0);
+        assert!(DETERMINISTIC_JITTER_RATIO > 0.0 && DETERMINISTIC_JITTER_RATIO < 1.0);
+
+        // Test that constants are finite numbers
+        assert!(MAX_VARIANCE_PCT.is_finite());
+        assert!(DEFAULT_REGRESSION_THRESHOLD_PCT.is_finite());
+        assert!(DETERMINISTIC_JITTER_RATIO.is_finite());
+
+        // Test MAX_SCENARIOS bound
+        assert!(MAX_SCENARIOS > 0);
+        assert!(MAX_SCENARIOS <= 1_000_000, "Should have reasonable upper bound");
     }
 }

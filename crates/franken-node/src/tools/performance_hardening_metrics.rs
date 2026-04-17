@@ -61,8 +61,12 @@ pub const METRIC_VERSION: &str = "phm-v1.0";
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_METRICS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -270,6 +274,26 @@ impl PerformanceHardeningMetrics {
                 }),
             );
             return Err("All metric fields must be finite".to_string());
+        }
+
+        if metric.cold_start_ms < 0.0
+            || metric.warm_start_ms < 0.0
+            || metric.baseline.p50_ms < 0.0
+            || metric.baseline.p95_ms < 0.0
+            || metric.baseline.p99_ms < 0.0
+            || metric.hardened.p50_ms < 0.0
+            || metric.hardened.p95_ms < 0.0
+            || metric.hardened.p99_ms < 0.0
+        {
+            self.log(
+                event_codes::PHM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({
+                    "metric_id": &metric.metric_id,
+                    "reason": "negative float in metric fields",
+                }),
+            );
+            return Err("All metric fields must be non-negative".to_string());
         }
 
         if metric.sample_count == 0 {
@@ -605,6 +629,226 @@ mod tests {
         let mut m = sample_metric("m1", OperationCategory::Request);
         m.sample_count = 0;
         assert!(engine.submit_metric(m, &trace()).is_err());
+    }
+
+    #[test]
+    fn rejected_unordered_hardened_percentiles_do_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-bad-hardened", OperationCategory::Request);
+        m.hardened = Percentiles {
+            p50_ms: 20.0,
+            p95_ms: 15.0,
+            p99_ms: 30.0,
+        };
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("unordered hardened percentiles should fail");
+
+        assert!(err.contains("Percentiles must be ordered"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_nan_baseline_percentile_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-nan-baseline", OperationCategory::Request);
+        m.baseline.p95_ms = f64::NAN;
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("non-finite baseline percentile should fail");
+
+        assert!(err.contains("finite"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_infinite_hardened_percentile_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-inf-hardened", OperationCategory::Verification);
+        m.hardened.p99_ms = f64::INFINITY;
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("non-finite hardened percentile should fail");
+
+        assert!(err.contains("finite"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_nan_cold_start_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-nan-cold-start", OperationCategory::Startup);
+        m.cold_start_ms = f64::NAN;
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("non-finite cold start should fail");
+
+        assert!(err.contains("finite"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_infinite_warm_start_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-inf-warm-start", OperationCategory::Startup);
+        m.warm_start_ms = f64::INFINITY;
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("non-finite warm start should fail");
+
+        assert!(err.contains("finite"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_zero_sample_metric_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-zero-samples", OperationCategory::Request);
+        m.sample_count = 0;
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("zero sample count should fail");
+
+        assert!(err.contains("sample_count"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn invalid_metric_submission_logs_invalid_metric_event() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-invalid-event", OperationCategory::Request);
+        m.baseline.p50_ms = f64::NAN;
+
+        let result = engine.submit_metric(m, &trace());
+
+        assert!(result.is_err());
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::PHM_ERR_INVALID_METRIC
+        );
+    }
+
+    #[test]
+    fn rejected_negative_baseline_percentile_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-negative-baseline", OperationCategory::Request);
+        m.baseline = Percentiles {
+            p50_ms: -10.0,
+            p95_ms: 1.0,
+            p99_ms: 2.0,
+        };
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("negative baseline percentile should fail");
+
+        assert!(err.contains("non-negative"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_negative_hardened_percentile_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-negative-hardened", OperationCategory::Verification);
+        m.hardened = Percentiles {
+            p50_ms: -3.0,
+            p95_ms: 4.0,
+            p99_ms: 5.0,
+        };
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("negative hardened percentile should fail");
+
+        assert!(err.contains("non-negative"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_negative_cold_start_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-negative-cold", OperationCategory::Startup);
+        m.cold_start_ms = -1.0;
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("negative cold start should fail");
+
+        assert!(err.contains("non-negative"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_negative_warm_start_does_not_store_metric() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-negative-warm", OperationCategory::Startup);
+        m.warm_start_ms = -1.0;
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("negative warm start should fail");
+
+        assert!(err.contains("non-negative"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_negative_metric_logs_invalid_metric_reason() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        let mut m = sample_metric("m-negative-event", OperationCategory::Migration);
+        m.hardened.p50_ms = -0.5;
+
+        let result = engine.submit_metric(m, "trace-negative-metric");
+
+        assert!(result.is_err());
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::PHM_ERR_INVALID_METRIC
+        );
+        assert_eq!(
+            engine.audit_log()[0].details["reason"],
+            "negative float in metric fields"
+        );
+    }
+
+    #[test]
+    fn rejected_negative_metric_preserves_existing_metrics() {
+        let mut engine = PerformanceHardeningMetrics::default();
+        engine
+            .submit_metric(
+                sample_metric("m-kept", OperationCategory::Request),
+                &trace(),
+            )
+            .unwrap();
+        let mut m = sample_metric("m-negative-rejected", OperationCategory::Request);
+        m.baseline = Percentiles {
+            p50_ms: -3.0,
+            p95_ms: -2.0,
+            p99_ms: -1.0,
+        };
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("ordered negative baseline should fail");
+
+        assert!(err.contains("non-negative"));
+        assert_eq!(engine.metrics().len(), 1);
+        assert_eq!(engine.metrics()[0].metric_id, "m-kept");
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_without_panic() {
+        let mut items = vec![1_u8, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
     }
 
     #[test]

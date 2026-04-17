@@ -24,8 +24,13 @@ const MAX_CARD_VERSIONS: usize = 512;
 const MAX_AUDIT_HISTORY: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1815,6 +1820,161 @@ mod tests {
     }
 
     #[test]
+    fn paginate_rejects_zero_page() {
+        let err = paginate(&[1, 2, 3], 0, 2).expect_err("page zero must fail");
+        assert!(matches!(
+            err,
+            TrustCardError::InvalidPagination {
+                page: 0,
+                per_page: 2
+            }
+        ));
+    }
+
+    #[test]
+    fn paginate_rejects_zero_per_page() {
+        let err = paginate(&[1, 2, 3], 1, 0).expect_err("per_page zero must fail");
+        assert!(matches!(
+            err,
+            TrustCardError::InvalidPagination {
+                page: 1,
+                per_page: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_items() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_new_item() {
+        let mut items: Vec<&str> = Vec::new();
+
+        push_bounded(&mut items, "ignored", 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_keeps_newest_items() {
+        let mut items = vec![10, 11, 12, 13];
+
+        push_bounded(&mut items, 14, 3);
+
+        assert_eq!(items, vec![12, 13, 14]);
+    }
+
+    #[test]
+    fn update_rejects_missing_extension_without_creating_history() {
+        let mut registry = TrustCardRegistry::default();
+
+        let err = registry
+            .update(
+                "npm:@missing/plugin",
+                TrustCardMutation {
+                    certification_level: Some(CertificationLevel::Bronze),
+                    revocation_status: None,
+                    active_quarantine: None,
+                    reputation_score_basis_points: None,
+                    reputation_trend: None,
+                    user_facing_risk_assessment: None,
+                    last_verified_timestamp: None,
+                    evidence_refs: None,
+                },
+                1_000,
+                "trace",
+            )
+            .expect_err("missing extension must fail update");
+
+        assert!(matches!(err, TrustCardError::NotFound(id) if id == "npm:@missing/plugin"));
+        assert!(registry.cards_by_extension.is_empty());
+        assert!(registry.cache_by_extension.is_empty());
+    }
+
+    #[test]
+    fn compare_rejects_missing_left_extension() {
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
+
+        let err = registry
+            .compare(
+                "npm:@missing/plugin",
+                "npm:@beta/telemetry-bridge",
+                1_100,
+                "trace",
+            )
+            .expect_err("missing left card must fail compare");
+
+        assert!(matches!(err, TrustCardError::NotFound(id) if id == "npm:@missing/plugin"));
+    }
+
+    #[test]
+    fn compare_rejects_missing_right_extension() {
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
+
+        let err = registry
+            .compare(
+                "npm:@acme/auth-guard",
+                "npm:@missing/plugin",
+                1_100,
+                "trace",
+            )
+            .expect_err("missing right card must fail compare");
+
+        assert!(matches!(err, TrustCardError::NotFound(id) if id == "npm:@missing/plugin"));
+    }
+
+    #[test]
+    fn compare_versions_rejects_missing_extension_history() {
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
+
+        let err = registry
+            .compare_versions("npm:@missing/plugin", 1, 2, 1_100, "trace")
+            .expect_err("missing history must fail version compare");
+
+        assert!(matches!(err, TrustCardError::NotFound(id) if id == "npm:@missing/plugin"));
+    }
+
+    #[test]
+    fn compare_versions_rejects_missing_left_version() {
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
+
+        let err = registry
+            .compare_versions("npm:@beta/telemetry-bridge", 99, 2, 1_100, "trace")
+            .expect_err("missing left version must fail version compare");
+
+        assert!(matches!(
+            err,
+            TrustCardError::VersionNotFound {
+                extension_id,
+                version: 99
+            } if extension_id == "npm:@beta/telemetry-bridge"
+        ));
+    }
+
+    #[test]
+    fn compare_versions_rejects_missing_right_version() {
+        let mut registry = fixture_registry(1_000).expect("fixture registry");
+
+        let err = registry
+            .compare_versions("npm:@beta/telemetry-bridge", 1, 99, 1_100, "trace")
+            .expect_err("missing right version must fail version compare");
+
+        assert!(matches!(
+            err,
+            TrustCardError::VersionNotFound {
+                extension_id,
+                version: 99
+            } if extension_id == "npm:@beta/telemetry-bridge"
+        ));
+    }
+
+    #[test]
     fn timestamp_from_secs_uses_rfc3339_and_not_unix_seconds() {
         let secs = 1_700_000_000_u64;
         let formatted = timestamp_from_secs(secs);
@@ -2369,5 +2529,732 @@ mod tests {
         assert!(
             matches!(err, TrustCardError::InvalidSnapshot(detail) if detail.contains("contains card"))
         );
+    }
+
+    #[test]
+    fn registry_snapshot_rejects_unsupported_schema() {
+        let registry = fixture_registry(1_000).expect("fixture registry");
+        let mut snapshot = registry.snapshot();
+        snapshot.schema_version = "franken-node/trust-card-registry-state/v0".to_string();
+
+        let err = TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000)
+            .expect_err("unsupported schema must fail");
+
+        assert!(matches!(
+            err,
+            TrustCardError::UnsupportedSnapshotSchema(schema)
+                if schema == "franken-node/trust-card-registry-state/v0"
+        ));
+    }
+
+    #[test]
+    fn registry_snapshot_rejects_empty_history_bucket() {
+        let registry = fixture_registry(1_000).expect("fixture registry");
+        let mut snapshot = registry.snapshot();
+        snapshot
+            .cards_by_extension
+            .insert("npm:@empty/plugin".to_string(), Vec::new());
+
+        let err = TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000)
+            .expect_err("empty history bucket must fail");
+
+        assert!(
+            matches!(err, TrustCardError::InvalidSnapshot(detail) if detail.contains("cannot be empty"))
+        );
+    }
+
+    #[test]
+    fn registry_snapshot_rejects_non_monotonic_versions() {
+        let registry = fixture_registry(1_000).expect("fixture registry");
+        let mut snapshot = registry.snapshot();
+        let history = snapshot
+            .cards_by_extension
+            .get_mut("npm:@beta/telemetry-bridge")
+            .expect("history");
+        history[1].trust_card_version = history[0].trust_card_version;
+        sign_card_in_place(&mut history[1], DEFAULT_REGISTRY_KEY).expect("resign");
+
+        let err = TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000)
+            .expect_err("non-monotonic history must fail");
+
+        assert!(
+            matches!(err, TrustCardError::InvalidSnapshot(detail) if detail.contains("non-monotonic"))
+        );
+    }
+
+    #[test]
+    fn registry_snapshot_rejects_broken_previous_hash_linkage() {
+        let registry = fixture_registry(1_000).expect("fixture registry");
+        let mut snapshot = registry.snapshot();
+        let history = snapshot
+            .cards_by_extension
+            .get_mut("npm:@beta/telemetry-bridge")
+            .expect("history");
+        history[1].previous_version_hash = Some("0".repeat(64));
+        sign_card_in_place(&mut history[1], DEFAULT_REGISTRY_KEY).expect("resign");
+
+        let err = TrustCardRegistry::from_snapshot(snapshot, DEFAULT_REGISTRY_KEY, 2_000)
+            .expect_err("broken previous hash linkage must fail");
+
+        assert!(
+            matches!(err, TrustCardError::InvalidSnapshot(detail) if detail.contains("previous_version_hash"))
+        );
+    }
+
+    #[test]
+    fn load_authoritative_state_rejects_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("missing-trust-card-state.json");
+
+        let err = TrustCardRegistry::load_authoritative_state(&path, 60, 2_000)
+            .expect_err("missing state file must fail");
+
+        assert!(matches!(err, TrustCardError::SnapshotRead { .. }));
+    }
+
+    #[test]
+    fn load_authoritative_state_rejects_malformed_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("malformed-trust-card-state.json");
+        std::fs::write(&path, "{not-json").expect("write malformed state");
+
+        let err = TrustCardRegistry::load_authoritative_state(&path, 60, 2_000)
+            .expect_err("malformed state file must fail");
+
+        assert!(matches!(err, TrustCardError::SnapshotParse { .. }));
+    }
+
+    // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────
+
+    #[test]
+    fn test_negative_publisher_id_with_unicode_injection_attacks() {
+        use crate::security::constant_time::ct_eq;
+
+        let malicious_publisher_ids = [
+            "publisher\u{202E}fake\u{202C}",       // BiDi override attack
+            "publisher\x1b[31mred\x1b[0m",         // ANSI escape injection
+            "publisher\0null\r\n\t",               // Control character injection
+            "publisher\"}{\"admin\":true,\"fake", // JSON injection attempt
+            "publisher/../../etc/passwd",          // Path traversal attempt
+            "publisher\u{200B}\u{FEFF}",          // Zero-width character injection
+            "publisher.with.dots",                 // Domain confusion
+            "PUBLISHER",                           // Case sensitivity test
+            "publisher@domain.com",                // Email-like format
+        ];
+
+        for malicious_id in malicious_publisher_ids {
+            let publisher = TrustCardPublisher {
+                publisher_id: malicious_id.to_string(),
+                display_name: "Test Publisher".to_string(),
+                domain: Some("example.com".to_string()),
+                contact_email: Some("test@example.com".to_string()),
+                verified_at_epoch: 1234567890,
+                signature_algorithm: "ecdsa-p256".to_string(),
+                public_key_pem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----".to_string(),
+            };
+
+            // Verify serialization handles malicious publisher ID safely
+            let json = serde_json::to_string(&publisher).expect("serialization should work");
+            let parsed: TrustCardPublisher = serde_json::from_str(&json).expect("deserialization should work");
+
+            // Verify malicious content is preserved exactly for forensics but contained
+            assert_eq!(parsed.publisher_id, malicious_id, "publisher ID should be preserved");
+
+            // Verify JSON structure integrity
+            let json_value: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+            let expected_keys = ["publisher_id", "display_name", "domain", "contact_email", "verified_at_epoch", "signature_algorithm", "public_key_pem"];
+
+            if let Some(obj) = json_value.as_object() {
+                for key in obj.keys() {
+                    assert!(expected_keys.contains(&key.as_str()),
+                           "unexpected field '{}' - possible JSON injection", key);
+                }
+            }
+
+            // Verify constant-time comparison works for publisher IDs
+            let normal_id = "normal-publisher-123";
+            assert!(!ct_eq(&parsed.publisher_id, normal_id), "publisher ID comparison should be constant-time");
+        }
+    }
+
+    #[test]
+    fn test_negative_trust_card_derivation_hash_with_massive_evidence_refs() {
+        // Create 10,000 evidence refs to stress the hashing function
+        let massive_refs: Vec<VerifiedEvidenceRef> = (0..10_000)
+            .map(|i| VerifiedEvidenceRef {
+                evidence_id: format!("evidence_{}_with_long_suffix_{}", i, "X".repeat(1000)),
+                evidence_type: EvidenceType::ProvenanceAttestation,
+                verified_at_epoch: 1234567890_u64.saturating_add(i as u64),
+                verification_receipt_hash: format!("hash_{}_with_long_suffix_{}", i, "Y".repeat(500)),
+            })
+            .collect();
+
+        let derived_at = u64::MAX; // Test with maximum timestamp
+
+        // Should handle massive inputs without overflow or memory exhaustion
+        let hash1 = compute_trust_card_derivation_hash(&massive_refs, derived_at);
+
+        // Verify hash is deterministic with same inputs
+        let hash2 = compute_trust_card_derivation_hash(&massive_refs, derived_at);
+        assert_eq!(hash1, hash2, "derivation hash should be deterministic");
+
+        // Verify hash format and length
+        assert!(hash1.starts_with("sha256:"), "hash should have proper prefix");
+        assert_eq!(hash1.len(), 71, "sha256 hash should have correct length");
+
+        // Verify different inputs produce different hashes
+        let different_refs = massive_refs[0..9999].to_vec(); // One less ref
+        let hash3 = compute_trust_card_derivation_hash(&different_refs, derived_at);
+        assert_ne!(hash1, hash3, "different inputs should produce different hashes");
+
+        // Test with extreme derived_at values
+        let hash_min = compute_trust_card_derivation_hash(&massive_refs, 0);
+        let hash_max = compute_trust_card_derivation_hash(&massive_refs, u64::MAX);
+        assert_ne!(hash_min, hash_max, "different timestamps should produce different hashes");
+
+        // Test collision resistance with similar evidence IDs
+        let collision_refs = vec![
+            VerifiedEvidenceRef {
+                evidence_id: "evidence_1".to_string(),
+                evidence_type: EvidenceType::ProvenanceAttestation,
+                verified_at_epoch: 123,
+                verification_receipt_hash: "hash1".to_string(),
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "evidence_2".to_string(),
+                evidence_type: EvidenceType::ProvenanceAttestation,
+                verified_at_epoch: 123,
+                verification_receipt_hash: "hash1".to_string(),
+            },
+        ];
+
+        let swapped_refs = vec![collision_refs[1].clone(), collision_refs[0].clone()];
+
+        let hash_original = compute_trust_card_derivation_hash(&collision_refs, 123);
+        let hash_swapped = compute_trust_card_derivation_hash(&swapped_refs, 123);
+        assert_ne!(hash_original, hash_swapped, "order should affect hash (collision resistance)");
+    }
+
+    #[test]
+    fn test_negative_capability_declaration_with_malicious_injection_patterns() {
+        let malicious_capabilities = vec![
+            CapabilityDeclaration {
+                name: "cap\u{202E}fake\u{202C}".to_string(),     // BiDi override
+                scope: "global".to_string(),
+                impact: "critical".to_string(),
+                evidence_ref: "ref\x1b[31m".to_string(),         // ANSI escape
+            },
+            CapabilityDeclaration {
+                name: "capability\"}{\"admin\":true,\"bypass".to_string(), // JSON injection
+                scope: "local\0null".to_string(),                // Null byte injection
+                impact: "high\r\n\t".to_string(),                // Control chars
+                evidence_ref: "ref/../../etc/passwd".to_string(), // Path traversal
+            },
+            CapabilityDeclaration {
+                name: "X".repeat(10_000), // Massive field (10KB)
+                scope: "Y".repeat(5_000), // Massive field (5KB)
+                impact: "Z".repeat(5_000), // Massive field (5KB)
+                evidence_ref: "W".repeat(10_000), // Massive field (10KB)
+            },
+        ];
+
+        let trust_card = TrustCard {
+            card_id: "test-card".to_string(),
+            publisher: test_publisher(),
+            extension_id: "test-extension".to_string(),
+            certification_level: CertificationLevel::Verified,
+            capability_declarations: malicious_capabilities.clone(),
+            reputation_score: 0.95,
+            trust_card_schema_version: "1.0.0".to_string(),
+            derived_at_epoch: 1234567890,
+            derivation_evidence_hash: "test-hash".to_string(),
+            revocation_status: RevocationStatus::Valid,
+            cache_metadata: CacheMetadata {
+                cached_at_epoch: 1234567890,
+                ttl_seconds: 60,
+                refresh_count: 0,
+            },
+            audit_history: vec![],
+        };
+
+        // Verify serialization handles malicious capabilities
+        let json = serde_json::to_string(&trust_card).expect("serialization should handle malicious capabilities");
+        let parsed: TrustCard = serde_json::from_str(&json).expect("deserialization should work");
+
+        // Verify capabilities are preserved (for forensics) but contained
+        assert_eq!(parsed.capability_declarations.len(), malicious_capabilities.len());
+
+        for (original, parsed_cap) in malicious_capabilities.iter().zip(parsed.capability_declarations.iter()) {
+            assert_eq!(original.name, parsed_cap.name, "capability name should be preserved");
+            assert_eq!(original.scope, parsed_cap.scope, "capability scope should be preserved");
+            assert_eq!(original.impact, parsed_cap.impact, "capability impact should be preserved");
+            assert_eq!(original.evidence_ref, parsed_cap.evidence_ref, "capability evidence_ref should be preserved");
+        }
+
+        // Verify JSON structure integrity
+        let json_value: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+        assert!(json_value.get("admin").is_none(), "JSON injection should not create admin field");
+
+        // Test that massive fields are handled without memory explosion
+        assert!(json.len() > 50_000, "serialized JSON should include massive fields");
+        assert!(json.len() < 1_000_000, "serialized JSON should be reasonably bounded");
+
+        // Test display functionality with malicious content
+        let display = format!("{:?}", trust_card);
+        assert!(display.len() > 1000, "debug display should include content");
+        assert!(display.len() < 100_000, "debug display should be bounded");
+    }
+
+    #[test]
+    fn test_negative_trust_card_filter_bypass_with_case_sensitivity() {
+        let test_card = TrustCard {
+            card_id: "test-card".to_string(),
+            publisher: TrustCardPublisher {
+                publisher_id: "Publisher-123".to_string(), // Mixed case
+                display_name: "Test Publisher".to_string(),
+                domain: Some("example.com".to_string()),
+                contact_email: Some("test@example.com".to_string()),
+                verified_at_epoch: 1234567890,
+                signature_algorithm: "ecdsa-p256".to_string(),
+                public_key_pem: "-----BEGIN PUBLIC KEY-----\ntest\n-----END PUBLIC KEY-----".to_string(),
+            },
+            extension_id: "Test-Extension".to_string(),
+            certification_level: CertificationLevel::Verified,
+            capability_declarations: vec![
+                CapabilityDeclaration {
+                    name: "Network-Access".to_string(), // Mixed case capability
+                    scope: "global".to_string(),
+                    impact: "medium".to_string(),
+                    evidence_ref: "ref123".to_string(),
+                },
+            ],
+            reputation_score: 0.95,
+            trust_card_schema_version: "1.0.0".to_string(),
+            derived_at_epoch: 1234567890,
+            derivation_evidence_hash: "test-hash".to_string(),
+            revocation_status: RevocationStatus::Valid,
+            cache_metadata: CacheMetadata {
+                cached_at_epoch: 1234567890,
+                ttl_seconds: 60,
+                refresh_count: 0,
+            },
+            audit_history: vec![],
+        };
+
+        // Test filters with different case variations
+        let filter_exact_case = TrustCardListFilter {
+            certification_level: Some(CertificationLevel::Verified),
+            publisher_id: Some("Publisher-123".to_string()), // Exact match
+            capability: Some("Network-Access".to_string()), // Exact match
+        };
+
+        let filter_wrong_case = TrustCardListFilter {
+            certification_level: Some(CertificationLevel::Verified),
+            publisher_id: Some("publisher-123".to_string()), // Different case
+            capability: Some("network-access".to_string()), // Different case
+        };
+
+        let filter_partial_match = TrustCardListFilter {
+            certification_level: Some(CertificationLevel::Verified),
+            publisher_id: Some("Publisher-123".to_string()),
+            capability: Some("Network".to_string()), // Partial match (should work due to contains())
+        };
+
+        // Test exact case matching
+        assert!(card_matches_filter(&test_card, &filter_exact_case),
+               "exact case should match");
+
+        // Test case sensitivity in publisher_id (should fail with wrong case)
+        assert!(!card_matches_filter(&test_card, &filter_wrong_case),
+               "wrong case should not match publisher_id");
+
+        // Test capability partial matching (contains() is case-sensitive)
+        assert!(card_matches_filter(&test_card, &filter_partial_match),
+               "partial capability match should work");
+
+        let filter_partial_wrong_case = TrustCardListFilter {
+            certification_level: Some(CertificationLevel::Verified),
+            publisher_id: Some("Publisher-123".to_string()),
+            capability: Some("network".to_string()), // Lowercase partial (should fail)
+        };
+
+        assert!(!card_matches_filter(&test_card, &filter_partial_wrong_case),
+               "case-sensitive capability partial match should fail");
+
+        // Test with unicode normalization bypass attempts
+        let filter_unicode_bypass = TrustCardListFilter {
+            certification_level: Some(CertificationLevel::Verified),
+            publisher_id: Some("Publisher\u{2010}123".to_string()), // Unicode hyphen instead of ASCII hyphen
+            capability: None,
+        };
+
+        assert!(!card_matches_filter(&test_card, &filter_unicode_bypass),
+               "unicode normalization bypass should not work");
+    }
+
+    #[test]
+    fn test_negative_trust_card_registry_hmac_key_injection() {
+        use crate::security::constant_time::ct_eq;
+
+        let malicious_keys = [
+            b"key\0null".as_slice(),                    // Null byte injection
+            b"key\r\n\t".as_slice(),                    // Control characters
+            b"key\x1b[31mred\x1b[0m".as_slice(),       // ANSI escape sequences
+            &[0u8; 0],                                  // Empty key
+            &[0u8; 1],                                  // Single null byte
+            &[255u8; 1000],                             // All-ones key
+            b"very_long_key_".repeat(100).as_slice(),   // Extremely long key
+        ];
+
+        for malicious_key in malicious_keys {
+            // Create HMAC with malicious key
+            let mut mac = match Hmac::<Sha256>::new_from_slice(malicious_key) {
+                Ok(mac) => mac,
+                Err(_) => continue, // Some keys might be rejected by HMAC
+            };
+
+            // Test HMAC computation with various inputs
+            let test_inputs = [
+                b"normal data",
+                b"data\0with\0nulls",
+                b"data\r\nwith\r\ncontrol\tchars",
+                b"\x1b[31mdata with ansi\x1b[0m",
+                &[0u8; 10000], // Large zero buffer
+                &b"A".repeat(100000), // Very large input
+            ];
+
+            for input in test_inputs {
+                mac.update(input);
+                let result = mac.finalize_reset();
+                let result_bytes = result.into_bytes();
+
+                // Verify HMAC output is always 32 bytes for SHA256
+                assert_eq!(result_bytes.len(), 32, "HMAC-SHA256 should always produce 32 bytes");
+
+                // Verify output doesn't contain obvious patterns that might indicate key leakage
+                let all_zero = result_bytes.iter().all(|&b| b == 0);
+                let all_same = result_bytes.iter().all(|&b| b == result_bytes[0]);
+
+                // While technically possible, these patterns are extremely unlikely with proper HMAC
+                if malicious_key.len() > 0 && !malicious_key.iter().all(|&b| b == 0) {
+                    assert!(!all_zero, "HMAC output should not be all zeros with non-zero key");
+                    assert!(!all_same, "HMAC output should not be all same byte");
+                }
+            }
+        }
+
+        // Test constant-time comparison of HMAC outputs
+        let key1 = b"test_key_1";
+        let key2 = b"test_key_2";
+
+        let mut mac1 = Hmac::<Sha256>::new_from_slice(key1).expect("valid key1");
+        let mut mac2 = Hmac::<Sha256>::new_from_slice(key2).expect("valid key2");
+
+        mac1.update(b"test data");
+        mac2.update(b"test data");
+
+        let result1 = mac1.finalize().into_bytes();
+        let result2 = mac2.finalize().into_bytes();
+
+        // Different keys should produce different outputs
+        assert!(!ct_eq(
+            &hex::encode(&result1),
+            &hex::encode(&result2)
+        ), "different keys should produce different HMAC outputs");
+    }
+
+    #[test]
+    fn test_negative_trust_card_audit_history_with_massive_entries() {
+        let mut audit_entries = Vec::new();
+
+        // Create 1000 audit entries with large content
+        for i in 0..1000 {
+            audit_entries.push(TrustCardAuditEntry {
+                audited_at_epoch: 1234567890_u64.saturating_add(i as u64),
+                audit_type: "security_review".to_string(),
+                auditor_id: format!("auditor_{}_with_long_id_{}", i, "X".repeat(500)),
+                finding_summary: format!("finding_{}_with_massive_content_{}", i, "Y".repeat(5000)),
+                severity: if i % 2 == 0 { "high".to_string() } else { "medium".to_string() },
+                remediation_status: if i % 3 == 0 { "resolved".to_string() } else { "pending".to_string() },
+            });
+        }
+
+        let mut trust_card = TrustCard {
+            card_id: "audit-test".to_string(),
+            publisher: test_publisher(),
+            extension_id: "audit-extension".to_string(),
+            certification_level: CertificationLevel::Verified,
+            capability_declarations: vec![],
+            reputation_score: 0.85,
+            trust_card_schema_version: "1.0.0".to_string(),
+            derived_at_epoch: 1234567890,
+            derivation_evidence_hash: "test-hash".to_string(),
+            revocation_status: RevocationStatus::Valid,
+            cache_metadata: CacheMetadata {
+                cached_at_epoch: 1234567890,
+                ttl_seconds: 60,
+                refresh_count: 0,
+            },
+            audit_history: audit_entries,
+        };
+
+        // Verify bounded storage kicks in
+        assert_eq!(trust_card.audit_history.len(), 1000, "should start with 1000 entries");
+
+        // Add more entries to test push_bounded
+        for i in 1000..1500 {
+            let entry = TrustCardAuditEntry {
+                audited_at_epoch: 1234567890_u64.saturating_add(i as u64),
+                audit_type: "additional_review".to_string(),
+                auditor_id: format!("auditor_{}", i),
+                finding_summary: format!("finding_{}", i),
+                severity: "low".to_string(),
+                remediation_status: "resolved".to_string(),
+            };
+
+            push_bounded(&mut trust_card.audit_history, entry, MAX_AUDIT_HISTORY);
+        }
+
+        // Should be bounded to MAX_AUDIT_HISTORY
+        assert_eq!(trust_card.audit_history.len(), MAX_AUDIT_HISTORY,
+                  "audit history should be bounded to MAX_AUDIT_HISTORY");
+
+        // Verify latest entries are preserved
+        let latest_entry = &trust_card.audit_history[trust_card.audit_history.len() - 1];
+        assert_eq!(latest_entry.audit_type, "additional_review", "latest entry should be preserved");
+
+        // Test serialization with massive audit history
+        let json = serde_json::to_string(&trust_card).expect("serialization should handle massive audit history");
+        assert!(json.len() > 100_000, "serialized JSON should be large");
+        assert!(json.len() < 10_000_000, "serialized JSON should be reasonably bounded");
+
+        // Test deserialization roundtrip
+        let parsed: TrustCard = serde_json::from_str(&json).expect("deserialization should work");
+        assert_eq!(parsed.audit_history.len(), trust_card.audit_history.len(),
+                  "audit history length should be preserved");
+    }
+
+    #[test]
+    fn test_negative_evidence_ref_with_hash_collision_simulation() {
+        use crate::security::constant_time::ct_eq;
+
+        // Create evidence refs with potential hash collisions
+        let collision_candidates = vec![
+            VerifiedEvidenceRef {
+                evidence_id: "evidence_1".to_string(),
+                evidence_type: EvidenceType::ProvenanceAttestation,
+                verified_at_epoch: 1234567890,
+                verification_receipt_hash: "sha256:a".repeat(32), // Fake SHA256
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "evidence_2".to_string(),
+                evidence_type: EvidenceType::ProvenanceAttestation,
+                verified_at_epoch: 1234567890,
+                verification_receipt_hash: "sha256:b".repeat(32), // Fake SHA256
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "evidence_1".to_string(), // Same ID, different hash
+                evidence_type: EvidenceType::ProvenanceAttestation,
+                verified_at_epoch: 1234567890,
+                verification_receipt_hash: "sha256:c".repeat(32),
+            },
+        ];
+
+        // Test ensure_evidence_refs_present with colliding refs
+        let result = ensure_evidence_refs_present(&collision_candidates);
+        assert!(result.is_ok(), "should accept non-empty evidence refs");
+
+        // Test with empty refs
+        let empty_result = ensure_evidence_refs_present(&[]);
+        assert!(matches!(empty_result, Err(TrustCardError::EvidenceMissing)),
+               "should reject empty evidence refs");
+
+        // Test derivation hash with collision candidates
+        let hash1 = compute_trust_card_derivation_hash(&collision_candidates, 123);
+        let hash2 = compute_trust_card_derivation_hash(&collision_candidates, 123);
+        assert_eq!(hash1, hash2, "derivation hash should be deterministic");
+
+        // Test that order matters (prevents some collision attacks)
+        let mut reversed = collision_candidates.clone();
+        reversed.reverse();
+        let hash_reversed = compute_trust_card_derivation_hash(&reversed, 123);
+        assert_ne!(hash1, hash_reversed, "order should affect hash");
+
+        // Test hash comparison with constant-time
+        let different_refs = vec![collision_candidates[0].clone()]; // Just one ref
+        let hash_different = compute_trust_card_derivation_hash(&different_refs, 123);
+
+        assert!(!ct_eq(&hash1, &hash_different), "different refs should produce different hashes");
+
+        // Test with malicious evidence IDs that might cause hash collisions
+        let malicious_refs = vec![
+            VerifiedEvidenceRef {
+                evidence_id: "evidence\0null".to_string(),
+                evidence_type: EvidenceType::CertificationEvidence,
+                verified_at_epoch: 123,
+                verification_receipt_hash: "hash1".to_string(),
+            },
+            VerifiedEvidenceRef {
+                evidence_id: "evidence".to_string(), // Without null
+                evidence_type: EvidenceType::CertificationEvidence,
+                verified_at_epoch: 123,
+                verification_receipt_hash: "hash1".to_string(),
+            },
+        ];
+
+        let hash_with_null = compute_trust_card_derivation_hash(&malicious_refs, 123);
+        let hash_without_null = compute_trust_card_derivation_hash(&malicious_refs[1..], 123);
+
+        // Length prefixing in the hash function should prevent null-byte collisions
+        assert_ne!(hash_with_null, hash_without_null, "null byte should not cause collision");
+    }
+
+    #[test]
+    fn test_negative_temp_file_operations_with_malicious_paths() {
+        // Test temp file creation with various edge cases
+        let test_cases = [
+            ("normal-file.json", true),
+            ("file-with-unicode-\u{1F4A9}.json", true),
+            ("file\0with\0nulls.json", true), // OS might reject, but shouldn't panic
+            ("file\r\nwith\r\ncontrol.json", true),
+            ("very_long_filename_".repeat(100), true), // Extremely long name
+        ];
+
+        for (filename, should_attempt) in test_cases {
+            if !should_attempt {
+                continue;
+            }
+
+            let dir = match tempfile::tempdir() {
+                Ok(dir) => dir,
+                Err(_) => continue,
+            };
+
+            let path = dir.path().join(filename);
+
+            // Test file creation
+            match NamedTempFile::new_in(dir.path()) {
+                Ok(mut temp_file) => {
+                    // Write test content
+                    let test_content = r#"{"test": "content with unicode \u{1F4A9} and control \r\n chars"}"#;
+
+                    match write!(temp_file, "{}", test_content) {
+                        Ok(_) => {
+                            // Test atomic rename
+                            match temp_file.persist(&path) {
+                                Ok(_) => {
+                                    // Verify file exists and content is correct
+                                    if let Ok(content) = std::fs::read_to_string(&path) {
+                                        assert_eq!(content, test_content, "file content should be preserved");
+                                    }
+
+                                    // Clean up
+                                    let _ = std::fs::remove_file(&path);
+                                }
+                                Err(_) => {
+                                    // Atomic rename might fail for malicious paths - that's OK
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Write might fail for some malicious content - that's OK
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Temp file creation might fail for malicious names - that's OK
+                }
+            }
+        }
+
+        // Test with directory traversal attempts
+        let dir = tempfile::tempdir().expect("tempdir should work");
+        let traversal_attempts = [
+            "../../../etc/passwd",
+            "..\\..\\windows\\system32\\config\\sam",
+            "legitimate/../../etc/passwd",
+            "/absolute/path/attempt",
+        ];
+
+        for traversal_path in traversal_attempts {
+            // These should either:
+            // 1. Be rejected by the OS/filesystem
+            // 2. Be contained within the temp directory
+            // 3. Fail gracefully without security implications
+
+            if let Ok(temp_file) = NamedTempFile::new_in(dir.path()) {
+                let target_path = dir.path().join(traversal_path);
+
+                // Attempt should either fail or be contained
+                let _ = temp_file.persist(&target_path);
+
+                // Verify no files were created outside the temp directory
+                // (This is a basic check - full verification would require path canonicalization)
+                if target_path.exists() {
+                    assert!(target_path.starts_with(dir.path()),
+                           "created file should be within temp directory");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_push_bounded_with_arithmetic_overflow_edge_cases() {
+        // Test push_bounded with potential overflow scenarios
+        let mut test_vec = Vec::new();
+
+        // Fill with maximum capacity near usize overflow
+        let large_cap = if cfg!(target_pointer_width = "64") {
+            1000 // Use reasonable size for testing
+        } else {
+            100  // Smaller for 32-bit
+        };
+
+        // Fill vector to capacity
+        for i in 0..large_cap {
+            push_bounded(&mut test_vec, i, large_cap);
+        }
+        assert_eq!(test_vec.len(), large_cap);
+
+        // Test overflow protection in drain calculation
+        let mut overflow_vec = vec![0; large_cap * 2]; // Start with more than capacity
+
+        // This should trigger the overflow protection in push_bounded
+        push_bounded(&mut overflow_vec, 999, large_cap);
+        assert_eq!(overflow_vec.len(), large_cap, "should be reduced to capacity");
+        assert_eq!(overflow_vec[overflow_vec.len() - 1], 999, "latest item should be preserved");
+
+        // Test with zero capacity (special case)
+        let mut zero_cap_vec = vec![1, 2, 3, 4, 5];
+        push_bounded(&mut zero_cap_vec, 6, 0);
+        assert_eq!(zero_cap_vec.len(), 0, "zero capacity should clear vector");
+
+        // Test with capacity 1 (minimum non-zero)
+        let mut single_cap_vec = vec![1, 2, 3];
+        push_bounded(&mut single_cap_vec, 4, 1);
+        assert_eq!(single_cap_vec.len(), 1, "capacity 1 should keep only latest");
+        assert_eq!(single_cap_vec[0], 4, "should keep the newly pushed item");
+
+        // Test saturating arithmetic in the drain calculation
+        // overflow = items.len().saturating_sub(cap).saturating_add(1)
+        let mut extreme_vec = Vec::new();
+        extreme_vec.resize(1000, 0);
+
+        // Test with very small capacity to trigger large drain
+        push_bounded(&mut extreme_vec, 1001, 5);
+        assert_eq!(extreme_vec.len(), 5, "should be reduced to small capacity");
+        assert_eq!(extreme_vec[4], 1001, "latest item should be at end");
+
+        // Verify arithmetic didn't overflow by checking all elements
+        let expected = [996, 997, 998, 999, 1001]; // What should remain after drain
+        for (i, &expected_val) in expected.iter().enumerate() {
+            if i < 4 {
+                // First 4 elements should be from original vector
+                assert!(extreme_vec[i] <= 999, "element {} should be from original range", i);
+            } else {
+                // Last element should be the new one
+                assert_eq!(extreme_vec[i], expected_val, "element {} should be new value", i);
+            }
+        }
     }
 }

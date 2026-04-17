@@ -61,8 +61,12 @@ pub const METRIC_VERSION: &str = "ccm-v1.0";
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_METRICS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -269,6 +273,18 @@ impl CompatibilityCorrectnessMetrics {
         mut metric: CorrectnessMetric,
         trace_id: &str,
     ) -> Result<String, String> {
+        if metric.metric_id.trim().is_empty() {
+            self.log(
+                event_codes::CCM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({
+                    "metric_id": &metric.metric_id,
+                    "reason": "metric_id must be non-empty",
+                }),
+            );
+            return Err("metric_id must be non-empty".to_string());
+        }
+
         if metric.total_tests == 0 {
             self.log(
                 event_codes::CCM_ERR_INVALID_METRIC,
@@ -291,6 +307,18 @@ impl CompatibilityCorrectnessMetrics {
                 }),
             );
             return Err("passed_tests cannot exceed total_tests".to_string());
+        }
+
+        if metric.regressions > metric.total_tests {
+            self.log(
+                event_codes::CCM_ERR_INVALID_METRIC,
+                trace_id,
+                serde_json::json!({
+                    "metric_id": &metric.metric_id,
+                    "reason": "regressions > total_tests",
+                }),
+            );
+            return Err("regressions cannot exceed total_tests".to_string());
         }
 
         if !metric.mean_detect_ms.is_finite() || metric.mean_detect_ms < 0.0 {
@@ -645,6 +673,332 @@ mod tests {
     }
 
     #[test]
+    fn submit_negative_mean_detect_fails() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric("m-negative", ApiFamily::Core, RiskBand::High, 100, 100);
+        m.mean_detect_ms = -1.0;
+
+        let err = engine.submit_metric(m, &trace()).unwrap_err();
+
+        assert!(err.contains("non-negative finite"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn submit_nan_mean_detect_fails() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric("m-nan", ApiFamily::Telemetry, RiskBand::Medium, 100, 100);
+        m.mean_detect_ms = f64::NAN;
+
+        let err = engine.submit_metric(m, &trace()).unwrap_err();
+
+        assert!(err.contains("non-negative finite"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn submit_infinite_mean_detect_fails() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric("m-inf", ApiFamily::Migration, RiskBand::Low, 100, 100);
+        m.mean_detect_ms = f64::INFINITY;
+
+        let err = engine.submit_metric(m, &trace()).unwrap_err();
+
+        assert!(err.contains("non-negative finite"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_zero_tests_metric_is_not_stored() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let m = sample_metric("m-zero", ApiFamily::Extension, RiskBand::High, 0, 0);
+
+        assert!(engine.submit_metric(m, &trace()).is_err());
+
+        assert!(engine.metrics().is_empty());
+        assert_eq!(engine.audit_log().len(), 1);
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::CCM_ERR_INVALID_METRIC
+        );
+    }
+
+    #[test]
+    fn rejected_passed_exceeds_total_metric_is_not_stored() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let m = sample_metric("m-over", ApiFamily::Management, RiskBand::Critical, 10, 11);
+
+        assert!(engine.submit_metric(m, &trace()).is_err());
+
+        assert!(engine.metrics().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"],
+            "passed_tests > total_tests"
+        );
+    }
+
+    #[test]
+    fn rejected_invalid_latency_logs_invalid_metric() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric("m-bad-latency", ApiFamily::Core, RiskBand::High, 100, 100);
+        m.mean_detect_ms = f64::NEG_INFINITY;
+
+        assert!(engine.submit_metric(m, &trace()).is_err());
+
+        assert_eq!(engine.audit_log().len(), 1);
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::CCM_ERR_INVALID_METRIC
+        );
+    }
+
+    #[test]
+    fn rejected_blank_metric_id_is_not_stored() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric("m-blank", ApiFamily::Core, RiskBand::High, 100, 100);
+        m.metric_id.clear();
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("blank metric id must fail");
+
+        assert!(err.contains("metric_id"));
+        assert!(engine.metrics().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"],
+            "metric_id must be non-empty"
+        );
+    }
+
+    #[test]
+    fn rejected_whitespace_metric_id_is_not_stored() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric(
+            "m-whitespace",
+            ApiFamily::Telemetry,
+            RiskBand::Medium,
+            10,
+            10,
+        );
+        m.metric_id = "   ".to_string();
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("whitespace metric id must fail");
+
+        assert!(err.contains("metric_id"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_blank_metric_id_takes_precedence_over_zero_tests() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric("m-blank-zero", ApiFamily::Core, RiskBand::High, 0, 1);
+        m.metric_id = String::new();
+
+        let err = engine
+            .submit_metric(m, "trace-blank-before-zero")
+            .expect_err("blank metric id should fail first");
+
+        assert!(err.contains("metric_id"));
+        assert!(engine.metrics().is_empty());
+        assert_eq!(engine.audit_log().len(), 1);
+        assert_eq!(
+            engine.audit_log()[0].details["reason"],
+            "metric_id must be non-empty"
+        );
+    }
+
+    #[test]
+    fn rejected_zero_tests_takes_precedence_over_passed_over_total() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let m = sample_metric("m-zero-before-over", ApiFamily::Core, RiskBand::High, 0, 1);
+
+        let err = engine
+            .submit_metric(m, "trace-zero-before-over")
+            .expect_err("zero total tests should fail first");
+
+        assert!(err.contains("total_tests"));
+        assert!(engine.metrics().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"],
+            "total_tests must be > 0"
+        );
+    }
+
+    #[test]
+    fn rejected_passed_over_total_takes_precedence_over_regressions_over_total() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric(
+            "m-pass-before-regression",
+            ApiFamily::Management,
+            RiskBand::Critical,
+            10,
+            11,
+        );
+        m.regressions = 12;
+
+        let err = engine
+            .submit_metric(m, "trace-pass-before-regression")
+            .expect_err("passed_tests should fail before regressions");
+
+        assert!(err.contains("passed_tests"));
+        assert!(engine.metrics().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"],
+            "passed_tests > total_tests"
+        );
+    }
+
+    #[test]
+    fn rejected_regressions_exceeding_total_is_not_stored() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric(
+            "m-regressions-over",
+            ApiFamily::Migration,
+            RiskBand::Low,
+            5,
+            5,
+        );
+        m.regressions = 6;
+
+        let err = engine
+            .submit_metric(m, &trace())
+            .expect_err("regressions above total tests must fail");
+
+        assert!(err.contains("regressions"));
+        assert!(engine.metrics().is_empty());
+    }
+
+    #[test]
+    fn rejected_regressions_exceeding_total_logs_invalid_metric() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric(
+            "m-regressions-event",
+            ApiFamily::Management,
+            RiskBand::High,
+            3,
+            3,
+        );
+        m.regressions = 4;
+
+        let result = engine.submit_metric(m, "trace-regressions-over");
+
+        assert!(result.is_err());
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::CCM_ERR_INVALID_METRIC
+        );
+        assert_eq!(
+            engine.audit_log()[0].details["reason"],
+            "regressions > total_tests"
+        );
+    }
+
+    #[test]
+    fn rejected_invalid_metric_preserves_existing_metrics() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        engine
+            .submit_metric(
+                sample_metric("m-kept", ApiFamily::Core, RiskBand::Low, 100, 100),
+                &trace(),
+            )
+            .unwrap();
+        let mut rejected = sample_metric("m-rejected", ApiFamily::Core, RiskBand::Low, 10, 10);
+        rejected.regressions = 11;
+
+        let err = engine
+            .submit_metric(rejected, &trace())
+            .expect_err("invalid metric must fail");
+
+        assert!(err.contains("regressions"));
+        assert_eq!(engine.metrics().len(), 1);
+        assert_eq!(engine.metrics()[0].metric_id, "m-kept");
+    }
+
+    #[test]
+    fn rejected_regression_metric_does_not_emit_regression_event() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut rejected = sample_metric(
+            "m-rejected-regression-event",
+            ApiFamily::Core,
+            RiskBand::High,
+            4,
+            4,
+        );
+        rejected.regressions = 5;
+
+        let err = engine
+            .submit_metric(rejected, "trace-no-regression-event")
+            .expect_err("invalid metric must fail before regression logging");
+
+        assert!(err.contains("regressions"));
+        assert!(engine.metrics().is_empty());
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::CCM_REGRESSION_DETECTED)
+        );
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::CCM_METRIC_SUBMITTED)
+        );
+    }
+
+    #[test]
+    fn rejected_blank_metric_id_report_remains_empty() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric(
+            "m-blank-report",
+            ApiFamily::Extension,
+            RiskBand::Critical,
+            10,
+            10,
+        );
+        m.metric_id = " ".to_string();
+
+        assert!(engine.submit_metric(m, &trace()).is_err());
+
+        let report = engine.generate_report(&trace());
+        assert_eq!(report.total_metrics, 0);
+        assert!(report.segments.is_empty());
+        assert!(report.flagged_segments.is_empty());
+    }
+
+    #[test]
+    fn rejected_nonfinite_latency_report_remains_empty() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let mut m = sample_metric(
+            "m-nonfinite-report",
+            ApiFamily::Telemetry,
+            RiskBand::Medium,
+            10,
+            10,
+        );
+        m.mean_detect_ms = f64::NAN;
+
+        assert!(engine.submit_metric(m, "trace-nonfinite-report").is_err());
+
+        let report = engine.generate_report("trace-report-after-nonfinite");
+        assert_eq!(report.total_metrics, 0);
+        assert!((report.overall_correctness - 0.0).abs() < f64::EPSILON);
+        assert!(report.segments.is_empty());
+        assert!(report.flagged_segments.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_without_panic() {
+        let mut items = vec![1_u8, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
     fn submit_sets_timestamp() {
         let mut engine = CompatibilityCorrectnessMetrics::default();
         let m = sample_metric("m1", ApiFamily::Core, RiskBand::Low, 100, 96);
@@ -660,6 +1014,19 @@ mod tests {
         let report = engine.generate_report(&trace());
         assert_eq!(report.total_metrics, 0);
         assert!(report.segments.is_empty());
+    }
+
+    #[test]
+    fn report_after_rejected_metric_remains_empty() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        let m = sample_metric("m-rejected", ApiFamily::Core, RiskBand::Critical, 10, 20);
+
+        assert!(engine.submit_metric(m, &trace()).is_err());
+
+        let report = engine.generate_report(&trace());
+        assert_eq!(report.total_metrics, 0);
+        assert!(report.segments.is_empty());
+        assert!(report.flagged_segments.is_empty());
     }
 
     #[test]
@@ -692,6 +1059,24 @@ mod tests {
             .unwrap();
         let report = engine.generate_report(&trace());
         assert_eq!(report.flagged_segments.len(), 1);
+    }
+
+    #[test]
+    fn below_threshold_metric_logs_threshold_error() {
+        let mut engine = CompatibilityCorrectnessMetrics::default();
+        engine
+            .submit_metric(
+                sample_metric("m-low", ApiFamily::Core, RiskBand::Critical, 1000, 900),
+                &trace(),
+            )
+            .unwrap();
+
+        let codes: Vec<&str> = engine
+            .audit_log()
+            .iter()
+            .map(|record| record.event_code.as_str())
+            .collect();
+        assert!(codes.contains(&event_codes::CCM_ERR_BELOW_THRESHOLD));
     }
 
     #[test]
@@ -776,6 +1161,15 @@ mod tests {
         let jsonl = engine.export_audit_log_jsonl().unwrap();
         let first: serde_json::Value = serde_json::from_str(jsonl.lines().next().unwrap()).unwrap();
         assert!(first["event_code"].is_string());
+    }
+
+    #[test]
+    fn export_empty_audit_log_is_empty_string() {
+        let engine = CompatibilityCorrectnessMetrics::default();
+
+        let jsonl = engine.export_audit_log_jsonl().unwrap();
+
+        assert!(jsonl.is_empty());
     }
 
     // === Overall correctness ===

@@ -58,6 +58,11 @@ const MAX_DOWNLOADS: usize = 4096;
 const MAX_ARTIFACTS_PER_RELEASE: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -197,6 +202,14 @@ impl VerifierBenchmarkReleases {
             );
             return Err("version must not be empty".to_string());
         }
+        if self.releases.contains_key(&release.release_id) {
+            self.log(
+                event_codes::VBR_ERR_INVALID_RELEASE,
+                trace_id,
+                serde_json::json!({"reason": "duplicate release_id", "release_id": &release.release_id}),
+            );
+            return Err(format!("duplicate release_id: {}", release.release_id));
+        }
         release.created_at = Utc::now().to_rfc3339();
         release.status = ReleaseStatus::Draft;
         release.download_count = 0;
@@ -239,13 +252,15 @@ impl VerifierBenchmarkReleases {
             .ok_or_else(|| format!("release not found: {release_id}"))?
             .quality_score;
 
-        if quality < MIN_QUALITY_SCORE {
+        if !quality.is_finite() || quality < MIN_QUALITY_SCORE {
             self.log(
                 event_codes::VBR_ERR_QUALITY_BELOW_THRESHOLD,
                 trace_id,
                 serde_json::json!({"score": quality, "min": MIN_QUALITY_SCORE}),
             );
-            return Err(format!("quality {quality} < {MIN_QUALITY_SCORE}"));
+            return Err(format!(
+                "quality must be finite and >= {MIN_QUALITY_SCORE}, got {quality}"
+            ));
         }
         self.log(
             event_codes::VBR_QUALITY_CHECKED,
@@ -723,5 +738,147 @@ mod tests {
             size_bytes: 1,
         };
         assert!(e.add_artifact("missing", art, &trace()).is_err());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_existing_items() {
+        let mut items = vec!["old-download", "old-artifact"];
+
+        push_bounded(&mut items, "new-entry", 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity bounded buffers must not retain stale release records"
+        );
+    }
+
+    #[test]
+    fn empty_version_rejection_does_not_store_release() {
+        let mut e = VerifierBenchmarkReleases::default();
+        let mut release = sample_release("empty-version", ReleaseType::VerifierTool);
+        release.version.clear();
+
+        let err = e
+            .create_release(release, &trace())
+            .expect_err("empty versions must be rejected");
+
+        assert!(err.contains("version"));
+        assert!(!e.releases().contains_key("empty-version"));
+        assert!(
+            e.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::VBR_ERR_INVALID_RELEASE),
+            "invalid release creation should be auditable"
+        );
+    }
+
+    #[test]
+    fn duplicate_release_id_rejected_without_overwrite() {
+        let mut e = VerifierBenchmarkReleases::default();
+        e.create_release(sample_release("dup", ReleaseType::VerifierTool), &trace())
+            .unwrap();
+        let mut replacement = sample_release("dup", ReleaseType::BenchmarkSuite);
+        replacement.version = "9.9.9".to_string();
+
+        let err = e
+            .create_release(replacement, &trace())
+            .expect_err("duplicate release IDs must be rejected");
+
+        assert!(err.contains("duplicate release_id"));
+        assert_eq!(e.releases()["dup"].release_type, ReleaseType::VerifierTool);
+        assert_eq!(e.releases()["dup"].version, "1.0.0");
+        assert_eq!(e.releases().len(), 1);
+    }
+
+    #[test]
+    fn publish_missing_release_does_not_append_audit() {
+        let mut e = VerifierBenchmarkReleases::default();
+
+        let err = e
+            .publish_release("missing-release", &trace())
+            .expect_err("missing release publish must fail");
+
+        assert!(err.contains("missing-release"));
+        assert!(
+            e.audit_log().is_empty(),
+            "missing release lookup must fail before quality/status audit records"
+        );
+    }
+
+    #[test]
+    fn publish_nan_quality_rejected_and_status_remains_draft() {
+        let mut e = VerifierBenchmarkReleases::default();
+        let mut release = sample_release("nan-quality", ReleaseType::VerifierTool);
+        release.quality_score = f64::NAN;
+        e.create_release(release, &trace()).unwrap();
+
+        let err = e
+            .publish_release("nan-quality", &trace())
+            .expect_err("NaN quality must fail publication");
+
+        assert!(err.contains("finite"));
+        assert_eq!(e.releases()["nan-quality"].status, ReleaseStatus::Draft);
+        assert!(
+            e.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::VBR_ERR_QUALITY_BELOW_THRESHOLD)
+        );
+    }
+
+    #[test]
+    fn publish_infinite_quality_rejected_without_status_change() {
+        let mut e = VerifierBenchmarkReleases::default();
+        let mut release = sample_release("inf-quality", ReleaseType::BenchmarkSuite);
+        release.quality_score = f64::INFINITY;
+        e.create_release(release, &trace()).unwrap();
+
+        let err = e
+            .publish_release("inf-quality", &trace())
+            .expect_err("infinite quality must fail publication");
+
+        assert!(err.contains("finite"));
+        assert_eq!(e.releases()["inf-quality"].status, ReleaseStatus::Draft);
+        assert!(
+            e.audit_log()
+                .iter()
+                .all(|record| record.event_code != event_codes::VBR_STATUS_CHANGED),
+            "failed non-finite quality publish must not emit status changes"
+        );
+    }
+
+    #[test]
+    fn record_download_missing_release_does_not_increment_any_counters() {
+        let mut e = VerifierBenchmarkReleases::default();
+        e.create_release(sample_release("r1", ReleaseType::VerifierTool), &trace())
+            .unwrap();
+        let audit_count_before = e.audit_log().len();
+
+        let err = e
+            .record_download("missing-release", "ci", &trace())
+            .expect_err("download for missing release must fail");
+
+        assert!(err.contains("missing-release"));
+        assert!(e.downloads().is_empty());
+        assert_eq!(e.releases()["r1"].download_count, 0);
+        assert_eq!(e.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn update_changelog_missing_release_does_not_audit() {
+        let mut e = VerifierBenchmarkReleases::default();
+
+        let err = e
+            .update_changelog("missing-release", "new changelog", &trace())
+            .expect_err("missing release changelog update must fail");
+
+        assert!(err.contains("missing-release"));
+        assert!(e.audit_log().is_empty());
+    }
+
+    #[test]
+    fn empty_audit_log_exports_empty_jsonl() {
+        let e = VerifierBenchmarkReleases::default();
+
+        assert_eq!(e.export_audit_log_jsonl().unwrap(), "");
     }
 }

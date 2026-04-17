@@ -71,8 +71,13 @@ fn current_year_base() -> i64 {
 const DETERMINISTIC_TIME_WINDOW_SECONDS: u64 = 365 * 24 * 60 * 60;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -674,9 +679,9 @@ impl VerifierToolkit {
     }
 
     fn validate_schema(&self, claim: &VerifiableClaim) -> bool {
-        !claim.claim_id.is_empty()
-            && !claim.description.is_empty()
-            && !claim.source_bead.is_empty()
+        !claim.claim_id.trim().is_empty()
+            && !claim.description.trim().is_empty()
+            && !claim.source_bead.trim().is_empty()
             && !claim.metric_values.is_empty()
             && self.threshold_keys_have_matching_metrics(claim)
     }
@@ -905,6 +910,51 @@ mod tests {
         assert!(!toolkit.validate_schema(&claim));
     }
 
+    #[test]
+    fn empty_description_fails_schema() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("test-empty-description");
+        claim.description.clear();
+
+        assert!(!toolkit.validate_schema(&claim));
+    }
+
+    #[test]
+    fn empty_source_bead_fails_schema() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("test-empty-source");
+        claim.source_bead.clear();
+
+        assert!(!toolkit.validate_schema(&claim));
+    }
+
+    #[test]
+    fn whitespace_claim_id_fails_schema() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("test-whitespace-id");
+        claim.claim_id = " \t\n ".to_string();
+
+        assert!(!toolkit.validate_schema(&claim));
+    }
+
+    #[test]
+    fn whitespace_description_fails_schema() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("test-whitespace-description");
+        claim.description = " \r\n ".to_string();
+
+        assert!(!toolkit.validate_schema(&claim));
+    }
+
+    #[test]
+    fn whitespace_source_bead_fails_schema() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("test-whitespace-source");
+        claim.source_bead = " \t ".to_string();
+
+        assert!(!toolkit.validate_schema(&claim));
+    }
+
     // === Evidence hash verification ===
 
     #[test]
@@ -927,6 +977,24 @@ mod tests {
         let toolkit = VerifierToolkit::default();
         let mut claim = sample_claim("test-1");
         claim.evidence_hash = String::new();
+        assert!(!toolkit.verify_evidence_hash(&claim));
+    }
+
+    #[test]
+    fn non_hex_hash_fails() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("test-non-hex");
+        claim.evidence_hash = "g".repeat(64);
+
+        assert!(!toolkit.verify_evidence_hash(&claim));
+    }
+
+    #[test]
+    fn overlong_hash_fails() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("test-overlong-hash");
+        claim.evidence_hash = "a".repeat(65);
+
         assert!(!toolkit.verify_evidence_hash(&claim));
     }
 
@@ -1143,6 +1211,52 @@ mod tests {
         assert_eq!(parsed["event_code"], event_codes::VTK_CLAIM_INGESTED);
     }
 
+    #[test]
+    fn whitespace_claim_id_fails_full_validation() {
+        let mut toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("whitespace-full-id");
+        claim.claim_id = "   ".to_string();
+
+        let report = toolkit.validate_claims(&[claim], &make_trace());
+
+        assert_eq!(report.overall_verdict, ValidationVerdict::Fail);
+        assert!(!report.claim_results[0].schema_valid);
+        assert!(!report.claim_results[0].overall_valid);
+    }
+
+    #[test]
+    fn disabled_hash_requirement_does_not_bypass_schema_failure() {
+        let config = ToolkitConfig {
+            require_evidence_hashes: false,
+            ..Default::default()
+        };
+        let mut toolkit = VerifierToolkit::new(config);
+        let mut claim = sample_claim("disabled-hash-schema");
+        claim.description = "\n\t".to_string();
+        claim.evidence_hash.clear();
+
+        let report = toolkit.validate_claims(&[claim], &make_trace());
+
+        assert_eq!(report.overall_verdict, ValidationVerdict::Fail);
+        assert!(!report.claim_results[0].schema_valid);
+        assert!(report.claim_results[0].evidence_verified);
+    }
+
+    #[test]
+    fn invalid_schema_claim_emits_rejection_event() {
+        let mut toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("reject-schema-event");
+        claim.source_bead = " \n ".to_string();
+
+        toolkit.validate_claims(&[claim], &make_trace());
+
+        let rejected = toolkit
+            .audit_log()
+            .iter()
+            .any(|record| record.event_code == event_codes::VTK_CLAIM_REJECTED);
+        assert!(rejected);
+    }
+
     // === Reports storage ===
 
     #[test]
@@ -1151,6 +1265,33 @@ mod tests {
         toolkit.validate_claims(&[sample_claim("c1")], &make_trace());
         toolkit.validate_claims(&[sample_claim("c2")], &make_trace());
         assert_eq!(toolkit.reports().len(), 2);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_existing_items() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_new_item() {
+        let mut items: Vec<&str> = Vec::new();
+
+        push_bounded(&mut items, "dropped", 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_keeps_latest_items() {
+        let mut items = vec![10, 11, 12, 13];
+
+        push_bounded(&mut items, 14, 3);
+
+        assert_eq!(items, vec![12, 13, 14]);
     }
 
     // === Config ===
@@ -1220,6 +1361,24 @@ mod tests {
     }
 
     #[test]
+    fn negative_threshold_fails_crosscheck() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("neg-thr-cross");
+        claim.thresholds.insert("score".to_string(), -0.01);
+
+        assert!(!toolkit.cross_check_claim(&claim));
+    }
+
+    #[test]
+    fn threshold_above_one_fails_crosscheck() {
+        let toolkit = VerifierToolkit::default();
+        let mut claim = sample_claim("high-thr-cross");
+        claim.thresholds.insert("score".to_string(), 1.01);
+
+        assert!(!toolkit.cross_check_claim(&claim));
+    }
+
+    #[test]
     fn infinity_threshold_fails_crosscheck() {
         let toolkit = VerifierToolkit::default();
         let mut claim = sample_claim("inf-thr-cross");
@@ -1255,5 +1414,183 @@ mod tests {
         assert!(!report.claim_results[0].metrics_within_thresholds);
         assert!(!report.claim_results[0].cross_check_passed);
         assert!(!report.claim_results[0].overall_valid);
+    }
+
+    // === Serde negative cases ===
+
+    #[test]
+    fn claim_type_deserialize_rejects_unknown_variant() {
+        let result: Result<ClaimType, _> = serde_json::from_str(r#""operational_guess""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validation_verdict_deserialize_rejects_lowercase_variant() {
+        let result: Result<ValidationVerdict, _> = serde_json::from_str(r#""pass""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn toolkit_config_deserialize_rejects_string_bool() {
+        let json = r#"{
+            "toolkit_version": "vtk-v1.0",
+            "strict_mode": "true",
+            "require_evidence_hashes": true,
+            "cross_check_enabled": true
+        }"#;
+
+        let result: Result<ToolkitConfig, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validation_report_deserialize_rejects_missing_content_hash() {
+        let json = r#"{
+            "report_id": "vtk-report-1",
+            "timestamp": "2026-04-17T00:00:00Z",
+            "toolkit_version": "vtk-v1.0",
+            "claims_validated": 0,
+            "claims_passed": 0,
+            "claims_failed": 0,
+            "overall_verdict": "PASS",
+            "claim_results": [],
+            "evidence_chain": []
+        }"#;
+
+        let result: Result<ValidationReport, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evidence_link_deserialize_rejects_missing_current_hash() {
+        let json = r#"{
+            "link_id": "link-1",
+            "claim_id": "claim-1",
+            "step_id": "step-1",
+            "parent_hash": "genesis"
+        }"#;
+
+        let result: Result<EvidenceLink, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn verifiable_claim_deserialize_rejects_string_metric_value() {
+        let raw = serde_json::json!({
+            "claim_id": "claim-string-metric",
+            "claim_type": "benchmark_performance",
+            "source_bead": "bd-test",
+            "description": "metric value must remain numeric",
+            "evidence_hash": "a".repeat(64),
+            "metric_values": {"score": "0.9"},
+            "thresholds": {"score": 0.75},
+            "metadata": {}
+        });
+
+        let result: Result<VerifiableClaim, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn verifiable_claim_deserialize_rejects_missing_thresholds() {
+        let raw = serde_json::json!({
+            "claim_id": "claim-missing-thresholds",
+            "claim_type": "benchmark_performance",
+            "source_bead": "bd-test",
+            "description": "thresholds are required",
+            "evidence_hash": "a".repeat(64),
+            "metric_values": {"score": 0.9},
+            "metadata": {}
+        });
+
+        let result: Result<VerifiableClaim, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn claim_validation_result_deserialize_rejects_missing_confidence() {
+        let raw = serde_json::json!({
+            "claim_id": "claim-no-confidence",
+            "claim_type": "benchmark_performance",
+            "schema_valid": true,
+            "evidence_verified": true,
+            "metrics_within_thresholds": true,
+            "cross_check_passed": true,
+            "overall_valid": true,
+            "validation_steps": []
+        });
+
+        let result: Result<ClaimValidationResult, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validation_step_deserialize_rejects_string_passed_flag() {
+        let raw = serde_json::json!({
+            "step_id": "step-1",
+            "step_name": "Schema validation",
+            "passed": "true",
+            "evidence_hash": "a".repeat(64),
+            "detail": "bad passed type"
+        });
+
+        let result: Result<ValidationStep, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn confidence_interval_deserialize_rejects_string_level() {
+        let raw = serde_json::json!({
+            "lower": 0.85,
+            "upper": 0.99,
+            "level": "0.95"
+        });
+
+        let result: Result<ConfidenceInterval, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audit_record_deserialize_rejects_missing_details() {
+        let raw = serde_json::json!({
+            "record_id": "vtk-audit-1",
+            "event_code": event_codes::VTK_CLAIM_INGESTED,
+            "timestamp": "2026-04-17T00:00:00Z",
+            "trace_id": "trace-1"
+        });
+
+        let result: Result<VtkAuditRecord, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validation_report_deserialize_rejects_string_claim_count() {
+        let raw = serde_json::json!({
+            "report_id": "vtk-report-1",
+            "timestamp": "2026-04-17T00:00:00Z",
+            "toolkit_version": TOOLKIT_VERSION,
+            "claims_validated": "0",
+            "claims_passed": 0_usize,
+            "claims_failed": 0_usize,
+            "overall_verdict": "PASS",
+            "claim_results": [],
+            "evidence_chain": [],
+            "content_hash": "a".repeat(64)
+        });
+
+        let result: Result<ValidationReport, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
     }
 }

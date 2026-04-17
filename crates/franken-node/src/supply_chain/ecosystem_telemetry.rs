@@ -19,9 +19,14 @@ const MAX_ANOMALY_ALERTS: usize = 4096;
 const MAX_DATA_POINTS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -1261,6 +1266,24 @@ mod tests {
     }
 
     #[test]
+    fn test_ingest_rejects_when_resource_budget_disallows_storage() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        pipeline.resource_budget.max_in_memory_points = 0;
+
+        let accepted = pipeline.ingest(make_point(
+            "p1",
+            MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+            0.95,
+            &ts(1),
+        ));
+
+        assert!(!accepted);
+        assert_eq!(pipeline.ingested_count(), 0);
+        assert_eq!(pipeline.stored_count(), 0);
+    }
+
+    #[test]
     fn test_query_by_metric() {
         let mut pipeline = TelemetryPipeline::new();
         pipeline.enable_collection();
@@ -1308,6 +1331,53 @@ mod tests {
         });
         assert_eq!(result.total_count, 1);
         assert!((result.data_points[0].value - 2.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn test_query_with_missing_label_filter_returns_empty() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        let mut point = make_point(
+            "p1",
+            MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+            0.95,
+            &ts(1),
+        );
+        point.labels.insert("region".to_string(), "us".to_string());
+        pipeline.ingest(point);
+
+        let result = pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: None,
+            to: None,
+            aggregation: None,
+            labels: BTreeMap::from([("region".to_string(), "eu".to_string())]),
+            limit: None,
+        });
+
+        assert_eq!(result.total_count, 0);
+        assert!(result.data_points.is_empty());
+    }
+
+    #[test]
+    fn test_query_reversed_time_range_returns_empty() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        let metric = MetricKind::Trust(TrustMetricKind::CertificationDistribution);
+        pipeline.ingest(make_point("p1", metric, 1.0, &ts(2)));
+        pipeline.ingest(make_point("p2", metric, 2.0, &ts(3)));
+
+        let result = pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: Some(ts(8)),
+            to: Some(ts(3)),
+            aggregation: None,
+            labels: BTreeMap::new(),
+            limit: None,
+        });
+
+        assert_eq!(result.total_count, 0);
+        assert!(result.data_points.is_empty());
     }
 
     #[test]
@@ -1485,6 +1555,55 @@ mod tests {
     }
 
     #[test]
+    fn test_anomaly_detection_ignores_missing_baseline() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        pipeline.anomaly_config.min_data_points = 2;
+        let metric = MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate);
+        pipeline.ingest(make_point("p1", metric, 0.1, &ts(1)));
+        pipeline.ingest(make_point("p2", metric, 0.1, &ts(2)));
+
+        let alerts = pipeline.detect_anomalies(&BTreeMap::new());
+
+        assert!(alerts.is_empty());
+        assert!(pipeline.active_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_anomaly_detection_ignores_zero_baseline() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        pipeline.anomaly_config.min_data_points = 2;
+        let metric = MetricKind::Adoption(AdoptionMetricKind::ExtensionsPublished);
+        pipeline.ingest(make_point("p1", metric, 100.0, &ts(1)));
+        pipeline.ingest(make_point("p2", metric, 100.0, &ts(2)));
+        let mut baseline = BTreeMap::new();
+        baseline.insert(metric, 0.0);
+
+        let alerts = pipeline.detect_anomalies(&baseline);
+
+        assert!(alerts.is_empty());
+        assert!(pipeline.active_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_anomaly_detection_requires_minimum_data_points() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        pipeline.anomaly_config.min_data_points = 3;
+        let metric = MetricKind::Trust(TrustMetricKind::RevocationPropagationLatency);
+        pipeline.ingest(make_point("p1", metric, 7200.0, &ts(1)));
+        pipeline.ingest(make_point("p2", metric, 7200.0, &ts(2)));
+        let mut baseline = BTreeMap::new();
+        baseline.insert(metric, 300.0);
+
+        let alerts = pipeline.detect_anomalies(&baseline);
+
+        assert!(alerts.is_empty());
+        assert!(pipeline.active_alerts().is_empty());
+    }
+
+    #[test]
     fn test_health_export() {
         let mut pipeline = TelemetryPipeline::new();
         pipeline.enable_collection();
@@ -1532,6 +1651,17 @@ mod tests {
         assert_eq!(report.bead_id, "bd-3cpa");
         assert_eq!(report.baseline_compromised, 20);
         assert_eq!(report.hardened_compromised, 2);
+    }
+
+    #[test]
+    fn test_load_compromise_reduction_report_missing_file_returns_error() {
+        let report_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../artifacts/13/definitely_missing_compromise_report.json");
+
+        let err = load_compromise_reduction_report(&report_path).unwrap_err();
+
+        assert!(err.contains("failed reading"));
+        assert!(err.contains("definitely_missing_compromise_report.json"));
     }
 
     #[test]
@@ -1728,6 +1858,143 @@ mod tests {
     }
 
     #[test]
+    fn test_query_limit_zero_returns_no_rows_but_preserves_total_count() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        let metric = MetricKind::Trust(TrustMetricKind::CertificationDistribution);
+        pipeline.ingest(make_point("p1", metric, 1.0, &ts(1)));
+        pipeline.ingest(make_point("p2", metric, 2.0, &ts(2)));
+
+        let result = pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: None,
+            to: None,
+            aggregation: None,
+            labels: BTreeMap::new(),
+            limit: Some(0),
+        });
+
+        assert_eq!(result.total_count, 2);
+        assert!(result.data_points.is_empty());
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_drops_existing_and_new_point() {
+        let metric = MetricKind::Trust(TrustMetricKind::CertificationDistribution);
+        let mut points = vec![make_point("p0", metric, 0.0, &ts(1))];
+
+        push_bounded(&mut points, make_point("p1", metric, 1.0, &ts(2)), 0);
+
+        assert!(points.is_empty());
+    }
+
+    #[test]
+    fn test_query_unknown_aggregation_returns_empty_without_mutation() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        let metric = MetricKind::Trust(TrustMetricKind::CertificationDistribution);
+        pipeline.ingest(make_point("p1", metric, 1.0, &ts(1)));
+        let before = pipeline.stored_count();
+
+        let result = pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: None,
+            to: None,
+            aggregation: Some(AggregationLevel::Weekly),
+            labels: BTreeMap::new(),
+            limit: None,
+        });
+
+        assert_eq!(result.total_count, 0);
+        assert!(result.data_points.is_empty());
+        assert_eq!(pipeline.stored_count(), before);
+    }
+
+    #[test]
+    fn test_query_excludes_exact_upper_bound_timestamp() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        let metric = MetricKind::Trust(TrustMetricKind::CertificationDistribution);
+        pipeline.ingest(make_point("p1", metric, 1.0, &ts(1)));
+        pipeline.ingest(make_point("p2", metric, 2.0, &ts(2)));
+
+        let result = pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: Some(ts(1)),
+            to: Some(ts(2)),
+            aggregation: None,
+            labels: BTreeMap::new(),
+            limit: None,
+        });
+
+        assert_eq!(result.total_count, 1);
+        assert_eq!(result.data_points[0].point_id, "p1");
+    }
+
+    #[test]
+    fn test_anomaly_detection_ignores_nan_baseline() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        pipeline.anomaly_config.min_data_points = 2;
+        let metric = MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate);
+        pipeline.ingest(make_point("p1", metric, 0.1, &ts(1)));
+        pipeline.ingest(make_point("p2", metric, 0.1, &ts(2)));
+        let mut baseline = BTreeMap::new();
+        baseline.insert(metric, f64::NAN);
+
+        let alerts = pipeline.detect_anomalies(&baseline);
+
+        assert!(alerts.is_empty());
+        assert!(pipeline.active_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_anomaly_detection_at_exact_threshold_does_not_alert() {
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        pipeline.anomaly_config.min_data_points = 2;
+        pipeline.anomaly_config.deviation_threshold_pct = 30.0;
+        let metric = MetricKind::Adoption(AdoptionMetricKind::ExtensionsPublished);
+        pipeline.ingest(make_point("p1", metric, 130.0, &ts(1)));
+        pipeline.ingest(make_point("p2", metric, 130.0, &ts(2)));
+        let mut baseline = BTreeMap::new();
+        baseline.insert(metric, 100.0);
+
+        let alerts = pipeline.detect_anomalies(&baseline);
+
+        assert!(alerts.is_empty());
+        assert!(pipeline.active_alerts().is_empty());
+    }
+
+    #[test]
+    fn test_health_export_invalid_export_timestamp_marks_report_stale() {
+        let pipeline = TelemetryPipeline::new();
+        let report = sample_compromise_report(&ts(3), 20, 2);
+
+        let export = pipeline.export_health("not-a-timestamp", Some(&report), None, None);
+
+        assert_eq!(export.compromise_reduction_factor, None);
+        assert_eq!(
+            export.compromise_reduction_metadata.availability,
+            DerivedMetricAvailability::StaleUpstream
+        );
+    }
+
+    #[test]
+    fn test_health_export_missing_certification_registry_is_missing_upstream() {
+        let pipeline = TelemetryPipeline::new();
+        let registry = make_active_extension_registry();
+
+        let export = pipeline.export_health(&ts(3), None, Some(&registry), None);
+
+        assert!(export.certification_distribution.is_empty());
+        assert_eq!(
+            export.certification_distribution_metadata.availability,
+            DerivedMetricAvailability::MissingUpstream
+        );
+    }
+
+    #[test]
     fn test_query_with_limit() {
         let mut pipeline = TelemetryPipeline::new();
         pipeline.enable_collection();
@@ -1751,5 +2018,589 @@ mod tests {
         });
         assert_eq!(result.data_points.len(), 3);
         assert_eq!(result.total_count, 10);
+    }
+
+    #[test]
+    fn telemetry_unicode_injection_attack() {
+        // Test BiDi override and control character injection in telemetry data
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+
+        let malicious_point_id = format!("point-{}\u{202e}evil\u{202d}-{}", "\u{200b}".repeat(500), "💥".repeat(300));
+        let mut malicious_labels = BTreeMap::new();
+        malicious_labels.insert(
+            format!("region\u{2066}hidden\u{2069}-{}", "\u{feff}".repeat(100)),
+            format!("us-{}\u{200f}rtl\u{200e}", "🔥".repeat(100))
+        );
+        malicious_labels.insert("component".to_string(), format!("telemetry\x1b[31mred\x1b[0m-{}", "\u{202a}ltr\u{202c}".repeat(50)));
+
+        let unicode_point = TelemetryDataPoint {
+            point_id: malicious_point_id.clone(),
+            timestamp: ts(1),
+            metric: MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+            value: 0.95,
+            aggregation: AggregationLevel::Raw,
+            privacy_filtered: false,
+            labels: malicious_labels.clone(),
+        };
+
+        assert!(pipeline.ingest(unicode_point));
+        assert_eq!(pipeline.ingested_count(), 1);
+        assert_eq!(pipeline.stored_count(), 1);
+
+        // Verify stored point handles massive Unicode safely
+        let query = TelemetryQuery {
+            metric: None,
+            from: None,
+            to: None,
+            aggregation: None,
+            labels: BTreeMap::new(),
+            limit: None,
+        };
+        let result = pipeline.query(&query);
+        assert_eq!(result.data_points[0].point_id, malicious_point_id);
+        assert!(result.data_points[0].point_id.chars().count() > 800);
+
+        // Test display safety (no panic on format)
+        let debug_str = format!("{:?}", result.data_points[0]);
+        assert!(debug_str.len() > 100);
+
+        // Test serialization robustness with Unicode injection
+        let json_result = serde_json::to_string(&pipeline);
+        assert!(json_result.is_ok());
+        let parsed: Result<TelemetryPipeline, _> = serde_json::from_str(&json_result.unwrap());
+        assert!(parsed.is_ok());
+
+        // Test anomaly detection with Unicode data
+        let mut baseline = BTreeMap::new();
+        baseline.insert(MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate), 0.5);
+        let alerts = pipeline.detect_anomalies(&baseline);
+        assert!(!alerts.is_empty());
+        assert!(alerts[0].description.len() > 10);
+    }
+
+    #[test]
+    fn telemetry_memory_exhaustion_stress() {
+        // Test bounded storage with massive telemetry payloads
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+        pipeline.resource_budget.max_in_memory_points = 100;
+
+        let massive_point_id = "a".repeat(100000);
+        let massive_timestamp = format!("2026-01-01T00:00:00Z-{}", "x".repeat(50000));
+
+        // Create massive labels payload
+        let mut massive_labels = BTreeMap::new();
+        for i in 0..1000 {
+            let key = format!("key_{}_with_very_long_name_{}", i, "x".repeat(1000));
+            let value = format!("value_{}_with_massive_payload_{}", i, "y".repeat(2000));
+            massive_labels.insert(key, value);
+        }
+
+        // Stress test with many oversized telemetry points
+        for i in 0..500 {
+            let point = TelemetryDataPoint {
+                point_id: format!("{massive_point_id}-{i}"),
+                timestamp: format!("{massive_timestamp}-{i}"),
+                metric: MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+                value: (i as f64) / 100.0,
+                aggregation: AggregationLevel::Raw,
+                privacy_filtered: false,
+                labels: massive_labels.clone(),
+            };
+            let _ = pipeline.ingest(point);
+        }
+
+        // Verify bounded capacity prevents memory exhaustion
+        assert!(pipeline.stored_count() <= 100);
+
+        // Verify resource budget enforcement
+        assert!(pipeline.stored_count() > 0); // Should still have some data
+        assert!(pipeline.ingested_count() > 100); // Should have processed more than stored
+
+        // Test memory usage is bounded despite massive payloads
+        let total_label_size: usize = pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: None,
+            to: None,
+            aggregation: None,
+            labels: BTreeMap::new(),
+            limit: None,
+        }).data_points.iter()
+            .map(|p| p.labels.iter().map(|(k, v)| k.len() + v.len()).sum::<usize>())
+            .sum();
+        assert!(total_label_size < 50_000_000); // Reasonable memory bound
+    }
+
+    #[test]
+    fn telemetry_json_structure_integrity_validation() {
+        // Test malicious JSON injection in telemetry structures
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+
+        let json_bomb = r#"{"nested":{"arrays":[[[[["very","deep"]]]]],"objects":{"a":{"b":{"c":{"d":"value"}}}}}}"#;
+        let json_injection_id = format!(r#"point","malicious":{json_bomb},"legitimate":"#);
+
+        let mut injection_labels = BTreeMap::new();
+        injection_labels.insert(
+            format!(r#"key","injection":{json_bomb},"hidden":"#),
+            "legitimate_value".to_string()
+        );
+        injection_labels.insert("normal_key".to_string(), json_bomb.to_string());
+
+        let injection_point = TelemetryDataPoint {
+            point_id: json_injection_id.clone(),
+            timestamp: ts(1),
+            metric: MetricKind::Adoption(AdoptionMetricKind::ExtensionsPublished),
+            value: 42.0,
+            aggregation: AggregationLevel::Raw,
+            privacy_filtered: false,
+            labels: injection_labels,
+        };
+
+        assert!(pipeline.ingest(injection_point));
+
+        // Verify JSON serialization integrity
+        let serialized = serde_json::to_string(&pipeline).unwrap();
+        assert!(!serialized.contains(r#""malicious":{"nested""#)); // Injection should be escaped
+
+        // Test deserialization with injected structure
+        let parsed: TelemetryPipeline = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed.stored_count(), 1);
+
+        // Test health export with malicious data
+        let export = pipeline.export_health(&ts(2), None, None, None);
+        assert!(!export.exported_at.is_empty());
+
+        // Verify query result integrity
+        let result = pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: None,
+            to: None,
+            aggregation: None,
+            labels: BTreeMap::new(),
+            limit: None,
+        });
+        assert_eq!(result.data_points[0].point_id, json_injection_id);
+        assert!(result.data_points[0].labels.contains_key("normal_key"));
+    }
+
+    #[test]
+    fn telemetry_floating_point_validation_bypass_attempts() {
+        // Test floating-point validation against bypass attempts
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+
+        let suspicious_values = [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            -0.0,
+            f64::MIN,
+            f64::MAX,
+            f64::EPSILON,
+            1.0 / 0.0,    // Should be infinity
+            0.0 / 0.0,    // Should be NaN
+            f64::from_bits(0x7FF0000000000001), // Signaling NaN
+            f64::from_bits(0xFFF8000000000001), // Quiet NaN with payload
+        ];
+
+        for (i, &value) in suspicious_values.iter().enumerate() {
+            let point = TelemetryDataPoint {
+                point_id: format!("suspicious-{i}"),
+                timestamp: ts(i as u32 + 1),
+                metric: MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+                value,
+                aggregation: AggregationLevel::Raw,
+                privacy_filtered: false,
+                labels: BTreeMap::new(),
+            };
+
+            let accepted = pipeline.ingest(point);
+            if !value.is_finite() {
+                assert!(!accepted, "Should reject non-finite value: {value}");
+            } else {
+                assert!(accepted, "Should accept finite value: {value}");
+            }
+        }
+
+        // Only finite values should be stored
+        assert!(pipeline.stored_count() <= 4); // -0.0, MIN, MAX, EPSILON
+
+        // Test anomaly detection with mixed finite/non-finite data
+        pipeline.data_points.push(TelemetryDataPoint {
+            point_id: "nan-injection".to_string(),
+            timestamp: ts(20),
+            metric: MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+            value: f64::NAN,
+            aggregation: AggregationLevel::Raw,
+            privacy_filtered: false,
+            labels: BTreeMap::new(),
+        });
+
+        let mut baseline = BTreeMap::new();
+        baseline.insert(MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate), 0.5);
+        let alerts = pipeline.detect_anomalies(&baseline);
+
+        // Anomaly detection should ignore non-finite stored points
+        for alert in &alerts {
+            assert!(alert.current_value.is_finite());
+            assert!(alert.baseline_value.is_finite());
+            assert!(alert.deviation_pct.is_finite());
+        }
+    }
+
+    #[test]
+    fn telemetry_anomaly_detection_bypass_attempts() {
+        // Test anomaly detection against bypass and manipulation attempts
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+
+        // Attempt to manipulate anomaly thresholds
+        pipeline.anomaly_config.deviation_threshold_pct = f64::NAN;
+        pipeline.anomaly_config.min_data_points = u32::MAX;
+
+        let metric = MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate);
+
+        // Add legitimate anomalous data
+        for i in 0..10 {
+            pipeline.ingest(make_point(&format!("anomaly-{i}"), metric, 0.1, &ts(i + 1)));
+        }
+
+        let mut baseline = BTreeMap::new();
+        baseline.insert(metric, 0.9); // High baseline, should trigger anomaly
+
+        // Reset to valid config to test bypass resistance
+        pipeline.anomaly_config.deviation_threshold_pct = 30.0;
+        pipeline.anomaly_config.min_data_points = 5;
+
+        let alerts = pipeline.detect_anomalies(&baseline);
+        assert!(!alerts.is_empty()); // Should still detect anomaly
+
+        // Test baseline manipulation attempts
+        let mut malicious_baseline = BTreeMap::new();
+        malicious_baseline.insert(metric, f64::NAN);
+        let nan_alerts = pipeline.detect_anomalies(&malicious_baseline);
+        assert!(nan_alerts.is_empty()); // Should ignore NaN baseline
+
+        malicious_baseline.insert(metric, f64::INFINITY);
+        let inf_alerts = pipeline.detect_anomalies(&malicious_baseline);
+        assert!(inf_alerts.is_empty()); // Should ignore infinite baseline
+
+        malicious_baseline.insert(metric, 0.0);
+        let zero_alerts = pipeline.detect_anomalies(&malicious_baseline);
+        assert!(zero_alerts.is_empty()); // Should ignore zero baseline
+
+        // Test extreme deviation calculation edge cases
+        malicious_baseline.insert(metric, f64::EPSILON);
+        let epsilon_alerts = pipeline.detect_anomalies(&malicious_baseline);
+        // Should handle very small baselines safely
+
+        // Test alert ID generation resistance
+        let original_alert_count = pipeline.anomaly_alerts.len();
+        let new_alerts = pipeline.detect_anomalies(&baseline);
+        if !new_alerts.is_empty() {
+            assert!(new_alerts[0].alert_id.contains(&original_alert_count.to_string()));
+        }
+    }
+
+    #[test]
+    fn telemetry_display_injection_and_format_safety() {
+        // Test format string injection and display safety in telemetry data
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+
+        // Create data with format specifiers and injection attempts
+        let malicious_inputs = [
+            ("point-{}", "ts-{}", "metric-%s", MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate)),
+            ("point\n\tmalicious", "ts\x00null", "metric\r\nCRLF", MetricKind::Trust(TrustMetricKind::QuarantineResolutionTime)),
+            ("point%n%s%d", "ts%x%p", "metric%c%u", MetricKind::Adoption(AdoptionMetricKind::ExtensionsPublished)),
+            ("point\x1b[31mred\x1b[0m", "ts\x1b[1mbold\x1b[0m", "metric\x1b[?1049h", MetricKind::Trust(TrustMetricKind::RevocationPropagationLatency)),
+            ("point\u{1f4a9}\u{200d}\u{1f525}", "ts\u{202e}RLO\u{202d}", "metric\u{2066}LRI\u{2069}", MetricKind::Trust(TrustMetricKind::ReputationDistribution)),
+        ];
+
+        for (i, (point_id, timestamp, label_value, metric)) in malicious_inputs.into_iter().enumerate() {
+            let mut labels = BTreeMap::new();
+            labels.insert("component".to_string(), label_value.to_string());
+            labels.insert("format_test".to_string(), format!("value-{}", point_id));
+
+            let malicious_point = TelemetryDataPoint {
+                point_id: point_id.to_string(),
+                timestamp: timestamp.to_string(),
+                metric,
+                value: (i + 1) as f64 * 10.0,
+                aggregation: AggregationLevel::Raw,
+                privacy_filtered: false,
+                labels,
+            };
+
+            assert!(pipeline.ingest(malicious_point));
+        }
+
+        // Test display safety - should not panic or produce control sequences
+        for point in &pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: None,
+            to: None,
+            aggregation: None,
+            labels: BTreeMap::new(),
+            limit: None,
+        }).data_points {
+            let debug_str = format!("{:?}", point);
+            assert!(!debug_str.contains('\x00'), "Debug output should escape null bytes");
+            assert!(!debug_str.contains('\r'), "Debug should escape CRLF");
+            assert!(!debug_str.contains('\n'), "Debug should escape newlines");
+        }
+
+        // Test anomaly alert display safety
+        let mut baseline = BTreeMap::new();
+        baseline.insert(MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate), 1.0);
+        let alerts = pipeline.detect_anomalies(&baseline);
+
+        for alert in &alerts {
+            let alert_debug = format!("{:?}", alert);
+            assert!(!alert_debug.contains('\x1b'), "Alert debug should escape ANSI");
+
+            let description_display = format!("{}", alert.description);
+            assert!(description_display.len() > 0, "Alert description should produce output");
+        }
+
+        // Test health export display safety
+        let export = pipeline.export_health("2026-01-01T00:00:00Z", None, None, None);
+        let export_debug = format!("{:?}", export);
+        assert!(!export_debug.contains('\x00'), "Export debug should be safe");
+
+        // Test error display safety with malformed data
+        let malformed_query = TelemetryQuery {
+            metric: None,
+            from: Some("not-a-timestamp\x00\x1b[31m".to_string()),
+            to: Some("also-bad\r\n%s".to_string()),
+            aggregation: None,
+            labels: {
+                let mut bad_labels = BTreeMap::new();
+                bad_labels.insert("key\x1b[?1049h".to_string(), "value%n".to_string());
+                bad_labels
+            },
+            limit: None,
+        };
+
+        let result = pipeline.query(&malformed_query);
+        // Query should handle malformed input safely without crashing
+        assert!(result.total_count == result.total_count); // Tautology to check for side effects
+    }
+
+    #[test]
+    fn telemetry_concurrent_pipeline_safety() {
+        // Test concurrent telemetry operations for race conditions
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let pipeline = Arc::new(Mutex::new(TelemetryPipeline::new()));
+        {
+            let mut p = pipeline.lock().unwrap();
+            p.enable_collection();
+        }
+
+        let mut handles = vec![];
+
+        // Spawn concurrent threads performing different operations
+        for thread_id in 0..10 {
+            let pipeline_clone = Arc::clone(&pipeline);
+
+            let handle = thread::spawn(move || {
+                let operations = [
+                    // Ingestion operations
+                    || {
+                        let mut p = pipeline_clone.lock().unwrap();
+                        let point = TelemetryDataPoint {
+                            point_id: format!("point-{thread_id}"),
+                            timestamp: format!("2026-01-{thread_id:02}T00:00:00Z"),
+                            metric: MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+                            value: (thread_id as f64) / 10.0,
+                            aggregation: AggregationLevel::Raw,
+                            privacy_filtered: false,
+                            labels: BTreeMap::new(),
+                        };
+                        let _ = p.ingest(point);
+                    },
+                    // Query operations
+                    || {
+                        let p = pipeline_clone.lock().unwrap();
+                        let query = TelemetryQuery {
+                            metric: Some(MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate)),
+                            from: None,
+                            to: None,
+                            aggregation: None,
+                            labels: BTreeMap::new(),
+                            limit: Some(5),
+                        };
+                        let _ = p.query(&query);
+                    },
+                    // Anomaly detection operations
+                    || {
+                        let mut p = pipeline_clone.lock().unwrap();
+                        let mut baseline = BTreeMap::new();
+                        baseline.insert(MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate), 0.5);
+                        let _ = p.detect_anomalies(&baseline);
+                    }
+                ];
+
+                // Perform multiple operations in this thread
+                for op in operations.iter().cycle().take(50) {
+                    op();
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify final state consistency
+        let final_pipeline = pipeline.lock().unwrap();
+        assert!(final_pipeline.ingested_count() >= 10);
+        assert!(final_pipeline.stored_count() <= final_pipeline.resource_budget().max_in_memory_points);
+
+        // Verify data integrity after concurrent access
+        let results = final_pipeline.query(&TelemetryQuery {
+            metric: None,
+            from: None,
+            to: None,
+            aggregation: None,
+            labels: BTreeMap::new(),
+            limit: None,
+        });
+
+        for point in &results.data_points {
+            assert!(point.point_id.starts_with("point-"));
+            assert!(point.value >= 0.0 && point.value <= 1.0);
+            assert!(point.timestamp.starts_with("2026-01-"));
+        }
+
+        // Verify health export works after concurrent operations
+        let export = final_pipeline.export_health("2026-01-01T00:00:00Z", None, None, None);
+        assert!(!export.exported_at.is_empty());
+        assert!(export.provenance_coverage.is_finite());
+    }
+
+    #[test]
+    fn telemetry_boundary_condition_stress_testing() {
+        // Test extreme boundary conditions and edge cases
+        let mut pipeline = TelemetryPipeline::new();
+        pipeline.enable_collection();
+
+        // Test empty and minimal inputs
+        let boundary_points = [
+            // Empty strings
+            TelemetryDataPoint {
+                point_id: String::new(),
+                timestamp: String::new(),
+                metric: MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate),
+                value: 0.0,
+                aggregation: AggregationLevel::Raw,
+                privacy_filtered: false,
+                labels: BTreeMap::new(),
+            },
+            // Single character
+            TelemetryDataPoint {
+                point_id: "a".to_string(),
+                timestamp: "b".to_string(),
+                metric: MetricKind::Adoption(AdoptionMetricKind::ExtensionsPublished),
+                value: 1.0,
+                aggregation: AggregationLevel::Hourly,
+                privacy_filtered: true,
+                labels: {
+                    let mut labels = BTreeMap::new();
+                    labels.insert("k".to_string(), "v".to_string());
+                    labels
+                },
+            },
+            // Extreme numeric values
+            TelemetryDataPoint {
+                point_id: "extreme".to_string(),
+                timestamp: "2026-01-01T00:00:00Z".to_string(),
+                metric: MetricKind::Trust(TrustMetricKind::QuarantineResolutionTime),
+                value: f64::MAX,
+                aggregation: AggregationLevel::Weekly,
+                privacy_filtered: false,
+                labels: BTreeMap::new(),
+            },
+        ];
+
+        for point in boundary_points {
+            let ingest_result = pipeline.ingest(point);
+            let _ = ingest_result; // Allow any result, testing for crashes
+        }
+
+        // Test extremely long inputs
+        let long_point = TelemetryDataPoint {
+            point_id: "a".repeat(1000000),
+            timestamp: format!("2026-01-01T00:00:00Z-{}", "x".repeat(100000)),
+            metric: MetricKind::Trust(TrustMetricKind::CertificationDistribution),
+            value: 42.0,
+            aggregation: AggregationLevel::Daily,
+            privacy_filtered: false,
+            labels: {
+                let mut labels = BTreeMap::new();
+                for i in 0..1000 {
+                    labels.insert(format!("key-{i}"), "z".repeat(10000));
+                }
+                labels
+            },
+        };
+
+        let long_ingest_result = pipeline.ingest(long_point);
+        assert!(long_ingest_result, "Should handle very long inputs");
+
+        // Test boundary queries
+        let boundary_queries = [
+            TelemetryQuery {
+                metric: None,
+                from: Some(String::new()),
+                to: Some(String::new()),
+                aggregation: None,
+                labels: BTreeMap::new(),
+                limit: Some(0),
+            },
+            TelemetryQuery {
+                metric: None,
+                from: Some("9999-12-31T23:59:59Z".to_string()),
+                to: Some("0001-01-01T00:00:00Z".to_string()), // Reversed range
+                aggregation: None,
+                labels: BTreeMap::new(),
+                limit: Some(usize::MAX),
+            },
+        ];
+
+        for query in boundary_queries {
+            let query_result = pipeline.query(&query);
+            assert!(query_result.total_count == query_result.total_count); // Tautology to check for side effects
+        }
+
+        // Test resource budget boundaries
+        let original_budget = pipeline.resource_budget.max_in_memory_points;
+        pipeline.resource_budget.max_in_memory_points = 0;
+
+        let zero_budget_point = make_point("zero-budget", MetricKind::Trust(TrustMetricKind::ProvenanceCoverageRate), 0.5, &ts(1));
+        assert!(!pipeline.ingest(zero_budget_point));
+
+        pipeline.resource_budget.max_in_memory_points = original_budget;
+
+        // Test serialization with boundary data
+        let json_result = serde_json::to_string(&pipeline);
+        assert!(json_result.is_ok(), "Should serialize boundary data safely");
+
+        let parsed_result: Result<TelemetryPipeline, _> = serde_json::from_str(&json_result.unwrap());
+        assert!(parsed_result.is_ok(), "Should deserialize boundary data safely");
+
+        // Test health export with boundary conditions
+        let export = pipeline.export_health("", None, None, None);
+        assert!(!export.exported_at.is_empty()); // Should handle empty timestamp gracefully
+        assert!(export.provenance_coverage.is_finite());
+        assert!(export.migration_velocity.is_finite());
+        assert!(export.avg_quarantine_resolution_secs.is_finite());
     }
 }

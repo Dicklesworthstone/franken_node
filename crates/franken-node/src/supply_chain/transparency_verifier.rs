@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::fmt;
 
-use crate::security::constant_time::ct_eq;
+use crate::security::constant_time::ct_eq_bytes;
 
 const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 
@@ -20,9 +20,9 @@ const RESERVED_ARTIFACT_ID: &str = "<unknown>";
 fn hash_pair(left: &str, right: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"transparency_interior_v1:");
-    h.update((left.len() as u64).to_le_bytes());
+    h.update(len_to_u64(left.len()).to_le_bytes());
     h.update(left.as_bytes());
-    h.update((right.len() as u64).to_le_bytes());
+    h.update(len_to_u64(right.len()).to_le_bytes());
     h.update(right.as_bytes());
     let digest = h.finalize();
     format!("{:x}", digest)
@@ -32,10 +32,14 @@ fn hash_pair(left: &str, right: &str) -> String {
 pub fn leaf_hash(data: &str) -> String {
     let mut h = Sha256::new();
     h.update(b"transparency_verifier_leaf_v1:");
-    h.update((data.len() as u64).to_le_bytes());
+    h.update(len_to_u64(data.len()).to_le_bytes());
     h.update(data.as_bytes());
     let digest = h.finalize();
     format!("{:x}", digest)
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 // ── Types ───────────────────────────────────────────────────────────
@@ -68,7 +72,7 @@ impl TransparencyPolicy {
     pub fn is_checkpoint_pinned(&self, tree_size: u64, root_hash: &str) -> bool {
         self.pinned_roots.iter().fold(false, |acc, r| {
             let size_match = r.tree_size == tree_size;
-            let hash_match = ct_eq(&r.root_hash, root_hash);
+            let hash_match = ct_eq_bytes(r.root_hash.as_bytes(), root_hash.as_bytes());
             acc | (size_match & hash_match)
         })
     }
@@ -237,7 +241,7 @@ pub fn verify_inclusion(
     }
 
     // Check leaf hash matches artifact hash
-    if !ct_eq(&proof.leaf_hash, artifact_hash) {
+    if !ct_eq_bytes(proof.leaf_hash.as_bytes(), artifact_hash.as_bytes()) {
         return ProofReceipt {
             connector_id: connector_id.into(),
             artifact_id: artifact_id.into(),
@@ -293,6 +297,9 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     if trimmed == RESERVED_ARTIFACT_ID {
         return Some(format!("artifact_id is reserved: {:?}", artifact_id));
     }
+    if artifact_id.contains('\0') {
+        return Some("artifact_id contains null byte".to_string());
+    }
     if trimmed != artifact_id {
         return Some("artifact_id contains leading or trailing whitespace".to_string());
     }
@@ -306,6 +313,9 @@ fn invalid_connector_id_reason(connector_id: &str) -> Option<String> {
     }
     if trimmed == RESERVED_ARTIFACT_ID {
         return Some(format!("connector_id is reserved: {:?}", connector_id));
+    }
+    if connector_id.contains('\0') {
+        return Some("connector_id contains null byte".to_string());
     }
     if trimmed != connector_id {
         return Some("connector_id contains leading or trailing whitespace".to_string());
@@ -402,8 +412,8 @@ pub fn build_test_tree(leaves: &[&str]) -> (String, Vec<InclusionProof>) {
             idx /= 2;
         }
         proofs.push(InclusionProof {
-            leaf_index: i as u64,
-            tree_size: n as u64,
+            leaf_index: len_to_u64(i),
+            tree_size: len_to_u64(n),
             leaf_hash: leaf_hash.clone(),
             audit_path,
         });
@@ -752,6 +762,473 @@ mod tests {
             receipt.failure_reason,
             Some(ProofFailure::PathInvalid { .. })
         ));
+    }
+
+    #[test]
+    fn reserved_artifact_id_rejected_before_proof_evaluation() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            "not-the-leaf-hash",
+            "conn-1",
+            RESERVED_ARTIFACT_ID,
+            "reserved-artifact",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
+    fn artifact_id_with_trailing_whitespace_rejected() {
+        let (root, proofs) = build_test_tree(&["a"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "artifact-1 ",
+            "artifact-whitespace",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidArtifactId { reason }) if reason.contains("whitespace")
+        ));
+    }
+
+    #[test]
+    fn empty_connector_id_rejected_before_missing_proof() {
+        let policy = TransparencyPolicy {
+            required: true,
+            pinned_roots: vec![],
+        };
+        let receipt = verify_inclusion(
+            &policy,
+            None,
+            "irrelevant-hash",
+            "   ",
+            "artifact-1",
+            "empty-connector",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("empty")
+        ));
+    }
+
+    #[test]
+    fn reserved_connector_id_rejected() {
+        let (root, proofs) = build_test_tree(&["a"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            RESERVED_ARTIFACT_ID,
+            "artifact-1",
+            "reserved-connector",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("reserved")
+        ));
+    }
+
+    #[test]
+    fn optional_policy_still_rejects_invalid_artifact_id() {
+        let policy = TransparencyPolicy {
+            required: false,
+            pinned_roots: vec![],
+        };
+        let receipt = verify_inclusion(
+            &policy,
+            None,
+            "irrelevant-hash",
+            "conn-1",
+            "\t",
+            "optional-invalid-artifact",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidArtifactId { reason }) if reason.contains("empty")
+        ));
+    }
+
+    #[test]
+    fn max_leaf_index_rejected_before_leaf_mismatch() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let mut bad_proof = proofs[0].clone();
+        bad_proof.leaf_index = u64::MAX;
+        bad_proof.leaf_hash = "wrong-leaf-hash".to_string();
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&bad_proof),
+            "expected-leaf-hash",
+            "conn-1",
+            "artifact-1",
+            "max-index",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::PathInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn missing_audit_path_for_multi_leaf_tree_rejected() {
+        let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let mut bad_proof = proofs[0].clone();
+        bad_proof.audit_path.clear();
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&bad_proof),
+            &bad_proof.leaf_hash,
+            "conn-1",
+            "artifact-1",
+            "empty-path",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::RootNotPinned { .. })
+        ));
+    }
+
+    #[test]
+    fn path_tamper_to_valid_leaf_hash_is_still_rejected() {
+        let (root, proofs) = build_test_tree(&["a", "b", "c", "d"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let mut bad_proof = proofs[0].clone();
+        bad_proof.audit_path[0] = proofs[2].leaf_hash.clone();
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&bad_proof),
+            &bad_proof.leaf_hash,
+            "conn-1",
+            "artifact-1",
+            "valid-hash-wrong-path",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::RootNotPinned { .. })
+        ));
+    }
+
+    #[test]
+    fn connector_id_with_leading_whitespace_rejected() {
+        let (root, proofs) = build_test_tree(&["a"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            " conn-1",
+            "artifact-1",
+            "connector-leading-space",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("whitespace")
+        ));
+    }
+
+    #[test]
+    fn optional_policy_still_rejects_invalid_connector_id() {
+        let policy = TransparencyPolicy {
+            required: false,
+            pinned_roots: Vec::new(),
+        };
+
+        let receipt = verify_inclusion(
+            &policy,
+            None,
+            "unused-hash",
+            "\n",
+            "artifact-1",
+            "optional-invalid-connector",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("empty")
+        ));
+    }
+
+    #[test]
+    fn optional_policy_rejects_provided_invalid_proof() {
+        let (_, proofs) = build_test_tree(&["a", "b"]);
+        let policy = TransparencyPolicy {
+            required: false,
+            pinned_roots: Vec::new(),
+        };
+
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "artifact-1",
+            "optional-invalid-proof",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::RootNotPinned { .. })
+        ));
+    }
+
+    #[test]
+    fn tree_size_smaller_than_leaf_index_rejected_before_leaf_mismatch() {
+        let (root, proofs) = build_test_tree(&["a", "b", "c"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let mut bad_proof = proofs[0].clone();
+        bad_proof.tree_size = 1;
+        bad_proof.leaf_index = 2;
+        bad_proof.leaf_hash = "wrong-leaf-hash".to_string();
+
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&bad_proof),
+            "expected-leaf-hash",
+            "conn-1",
+            "artifact-1",
+            "small-tree-invalid-index",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::PathInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn checkpoint_not_pinned_when_tree_size_differs_even_if_hash_matches() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let policy = TransparencyPolicy {
+            required: true,
+            pinned_roots: vec![LogRoot {
+                tree_size: proofs[0].tree_size.saturating_add(1),
+                root_hash: root.clone(),
+            }],
+        };
+
+        assert!(!policy.is_checkpoint_pinned(proofs[0].tree_size, &root));
+    }
+
+    #[test]
+    fn artifact_id_with_null_byte_rejected_before_leaf_mismatch() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let policy = test_policy(&root, proofs[0].tree_size);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            "not-the-leaf-hash",
+            "conn-1",
+            "artifact\0shadow",
+            "artifact-null-byte",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidArtifactId { reason }) if reason.contains("null byte")
+        ));
+    }
+
+    #[test]
+    fn connector_id_with_null_byte_rejected_before_missing_proof() {
+        let policy = TransparencyPolicy {
+            required: true,
+            pinned_roots: Vec::new(),
+        };
+        let receipt = verify_inclusion(
+            &policy,
+            None,
+            "unused-hash",
+            "conn\0shadow",
+            "artifact-1",
+            "connector-null-byte",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::InvalidConnectorId { reason }) if reason.contains("null byte")
+        ));
+    }
+
+    #[test]
+    fn checkpoint_hash_same_length_tamper_is_not_pinned() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let tampered_root = tamper_same_length_hash(&root);
+        let policy = TransparencyPolicy {
+            required: true,
+            pinned_roots: vec![LogRoot {
+                tree_size: proofs[0].tree_size,
+                root_hash: tampered_root.clone(),
+            }],
+        };
+
+        assert!(!policy.is_checkpoint_pinned(proofs[0].tree_size, &root));
+        assert!(policy.is_checkpoint_pinned(proofs[0].tree_size, &tampered_root));
+    }
+
+    #[test]
+    fn root_hash_with_trailing_whitespace_not_pinned() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let policy = TransparencyPolicy {
+            required: true,
+            pinned_roots: vec![LogRoot {
+                tree_size: proofs[0].tree_size,
+                root_hash: format!("{root} "),
+            }],
+        };
+
+        assert!(!policy.is_checkpoint_pinned(proofs[0].tree_size, &root));
+    }
+
+    #[test]
+    fn hash_pair_length_prefix_prevents_boundary_collision() {
+        let first = hash_pair("ab", "c");
+        let second = hash_pair("a", "bc");
+
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn single_leaf_wrong_pinned_root_rejected() {
+        let (root, proofs) = build_test_tree(&["solo"]);
+        let tampered_root = tamper_same_length_hash(&root);
+        let policy = TransparencyPolicy {
+            required: true,
+            pinned_roots: vec![LogRoot {
+                tree_size: proofs[0].tree_size,
+                root_hash: tampered_root,
+            }],
+        };
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &proofs[0].leaf_hash,
+            "conn-1",
+            "artifact-1",
+            "single-leaf-root-mismatch",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::RootNotPinned { .. })
+        ));
+    }
+
+    #[test]
+    fn optional_policy_rejects_provided_leaf_mismatch_before_root_check() {
+        let (root, proofs) = build_test_tree(&["a", "b"]);
+        let policy = TransparencyPolicy {
+            required: false,
+            pinned_roots: vec![LogRoot {
+                tree_size: proofs[0].tree_size,
+                root_hash: root,
+            }],
+        };
+        let tampered_leaf = tamper_same_length_hash(&proofs[0].leaf_hash);
+        let receipt = verify_inclusion(
+            &policy,
+            Some(&proofs[0]),
+            &tampered_leaf,
+            "conn-1",
+            "artifact-1",
+            "optional-leaf-mismatch",
+            "ts",
+        );
+
+        assert!(!receipt.verified);
+        assert!(!receipt.log_root_matched);
+        assert!(!receipt.proof_valid);
+        assert!(matches!(
+            receipt.failure_reason,
+            Some(ProofFailure::LeafMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn serde_rejects_inclusion_proof_missing_leaf_hash() {
+        let json = serde_json::json!({
+            "leaf_index": 0,
+            "tree_size": 1,
+            "audit_path": []
+        });
+
+        let err = serde_json::from_value::<InclusionProof>(json).unwrap_err();
+
+        assert!(err.to_string().contains("leaf_hash"));
+    }
+
+    #[test]
+    fn serde_rejects_unknown_proof_failure_variant() {
+        let err =
+            serde_json::from_str::<ProofFailure>(r#""hash_algorithm_downgrade""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn empty_tree_builds_empty_root_and_no_proofs() {
+        let (root, proofs) = build_test_tree(&[]);
+
+        assert!(root.is_empty());
+        assert!(proofs.is_empty());
     }
 
     // === Serde ===

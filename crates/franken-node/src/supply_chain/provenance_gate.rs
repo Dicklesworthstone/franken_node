@@ -83,6 +83,39 @@ impl ProvenancePolicy {
                 reason: "trusted_builders must not be empty".to_string(),
             });
         }
+        if self
+            .trusted_builders
+            .iter()
+            .any(|builder| builder.trim().is_empty())
+        {
+            return Err(ProvenanceError::PolicyInvalid {
+                reason: "trusted_builders must not contain empty builder IDs".to_string(),
+            });
+        }
+        if self
+            .trusted_builders
+            .iter()
+            .any(|builder| builder.trim() != builder)
+        {
+            return Err(ProvenanceError::PolicyInvalid {
+                reason: "trusted_builders must not contain surrounding whitespace".to_string(),
+            });
+        }
+        for attestation in &self.required_attestations {
+            if let AttestationType::Custom(name) = attestation {
+                if name.trim().is_empty() {
+                    return Err(ProvenanceError::PolicyInvalid {
+                        reason: "custom attestation names must not be empty".to_string(),
+                    });
+                }
+                if name.trim() != name {
+                    return Err(ProvenanceError::PolicyInvalid {
+                        reason: "custom attestation names must not contain surrounding whitespace"
+                            .to_string(),
+                    });
+                }
+            }
+        }
         Ok(())
     }
 }
@@ -183,7 +216,7 @@ pub fn evaluate_gate(
             passed: false,
             missing_attestations: missing,
             assurance_ok,
-            builder_trusted,
+            builder_trusted: false,
             failure_reason: Some(GateFailure::PolicyInvalid { reason }),
             trace_id: trace_id.to_string(),
             timestamp: timestamp.to_string(),
@@ -241,6 +274,9 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     }
     if trimmed == RESERVED_ARTIFACT_ID {
         return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if artifact_id.contains('\0') {
+        return Some("artifact_id contains null byte".to_string());
     }
     if trimmed != artifact_id {
         return Some("artifact_id contains leading or trailing whitespace".to_string());
@@ -306,6 +342,27 @@ mod tests {
             build_assurance: BuildAssurance::Hardened,
             builder_id: "builder-alpha".into(),
         }
+    }
+
+    fn sorted_attestations(attestations: &[AttestationType]) -> Vec<String> {
+        let mut names: Vec<String> = attestations
+            .iter()
+            .map(std::string::ToString::to_string)
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn assert_same_semantics(left: &GateDecision, right: &GateDecision) {
+        assert_eq!(left.artifact_id, right.artifact_id);
+        assert_eq!(left.passed, right.passed);
+        assert_eq!(left.assurance_ok, right.assurance_ok);
+        assert_eq!(left.builder_trusted, right.builder_trusted);
+        assert_eq!(
+            sorted_attestations(&left.missing_attestations),
+            sorted_attestations(&right.missing_attestations)
+        );
+        assert_eq!(left.failure_reason, right.failure_reason);
     }
 
     // === BuildAssurance ===
@@ -420,6 +477,406 @@ mod tests {
         assert_eq!(result.trace_id, "trace-xyz");
     }
 
+    // === Negative path precedence ===
+
+    #[test]
+    fn invalid_policy_precedence_keeps_policy_reason_for_empty_artifact() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Slsa],
+            min_build_assurance: BuildAssurance::Verified,
+            trusted_builders: vec![],
+        };
+        let mut provenance = good_provenance();
+        provenance.artifact_id.clear();
+
+        let result = evaluate_gate(&policy, &provenance, "neg-policy-first", "ts");
+
+        assert!(!result.passed);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::PolicyInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_artifact_id_precedes_missing_attestation() {
+        let mut provenance = good_provenance();
+        provenance.artifact_id.clear();
+        provenance.attestations.clear();
+
+        let result = evaluate_gate(&test_policy(), &provenance, "neg-artifact-first", "ts");
+
+        assert!(!result.passed);
+        assert_eq!(
+            sorted_attestations(&result.missing_attestations),
+            vec!["sigstore".to_string(), "slsa".to_string()]
+        );
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
+    fn null_byte_artifact_id_blocks() {
+        let mut provenance = good_provenance();
+        provenance.artifact_id = "artifact\0shadow".to_string();
+
+        let result = evaluate_gate(&test_policy(), &provenance, "neg-nul-artifact", "ts");
+
+        assert!(!result.passed);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::InvalidArtifactId { ref reason })
+                if reason == "artifact_id contains null byte"
+        ));
+    }
+
+    #[test]
+    fn missing_attestation_precedes_low_assurance_and_untrusted_builder() {
+        let mut provenance = good_provenance();
+        provenance.attestations.clear();
+        provenance.build_assurance = BuildAssurance::None;
+        provenance.builder_id = "rogue-builder".into();
+
+        let result = evaluate_gate(&test_policy(), &provenance, "neg-missing-first", "ts");
+
+        assert!(!result.passed);
+        assert!(!result.assurance_ok);
+        assert!(!result.builder_trusted);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::MissingAttestation { .. })
+        ));
+    }
+
+    #[test]
+    fn low_assurance_precedes_untrusted_builder_when_attestations_present() {
+        let mut provenance = good_provenance();
+        provenance.build_assurance = BuildAssurance::Basic;
+        provenance.builder_id = "rogue-builder".into();
+
+        let result = evaluate_gate(&test_policy(), &provenance, "neg-assurance-first", "ts");
+
+        assert!(!result.passed);
+        assert!(result.missing_attestations.is_empty());
+        assert!(!result.assurance_ok);
+        assert!(!result.builder_trusted);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::InsufficientAssurance {
+                have: BuildAssurance::Basic,
+                need: BuildAssurance::Verified,
+            })
+        ));
+    }
+
+    #[test]
+    fn custom_attestation_name_mismatch_is_missing_required_custom() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Custom("sbom".into())],
+            min_build_assurance: BuildAssurance::None,
+            trusted_builders: vec!["builder-alpha".into()],
+        };
+        let mut provenance = good_provenance();
+        provenance.attestations = vec![AttestationType::Custom("SBOM".into())];
+
+        let result = evaluate_gate(&policy, &provenance, "neg-custom-case", "ts");
+
+        assert!(!result.passed);
+        assert_eq!(
+            result.missing_attestations,
+            vec![AttestationType::Custom("sbom".into())]
+        );
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::MissingAttestation { .. })
+        ));
+    }
+
+    #[test]
+    fn duplicate_trusted_builders_do_not_trust_unlisted_builder() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![],
+            min_build_assurance: BuildAssurance::None,
+            trusted_builders: vec!["builder-alpha".into(), "builder-alpha".into()],
+        };
+        let mut provenance = good_provenance();
+        provenance.builder_id = "builder-omega".into();
+
+        let result = evaluate_gate(&policy, &provenance, "neg-builder-dup", "ts");
+
+        assert!(!result.passed);
+        assert!(result.missing_attestations.is_empty());
+        assert!(result.assurance_ok);
+        assert!(!result.builder_trusted);
+        assert!(matches!(
+            result.failure_reason,
+            Some(GateFailure::UntrustedBuilder { ref builder_id })
+                if builder_id == "builder-omega"
+        ));
+    }
+
+    #[test]
+    fn serde_rejects_unknown_build_assurance() {
+        let json = r#"{
+            "artifact_id":"art-1",
+            "connector_id":"conn-1",
+            "attestations":["slsa"],
+            "build_assurance":"root",
+            "builder_id":"builder-alpha"
+        }"#;
+
+        let result = serde_json::from_str::<ArtifactProvenance>(json);
+
+        assert!(result.is_err());
+    }
+
+    // === Metamorphic relations ===
+
+    #[test]
+    fn mr_provenance_attestation_order_is_semantics_invariant() {
+        let policy = test_policy();
+        let original = good_provenance();
+        let mut reordered = original.clone();
+        reordered.attestations.reverse();
+
+        let baseline = evaluate_gate(&policy, &original, "mr-order-a", "ts");
+        let transformed = evaluate_gate(&policy, &reordered, "mr-order-b", "ts");
+
+        assert_same_semantics(&baseline, &transformed);
+        assert!(transformed.passed);
+    }
+
+    #[test]
+    fn mr_required_attestation_order_preserves_missing_set() {
+        let mut policy = test_policy();
+        let mut reordered_policy = policy.clone();
+        reordered_policy.required_attestations.reverse();
+
+        let mut provenance = good_provenance();
+        provenance.attestations.clear();
+
+        let baseline = evaluate_gate(&policy, &provenance, "mr-required-a", "ts");
+        let transformed = evaluate_gate(&reordered_policy, &provenance, "mr-required-b", "ts");
+
+        assert!(!baseline.passed);
+        assert!(!transformed.passed);
+        assert_eq!(
+            sorted_attestations(&baseline.missing_attestations),
+            sorted_attestations(&transformed.missing_attestations)
+        );
+        assert_eq!(
+            sorted_attestations(&baseline.missing_attestations),
+            vec!["sigstore".to_string(), "slsa".to_string()]
+        );
+        policy.required_attestations.reverse();
+        assert_eq!(policy, reordered_policy);
+    }
+
+    #[test]
+    fn mr_extra_irrelevant_attestation_preserves_passing_decision() {
+        let policy = test_policy();
+        let original = good_provenance();
+        let mut enriched = original.clone();
+        enriched
+            .attestations
+            .push(AttestationType::Custom("sbom".into()));
+
+        let baseline = evaluate_gate(&policy, &original, "mr-extra-a", "ts");
+        let transformed = evaluate_gate(&policy, &enriched, "mr-extra-b", "ts");
+
+        assert_same_semantics(&baseline, &transformed);
+        assert!(transformed.passed);
+    }
+
+    #[test]
+    fn mr_adding_missing_required_attestation_repairs_only_missing_dimension() {
+        let policy = test_policy();
+        let mut missing_sigstore = good_provenance();
+        missing_sigstore.attestations = vec![AttestationType::Slsa];
+
+        let mut repaired = missing_sigstore.clone();
+        repaired.attestations.push(AttestationType::Sigstore);
+
+        let before = evaluate_gate(&policy, &missing_sigstore, "mr-repair-a", "ts");
+        let after = evaluate_gate(&policy, &repaired, "mr-repair-b", "ts");
+
+        assert!(!before.passed);
+        assert_eq!(before.missing_attestations, vec![AttestationType::Sigstore]);
+        assert!(before.assurance_ok);
+        assert!(before.builder_trusted);
+        assert!(after.passed);
+        assert!(after.missing_attestations.is_empty());
+        assert_eq!(before.assurance_ok, after.assurance_ok);
+        assert_eq!(before.builder_trusted, after.builder_trusted);
+    }
+
+    #[test]
+    fn mr_strengthening_assurance_preserves_admission() {
+        let policy = test_policy();
+        let mut verified = good_provenance();
+        verified.build_assurance = BuildAssurance::Verified;
+        let mut hardened = verified.clone();
+        hardened.build_assurance = BuildAssurance::Hardened;
+
+        let verified_decision = evaluate_gate(&policy, &verified, "mr-assurance-a", "ts");
+        let hardened_decision = evaluate_gate(&policy, &hardened, "mr-assurance-b", "ts");
+
+        assert!(verified_decision.passed);
+        assert!(hardened_decision.passed);
+        assert_eq!(
+            verified_decision.missing_attestations,
+            hardened_decision.missing_attestations
+        );
+        assert!(hardened_decision.assurance_ok);
+        assert_eq!(
+            verified_decision.builder_trusted,
+            hardened_decision.builder_trusted
+        );
+    }
+
+    #[test]
+    fn mr_weakening_assurance_cannot_improve_decision() {
+        let policy = test_policy();
+        let mut verified = good_provenance();
+        verified.build_assurance = BuildAssurance::Verified;
+        let mut weakened = verified.clone();
+        weakened.build_assurance = BuildAssurance::Basic;
+
+        let before = evaluate_gate(&policy, &verified, "mr-weaken-a", "ts");
+        let after = evaluate_gate(&policy, &weakened, "mr-weaken-b", "ts");
+
+        assert!(before.passed);
+        assert!(!after.passed);
+        assert!(!after.assurance_ok);
+        assert_eq!(before.builder_trusted, after.builder_trusted);
+        assert!(matches!(
+            after.failure_reason,
+            Some(GateFailure::InsufficientAssurance {
+                have: BuildAssurance::Basic,
+                need: BuildAssurance::Verified,
+            })
+        ));
+    }
+
+    #[test]
+    fn mr_trusted_builder_order_is_semantics_invariant() {
+        let policy = test_policy();
+        let mut reordered_policy = policy.clone();
+        reordered_policy.trusted_builders.reverse();
+        let provenance = good_provenance();
+
+        let baseline = evaluate_gate(&policy, &provenance, "mr-builder-order-a", "ts");
+        let transformed = evaluate_gate(&reordered_policy, &provenance, "mr-builder-order-b", "ts");
+
+        assert_same_semantics(&baseline, &transformed);
+        assert!(transformed.passed);
+    }
+
+    #[test]
+    fn mr_expanding_trusted_builders_preserves_existing_admission() {
+        let policy = test_policy();
+        let mut expanded_policy = policy.clone();
+        expanded_policy
+            .trusted_builders
+            .push("builder-gamma".into());
+        let provenance = good_provenance();
+
+        let baseline = evaluate_gate(&policy, &provenance, "mr-builder-expand-a", "ts");
+        let transformed = evaluate_gate(&expanded_policy, &provenance, "mr-builder-expand-b", "ts");
+
+        assert_same_semantics(&baseline, &transformed);
+        assert!(transformed.passed);
+    }
+
+    #[test]
+    fn mr_trace_and_timestamp_do_not_change_gate_semantics() {
+        let policy = test_policy();
+        let provenance = good_provenance();
+
+        let baseline = evaluate_gate(&policy, &provenance, "trace-a", "2026-04-17T00:00:00Z");
+        let transformed = evaluate_gate(&policy, &provenance, "trace-b", "2026-04-17T01:00:00Z");
+
+        assert_same_semantics(&baseline, &transformed);
+        assert_eq!(baseline.trace_id, "trace-a");
+        assert_eq!(transformed.trace_id, "trace-b");
+        assert_eq!(baseline.timestamp, "2026-04-17T00:00:00Z");
+        assert_eq!(transformed.timestamp, "2026-04-17T01:00:00Z");
+    }
+
+    #[test]
+    fn mr_duplicate_present_attestations_do_not_mask_missing_required_type() {
+        let policy = test_policy();
+        let mut duplicated = good_provenance();
+        duplicated.attestations = vec![AttestationType::Slsa, AttestationType::Slsa];
+
+        let decision = evaluate_gate(&policy, &duplicated, "mr-duplicate", "ts");
+
+        assert!(!decision.passed);
+        assert_eq!(
+            decision.missing_attestations,
+            vec![AttestationType::Sigstore]
+        );
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::MissingAttestation { ref types })
+                if types == &vec![AttestationType::Sigstore]
+        ));
+    }
+
+    #[test]
+    fn mr_adding_required_attestation_can_only_narrow_policy() {
+        let policy = test_policy();
+        let mut narrowed_policy = policy.clone();
+        narrowed_policy
+            .required_attestations
+            .push(AttestationType::InToto);
+        let provenance = good_provenance();
+
+        let baseline = evaluate_gate(&policy, &provenance, "mr-narrow-a", "ts");
+        let transformed = evaluate_gate(&narrowed_policy, &provenance, "mr-narrow-b", "ts");
+
+        assert!(baseline.passed);
+        assert!(!transformed.passed);
+        assert_eq!(
+            transformed.missing_attestations,
+            vec![AttestationType::InToto]
+        );
+        assert!(transformed.assurance_ok);
+        assert!(transformed.builder_trusted);
+    }
+
+    #[test]
+    fn mr_compound_reorder_enrich_and_strengthen_preserves_passing_decision() {
+        let policy = test_policy();
+        let original = good_provenance();
+        let mut transformed_policy = policy.clone();
+        transformed_policy.required_attestations.reverse();
+        transformed_policy.trusted_builders.reverse();
+
+        let mut transformed_provenance = original.clone();
+        transformed_provenance.attestations.reverse();
+        transformed_provenance
+            .attestations
+            .push(AttestationType::Custom("vex".into()));
+        transformed_provenance.build_assurance = BuildAssurance::Hardened;
+
+        let baseline = evaluate_gate(&policy, &original, "mr-compound-a", "ts");
+        let transformed = evaluate_gate(
+            &transformed_policy,
+            &transformed_provenance,
+            "mr-compound-b",
+            "ts",
+        );
+
+        assert!(baseline.passed);
+        assert!(transformed.passed);
+        assert!(transformed.missing_attestations.is_empty());
+        assert_eq!(baseline.assurance_ok, transformed.assurance_ok);
+        assert_eq!(baseline.builder_trusted, transformed.builder_trusted);
+    }
+
     // === AttestationType ===
 
     #[test]
@@ -448,6 +905,124 @@ mod tests {
     #[test]
     fn valid_policy_passes() {
         assert!(test_policy().validate().is_ok());
+    }
+
+    #[test]
+    fn whitespace_only_trusted_builder_policy_is_invalid() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Slsa],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec![" \t ".to_string()],
+        };
+
+        let err = policy
+            .validate()
+            .expect_err("blank trusted builder must fail closed");
+
+        assert!(matches!(
+            err,
+            ProvenanceError::PolicyInvalid { reason }
+                if reason.contains("empty builder IDs")
+        ));
+    }
+
+    #[test]
+    fn trusted_builder_with_surrounding_whitespace_policy_is_invalid() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Slsa],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec![" builder-alpha".to_string()],
+        };
+
+        let err = policy
+            .validate()
+            .expect_err("trusted builder aliases must be canonical");
+
+        assert!(matches!(
+            err,
+            ProvenanceError::PolicyInvalid { reason }
+                if reason.contains("surrounding whitespace")
+        ));
+    }
+
+    #[test]
+    fn gate_rejects_policy_with_whitespace_builder_even_if_provenance_matches() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Slsa, AttestationType::Sigstore],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec![" builder-alpha ".to_string()],
+        };
+        let mut provenance = good_provenance();
+        provenance.builder_id = " builder-alpha ".to_string();
+
+        let decision = evaluate_gate(&policy, &provenance, "t-builder-policy-ws", "ts");
+
+        assert!(!decision.passed);
+        assert!(!decision.builder_trusted);
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::PolicyInvalid { ref reason })
+                if reason.contains("surrounding whitespace")
+        ));
+    }
+
+    #[test]
+    fn empty_required_custom_attestation_policy_is_invalid() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Custom(String::new())],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec!["builder-alpha".to_string()],
+        };
+
+        let err = policy
+            .validate()
+            .expect_err("blank custom attestation names must fail closed");
+
+        assert!(matches!(
+            err,
+            ProvenanceError::PolicyInvalid { reason }
+                if reason.contains("custom attestation names must not be empty")
+        ));
+    }
+
+    #[test]
+    fn whitespace_required_custom_attestation_policy_is_invalid() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Custom(" sbom ".to_string())],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec!["builder-alpha".to_string()],
+        };
+
+        let err = policy
+            .validate()
+            .expect_err("custom attestation names must be canonical");
+
+        assert!(matches!(
+            err,
+            ProvenanceError::PolicyInvalid { reason }
+                if reason.contains("custom attestation names must not contain surrounding whitespace")
+        ));
+    }
+
+    #[test]
+    fn invalid_custom_attestation_policy_precedes_matching_provenance_claim() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Custom(String::new())],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec!["builder-alpha".to_string()],
+        };
+        let mut provenance = good_provenance();
+        provenance.attestations = vec![AttestationType::Custom(String::new())];
+
+        let decision = evaluate_gate(&policy, &provenance, "t-empty-custom-policy", "ts");
+
+        assert!(!decision.passed);
+        assert!(!decision.builder_trusted);
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::PolicyInvalid { ref reason })
+                if reason.contains("custom attestation names")
+        ));
     }
 
     #[test]
@@ -498,6 +1073,130 @@ mod tests {
             reason: "bad".into(),
         };
         assert!(f5.to_string().contains("PROV_POLICY_INVALID"));
+    }
+
+    #[test]
+    fn invalid_policy_with_reserved_artifact_reports_policy_invalid() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Slsa],
+            min_build_assurance: BuildAssurance::Hardened,
+            trusted_builders: Vec::new(),
+        };
+        let mut provenance = good_provenance();
+        provenance.artifact_id = RESERVED_ARTIFACT_ID.to_string();
+
+        let decision = evaluate_gate(&policy, &provenance, "t-policy-first", "ts");
+
+        assert!(!decision.passed);
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::PolicyInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn invalid_artifact_id_precedes_other_gate_failures() {
+        let policy = test_policy();
+        let mut provenance = good_provenance();
+        provenance.artifact_id = " \t ".to_string();
+        provenance.attestations.clear();
+        provenance.build_assurance = BuildAssurance::None;
+        provenance.builder_id = "rogue-builder".to_string();
+
+        let decision = evaluate_gate(&policy, &provenance, "t-artifact-first", "ts");
+
+        assert!(!decision.passed);
+        assert!(!decision.assurance_ok);
+        assert!(!decision.builder_trusted);
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::InvalidArtifactId { ref reason })
+                if reason.contains("empty")
+        ));
+    }
+
+    #[test]
+    fn builder_id_with_trailing_space_is_not_trusted_alias() {
+        let policy = test_policy();
+        let mut provenance = good_provenance();
+        provenance.builder_id = "builder-alpha ".to_string();
+
+        let decision = evaluate_gate(&policy, &provenance, "t-builder-space", "ts");
+
+        assert!(!decision.passed);
+        assert!(decision.missing_attestations.is_empty());
+        assert!(decision.assurance_ok);
+        assert!(!decision.builder_trusted);
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::UntrustedBuilder { ref builder_id })
+                if builder_id == "builder-alpha "
+        ));
+    }
+
+    #[test]
+    fn empty_custom_attestation_name_is_not_satisfied_by_named_custom() {
+        let policy = ProvenancePolicy {
+            required_attestations: vec![AttestationType::Custom(String::new())],
+            min_build_assurance: BuildAssurance::Basic,
+            trusted_builders: vec!["builder-alpha".to_string()],
+        };
+        let mut provenance = good_provenance();
+        provenance.attestations = vec![AttestationType::Custom("vex".to_string())];
+
+        let decision = evaluate_gate(&policy, &provenance, "t-empty-custom", "ts");
+
+        assert!(!decision.passed);
+        assert!(matches!(
+            decision.failure_reason,
+            Some(GateFailure::PolicyInvalid { ref reason })
+                if reason.contains("custom attestation names must not be empty")
+        ));
+    }
+
+    #[test]
+    fn serde_rejects_unknown_build_assurance_variant() {
+        let err = serde_json::from_str::<BuildAssurance>(r#""super_hardened""#)
+            .expect_err("unknown build assurance must be rejected");
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_unknown_gate_failure_variant() {
+        let err = serde_json::from_str::<GateFailure>(r#"{"policy_bypass":{}}"#)
+            .expect_err("unknown gate failure must be rejected");
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_policy_missing_trusted_builders() {
+        let value = serde_json::json!({
+            "required_attestations": ["slsa"],
+            "min_build_assurance": "verified"
+        });
+
+        let err = serde_json::from_value::<ProvenancePolicy>(value)
+            .expect_err("missing trusted_builders must fail deserialization");
+
+        assert!(err.to_string().contains("trusted_builders"));
+    }
+
+    #[test]
+    fn serde_rejects_provenance_attestations_as_object() {
+        let value = serde_json::json!({
+            "artifact_id": "art-1",
+            "connector_id": "conn-1",
+            "attestations": {"slsa": true},
+            "build_assurance": "verified",
+            "builder_id": "builder-alpha"
+        });
+
+        let err = serde_json::from_value::<ArtifactProvenance>(value)
+            .expect_err("object attestations must fail deserialization");
+
+        assert!(err.to_string().contains("attestations"));
     }
 
     // === Serde ===

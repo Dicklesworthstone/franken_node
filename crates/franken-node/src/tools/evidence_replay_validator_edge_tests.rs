@@ -7,9 +7,9 @@
 //! - Error handling boundaries
 //! - Determinism under extreme conditions
 
-use crate::tools::evidence_replay_validator::*;
-use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
 use crate::capacity_defaults::aliases::{MAX_FIELDS, MAX_RESULTS};
+use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry};
+use crate::tools::evidence_replay_validator::*;
 
 /// Test floating point edge cases in score comparison
 #[cfg(test)]
@@ -64,7 +64,9 @@ mod floating_point_edge_tests {
         // NaN comparisons are always false, so it should pick the first valid score
         // or handle this edge case appropriately
         match result {
-            ReplayResult::Match | ReplayResult::Mismatch { .. } | ReplayResult::Unresolvable { .. } => {
+            ReplayResult::Match
+            | ReplayResult::Mismatch { .. }
+            | ReplayResult::Unresolvable { .. } => {
                 // Any of these outcomes is acceptable as long as it doesn't panic
             }
         }
@@ -168,7 +170,10 @@ mod floating_point_edge_tests {
 
         // Should handle extreme values without issues
         let result = validator.validate(&entry, &context);
-        assert!(matches!(result, ReplayResult::Match | ReplayResult::Mismatch { .. }));
+        assert!(matches!(
+            result,
+            ReplayResult::Match | ReplayResult::Mismatch { .. }
+        ));
     }
 }
 
@@ -212,7 +217,7 @@ mod input_validation_edge_tests {
                 },
             ],
             vec![Constraint {
-                id: "".to_string(), // Empty constraint ID
+                id: "".to_string(),          // Empty constraint ID
                 description: "".to_string(), // Empty description
                 satisfied: true,
             }],
@@ -344,6 +349,225 @@ mod input_validation_edge_tests {
         // Should handle special characters without issues
         let result = validator.validate(&entry, &context);
         assert!(result.is_match());
+    }
+}
+
+/// Test negative replay outcomes and failure accounting
+#[cfg(test)]
+mod negative_replay_path_tests {
+    use super::*;
+
+    #[test]
+    fn empty_candidates_make_context_unresolvable() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-NO-CANDIDATES", DecisionKind::Admit, 1);
+        let context = ReplayContext::new(
+            Vec::new(),
+            vec![Constraint {
+                id: "default".to_string(),
+                description: "candidate set must be present".to_string(),
+                satisfied: true,
+            }],
+            1,
+            "policy-snapshot",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(validator.unresolvable_count(), 1);
+        assert_eq!(validator.mismatch_count(), 0);
+    }
+
+    #[test]
+    fn empty_policy_snapshot_make_context_unresolvable() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-NO-POLICY", DecisionKind::Admit, 1);
+        let context = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-NO-POLICY".to_string(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "default".to_string(),
+                description: "policy snapshot must be present".to_string(),
+                satisfied: true,
+            }],
+            1,
+            "",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(validator.results()[0].0, "DEC-NO-POLICY");
+    }
+
+    #[test]
+    fn all_non_finite_scores_for_admit_mismatch_with_no_candidate() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-NON-FINITE", DecisionKind::Admit, 1);
+        let context = ReplayContext::new(
+            vec![
+                Candidate {
+                    id: "nan".to_string(),
+                    decision_kind: DecisionKind::Admit,
+                    score: f64::NAN,
+                    metadata: serde_json::json!({}),
+                },
+                Candidate {
+                    id: "infinite".to_string(),
+                    decision_kind: DecisionKind::Admit,
+                    score: f64::INFINITY,
+                    metadata: serde_json::json!({}),
+                },
+            ],
+            vec![Constraint {
+                id: "default".to_string(),
+                description: "scores must be finite".to_string(),
+                satisfied: true,
+            }],
+            1,
+            "policy-snapshot",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        if let ReplayResult::Mismatch { got, diff, .. } = result {
+            assert_eq!(got.decision_kind, "none");
+            assert_eq!(diff.field_count(), 1);
+            assert!(
+                diff.fields
+                    .iter()
+                    .any(|field| field.field_name == "selected_candidate")
+            );
+        } else {
+            panic!("expected mismatch when no finite candidate can be selected");
+        }
+    }
+
+    #[test]
+    fn unsatisfied_constraints_for_admit_mismatch_with_no_candidate() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-CONSTRAINT-FAIL", DecisionKind::Admit, 1);
+        let context = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-CONSTRAINT-FAIL".to_string(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "deny-all".to_string(),
+                description: "constraint intentionally fails".to_string(),
+                satisfied: false,
+            }],
+            1,
+            "policy-snapshot",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_mismatch());
+        assert_eq!(validator.mismatch_count(), 1);
+        assert_eq!(validator.match_count(), 0);
+    }
+
+    #[test]
+    fn epoch_mismatch_is_unresolvable_not_mismatch() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-EPOCH-MISMATCH", DecisionKind::Admit, 7);
+        let context = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-EPOCH-MISMATCH".to_string(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "default".to_string(),
+                description: "epoch must match".to_string(),
+                satisfied: true,
+            }],
+            8,
+            "policy-snapshot",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        assert!(result.is_unresolvable());
+        assert_eq!(validator.unresolvable_count(), 1);
+        assert_eq!(validator.mismatch_count(), 0);
+    }
+
+    #[test]
+    fn decision_kind_mismatch_reports_decision_kind_diff() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-KIND-MISMATCH", DecisionKind::Admit, 1);
+        let context = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-KIND-MISMATCH".to_string(),
+                decision_kind: DecisionKind::Deny,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "default".to_string(),
+                description: "kind mismatch".to_string(),
+                satisfied: true,
+            }],
+            1,
+            "policy-snapshot",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        if let ReplayResult::Mismatch { diff, .. } = result {
+            assert_eq!(diff.field_count(), 1);
+            assert!(
+                diff.fields
+                    .iter()
+                    .any(|field| field.field_name == "decision_kind")
+            );
+        } else {
+            panic!("expected decision kind mismatch");
+        }
+    }
+
+    #[test]
+    fn candidate_id_mismatch_reports_decision_id_diff() {
+        let mut validator = EvidenceReplayValidator::new();
+        let entry = test_replay_entry("DEC-ID-EXPECTED", DecisionKind::Admit, 1);
+        let context = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-ID-ACTUAL".to_string(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "default".to_string(),
+                description: "id mismatch".to_string(),
+                satisfied: true,
+            }],
+            1,
+            "policy-snapshot",
+        );
+
+        let result = validator.validate(&entry, &context);
+
+        if let ReplayResult::Mismatch { diff, .. } = result {
+            assert_eq!(diff.field_count(), 1);
+            assert!(
+                diff.fields
+                    .iter()
+                    .any(|field| field.field_name == "decision_id")
+            );
+        } else {
+            panic!("expected decision id mismatch");
+        }
     }
 }
 
@@ -484,7 +708,7 @@ mod resource_exhaustion_tests {
 
         let context = ReplayContext::new(
             vec![Candidate {
-                id: "different-id".to_string(), // Will cause mismatch
+                id: "different-id".to_string(),    // Will cause mismatch
                 decision_kind: DecisionKind::Deny, // Different kind - will cause another field diff
                 score: 1.0,
                 metadata: serde_json::json!({}),
@@ -697,7 +921,8 @@ mod determinism_stress_tests {
         let mut validator = EvidenceReplayValidator::new();
 
         for i in 0..1000 {
-            let entry = test_replay_entry(&format!("STRESS-{:04}", i), DecisionKind::Admit, i as u64);
+            let entry =
+                test_replay_entry(&format!("STRESS-{:04}", i), DecisionKind::Admit, i as u64);
             let context = matching_context(&entry);
 
             let result = validator.validate(&entry, &context);

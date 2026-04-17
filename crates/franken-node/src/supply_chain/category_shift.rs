@@ -18,9 +18,13 @@ const MAX_BET_ENTRIES: usize = 4096;
 const MAX_TELEMETRY: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -1127,6 +1131,338 @@ mod tests {
     }
 
     #[test]
+    fn positive_infinite_claim_value_is_rejected_before_evidence_verification() {
+        let mut pipeline = ReportingPipeline::default();
+        let now = 1_000_000;
+        let result = pipeline.ingest_dimension(
+            ReportDimension::SecurityPosture,
+            "adv",
+            "bd-9is",
+            vec![ClaimInput {
+                summary: "infinite claim".to_string(),
+                value: f64::INFINITY,
+                unit: "factor".to_string(),
+                evidence: sample_evidence(now),
+            }],
+            now,
+            "trace",
+        );
+
+        assert!(matches!(
+            result.unwrap_err(),
+            CategoryShiftError::ClaimInvalid(detail)
+                if detail.contains("claim value must be finite")
+        ));
+        assert!(pipeline.dimensions.is_empty());
+        assert!(pipeline.telemetry().is_empty());
+    }
+
+    #[test]
+    fn negative_infinite_claim_value_is_rejected_before_evidence_verification() {
+        let mut pipeline = ReportingPipeline::default();
+        let now = 1_000_000;
+        let result = pipeline.ingest_dimension(
+            ReportDimension::SecurityPosture,
+            "adv",
+            "bd-9is",
+            vec![ClaimInput {
+                summary: "negative infinite claim".to_string(),
+                value: f64::NEG_INFINITY,
+                unit: "factor".to_string(),
+                evidence: sample_evidence(now),
+            }],
+            now,
+            "trace",
+        );
+
+        assert!(matches!(
+            result.unwrap_err(),
+            CategoryShiftError::ClaimInvalid(detail)
+                if detail.contains("claim value must be finite")
+        ));
+        assert!(pipeline.dimensions.is_empty());
+        assert!(pipeline.telemetry().is_empty());
+    }
+
+    #[test]
+    fn hash_mismatch_does_not_advance_claim_counter() {
+        let mut pipeline = ReportingPipeline::default();
+        let now = 1_000_000;
+        let bad_evidence = EvidenceInput {
+            artifact_path: "artifacts/test/bad-counter.json".to_string(),
+            sha256_hash: sha256_hex(b"expected content"),
+            generated_at_secs: now,
+            content: Some("different content".to_string()),
+        };
+
+        let result = pipeline.ingest_dimension(
+            ReportDimension::SecurityPosture,
+            "adv",
+            "bd-9is",
+            vec![ClaimInput {
+                summary: "bad claim".to_string(),
+                value: 1.0,
+                unit: "factor".to_string(),
+                evidence: bad_evidence,
+            }],
+            now,
+            "trace-bad",
+        );
+        assert!(matches!(
+            result.unwrap_err(),
+            CategoryShiftError::HashMismatch(path)
+                if path == "artifacts/test/bad-counter.json"
+        ));
+        assert!(pipeline.dimensions.is_empty());
+        assert!(pipeline.telemetry().is_empty());
+
+        pipeline
+            .ingest_dimension(
+                ReportDimension::BenchmarkComparisons,
+                "bench",
+                "bd-f5d",
+                vec![sample_claim(now)],
+                now,
+                "trace-good",
+            )
+            .expect("valid claim should still start at first claim id");
+        let dim = pipeline
+            .dimensions
+            .values()
+            .next()
+            .expect("dimension exists");
+        assert_eq!(dim.claims[0].claim_id, "CSR-CLAIM-001");
+    }
+
+    #[test]
+    fn failed_ingest_with_multiple_claims_does_not_store_partial_dimension() {
+        let mut pipeline = ReportingPipeline::default();
+        let now = 1_000_000;
+        let mut invalid = sample_claim(now);
+        invalid.value = f64::NAN;
+
+        let result = pipeline.ingest_dimension(
+            ReportDimension::MigrationVelocity,
+            "migration",
+            "bd-1e0",
+            vec![sample_claim(now), invalid],
+            now,
+            "trace-partial",
+        );
+
+        assert!(matches!(
+            result.unwrap_err(),
+            CategoryShiftError::ClaimInvalid(detail)
+                if detail.contains("claim value must be finite")
+        ));
+        assert!(pipeline.dimensions.is_empty());
+        assert_eq!(pipeline.telemetry().len(), 1);
+        assert_eq!(pipeline.telemetry()[0].event_code, CSR_CLAIM_VERIFIED);
+        assert!(
+            !pipeline
+                .telemetry()
+                .iter()
+                .any(|event| event.event_code == CSR_DIMENSION_COLLECTED)
+        );
+    }
+
+    #[test]
+    fn empty_pipeline_error_does_not_emit_report_generated_event() {
+        let mut pipeline = ReportingPipeline::default();
+        pipeline.start(1000, "trace-start");
+
+        let err = pipeline
+            .generate_report(1001, "trace-report")
+            .expect_err("empty pipeline should fail");
+
+        assert!(matches!(err, CategoryShiftError::EmptyPipeline));
+        assert!(
+            !pipeline
+                .telemetry()
+                .iter()
+                .any(|event| event.event_code == CSR_REPORT_GENERATED)
+        );
+        assert_eq!(pipeline.history().len(), 0);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_entries() {
+        let mut entries = vec!["oldest", "newest"];
+
+        push_bounded(&mut entries, "ignored", 0);
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn hash_mismatch_after_valid_claim_does_not_collect_dimension() {
+        let mut pipeline = ReportingPipeline::default();
+        let now = 1_000_000;
+        let mut bad_claim = sample_claim(now);
+        bad_claim.evidence.sha256_hash = sha256_hex(b"expected content");
+        bad_claim.evidence.content = Some("tampered content".to_string());
+
+        let result = pipeline.ingest_dimension(
+            ReportDimension::BenchmarkComparisons,
+            "bench",
+            "bd-f5d",
+            vec![sample_claim(now), bad_claim],
+            now,
+            "trace-hash-partial",
+        );
+
+        assert!(matches!(
+            result.unwrap_err(),
+            CategoryShiftError::HashMismatch(path)
+                if path == "artifacts/test/sample.json"
+        ));
+        assert!(pipeline.dimensions.is_empty());
+        assert!(
+            !pipeline
+                .telemetry()
+                .iter()
+                .any(|event| event.event_code == CSR_DIMENSION_COLLECTED)
+        );
+    }
+
+    #[test]
+    fn failed_ingest_keeps_report_generation_empty() {
+        let mut pipeline = ReportingPipeline::default();
+        let now = 1_000_000;
+        let mut invalid = sample_claim(now);
+        invalid.value = f64::NAN;
+
+        let ingest = pipeline.ingest_dimension(
+            ReportDimension::MigrationVelocity,
+            "migration",
+            "bd-1e0",
+            vec![invalid],
+            now,
+            "trace-invalid-ingest",
+        );
+        let report = pipeline.generate_report(now, "trace-report");
+
+        assert!(matches!(
+            ingest.unwrap_err(),
+            CategoryShiftError::ClaimInvalid(detail)
+                if detail.contains("claim value must be finite")
+        ));
+        assert!(matches!(
+            report.unwrap_err(),
+            CategoryShiftError::EmptyPipeline
+        ));
+        assert!(pipeline.history().is_empty());
+    }
+
+    #[test]
+    fn empty_pipeline_errors_do_not_advance_report_version() {
+        let mut pipeline = ReportingPipeline::default();
+        let now = 1_000_000;
+
+        assert!(matches!(
+            pipeline.generate_report(now, "trace-empty-1").unwrap_err(),
+            CategoryShiftError::EmptyPipeline
+        ));
+        assert!(matches!(
+            pipeline
+                .generate_report(now + 1, "trace-empty-2")
+                .unwrap_err(),
+            CategoryShiftError::EmptyPipeline
+        ));
+        pipeline
+            .ingest_dimension(
+                ReportDimension::BenchmarkComparisons,
+                "bench",
+                "bd-f5d",
+                vec![sample_claim(now)],
+                now,
+                "trace-valid",
+            )
+            .expect("valid ingest should succeed");
+
+        let report = pipeline
+            .generate_report(now + 2, "trace-report")
+            .expect("first successful report should publish");
+
+        assert_eq!(report.version, 1);
+    }
+
+    #[test]
+    fn zero_freshness_window_marks_current_evidence_stale() {
+        let pipeline = ReportingPipeline::new(PipelineConfig {
+            freshness_window_secs: 0,
+            ..PipelineConfig::default()
+        });
+        let now = 1_000_000;
+        let content = r#"{"freshness":"zero"}"#;
+        let evidence = EvidenceInput {
+            artifact_path: "artifacts/test/zero-freshness.json".to_string(),
+            sha256_hash: sha256_hex(content.as_bytes()),
+            generated_at_secs: now,
+            content: Some(content.to_string()),
+        };
+
+        let verified = pipeline
+            .verify_evidence(&evidence, now)
+            .expect("hash should be valid");
+
+        assert_eq!(verified.freshness, FreshnessStatus::Stale);
+    }
+
+    #[test]
+    fn report_hash_changes_when_claim_value_is_tampered() {
+        let now = 1_000_000;
+        let (_, mut report) = demo_pipeline(now).expect("demo pipeline should succeed");
+        let original_hash = report.report_hash.clone();
+        let claim = report
+            .claims
+            .first_mut()
+            .expect("demo report should include claims");
+        claim.value = 123.0;
+        let tampered_hash = compute_report_hash(&report).expect("tampered report should hash");
+
+        assert!(!ct_eq(&original_hash, &tampered_hash));
+    }
+
+    #[test]
+    fn report_hash_changes_when_manifest_hash_is_tampered() {
+        let now = 1_000_000;
+        let (_, mut report) = demo_pipeline(now).expect("demo pipeline should succeed");
+        let original_hash = report.report_hash.clone();
+        let manifest = report
+            .manifest
+            .first_mut()
+            .expect("demo report should include manifest entries");
+        manifest.sha256_hash = sha256_hex(b"forged manifest content");
+        let tampered_hash = compute_report_hash(&report).expect("tampered report should hash");
+
+        assert!(!ct_eq(&original_hash, &tampered_hash));
+    }
+
+    #[test]
+    fn diff_reports_detects_added_claim() {
+        let now = 1_000_000;
+        let (_, old_report) = demo_pipeline(now).expect("demo pipeline should succeed");
+        let mut new_report = old_report.clone();
+        let mut added_claim = old_report
+            .claims
+            .first()
+            .expect("demo report should include claims")
+            .clone();
+        added_claim.claim_id = "CSR-CLAIM-999".to_string();
+        new_report.claims.push(added_claim);
+
+        let diffs = ReportingPipeline::diff_reports(&old_report, &new_report);
+
+        assert!(diffs.iter().any(|diff| {
+            diff.claim_id == "CSR-CLAIM-999"
+                && diff.field == "status"
+                && diff.old_value == "absent"
+                && diff.new_value == "added"
+        }));
+    }
+
+    #[test]
     fn stale_evidence_marked_as_stale() {
         let mut pipeline = ReportingPipeline::default();
         let now: u64 = 10_000_000;
@@ -1342,6 +1678,45 @@ mod tests {
     }
 
     #[test]
+    fn diff_reports_detects_removed_claim() {
+        let now = 1_000_000;
+        let (_, old_report) = demo_pipeline(now).expect("should succeed");
+        let mut new_report = old_report.clone();
+        let removed = new_report.claims.pop().expect("demo report has claims");
+
+        let diffs = ReportingPipeline::diff_reports(&old_report, &new_report);
+
+        assert!(diffs.iter().any(|diff| {
+            diff.claim_id == removed.claim_id
+                && diff.field == "status"
+                && diff.old_value == "present"
+                && diff.new_value == "removed"
+        }));
+    }
+
+    #[test]
+    fn diff_reports_detects_claim_outcome_regression() {
+        let now = 1_000_000;
+        let (_, old_report) = demo_pipeline(now).expect("should succeed");
+        let mut new_report = old_report.clone();
+        let claim = new_report
+            .claims
+            .first_mut()
+            .expect("demo report has claims");
+        let claim_id = claim.claim_id.clone();
+        claim.outcome = ClaimOutcome::HashMismatch;
+
+        let diffs = ReportingPipeline::diff_reports(&old_report, &new_report);
+
+        assert!(diffs.iter().any(|diff| {
+            diff.claim_id == claim_id
+                && diff.field == "outcome"
+                && diff.old_value == "Verified"
+                && diff.new_value == "HashMismatch"
+        }));
+    }
+
+    #[test]
     fn sha256_hex_computes_correctly() {
         let hash = sha256_hex(b"hello");
         assert_eq!(hash.len(), 64);
@@ -1391,6 +1766,18 @@ mod tests {
         );
         assert_eq!(
             evaluate_threshold_status(100.0, f64::INFINITY),
+            ThresholdStatus::NotMet
+        );
+    }
+
+    #[test]
+    fn evaluate_threshold_negative_inf_is_fail_closed() {
+        assert_eq!(
+            evaluate_threshold_status(f64::NEG_INFINITY, 95.0),
+            ThresholdStatus::NotMet
+        );
+        assert_eq!(
+            evaluate_threshold_status(100.0, f64::NEG_INFINITY),
             ThresholdStatus::NotMet
         );
     }

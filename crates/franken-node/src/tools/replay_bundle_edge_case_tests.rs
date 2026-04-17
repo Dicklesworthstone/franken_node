@@ -712,6 +712,145 @@ mod error_handling_edge_tests {
     }
 
     #[test]
+    fn test_collected_at_without_timezone_rejected() {
+        let mut package = create_test_evidence_package();
+        package.collected_at = "2026-01-01T00:00:00".to_string();
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::TimestampParse { .. })
+        ));
+    }
+
+    #[test]
+    fn test_expected_incident_id_mismatch_rejected() {
+        let package = create_test_evidence_package();
+
+        let result = validate_incident_evidence_package(&package, Some("DIFFERENT-INCIDENT"));
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceIncidentIdMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn test_empty_evidence_refs_rejected() {
+        let mut package = create_test_evidence_package();
+        package.evidence_refs.clear();
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(result, Err(ReplayBundleError::EvidenceRefsEmpty)));
+    }
+
+    #[test]
+    fn test_empty_event_id_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].event_id = " \t ".to_string();
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceFieldEmpty { .. })
+        ));
+    }
+
+    #[test]
+    fn test_empty_event_provenance_ref_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].provenance_ref = " \n ".to_string();
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceFieldEmpty { .. })
+        ));
+    }
+
+    #[test]
+    fn test_initial_state_snapshot_float_rejected() {
+        let mut package = create_test_evidence_package();
+        package.initial_state_snapshot = json!({"unsafe_float": 0.125});
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::NonDeterministicFloat { .. })
+        ));
+    }
+
+    #[test]
+    fn test_future_parent_event_ref_rejected_during_generation() {
+        let mut package = create_test_evidence_package();
+        package.events[0].parent_event_id = Some("evt-002".to_string());
+        package.events.push(IncidentEvidenceEvent {
+            event_id: "evt-002".to_string(),
+            timestamp: "2026-01-01T00:00:00.000002Z".to_string(),
+            event_type: EventType::PolicyEval,
+            payload: json!({"test": "later"}),
+            provenance_ref: "refs/logs/event-001.json".to_string(),
+            parent_event_id: None,
+            state_snapshot: None,
+            policy_version: None,
+        });
+
+        let result = generate_replay_bundle_from_evidence(&package);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceCausalParentInvalid { .. })
+        ));
+    }
+
+    #[test]
+    fn test_event_policy_version_empty_string_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].policy_version = Some(String::new());
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceFieldEmpty { .. })
+        ));
+    }
+
+    #[test]
+    fn test_unsorted_evidence_event_timestamps_rejected() {
+        let mut package = create_test_evidence_package();
+        let mut earlier = package.events[0].clone();
+        earlier.event_id = "evt-earlier".to_string();
+        earlier.timestamp = "2025-12-31T23:59:59.000000Z".to_string();
+        package.events.push(earlier);
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceEventsUnsorted { .. })
+        ));
+    }
+
+    #[test]
+    fn test_float_in_evidence_state_snapshot_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].state_snapshot = Some(json!({"ratio": 0.5}));
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::NonDeterministicFloat { .. })
+        ));
+    }
+
+    #[test]
     fn test_causal_parent_edge_cases() {
         // Test invalid causal parent references
         let events = vec![
@@ -738,6 +877,123 @@ mod error_handling_edge_tests {
         // Invalid causal parents should be stripped out
         assert!(bundle.timeline[1].causal_parent.is_none()); // Invalid ref to 3
         assert!(bundle.timeline[2].causal_parent.is_none()); // Self-reference
+    }
+
+    #[test]
+    fn negative_evidence_schema_mismatch_is_rejected() {
+        let mut package = create_test_evidence_package();
+        package.schema_version = "franken-node/incident-evidence-source/v0".to_string();
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceSchemaMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_evidence_empty_events_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events.clear();
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceEventsEmpty)
+        ));
+    }
+
+    #[test]
+    fn negative_evidence_duplicate_event_id_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events.push(package.events[0].clone());
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceDuplicateEventId { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_evidence_self_parent_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].parent_event_id = Some(package.events[0].event_id.clone());
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceSelfParentRef { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_evidence_missing_parent_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].parent_event_id = Some("evt-missing".to_string());
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceMissingParentRef { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_evidence_unknown_provenance_ref_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].provenance_ref = "refs/logs/missing.json".to_string();
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceUnknownProvenanceRef { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_evidence_invalid_collected_at_rejected() {
+        let mut package = create_test_evidence_package();
+        package.collected_at = "2026-99-99T99:99:99Z".to_string();
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::TimestampParse { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_evidence_float_payload_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].payload = json!({"non_deterministic": 1.25});
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::NonDeterministicFloat { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_evidence_empty_event_policy_version_rejected() {
+        let mut package = create_test_evidence_package();
+        package.events[0].policy_version = Some(" \t ".to_string());
+
+        let result = validate_incident_evidence_package(&package, None);
+
+        assert!(matches!(
+            result,
+            Err(ReplayBundleError::EvidenceFieldEmpty { .. })
+        ));
     }
 
     fn create_test_evidence_package() -> IncidentEvidencePackage {

@@ -756,9 +756,20 @@ impl ReputationRegistry {
         };
         entry.entry_hash = compute_entry_hash(&entry);
         if self.audit_trail.len() >= MAX_AUDIT_TRAIL {
-            let overflow = self.audit_trail.len() - MAX_AUDIT_TRAIL + 1;
-            self.chain_anchor_hash = Some(self.audit_trail[overflow - 1].entry_hash.clone());
-            self.audit_trail.drain(0..overflow);
+            let overflow = self
+                .audit_trail
+                .len()
+                .saturating_sub(MAX_AUDIT_TRAIL)
+                .saturating_add(1);
+            let drain_len = overflow.min(self.audit_trail.len());
+            if drain_len > 0 {
+                self.chain_anchor_hash = Some(
+                    self.audit_trail[drain_len.saturating_sub(1)]
+                        .entry_hash
+                        .clone(),
+                );
+                self.audit_trail.drain(0..drain_len);
+            }
         }
         self.audit_trail.push(entry);
     }
@@ -980,6 +991,24 @@ mod tests {
     }
 
     #[test]
+    fn test_duplicate_signal_rejection_does_not_mutate_reputation_or_audit() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal("sig-dup", "pub-1", SignalKind::ExtensionQuality);
+        reg.ingest_signal(&signal, &ts(1)).unwrap();
+        let before = reg.get_reputation("pub-1").unwrap().clone();
+        let audit_len = reg.audit_trail_len();
+
+        let result = reg.ingest_signal(&signal, &ts(2));
+
+        assert!(matches!(result, Err(ReputationError::DuplicateSignal(id)) if id == "sig-dup"));
+        let after = reg.get_reputation("pub-1").unwrap();
+        assert_eq!(after.score, before.score);
+        assert_eq!(after.tier, before.tier);
+        assert_eq!(after.signal_count, before.signal_count);
+        assert_eq!(reg.audit_trail_len(), audit_len);
+    }
+
+    #[test]
     fn test_frozen_rejects_signals() {
         let mut reg = ReputationRegistry::new();
         reg.register_publisher("pub-1", &ts(1));
@@ -988,6 +1017,26 @@ mod tests {
         let signal = make_signal("sig-1", "pub-1", SignalKind::ExtensionQuality);
         let result = reg.ingest_signal(&signal, &ts(3));
         assert!(matches!(result, Err(ReputationError::ReputationFrozen(_))));
+    }
+
+    #[test]
+    fn test_frozen_signal_rejection_can_be_retried_after_unfreeze() {
+        let mut reg = ReputationRegistry::new();
+        reg.register_publisher("pub-1", &ts(1));
+        reg.freeze("pub-1", "inv-001", "suspected compromise", &ts(2))
+            .unwrap();
+        let signal = make_signal("sig-retry", "pub-1", SignalKind::ExtensionQuality);
+
+        let frozen_result = reg.ingest_signal(&signal, &ts(3));
+        assert!(matches!(
+            frozen_result,
+            Err(ReputationError::ReputationFrozen(publisher)) if publisher == "pub-1"
+        ));
+
+        reg.unfreeze("pub-1", "inv-001", &ts(4)).unwrap();
+        let retry_result = reg.ingest_signal(&signal, &ts(5));
+        assert!(retry_result.is_ok());
+        assert_eq!(reg.get_reputation("pub-1").unwrap().signal_count, 1);
     }
 
     #[test]
@@ -1042,6 +1091,34 @@ mod tests {
     }
 
     #[test]
+    fn test_get_reputation_rejects_unknown_publisher() {
+        let reg = ReputationRegistry::new();
+
+        let result = reg.get_reputation("missing-pub");
+
+        assert!(matches!(
+            result,
+            Err(ReputationError::PublisherNotFound(publisher)) if publisher == "missing-pub"
+        ));
+        assert_eq!(reg.publisher_count(), 0);
+        assert_eq!(reg.audit_trail_len(), 0);
+    }
+
+    #[test]
+    fn test_apply_decay_rejects_unknown_publisher_without_audit_entry() {
+        let mut reg = ReputationRegistry::new();
+
+        let result = reg.apply_decay("missing-pub", 30, &ts(2));
+
+        assert!(matches!(
+            result,
+            Err(ReputationError::PublisherNotFound(publisher)) if publisher == "missing-pub"
+        ));
+        assert_eq!(reg.publisher_count(), 0);
+        assert_eq!(reg.audit_trail_len(), 0);
+    }
+
+    #[test]
     fn test_decay_skipped_below_min_interval() {
         let mut reg = ReputationRegistry::new();
         reg.register_publisher("pub-1", &ts(1));
@@ -1049,6 +1126,29 @@ mod tests {
         // No change.
         assert_eq!(result.old_score, result.new_score);
         assert!(result.explanation.contains("skipped"));
+    }
+
+    #[test]
+    fn test_invalid_infinite_decay_rate_preserves_state_and_audit() {
+        let mut reg = ReputationRegistry::new();
+        reg.register_publisher("pub-1", &ts(1));
+        if let Some(pub_rec) = reg.publishers.get_mut("pub-1") {
+            pub_rec.decay_config.daily_rate = f64::INFINITY;
+        }
+        let before = reg.get_reputation("pub-1").unwrap().clone();
+        let audit_len = reg.audit_trail_len();
+
+        let result = reg.apply_decay("pub-1", 30, &ts(2));
+
+        assert!(matches!(
+            result,
+            Err(ReputationError::InvalidDecayRate { rate }) if rate.is_infinite()
+        ));
+        let after = reg.get_reputation("pub-1").unwrap();
+        assert_eq!(after.score, before.score);
+        assert_eq!(after.tier, before.tier);
+        assert_eq!(after.last_decay_at, before.last_decay_at);
+        assert_eq!(reg.audit_trail_len(), audit_len);
     }
 
     #[test]
@@ -1158,6 +1258,48 @@ mod tests {
         let rep_b = reg.get_reputation("pub-b").unwrap();
         assert_eq!(rep_a.score, 10.0);
         assert_eq!(rep_b.score, 30.0);
+    }
+
+    #[test]
+    fn test_freeze_unknown_publisher_does_not_create_record_or_audit() {
+        let mut reg = ReputationRegistry::new();
+
+        let result = reg.freeze("missing-pub", "inv-001", "investigation", &ts(1));
+
+        assert!(matches!(
+            result,
+            Err(ReputationError::PublisherNotFound(publisher)) if publisher == "missing-pub"
+        ));
+        assert_eq!(reg.publisher_count(), 0);
+        assert_eq!(reg.audit_trail_len(), 0);
+    }
+
+    #[test]
+    fn test_unfreeze_unknown_publisher_does_not_create_record_or_audit() {
+        let mut reg = ReputationRegistry::new();
+
+        let result = reg.unfreeze("missing-pub", "inv-001", &ts(1));
+
+        assert!(matches!(
+            result,
+            Err(ReputationError::PublisherNotFound(publisher)) if publisher == "missing-pub"
+        ));
+        assert_eq!(reg.publisher_count(), 0);
+        assert_eq!(reg.audit_trail_len(), 0);
+    }
+
+    #[test]
+    fn test_start_recovery_unknown_publisher_does_not_create_record_or_audit() {
+        let mut reg = ReputationRegistry::new();
+
+        let result = reg.start_recovery("missing-pub", "submit provenance", &ts(1));
+
+        assert!(matches!(
+            result,
+            Err(ReputationError::PublisherNotFound(publisher)) if publisher == "missing-pub"
+        ));
+        assert_eq!(reg.publisher_count(), 0);
+        assert_eq!(reg.audit_trail_len(), 0);
     }
 
     #[test]
@@ -1281,5 +1423,235 @@ mod tests {
             result.is_ok(),
             "disabled (false) signal should allow re-ingestion"
         );
+    }
+
+    #[test]
+    fn test_query_unknown_publisher_returns_empty_without_mutation() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal("sig-known", "pub-known", SignalKind::ExtensionQuality);
+        reg.ingest_signal(&signal, &ts(1)).unwrap();
+        let audit_len = reg.audit_trail_len();
+
+        let entries = reg.query_audit_trail("pub-missing");
+
+        assert!(entries.is_empty());
+        assert_eq!(reg.audit_trail_len(), audit_len);
+        assert!(reg.get_reputation("pub-missing").is_err());
+    }
+
+    #[test]
+    fn test_inverted_audit_range_returns_empty() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal("sig-range", "pub-1", SignalKind::ExtensionQuality);
+        reg.ingest_signal(&signal, &ts(2)).unwrap();
+
+        let entries = reg.query_audit_trail_range("pub-1", &ts(3), &ts(1));
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_audit_range_excludes_wrong_publisher_even_when_time_matches() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal("sig-a", "pub-a", SignalKind::ExtensionQuality);
+        reg.ingest_signal(&signal, &ts(2)).unwrap();
+
+        let entries = reg.query_audit_trail_range("pub-b", &ts(1), &ts(3));
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn test_invalid_infinite_decay_baseline_preserves_state_and_audit() {
+        let mut reg = ReputationRegistry::new();
+        reg.register_publisher("pub-1", &ts(1));
+        if let Some(pub_rec) = reg.publishers.get_mut("pub-1") {
+            pub_rec.decay_config.baseline = f64::INFINITY;
+        }
+        let before = reg.get_reputation("pub-1").unwrap().clone();
+        let audit_len = reg.audit_trail_len();
+
+        let result = reg.apply_decay("pub-1", 30, &ts(2));
+
+        assert!(matches!(
+            result,
+            Err(ReputationError::InvalidDecayRate { rate })
+                if (rate - DecayConfig::default().daily_rate).abs() < f64::EPSILON
+        ));
+        let after = reg.get_reputation("pub-1").unwrap();
+        assert_eq!(after.score, before.score);
+        assert_eq!(after.tier, before.tier);
+        assert_eq!(after.last_decay_at, before.last_decay_at);
+        assert_eq!(reg.audit_trail_len(), audit_len);
+    }
+
+    #[test]
+    fn test_audit_integrity_detects_prev_hash_tamper() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal("sig-tamper", "pub-1", SignalKind::CertificationAdherence);
+        reg.ingest_signal(&signal, &ts(2)).unwrap();
+
+        reg.audit_trail[1].prev_hash = tamper_same_length(&reg.audit_trail[1].prev_hash);
+
+        assert!(matches!(
+            reg.verify_audit_integrity(),
+            Err(ReputationError::AuditIntegrityViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_audit_integrity_detects_publisher_id_tamper() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal(
+            "sig-pub-tamper",
+            "pub-1",
+            SignalKind::CertificationAdherence,
+        );
+        reg.ingest_signal(&signal, &ts(2)).unwrap();
+
+        reg.audit_trail[0].publisher_id = "pub-x".to_owned();
+
+        assert!(matches!(
+            reg.verify_audit_integrity(),
+            Err(ReputationError::AuditIntegrityViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_infinite_weight_override_falls_back_without_poisoning_score() {
+        let mut reg = ReputationRegistry::new();
+        let mut signal = make_signal("sig-inf-weight", "pub-1", SignalKind::CertificationAdherence);
+        signal.weight_override = Some(f64::INFINITY);
+
+        let result = reg.ingest_signal(&signal, &ts(1)).unwrap();
+
+        assert!((result.new_score - 36.0).abs() < f64::EPSILON);
+        assert_eq!(reg.get_reputation("pub-1").unwrap().signal_count, 1);
+    }
+
+    #[test]
+    fn test_negative_infinite_weight_override_falls_back_without_poisoning_score() {
+        let mut reg = ReputationRegistry::new();
+        let mut signal = make_signal("sig-neg-inf-weight", "pub-1", SignalKind::RevocationEvent);
+        signal.weight_override = Some(f64::NEG_INFINITY);
+
+        let result = reg.ingest_signal(&signal, &ts(1)).unwrap();
+
+        assert!((result.new_score - 15.0).abs() < f64::EPSILON);
+        assert_eq!(reg.get_reputation("pub-1").unwrap().signal_count, 1);
+    }
+
+    #[test]
+    fn test_invalid_nan_decay_baseline_preserves_state_and_audit() {
+        let mut reg = ReputationRegistry::new();
+        reg.register_publisher("pub-1", &ts(1));
+        if let Some(pub_rec) = reg.publishers.get_mut("pub-1") {
+            pub_rec.decay_config.baseline = f64::NAN;
+        }
+        let before = reg.get_reputation("pub-1").unwrap().clone();
+        let audit_len = reg.audit_trail_len();
+
+        let result = reg.apply_decay("pub-1", 30, &ts(2));
+
+        assert!(matches!(
+            result,
+            Err(ReputationError::InvalidDecayRate { rate })
+                if (rate - DecayConfig::default().daily_rate).abs() < f64::EPSILON
+        ));
+        let after = reg.get_reputation("pub-1").unwrap();
+        assert_eq!(after.score, before.score);
+        assert_eq!(after.tier, before.tier);
+        assert_eq!(after.last_decay_at, before.last_decay_at);
+        assert_eq!(reg.audit_trail_len(), audit_len);
+    }
+
+    #[test]
+    fn test_ingest_with_nan_existing_score_uses_zero_old_score() {
+        let mut reg = ReputationRegistry::new();
+        reg.register_publisher("pub-1", &ts(1));
+        if let Some(pub_rec) = reg.publishers.get_mut("pub-1") {
+            pub_rec.score = f64::NAN;
+        }
+        let signal = make_signal("sig-nan-score-ingest", "pub-1", SignalKind::ExtensionQuality);
+
+        let result = reg.ingest_signal(&signal, &ts(2)).unwrap();
+
+        assert!((result.old_score - 0.0).abs() < f64::EPSILON);
+        assert!((result.new_score - 3.0).abs() < f64::EPSILON);
+        assert!(reg.get_reputation("pub-1").unwrap().score.is_finite());
+    }
+
+    #[test]
+    fn test_decay_with_nan_existing_score_uses_zero_old_score() {
+        let mut reg = ReputationRegistry::new();
+        reg.register_publisher("pub-1", &ts(1));
+        if let Some(pub_rec) = reg.publishers.get_mut("pub-1") {
+            pub_rec.score = f64::NAN;
+        }
+
+        let result = reg.apply_decay("pub-1", 30, &ts(2)).unwrap();
+
+        assert!((result.old_score - 0.0).abs() < f64::EPSILON);
+        assert!(result.new_score.is_finite());
+        assert!(result.new_score < DecayConfig::default().baseline);
+        assert!(reg.get_reputation("pub-1").unwrap().score.is_finite());
+    }
+
+    #[test]
+    fn test_audit_integrity_detects_sequence_tamper() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal("sig-sequence-tamper", "pub-1", SignalKind::ExtensionQuality);
+        reg.ingest_signal(&signal, &ts(1)).unwrap();
+
+        reg.audit_trail[0].sequence = 99;
+
+        assert!(matches!(
+            reg.verify_audit_integrity(),
+            Err(ReputationError::AuditIntegrityViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_audit_integrity_detects_timestamp_tamper() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal("sig-time-tamper", "pub-1", SignalKind::ExtensionQuality);
+        reg.ingest_signal(&signal, &ts(1)).unwrap();
+
+        reg.audit_trail[0].timestamp = ts(9);
+
+        assert!(matches!(
+            reg.verify_audit_integrity(),
+            Err(ReputationError::AuditIntegrityViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_audit_integrity_detects_event_tamper() {
+        let mut reg = ReputationRegistry::new();
+        let signal = make_signal("sig-event-tamper", "pub-1", SignalKind::ExtensionQuality);
+        reg.ingest_signal(&signal, &ts(1)).unwrap();
+
+        reg.audit_trail[0].event = AuditEvent::RecoveryStarted {
+            recovery_plan: "forged recovery".to_owned(),
+        };
+
+        assert!(matches!(
+            reg.verify_audit_integrity(),
+            Err(ReputationError::AuditIntegrityViolation { .. })
+        ));
+    }
+
+    #[test]
+    fn test_empty_registry_queries_are_empty() {
+        let reg = ReputationRegistry::new();
+
+        assert!(reg.list_publishers().is_empty());
+        assert!(reg.query_audit_trail("pub-1").is_empty());
+        assert!(
+            reg.query_audit_trail_range("pub-1", &ts(1), &ts(2))
+                .is_empty()
+        );
+        assert_eq!(reg.publisher_count(), 0);
+        assert_eq!(reg.audit_trail_len(), 0);
     }
 }

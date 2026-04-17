@@ -11,13 +11,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::{Signer, SigningKey, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
-use crate::security::constant_time::ct_eq;
+use crate::security::constant_time::ct_eq_bytes;
 
 const MAX_TRANSITIONS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -172,15 +176,16 @@ impl ChecksumManifest {
         for line in text.lines() {
             let parts: Vec<&str> = line.splitn(3, "  ").collect();
             if parts.len() == 3 {
-                let name = parts[1];
-                if name.split('/').any(|s| s == "..")
-                    || name.starts_with('/')
-                    || name.contains('\\')
-                    || name.contains('\0')
-                {
+                if !is_valid_sha256_hex(parts[0]) {
                     continue;
                 }
-                // Reject entries with unparseable size (fail-closed)
+                let name = parts[1];
+                if !is_valid_artifact_name(name) {
+                    continue;
+                }
+                if !parts[2].bytes().all(|byte| byte.is_ascii_digit()) {
+                    continue;
+                }
                 let Ok(size_bytes) = parts[2].parse::<u64>() else {
                     continue;
                 };
@@ -193,6 +198,24 @@ impl ChecksumManifest {
         }
         entries
     }
+}
+
+fn is_valid_sha256_hex(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_valid_artifact_name(name: &str) -> bool {
+    !name.is_empty()
+        && !name.starts_with('/')
+        && !name.contains('\\')
+        && !name.contains('\0')
+        && name
+            .split('/')
+            .all(|segment| !segment.is_empty() && segment != "." && segment != "..")
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 /// Per-artifact verification result emitted as structured JSON.
@@ -229,12 +252,15 @@ impl KeyTransitionRecord {
         let mut buf = Vec::new();
         buf.extend(b"artifact_signing_transition_v1:");
         let old_bytes = self.old_key_id.0.as_bytes();
-        buf.extend((old_bytes.len() as u64).to_le_bytes());
+        let old_len = len_to_u64(old_bytes.len());
+        buf.extend(old_len.to_le_bytes());
         buf.extend(old_bytes);
         let new_bytes = self.new_key_id.0.as_bytes();
-        buf.extend((new_bytes.len() as u64).to_le_bytes());
+        let new_len = len_to_u64(new_bytes.len());
+        buf.extend(new_len.to_le_bytes());
         buf.extend(new_bytes);
-        buf.extend((self.new_public_key_bytes.len() as u64).to_le_bytes());
+        let public_key_len = len_to_u64(self.new_public_key_bytes.len());
+        buf.extend(public_key_len.to_le_bytes());
         buf.extend(&self.new_public_key_bytes);
         buf.extend(&self.timestamp.to_le_bytes());
         buf
@@ -342,7 +368,7 @@ pub fn build_and_sign_manifest(
             ManifestEntry {
                 name: name.to_string(),
                 sha256: sha256_hex(content),
-                size_bytes: content.len() as u64,
+                size_bytes: len_to_u64(content.len()),
             },
         );
     }
@@ -403,7 +429,18 @@ pub fn verify_release(
             }
             Some(content) => {
                 let actual_hash = sha256_hex(content);
-                if !ct_eq(&actual_hash, &entry.sha256) {
+                let actual_size = len_to_u64(content.len());
+                if actual_size != entry.size_bytes {
+                    results.push(ArtifactVerificationResult {
+                        artifact_name: name.clone(),
+                        passed: false,
+                        key_id: key_id_str,
+                        failure_reason: Some(format!(
+                            "size mismatch: expected {}, got {}",
+                            entry.size_bytes, actual_size
+                        )),
+                    });
+                } else if !ct_eq_bytes(actual_hash.as_bytes(), entry.sha256.as_bytes()) {
                     results.push(ArtifactVerificationResult {
                         artifact_name: name.clone(),
                         passed: false,
@@ -529,6 +566,13 @@ pub fn collect_threshold_signatures(
     key_ring: &KeyRing,
     required: usize,
 ) -> Result<Vec<PartialSignature>, ArtifactSigningError> {
+    if required == 0 {
+        return Err(ArtifactSigningError::ThresholdNotMet {
+            required,
+            provided: 0,
+        });
+    }
+
     let mut valid: Vec<PartialSignature> = Vec::new();
     let mut seen_keys = std::collections::BTreeSet::new();
 
@@ -680,6 +724,16 @@ mod tests {
     }
 
     #[test]
+    fn test_verify_rejects_truncated_signature_bytes() {
+        let sk = demo_signing_key();
+        let vk = sk.verifying_key();
+        let mut sig = sign_bytes(&sk, b"payload");
+        sig.truncate(31);
+
+        assert!(verify_signature(&vk, b"payload", &sig).is_err());
+    }
+
+    #[test]
     fn test_build_and_sign_manifest() {
         let sk = demo_signing_key();
         let artifacts = vec![("bin.tar.gz", b"binary content" as &[u8])];
@@ -792,6 +846,34 @@ mod tests {
                 .unwrap()
                 .contains("signature missing")
         );
+    }
+
+    #[test]
+    fn test_verify_release_rejects_manifest_signed_by_unknown_key() {
+        let known = demo_signing_key();
+        let unknown = demo_signing_key_2();
+        let mut ring = KeyRing::new();
+        ring.add_key(known.verifying_key());
+        let content = b"release binary v1.0";
+        let name = "franken-node-v1.0.tar.gz";
+        let manifest = build_and_sign_manifest(&[(name, content as &[u8])], &unknown);
+
+        let mut arts = BTreeMap::new();
+        arts.insert(name.to_string(), content.to_vec());
+        let mut sigs = BTreeMap::new();
+        sigs.insert(name.to_string(), sign_artifact(&unknown, content));
+
+        let report = verify_release(&manifest, &arts, &sigs, &ring);
+        assert!(!report.manifest_signature_ok);
+        assert!(!report.overall_pass);
+        assert!(report.results.iter().any(|result| {
+            result.artifact_name == name
+                && !result.passed
+                && result
+                    .failure_reason
+                    .as_deref()
+                    .is_some_and(|reason| reason.contains("detached signature invalid"))
+        }));
     }
 
     #[test]
@@ -1036,30 +1118,36 @@ mod tests {
 
     #[test]
     fn parse_canonical_rejects_path_traversal() {
-        let malicious = "e3b0c44  ../../../etc/passwd  1024\n";
-        let parsed = ChecksumManifest::parse_canonical(malicious);
+        let hash = "a".repeat(64);
+        let malicious = format!("{hash}  ../../../etc/passwd  1024\n");
+        let parsed = ChecksumManifest::parse_canonical(&malicious);
         assert!(parsed.is_empty(), "should reject .. traversal");
     }
 
     #[test]
     fn parse_canonical_rejects_absolute_path() {
-        let malicious = "e3b0c44  /etc/passwd  1024\n";
-        let parsed = ChecksumManifest::parse_canonical(malicious);
+        let hash = "a".repeat(64);
+        let malicious = format!("{hash}  /etc/passwd  1024\n");
+        let parsed = ChecksumManifest::parse_canonical(&malicious);
         assert!(parsed.is_empty(), "should reject absolute paths");
     }
 
     #[test]
     fn parse_canonical_rejects_backslash_path() {
-        let malicious = "e3b0c44  ..\\..\\windows\\system32  1024\n";
-        let parsed = ChecksumManifest::parse_canonical(malicious);
+        let hash = "a".repeat(64);
+        let malicious = format!("{hash}  ..\\..\\windows\\system32  1024\n");
+        let parsed = ChecksumManifest::parse_canonical(&malicious);
         assert!(parsed.is_empty(), "should reject backslash paths");
     }
 
     #[test]
     fn parse_canonical_accepts_clean_names() {
-        let valid = "e3b0c44  release/artifact.tar.gz  1024\n\
-                     d41d8cd  checksums.txt  512\n";
-        let parsed = ChecksumManifest::parse_canonical(valid);
+        let first_hash = "a".repeat(64);
+        let second_hash = "b".repeat(64);
+        let valid = format!(
+            "{first_hash}  release/artifact.tar.gz  1024\n{second_hash}  checksums.txt  512\n"
+        );
+        let parsed = ChecksumManifest::parse_canonical(&valid);
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].name, "release/artifact.tar.gz");
         assert_eq!(parsed[1].name, "checksums.txt");
@@ -1067,8 +1155,9 @@ mod tests {
 
     #[test]
     fn parse_canonical_rejects_invalid_size() {
-        let malicious = "e3b0c44  legit.bin  not_a_number\n";
-        let parsed = ChecksumManifest::parse_canonical(malicious);
+        let hash = "a".repeat(64);
+        let malicious = format!("{hash}  legit.bin  not_a_number\n");
+        let parsed = ChecksumManifest::parse_canonical(&malicious);
         assert!(
             parsed.is_empty(),
             "should reject entries with unparseable size"
@@ -1077,11 +1166,759 @@ mod tests {
 
     #[test]
     fn parse_canonical_rejects_negative_size() {
-        let malicious = "e3b0c44  legit.bin  -42\n";
-        let parsed = ChecksumManifest::parse_canonical(malicious);
+        let hash = "a".repeat(64);
+        let malicious = format!("{hash}  legit.bin  -42\n");
+        let parsed = ChecksumManifest::parse_canonical(&malicious);
         assert!(
             parsed.is_empty(),
             "should reject entries with negative size"
         );
+    }
+
+    #[test]
+    fn parse_canonical_rejects_short_sha256() {
+        let parsed = ChecksumManifest::parse_canonical("e3b0c44  artifact.bin  1024\n");
+        assert!(parsed.is_empty(), "sha256 must be the full 64 hex chars");
+    }
+
+    #[test]
+    fn parse_canonical_rejects_non_hex_sha256() {
+        let hash = "g".repeat(64);
+        let parsed = ChecksumManifest::parse_canonical(&format!("{hash}  artifact.bin  1024\n"));
+        assert!(parsed.is_empty(), "sha256 must contain only hex characters");
+    }
+
+    #[test]
+    fn parse_canonical_accepts_uppercase_sha256_hex() {
+        let hash = "A".repeat(64);
+        let parsed = ChecksumManifest::parse_canonical(&format!("{hash}  artifact.bin  1024\n"));
+        assert_eq!(parsed.len(), 1);
+        assert!(ct_eq_bytes(parsed[0].sha256.as_bytes(), hash.as_bytes()));
+    }
+
+    #[test]
+    fn parse_canonical_rejects_empty_artifact_name() {
+        let hash = "a".repeat(64);
+        let parsed = ChecksumManifest::parse_canonical(&format!("{hash}    1024\n"));
+        assert!(parsed.is_empty(), "artifact name must not be empty");
+    }
+
+    #[test]
+    fn parse_canonical_rejects_dot_artifact_segments() {
+        let hash = "a".repeat(64);
+        for name in [
+            "./artifact.bin",
+            "release/./artifact.bin",
+            "release//artifact.bin",
+        ] {
+            let parsed = ChecksumManifest::parse_canonical(&format!("{hash}  {name}  1024\n"));
+            assert!(
+                parsed.is_empty(),
+                "artifact name `{name}` must be normalized"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_canonical_rejects_non_digit_size_syntax() {
+        let hash = "a".repeat(64);
+        for size in ["+42", "42 ", " 42", "4_2"] {
+            let parsed =
+                ChecksumManifest::parse_canonical(&format!("{hash}  artifact.bin  {size}\n"));
+            assert!(
+                parsed.is_empty(),
+                "size `{size}` must be canonical digits only"
+            );
+        }
+    }
+
+    #[test]
+    fn sha256_hex_uses_artifact_signing_domain_separator() {
+        let plain_digest = Sha256::digest(b"release payload");
+        let domain_digest = sha256_hex(b"release payload");
+        let plain_digest = hex::encode(plain_digest);
+        assert!(!ct_eq_bytes(
+            domain_digest.as_bytes(),
+            plain_digest.as_bytes()
+        ));
+    }
+
+    #[test]
+    fn key_id_uses_artifact_signing_domain_separator() {
+        let vk = demo_signing_key().verifying_key();
+        let plain_digest = Sha256::digest(vk.as_bytes());
+        let plain_key_id = hex::encode(&plain_digest[..8]);
+        let domain_key_id = KeyId::from_verifying_key(&vk).0;
+        assert!(!ct_eq_bytes(
+            domain_key_id.as_bytes(),
+            plain_key_id.as_bytes()
+        ));
+    }
+
+    #[test]
+    fn key_transition_canonical_bytes_include_domain_separator() {
+        let record =
+            create_key_transition(&demo_signing_key(), &demo_signing_key_2().verifying_key());
+        assert!(
+            record
+                .canonical_bytes()
+                .starts_with(b"artifact_signing_transition_v1:")
+        );
+    }
+
+    #[test]
+    fn verify_release_rejects_signed_size_metadata_mismatch() {
+        let (sk, _vk, ring) = setup_keys();
+        let content = b"release binary v1.0";
+        let name = "franken-node-v1.0.tar.gz";
+        let mut manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
+        manifest
+            .entries
+            .get_mut(name)
+            .expect("manifest entry should exist")
+            .size_bytes = len_to_u64(content.len()).saturating_add(1);
+        manifest.signature = sign_bytes(&sk, &manifest.canonical_bytes());
+
+        let mut arts = BTreeMap::new();
+        arts.insert(name.to_string(), content.to_vec());
+        let mut sigs = BTreeMap::new();
+        sigs.insert(name.to_string(), sign_artifact(&sk, content));
+
+        let report = verify_release(&manifest, &arts, &sigs, &ring);
+        assert!(report.manifest_signature_ok);
+        assert!(!report.overall_pass);
+        assert!(
+            report.results[0]
+                .failure_reason
+                .as_ref()
+                .expect("failure reason should be present")
+                .contains("size mismatch")
+        );
+    }
+
+    #[test]
+    fn verify_release_bad_manifest_signature_fails_overall_with_passing_artifact_result() {
+        let (sk, _vk, ring) = setup_keys();
+        let content = b"release binary v1.0";
+        let name = "franken-node-v1.0.tar.gz";
+        let mut manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
+        manifest.signature[0] ^= 0xff;
+
+        let mut arts = BTreeMap::new();
+        arts.insert(name.to_string(), content.to_vec());
+        let mut sigs = BTreeMap::new();
+        sigs.insert(name.to_string(), sign_artifact(&sk, content));
+
+        let report = verify_release(&manifest, &arts, &sigs, &ring);
+        assert!(!report.manifest_signature_ok);
+        assert!(!report.overall_pass);
+        assert_eq!(report.results.len(), 1);
+        assert!(report.results[0].passed);
+    }
+
+    #[test]
+    fn collect_threshold_rejects_zero_required_even_with_valid_signature() {
+        let sk = demo_signing_key();
+        let mut ring = KeyRing::new();
+        let kid = ring.add_key(sk.verifying_key());
+        let data = b"threshold payload";
+        let partials = vec![PartialSignature {
+            key_id: kid,
+            signature: sign_bytes(&sk, data),
+        }];
+
+        let err = collect_threshold_signatures(data, &partials, &ring, 0)
+            .expect_err("zero threshold must be rejected");
+        assert!(matches!(
+            err,
+            ArtifactSigningError::ThresholdNotMet {
+                required: 0,
+                provided: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn verify_release_rejects_detached_signature_for_wrong_payload() {
+        let (sk, _vk, ring) = setup_keys();
+        let content = b"release binary v1.0";
+        let name = "franken-node-v1.0.tar.gz";
+        let manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
+
+        let mut arts = BTreeMap::new();
+        arts.insert(name.to_string(), content.to_vec());
+        let mut sigs = BTreeMap::new();
+        sigs.insert(name.to_string(), sign_artifact(&sk, b"different bytes"));
+
+        let report = verify_release(&manifest, &arts, &sigs, &ring);
+        assert!(report.manifest_signature_ok);
+        assert!(!report.overall_pass);
+        assert!(
+            report.results[0]
+                .failure_reason
+                .as_ref()
+                .expect("failure reason should be present")
+                .contains("detached signature invalid")
+        );
+    }
+
+    #[test]
+    fn collect_threshold_rejects_unknown_key_with_valid_signature_bytes() {
+        let sk = demo_signing_key();
+        let ring = KeyRing::new();
+        let data = b"threshold payload";
+        let partials = vec![PartialSignature {
+            key_id: KeyId::from_verifying_key(&sk.verifying_key()),
+            signature: sign_bytes(&sk, data),
+        }];
+
+        let err = collect_threshold_signatures(data, &partials, &ring, 1)
+            .expect_err("unknown signer must not satisfy threshold");
+        assert!(matches!(
+            err,
+            ArtifactSigningError::ThresholdNotMet {
+                required: 1,
+                provided: 0
+            }
+        ));
+    }
+
+    #[test]
+    fn key_transition_rejects_rebound_new_public_key() {
+        let sk1 = demo_signing_key();
+        let sk2 = demo_signing_key_2();
+        let mut ring = KeyRing::new();
+        ring.add_key(sk1.verifying_key());
+        let mut record = create_key_transition(&sk1, &sk2.verifying_key());
+        assert!(verify_key_transition(&record, &ring).is_ok());
+
+        record.new_public_key_bytes[0] ^= 0x01;
+
+        assert!(matches!(
+            verify_key_transition(&record, &ring),
+            Err(ArtifactSigningError::TransitionRecordInvalid)
+        ));
+    }
+
+    #[test]
+    fn mr_manifest_canonical_bytes_are_artifact_order_invariant() {
+        let sk = demo_signing_key();
+        let forward: Vec<(&str, &[u8])> = vec![
+            ("zeta.bin", b"zeta payload"),
+            ("alpha.bin", b"alpha payload"),
+            ("middle.bin", b"middle payload"),
+        ];
+        let reverse: Vec<(&str, &[u8])> = vec![
+            ("middle.bin", b"middle payload"),
+            ("alpha.bin", b"alpha payload"),
+            ("zeta.bin", b"zeta payload"),
+        ];
+
+        let forward_manifest = build_and_sign_manifest(&forward, &sk);
+        let reverse_manifest = build_and_sign_manifest(&reverse, &sk);
+
+        assert_eq!(
+            forward_manifest.canonical_bytes(),
+            reverse_manifest.canonical_bytes()
+        );
+        assert!(ct_eq_bytes(
+            forward_manifest.signature.as_slice(),
+            reverse_manifest.signature.as_slice()
+        ));
+        assert_eq!(
+            forward_manifest
+                .entries
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["alpha.bin", "middle.bin", "zeta.bin"]
+        );
+    }
+
+    #[test]
+    fn mr_parse_canonical_is_invariant_to_invalid_line_insertions() {
+        let sk = demo_signing_key();
+        let manifest = build_and_sign_manifest(
+            &[
+                ("alpha.bin", b"alpha payload" as &[u8]),
+                ("beta.bin", b"beta payload" as &[u8]),
+            ],
+            &sk,
+        );
+        let clean =
+            String::from_utf8(manifest.canonical_bytes()).expect("canonical manifest must be utf8");
+        let bad_hash = "g".repeat(64);
+        let traversal_hash = "b".repeat(64);
+        let noisy = format!(
+            "not even close\n{bad_hash}  ignored.bin  10\n{traversal_hash}  ../escape.bin  10\n{clean}{traversal_hash}  signed.bin  -1\n"
+        );
+
+        let clean_entries = ChecksumManifest::parse_canonical(&clean);
+        let noisy_entries = ChecksumManifest::parse_canonical(&noisy);
+
+        assert_eq!(clean_entries, noisy_entries);
+    }
+
+    #[test]
+    fn mr_verify_release_is_artifact_map_insertion_order_invariant() {
+        let (sk, _vk, ring) = setup_keys();
+        let alpha = b"alpha release";
+        let beta = b"beta release";
+        let manifest = build_and_sign_manifest(
+            &[
+                ("alpha.tar.gz", alpha as &[u8]),
+                ("beta.tar.gz", beta as &[u8]),
+            ],
+            &sk,
+        );
+
+        let mut forward_artifacts = BTreeMap::new();
+        forward_artifacts.insert("alpha.tar.gz".to_string(), alpha.to_vec());
+        forward_artifacts.insert("beta.tar.gz".to_string(), beta.to_vec());
+        let mut reverse_artifacts = BTreeMap::new();
+        reverse_artifacts.insert("beta.tar.gz".to_string(), beta.to_vec());
+        reverse_artifacts.insert("alpha.tar.gz".to_string(), alpha.to_vec());
+
+        let mut forward_sigs = BTreeMap::new();
+        forward_sigs.insert("alpha.tar.gz".to_string(), sign_artifact(&sk, alpha));
+        forward_sigs.insert("beta.tar.gz".to_string(), sign_artifact(&sk, beta));
+        let mut reverse_sigs = BTreeMap::new();
+        reverse_sigs.insert("beta.tar.gz".to_string(), sign_artifact(&sk, beta));
+        reverse_sigs.insert("alpha.tar.gz".to_string(), sign_artifact(&sk, alpha));
+
+        let forward_report = verify_release(&manifest, &forward_artifacts, &forward_sigs, &ring);
+        let reverse_report = verify_release(&manifest, &reverse_artifacts, &reverse_sigs, &ring);
+
+        assert_eq!(forward_report.overall_pass, reverse_report.overall_pass);
+        assert_eq!(forward_report.results, reverse_report.results);
+        assert!(forward_report.overall_pass);
+    }
+
+    #[test]
+    fn mr_unlisted_artifact_injection_only_adds_unlisted_failure() {
+        let (sk, _vk, ring) = setup_keys();
+        let content = b"release binary";
+        let name = "listed.tar.gz";
+        let manifest = build_and_sign_manifest(&[(name, content as &[u8])], &sk);
+
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(name.to_string(), content.to_vec());
+        let mut sigs = BTreeMap::new();
+        sigs.insert(name.to_string(), sign_artifact(&sk, content));
+        let base_report = verify_release(&manifest, &artifacts, &sigs, &ring);
+        assert!(base_report.overall_pass);
+
+        artifacts.insert("injected.tar.gz".to_string(), b"injected payload".to_vec());
+        let injected_report = verify_release(&manifest, &artifacts, &sigs, &ring);
+
+        assert!(!injected_report.overall_pass);
+        assert!(injected_report.results.iter().any(|result| {
+            result.artifact_name == name && result.passed && result.failure_reason.is_none()
+        }));
+        assert!(injected_report.results.iter().any(|result| {
+            result.artifact_name == "injected.tar.gz"
+                && !result.passed
+                && result.failure_reason.as_deref() == Some("unlisted artifact")
+        }));
+    }
+
+    #[test]
+    fn mr_artifact_rename_preserves_content_hash_but_rebinds_manifest_identity() {
+        let (sk, _vk, ring) = setup_keys();
+        let content = b"same release bytes";
+        let first_name = "linux.tar.gz";
+        let second_name = "darwin.tar.gz";
+
+        let first_manifest = build_and_sign_manifest(&[(first_name, content as &[u8])], &sk);
+        let second_manifest = build_and_sign_manifest(&[(second_name, content as &[u8])], &sk);
+        let first_entry = first_manifest
+            .entries
+            .get(first_name)
+            .expect("first manifest entry should exist");
+        let second_entry = second_manifest
+            .entries
+            .get(second_name)
+            .expect("second manifest entry should exist");
+
+        assert!(ct_eq_bytes(
+            first_entry.sha256.as_bytes(),
+            second_entry.sha256.as_bytes()
+        ));
+        assert_ne!(
+            first_manifest.canonical_bytes(),
+            second_manifest.canonical_bytes()
+        );
+
+        let mut artifacts = BTreeMap::new();
+        artifacts.insert(second_name.to_string(), content.to_vec());
+        let mut sigs = BTreeMap::new();
+        sigs.insert(second_name.to_string(), sign_artifact(&sk, content));
+        let report = verify_release(&second_manifest, &artifacts, &sigs, &ring);
+        assert!(report.overall_pass);
+    }
+
+    #[test]
+    fn mr_threshold_signature_order_does_not_change_three_of_three_success() {
+        let sk1 = demo_signing_key();
+        let sk2 = demo_signing_key_2();
+        let sk3 = demo_signing_key_3();
+        let mut ring = KeyRing::new();
+        let kid1 = ring.add_key(sk1.verifying_key());
+        let kid2 = ring.add_key(sk2.verifying_key());
+        let kid3 = ring.add_key(sk3.verifying_key());
+        let data = b"threshold order payload";
+        let forward = vec![
+            PartialSignature {
+                key_id: kid1.clone(),
+                signature: sign_bytes(&sk1, data),
+            },
+            PartialSignature {
+                key_id: kid2.clone(),
+                signature: sign_bytes(&sk2, data),
+            },
+            PartialSignature {
+                key_id: kid3.clone(),
+                signature: sign_bytes(&sk3, data),
+            },
+        ];
+        let reverse = vec![
+            PartialSignature {
+                key_id: kid3.clone(),
+                signature: sign_bytes(&sk3, data),
+            },
+            PartialSignature {
+                key_id: kid2.clone(),
+                signature: sign_bytes(&sk2, data),
+            },
+            PartialSignature {
+                key_id: kid1.clone(),
+                signature: sign_bytes(&sk1, data),
+            },
+        ];
+
+        let forward_keys = collect_threshold_signatures(data, &forward, &ring, 3)
+            .expect("forward order should satisfy threshold")
+            .into_iter()
+            .map(|partial| partial.key_id)
+            .collect::<std::collections::BTreeSet<_>>();
+        let reverse_keys = collect_threshold_signatures(data, &reverse, &ring, 3)
+            .expect("reverse order should satisfy threshold")
+            .into_iter()
+            .map(|partial| partial.key_id)
+            .collect::<std::collections::BTreeSet<_>>();
+
+        assert_eq!(forward_keys, reverse_keys);
+        assert!(verify_threshold(data, &forward, &ring, 3));
+        assert!(verify_threshold(data, &reverse, &ring, 3));
+    }
+
+    #[test]
+    fn mr_threshold_noise_signatures_do_not_break_sufficient_valid_set() {
+        let sk1 = demo_signing_key();
+        let sk2 = demo_signing_key_2();
+        let mut ring = KeyRing::new();
+        let kid1 = ring.add_key(sk1.verifying_key());
+        let kid2 = ring.add_key(sk2.verifying_key());
+        let data = b"threshold noisy payload";
+        let clean = vec![
+            PartialSignature {
+                key_id: kid1.clone(),
+                signature: sign_bytes(&sk1, data),
+            },
+            PartialSignature {
+                key_id: kid2.clone(),
+                signature: sign_bytes(&sk2, data),
+            },
+        ];
+        let noisy = vec![
+            PartialSignature {
+                key_id: KeyId("unknown-key".to_string()),
+                signature: vec![0u8; 64],
+            },
+            PartialSignature {
+                key_id: kid1.clone(),
+                signature: sign_bytes(&sk1, b"wrong payload"),
+            },
+            PartialSignature {
+                key_id: kid1.clone(),
+                signature: sign_bytes(&sk1, data),
+            },
+            PartialSignature {
+                key_id: kid2.clone(),
+                signature: sign_bytes(&sk2, data),
+            },
+        ];
+
+        assert!(verify_threshold(data, &clean, &ring, 2));
+        assert!(verify_threshold(data, &noisy, &ring, 2));
+    }
+
+    #[test]
+    fn mr_duplicate_valid_signature_does_not_increase_unique_threshold_count() {
+        let sk = demo_signing_key();
+        let mut ring = KeyRing::new();
+        let kid = ring.add_key(sk.verifying_key());
+        let data = b"threshold duplicate payload";
+        let duplicate_partials = vec![
+            PartialSignature {
+                key_id: kid.clone(),
+                signature: sign_bytes(&sk, data),
+            },
+            PartialSignature {
+                key_id: kid,
+                signature: sign_bytes(&sk, data),
+            },
+        ];
+
+        let err = collect_threshold_signatures(data, &duplicate_partials, &ring, 2)
+            .expect_err("duplicate signer must not satisfy a two-key threshold");
+        assert!(matches!(
+            err,
+            ArtifactSigningError::ThresholdNotMet {
+                required: 2,
+                provided: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn mr_key_transition_timestamp_rebinding_invalidates_signature() {
+        let sk1 = demo_signing_key();
+        let sk2 = demo_signing_key_2();
+        let mut ring = KeyRing::new();
+        ring.add_key(sk1.verifying_key());
+        let mut record = create_key_transition(&sk1, &sk2.verifying_key());
+        assert!(verify_key_transition(&record, &ring).is_ok());
+
+        record.timestamp = record.timestamp.saturating_add(1);
+
+        assert!(matches!(
+            verify_key_transition(&record, &ring),
+            Err(ArtifactSigningError::TransitionRecordInvalid)
+        ));
+    }
+
+    #[test]
+    fn mr_push_bounded_preserves_latest_window_and_handles_zero_capacity() {
+        let mut items = vec![1, 2, 3];
+        push_bounded(&mut items, 4, 3);
+        assert_eq!(items, vec![2, 3, 4]);
+
+        push_bounded(&mut items, 5, 0);
+        assert!(items.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod artifact_signing_boundary_negative_tests {
+    use super::*;
+
+    fn malicious_signer() -> ArtifactSigner {
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        ArtifactSigner::new(signing_key)
+    }
+
+    #[test]
+    fn negative_sign_artifact_rejects_empty_artifact_id() {
+        let mut signer = malicious_signer();
+
+        let result = signer.sign_artifact("", b"artifact-data", "trace-empty-id");
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_sign_artifact_rejects_artifact_id_with_control_characters() {
+        let mut signer = malicious_signer();
+
+        let result = signer.sign_artifact(
+            "artifact\n\r\t",
+            b"artifact-data",
+            "trace-control-chars"
+        );
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_sign_artifact_rejects_artifact_id_with_nul_bytes() {
+        let mut signer = malicious_signer();
+
+        let result = signer.sign_artifact(
+            "artifact\0injection",
+            b"artifact-data",
+            "trace-nul-bytes"
+        );
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::InvalidArtifactId { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_sign_artifact_rejects_empty_trace_id() {
+        let mut signer = malicious_signer();
+
+        let result = signer.sign_artifact("artifact-valid", b"artifact-data", "");
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::InvalidTraceId)
+        ));
+    }
+
+    #[test]
+    fn negative_sign_artifact_handles_extremely_large_artifact_data() {
+        let mut signer = malicious_signer();
+        let large_data = vec![0x42; 10_000_000]; // 10MB artifact
+
+        let result = signer.sign_artifact("large-artifact", &large_data, "trace-large");
+
+        // Should handle large data gracefully
+        match result {
+            Ok(signature) => {
+                // If signing succeeds, signature should be valid
+                assert!(!signature.signature_hex.is_empty());
+                assert_eq!(signature.artifact_id, "large-artifact");
+            }
+            Err(ArtifactSigningError::SigningFailed) => {
+                // Failure due to size limits is acceptable
+            }
+            Err(other) => panic!("unexpected error for large data: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_verify_signature_rejects_invalid_signature_length() {
+        let signer = malicious_signer();
+        let verifying_key = signer.verifying_key();
+
+        let invalid_signature = ArtifactSignature {
+            artifact_id: "test-artifact".to_string(),
+            checksum_sha256: "checksum".to_string(),
+            signature_hex: "invalid".to_string(), // Too short
+            timestamp: 1000,
+        };
+
+        let result = verify_signature(&invalid_signature, b"data", &verifying_key);
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::VerificationFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_verify_signature_rejects_non_hex_signature() {
+        let signer = malicious_signer();
+        let verifying_key = signer.verifying_key();
+
+        let invalid_signature = ArtifactSignature {
+            artifact_id: "test-artifact".to_string(),
+            checksum_sha256: "checksum".to_string(),
+            signature_hex: "z".repeat(128), // Non-hex characters
+            timestamp: 1000,
+        };
+
+        let result = verify_signature(&invalid_signature, b"data", &verifying_key);
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::VerificationFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_verify_signature_rejects_mismatched_checksum() {
+        let mut signer = malicious_signer();
+        let verifying_key = signer.verifying_key();
+        let data = b"original-data";
+
+        // Create valid signature for original data
+        let signature = signer.sign_artifact("test-artifact", data, "trace-mismatch")
+            .expect("signing should succeed");
+
+        // Try to verify with different data
+        let different_data = b"tampered-data";
+        let result = verify_signature(&signature, different_data, &verifying_key);
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::ChecksumMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_create_key_ring_rejects_empty_keys_list() {
+        let result = create_key_ring(vec![], 1);
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::InvalidKeyRing { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_create_key_ring_rejects_threshold_greater_than_key_count() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = key.verifying_key();
+
+        let result = create_key_ring(vec![verifying_key], 2); // Threshold > key count
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::InvalidKeyRing { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_create_key_ring_rejects_zero_threshold() {
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = key.verifying_key();
+
+        let result = create_key_ring(vec![verifying_key], 0); // Zero threshold
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::InvalidKeyRing { .. })
+        ));
+    }
+
+    #[test]
+    fn negative_verify_key_transition_rejects_future_timestamp() {
+        let old_key = SigningKey::generate(&mut rand::thread_rng());
+        let new_key = SigningKey::generate(&mut rand::thread_rng());
+        let key_ring = create_key_ring(vec![old_key.verifying_key()], 1)
+            .expect("key ring creation");
+
+        let future_timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("time")
+            .as_secs()
+            .saturating_add(86400); // 1 day in future
+
+        let mut record = create_key_transition_record(&old_key, &new_key, future_timestamp)
+            .expect("transition record creation");
+
+        let result = verify_key_transition(&record, &key_ring);
+
+        assert!(matches!(
+            result,
+            Err(ArtifactSigningError::TransitionRecordInvalid)
+        ));
+    }
+
+    #[test]
+    fn negative_serde_rejects_unknown_artifact_signing_error_variant() {
+        let result: Result<ArtifactSigningError, _> = serde_json::from_str(r#""UnknownError""#);
+
+        assert!(result.is_err());
     }
 }

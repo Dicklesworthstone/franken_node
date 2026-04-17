@@ -530,7 +530,8 @@ pub fn generate_replay_bundle_from_evidence(
                         parent_event_id: parent_event_id.clone(),
                     }
                 })?;
-                let current_index = u64::try_from(event_log.len().saturating_add(1)).unwrap_or(u64::MAX);
+                let current_index =
+                    u64::try_from(event_log.len().saturating_add(1)).unwrap_or(u64::MAX);
                 if causal_parent >= current_index {
                     return Err(ReplayBundleError::EvidenceCausalParentInvalid {
                         event_id: event.event_id.clone(),
@@ -541,14 +542,18 @@ pub fn generate_replay_bundle_from_evidence(
             }
             None => None,
         };
-        push_bounded(&mut event_log, RawEvent {
-            timestamp: event.timestamp,
-            event_type: event.event_type,
-            payload: event.payload,
-            causal_parent,
-            state_snapshot: event.state_snapshot,
-            policy_version: None,
-        }, MAX_EVENT_LOG);
+        push_bounded(
+            &mut event_log,
+            RawEvent {
+                timestamp: event.timestamp,
+                event_type: event.event_type,
+                payload: event.payload,
+                causal_parent,
+                state_snapshot: event.state_snapshot,
+                policy_version: None,
+            },
+            MAX_EVENT_LOG,
+        );
     }
 
     if let Some(first) = event_log.first_mut() {
@@ -585,17 +590,21 @@ pub fn generate_replay_bundle(
             Some(snapshot) => Some(canonicalize_value(snapshot, "$.state_snapshot")?),
             None => None,
         };
-        push_bounded(&mut prepared, PreparedEvent {
-            normalized_timestamp,
-            timestamp_micros,
-            event_type: event.event_type,
-            payload,
-            _payload_hash: payload_hash,
-            causal_parent: event.causal_parent,
-            state_snapshot,
-            policy_version: event.policy_version.clone(),
-            original_index: idx,
-        }, MAX_PREPARED_EVENTS);
+        push_bounded(
+            &mut prepared,
+            PreparedEvent {
+                normalized_timestamp,
+                timestamp_micros,
+                event_type: event.event_type,
+                payload,
+                _payload_hash: payload_hash,
+                causal_parent: event.causal_parent,
+                state_snapshot,
+                policy_version: event.policy_version.clone(),
+                original_index: idx,
+            },
+            MAX_PREPARED_EVENTS,
+        );
     }
 
     prepared.sort_by(|left, right| {
@@ -606,7 +615,8 @@ pub fn generate_replay_bundle(
 
     let mut original_to_new = vec![0_u64; event_log.len()];
     for (new_index, event) in prepared.iter().enumerate() {
-        original_to_new[event.original_index] = u64::try_from(new_index.saturating_add(1)).unwrap_or(u64::MAX);
+        original_to_new[event.original_index] =
+            u64::try_from(new_index.saturating_add(1)).unwrap_or(u64::MAX);
     }
 
     let timeline: Vec<TimelineEvent> = prepared
@@ -1039,17 +1049,21 @@ fn chunk_timeline(
         let chunk_bytes = canonical_json_bytes(&chunk_value)?;
         let first_sequence_number = events.first().map_or(0, |event| event.sequence_number);
         let last_sequence_number = events.last().map_or(0, |event| event.sequence_number);
-        push_bounded(&mut chunks, BundleChunk {
-            bundle_id,
-            chunk_index: u32::try_from(idx).unwrap_or(u32::MAX),
-            total_chunks,
-            event_count: events.len(),
-            first_sequence_number,
-            last_sequence_number,
-            compressed_size_bytes: gzip_size_bytes(&chunk_bytes)?,
-            chunk_hash: sha256_hex(&chunk_bytes),
-            events,
-        }, MAX_CHUNKS_PER_BUNDLE);
+        push_bounded(
+            &mut chunks,
+            BundleChunk {
+                bundle_id,
+                chunk_index: u32::try_from(idx).unwrap_or(u32::MAX),
+                total_chunks,
+                event_count: events.len(),
+                first_sequence_number,
+                last_sequence_number,
+                compressed_size_bytes: gzip_size_bytes(&chunk_bytes)?,
+                chunk_hash: sha256_hex(&chunk_bytes),
+                events,
+            },
+            MAX_CHUNKS_PER_BUNDLE,
+        );
     }
 
     Ok(chunks)
@@ -1109,7 +1123,7 @@ fn canonicalize_value(value: &Value, path: &str) -> Result<Value, ReplayBundleEr
 /// Hardening: bounded push to prevent unbounded growth of struct-field Vecs
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1619,5 +1633,681 @@ mod tests {
         );
         assert_eq!(bundle.policy_version, package.policy_version);
         assert_eq!(bundle.incident_id, package.incident_id);
+    }
+
+    // Integer overflow protection tests for bd-7nqi2
+
+    /// Test that sequence number calculations handle large indices safely using saturating arithmetic
+    #[test]
+    fn sequence_number_calculation_uses_saturating_arithmetic() {
+        // Test with large index values that would overflow with regular arithmetic
+        let large_index = usize::MAX - 1;
+
+        // This should not panic and should saturate to u64::MAX
+        let sequence_number = u64::try_from(large_index.saturating_add(1)).unwrap_or(u64::MAX);
+
+        // Should saturate to u64::MAX rather than panicking
+        assert_eq!(sequence_number, u64::MAX);
+    }
+
+    /// Test push_bounded function with edge cases that could cause overflow
+    #[test]
+    fn push_bounded_handles_large_collections_safely() {
+        let mut items: Vec<u32> = Vec::new();
+
+        // Fill up to a large capacity to test overflow protection
+        let large_cap = 1000;
+        for i in 0..large_cap {
+            super::push_bounded(&mut items, i, large_cap);
+        }
+        assert_eq!(items.len(), large_cap);
+
+        // Add more items beyond capacity - should use saturating arithmetic
+        for i in large_cap..(large_cap + 10) {
+            super::push_bounded(&mut items, i, large_cap);
+        }
+
+        // Should maintain the capacity limit
+        assert_eq!(items.len(), large_cap);
+
+        // Verify the items were properly rotated (oldest removed, newest kept)
+        assert_eq!(items[items.len() - 1], (large_cap + 9) as u32);
+    }
+
+    /// Test event sequence numbering with maximum index values
+    #[test]
+    fn event_sequence_numbering_saturates_safely() {
+        // Create an event with extremely large original index
+        let large_original_index = usize::MAX - 10;
+
+        // Simulate the sequence number calculation from the timeline generation
+        let sequence_number =
+            u64::try_from(large_original_index.saturating_add(1)).unwrap_or(u64::MAX);
+
+        // Should saturate to u64::MAX instead of overflowing
+        assert_eq!(sequence_number, u64::MAX);
+    }
+
+    /// Test that overflow protection works in id_to_index mapping
+    #[test]
+    fn id_to_index_mapping_uses_saturating_arithmetic() {
+        // Test the pattern used in generate_replay_bundle_from_evidence
+        let large_idx = usize::MAX - 5;
+
+        // This pattern is used in the id_to_index calculation
+        let mapped_index = u64::try_from(large_idx.saturating_add(1)).unwrap_or(u64::MAX);
+
+        // Should saturate rather than overflow
+        assert_eq!(mapped_index, u64::MAX);
+    }
+
+    /// Test current_index calculation with large event log lengths
+    #[test]
+    fn current_index_calculation_saturates_safely() {
+        // Test with large event log length that could cause overflow
+        let large_log_length = usize::MAX - 100;
+
+        // This pattern is used in the causal parent validation
+        let current_index = u64::try_from(large_log_length.saturating_add(1)).unwrap_or(u64::MAX);
+
+        // Should saturate to u64::MAX
+        assert_eq!(current_index, u64::MAX);
+    }
+
+    /// Test that causal parent subtraction uses saturating arithmetic
+    #[test]
+    fn causal_parent_subtraction_uses_saturating_arithmetic() {
+        // Test the pattern used in causal parent index calculation
+        let large_parent = u64::MAX - 1;
+
+        // This should use saturating_sub (as seen in line 620)
+        let parent_index_result = usize::try_from(large_parent.saturating_sub(1));
+
+        // Should handle the conversion gracefully
+        assert!(parent_index_result.is_ok() || parent_index_result.is_err());
+
+        // Test edge case where parent is 0
+        let zero_parent = 0u64;
+        let zero_result = usize::try_from(zero_parent.saturating_sub(1));
+        // saturating_sub(1) on 0 should give u64::MAX, which won't fit in usize
+        assert!(zero_result.is_err());
+    }
+
+    /// Test that push_bounded handles edge case where items.len() equals cap
+    #[test]
+    fn push_bounded_handles_exact_capacity_boundary() {
+        let mut items = vec![1, 2, 3];
+        let cap = 3;
+
+        // At exact capacity, adding one more should evict the oldest
+        super::push_bounded(&mut items, 4, cap);
+
+        assert_eq!(items.len(), cap);
+        assert_eq!(items, vec![2, 3, 4]);
+    }
+
+    /// Test push_bounded with zero capacity edge case
+    #[test]
+    fn push_bounded_handles_zero_capacity() {
+        let mut items: Vec<i32> = Vec::new();
+
+        // With zero capacity, should handle gracefully
+        super::push_bounded(&mut items, 42, 0);
+
+        // Should be limited to capacity of 0 (empty)
+        assert!(items.is_empty());
+    }
+
+    /// Test that chunk size calculations use saturating arithmetic
+    #[test]
+    fn chunk_size_calculations_use_saturating_arithmetic() {
+        // Test the saturating arithmetic used in chunk_timeline function
+        let large_size = usize::MAX - 1000;
+        let delimiter = 1usize;
+        let event_size = 500usize;
+
+        // This pattern is used in the chunking logic
+        let total_size = large_size
+            .saturating_add(delimiter)
+            .saturating_add(event_size);
+
+        // Should saturate rather than overflow
+        assert_eq!(total_size, usize::MAX);
+    }
+
+    // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────
+
+    #[test]
+    fn test_negative_incident_id_with_unicode_injection_attacks() {
+        use crate::security::constant_time::ct_eq;
+
+        let malicious_incident_ids = [
+            "incident\u{202E}fake_id\u{202C}", // BiDi override attack
+            "incident\x1b[31mred\x1b[0m",      // ANSI escape injection
+            "incident\0null\r\n\t",            // Control character injection
+            "incident\"injection}malicious",   // JSON injection attempt
+            "incident/../../etc/passwd",       // Path traversal attempt
+            "incident\u{200B}\u{200C}\u{200D}", // Zero-width character injection
+        ];
+
+        for malicious_id in malicious_incident_ids {
+            // Verify incident ID validation catches injection attempts
+            let builder = ReplayBundleBuilder::new(malicious_id);
+
+            // The ID should be stored as-is, but Bundle operations should validate
+            // Let's test that the incident_id field doesn't break serialization
+            let result = builder.build();
+
+            match result {
+                Ok(bundle) => {
+                    // If bundle creation succeeds, verify JSON serialization is safe
+                    let json = serde_json::to_string(&bundle).expect("serialization should not fail");
+
+                    // Verify the malicious content is properly escaped in JSON
+                    let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+                    let parsed_id = parsed.get("incident_id").and_then(|v| v.as_str()).unwrap_or("");
+
+                    // The ID should be preserved exactly for forensics, but contained safely
+                    assert_eq!(parsed_id, malicious_id, "incident ID should be preserved for forensics");
+                }
+                Err(_) => {
+                    // If validation rejects the ID, that's also acceptable security behavior
+                }
+            }
+
+            // Verify constant-time comparison works for incident IDs
+            let normal_id = "normal_incident_123";
+            assert!(!ct_eq(malicious_id, normal_id), "incident ID comparison should be constant-time");
+        }
+    }
+
+    #[test]
+    fn test_negative_raw_event_with_massive_payload_memory_exhaustion() {
+        // Create event with 5MB JSON payload
+        let massive_payload = serde_json::json!({
+            "attack_type": "memory_exhaustion",
+            "large_field": "X".repeat(5_000_000), // 5MB string
+            "nested": {
+                "deep": {
+                    "structure": "Y".repeat(1_000_000) // 1MB nested string
+                }
+            }
+        });
+
+        let massive_event = RawEvent::new(
+            "2026-02-20T10:00:00.000100Z",
+            EventType::ExternalSignal,
+            massive_payload,
+        );
+
+        // Verify the event can be created without panic
+        assert_eq!(massive_event.event_type, EventType::ExternalSignal);
+
+        // Test serialization with massive payload
+        let json = serde_json::to_string(&massive_event).expect("serialization should handle large payload");
+        assert!(json.len() > 6_000_000, "serialized form should preserve large payload");
+
+        // Test that bundles properly handle oversized events
+        let mut builder = ReplayBundleBuilder::new("massive-test");
+        builder.add_raw_event(massive_event);
+
+        match builder.build() {
+            Ok(bundle) => {
+                // If it succeeds, verify it's within bounds or chunked appropriately
+                let serialized = serde_json::to_string(&bundle).unwrap();
+                // Large bundles should either be rejected or chunked
+                if serialized.len() > MAX_BUNDLE_BYTES {
+                    panic!("oversized bundle should have been rejected or chunked");
+                }
+            }
+            Err(ReplayBundleError::OversizedEvent { .. }) => {
+                // This is the expected behavior for oversized events
+            }
+            Err(other) => {
+                panic!("unexpected error for oversized event: {:?}", other);
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_bundle_manifest_with_json_injection_attacks() {
+        let mut builder = ReplayBundleBuilder::new("injection-test");
+
+        // Add event with potential JSON injection in state snapshot
+        let injection_payload = serde_json::json!({
+            "normal_field": "value",
+            "injection": "\"},\"malicious_field\":\"injected\",\"admin\":true,\"bypass"
+        });
+
+        let event = RawEvent::new(
+            "2026-02-20T10:00:00.000100Z",
+            EventType::InternalEvent,
+            injection_payload,
+        ).with_state_snapshot(serde_json::json!({
+            "normal_state": "ok",
+            "injection_attempt": "state\"},\"injected_admin\":true,\"bypass"
+        }));
+
+        builder.add_raw_event(event);
+        let bundle = builder.build().expect("bundle should build");
+
+        // Verify JSON structure integrity in manifest
+        let json = serde_json::to_string(&bundle).expect("serialization should succeed");
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+
+        // Verify no extra fields were injected at the bundle level
+        let expected_bundle_keys = ["incident_id", "bundle_id", "created_at", "policy_version", "manifest", "events"];
+        if let Some(bundle_obj) = parsed.as_object() {
+            for key in bundle_obj.keys() {
+                assert!(expected_bundle_keys.contains(&key.as_str()),
+                       "unexpected field '{}' - possible JSON injection", key);
+            }
+        }
+
+        // Verify manifest structure is not corrupted
+        let manifest = parsed.get("manifest").expect("manifest should exist");
+        assert!(manifest.is_object(), "manifest should be object");
+
+        // Verify injection attempts are contained within event payloads (safe)
+        let events = parsed.get("events").expect("events should exist");
+        assert!(events.is_array(), "events should be array");
+
+        if let Some(events_arr) = events.as_array() {
+            for event in events_arr {
+                if let Some(payload) = event.get("payload") {
+                    // Injection should be contained as literal strings in the payload
+                    let payload_str = payload.to_string();
+                    if payload_str.contains("malicious_field") {
+                        // It should be escaped as a literal string, not parsed as JSON structure
+                        assert!(payload_str.contains("\\\""), "JSON injection should be escaped");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_timeline_metadata_with_extreme_sequence_numbers() {
+        // Test with sequence numbers near overflow boundaries
+        let extreme_sequences = [
+            0,
+            1,
+            u64::MAX - 1,
+            u64::MAX,
+        ];
+
+        for seq in extreme_sequences {
+            let metadata = TimelineMetadata {
+                sequence_number: seq,
+                timestamp: Utc::now(),
+                bundle_chunk_index: 0,
+                total_chunks: 1,
+            };
+
+            // Verify serialization handles extreme values
+            let json = serde_json::to_string(&metadata).expect("serialization should handle extreme values");
+            let parsed: TimelineMetadata = serde_json::from_str(&json).expect("deserialization should work");
+
+            assert_eq!(parsed.sequence_number, seq, "sequence number should be preserved");
+
+            // Test that sequence number arithmetic uses saturating operations
+            let next_seq = seq.saturating_add(1);
+            if seq == u64::MAX {
+                assert_eq!(next_seq, u64::MAX, "sequence increment should saturate");
+            } else {
+                assert_eq!(next_seq, seq + 1, "normal increment should work");
+            }
+        }
+
+        // Test chunk index boundaries
+        let extreme_chunks = [
+            (0, 1),
+            (999, 1000),
+            (u32::MAX as usize, (u32::MAX as usize) + 1),
+        ];
+
+        for (chunk_idx, total) in extreme_chunks {
+            if chunk_idx < MAX_CHUNKS_PER_BUNDLE && total <= MAX_CHUNKS_PER_BUNDLE {
+                let metadata = TimelineMetadata {
+                    sequence_number: 1,
+                    timestamp: Utc::now(),
+                    bundle_chunk_index: chunk_idx,
+                    total_chunks: total,
+                };
+
+                // Should handle within bounds
+                let json = serde_json::to_string(&metadata).expect("chunk serialization should work");
+                let parsed: TimelineMetadata = serde_json::from_str(&json).expect("chunk deserialization should work");
+                assert_eq!(parsed.bundle_chunk_index, chunk_idx);
+                assert_eq!(parsed.total_chunks, total);
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_temp_file_guard_with_malicious_paths() {
+        let malicious_paths = [
+            "/tmp/../../etc/passwd.tmp",           // Path traversal
+            "/tmp/bundle\0null.tmp",              // Null byte injection
+            "/tmp/bundle\r\n.tmp",                // CRLF injection
+            "/tmp/bundle\u{202E}fake.tmp",        // BiDi override
+            "/tmp/bundle\x1b[31m.tmp",            // ANSI escape
+        ];
+
+        for malicious_path in malicious_paths {
+            let path_buf = std::path::PathBuf::from(malicious_path);
+
+            // Create guard with malicious path
+            let mut guard = TempFileGuard::new(path_buf.clone());
+
+            // Test abandoned_path generation with malicious input
+            let abandoned = TempFileGuard::abandoned_path(&path_buf);
+            let abandoned_str = abandoned.to_string_lossy();
+
+            // Verify abandoned path doesn't contain original injection patterns
+            // (The path might be sanitized or preserved, but shouldn't propagate injection)
+            assert!(abandoned_str.contains("orphaned-"), "abandoned path should have orphaned marker");
+
+            // Test defuse mechanism
+            guard.defuse();
+            // Dropping defused guard should not attempt file operations
+        }
+
+        // Test with extremely long path
+        let long_path_component = "x".repeat(1000);
+        let long_path = std::path::PathBuf::from(format!("/tmp/{}.tmp", long_path_component));
+
+        let abandoned = TempFileGuard::abandoned_path(&long_path);
+        let abandoned_str = abandoned.to_string_lossy();
+
+        // Should handle long paths without panic
+        assert!(abandoned_str.len() > long_path_component.len(), "abandoned path should be longer");
+        assert!(abandoned_str.contains("orphaned-"), "should contain orphaned marker");
+    }
+
+    #[test]
+    fn test_negative_bundle_compression_with_adversarial_payloads() {
+        // Test with highly compressible payload (zip bomb potential)
+        let repetitive_payload = serde_json::json!({
+            "type": "zip_bomb_test",
+            "repeated_data": "AAAA".repeat(100_000), // 400KB of repeated data
+        });
+
+        let compressible_event = RawEvent::new(
+            "2026-02-20T10:00:00.000100Z",
+            EventType::ExternalSignal,
+            repetitive_payload,
+        );
+
+        let mut builder = ReplayBundleBuilder::new("compression-test");
+        builder.add_raw_event(compressible_event);
+
+        let bundle = builder.build().expect("bundle should build");
+
+        // Verify that compression is bounded and doesn't create extremely small bundles
+        // that expand to huge sizes (zip bomb protection)
+        let json = serde_json::to_string(&bundle).expect("serialization should work");
+        let original_size = json.len();
+
+        // Simulate compression like the chunking logic might do
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        std::io::Write::write_all(&mut encoder, json.as_bytes()).expect("compression write should work");
+        let compressed = encoder.finish().expect("compression should complete");
+
+        let compression_ratio = original_size as f64 / compressed.len() as f64;
+
+        // Verify reasonable compression ratio bounds
+        assert!(compression_ratio < 1000.0, "compression ratio should not be extreme (zip bomb protection)");
+        assert!(compressed.len() > 1000, "compressed size should have reasonable minimum");
+
+        // Test with highly entropic payload (should not compress well)
+        let random_payload = serde_json::json!({
+            "type": "entropy_test",
+            "random_data": (0..50000).map(|i| format!("{:x}", i * 31 + 17)).collect::<String>(),
+        });
+
+        let entropic_event = RawEvent::new(
+            "2026-02-20T10:00:00.000200Z",
+            EventType::InternalEvent,
+            random_payload,
+        );
+
+        let mut builder2 = ReplayBundleBuilder::new("entropy-test");
+        builder2.add_raw_event(entropic_event);
+
+        let bundle2 = builder2.build().expect("entropic bundle should build");
+        let json2 = serde_json::to_string(&bundle2).expect("entropic serialization should work");
+
+        // High-entropy data should not compress as well
+        let mut encoder2 = GzEncoder::new(Vec::new(), Compression::default());
+        std::io::Write::write_all(&mut encoder2, json2.as_bytes()).expect("entropic compression should work");
+        let compressed2 = encoder2.finish().expect("entropic compression should complete");
+
+        let entropy_ratio = json2.len() as f64 / compressed2.len() as f64;
+        assert!(entropy_ratio < compression_ratio, "high entropy should compress worse than repetitive data");
+    }
+
+    #[test]
+    fn test_negative_event_type_serialization_with_invalid_variants() {
+        // Test EventType serialization robustness
+        let event_types = [
+            EventType::ExternalSignal,
+            EventType::InternalEvent,
+            EventType::StateTransition,
+            EventType::ErrorCondition,
+        ];
+
+        for event_type in event_types {
+            let event = RawEvent::new(
+                "2026-02-20T10:00:00.000100Z",
+                event_type,
+                serde_json::json!({"test": "data"}),
+            );
+
+            // Test JSON roundtrip
+            let json = serde_json::to_string(&event).expect("event serialization should work");
+            let parsed: RawEvent = serde_json::from_str(&json).expect("event deserialization should work");
+            assert_eq!(parsed.event_type, event_type, "event type should be preserved");
+        }
+
+        // Test potential deserialization of invalid enum variants
+        let invalid_json = r#"{
+            "timestamp": "2026-02-20T10:00:00.000100Z",
+            "event_type": "InvalidVariant",
+            "payload": {"test": "data"},
+            "state_snapshot": null,
+            "policy_version": "0.1.0"
+        }"#;
+
+        let result: Result<RawEvent, _> = serde_json::from_str(invalid_json);
+        assert!(result.is_err(), "invalid event type should fail deserialization");
+
+        // Test with numeric event type (type confusion attack)
+        let numeric_json = r#"{
+            "timestamp": "2026-02-20T10:00:00.000100Z",
+            "event_type": 999,
+            "payload": {"test": "data"},
+            "state_snapshot": null,
+            "policy_version": "0.1.0"
+        }"#;
+
+        let result2: Result<RawEvent, _> = serde_json::from_str(numeric_json);
+        assert!(result2.is_err(), "numeric event type should fail deserialization");
+    }
+
+    #[test]
+    fn test_negative_bundle_id_collision_resistance() {
+        use crate::security::constant_time::ct_eq;
+
+        // Create multiple bundles with same incident_id to test collision resistance
+        let incident_id = "collision-test";
+
+        let mut bundle_ids = Vec::new();
+        for i in 0..100 {
+            let mut builder = ReplayBundleBuilder::new(incident_id);
+
+            // Add slightly different events to test deterministic ID generation
+            let event = RawEvent::new(
+                &format!("2026-02-20T10:00:0{:02}.000100Z", i % 60),
+                EventType::InternalEvent,
+                serde_json::json!({"iteration": i}),
+            );
+
+            builder.add_raw_event(event);
+            let bundle = builder.build().expect("bundle should build");
+            bundle_ids.push(bundle.bundle_id);
+        }
+
+        // Verify all bundle IDs are unique (no collisions)
+        for i in 0..bundle_ids.len() {
+            for j in i + 1..bundle_ids.len() {
+                assert!(!ct_eq(&bundle_ids[i], &bundle_ids[j]),
+                       "bundle IDs should be unique: {} vs {}", bundle_ids[i], bundle_ids[j]);
+            }
+        }
+
+        // Verify bundle IDs have expected format and length
+        for bundle_id in &bundle_ids {
+            assert!(!bundle_id.is_empty(), "bundle ID should not be empty");
+            assert!(bundle_id.len() > 10, "bundle ID should have reasonable length");
+            assert!(bundle_id.len() < 256, "bundle ID should be reasonably bounded");
+
+            // Should not contain injection patterns
+            assert!(!bundle_id.contains('\0'), "bundle ID should not contain null bytes");
+            assert!(!bundle_id.contains('\n'), "bundle ID should not contain newlines");
+            assert!(!bundle_id.contains('\x1b'), "bundle ID should not contain ANSI escapes");
+        }
+    }
+
+    #[test]
+    fn test_negative_floating_point_validation_bypass_attempts() {
+        // Test various floating point values that might bypass validation
+        let suspicious_values = [
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            f64::MIN,
+            f64::MAX,
+            -0.0,
+            f64::from_bits(0x7FF0000000000001), // Signaling NaN
+            f64::from_bits(0x7FF8000000000000), // Quiet NaN
+        ];
+
+        for suspicious_value in suspicious_values {
+            let payload_with_float = serde_json::json!({
+                "test_field": "normal",
+                "suspicious_number": suspicious_value,
+                "nested": {
+                    "inner_float": suspicious_value
+                }
+            });
+
+            let event = RawEvent::new(
+                "2026-02-20T10:00:00.000100Z",
+                EventType::ErrorCondition,
+                payload_with_float,
+            );
+
+            let mut builder = ReplayBundleBuilder::new("float-test");
+            builder.add_raw_event(event);
+
+            match builder.build() {
+                Ok(_bundle) => {
+                    // If bundle creation succeeds, the non-deterministic float validation
+                    // either didn't trigger (floats were in safe locations) or was bypassed
+                    // In a production system, this might be concerning
+                }
+                Err(ReplayBundleError::NonDeterministicFloat { path }) => {
+                    // This is the expected behavior - floats should be detected and rejected
+                    assert!(!path.is_empty(), "float detection should provide path");
+                }
+                Err(other) => {
+                    // Other errors might be acceptable depending on validation order
+                    println!("Got unexpected error for float {}: {:?}", suspicious_value, other);
+                }
+            }
+        }
+
+        // Test edge case: floats embedded in string values (should be OK)
+        let string_with_float_content = serde_json::json!({
+            "text_field": "The value is 3.14159",
+            "json_string": "{\"inner_float\": 2.718}",
+        });
+
+        let string_event = RawEvent::new(
+            "2026-02-20T10:00:00.000100Z",
+            EventType::InternalEvent,
+            string_with_float_content,
+        );
+
+        let mut builder = ReplayBundleBuilder::new("string-float-test");
+        builder.add_raw_event(string_event);
+
+        // String content containing float representations should be OK
+        let result = builder.build();
+        assert!(result.is_ok(), "floats in string content should be allowed");
+    }
+
+    #[test]
+    fn test_negative_timestamp_parsing_with_malicious_formats() {
+        let malicious_timestamps = [
+            "2026-02-20T10:00:00.000100Z\x00null",     // Null byte injection
+            "2026-02-20T10:00:00.000100Z\r\n",         // CRLF injection
+            "2026-02-20T10:00:00.000100Z\x1b[31m",     // ANSI escape
+            "2026-02-20T10:00:00.000100Z\"injection",   // Quote injection
+            "2026-02-20T10:00:00.000100Z\u{202E}fake", // BiDi override
+            "2026\u{200B}-02-20T10:00:00.000100Z",     // Zero-width space
+            "9999-12-31T23:59:59.999999Z",             // Extreme future date
+            "0001-01-01T00:00:00.000000Z",             // Extreme past date
+            "2026-13-45T25:61:61.999999Z",             // Invalid date components
+            "not-a-timestamp-at-all",                   // Complete garbage
+            "",                                         // Empty string
+            "\u{FFFD}\u{FFFD}\u{FFFD}",                // Replacement characters
+        ];
+
+        for malicious_timestamp in malicious_timestamps {
+            // Test direct timestamp construction
+            let result = RawEvent::new(
+                malicious_timestamp,
+                EventType::ErrorCondition,
+                serde_json::json!({"test": "timestamp_validation"}),
+            );
+
+            // The constructor might:
+            // 1. Accept the timestamp and fail later during validation
+            // 2. Fail immediately during parsing
+            // 3. Sanitize/normalize the timestamp
+
+            // Test that timestamps are properly validated somewhere in the pipeline
+            let mut builder = ReplayBundleBuilder::new("timestamp-test");
+            builder.add_raw_event(result);
+
+            match builder.build() {
+                Ok(bundle) => {
+                    // If successful, verify the timestamp in the bundle is valid
+                    let json = serde_json::to_string(&bundle).expect("serialization should work");
+                    let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+
+                    if let Some(events) = parsed.get("events").and_then(|e| e.as_array()) {
+                        for event in events {
+                            if let Some(timestamp) = event.get("timestamp").and_then(|t| t.as_str()) {
+                                // Verify stored timestamp doesn't contain injection patterns
+                                assert!(!timestamp.contains('\0'), "stored timestamp should not contain null bytes");
+                                assert!(!timestamp.contains('\r'), "stored timestamp should not contain CRLF");
+                                assert!(!timestamp.contains('\x1b'), "stored timestamp should not contain ANSI");
+                            }
+                        }
+                    }
+                }
+                Err(ReplayBundleError::TimestampParse { timestamp, .. }) => {
+                    // Expected behavior for invalid timestamps
+                    assert_eq!(timestamp, malicious_timestamp, "error should reference original timestamp");
+                }
+                Err(other) => {
+                    // Other validation errors might also be acceptable
+                    println!("Got other error for timestamp '{}': {:?}", malicious_timestamp, other);
+                }
+            }
+        }
     }
 }

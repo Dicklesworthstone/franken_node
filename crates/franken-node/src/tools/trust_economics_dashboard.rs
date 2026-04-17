@@ -66,8 +66,13 @@ pub const MODEL_VERSION: &str = "ted-v1.0";
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_REPORTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len().saturating_add(1).saturating_sub(cap);
+    if overflow > 0 {
         items.drain(0..overflow);
     }
     items.push(item);
@@ -184,6 +189,10 @@ pub struct AttackCost {
 
 impl AttackCost {
     pub fn compute(time: f64, compute: f64, tooling: f64, detection: f64) -> Self {
+        let time = finite_non_negative(time);
+        let compute = finite_non_negative(compute);
+        let tooling = finite_non_negative(tooling);
+        let detection = finite_probability(detection);
         let aggregate = time * 50.0 + compute * 10.0 + tooling * 200.0 + detection * 500.0;
         Self {
             time_hours: time,
@@ -320,19 +329,27 @@ impl ExpectedLossModel {
         observed_frequency: f64,
         effectiveness: f64,
     ) {
-        if !observed_frequency.is_finite() || !effectiveness.is_finite() {
+        if !observed_frequency.is_finite()
+            || !effectiveness.is_finite()
+            || observed_frequency < 0.0
+            || !(0.0..=1.0).contains(&effectiveness)
+        {
             return;
         }
+
+        let Some(freq) = self.attack_frequencies.get_mut(category) else {
+            return;
+        };
+        let Some(eff) = self.defense_effectiveness.get_mut(category) else {
+            return;
+        };
+
         self.observation_count = self.observation_count.saturating_add(1);
         let n = self.observation_count as f64;
         let w = self.prior_weight;
 
-        if let Some(freq) = self.attack_frequencies.get_mut(category) {
-            *freq = (w * *freq + n * observed_frequency) / (w + n);
-        }
-        if let Some(eff) = self.defense_effectiveness.get_mut(category) {
-            *eff = (w * *eff + n * effectiveness) / (w + n);
-        }
+        *freq = (w * *freq + n * observed_frequency) / (w + n);
+        *eff = (w * *eff + n * effectiveness) / (w + n);
     }
 
     /// Compute expected annual loss for a category.
@@ -341,16 +358,20 @@ impl ExpectedLossModel {
             .attack_frequencies
             .get(category)
             .copied()
+            .filter(|value| value.is_finite() && *value >= 0.0)
             .unwrap_or(0.1);
         let eff = self
             .defense_effectiveness
             .get(category)
             .copied()
+            .filter(|value| value.is_finite())
+            .map(|value| value.clamp(0.0, 1.0))
             .unwrap_or(0.5);
         let cost = self
             .operational_costs
             .get(category)
             .copied()
+            .filter(|value| value.is_finite() && *value >= 0.0)
             .unwrap_or(1000.0);
         freq * (1.0 - eff) * cost * 365.0
     }
@@ -417,6 +438,22 @@ impl Default for DashboardConfig {
     }
 }
 
+impl DashboardConfig {
+    fn normalized(mut self) -> Self {
+        let defaults = Self::default();
+        if self.model_version.trim().is_empty() {
+            self.model_version = defaults.model_version;
+        }
+        if !self.staleness_threshold_hours.is_finite() || self.staleness_threshold_hours <= 0.0 {
+            self.staleness_threshold_hours = defaults.staleness_threshold_hours;
+        }
+        if !self.default_loss_estimate.is_finite() || self.default_loss_estimate < 0.0 {
+            self.default_loss_estimate = defaults.default_loss_estimate;
+        }
+        self
+    }
+}
+
 impl Default for TrustEconomicsDashboard {
     fn default() -> Self {
         Self::new(DashboardConfig::default())
@@ -425,6 +462,7 @@ impl Default for TrustEconomicsDashboard {
 
 impl TrustEconomicsDashboard {
     pub fn new(config: DashboardConfig) -> Self {
+        let config = config.normalized();
         Self {
             model: ExpectedLossModel::default(),
             config,
@@ -767,6 +805,22 @@ impl TrustEconomicsDashboard {
     }
 }
 
+fn finite_non_negative(value: f64) -> f64 {
+    if value.is_finite() && value >= 0.0 {
+        value
+    } else {
+        0.0
+    }
+}
+
+fn finite_probability(value: f64) -> f64 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        0.0
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -777,6 +831,26 @@ mod tests {
 
     fn make_trace() -> String {
         Uuid::now_v7().to_string()
+    }
+
+    // === Bounded retention negative cases ===
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_items() {
+        let mut items = vec![1, 2];
+
+        push_bounded(&mut items, 3, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_overfull_input_keeps_newest_items_with_new_item() {
+        let mut items = vec![1, 2, 3, 4];
+
+        push_bounded(&mut items, 5, 2);
+
+        assert_eq!(items, vec![4, 5]);
     }
 
     // === Attack categories ===
@@ -803,6 +877,36 @@ mod tests {
         let cost = AttackCost::compute(10.0, 5.0, 0.5, 0.3);
         let expected = 10.0 * 50.0 + 5.0 * 10.0 + 0.5 * 200.0 + 0.3 * 500.0;
         assert!((cost.aggregate_cost - expected).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn attack_cost_rejects_negative_components_by_clamping_to_zero() {
+        let cost = AttackCost::compute(-10.0, -5.0, -0.5, -0.3);
+
+        assert_eq!(cost.time_hours, 0.0);
+        assert_eq!(cost.compute_units, 0.0);
+        assert_eq!(cost.tooling_sophistication, 0.0);
+        assert_eq!(cost.detection_risk, 0.0);
+        assert_eq!(cost.aggregate_cost, 0.0);
+    }
+
+    #[test]
+    fn attack_cost_rejects_nonfinite_components_by_clamping_to_zero() {
+        let cost = AttackCost::compute(f64::NAN, f64::INFINITY, f64::NEG_INFINITY, f64::NAN);
+
+        assert_eq!(cost.time_hours, 0.0);
+        assert_eq!(cost.compute_units, 0.0);
+        assert_eq!(cost.tooling_sophistication, 0.0);
+        assert_eq!(cost.detection_risk, 0.0);
+        assert_eq!(cost.aggregate_cost, 0.0);
+    }
+
+    #[test]
+    fn attack_cost_clamps_detection_risk_above_one() {
+        let cost = AttackCost::compute(0.0, 0.0, 0.0, 2.0);
+
+        assert_eq!(cost.detection_risk, 1.0);
+        assert_eq!(cost.aggregate_cost, 500.0);
     }
 
     // === Amplification metrics ===
@@ -936,11 +1040,263 @@ mod tests {
     }
 
     #[test]
+    fn posterior_update_rejects_nan_frequency() {
+        let mut model = ExpectedLossModel::default();
+        let before = model.expected_loss("credential_exfiltration");
+
+        model.posterior_update("credential_exfiltration", f64::NAN, 0.9);
+
+        assert_eq!(model.observation_count, 0);
+        assert_eq!(model.expected_loss("credential_exfiltration"), before);
+    }
+
+    #[test]
+    fn posterior_update_rejects_infinite_effectiveness() {
+        let mut model = ExpectedLossModel::default();
+        let before = model.expected_loss("credential_exfiltration");
+
+        model.posterior_update("credential_exfiltration", 0.2, f64::INFINITY);
+
+        assert_eq!(model.observation_count, 0);
+        assert_eq!(model.expected_loss("credential_exfiltration"), before);
+    }
+
+    #[test]
+    fn posterior_update_rejects_negative_frequency() {
+        let mut model = ExpectedLossModel::default();
+        let before = model.expected_loss("credential_exfiltration");
+
+        model.posterior_update("credential_exfiltration", -0.01, 0.7);
+
+        assert_eq!(model.observation_count, 0);
+        assert_eq!(model.expected_loss("credential_exfiltration"), before);
+    }
+
+    #[test]
+    fn posterior_update_rejects_negative_effectiveness() {
+        let mut model = ExpectedLossModel::default();
+        let before = model.expected_loss("credential_exfiltration");
+
+        model.posterior_update("credential_exfiltration", 0.2, -0.01);
+
+        assert_eq!(model.observation_count, 0);
+        assert_eq!(model.expected_loss("credential_exfiltration"), before);
+    }
+
+    #[test]
+    fn posterior_update_rejects_effectiveness_above_one() {
+        let mut model = ExpectedLossModel::default();
+        let before = model.expected_loss("credential_exfiltration");
+
+        model.posterior_update("credential_exfiltration", 0.2, 1.01);
+
+        assert_eq!(model.observation_count, 0);
+        assert_eq!(model.expected_loss("credential_exfiltration"), before);
+    }
+
+    #[test]
+    fn posterior_update_unknown_category_does_not_create_entries() {
+        let mut model = ExpectedLossModel::default();
+
+        model.posterior_update("unknown_attack", 0.8, 0.1);
+
+        assert!(!model.attack_frequencies.contains_key("unknown_attack"));
+        assert!(!model.defense_effectiveness.contains_key("unknown_attack"));
+    }
+
+    #[test]
+    fn posterior_update_unknown_category_does_not_count_observation() {
+        let mut model = ExpectedLossModel::default();
+
+        model.posterior_update("unknown_attack", 0.8, 0.1);
+
+        assert_eq!(model.observation_count, 0);
+    }
+
+    #[test]
+    fn posterior_update_missing_effectiveness_entry_does_not_half_update_frequency() {
+        let mut model = ExpectedLossModel::default();
+        let before_frequency = model
+            .attack_frequencies
+            .get("credential_exfiltration")
+            .copied()
+            .expect("default frequency should exist");
+        model
+            .defense_effectiveness
+            .remove("credential_exfiltration")
+            .expect("default effectiveness should exist");
+
+        model.posterior_update("credential_exfiltration", 0.8, 0.7);
+
+        assert_eq!(model.observation_count, 0);
+        assert_eq!(
+            model
+                .attack_frequencies
+                .get("credential_exfiltration")
+                .copied(),
+            Some(before_frequency)
+        );
+        assert!(
+            !model
+                .defense_effectiveness
+                .contains_key("credential_exfiltration")
+        );
+    }
+
+    #[test]
+    fn expected_loss_missing_frequency_uses_default_frequency() {
+        let mut model = ExpectedLossModel::default();
+        model
+            .attack_frequencies
+            .remove("credential_exfiltration")
+            .expect("default frequency should exist");
+
+        let loss = model.expected_loss("credential_exfiltration");
+
+        assert_eq!(loss, 0.1 * (1.0 - 0.5) * 1000.0 * 365.0);
+    }
+
+    #[test]
+    fn expected_loss_missing_effectiveness_uses_default_effectiveness() {
+        let mut model = ExpectedLossModel::default();
+        model
+            .defense_effectiveness
+            .remove("credential_exfiltration")
+            .expect("default effectiveness should exist");
+
+        let loss = model.expected_loss("credential_exfiltration");
+
+        assert_eq!(loss, 0.1 * (1.0 - 0.5) * 1000.0 * 365.0);
+    }
+
+    #[test]
+    fn expected_loss_missing_operational_cost_uses_default_cost() {
+        let mut model = ExpectedLossModel::default();
+        model
+            .operational_costs
+            .remove("credential_exfiltration")
+            .expect("default operational cost should exist");
+
+        let loss = model.expected_loss("credential_exfiltration");
+
+        assert_eq!(loss, 0.1 * (1.0 - 0.5) * 1000.0 * 365.0);
+    }
+
+    #[test]
+    fn expected_loss_negative_frequency_uses_default_frequency() {
+        let mut model = ExpectedLossModel::default();
+        model
+            .attack_frequencies
+            .insert("credential_exfiltration".to_string(), -1.0);
+
+        let loss = model.expected_loss("credential_exfiltration");
+
+        assert_eq!(loss, 0.1 * (1.0 - 0.5) * 1000.0 * 365.0);
+    }
+
+    #[test]
+    fn expected_loss_nonfinite_operational_cost_uses_default_cost() {
+        let mut model = ExpectedLossModel::default();
+        model
+            .operational_costs
+            .insert("credential_exfiltration".to_string(), f64::INFINITY);
+
+        let loss = model.expected_loss("credential_exfiltration");
+
+        assert_eq!(loss, 0.1 * (1.0 - 0.5) * 1000.0 * 365.0);
+    }
+
+    #[test]
+    fn expected_loss_effectiveness_above_one_is_clamped_to_full_defense() {
+        let mut model = ExpectedLossModel::default();
+        model
+            .defense_effectiveness
+            .insert("credential_exfiltration".to_string(), 1.5);
+
+        let loss = model.expected_loss("credential_exfiltration");
+
+        assert_eq!(loss, 0.0);
+    }
+
+    #[test]
+    fn dashboard_update_with_nan_frequency_keeps_model_estimates() {
+        let mut dash = TrustEconomicsDashboard::default();
+        let before = dash.model.expected_loss("credential_exfiltration");
+
+        dash.update_model("credential_exfiltration", f64::NAN, 0.9, &make_trace());
+
+        assert_eq!(dash.model.observation_count, 0);
+        assert_eq!(dash.model.expected_loss("credential_exfiltration"), before);
+    }
+
+    #[test]
     fn expected_loss_positive() {
         let model = ExpectedLossModel::default();
         for cat in AttackCategory::all() {
             assert!(model.expected_loss(cat.label()) >= 0.0);
         }
+    }
+
+    #[test]
+    fn attack_category_deserialize_rejects_hyphenated_label() {
+        assert!(serde_json::from_str::<AttackCategory>("\"credential-exfiltration\"").is_err());
+    }
+
+    #[test]
+    fn platform_deserialize_rejects_display_case_label() {
+        assert!(serde_json::from_str::<Platform>("\"NodeJs\"").is_err());
+    }
+
+    #[test]
+    fn privilege_level_deserialize_rejects_unknown_role_name() {
+        assert!(serde_json::from_str::<PrivilegeLevel>("\"root\"").is_err());
+    }
+
+    #[test]
+    fn optimization_objective_deserialize_rejects_numeric_type() {
+        assert!(serde_json::from_str::<OptimizationObjective>("1").is_err());
+    }
+
+    #[test]
+    fn dashboard_new_blank_model_version_uses_default() {
+        let config = DashboardConfig {
+            model_version: " \t ".to_string(),
+            ..DashboardConfig::default()
+        };
+
+        let dash = TrustEconomicsDashboard::new(config);
+
+        assert_eq!(dash.config.model_version, MODEL_VERSION);
+    }
+
+    #[test]
+    fn dashboard_new_negative_loss_estimate_uses_default() {
+        let config = DashboardConfig {
+            default_loss_estimate: -1.0,
+            ..DashboardConfig::default()
+        };
+
+        let dash = TrustEconomicsDashboard::new(config);
+
+        assert_eq!(
+            dash.config.default_loss_estimate,
+            DashboardConfig::default().default_loss_estimate
+        );
+    }
+
+    #[test]
+    fn dashboard_new_nonfinite_staleness_threshold_uses_default() {
+        let config = DashboardConfig {
+            staleness_threshold_hours: f64::NAN,
+            ..DashboardConfig::default()
+        };
+
+        let dash = TrustEconomicsDashboard::new(config);
+
+        assert_eq!(
+            dash.config.staleness_threshold_hours,
+            DashboardConfig::default().staleness_threshold_hours
+        );
     }
 
     // === Report structure ===

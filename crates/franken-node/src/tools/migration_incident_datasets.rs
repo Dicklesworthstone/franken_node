@@ -230,6 +230,49 @@ impl ReproducibleDatasets {
         mut entry: DatasetEntry,
         trace_id: &str,
     ) -> Result<String, String> {
+        if entry.dataset_id.is_empty() {
+            self.log(
+                event_codes::RDS_ERR_INCOMPLETE,
+                trace_id,
+                serde_json::json!({"reason": "empty dataset_id"}),
+            );
+            return Err("dataset id must not be empty".to_string());
+        }
+        if self.datasets.contains_key(&entry.dataset_id) {
+            self.log(
+                event_codes::RDS_ERR_INCOMPLETE,
+                trace_id,
+                serde_json::json!({"dataset_id": &entry.dataset_id, "reason": "duplicate dataset_id"}),
+            );
+            return Err(format!("duplicate dataset: {}", entry.dataset_id));
+        }
+        if entry.title.is_empty() || entry.description.is_empty() || entry.source_bead.is_empty() {
+            self.log(
+                event_codes::RDS_ERR_INCOMPLETE,
+                trace_id,
+                serde_json::json!({
+                    "dataset_id": &entry.dataset_id,
+                    "reason": "empty required metadata",
+                }),
+            );
+            return Err("dataset metadata fields must not be empty".to_string());
+        }
+        if entry.provenance.source_system.is_empty()
+            || entry.provenance.collection_method.is_empty()
+            || entry.provenance.collection_date.is_empty()
+            || entry.provenance.license.is_empty()
+        {
+            self.log(
+                event_codes::RDS_ERR_INCOMPLETE,
+                trace_id,
+                serde_json::json!({
+                    "dataset_id": &entry.dataset_id,
+                    "reason": "incomplete provenance",
+                }),
+            );
+            return Err("dataset provenance fields must not be empty".to_string());
+        }
+
         // Verify integrity hash
         if entry.content_hash.len() != 64
             || !entry.content_hash.chars().all(|c| c.is_ascii_hexdigit())
@@ -281,9 +324,45 @@ impl ReproducibleDatasets {
         );
 
         // Validate replay instructions
+        if entry.replay_instructions.expected_hash.len() != 64
+            || !entry
+                .replay_instructions
+                .expected_hash
+                .chars()
+                .all(|c| c.is_ascii_hexdigit())
+        {
+            self.log(
+                event_codes::RDS_ERR_INTEGRITY,
+                trace_id,
+                serde_json::json!({
+                    "dataset_id": &entry.dataset_id,
+                    "reason": "invalid replay expected hash",
+                }),
+            );
+            return Err("Replay expected hash must be 64 hex chars".to_string());
+        }
         if self.config.require_replay_instructions && entry.replay_instructions.commands.is_empty()
         {
+            self.log(
+                event_codes::RDS_ERR_INCOMPLETE,
+                trace_id,
+                serde_json::json!({
+                    "dataset_id": &entry.dataset_id,
+                    "reason": "missing replay commands",
+                }),
+            );
             return Err("Replay instructions must include at least one command".to_string());
+        }
+        if self.config.require_replay_instructions && !entry.replay_instructions.deterministic {
+            self.log(
+                event_codes::RDS_ERR_INCOMPLETE,
+                trace_id,
+                serde_json::json!({
+                    "dataset_id": &entry.dataset_id,
+                    "reason": "nondeterministic replay",
+                }),
+            );
+            return Err("Replay instructions must be deterministic".to_string());
         }
 
         self.log(
@@ -330,6 +409,16 @@ impl ReproducibleDatasets {
         dataset_ids: &[String],
         trace_id: &str,
     ) -> Result<DatasetBundle, String> {
+        if dataset_ids.is_empty() {
+            return Err("bundle must include at least one dataset".to_string());
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for id in dataset_ids {
+            if !seen.insert(id.as_str()) {
+                return Err(format!("duplicate dataset in bundle: {id}"));
+            }
+        }
+
         let mut total_records: usize = 0;
         for id in dataset_ids {
             match self.datasets.get(id) {
@@ -573,6 +662,139 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn register_empty_dataset_id_rejected_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let err = engine
+            .register_dataset(
+                sample_entry("", DatasetType::MigrationScenario, 500),
+                "trace-empty-dataset",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("dataset id"));
+        assert!(engine.datasets().is_empty());
+        assert_eq!(engine.audit_log().len(), 1);
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::RDS_ERR_INCOMPLETE
+        );
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("empty dataset_id")
+        );
+    }
+
+    #[test]
+    fn register_duplicate_dataset_id_rejected_without_overwrite() {
+        let mut engine = ReproducibleDatasets::default();
+        engine
+            .register_dataset(
+                sample_entry("ds-1", DatasetType::MigrationScenario, 500),
+                &make_trace(),
+            )
+            .unwrap();
+        let mut replacement = sample_entry("ds-1", DatasetType::SecurityIncident, 900);
+        replacement.title = "Replacement".to_string();
+        let err = engine
+            .register_dataset(replacement, "trace-duplicate-dataset")
+            .unwrap_err();
+
+        assert!(err.contains("duplicate"));
+        assert_eq!(engine.datasets().len(), 1);
+        assert_eq!(
+            engine.datasets()["ds-1"].dataset_type,
+            DatasetType::MigrationScenario
+        );
+        assert_eq!(engine.datasets()["ds-1"].title, "Test dataset: ds-1");
+        assert_eq!(engine.datasets()["ds-1"].record_count, 500);
+    }
+
+    #[test]
+    fn register_empty_required_metadata_rejected_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let mut entry = sample_entry("ds-empty-meta", DatasetType::MigrationScenario, 500);
+        entry.source_bead.clear();
+        let err = engine
+            .register_dataset(entry, "trace-empty-metadata")
+            .unwrap_err();
+
+        assert!(err.contains("metadata"));
+        assert!(engine.datasets().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("empty required metadata")
+        );
+    }
+
+    #[test]
+    fn register_incomplete_provenance_rejected_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let mut entry = sample_entry("ds-bad-provenance", DatasetType::SecurityIncident, 500);
+        entry.provenance.license.clear();
+        let err = engine
+            .register_dataset(entry, "trace-bad-provenance")
+            .unwrap_err();
+
+        assert!(err.contains("provenance"));
+        assert!(engine.datasets().is_empty());
+        assert_eq!(
+            engine.audit_log()[0].details["reason"].as_str(),
+            Some("incomplete provenance")
+        );
+    }
+
+    #[test]
+    fn register_invalid_replay_expected_hash_rejected_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let mut entry = sample_entry("ds-bad-replay-hash", DatasetType::BenchmarkBaseline, 500);
+        entry.replay_instructions.expected_hash = "not-a-hex-digest".to_string();
+        let err = engine
+            .register_dataset(entry, "trace-bad-replay-hash")
+            .unwrap_err();
+
+        assert!(err.contains("Replay expected hash"));
+        assert!(engine.datasets().is_empty());
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::RDS_ERR_INTEGRITY
+            && matches!(
+                record.details["reason"].as_str(),
+                Some("invalid replay expected hash")
+            )));
+    }
+
+    #[test]
+    fn register_missing_replay_commands_logs_incomplete_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let mut entry = sample_entry("ds-no-replay", DatasetType::MigrationScenario, 500);
+        entry.replay_instructions.commands.clear();
+        let err = engine
+            .register_dataset(entry, "trace-no-replay")
+            .unwrap_err();
+
+        assert!(err.contains("Replay instructions"));
+        assert!(engine.datasets().is_empty());
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::RDS_ERR_INCOMPLETE
+            && record.details["reason"].as_str() == Some("missing replay commands")));
+    }
+
+    #[test]
+    fn register_nondeterministic_replay_rejected_without_insert() {
+        let mut engine = ReproducibleDatasets::default();
+        let mut entry = sample_entry("ds-nondet", DatasetType::CompatibilityMatrix, 500);
+        entry.replay_instructions.deterministic = false;
+        let err = engine
+            .register_dataset(entry, "trace-nondet-replay")
+            .unwrap_err();
+
+        assert!(err.contains("deterministic"));
+        assert!(engine.datasets().is_empty());
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::RDS_ERR_INCOMPLETE
+            && record.details["reason"].as_str() == Some("nondeterministic replay")));
+    }
+
     // === Bundle publication ===
 
     #[test]
@@ -603,6 +825,66 @@ mod tests {
         let mut engine = ReproducibleDatasets::default();
         let result = engine.publish_bundle(&["nonexistent".to_string()], &make_trace());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn publish_empty_bundle_rejected_without_audit_or_storage() {
+        let mut engine = ReproducibleDatasets::default();
+        let err = engine
+            .publish_bundle(&[], "trace-empty-bundle")
+            .unwrap_err();
+
+        assert!(err.contains("at least one dataset"));
+        assert!(engine.bundles().is_empty());
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn publish_duplicate_dataset_bundle_rejected_without_storage() {
+        let mut engine = ReproducibleDatasets::default();
+        engine
+            .register_dataset(
+                sample_entry("ds-1", DatasetType::MigrationScenario, 500),
+                &make_trace(),
+            )
+            .unwrap();
+        let audit_len = engine.audit_log().len();
+        let err = engine
+            .publish_bundle(
+                &["ds-1".to_string(), "ds-1".to_string()],
+                "trace-duplicate-bundle",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("duplicate dataset"));
+        assert!(engine.bundles().is_empty());
+        assert_eq!(engine.audit_log().len(), audit_len);
+    }
+
+    #[test]
+    fn publish_missing_dataset_rejected_without_partial_bundle() {
+        let mut engine = ReproducibleDatasets::default();
+        engine
+            .register_dataset(
+                sample_entry("ds-1", DatasetType::MigrationScenario, 500),
+                &make_trace(),
+            )
+            .unwrap();
+        let err = engine
+            .publish_bundle(
+                &["ds-1".to_string(), "missing".to_string()],
+                "trace-missing-dataset",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("not found"));
+        assert!(engine.bundles().is_empty());
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::RDS_BUNDLE_PUBLISHED)
+        );
     }
 
     #[test]

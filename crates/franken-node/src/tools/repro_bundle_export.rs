@@ -678,8 +678,12 @@ impl ReproBundleExporter {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1319,5 +1323,176 @@ mod tests {
         let bundle = generate_repro_bundle(&ctx);
         assert_eq!(bundle.config.get("hardening_level"), Some("critical"));
         assert_eq!(bundle.config.len(), 2);
+    }
+
+    // ── push_bounded underflow protection (bd-1944k) ──
+
+    #[test]
+    fn push_bounded_prevents_underflow_when_cap_larger_than_length() {
+        // Test case: cap > items.len() should not cause integer underflow
+        let mut items = vec![1, 2];
+        push_bounded(&mut items, 3, 10); // cap=10 > items.len()=2
+
+        // Should not panic and should just add the item
+        assert_eq!(items, vec![1, 2, 3]);
+
+        // Test edge case: cap much larger than length
+        let mut small_vec = vec![42];
+        push_bounded(&mut small_vec, 99, 1000);
+        assert_eq!(small_vec, vec![42, 99]);
+    }
+
+    #[test]
+    fn validate_bundle_reports_multiple_independent_failures() {
+        let ctx = make_context();
+        let mut bundle = generate_repro_bundle(&ctx);
+        bundle.bundle_id = String::new();
+        bundle.schema_version = SCHEMA_VERSION.saturating_add(1);
+        bundle.failure_context.error_message = String::new();
+        bundle.event_trace.clear();
+
+        let errs = validate_bundle(&bundle).unwrap_err();
+
+        assert!(errs.iter().any(|err| matches!(
+            err,
+            SchemaError::MissingField(field) if field == "bundle_id"
+        )));
+        assert!(
+            errs.iter()
+                .any(|err| matches!(err, SchemaError::InvalidVersion { .. }))
+        );
+        assert!(errs.iter().any(|err| matches!(
+            err,
+            SchemaError::MissingField(field) if field.contains("error_message")
+        )));
+        assert!(
+            errs.iter()
+                .any(|err| matches!(err, SchemaError::EmptyEventTrace))
+        );
+    }
+
+    #[test]
+    fn validate_bundle_reports_each_non_portable_evidence_ref() {
+        let ctx = make_context();
+        let mut bundle = generate_repro_bundle(&ctx);
+        bundle.evidence_refs.push(EvidenceRef {
+            evidence_id: "bad-unix".into(),
+            decision_kind: "deny".into(),
+            epoch_id: 42,
+            relative_path: "/tmp/evidence.json".into(),
+        });
+        bundle.evidence_refs.push(EvidenceRef {
+            evidence_id: "bad-parent".into(),
+            decision_kind: "deny".into(),
+            epoch_id: 42,
+            relative_path: "evidence/../secret.json".into(),
+        });
+
+        let errs = validate_bundle(&bundle).unwrap_err();
+        let path_errors = errs
+            .iter()
+            .filter(|err| matches!(err, SchemaError::NonPortablePath(_)))
+            .count();
+
+        assert_eq!(path_errors, 2);
+    }
+
+    #[test]
+    fn validate_bundle_rejects_windows_drive_config_value() {
+        let mut ctx = make_context();
+        ctx.config = ctx
+            .config
+            .with_entry("artifact_root", "C:\\franken\\bundle");
+        let bundle = generate_repro_bundle(&ctx);
+
+        let errs = validate_bundle(&bundle).unwrap_err();
+
+        assert!(errs.iter().any(|err| match err {
+            SchemaError::NonPortablePath(path) => path.contains("C:\\franken\\bundle"),
+            _ => false,
+        }));
+    }
+
+    #[test]
+    fn replay_detects_payload_tampering_even_when_order_is_valid() {
+        let ctx = make_context();
+        let mut bundle = generate_repro_bundle(&ctx);
+        bundle.event_trace[1].payload = "participant count rewritten".into();
+
+        let outcome = replay_bundle(&bundle);
+
+        assert!(matches!(
+            outcome,
+            ReplayOutcome::Divergence {
+                divergence_point: 3,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn replay_detects_duplicate_sequence_at_later_event() {
+        let ctx = make_context();
+        let mut bundle = generate_repro_bundle(&ctx);
+        bundle.event_trace[2].seq = 2;
+
+        let outcome = replay_bundle(&bundle);
+
+        assert!(matches!(
+            outcome,
+            ReplayOutcome::Divergence {
+                divergence_point: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn replay_schema_mismatch_takes_precedence_over_id_tampering() {
+        let ctx = make_context();
+        let mut bundle = generate_repro_bundle(&ctx);
+        bundle.schema_version = SCHEMA_VERSION.saturating_add(10);
+        bundle.bundle_id = "RB-altered".into();
+
+        let outcome = replay_bundle(&bundle);
+
+        assert!(matches!(
+            outcome,
+            ReplayOutcome::Divergence {
+                divergence_point: 0,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn exporter_time_range_with_inverted_bounds_returns_empty() {
+        let exp = ReproBundleExporter::with_defaults();
+        let ctx = make_context();
+        let bundle = generate_repro_bundle(&ctx);
+        let bundles = vec![bundle];
+
+        let result = exp.export_for_range(&bundles, 9000, 1000);
+
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn exporter_find_bundle_rejects_near_miss_identifier() {
+        let mut exp = ReproBundleExporter::with_defaults();
+        let ctx = make_context();
+        let stored_id = exp.export(&ctx).bundle_id.clone();
+        let wrong_id = format!("{stored_id}-extra");
+
+        assert!(exp.find_bundle(&wrong_id).is_none());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_retaining_new_item() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
     }
 }

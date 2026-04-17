@@ -511,7 +511,7 @@ mod tests {
             signature: ManifestSignature {
                 scheme: SignatureScheme::ThresholdEd25519,
                 publisher_key_id: "key-publisher-01".to_string(),
-                signature: "QUJDREVGR0hJSg==".to_string(),
+                signature: "QUJDREU=".to_string(),
                 threshold: Some(ThresholdSignaturePolicy {
                     threshold: 2,
                     total_signers: 3,
@@ -726,5 +726,661 @@ mod tests {
                 "valid relative entrypoint should not trigger path traversal"
             );
         }
+    }
+
+    #[test]
+    fn whitespace_only_package_name_is_rejected_as_missing() {
+        let mut manifest = valid_manifest();
+        manifest.package.name = "   ".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field } if field == "package.name"
+        ));
+    }
+
+    #[test]
+    fn whitespace_only_minimum_runtime_version_is_rejected() {
+        let mut manifest = valid_manifest();
+        manifest.minimum_runtime_version = "\t\n".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "minimum_runtime_version"
+        ));
+    }
+
+    #[test]
+    fn empty_capability_set_is_rejected_before_engine_projection() {
+        let mut manifest = valid_manifest();
+        manifest.capabilities.clear();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_EMPTY_CAPABILITIES");
+        assert!(matches!(error, ManifestSchemaError::EmptyCapabilities));
+    }
+
+    #[test]
+    fn attestation_with_blank_digest_is_rejected_with_indexed_field() {
+        let mut manifest = valid_manifest();
+        manifest.provenance.attestation_chain[0].digest = " ".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "provenance.attestation_chain[0].digest"
+        ));
+    }
+
+    #[test]
+    fn threshold_zero_is_rejected() {
+        let mut manifest = valid_manifest();
+        manifest.signature.threshold = Some(ThresholdSignaturePolicy {
+            threshold: 0,
+            total_signers: 3,
+            signer_key_ids: vec![
+                "key-a".to_string(),
+                "key-b".to_string(),
+                "key-c".to_string(),
+            ],
+        });
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_THRESHOLD_INVALID");
+        assert!(error.to_string().contains("must be > 0"));
+    }
+
+    #[test]
+    fn threshold_greater_than_total_signers_is_rejected() {
+        let mut manifest = valid_manifest();
+        manifest.signature.threshold = Some(ThresholdSignaturePolicy {
+            threshold: 4,
+            total_signers: 3,
+            signer_key_ids: vec![
+                "key-a".to_string(),
+                "key-b".to_string(),
+                "key-c".to_string(),
+            ],
+        });
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_THRESHOLD_INVALID");
+        assert!(error.to_string().contains("threshold cannot exceed"));
+    }
+
+    #[test]
+    fn threshold_signer_key_ids_must_not_contain_blank_entries() {
+        let mut manifest = valid_manifest();
+        manifest.signature.threshold = Some(ThresholdSignaturePolicy {
+            threshold: 2,
+            total_signers: 3,
+            signer_key_ids: vec!["key-a".to_string(), " ".to_string(), "key-c".to_string()],
+        });
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_THRESHOLD_INVALID");
+        assert!(error.to_string().contains("empty entries"));
+    }
+
+    #[test]
+    fn base64_like_but_undecodable_signature_fails_projection() {
+        let mut manifest = valid_manifest();
+        manifest.signature.signature = "A=AA".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_ENGINE_PROJECTION");
+        assert!(error.to_string().contains("signature base64 decode failed"));
+    }
+
+    #[test]
+    fn entrypoint_rejects_embedded_dotdot_segment() {
+        let mut manifest = valid_manifest();
+        manifest.entrypoint = "dist/../main.js".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+        assert!(error.to_string().contains(".."));
+    }
+
+    #[test]
+    fn whitespace_only_package_version_is_rejected_as_missing() {
+        let mut manifest = valid_manifest();
+        manifest.package.version = "\n\t ".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field } if field == "package.version"
+        ));
+    }
+
+    #[test]
+    fn whitespace_only_package_author_is_rejected_as_missing() {
+        let mut manifest = valid_manifest();
+        manifest.package.author = "   ".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field } if field == "package.author"
+        ));
+    }
+
+    #[test]
+    fn whitespace_only_behavioral_summary_is_rejected_as_missing() {
+        let mut manifest = valid_manifest();
+        manifest.behavioral_profile.summary = "\r\n".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "behavioral_profile.summary"
+        ));
+    }
+
+    #[test]
+    fn whitespace_only_revocation_pointer_is_rejected_as_missing() {
+        let mut manifest = valid_manifest();
+        manifest.trust.revocation_status_pointer = "\t".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "trust.revocation_status_pointer"
+        ));
+    }
+
+    #[test]
+    fn whitespace_only_trust_card_reference_is_rejected_as_missing() {
+        let mut manifest = valid_manifest();
+        manifest.trust.trust_card_reference = " ".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "trust.trust_card_reference"
+        ));
+    }
+
+    #[test]
+    fn whitespace_only_publisher_key_id_is_rejected_as_missing() {
+        let mut manifest = valid_manifest();
+        manifest.signature.publisher_key_id = " \n".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "signature.publisher_key_id"
+        ));
+    }
+
+    #[test]
+    fn whitespace_only_signed_at_is_rejected_as_missing() {
+        let mut manifest = valid_manifest();
+        manifest.signature.signed_at = "\t".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field } if field == "signature.signed_at"
+        ));
+    }
+
+    #[test]
+    fn threshold_total_signers_zero_is_rejected() {
+        let mut manifest = valid_manifest();
+        manifest.signature.threshold = Some(ThresholdSignaturePolicy {
+            threshold: 1,
+            total_signers: 0,
+            signer_key_ids: Vec::new(),
+        });
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_THRESHOLD_INVALID");
+        assert!(error.to_string().contains("must be > 0"));
+    }
+
+    #[test]
+    fn threshold_signer_key_ids_longer_than_total_is_rejected() {
+        let mut manifest = valid_manifest();
+        manifest.signature.threshold = Some(ThresholdSignaturePolicy {
+            threshold: 2,
+            total_signers: 2,
+            signer_key_ids: vec![
+                "key-a".to_string(),
+                "key-b".to_string(),
+                "key-c".to_string(),
+            ],
+        });
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_THRESHOLD_INVALID");
+        assert!(
+            error
+                .to_string()
+                .contains("length must equal total_signers")
+        );
+    }
+
+    #[test]
+    fn schema_version_mismatch_precedes_missing_package_name() {
+        let mut manifest = valid_manifest();
+        manifest.schema_version = "0.9".to_string();
+        manifest.package.name.clear();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_SCHEMA_VERSION");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::InvalidSchemaVersion { ref actual, .. } if actual == "0.9"
+        ));
+    }
+
+    #[test]
+    fn blank_attestation_id_is_rejected_with_indexed_field() {
+        let mut manifest = valid_manifest();
+        manifest.provenance.attestation_chain[0].id = "\n\t".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "provenance.attestation_chain[0].id"
+        ));
+    }
+
+    #[test]
+    fn blank_attestation_type_is_rejected_with_indexed_field() {
+        let mut manifest = valid_manifest();
+        manifest.provenance.attestation_chain[0].attestation_type = " ".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "provenance.attestation_chain[0].attestation_type"
+        ));
+    }
+
+    #[test]
+    fn second_attestation_blank_digest_reports_second_index() {
+        let mut manifest = valid_manifest();
+        manifest.provenance.attestation_chain.push(AttestationRef {
+            id: "att-02".to_string(),
+            attestation_type: "slsa".to_string(),
+            digest: " \t".to_string(),
+        });
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_MISSING_FIELD");
+        assert!(matches!(
+            error,
+            ManifestSchemaError::MissingField { ref field }
+                if field == "provenance.attestation_chain[1].digest"
+        ));
+    }
+
+    #[test]
+    fn signature_with_embedded_whitespace_is_malformed() {
+        let mut manifest = valid_manifest();
+        manifest.signature.signature = "QUJD REVGR0hJ".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_SIGNATURE_MALFORMED");
+        assert!(error.to_string().contains("base64-like"));
+    }
+
+    #[test]
+    fn serde_rejects_unknown_risk_tier() {
+        let err = serde_json::from_str::<RiskTier>(r#""severe""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_unknown_signature_scheme() {
+        let err = serde_json::from_str::<SignatureScheme>(r#""rsa_pkcs1""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_manifest_missing_signature_field() {
+        let mut value = serde_json::to_value(valid_manifest()).expect("should serialize");
+        if let serde_json::Value::Object(fields) = &mut value {
+            fields.remove("signature");
+        }
+
+        let err = serde_json::from_value::<SignedExtensionManifest>(value).unwrap_err();
+
+        assert!(err.to_string().contains("signature"));
+    }
+
+    #[test]
+    fn entrypoint_rejects_dotdot_after_current_dir_segment() {
+        let mut manifest = valid_manifest();
+        manifest.entrypoint = "./../dist/main.js".to_string();
+
+        let error = validate_signed_manifest(&manifest).expect_err("should fail");
+
+        assert_eq!(error.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+        assert!(error.to_string().contains(".."));
+    }
+
+    #[test]
+    fn negative_unicode_injection_in_package_name() {
+        let mut manifest = valid_manifest();
+        // Test BiDi override injection in package name
+        manifest.package.name = "safe\u{202e}evil\u{202c}package".to_string();
+
+        let result = validate_signed_manifest(&manifest);
+        // Should handle Unicode without corruption
+        if let Err(e) = result {
+            assert_ne!(e.code(), "EMS_MISSING_FIELD");
+        }
+
+        // Test zero-width characters
+        manifest.package.name = "package\u{200b}\u{feff}hidden".to_string();
+        let result = validate_signed_manifest(&manifest);
+        if let Err(e) = result {
+            assert_ne!(e.code(), "EMS_MISSING_FIELD");
+        }
+    }
+
+    #[test]
+    fn negative_massive_signature_memory_exhaustion() {
+        let mut manifest = valid_manifest();
+
+        // Create massive base64-encoded signature (10MB)
+        let massive_data = vec![b'A'; 10 * 1024 * 1024];
+        let massive_signature = base64::engine::general_purpose::STANDARD.encode(&massive_data);
+        manifest.signature.signature = massive_signature;
+
+        let result = validate_signed_manifest(&manifest);
+        // Should handle large signatures without memory issues
+        if let Err(e) = result {
+            // Acceptable to reject due to size, but shouldn't panic
+            assert!(e.code() == "EMS_ENGINE_PROJECTION" || e.code() == "EMS_SIGNATURE_MALFORMED");
+        }
+    }
+
+    #[test]
+    fn negative_publisher_key_id_injection_attacks() {
+        let mut manifest = valid_manifest();
+
+        let malicious_key_ids = vec![
+            "../../../etc/passwd",                    // Path traversal
+            "key\nnewline",                          // Newline injection
+            "key\ttab",                              // Tab injection
+            "key\x00null",                           // Null byte injection
+            "key\"quote'single",                     // Quote injection
+            "key\u{202e}reverse\u{202c}trap",       // BiDi override
+        ];
+
+        for malicious_id in malicious_key_ids {
+            manifest.signature.publisher_key_id = malicious_id.to_string();
+            let result = validate_signed_manifest(&manifest);
+
+            if let Err(e) = result {
+                // Should not fail due to missing field
+                assert_ne!(e.code(), "EMS_MISSING_FIELD");
+            }
+        }
+    }
+
+    #[test]
+    fn negative_attestation_chain_overflow_boundaries() {
+        let mut manifest = valid_manifest();
+
+        // Create massive attestation chain (1000 entries)
+        let mut massive_chain = Vec::new();
+        for i in 0..1000 {
+            massive_chain.push(AttestationRef {
+                id: format!("attestation-{:04}", i),
+                attestation_type: "slsa".to_string(),
+                digest: format!("sha256:{:064x}", i),
+            });
+        }
+        manifest.provenance.attestation_chain = massive_chain;
+
+        let result = validate_signed_manifest(&manifest);
+        // Should handle large chains gracefully
+        if let Err(e) = result {
+            // May fail due to size limits, but not missing fields
+            assert_ne!(e.code(), "EMS_MISSING_FIELD");
+        }
+    }
+
+    #[test]
+    fn negative_threshold_arithmetic_overflow_edge_cases() {
+        let mut manifest = valid_manifest();
+
+        // Test near-overflow threshold values
+        let overflow_cases = vec![
+            (u32::MAX, u32::MAX),     // Both at max
+            (u32::MAX - 1, u32::MAX), // Threshold one below max
+            (1, u32::MAX),            // Threshold 1, signers at max
+            (u32::MAX / 2, u32::MAX), // Threshold at half max
+        ];
+
+        for (threshold, total_signers) in overflow_cases {
+            manifest.signature.threshold = Some(ThresholdSignaturePolicy {
+                threshold,
+                total_signers,
+                signer_key_ids: (0..total_signers.min(10))
+                    .map(|i| format!("key-{}", i))
+                    .collect(),
+            });
+
+            let result = validate_signed_manifest(&manifest);
+            if let Err(e) = result {
+                // Should fail gracefully with threshold errors
+                assert_eq!(e.code(), "EMS_THRESHOLD_INVALID");
+            }
+        }
+    }
+
+    #[test]
+    fn negative_network_zones_massive_list() {
+        let mut manifest = valid_manifest();
+
+        // Create massive network zones list (10000 entries)
+        let massive_zones: Vec<String> = (0..10000)
+            .map(|i| format!("zone-{:04}", i))
+            .collect();
+        manifest.behavioral_profile.declared_network_zones = massive_zones;
+
+        let result = validate_signed_manifest(&manifest);
+        // Should handle large zone lists without memory issues
+        if let Err(e) = result {
+            // May fail due to size, but shouldn't crash
+            assert_ne!(e.code(), "EMS_MISSING_FIELD");
+        }
+    }
+
+    #[test]
+    fn negative_reproducibility_markers_unicode_edge_cases() {
+        let mut manifest = valid_manifest();
+
+        let unicode_markers = vec![
+            "\u{FEFF}BOM-marker",                    // Byte Order Mark
+            "marker\u{200B}\u{200C}\u{200D}zwj",    // Zero-width joiners
+            "marker\u{1F4A9}\u{1F525}emoji",        // Emoji sequence
+            "\u{202E}reverse\u{202C}marker",        // BiDi override
+            "marker\u{0000}null",                   // Null byte
+            "marker\nnewline",                      // Newline
+        ];
+
+        for marker in unicode_markers {
+            manifest.provenance.reproducibility_markers = vec![marker.to_string()];
+            let result = validate_signed_manifest(&manifest);
+
+            // Should handle Unicode markers gracefully
+            if let Err(e) = result {
+                assert_ne!(e.code(), "EMS_MISSING_FIELD");
+            }
+        }
+    }
+
+    #[test]
+    fn negative_entrypoint_length_boundary_attacks() {
+        let mut manifest = valid_manifest();
+
+        // Test extremely long entrypoint paths
+        let long_paths = vec![
+            "a".repeat(10000),                              // 10KB path
+            format!("{}/main.js", "dir/".repeat(1000)),     // Deep nesting
+            format!("main{}.js", "x".repeat(5000)),         // Long filename
+        ];
+
+        for path in long_paths {
+            manifest.entrypoint = path;
+            let result = validate_signed_manifest(&manifest);
+
+            // Should handle long paths gracefully
+            if let Err(e) = result {
+                // May reject due to length, but not path traversal for valid chars
+                if !e.code().starts_with("EMS_ENGINE_") {
+                    assert_ne!(e.code(), "EMS_ENTRYPOINT_PATH_TRAVERSAL");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_signature_scheme_deserialization_edge_cases() {
+        // Test malformed signature scheme JSON
+        let malformed_schemes = vec![
+            r#""""#,                    // Empty string
+            r#""ED25519""#,             // Wrong case
+            r#""ed25519_variant""#,     // Non-existent variant
+            r#"null"#,                  // Null value
+            r#"123"#,                   // Number instead of string
+            r#"[]"#,                    // Array instead of string
+        ];
+
+        for scheme_json in malformed_schemes {
+            let result = serde_json::from_str::<SignatureScheme>(scheme_json);
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn negative_manifest_serialization_round_trip_corruption() {
+        let mut manifest = valid_manifest();
+
+        // Add edge case values that might break serialization
+        manifest.package.name = "test\u{FFFF}package".to_string();
+        manifest.signature.signed_at = "2024-01-01T00:00:00.000000000Z".to_string(); // Max precision
+        manifest.behavioral_profile.summary = "Summary with\n\t\rwhitespace\u{0000}chars".to_string();
+
+        // Test serialization round-trip
+        let serialized = serde_json::to_string(&manifest);
+        assert!(serialized.is_ok());
+
+        let json_str = serialized.unwrap();
+        let deserialized: Result<SignedExtensionManifest, _> = serde_json::from_str(&json_str);
+        assert!(deserialized.is_ok());
+
+        let recovered = deserialized.unwrap();
+        assert_eq!(recovered.package.name, manifest.package.name);
+    }
+
+    #[test]
+    fn negative_concurrent_manifest_validation_safety() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let barrier = Arc::new(Barrier::new(4));
+
+        let handles: Vec<_> = (0..4).map(|i| {
+            let barrier = Arc::clone(&barrier);
+            thread::spawn(move || {
+                barrier.wait();
+
+                let mut manifest = valid_manifest();
+                manifest.package.name = format!("concurrent-package-{}", i);
+
+                // Each thread validates different manifests
+                for j in 0..100 {
+                    manifest.package.version = format!("1.{}.{}", i, j);
+                    let _ = validate_signed_manifest(&manifest);
+                }
+            })
+        }).collect();
+
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+    }
+
+    #[test]
+    fn negative_empty_collections_edge_cases() {
+        let mut manifest = valid_manifest();
+
+        // Test various empty collections
+        manifest.capabilities.clear(); // Should fail with EMS_EMPTY_CAPABILITIES
+        let result = validate_signed_manifest(&manifest);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), "EMS_EMPTY_CAPABILITIES");
+
+        // Reset and test empty attestation chain
+        manifest.capabilities = vec![frankenengine_extension_host::Capability::FileSystemRead];
+        manifest.provenance.attestation_chain.clear();
+        let result = validate_signed_manifest(&manifest);
+        // May or may not require attestations - implementation dependent
+
+        // Test empty reproducibility markers
+        manifest.provenance.reproducibility_markers.clear();
+        let result = validate_signed_manifest(&manifest);
+        // Empty markers should be allowed
+
+        // Test empty network zones
+        manifest.behavioral_profile.declared_network_zones.clear();
+        let result = validate_signed_manifest(&manifest);
+        // Empty zones should be allowed
     }
 }

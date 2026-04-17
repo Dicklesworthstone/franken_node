@@ -61,8 +61,12 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_CORRECTIVE_ACTIONS: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -311,6 +315,18 @@ impl TransparentReports {
         mut report: TransparentReport,
         trace_id: &str,
     ) -> Result<String, String> {
+        if report.report_id.trim().is_empty() {
+            return Err("Report id must not be empty".to_string());
+        }
+
+        if self.reports.contains_key(&report.report_id) {
+            return Err(format!("Report {} already exists", report.report_id));
+        }
+
+        if report.title.trim().is_empty() {
+            return Err("Report title must not be empty".to_string());
+        }
+
         // Validate required sections
         for sec in REQUIRED_SECTIONS {
             if !report.sections.contains_key(*sec) {
@@ -323,6 +339,21 @@ impl TransparentReports {
                     }),
                 );
                 return Err(format!("Missing required section: {}", sec));
+            }
+            if report
+                .sections
+                .get(*sec)
+                .is_some_and(|section| section.trim().is_empty())
+            {
+                self.log(
+                    event_codes::TR_ERR_MISSING_SECTION,
+                    trace_id,
+                    serde_json::json!({
+                        "report_id": &report.report_id,
+                        "empty": sec,
+                    }),
+                );
+                return Err(format!("Empty required section: {}", sec));
             }
         }
 
@@ -339,6 +370,13 @@ impl TransparentReports {
         if report.timeline.is_empty() {
             return Err("Timeline must have at least one entry".to_string());
         }
+        if report.timeline.iter().any(|entry| {
+            entry.timestamp.trim().is_empty()
+                || entry.event.trim().is_empty()
+                || entry.actor.trim().is_empty()
+        }) {
+            return Err("Timeline entries must have timestamp, event, and actor".to_string());
+        }
 
         self.log(
             event_codes::TR_TIMELINE_ADDED,
@@ -350,6 +388,13 @@ impl TransparentReports {
         );
 
         // Root cause
+        if report
+            .root_causes
+            .iter()
+            .any(|cause| cause.trim().is_empty())
+        {
+            return Err("Root causes must not contain empty entries".to_string());
+        }
         if !report.root_causes.is_empty() {
             self.log(
                 event_codes::TR_ROOT_CAUSE_ANALYZED,
@@ -362,6 +407,13 @@ impl TransparentReports {
         }
 
         // Lessons
+        if report
+            .lessons_learned
+            .iter()
+            .any(|lesson| lesson.trim().is_empty())
+        {
+            return Err("Lessons learned must not contain empty entries".to_string());
+        }
         if !report.lessons_learned.is_empty() {
             self.log(
                 event_codes::TR_LESSONS_RECORDED,
@@ -421,11 +473,34 @@ impl TransparentReports {
             return Err(format!("Report {} not found", report_id));
         }
 
+        if action.action_id.trim().is_empty() {
+            return Err("Action id must not be empty".to_string());
+        }
+
+        if action.description.trim().is_empty() {
+            return Err("Action description must not be empty".to_string());
+        }
+
+        if action.owner.trim().is_empty() {
+            return Err("Action owner must not be empty".to_string());
+        }
+
+        if action.due_date.trim().is_empty() {
+            return Err("Action due date must not be empty".to_string());
+        }
+
         let mut report = self
             .reports
             .get(report_id)
             .cloned()
             .ok_or_else(|| format!("Report {report_id} not found"))?;
+        if report
+            .corrective_actions
+            .iter()
+            .any(|existing| existing.action_id == action.action_id)
+        {
+            return Err(format!("Action {} already exists", action.action_id));
+        }
         let action_id = action.action_id.clone();
         push_bounded(
             &mut report.corrective_actions,
@@ -653,6 +728,46 @@ mod tests {
     }
 
     #[test]
+    fn push_bounded_zero_capacity_clears_existing_items() {
+        let mut values = vec![1, 2, 3];
+
+        push_bounded(&mut values, 4, 0);
+
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_overfull_vector_keeps_newest_window() {
+        let mut values = vec![1, 2, 3, 4];
+
+        push_bounded(&mut values, 5, 2);
+
+        assert_eq!(values, vec![4, 5]);
+    }
+
+    fn engine_with_identified_action() -> TransparentReports {
+        let mut engine = TransparentReports::default();
+        engine
+            .create_report(
+                sample_report("r-action", ReportCategory::SecurityIncident),
+                &trace(),
+            )
+            .expect("report should be accepted");
+        engine
+            .add_corrective_action("r-action", sample_action("a-action"), &trace())
+            .expect("action should be accepted");
+        engine
+    }
+
+    fn advance_action(
+        engine: &mut TransparentReports,
+        action_id: &str,
+        status: ActionStatus,
+    ) -> Result<(), String> {
+        engine.update_action_status("r-action", action_id, status, &trace())
+    }
+
+    #[test]
     fn five_categories() {
         assert_eq!(ReportCategory::all().len(), 5);
     }
@@ -695,6 +810,166 @@ mod tests {
         let mut r = sample_report("r-1", ReportCategory::SecurityIncident);
         r.timeline.clear();
         assert!(engine.create_report(r, &trace()).is_err());
+    }
+
+    #[test]
+    fn missing_each_required_section_is_rejected() {
+        for missing_section in REQUIRED_SECTIONS {
+            let mut engine = TransparentReports::default();
+            let mut report = sample_report("r-missing-section", ReportCategory::ComplianceGap);
+            report.sections.remove(*missing_section);
+
+            let err = engine
+                .create_report(report, &trace())
+                .expect_err("missing mandatory section should fail");
+
+            assert!(err.contains(*missing_section));
+            assert!(engine.reports().is_empty());
+        }
+    }
+
+    #[test]
+    fn failed_missing_section_create_does_not_store_partial_report() {
+        let mut engine = TransparentReports::default();
+        let mut report = sample_report("r-partial", ReportCategory::ServiceOutage);
+        report.sections.remove("impact_assessment");
+
+        let result = engine.create_report(report, &trace());
+
+        assert!(result.is_err());
+        assert!(!engine.reports().contains_key("r-partial"));
+    }
+
+    #[test]
+    fn failed_empty_timeline_create_does_not_store_partial_report() {
+        let mut engine = TransparentReports::default();
+        let mut report = sample_report("r-empty-timeline", ReportCategory::DataIntegrity);
+        report.timeline.clear();
+
+        let result = engine.create_report(report, &trace());
+
+        assert!(result.is_err());
+        assert!(!engine.reports().contains_key("r-empty-timeline"));
+    }
+
+    #[test]
+    fn empty_report_id_does_not_store_or_audit() {
+        let mut engine = TransparentReports::default();
+
+        let err = engine
+            .create_report(sample_report("", ReportCategory::SecurityIncident), &trace())
+            .expect_err("empty report id must fail");
+
+        assert!(err.contains("Report id"));
+        assert!(engine.reports().is_empty());
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn whitespace_report_title_does_not_store_or_audit() {
+        let mut engine = TransparentReports::default();
+        let mut report = sample_report("r-blank-title", ReportCategory::ComplianceGap);
+        report.title = " \t ".to_string();
+
+        let err = engine
+            .create_report(report, &trace())
+            .expect_err("blank report titles must fail");
+
+        assert!(err.contains("title"));
+        assert!(!engine.reports().contains_key("r-blank-title"));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn duplicate_report_id_does_not_overwrite_original() {
+        let mut engine = TransparentReports::default();
+        engine
+            .create_report(
+                sample_report("r-dupe", ReportCategory::SecurityIncident),
+                &trace(),
+            )
+            .expect("first report should be accepted");
+        let original_hash = engine.reports()["r-dupe"].content_hash.clone();
+        let original_created_at = engine.reports()["r-dupe"].created_at.clone();
+        let audit_count_before = engine.audit_log().len();
+        let mut duplicate = sample_report("r-dupe", ReportCategory::ComplianceGap);
+        duplicate.title = "Replacement title".to_string();
+
+        let err = engine
+            .create_report(duplicate, &trace())
+            .expect_err("duplicate report ids must fail");
+
+        assert!(err.contains("already exists"));
+        assert_eq!(
+            engine.reports()["r-dupe"].category,
+            ReportCategory::SecurityIncident
+        );
+        assert_ne!(engine.reports()["r-dupe"].title, "Replacement title");
+        assert_eq!(engine.reports()["r-dupe"].content_hash, original_hash);
+        assert_eq!(engine.reports()["r-dupe"].created_at, original_created_at);
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn blank_required_section_is_rejected_without_storing_report() {
+        let mut engine = TransparentReports::default();
+        let mut report = sample_report("r-blank-section", ReportCategory::ServiceOutage);
+        report
+            .sections
+            .insert("lessons_learned".to_string(), " \n ".to_string());
+
+        let err = engine
+            .create_report(report, "trace-blank-section")
+            .expect_err("blank required sections must fail");
+
+        assert!(err.contains("lessons_learned"));
+        assert!(!engine.reports().contains_key("r-blank-section"));
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::TR_ERR_MISSING_SECTION
+        );
+    }
+
+    #[test]
+    fn blank_timeline_event_is_rejected_without_storing_report() {
+        let mut engine = TransparentReports::default();
+        let mut report = sample_report("r-blank-timeline", ReportCategory::DataIntegrity);
+        report.timeline[0].event = " \t ".to_string();
+
+        let err = engine
+            .create_report(report, &trace())
+            .expect_err("blank timeline events must fail");
+
+        assert!(err.contains("Timeline entries"));
+        assert!(!engine.reports().contains_key("r-blank-timeline"));
+    }
+
+    #[test]
+    fn blank_root_cause_is_rejected_without_storing_report() {
+        let mut engine = TransparentReports::default();
+        let mut report = sample_report("r-blank-root-cause", ReportCategory::DataIntegrity);
+        report.root_causes.push(" \n ".to_string());
+
+        let err = engine
+            .create_report(report, &trace())
+            .expect_err("blank root causes must fail");
+
+        assert!(err.contains("Root causes"));
+        assert!(!engine.reports().contains_key("r-blank-root-cause"));
+    }
+
+    #[test]
+    fn blank_lesson_is_rejected_without_storing_report() {
+        let mut engine = TransparentReports::default();
+        let mut report = sample_report("r-blank-lesson", ReportCategory::PerformanceRegression);
+        report.lessons_learned.push(" \t ".to_string());
+
+        let err = engine
+            .create_report(report, &trace())
+            .expect_err("blank lessons must fail");
+
+        assert!(err.contains("Lessons learned"));
+        assert!(!engine.reports().contains_key("r-blank-lesson"));
     }
 
     #[test]
@@ -796,6 +1071,72 @@ mod tests {
     }
 
     #[test]
+    fn empty_action_id_does_not_mutate_report_or_audit() {
+        let mut engine = TransparentReports::default();
+        engine
+            .create_report(
+                sample_report("r-empty-action", ReportCategory::SecurityIncident),
+                &trace(),
+            )
+            .expect("report should be accepted");
+        let audit_count_before = engine.audit_log().len();
+
+        let err = engine
+            .add_corrective_action("r-empty-action", sample_action(""), &trace())
+            .expect_err("empty action ids must fail");
+
+        assert!(err.contains("Action id"));
+        assert!(engine.reports()["r-empty-action"]
+            .corrective_actions
+            .is_empty());
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn blank_action_owner_does_not_mutate_report_or_audit() {
+        let mut engine = TransparentReports::default();
+        engine
+            .create_report(
+                sample_report("r-blank-owner", ReportCategory::SecurityIncident),
+                &trace(),
+            )
+            .expect("report should be accepted");
+        let audit_count_before = engine.audit_log().len();
+        let mut action = sample_action("a-blank-owner");
+        action.owner = " \n ".to_string();
+
+        let err = engine
+            .add_corrective_action("r-blank-owner", action, &trace())
+            .expect_err("blank action owners must fail");
+
+        assert!(err.contains("owner"));
+        assert!(engine.reports()["r-blank-owner"]
+            .corrective_actions
+            .is_empty());
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn duplicate_action_id_does_not_overwrite_existing_action() {
+        let mut engine = engine_with_identified_action();
+        let audit_count_before = engine.audit_log().len();
+        let original_hash = engine.reports()["r-action"].content_hash.clone();
+        let mut duplicate = sample_action("a-action");
+        duplicate.description = "Replacement action".to_string();
+
+        let err = engine
+            .add_corrective_action("r-action", duplicate, &trace())
+            .expect_err("duplicate action ids must fail");
+
+        assert!(err.contains("already exists"));
+        let actions = &engine.reports()["r-action"].corrective_actions;
+        assert_eq!(actions.len(), 1);
+        assert_ne!(actions[0].description, "Replacement action");
+        assert_eq!(engine.reports()["r-action"].content_hash, original_hash);
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
     fn action_identified_to_planned() {
         let mut engine = TransparentReports::default();
         engine
@@ -861,6 +1202,112 @@ mod tests {
             engine
                 .update_action_status("r-1", "a-1", ActionStatus::Verified, &trace())
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn update_action_status_missing_report_fails() {
+        let mut engine = TransparentReports::default();
+
+        let err = engine
+            .update_action_status(
+                "missing-report",
+                "a-action",
+                ActionStatus::Planned,
+                &trace(),
+            )
+            .expect_err("missing report should fail");
+
+        assert!(err.contains("Report missing-report not found"));
+    }
+
+    #[test]
+    fn update_action_status_missing_action_fails() {
+        let mut engine = engine_with_identified_action();
+
+        let err = engine
+            .update_action_status(
+                "r-action",
+                "missing-action",
+                ActionStatus::Planned,
+                &trace(),
+            )
+            .expect_err("missing action should fail");
+
+        assert!(err.contains("Action missing-action not found"));
+    }
+
+    #[test]
+    fn planned_action_cannot_skip_directly_to_verified() {
+        let mut engine = engine_with_identified_action();
+        advance_action(&mut engine, "a-action", ActionStatus::Planned)
+            .expect("identified to planned should be valid");
+
+        let result = advance_action(&mut engine, "a-action", ActionStatus::Verified);
+
+        assert!(result.is_err());
+        let stored = engine
+            .reports()
+            .get("r-action")
+            .expect("report should exist");
+        assert_eq!(stored.corrective_actions[0].status, ActionStatus::Planned);
+    }
+
+    #[test]
+    fn implemented_action_cannot_revert_directly_to_identified() {
+        let mut engine = engine_with_identified_action();
+        advance_action(&mut engine, "a-action", ActionStatus::Planned)
+            .expect("identified to planned should be valid");
+        advance_action(&mut engine, "a-action", ActionStatus::Implemented)
+            .expect("planned to implemented should be valid");
+
+        let result = advance_action(&mut engine, "a-action", ActionStatus::Identified);
+
+        assert!(result.is_err());
+        let stored = engine
+            .reports()
+            .get("r-action")
+            .expect("report should exist");
+        assert_eq!(
+            stored.corrective_actions[0].status,
+            ActionStatus::Implemented
+        );
+    }
+
+    #[test]
+    fn verified_action_cannot_reopen_to_planned() {
+        let mut engine = engine_with_identified_action();
+        advance_action(&mut engine, "a-action", ActionStatus::Planned)
+            .expect("identified to planned should be valid");
+        advance_action(&mut engine, "a-action", ActionStatus::Implemented)
+            .expect("planned to implemented should be valid");
+        advance_action(&mut engine, "a-action", ActionStatus::Verified)
+            .expect("implemented to verified should be valid");
+
+        let result = advance_action(&mut engine, "a-action", ActionStatus::Planned);
+
+        assert!(result.is_err());
+        let stored = engine
+            .reports()
+            .get("r-action")
+            .expect("report should exist");
+        assert_eq!(stored.corrective_actions[0].status, ActionStatus::Verified);
+    }
+
+    #[test]
+    fn invalid_transition_leaves_action_status_unchanged() {
+        let mut engine = engine_with_identified_action();
+
+        let result = advance_action(&mut engine, "a-action", ActionStatus::Verified);
+
+        assert!(result.is_err());
+        let stored = engine
+            .reports()
+            .get("r-action")
+            .expect("report should exist");
+        assert_eq!(
+            stored.corrective_actions[0].status,
+            ActionStatus::Identified
         );
     }
 

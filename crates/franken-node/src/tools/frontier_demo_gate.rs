@@ -31,8 +31,12 @@ use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_RESULTS};
 const MAX_REGISTERED_PROGRAMS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -563,6 +567,35 @@ mod tests {
         env
     }
 
+    // === bounded collection hardening ===
+
+    #[test]
+    fn test_push_bounded_zero_capacity_drops_without_panic() {
+        let mut values = vec![1, 2, 3];
+
+        push_bounded(&mut values, 4, 0);
+
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn test_push_bounded_overfull_vector_trims_back_to_capacity() {
+        let mut values = vec![1, 2, 3, 4];
+
+        push_bounded(&mut values, 5, 2);
+
+        assert_eq!(values, vec![4, 5]);
+    }
+
+    #[test]
+    fn test_push_bounded_capacity_one_keeps_newest_item_only() {
+        let mut values = vec![10];
+
+        push_bounded(&mut values, 11, 1);
+
+        assert_eq!(values, vec![11]);
+    }
+
     // === FrontierProgram enum ===
 
     #[test]
@@ -797,6 +830,50 @@ mod tests {
         assert_eq!(runner.registered_programs.len(), 5);
     }
 
+    #[test]
+    fn test_runner_all_passed_is_false_without_results() {
+        let runner = DemoGateRunner::new();
+        assert!(!runner.all_passed());
+        assert!(runner.results().is_empty());
+        assert!(runner.events().is_empty());
+    }
+
+    #[test]
+    fn test_runner_duplicate_register_does_not_touch_execution_state() {
+        let mut runner = DemoGateRunner::new();
+        let registered_before = runner.registered_programs.clone();
+
+        runner.register(FrontierProgram::TrustFabric);
+
+        assert_eq!(runner.registered_programs, registered_before);
+        assert!(runner.results().is_empty());
+        assert!(runner.events().is_empty());
+    }
+
+    #[test]
+    fn test_failed_gate_records_failure_without_pass_event() {
+        let mut runner = DemoGateRunner::new();
+        let gate = DefaultDemoGate::new(FrontierProgram::TrustFabric).with_pass(false);
+
+        let result = runner.execute_gate(&gate);
+
+        assert!(!result.passed);
+        assert!(!runner.all_passed());
+        assert_eq!(runner.results().len(), 1);
+        assert!(
+            runner
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::DEMO_GATE_FAIL)
+        );
+        assert!(
+            !runner
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::DEMO_GATE_PASS)
+        );
+    }
+
     // === run_all + manifest ===
 
     #[test]
@@ -885,6 +962,126 @@ mod tests {
         assert!(!manifest.validate_fingerprint());
     }
 
+    #[test]
+    fn test_run_all_empty_gate_list_does_not_create_results() {
+        let mut runner = DemoGateRunner::new();
+        let gates: [&dyn FrontierDemoGate; 0] = [];
+
+        let manifest = runner.run_all(&gates, "abc123", make_env());
+
+        assert!(runner.results().is_empty());
+        assert_eq!(runner.events().len(), 1);
+        assert_eq!(runner.events()[0].code, event_codes::MANIFEST_GENERATED);
+        assert!(manifest.input_fingerprints.is_empty());
+        assert!(manifest.output_fingerprints.is_empty());
+        assert!(manifest.timing_per_gate.is_empty());
+        assert!(!runner.all_passed());
+    }
+
+    #[test]
+    fn test_run_all_with_failed_gate_preserves_failed_result() {
+        let mut runner = DemoGateRunner::new();
+        let gate = DefaultDemoGate::new(FrontierProgram::TrustFabric).with_pass(false);
+        let gates: [&dyn FrontierDemoGate; 1] = [&gate];
+
+        let manifest = runner.run_all(&gates, "abc123", make_env());
+
+        assert_eq!(runner.results().len(), 1);
+        assert!(!runner.results()[0].passed);
+        assert!(!runner.all_passed());
+        assert!(
+            manifest
+                .output_fingerprints
+                .contains_key(FrontierProgram::TrustFabric.label())
+        );
+        assert!(
+            runner
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::DEMO_GATE_FAIL)
+        );
+    }
+
+    #[test]
+    fn test_manifest_environment_tamper_invalidates_without_recomputing() {
+        let mut manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            make_env(),
+            BTreeMap::new(),
+        );
+        let stored_fingerprint = manifest.manifest_fingerprint.clone();
+
+        manifest
+            .environment_metadata
+            .insert("arch".to_string(), "arm64".to_string());
+
+        assert!(!manifest.validate_fingerprint());
+        assert!(!stored_fingerprint.is_empty());
+        assert!(crate::security::constant_time::ct_eq(
+            &manifest.manifest_fingerprint,
+            &stored_fingerprint
+        ));
+    }
+
+    #[test]
+    fn test_manifest_input_fingerprint_tamper_invalidates_without_recomputing() {
+        let mut manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::from([("trust_fabric".to_string(), sha256_fingerprint(b"input"))]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let stored_fingerprint = manifest.manifest_fingerprint.clone();
+
+        manifest
+            .input_fingerprints
+            .insert("trust_fabric".to_string(), sha256_fingerprint(b"tampered"));
+
+        assert!(!manifest.validate_fingerprint());
+        assert!(crate::security::constant_time::ct_eq(
+            &manifest.manifest_fingerprint,
+            &stored_fingerprint
+        ));
+    }
+
+    #[test]
+    fn test_manifest_output_fingerprint_tamper_invalidates_without_recomputing() {
+        let mut manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::from([("trust_fabric".to_string(), sha256_fingerprint(b"output"))]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+
+        manifest.output_fingerprints.insert(
+            "trust_fabric".to_string(),
+            sha256_fingerprint(b"different-output"),
+        );
+
+        assert!(!manifest.validate_fingerprint());
+    }
+
+    #[test]
+    fn test_manifest_timing_tamper_invalidates_without_recomputing() {
+        let mut manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::from([("trust_fabric".to_string(), 42)]),
+        );
+
+        manifest
+            .timing_per_gate
+            .insert("trust_fabric".to_string(), 43);
+
+        assert!(!manifest.validate_fingerprint());
+    }
+
     // === ExternalVerifierBootstrap ===
 
     #[test]
@@ -920,6 +1117,79 @@ mod tests {
         let other_gate = DefaultDemoGate::new(FrontierProgram::VerifierEconomy);
         let other_result = other_gate.execute();
         assert!(!bootstrap.verify_results(&[other_result]));
+    }
+
+    #[test]
+    fn test_bootstrap_empty_expected_results_rejects_extra_result() {
+        let manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let bootstrap = ExternalVerifierBootstrap::new(manifest, vec![]);
+        let unexpected = DefaultDemoGate::new(FrontierProgram::TrustFabric).execute();
+
+        assert!(!bootstrap.verify_results(&[unexpected]));
+        assert!(bootstrap.gate_results.is_empty());
+        assert_eq!(bootstrap.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_bootstrap_rejects_schema_tampered_result() {
+        let manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let gate = DefaultDemoGate::new(FrontierProgram::TrustFabric);
+        let result = gate.execute();
+        let bootstrap = ExternalVerifierBootstrap::new(manifest, vec![result.clone()]);
+        let mut tampered = result;
+        tampered.schema_version = "demo-v0.9".to_string();
+
+        assert!(!bootstrap.verify_results(&[tampered]));
+        assert_eq!(bootstrap.gate_results.len(), 1);
+        assert_eq!(bootstrap.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn test_bootstrap_rejects_reordered_results() {
+        let manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let trust_result = DefaultDemoGate::new(FrontierProgram::TrustFabric).execute();
+        let verifier_result = DefaultDemoGate::new(FrontierProgram::VerifierEconomy).execute();
+        let bootstrap = ExternalVerifierBootstrap::new(
+            manifest,
+            vec![trust_result.clone(), verifier_result.clone()],
+        );
+
+        assert!(!bootstrap.verify_results(&[verifier_result, trust_result]));
+    }
+
+    #[test]
+    fn test_bootstrap_rejects_tampered_output_fingerprint() {
+        let manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let result = DefaultDemoGate::new(FrontierProgram::TrustFabric).execute();
+        let bootstrap = ExternalVerifierBootstrap::new(manifest, vec![result.clone()]);
+        let mut tampered = result;
+        tampered.output_fingerprint = sha256_fingerprint(b"tampered-output");
+
+        assert!(!bootstrap.verify_results(&[tampered]));
     }
 
     #[test]
@@ -1028,6 +1298,17 @@ mod tests {
         assert_eq!(fp1, fp2);
     }
 
+    #[test]
+    fn test_sha256_fingerprint_is_domain_separated_from_raw_sha256() {
+        let domain_separated = sha256_fingerprint(b"hello");
+        let raw = hex::encode(Sha256::digest(b"hello"));
+
+        assert!(!crate::security::constant_time::ct_eq(
+            &domain_separated,
+            &raw
+        ));
+    }
+
     // === ResourceMetrics ===
 
     #[test]
@@ -1098,5 +1379,140 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);
+    }
+
+    #[test]
+    fn negative_frontier_program_deserialize_rejects_display_name() {
+        let parsed: Result<FrontierProgram, _> = serde_json::from_str("\"Trust Fabric\"");
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn negative_frontier_program_deserialize_rejects_unknown_label() {
+        let parsed: Result<FrontierProgram, _> = serde_json::from_str("\"unknown_program\"");
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn negative_demo_gate_result_deserialize_rejects_missing_program() {
+        let raw = serde_json::json!({
+            "passed": true,
+            "timing_ms": 42_u64,
+            "resource_metrics": {
+                "peak_memory_bytes": 1024_u64,
+                "cpu_time_ms": 10_u64,
+                "io_operations": 2_u64
+            },
+            "output_fingerprint": sha256_fingerprint(b"output"),
+            "schema_version": SCHEMA_VERSION,
+            "detail": "missing program"
+        });
+
+        let parsed: Result<DemoGateResult, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn negative_demo_gate_result_deserialize_rejects_string_timing() {
+        let raw = serde_json::json!({
+            "program": "trust_fabric",
+            "passed": true,
+            "timing_ms": "42",
+            "resource_metrics": {
+                "peak_memory_bytes": 1024_u64,
+                "cpu_time_ms": 10_u64,
+                "io_operations": 2_u64
+            },
+            "output_fingerprint": sha256_fingerprint(b"output"),
+            "schema_version": SCHEMA_VERSION,
+            "detail": "bad timing type"
+        });
+
+        let parsed: Result<DemoGateResult, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn negative_demo_event_deserialize_rejects_unknown_program_label() {
+        let raw = serde_json::json!({
+            "code": event_codes::DEMO_GATE_START,
+            "program": "not_a_frontier_program",
+            "detail": "bad program",
+            "timestamp": "2026-04-17T00:00:00Z"
+        });
+
+        let parsed: Result<DemoEvent, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn negative_manifest_deserialize_rejects_string_timing_value() {
+        let raw = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "git_commit_hash": "abc123",
+            "input_fingerprints": {},
+            "output_fingerprints": {},
+            "environment_metadata": {},
+            "timing_per_gate": {"trust_fabric": "42"},
+            "manifest_fingerprint": sha256_fingerprint(b"manifest")
+        });
+
+        let parsed: Result<ReproducibilityManifest, _> = serde_json::from_value(raw);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn negative_manifest_validation_rejects_empty_output_fingerprint_mutation() {
+        let mut manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::from([("trust_fabric".to_string(), sha256_fingerprint(b"output"))]),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+
+        manifest
+            .output_fingerprints
+            .insert("trust_fabric".to_string(), String::new());
+
+        assert!(!manifest.validate_fingerprint());
+    }
+
+    #[test]
+    fn negative_bootstrap_verify_rejects_missing_expected_result() {
+        let manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let trust_result = DefaultDemoGate::new(FrontierProgram::TrustFabric).execute();
+        let verifier_result = DefaultDemoGate::new(FrontierProgram::VerifierEconomy).execute();
+        let bootstrap =
+            ExternalVerifierBootstrap::new(manifest, vec![trust_result.clone(), verifier_result]);
+
+        assert!(!bootstrap.verify_results(&[trust_result]));
+    }
+
+    #[test]
+    fn negative_bootstrap_verify_rejects_extra_duplicate_result() {
+        let manifest = ReproducibilityManifest::new(
+            "abc".to_string(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+            BTreeMap::new(),
+        );
+        let result = DefaultDemoGate::new(FrontierProgram::TrustFabric).execute();
+        let bootstrap = ExternalVerifierBootstrap::new(manifest, vec![result.clone()]);
+
+        assert!(!bootstrap.verify_results(&[result.clone(), result]));
     }
 }

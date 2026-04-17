@@ -50,11 +50,24 @@ const MAX_ADMISSION_RECEIPTS: usize = 4096;
 const MAX_VERSIONS_PER_EXTENSION: usize = 1024;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items
+            .len()
+            .saturating_sub(cap)
+            .saturating_add(1)
+            .min(items.len());
         items.drain(0..overflow);
     }
     items.push(item);
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 // ---------------------------------------------------------------------------
@@ -286,6 +299,29 @@ impl AdmissionKernel {
             compute_admission_digest(manifest_bytes, &signature.key_id, provenance);
         let timestamp = Utc::now().to_rfc3339();
 
+        if signature.algorithm != "ed25519" {
+            return AdmissionReceipt {
+                receipt_id: Uuid::now_v7().to_string(),
+                extension_name: extension_name.to_string(),
+                publisher_key_id: signature.key_id.clone(),
+                manifest_digest,
+                provenance_level: None,
+                admitted: false,
+                witness: Some(NegativeWitness {
+                    rejection_code: event_codes::SER_ERR_INVALID_SIGNATURE.to_string(),
+                    rejection_reason: format!(
+                        "unsupported signature algorithm: {}",
+                        signature.algorithm
+                    ),
+                    checked_fields: vec!["signature.algorithm".to_string()],
+                    remediation: "Use canonical ed25519 signatures over the manifest bytes."
+                        .to_string(),
+                }),
+                trace_id: trace_id.to_string(),
+                timestamp,
+            };
+        }
+
         // Step 1: Verify publisher key exists in key ring
         let key_id = KeyId(signature.key_id.clone());
         let verifying_key = match self.key_ring.get_key(&key_id) {
@@ -441,15 +477,15 @@ fn compute_admission_digest(
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"extension_registry_admission_v1:");
-    hasher.update((manifest_bytes.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(manifest_bytes.len()).to_le_bytes());
     hasher.update(manifest_bytes);
-    hasher.update((publisher_key_id.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(publisher_key_id.len()).to_le_bytes());
     hasher.update(publisher_key_id.as_bytes());
-    hasher.update((provenance.vcs_commit_sha.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(provenance.vcs_commit_sha.len()).to_le_bytes());
     hasher.update(provenance.vcs_commit_sha.as_bytes());
-    hasher.update((provenance.build_system_identifier.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(provenance.build_system_identifier.len()).to_le_bytes());
     hasher.update(provenance.build_system_identifier.as_bytes());
-    hasher.update((provenance.output_hash.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(provenance.output_hash.len()).to_le_bytes());
     hasher.update(provenance.output_hash.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -1025,6 +1061,12 @@ mod tests {
         SignedExtensionRegistry::new(RegistryConfig::default(), test_kernel(vk))
     }
 
+    fn transparency_required_registry(vk: &ed25519_dalek::VerifyingKey) -> SignedExtensionRegistry {
+        let mut kernel = test_kernel(vk);
+        kernel.transparency_policy.required = true;
+        SignedExtensionRegistry::new(RegistryConfig::default(), kernel)
+    }
+
     /// Build a valid registration request signed by the given key.
     fn valid_request(name: &str, sk: &SigningKey, now_epoch: u64) -> RegistrationRequest {
         let manifest_bytes = format!("manifest:{}:1.0.0", name).into_bytes();
@@ -1189,6 +1231,95 @@ mod tests {
         );
     }
 
+    #[test]
+    fn adversarial_unsupported_signature_algorithm_rejected() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let mut req = valid_request("ext-a", &sk, now_epoch());
+        req.signature.algorithm = "ed25519ph".to_string();
+
+        let result = reg.register(req, &make_trace(), now_epoch());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_INVALID_SIGNATURE)
+        );
+        let witness = reg.admission_receipts()[0]
+            .witness
+            .as_ref()
+            .expect("negative witness");
+        assert!(
+            witness
+                .checked_fields
+                .contains(&"signature.algorithm".to_string())
+        );
+        assert!(reg.list(None).is_empty());
+    }
+
+    #[test]
+    fn adversarial_trusted_key_id_with_wrong_signing_key_rejected() {
+        let (_trusted_sk, trusted_vk) = test_keypair();
+        let (untrusted_sk, _untrusted_vk) = test_keypair_2();
+        let mut reg = test_registry(&trusted_vk);
+        let mut req = valid_request("ext-a", &untrusted_sk, now_epoch());
+        req.signature.key_id = KeyId::from_verifying_key(&trusted_vk).to_string();
+
+        let result = reg.register(req, &make_trace(), now_epoch());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_INVALID_SIGNATURE)
+        );
+        assert!(reg.list(None).is_empty());
+    }
+
+    #[test]
+    fn adversarial_missing_transparency_proof_rejected_when_required() {
+        let (sk, vk) = test_keypair();
+        let mut reg = transparency_required_registry(&vk);
+        let mut req = valid_request("ext-a", &sk, now_epoch());
+        req.transparency_proof = None;
+
+        let result = reg.register(req, &make_trace(), now_epoch());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_TRANSPARENCY_FAILED)
+        );
+        let witness = reg.admission_receipts()[0]
+            .witness
+            .as_ref()
+            .expect("witness");
+        assert!(
+            witness
+                .checked_fields
+                .contains(&"transparency_proof".to_string())
+        );
+        assert!(reg.list(None).is_empty());
+    }
+
+    #[test]
+    fn rejected_admission_does_not_insert_extension() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let mut req = valid_request("ext-a", &sk, now_epoch());
+        req.signature.signature_bytes = vec![0x11; 64];
+
+        let result = reg.register(req, &make_trace(), now_epoch());
+
+        assert!(!result.success);
+        assert!(reg.list(None).is_empty());
+        assert_eq!(reg.admission_receipts().len(), 1);
+        assert!(
+            reg.audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::SER_ERR_INVALID_SIGNATURE)
+        );
+    }
+
     // === Adversarial: provenance chain ===
 
     #[test]
@@ -1242,6 +1373,23 @@ mod tests {
             result.error_code.as_deref(),
             Some(event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID)
         );
+    }
+
+    #[test]
+    fn adversarial_tampered_provenance_link_signature_rejected() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let mut req = valid_request("ext-a", &sk, now_epoch());
+        req.provenance.links[0].signature.push_str("00");
+
+        let result = reg.register(req, &make_trace(), now_epoch());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_PROVENANCE_CHAIN_INVALID)
+        );
+        assert!(reg.list(None).is_empty());
     }
 
     // === Regression: shape-only checks no longer work ===
@@ -1337,11 +1485,54 @@ mod tests {
     }
 
     #[test]
+    fn add_version_to_revoked_extension_preserves_lineage() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
+        let ext_id = r.extension_id.unwrap();
+        reg.revoke(
+            &ext_id,
+            RevocationReason::SecurityVulnerability,
+            "admin",
+            &make_trace(),
+        );
+        let before = reg.version_lineage(&ext_id).expect("lineage").len();
+
+        let result = reg.add_version(&ext_id, valid_version("2.0.0"), &make_trace());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_ALREADY_REVOKED)
+        );
+        assert_eq!(reg.version_lineage(&ext_id).expect("lineage").len(), before);
+    }
+
+    #[test]
     fn add_version_not_found() {
         let (_, vk) = test_keypair();
         let mut reg = test_registry(&vk);
         let result = reg.add_version("nonexistent", valid_version("1.0.0"), &make_trace());
         assert!(!result.success);
+    }
+
+    #[test]
+    fn add_version_missing_extension_does_not_emit_audit() {
+        let (_, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+
+        let result = reg.add_version("missing", valid_version("1.0.0"), &make_trace());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_NOT_FOUND)
+        );
+        assert!(reg.audit_log().is_empty());
     }
 
     // === Deprecation ===
@@ -1382,6 +1573,51 @@ mod tests {
         );
         let result = reg.deprecate(&ext_id, &make_trace());
         assert!(!result.success);
+    }
+
+    #[test]
+    fn deprecate_missing_extension_does_not_emit_mutation_audit() {
+        let (_, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+
+        let result = reg.deprecate("missing-extension", &make_trace());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_NOT_FOUND)
+        );
+        assert!(reg.audit_log().is_empty());
+    }
+
+    #[test]
+    fn deprecate_revoked_extension_preserves_terminal_status() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let r = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
+        let ext_id = r.extension_id.unwrap();
+        reg.revoke(
+            &ext_id,
+            RevocationReason::PolicyViolation,
+            "admin",
+            &make_trace(),
+        );
+
+        let result = reg.deprecate(&ext_id, &make_trace());
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_ALREADY_REVOKED)
+        );
+        assert_eq!(
+            reg.query(&ext_id).expect("extension").status,
+            ExtensionStatus::Revoked
+        );
     }
 
     // === Revocation ===
@@ -1433,6 +1669,62 @@ mod tests {
             result.error_code.as_deref(),
             Some(event_codes::SER_ERR_ALREADY_REVOKED)
         );
+    }
+
+    #[test]
+    fn duplicate_revocation_does_not_advance_sequence_or_append_record() {
+        let (sk, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+        let result = reg.register(
+            valid_request("ext-a", &sk, now_epoch()),
+            &make_trace(),
+            now_epoch(),
+        );
+        let ext_id = result.extension_id.expect("extension id");
+        reg.revoke(
+            &ext_id,
+            RevocationReason::PolicyViolation,
+            "admin",
+            &make_trace(),
+        );
+        let sequence_after_first = reg.revocation_sequence;
+        let records_after_first = reg.revocations().len();
+
+        let duplicate = reg.revoke(
+            &ext_id,
+            RevocationReason::SecurityVulnerability,
+            "admin",
+            &make_trace(),
+        );
+
+        assert!(!duplicate.success);
+        assert_eq!(
+            duplicate.error_code.as_deref(),
+            Some(event_codes::SER_ERR_ALREADY_REVOKED)
+        );
+        assert_eq!(reg.revocation_sequence, sequence_after_first);
+        assert_eq!(reg.revocations().len(), records_after_first);
+    }
+
+    #[test]
+    fn revoke_missing_extension_does_not_increment_sequence_or_record() {
+        let (_, vk) = test_keypair();
+        let mut reg = test_registry(&vk);
+
+        let result = reg.revoke(
+            "missing-extension",
+            RevocationReason::SecurityVulnerability,
+            "admin",
+            &make_trace(),
+        );
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error_code.as_deref(),
+            Some(event_codes::SER_ERR_NOT_FOUND)
+        );
+        assert!(reg.revocations().is_empty());
+        assert_eq!(reg.revocation_sequence, 0);
     }
 
     #[test]
@@ -1764,6 +2056,45 @@ mod tests {
         assert_ne!(d1, d2);
     }
 
+    #[test]
+    fn admission_digest_changes_with_vcs_commit_tamper() {
+        let mut prov = valid_provenance(1000);
+        let original = compute_admission_digest(b"manifest", "key-1", &prov);
+        prov.vcs_commit_sha.push_str("-tampered");
+        let changed = compute_admission_digest(b"manifest", "key-1", &prov);
+
+        assert_ne!(original, changed);
+    }
+
+    #[test]
+    fn admission_digest_changes_with_build_system_tamper() {
+        let mut prov = valid_provenance(1000);
+        let original = compute_admission_digest(b"manifest", "key-1", &prov);
+        prov.build_system_identifier = "local-shell".to_string();
+        let changed = compute_admission_digest(b"manifest", "key-1", &prov);
+
+        assert_ne!(original, changed);
+    }
+
+    #[test]
+    fn admission_digest_changes_with_output_hash_tamper() {
+        let mut prov = valid_provenance(1000);
+        let original = compute_admission_digest(b"manifest", "key-1", &prov);
+        prov.output_hash = "0".repeat(64);
+        let changed = compute_admission_digest(b"manifest", "key-1", &prov);
+
+        assert_ne!(original, changed);
+    }
+
+    #[test]
+    fn admission_digest_length_prefix_blocks_field_boundary_collision() {
+        let prov = valid_provenance(1000);
+        let first = compute_admission_digest(b"ab", "c", &prov);
+        let second = compute_admission_digest(b"a", "bc", &prov);
+
+        assert_ne!(first, second);
+    }
+
     // === Determinism ===
 
     #[test]
@@ -1826,5 +2157,23 @@ mod tests {
             versions.len(),
             MAX_VERSIONS_PER_EXTENSION,
         );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_existing_and_new_items() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_overfull_input_preserves_latest_window() {
+        let mut items = vec![1, 2, 3, 4, 5];
+
+        push_bounded(&mut items, 6, 3);
+
+        assert_eq!(items, vec![4, 5, 6]);
     }
 }

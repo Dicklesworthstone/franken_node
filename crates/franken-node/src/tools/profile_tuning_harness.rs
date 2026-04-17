@@ -197,8 +197,12 @@ use sha2::{Digest, Sha256};
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -365,6 +369,13 @@ impl ProfileTuningHarness {
                 diagnostics.push(Self::non_finite_metric_diagnostic(
                     &row.class_id,
                     "baseline.overhead_ratio",
+                    self.config.regression_threshold_pct,
+                ));
+            } else if row.overhead_ratio < 0.0 {
+                diagnostics.push(Self::negative_metric_diagnostic(
+                    &row.class_id,
+                    "baseline.overhead_ratio",
+                    row.overhead_ratio,
                     self.config.regression_threshold_pct,
                 ));
             }
@@ -587,6 +598,16 @@ impl ProfileTuningHarness {
                     &metric,
                     threshold_pct,
                 ));
+            } else if value < 0.0 {
+                let metric = prefix
+                    .map(|prefix| format!("{prefix}.{metric}"))
+                    .unwrap_or_else(|| metric.to_string());
+                diagnostics.push(Self::negative_metric_diagnostic(
+                    &benchmark.class_id,
+                    &metric,
+                    value,
+                    threshold_pct,
+                ));
             }
         }
     }
@@ -600,6 +621,20 @@ impl ProfileTuningHarness {
             class_id: class_id.to_string(),
             metric: metric.to_string(),
             change_pct: f64::INFINITY,
+            threshold_pct,
+        }
+    }
+
+    fn negative_metric_diagnostic(
+        class_id: &str,
+        metric: &str,
+        value: f64,
+        threshold_pct: f64,
+    ) -> RegressionDiagnostic {
+        RegressionDiagnostic {
+            class_id: class_id.to_string(),
+            metric: metric.to_string(),
+            change_pct: value,
             threshold_pct,
         }
     }
@@ -734,6 +769,65 @@ mod tests {
             p50_decode_us: 1.2,
             p99_decode_us: 4.0,
         }]
+    }
+
+    fn accepted_bundle_from_defaults() -> SignedPolicyBundle {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        match harness.run(&sample_baseline(), &sample_benchmarks(), None) {
+            HarnessOutcome::Accepted(bundle) => bundle,
+            HarnessOutcome::Rejected(_) => unreachable!("Expected Accepted"),
+        }
+    }
+
+    // -- Bounded event helper ------------------------------------------
+
+    #[test]
+    fn test_push_bounded_zero_capacity_clears_existing_items() {
+        let mut events = vec![HarnessEvent {
+            code: "old".to_string(),
+            detail: "stale".to_string(),
+        }];
+
+        push_bounded(
+            &mut events,
+            HarnessEvent {
+                code: "new".to_string(),
+                detail: "ignored".to_string(),
+            },
+            0,
+        );
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn test_push_bounded_overfull_event_buffer_keeps_newest_items() {
+        let mut events = vec![
+            HarnessEvent {
+                code: "one".to_string(),
+                detail: "1".to_string(),
+            },
+            HarnessEvent {
+                code: "two".to_string(),
+                detail: "2".to_string(),
+            },
+            HarnessEvent {
+                code: "three".to_string(),
+                detail: "3".to_string(),
+            },
+        ];
+
+        push_bounded(
+            &mut events,
+            HarnessEvent {
+                code: "four".to_string(),
+                detail: "4".to_string(),
+            },
+            2,
+        );
+
+        let codes: Vec<&str> = events.iter().map(|event| event.code.as_str()).collect();
+        assert_eq!(codes, vec!["three", "four"]);
     }
 
     // -- HMAC signing ---------------------------------------------------
@@ -1125,6 +1219,97 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_harness_rejects_negative_baseline_overhead() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut baseline = sample_baseline();
+        baseline[0].overhead_ratio = -0.01;
+
+        let outcome = harness.run(&baseline, &sample_benchmarks(), None);
+
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "baseline.overhead_ratio");
+            assert!(diags[0].change_pct < 0.0);
+            assert!(
+                harness
+                    .events()
+                    .iter()
+                    .all(|event| event.code != PT_BUNDLE_SIGNED)
+            );
+        } else {
+            unreachable!("Expected Rejected");
+        }
+    }
+
+    #[test]
+    fn test_harness_rejects_negative_current_overhead() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut benchmarks = sample_benchmarks();
+        benchmarks[0].overhead_ratio = -0.02;
+
+        let outcome = harness.run(&sample_baseline(), &benchmarks, None);
+
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "overhead_ratio");
+            assert!(diags[0].change_pct < 0.0);
+        } else {
+            unreachable!("Expected Rejected");
+        }
+    }
+
+    #[test]
+    fn test_harness_rejects_negative_current_p50_encode() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut benchmarks = sample_benchmarks();
+        benchmarks[0].p50_encode_us = -1.0;
+
+        let outcome = harness.run(&sample_baseline(), &benchmarks, None);
+
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "p50_encode_us");
+            assert!(diags[0].change_pct < 0.0);
+        } else {
+            unreachable!("Expected Rejected");
+        }
+    }
+
+    #[test]
+    fn test_harness_rejects_negative_current_p99_decode() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut benchmarks = sample_benchmarks();
+        benchmarks[0].p99_decode_us = -4.0;
+
+        let outcome = harness.run(&sample_baseline(), &benchmarks, None);
+
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "p99_decode_us");
+            assert!(diags[0].change_pct < 0.0);
+        } else {
+            unreachable!("Expected Rejected");
+        }
+    }
+
+    #[test]
+    fn test_harness_rejects_negative_previous_p99_encode() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut previous = sample_benchmarks();
+        previous[0].p99_encode_us = -5.0;
+
+        let outcome = harness.run(&sample_baseline(), &sample_benchmarks(), Some(&previous));
+
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "previous.p99_encode_us");
+            assert!(diags[0].change_pct < 0.0);
+        } else {
+            unreachable!("Expected Rejected");
+        }
+    }
+
     // -- Harness: events -----------------------------------------------
 
     #[test]
@@ -1340,6 +1525,138 @@ mod tests {
             assert!(!wrong_harness.verify_bundle(&bundle));
         } else {
             unreachable!("Expected Accepted");
+        }
+    }
+
+    #[test]
+    fn test_verify_bundle_rejects_candidate_tamper_without_verified_event() {
+        let mut bundle = accepted_bundle_from_defaults();
+        bundle.candidates[0].symbol_size_bytes = 512;
+
+        let mut verifier = ProfileTuningHarness::with_defaults();
+        assert!(!verifier.verify_bundle(&bundle));
+        assert!(
+            verifier
+                .events()
+                .iter()
+                .all(|event| event.code != PT_BUNDLE_VERIFIED)
+        );
+    }
+
+    #[test]
+    fn test_verify_bundle_rejects_delta_tamper() {
+        let mut bundle = accepted_bundle_from_defaults();
+        bundle.deltas[0].p99_decode_change_pct = 99.0;
+
+        let mut verifier = ProfileTuningHarness::with_defaults();
+        assert!(!verifier.verify_bundle(&bundle));
+    }
+
+    #[test]
+    fn test_verify_bundle_rejects_threshold_tamper() {
+        let mut bundle = accepted_bundle_from_defaults();
+        bundle.regression_threshold_pct = 0.1;
+
+        let mut verifier = ProfileTuningHarness::with_defaults();
+        assert!(!verifier.verify_bundle(&bundle));
+    }
+
+    #[test]
+    fn test_verify_bundle_rejects_previous_chain_tamper() {
+        let mut bundle = accepted_bundle_from_defaults();
+        bundle.previous_bundle_hash = Some("forged-previous-link".into());
+
+        let mut verifier = ProfileTuningHarness::with_defaults();
+        assert!(!verifier.verify_bundle(&bundle));
+    }
+
+    #[test]
+    fn test_hmac_verify_rejects_truncated_signature() {
+        let signature = hmac_sign("payload", "key");
+        let truncated = &signature[..signature.len() - 2];
+
+        assert!(!hmac_verify("payload", "key", truncated));
+    }
+
+    #[test]
+    fn test_hmac_verify_rejects_extended_signature() {
+        let signature = hmac_sign("payload", "key");
+        let extended = format!("{signature}00");
+
+        assert!(!hmac_verify("payload", "key", &extended));
+    }
+
+    #[test]
+    fn test_hmac_verify_rejects_empty_signature() {
+        assert!(!hmac_verify("payload", "key", ""));
+    }
+
+    #[test]
+    fn test_parse_baseline_csv_sanitizes_malformed_numeric_fields() {
+        let csv = "class_id,symbol_size_bytes,overhead_ratio,fetch_priority,prefetch_policy\n\
+                   malformed,not-a-number,not-finite,normal,lazy\n";
+
+        let rows = parse_baseline_csv(csv);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].class_id, "malformed");
+        assert_eq!(rows[0].symbol_size_bytes, 0);
+        assert_eq!(rows[0].overhead_ratio, 0.0);
+    }
+
+    #[test]
+    fn test_harness_rejects_infinite_current_overhead_before_signing() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut benchmarks = sample_benchmarks();
+        benchmarks[0].overhead_ratio = f64::INFINITY;
+
+        let outcome = harness.run(&sample_baseline(), &benchmarks, None);
+
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "overhead_ratio");
+            assert!(
+                harness
+                    .events()
+                    .iter()
+                    .all(|event| event.code != PT_BUNDLE_SIGNED)
+            );
+        } else {
+            unreachable!("Expected Rejected");
+        }
+    }
+
+    #[test]
+    fn test_harness_rejects_nan_previous_p50_encode() {
+        let mut harness = ProfileTuningHarness::with_defaults();
+        let mut previous = sample_benchmarks();
+        previous[0].p50_encode_us = f64::NAN;
+
+        let outcome = harness.run(&sample_baseline(), &sample_benchmarks(), Some(&previous));
+
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert_eq!(diags[0].class_id, "critical_marker");
+            assert_eq!(diags[0].metric, "previous.p50_encode_us");
+            assert!(!diags[0].change_pct.is_finite());
+        } else {
+            unreachable!("Expected Rejected");
+        }
+    }
+
+    #[test]
+    fn test_negative_regression_threshold_rejects_stable_delta() {
+        let mut config = HarnessConfig::with_defaults();
+        config.regression_threshold_pct = -0.1;
+        let mut harness = ProfileTuningHarness::new(config);
+        let previous = sample_benchmarks();
+
+        let outcome = harness.run(&sample_baseline(), &sample_benchmarks(), Some(&previous));
+
+        if let HarnessOutcome::Rejected(diags) = outcome {
+            assert!(!diags.is_empty());
+            assert!(diags.iter().all(|diag| diag.change_pct.is_finite()));
+        } else {
+            unreachable!("Expected Rejected");
         }
     }
 

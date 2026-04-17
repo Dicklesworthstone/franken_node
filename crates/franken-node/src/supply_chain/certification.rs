@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use super::reputation::ReputationTier;
-use crate::security::constant_time::ct_eq;
+use crate::security::constant_time::ct_eq_bytes;
 
 const MAX_AUDIT_TRAIL: usize = 4096;
 
@@ -247,18 +247,22 @@ pub(crate) fn compute_derivation_hash(refs: &[VerifiedEvidenceRef], derived_at: 
     let mut hasher = Sha256::new();
     hasher.update(b"certification_derivation_v1:");
     hasher.update(derived_at.to_le_bytes());
-    hasher.update((refs.len() as u64).to_le_bytes());
+    hasher.update(len_to_u64(refs.len()).to_le_bytes());
     for r in refs {
-        hasher.update((r.evidence_id.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(r.evidence_id.len()).to_le_bytes());
         hasher.update(r.evidence_id.as_bytes());
         let type_tag = serde_json::to_string(&r.evidence_type).unwrap_or_default();
-        hasher.update((type_tag.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(type_tag.len()).to_le_bytes());
         hasher.update(type_tag.as_bytes());
         hasher.update(r.verified_at_epoch.to_le_bytes());
-        hasher.update((r.verification_receipt_hash.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(r.verification_receipt_hash.len()).to_le_bytes());
         hasher.update(r.verification_receipt_hash.as_bytes());
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))
+}
+
+fn len_to_u64(len: usize) -> u64 {
+    u64::try_from(len).unwrap_or(u64::MAX)
 }
 
 // ── Certification evaluation ─────────────────────────────────────────────────
@@ -323,8 +327,8 @@ pub fn evaluate_certification(input: &CertificationInput) -> CertificationResult
     let mut unsatisfied = Vec::new();
 
     // Basic criteria: publisher identity and manifest.
-    let has_publisher = !input.publisher_id.is_empty();
-    let has_manifest = !input.extension_id.is_empty() && !input.version.is_empty();
+    let has_publisher = !input.publisher_id.trim().is_empty();
+    let has_manifest = !input.extension_id.trim().is_empty() && !input.version.trim().is_empty();
     if has_publisher {
         satisfied.push("publisher_identity_verified".to_owned());
     } else {
@@ -370,8 +374,8 @@ pub fn evaluate_certification(input: &CertificationInput) -> CertificationResult
     // be non-trivial to prevent acceptance of obviously-fake attestations.
     let attestation_valid = input.has_audit_attestation
         && input.audit_attestation.as_ref().is_some_and(|att| {
-            !att.auditor_id.is_empty()
-                && !att.scope.is_empty()
+            !att.auditor_id.trim().is_empty()
+                && !att.scope.trim().is_empty()
                 && att.attestation_hash.starts_with("sha256:")
                 && att.attestation_hash.len() == 71 // "sha256:" (7) + 64 hex chars
                 && att.attestation_hash[7..].bytes().all(|b| b.is_ascii_hexdigit())
@@ -806,11 +810,11 @@ impl CertificationRegistry {
             } else {
                 &self.audit_trail[i - 1].entry_hash
             };
-            if !ct_eq(&entry.prev_hash, expected_prev) {
+            if !ct_eq_bytes(entry.prev_hash.as_bytes(), expected_prev.as_bytes()) {
                 return Err(CertificationError::AuditIntegrityViolation);
             }
             let computed = compute_entry_hash(entry);
-            if !ct_eq(&computed, &entry.entry_hash) {
+            if !ct_eq_bytes(computed.as_bytes(), entry.entry_hash.as_bytes()) {
                 return Err(CertificationError::AuditIntegrityViolation);
             }
         }
@@ -857,8 +861,16 @@ impl CertificationRegistry {
         };
         entry.entry_hash = compute_entry_hash(&entry);
         if self.audit_trail.len() >= MAX_AUDIT_TRAIL {
-            let overflow = self.audit_trail.len() - MAX_AUDIT_TRAIL + 1;
-            self.chain_anchor_hash = Some(self.audit_trail[overflow - 1].entry_hash.clone());
+            let overflow = self
+                .audit_trail
+                .len()
+                .saturating_sub(MAX_AUDIT_TRAIL)
+                .saturating_add(1)
+                .min(self.audit_trail.len());
+            if overflow > 0 {
+                self.chain_anchor_hash =
+                    Some(self.audit_trail[overflow - 1].entry_hash.clone());
+            }
             self.audit_trail.drain(0..overflow);
         }
         self.audit_trail.push(entry);
@@ -904,7 +916,7 @@ fn compute_entry_hash(entry: &CertificationAuditEntry) -> String {
         entry.extension_id.as_str(),
         event_json.as_str(),
     ] {
-        hasher.update((field.len() as u64).to_le_bytes());
+        hasher.update(len_to_u64(field.len()).to_le_bytes());
         hasher.update(field.as_bytes());
     }
     format!("sha256:{}", hex::encode(hasher.finalize()))
@@ -981,6 +993,18 @@ mod tests {
         }
     }
 
+    fn valid_attestation() -> AuditAttestation {
+        AuditAttestation {
+            auditor_id: "auditor-1".to_owned(),
+            audit_date: "2026-01-15".to_owned(),
+            scope: "full security audit".to_owned(),
+            findings_summary: "no critical findings".to_owned(),
+            attestation_hash:
+                "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90"
+                    .to_owned(),
+        }
+    }
+
     fn tamper_same_length(hash: &str) -> String {
         assert!(!hash.is_empty(), "hash cannot be empty");
         let mut bytes = hash.as_bytes().to_vec();
@@ -1002,6 +1026,26 @@ mod tests {
     }
 
     #[test]
+    fn test_whitespace_publisher_blocks_basic_certification() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::PublisherSigned,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.publisher_id = "   ".to_owned();
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Uncertified);
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"publisher_identity_verified".to_owned())
+        );
+    }
+
+    #[test]
     fn test_basic_with_publisher_and_manifest() {
         let input = make_input(
             "ext-1",
@@ -1019,6 +1063,45 @@ mod tests {
         assert!(
             result
                 .satisfied_criteria
+                .contains(&"manifest_declared".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_whitespace_extension_id_blocks_manifest_declared() {
+        let input = make_input(
+            "   ",
+            ProvenanceLevel::PublisherSigned,
+            ReputationTier::Established,
+            60.0,
+        );
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Uncertified);
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"manifest_declared".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_whitespace_version_blocks_manifest_declared() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::PublisherSigned,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.version = "\t ".to_owned();
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Uncertified);
+        assert!(
+            result
+                .unsatisfied_criteria
                 .contains(&"manifest_declared".to_owned())
         );
     }
@@ -1124,6 +1207,111 @@ mod tests {
     }
 
     #[test]
+    fn test_audited_rejects_whitespace_auditor_id() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::IndependentReproduced,
+            ReputationTier::Trusted,
+            90.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(95.0);
+        input.has_audit_attestation = true;
+        let mut attestation = valid_attestation();
+        attestation.auditor_id = " \t ".to_owned();
+        input.audit_attestation = Some(attestation);
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Verified);
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"third_party_audit_attestation".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_audited_rejects_empty_attestation_scope() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::IndependentReproduced,
+            ReputationTier::Trusted,
+            90.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(95.0);
+        input.has_audit_attestation = true;
+        input.audit_attestation = Some(AuditAttestation {
+            auditor_id: "auditor-1".to_owned(),
+            audit_date: "2026-01-15".to_owned(),
+            scope: String::new(),
+            findings_summary: "no critical findings".to_owned(),
+            attestation_hash:
+                "sha256:a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90".to_owned(),
+        });
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Verified);
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"third_party_audit_attestation".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_audited_rejects_whitespace_attestation_scope() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::IndependentReproduced,
+            ReputationTier::Trusted,
+            90.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(95.0);
+        input.has_audit_attestation = true;
+        let mut attestation = valid_attestation();
+        attestation.scope = " \n ".to_owned();
+        input.audit_attestation = Some(attestation);
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Verified);
+        assert_ne!(result.max_achievable, CertificationLevel::Audited);
+    }
+
+    #[test]
+    fn test_audited_rejects_non_hex_attestation_hash() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::IndependentReproduced,
+            ReputationTier::Trusted,
+            90.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = Some(95.0);
+        input.has_audit_attestation = true;
+        input.audit_attestation = Some(AuditAttestation {
+            auditor_id: "auditor-1".to_owned(),
+            audit_date: "2026-01-15".to_owned(),
+            scope: "full security audit".to_owned(),
+            findings_summary: "no critical findings".to_owned(),
+            attestation_hash: format!("sha256:{}", "g".repeat(64)),
+        });
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Verified);
+        assert_ne!(result.max_achievable, CertificationLevel::Audited);
+    }
+
+    #[test]
     fn test_insufficient_coverage_blocks_verified() {
         let mut input = make_input(
             "ext-1",
@@ -1136,6 +1324,50 @@ mod tests {
         input.test_coverage_pct = Some(50.0); // Below 80% threshold
         let result = evaluate_certification(&input);
         assert_eq!(result.level, CertificationLevel::Standard);
+    }
+
+    #[test]
+    fn test_missing_coverage_percentage_blocks_verified() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::SignedReproducible,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = true;
+        input.test_coverage_pct = None;
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Standard);
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"test_coverage_above_80pct".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_coverage_percentage_without_evidence_flag_blocks_verified() {
+        let mut input = make_input(
+            "ext-1",
+            ProvenanceLevel::SignedReproducible,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.has_reproducible_build_evidence = true;
+        input.has_test_coverage_evidence = false;
+        input.test_coverage_pct = Some(95.0);
+
+        let result = evaluate_certification(&input);
+
+        assert_eq!(result.level, CertificationLevel::Standard);
+        assert!(
+            result
+                .unsatisfied_criteria
+                .contains(&"test_coverage_above_80pct".to_owned())
+        );
     }
 
     #[test]
@@ -1206,6 +1438,79 @@ mod tests {
         assert!(matches!(
             result,
             Err(CertificationError::InsufficientCertification { .. })
+        ));
+    }
+
+    #[test]
+    fn test_deployment_gate_rejects_unknown_extension() {
+        let reg = CertificationRegistry::new();
+
+        let result =
+            reg.check_deployment_gate("missing-ext", "1.0.0", DeploymentContext::Development);
+
+        assert!(matches!(
+            result,
+            Err(CertificationError::ExtensionNotFound(key)) if key == "missing-ext@1.0.0"
+        ));
+    }
+
+    #[test]
+    fn test_staging_deployment_rejects_uncertified_result() {
+        let mut reg = CertificationRegistry::new();
+        let mut input = make_input(
+            "ext-uncertified",
+            ProvenanceLevel::PublisherSigned,
+            ReputationTier::Established,
+            60.0,
+        );
+        input.evidence_refs.clear();
+        reg.evaluate_and_register(&input, &ts(1));
+
+        let result =
+            reg.check_deployment_gate("ext-uncertified", "1.0.0", DeploymentContext::Staging);
+
+        assert!(matches!(
+            result,
+            Err(CertificationError::InsufficientCertification {
+                context: DeploymentContext::Staging,
+                required: CertificationLevel::Basic,
+                actual: CertificationLevel::Uncertified,
+            })
+        ));
+    }
+
+    #[test]
+    fn test_capability_gate_rejects_unknown_extension() {
+        let reg = CertificationRegistry::new();
+
+        let result =
+            reg.check_capability_gate("missing-ext", "1.0.0", &CapabilityCategory::FileRead);
+
+        assert!(matches!(
+            result,
+            Err(CertificationError::ExtensionNotFound(key)) if key == "missing-ext@1.0.0"
+        ));
+    }
+
+    #[test]
+    fn test_capability_gate_denies_process_spawn_for_standard() {
+        let mut reg = CertificationRegistry::new();
+        let input = make_input(
+            "ext-1",
+            ProvenanceLevel::PublisherSigned,
+            ReputationTier::Established,
+            60.0,
+        );
+        reg.evaluate_and_register(&input, &ts(1));
+
+        let result = reg.check_capability_gate("ext-1", "1.0.0", &CapabilityCategory::ProcessSpawn);
+
+        assert!(matches!(
+            result,
+            Err(CertificationError::CapabilityDenied {
+                capability,
+                level: CertificationLevel::Standard,
+            }) if capability == "ProcessSpawn"
         ));
     }
 
@@ -1446,6 +1751,48 @@ mod tests {
     }
 
     #[test]
+    fn test_promote_unknown_extension_does_not_append_audit_entry() {
+        let mut reg = CertificationRegistry::new();
+
+        let err = reg
+            .promote(
+                "missing-ext",
+                "1.0.0",
+                CertificationLevel::Basic,
+                "evidence-ref",
+                &ts(1),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CertificationError::ExtensionNotFound(key) if key == "missing-ext@1.0.0")
+        );
+        assert_eq!(reg.record_count(), 0);
+        assert_eq!(reg.audit_trail_len(), 0);
+    }
+
+    #[test]
+    fn test_demote_unknown_extension_does_not_append_audit_entry() {
+        let mut reg = CertificationRegistry::new();
+
+        let err = reg
+            .demote(
+                "missing-ext",
+                "1.0.0",
+                CertificationLevel::Uncertified,
+                "missing record",
+                &ts(1),
+            )
+            .unwrap_err();
+
+        assert!(
+            matches!(err, CertificationError::ExtensionNotFound(key) if key == "missing-ext@1.0.0")
+        );
+        assert_eq!(reg.record_count(), 0);
+        assert_eq!(reg.audit_trail_len(), 0);
+    }
+
+    #[test]
     fn test_audit_trail_integrity() {
         let mut reg = CertificationRegistry::new();
         // Use Verified-level evidence so max_achievable = Verified.
@@ -1499,6 +1846,42 @@ mod tests {
 
         let last = reg.audit_trail.last_mut().expect("audit entry");
         last.entry_hash = tamper_same_length(&last.entry_hash);
+
+        assert!(matches!(
+            reg.verify_audit_integrity(),
+            Err(CertificationError::AuditIntegrityViolation)
+        ));
+    }
+
+    #[test]
+    fn test_audit_trail_integrity_detects_prev_hash_tamper() {
+        let mut reg = CertificationRegistry::new();
+        let input = make_verified_input("ext-prev-tamper");
+        reg.evaluate_and_register(&input, &ts(1));
+        reg.demote(
+            "ext-prev-tamper",
+            "1.0.0",
+            CertificationLevel::Standard,
+            "setup second audit entry",
+            &ts(2),
+        )
+        .unwrap();
+
+        reg.audit_trail[1].prev_hash = tamper_same_length(&reg.audit_trail[1].prev_hash);
+
+        assert!(matches!(
+            reg.verify_audit_integrity(),
+            Err(CertificationError::AuditIntegrityViolation)
+        ));
+    }
+
+    #[test]
+    fn test_audit_trail_integrity_detects_entry_payload_tamper() {
+        let mut reg = CertificationRegistry::new();
+        let input = make_verified_input("ext-payload-tamper");
+        reg.evaluate_and_register(&input, &ts(1));
+
+        reg.audit_trail[0].extension_id = "ext-payload-tampered".to_owned();
 
         assert!(matches!(
             reg.verify_audit_integrity(),
@@ -1637,6 +2020,16 @@ mod tests {
         // Different epoch produces different hash.
         let h3 = compute_derivation_hash(&refs, 43);
         assert_ne!(h1, h3);
+    }
+
+    #[test]
+    fn test_derivation_hash_changes_when_receipt_hash_changes() {
+        let mut refs = sample_evidence_refs();
+        let original = compute_derivation_hash(&refs, 42);
+        refs[0].verification_receipt_hash = "c".repeat(64);
+        let changed = compute_derivation_hash(&refs, 42);
+
+        assert!(!ct_eq_bytes(original.as_bytes(), changed.as_bytes()));
     }
 
     #[test]

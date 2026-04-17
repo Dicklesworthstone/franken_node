@@ -21,7 +21,9 @@ fn test_event_sequence_overflow_protection() {
 
     // Test with events at the edge of index limits
     for i in (u64::MAX - 100)..=u64::MAX {
-        if i == u64::MAX { break; } // Avoid actual overflow in test setup
+        if i == u64::MAX {
+            break;
+        } // Avoid actual overflow in test setup
         events.push(RawEvent::new(
             format!("2026-02-20T10:00:00.{:06}Z", i % 1_000_000),
             EventType::StateChange,
@@ -29,7 +31,9 @@ fn test_event_sequence_overflow_protection() {
         ));
 
         // Limit test size to avoid excessive memory usage
-        if events.len() > 1000 { break; }
+        if events.len() > 1000 {
+            break;
+        }
     }
 
     // Should handle large sequences gracefully
@@ -42,7 +46,7 @@ fn test_event_sequence_overflow_protection() {
                 assert!(event.sequence_number > 0);
                 assert!(event.sequence_number <= u64::MAX);
             }
-        },
+        }
         Err(_) => {
             // Acceptable to fail gracefully with very large sequences
         }
@@ -196,7 +200,9 @@ fn test_oversized_event_rejection() {
     assert!(result.is_err());
 
     match result {
-        Err(ReplayBundleError::OversizedEvent { sequence_number, .. }) => {
+        Err(ReplayBundleError::OversizedEvent {
+            sequence_number, ..
+        }) => {
             assert_eq!(sequence_number, 1);
         }
         _ => panic!("Expected OversizedEvent error"),
@@ -245,12 +251,14 @@ fn test_causal_parent_validation() {
             "2026-02-20T10:00:00.000002Z",
             EventType::PolicyEval,
             serde_json::json!({"decision": "allow"}),
-        ).with_causal_parent(1), // Valid parent
+        )
+        .with_causal_parent(1), // Valid parent
         RawEvent::new(
             "2026-02-20T10:00:00.000003Z",
             EventType::OperatorAction,
             serde_json::json!({"action": "approve"}),
-        ).with_causal_parent(2), // Valid parent
+        )
+        .with_causal_parent(2), // Valid parent
     ];
 
     let bundle = generate_replay_bundle("INC-CAUSAL-001", &events).unwrap();
@@ -266,7 +274,8 @@ fn test_causal_parent_validation() {
             "2026-02-20T10:00:00.000001Z",
             EventType::ExternalSignal,
             serde_json::json!({"signal": "start"}),
-        ).with_causal_parent(2), // Invalid - references event 2 which doesn't exist yet
+        )
+        .with_causal_parent(2), // Invalid - references event 2 which doesn't exist yet
     ];
 
     // Should handle invalid causal parents gracefully
@@ -295,18 +304,16 @@ fn test_evidence_package_validation_edge_cases() {
         detector: "unit-test".to_string(),
         policy_version: "1.0.0".to_string(),
         initial_state_snapshot: serde_json::json!({"state": "initial"}),
-        events: vec![
-            IncidentEvidenceEvent {
-                event_id: "evt-001".to_string(),
-                timestamp: "2026-02-20T10:00:00.000001Z".to_string(),
-                event_type: EventType::ExternalSignal,
-                payload: serde_json::json!({"signal": "test"}),
-                provenance_ref: "refs/log.json".to_string(),
-                parent_event_id: None,
-                state_snapshot: None,
-                policy_version: None,
-            }
-        ],
+        events: vec![IncidentEvidenceEvent {
+            event_id: "evt-001".to_string(),
+            timestamp: "2026-02-20T10:00:00.000001Z".to_string(),
+            event_type: EventType::ExternalSignal,
+            payload: serde_json::json!({"signal": "test"}),
+            provenance_ref: "refs/log.json".to_string(),
+            parent_event_id: None,
+            state_snapshot: None,
+            policy_version: None,
+        }],
         evidence_refs: vec!["refs/log.json".to_string()],
         metadata: IncidentEvidenceMetadata {
             title: "Test incident".to_string(),
@@ -341,18 +348,16 @@ fn test_evidence_package_validation_edge_cases() {
     // Empty events should fail
     package.events.clear();
     assert!(validate_incident_evidence_package(&package, None).is_err());
-    package.events = vec![
-        IncidentEvidenceEvent {
-            event_id: "evt-001".to_string(),
-            timestamp: "2026-02-20T10:00:00.000001Z".to_string(),
-            event_type: EventType::ExternalSignal,
-            payload: serde_json::json!({"signal": "test"}),
-            provenance_ref: "refs/log.json".to_string(),
-            parent_event_id: None,
-            state_snapshot: None,
-            policy_version: None,
-        }
-    ]; // Reset
+    package.events = vec![IncidentEvidenceEvent {
+        event_id: "evt-001".to_string(),
+        timestamp: "2026-02-20T10:00:00.000001Z".to_string(),
+        event_type: EventType::ExternalSignal,
+        payload: serde_json::json!({"signal": "test"}),
+        provenance_ref: "refs/log.json".to_string(),
+        parent_event_id: None,
+        state_snapshot: None,
+        policy_version: None,
+    }]; // Reset
 
     // Duplicate event IDs should fail
     let duplicate_event = IncidentEvidenceEvent {
@@ -372,13 +377,11 @@ fn test_evidence_package_validation_edge_cases() {
 /// Test integrity validation edge cases
 #[test]
 fn test_integrity_validation_edge_cases() {
-    let events = vec![
-        RawEvent::new(
-            "2026-02-20T10:00:00.000000Z",
-            EventType::StateChange,
-            serde_json::json!({"test": "integrity"}),
-        )
-    ];
+    let events = vec![RawEvent::new(
+        "2026-02-20T10:00:00.000000Z",
+        EventType::StateChange,
+        serde_json::json!({"test": "integrity"}),
+    )];
 
     let mut bundle = generate_replay_bundle("INC-INTEGRITY-001", &events).unwrap();
 
@@ -411,7 +414,11 @@ fn test_large_bundle_memory_protection() {
 
     for i in 0..max_reasonable_events {
         events.push(RawEvent::new(
-            format!("2026-02-20T10:00:{:02}.{:06}Z", i / 1_000_000, i % 1_000_000),
+            format!(
+                "2026-02-20T10:00:{:02}.{:06}Z",
+                i / 1_000_000,
+                i % 1_000_000
+            ),
             EventType::StateChange,
             serde_json::json!({"sequence": i}),
         ));
@@ -437,15 +444,13 @@ fn test_large_bundle_memory_protection() {
 fn test_uuid_v7_determinism() {
     let incident_id = "INC-UUID-001";
     let created_at = "2026-02-20T10:00:00.000000Z";
-    let timeline = vec![
-        TimelineEvent {
-            sequence_number: 1,
-            timestamp: created_at.to_string(),
-            event_type: EventType::StateChange,
-            payload: serde_json::json!({"test": "uuid"}),
-            causal_parent: None,
-        }
-    ];
+    let timeline = vec![TimelineEvent {
+        sequence_number: 1,
+        timestamp: created_at.to_string(),
+        event_type: EventType::StateChange,
+        payload: serde_json::json!({"test": "uuid"}),
+        causal_parent: None,
+    }];
 
     // Generate UUID multiple times - should be deterministic
     let uuid1 = deterministic_bundle_id(incident_id, created_at, &timeline).unwrap();
@@ -463,13 +468,15 @@ fn test_uuid_v7_determinism() {
 /// Test atomic file write operations
 #[test]
 fn test_atomic_file_operations() {
-    let bundle = generate_replay_bundle("INC-ATOMIC-001", &[
-        RawEvent::new(
+    let bundle = generate_replay_bundle(
+        "INC-ATOMIC-001",
+        &[RawEvent::new(
             "2026-02-20T10:00:00Z",
             EventType::StateChange,
             serde_json::json!({"atomic": true}),
-        )
-    ]).unwrap();
+        )],
+    )
+    .unwrap();
 
     let dir = tempfile::tempdir().unwrap();
     let file_path = dir.path().join("test-bundle.json");
@@ -496,5 +503,181 @@ fn test_atomic_file_operations() {
         })
         .collect();
 
-    assert!(temp_files.is_empty(), "No temp files should remain: {:?}", temp_files);
+    assert!(
+        temp_files.is_empty(),
+        "No temp files should remain: {:?}",
+        temp_files
+    );
+}
+
+fn negative_path_evidence_package() -> IncidentEvidencePackage {
+    IncidentEvidencePackage {
+        schema_version: INCIDENT_EVIDENCE_SCHEMA.to_string(),
+        incident_id: "INC-NEG-001".to_string(),
+        collected_at: "2026-02-20T10:05:00Z".to_string(),
+        trace_id: "trace-negative-path".to_string(),
+        severity: IncidentSeverity::High,
+        incident_type: "sandbox_escape_attempt".to_string(),
+        detector: "negative-path-suite".to_string(),
+        policy_version: "1.0.0".to_string(),
+        initial_state_snapshot: serde_json::json!({"mode": "strict", "epoch": 17_u64}),
+        events: vec![
+            IncidentEvidenceEvent {
+                event_id: "evt-parent".to_string(),
+                timestamp: "2026-02-20T10:00:00.000100Z".to_string(),
+                event_type: EventType::ExternalSignal,
+                payload: serde_json::json!({"signal": "suspicious_spawn"}),
+                provenance_ref: "refs/parent.json".to_string(),
+                parent_event_id: None,
+                state_snapshot: None,
+                policy_version: None,
+            },
+            IncidentEvidenceEvent {
+                event_id: "evt-child".to_string(),
+                timestamp: "2026-02-20T10:00:00.000200Z".to_string(),
+                event_type: EventType::PolicyEval,
+                payload: serde_json::json!({"decision": "quarantine"}),
+                provenance_ref: "refs/child.json".to_string(),
+                parent_event_id: Some("evt-parent".to_string()),
+                state_snapshot: None,
+                policy_version: None,
+            },
+        ],
+        evidence_refs: vec![
+            "refs/parent.json".to_string(),
+            "refs/child.json".to_string(),
+        ],
+        metadata: IncidentEvidenceMetadata {
+            title: "Negative path incident".to_string(),
+            affected_components: vec!["runtime".to_string()],
+            tags: vec!["negative-path".to_string()],
+        },
+    }
+}
+
+#[test]
+fn test_empty_incident_id_is_rejected_before_bundle_derivation() {
+    let err = generate_replay_bundle(
+        "   ",
+        &[RawEvent::new(
+            "2026-02-20T10:00:00Z",
+            EventType::StateChange,
+            serde_json::json!({"state": "ignored"}),
+        )],
+    )
+    .expect_err("blank incident id must be rejected");
+
+    assert!(matches!(err, ReplayBundleError::EmptyIncidentId));
+}
+
+#[test]
+fn test_evidence_expected_incident_id_mismatch_is_rejected() {
+    let package = negative_path_evidence_package();
+    let err = validate_incident_evidence_package(&package, Some("INC-DIFFERENT"))
+        .expect_err("expected incident id mismatch must fail");
+
+    assert!(matches!(
+        err,
+        ReplayBundleError::EvidenceIncidentIdMismatch { .. }
+    ));
+}
+
+#[test]
+fn test_evidence_unknown_provenance_ref_is_rejected() {
+    let mut package = negative_path_evidence_package();
+    package.events[1].provenance_ref = "refs/unlisted-child.json".to_string();
+
+    let err = validate_incident_evidence_package(&package, None)
+        .expect_err("unknown provenance ref must fail");
+
+    assert!(matches!(
+        err,
+        ReplayBundleError::EvidenceUnknownProvenanceRef { .. }
+    ));
+}
+
+#[test]
+fn test_evidence_missing_parent_event_is_rejected() {
+    let mut package = negative_path_evidence_package();
+    package.events[1].parent_event_id = Some("evt-missing".to_string());
+
+    let err = validate_incident_evidence_package(&package, None)
+        .expect_err("missing parent event must fail");
+
+    assert!(matches!(
+        err,
+        ReplayBundleError::EvidenceMissingParentRef { .. }
+    ));
+}
+
+#[test]
+fn test_evidence_self_parent_event_is_rejected() {
+    let mut package = negative_path_evidence_package();
+    package.events[0].parent_event_id = Some("evt-parent".to_string());
+
+    let err = validate_incident_evidence_package(&package, None)
+        .expect_err("self-parent event must fail");
+
+    assert!(matches!(
+        err,
+        ReplayBundleError::EvidenceSelfParentRef { .. }
+    ));
+}
+
+#[test]
+fn test_evidence_unsorted_timestamps_are_rejected() {
+    let mut package = negative_path_evidence_package();
+    package.events[1].timestamp = "2026-02-20T09:59:59.999999Z".to_string();
+
+    let err = validate_incident_evidence_package(&package, None)
+        .expect_err("unsorted event timestamps must fail");
+
+    assert!(matches!(
+        err,
+        ReplayBundleError::EvidenceEventsUnsorted { .. }
+    ));
+}
+
+#[test]
+fn test_evidence_future_parent_becomes_invalid_causal_parent() {
+    let mut package = negative_path_evidence_package();
+    package.events[0].parent_event_id = Some("evt-child".to_string());
+
+    let err = generate_replay_bundle_from_evidence(&package)
+        .expect_err("future parent must be rejected during causal mapping");
+
+    assert!(matches!(
+        err,
+        ReplayBundleError::EvidenceCausalParentInvalid { .. }
+    ));
+}
+
+#[test]
+fn test_nested_float_payload_reports_non_deterministic_path() {
+    let events = vec![RawEvent::new(
+        "2026-02-20T10:00:00Z",
+        EventType::PolicyEval,
+        serde_json::json!({"metrics": {"risk": [1_u64, 2.5_f64]}}),
+    )];
+
+    let err = generate_replay_bundle("INC-FLOAT-NEG-001", &events)
+        .expect_err("nested float payload must be rejected");
+
+    match err {
+        ReplayBundleError::NonDeterministicFloat { path } => {
+            assert_eq!(path, "$.payload.metrics.risk[1]");
+        }
+        other => panic!("expected NonDeterministicFloat, got {other:?}"),
+    }
+}
+
+#[test]
+fn test_read_bundle_from_path_rejects_malformed_json() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let file_path = dir.path().join("bundle.json");
+    std::fs::write(&file_path, "{not valid json").expect("write malformed bundle");
+
+    let err = read_bundle_from_path(&file_path).expect_err("malformed JSON must fail");
+
+    assert!(matches!(err, ReplayBundleError::Json(_)));
 }

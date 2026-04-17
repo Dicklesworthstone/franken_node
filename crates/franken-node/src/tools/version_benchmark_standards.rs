@@ -59,11 +59,56 @@ pub mod invariants {
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len().saturating_add(1).saturating_sub(cap);
+    if overflow > 0 {
         items.drain(0..overflow);
     }
     items.push(item);
+}
+
+fn revision_validation_error(revision: &StandardRevision) -> Option<&'static str> {
+    if revision.title.trim().is_empty() {
+        return Some("empty title");
+    }
+    if revision.release_date.trim().is_empty() {
+        return Some("empty release_date");
+    }
+    if revision.tracks.is_empty() {
+        return Some("empty tracks");
+    }
+    if revision.tracks.iter().any(|track| track.trim().is_empty()) {
+        return Some("blank track");
+    }
+    if revision.track_count != revision.tracks.len() {
+        return Some("track_count mismatch");
+    }
+    if revision.scoring_formula_version.trim().is_empty() {
+        return Some("empty scoring_formula_version");
+    }
+    if revision.harness_version.trim().is_empty() {
+        return Some("empty harness_version");
+    }
+    if revision
+        .changelog
+        .iter()
+        .any(|entry| entry.description.trim().is_empty())
+    {
+        return Some("empty changelog description");
+    }
+    if revision
+        .changelog
+        .iter()
+        .flat_map(|entry| entry.affected_tracks.iter())
+        .any(|track| track.trim().is_empty())
+    {
+        return Some("blank affected track");
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -263,6 +308,18 @@ impl BenchmarkVersioning {
 
     /// Register a new standard revision.
     pub fn register_revision(&mut self, revision: StandardRevision, trace_id: &str) {
+        if let Some(reason) = revision_validation_error(&revision) {
+            self.log(
+                event_codes::BSV_ERR_INVALID_VERSION,
+                trace_id,
+                serde_json::json!({
+                    "version": revision.version.label(),
+                    "reason": reason,
+                }),
+            );
+            return;
+        }
+
         self.log(
             event_codes::BSV_REVISION_REGISTERED,
             trace_id,
@@ -662,6 +719,42 @@ mod tests {
         Uuid::now_v7().to_string()
     }
 
+    fn custom_revision(version: SemVer) -> StandardRevision {
+        StandardRevision {
+            version,
+            title: "Custom revision".to_string(),
+            release_date: "2026-03-01".to_string(),
+            tracks: vec!["track_a".to_string()],
+            track_count: 1,
+            scoring_formula_version: "sf-v3.0".to_string(),
+            harness_version: "h-v3.0".to_string(),
+            deprecated: false,
+            changelog: vec![],
+        }
+    }
+
+    fn assert_invalid_revision_rejected(mut revision: StandardRevision, reason: &str) {
+        let mut engine = BenchmarkVersioning::new();
+        let version = revision.version.clone();
+        let original_len = engine.revisions().len();
+        revision.deprecated = true;
+
+        engine.register_revision(revision, "trace-invalid-revision");
+
+        assert_eq!(engine.revisions().len(), original_len);
+        assert!(!engine.revisions().contains_key(&version));
+        assert!(engine.audit_log().iter().any(|record| record.event_code
+            == event_codes::BSV_ERR_INVALID_VERSION
+            && record.details["reason"].as_str() == Some(reason)));
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::BSV_DEPRECATION_NOTICED),
+            "invalid deprecated revisions must fail before deprecation audit records"
+        );
+    }
+
     // === SemVer ===
 
     #[test]
@@ -905,18 +998,319 @@ mod tests {
     #[test]
     fn register_custom_revision() {
         let mut engine = BenchmarkVersioning::new();
-        let v3 = StandardRevision {
-            version: SemVer::new(3, 0, 0),
-            title: "Custom revision".to_string(),
-            release_date: "2026-03-01".to_string(),
-            tracks: vec!["track_a".to_string()],
-            track_count: 1,
-            scoring_formula_version: "sf-v3.0".to_string(),
-            harness_version: "h-v3.0".to_string(),
-            deprecated: false,
-            changelog: vec![],
-        };
+        let v3 = custom_revision(SemVer::new(3, 0, 0));
         engine.register_revision(v3, &make_trace());
         assert_eq!(engine.revisions().len(), 4);
+    }
+
+    #[test]
+    fn register_revision_rejects_whitespace_title_without_insert() {
+        let mut revision = custom_revision(SemVer::new(3, 1, 0));
+        revision.title = " \n\t ".to_string();
+
+        assert_invalid_revision_rejected(revision, "empty title");
+    }
+
+    #[test]
+    fn register_revision_rejects_empty_release_date_without_insert() {
+        let mut revision = custom_revision(SemVer::new(3, 2, 0));
+        revision.release_date.clear();
+
+        assert_invalid_revision_rejected(revision, "empty release_date");
+    }
+
+    #[test]
+    fn register_revision_rejects_empty_tracks_without_insert() {
+        let mut revision = custom_revision(SemVer::new(3, 3, 0));
+        revision.tracks.clear();
+        revision.track_count = 0;
+
+        assert_invalid_revision_rejected(revision, "empty tracks");
+    }
+
+    #[test]
+    fn register_revision_rejects_blank_track_without_insert() {
+        let mut revision = custom_revision(SemVer::new(3, 4, 0));
+        revision.tracks = vec![" \t ".to_string()];
+        revision.track_count = 1;
+
+        assert_invalid_revision_rejected(revision, "blank track");
+    }
+
+    #[test]
+    fn register_revision_rejects_track_count_mismatch_without_insert() {
+        let mut revision = custom_revision(SemVer::new(3, 5, 0));
+        revision.track_count = revision.tracks.len().saturating_add(1);
+
+        assert_invalid_revision_rejected(revision, "track_count mismatch");
+    }
+
+    #[test]
+    fn register_revision_rejects_empty_harness_version_without_insert() {
+        let mut revision = custom_revision(SemVer::new(3, 6, 0));
+        revision.harness_version = " \n\t ".to_string();
+
+        assert_invalid_revision_rejected(revision, "empty harness_version");
+    }
+
+    #[test]
+    fn register_revision_rejects_blank_changelog_description_without_insert() {
+        let mut revision = custom_revision(SemVer::new(3, 7, 0));
+        revision.changelog = vec![ChangelogEntry {
+            change_type: ChangeType::Feature,
+            description: " \t ".to_string(),
+            affected_tracks: vec!["track_a".to_string()],
+        }];
+
+        assert_invalid_revision_rejected(revision, "empty changelog description");
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_existing_items() {
+        let mut items = vec!["old-guide", "old-audit"];
+
+        push_bounded(&mut items, "new-guide", 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity bounded buffers must not retain stale versioning records"
+        );
+    }
+
+    #[test]
+    fn semver_parse_rejects_empty_components_and_extra_segments() {
+        assert!(SemVer::parse("").is_none());
+        assert!(SemVer::parse("1..0").is_none());
+        assert!(SemVer::parse(".1.0").is_none());
+        assert!(SemVer::parse("1.0.0.0").is_none());
+    }
+
+    #[test]
+    fn semver_parse_rejects_non_numeric_and_overflowing_components() {
+        assert!(SemVer::parse("1.two.3").is_none());
+        assert!(SemVer::parse("1.0.-1").is_none());
+        assert!(SemVer::parse("4294967296.0.0").is_none());
+    }
+
+    #[test]
+    fn missing_from_version_returns_none_without_audit() {
+        let mut engine = BenchmarkVersioning::new();
+        let audit_count_before = engine.audit_log().len();
+
+        let guide =
+            engine.compute_migration(&SemVer::new(9, 9, 9), &SemVer::new(2, 0, 0), &make_trace());
+
+        assert!(guide.is_none());
+        assert_eq!(
+            engine.audit_log().len(),
+            audit_count_before,
+            "missing source versions must fail before migration audit records"
+        );
+    }
+
+    #[test]
+    fn missing_to_version_returns_none_without_migration_audit() {
+        let mut engine = BenchmarkVersioning::new();
+        let audit_count_before = engine.audit_log().len();
+
+        let guide =
+            engine.compute_migration(&SemVer::new(1, 0, 0), &SemVer::new(9, 9, 9), &make_trace());
+
+        assert!(guide.is_none());
+        assert_eq!(
+            engine.audit_log().len(),
+            audit_count_before,
+            "missing target versions must fail before migration audit records"
+        );
+    }
+
+    #[test]
+    fn missing_compatibility_target_does_not_log_compat_checked() {
+        let mut engine = BenchmarkVersioning::new();
+
+        let level =
+            engine.check_compatibility(&SemVer::new(1, 0, 0), &SemVer::new(4, 0, 0), &make_trace());
+
+        assert!(level.is_none());
+        assert!(
+            engine
+                .audit_log()
+                .iter()
+                .all(|record| record.event_code != event_codes::BSV_COMPAT_CHECKED),
+            "missing compatibility target must not emit compatibility-checked audit records"
+        );
+    }
+
+    #[test]
+    fn empty_engine_report_has_no_migration_paths() {
+        let mut engine = BenchmarkVersioning {
+            revisions: BTreeMap::new(),
+            current_version: SemVer::new(0, 0, 0),
+            audit_log: Vec::new(),
+        };
+
+        let report = engine.generate_report(&make_trace());
+
+        assert_eq!(report.revisions_registered, 0);
+        assert_eq!(report.migration_guides_available, 0);
+        assert!(report.deprecation_notices.is_empty());
+        assert_eq!(report.current_version, SemVer::new(0, 0, 0));
+    }
+
+    #[test]
+    fn empty_engine_audit_export_is_empty_before_report_generation() {
+        let engine = BenchmarkVersioning {
+            revisions: BTreeMap::new(),
+            current_version: SemVer::new(0, 0, 0),
+            audit_log: Vec::new(),
+        };
+
+        assert_eq!(engine.export_audit_log_jsonl().unwrap(), "");
+    }
+
+    #[test]
+    fn semver_deserialize_rejects_string_component() {
+        let raw = serde_json::json!({
+            "major": "1",
+            "minor": 0_u32,
+            "patch": 0_u32,
+        });
+
+        let result: Result<SemVer, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "semver components must remain numeric in serialized artifacts"
+        );
+    }
+
+    #[test]
+    fn change_type_deserialize_rejects_camel_case_label() {
+        let result: Result<ChangeType, _> = serde_json::from_str("\"BreakingChange\"");
+
+        assert!(
+            result.is_err(),
+            "change-type labels must use the canonical snake_case contract"
+        );
+    }
+
+    #[test]
+    fn compatibility_level_deserialize_rejects_display_case_label() {
+        let result: Result<CompatibilityLevel, _> = serde_json::from_str("\"RequiresMigration\"");
+
+        assert!(
+            result.is_err(),
+            "compatibility labels must not accept Rust display/debug casing"
+        );
+    }
+
+    #[test]
+    fn migration_effort_deserialize_rejects_unknown_label() {
+        let result: Result<MigrationEffort, _> = serde_json::from_str("\"extreme\"");
+
+        assert!(
+            result.is_err(),
+            "unknown migration effort labels must fail closed"
+        );
+    }
+
+    #[test]
+    fn standard_revision_deserialize_rejects_missing_changelog() {
+        let raw = serde_json::json!({
+            "version": {"major": 1_u32, "minor": 2_u32, "patch": 0_u32},
+            "title": "Incomplete revision",
+            "release_date": "2026-04-01",
+            "tracks": ["runtime"],
+            "track_count": 1_usize,
+            "scoring_formula_version": "sf-v1",
+            "harness_version": "h-v1",
+            "deprecated": false,
+        });
+
+        let result: Result<StandardRevision, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "standard revisions must carry explicit changelog evidence"
+        );
+    }
+
+    #[test]
+    fn migration_step_deserialize_rejects_string_step_number() {
+        let raw = serde_json::json!({
+            "step_number": "1",
+            "action": "update scoring formula",
+            "description": "Apply the new scoring formula before publishing artifacts.",
+            "automated": true,
+        });
+
+        let result: Result<MigrationStep, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "migration step numbers must remain numeric for deterministic ordering"
+        );
+    }
+
+    #[test]
+    fn migration_guide_deserialize_rejects_missing_content_hash() {
+        let raw = serde_json::json!({
+            "from_version": {"major": 1_u32, "minor": 0_u32, "patch": 0_u32},
+            "to_version": {"major": 2_u32, "minor": 0_u32, "patch": 0_u32},
+            "compatibility": "requires_migration",
+            "breaking_changes": ["Changed scoring denominator"],
+            "migration_steps": [{
+                "step_number": 1_usize,
+                "action": "recompute baselines",
+                "description": "Regenerate benchmark baselines under the new standard.",
+                "automated": false,
+            }],
+            "rollback_possible": true,
+            "estimated_effort": "medium",
+        });
+
+        let result: Result<MigrationGuide, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "migration guides must include an integrity hash"
+        );
+    }
+
+    #[test]
+    fn versioning_report_deserialize_rejects_string_revision_count() {
+        let raw = serde_json::json!({
+            "report_id": "bsv-report-1",
+            "timestamp": "2026-04-01T00:00:00Z",
+            "current_version": {"major": 2_u32, "minor": 0_u32, "patch": 0_u32},
+            "revisions_registered": "3",
+            "migration_guides_available": 2_usize,
+            "deprecation_notices": [],
+            "content_hash": "0123456789abcdef",
+        });
+
+        let result: Result<VersioningReport, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "versioning report counts must not accept stringly typed values"
+        );
+    }
+
+    #[test]
+    fn bsv_audit_record_deserialize_rejects_missing_details() {
+        let raw = serde_json::json!({
+            "record_id": "audit-1",
+            "event_code": event_codes::BSV_REPORT_GENERATED,
+            "timestamp": "2026-04-01T00:00:00Z",
+            "trace_id": make_trace(),
+        });
+
+        let result: Result<BsvAuditRecord, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "audit records must include details for operator traceability"
+        );
     }
 }

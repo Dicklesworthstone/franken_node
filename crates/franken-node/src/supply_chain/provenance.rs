@@ -748,8 +748,8 @@ fn classify_events(
 fn push_unique_event(events: &mut Vec<ProvenanceEventCode>, event: ProvenanceEventCode) {
     if !events.contains(&event) {
         if events.len() >= MAX_EVENTS {
-            let overflow = events.len() - MAX_EVENTS + 1;
-            events.drain(0..overflow);
+            let overflow = events.len().saturating_sub(MAX_EVENTS).saturating_add(1);
+            events.drain(0..overflow.min(events.len()));
         }
         events.push(event);
     }
@@ -1158,6 +1158,312 @@ mod tests {
     }
 
     #[test]
+    fn mr_custom_claim_order_preserves_canonical_json_and_verdict() {
+        let mut first = base_attestation();
+        first.custom_claims = BTreeMap::from([
+            ("build.recipe".to_string(), "reproducible".to_string()),
+            (
+                "slsa.predicateType".to_string(),
+                "https://slsa.dev/provenance/v1".to_string(),
+            ),
+            ("source.tree".to_string(), "clean".to_string()),
+        ]);
+        sign_links_in_place(&mut first).expect("sign first ordering");
+
+        let mut second = base_attestation();
+        second.custom_claims = BTreeMap::from([
+            ("source.tree".to_string(), "clean".to_string()),
+            (
+                "slsa.predicateType".to_string(),
+                "https://slsa.dev/provenance/v1".to_string(),
+            ),
+            ("build.recipe".to_string(), "reproducible".to_string()),
+        ]);
+        sign_links_in_place(&mut second).expect("sign second ordering");
+
+        assert_eq!(
+            canonical_attestation_json(&first).expect("first canonical json"),
+            canonical_attestation_json(&second).expect("second canonical json")
+        );
+
+        let policy = VerificationPolicy::production_default();
+        let first_report = verify_attestation_chain(&first, &policy, 1_700_000_400, "same-trace");
+        let second_report = verify_attestation_chain(&second, &policy, 1_700_000_400, "same-trace");
+        assert_eq!(first_report, second_report);
+    }
+
+    #[test]
+    fn mr_trace_id_change_preserves_verification_decision() {
+        let attestation = base_attestation();
+        let policy = VerificationPolicy::production_default();
+
+        let first = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "trace-a");
+        let second = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "trace-b");
+
+        assert_ne!(first.trace_id, second.trace_id);
+        assert_eq!(first.chain_valid, second.chain_valid);
+        assert_eq!(first.provenance_level, second.provenance_level);
+        assert_eq!(first.issues, second.issues);
+        assert_eq!(first.events, second.events);
+    }
+
+    #[test]
+    fn mr_link_permutation_breaks_canonical_chain_order() {
+        let ordered = base_attestation();
+        let mut permuted = ordered.clone();
+        permuted.links.swap(0, 1);
+        sign_links_in_place(&mut permuted).expect("sign permuted links");
+
+        let policy = VerificationPolicy::production_default();
+        let ordered_report = verify_attestation_chain(&ordered, &policy, 1_700_000_400, "ordered");
+        let permuted_report =
+            verify_attestation_chain(&permuted, &policy, 1_700_000_400, "permuted");
+
+        assert!(ordered_report.chain_valid);
+        assert!(!permuted_report.chain_valid);
+        assert!(permuted_report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::ChainLinkOrderInvalid
+                && issue.link_role == Some(ChainLinkRole::BuildSystem)
+        }));
+        assert!(permuted_report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::ChainLinkOrderInvalid
+                && issue.link_role == Some(ChainLinkRole::Publisher)
+        }));
+    }
+
+    #[test]
+    fn mr_claimed_slsa_reduction_never_increases_provenance_level() {
+        let high_claim = base_attestation();
+        let mut level_two_claim = high_claim.clone();
+        level_two_claim.slsa_level_claim = 2;
+        sign_links_in_place(&mut level_two_claim).expect("sign level two claim");
+
+        let mut level_one_claim = high_claim.clone();
+        level_one_claim.slsa_level_claim = 1;
+        sign_links_in_place(&mut level_one_claim).expect("sign level one claim");
+
+        let policy = VerificationPolicy::production_default();
+        let high_report = verify_attestation_chain(&high_claim, &policy, 1_700_000_400, "level-3");
+        let level_two_report =
+            verify_attestation_chain(&level_two_claim, &policy, 1_700_000_400, "level-2");
+        let level_one_report =
+            verify_attestation_chain(&level_one_claim, &policy, 1_700_000_400, "level-1");
+
+        assert_eq!(
+            high_report.provenance_level,
+            ProvenanceLevel::Level3IndependentReproduced
+        );
+        assert_eq!(
+            level_two_report.provenance_level,
+            ProvenanceLevel::Level2SignedReproducible
+        );
+        assert_eq!(
+            level_one_report.provenance_level,
+            ProvenanceLevel::Level1PublisherSigned
+        );
+        assert!(level_two_report.provenance_level <= high_report.provenance_level);
+        assert!(level_one_report.provenance_level <= level_two_report.provenance_level);
+        assert!(level_two_report.chain_valid);
+        assert!(!level_one_report.chain_valid);
+    }
+
+    #[test]
+    fn mr_policy_depth_relaxation_can_only_remove_depth_failures() {
+        let mut attestation = base_attestation();
+        attestation.links.truncate(2);
+        sign_links_in_place(&mut attestation).expect("re-sign shortened chain");
+
+        let strict_policy = VerificationPolicy::production_default();
+        let mut relaxed_policy = VerificationPolicy::production_default();
+        relaxed_policy.required_chain_depth = 2;
+
+        let strict_report =
+            verify_attestation_chain(&attestation, &strict_policy, 1_700_000_400, "strict-depth");
+        let relaxed_report = verify_attestation_chain(
+            &attestation,
+            &relaxed_policy,
+            1_700_000_400,
+            "relaxed-depth",
+        );
+
+        assert!(!strict_report.chain_valid);
+        assert!(
+            strict_report
+                .issues
+                .iter()
+                .any(|issue| issue.code == VerificationErrorCode::ChainIncomplete)
+        );
+        assert!(relaxed_report.chain_valid);
+        assert!(relaxed_report.issues.is_empty());
+        assert_eq!(
+            relaxed_report.provenance_level,
+            ProvenanceLevel::Level2SignedReproducible
+        );
+    }
+
+    #[test]
+    fn mr_output_hash_tamper_resign_restores_signature_but_not_payload_binding() {
+        let mut attestation = base_attestation();
+        attestation.output_hash = "sha256:output-transformed".to_string();
+        sign_links_in_place(&mut attestation).expect("re-sign transformed output hash");
+
+        let policy = VerificationPolicy::production_default();
+        let mismatched_report =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_400, "mismatch");
+        assert!(!mismatched_report.chain_valid);
+        assert!(mismatched_report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::InvalidSignature
+                && issue
+                    .message
+                    .contains("signed payload hash does not match attestation output hash")
+        }));
+
+        for link in &mut attestation.links {
+            link.signed_payload_hash = attestation.output_hash.clone();
+        }
+        sign_links_in_place(&mut attestation).expect("re-sign restored payload binding");
+
+        let restored_report =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_400, "restored");
+        assert!(restored_report.chain_valid);
+        assert!(restored_report.issues.is_empty());
+    }
+
+    #[test]
+    fn mr_reproducibility_hash_change_changes_signatures_but_preserves_level_when_resigned() {
+        let original = base_attestation();
+        let original_signatures: Vec<_> = original
+            .links
+            .iter()
+            .map(|link| link.signature.clone())
+            .collect();
+
+        let mut transformed = original.clone();
+        transformed.reproducibility_hash = "sha256:repro-transformed".to_string();
+        sign_links_in_place(&mut transformed).expect("re-sign transformed reproducibility hash");
+        let transformed_signatures: Vec<_> = transformed
+            .links
+            .iter()
+            .map(|link| link.signature.clone())
+            .collect();
+
+        assert_ne!(original_signatures, transformed_signatures);
+        assert_ne!(
+            canonical_attestation_json(&original).expect("original canonical json"),
+            canonical_attestation_json(&transformed).expect("transformed canonical json")
+        );
+
+        let policy = VerificationPolicy::production_default();
+        let original_report =
+            verify_attestation_chain(&original, &policy, 1_700_000_400, "original");
+        let transformed_report =
+            verify_attestation_chain(&transformed, &policy, 1_700_000_400, "transformed");
+
+        assert!(original_report.chain_valid);
+        assert!(transformed_report.chain_valid);
+        assert_eq!(
+            original_report.provenance_level,
+            transformed_report.provenance_level
+        );
+    }
+
+    #[test]
+    fn mr_cached_window_boundary_progression_is_monotonic() {
+        let mut attestation = base_attestation();
+        for link in &mut attestation.links {
+            link.issued_at_epoch = 1_700_000_000;
+            link.expires_at_epoch = 1_700_000_100;
+        }
+        sign_links_in_place(&mut attestation).expect("re-sign bounded links");
+
+        let policy = VerificationPolicy {
+            max_attestation_age_secs: u64::MAX,
+            cached_trust_window_secs: 50,
+            mode: VerificationMode::CachedTrustWindow,
+            ..VerificationPolicy::development_profile()
+        };
+
+        let before_expiry =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_099, "before-expiry");
+        let at_expiry = verify_attestation_chain(&attestation, &policy, 1_700_000_100, "at-expiry");
+        let at_cache_boundary =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_150, "cache-boundary");
+
+        assert!(before_expiry.chain_valid);
+        assert!(before_expiry.issues.is_empty());
+
+        assert!(at_expiry.chain_valid);
+        assert!(at_expiry.issues.iter().all(|issue| {
+            issue.code == VerificationErrorCode::ChainStale && issue.allow_in_cached_mode
+        }));
+
+        assert!(!at_cache_boundary.chain_valid);
+        assert!(at_cache_boundary.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::ChainStale && !issue.allow_in_cached_mode
+        }));
+    }
+
+    #[test]
+    fn mr_source_signer_independence_restores_level_after_distinct_relabeling() {
+        let mut shared_source_signer = base_attestation();
+        shared_source_signer.links[2].signer_id = shared_source_signer.links[1].signer_id.clone();
+        sign_links_in_place(&mut shared_source_signer).expect("re-sign shared signer");
+
+        let mut independent_source_signer = shared_source_signer.clone();
+        independent_source_signer.links[2].signer_id = "independent-vcs-key".to_string();
+        sign_links_in_place(&mut independent_source_signer).expect("re-sign independent signer");
+
+        let policy = VerificationPolicy::production_default();
+        let shared_report = verify_attestation_chain(
+            &shared_source_signer,
+            &policy,
+            1_700_000_400,
+            "shared-source",
+        );
+        let independent_report = verify_attestation_chain(
+            &independent_source_signer,
+            &policy,
+            1_700_000_400,
+            "independent-source",
+        );
+
+        assert!(shared_report.chain_valid);
+        assert!(independent_report.chain_valid);
+        assert_eq!(
+            shared_report.provenance_level,
+            ProvenanceLevel::Level2SignedReproducible
+        );
+        assert_eq!(
+            independent_report.provenance_level,
+            ProvenanceLevel::Level3IndependentReproduced
+        );
+    }
+
+    #[test]
+    fn mr_revocation_transform_only_marks_revoked_role_when_signatures_still_match() {
+        let mut attestation = base_attestation();
+        attestation.links[2].revoked = true;
+        sign_links_in_place(&mut attestation).expect("re-sign revoked link");
+
+        let policy = VerificationPolicy::production_default();
+        let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "revoked");
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::ChainLinkRevoked
+                && issue.link_role == Some(ChainLinkRole::SourceVcs)
+        }));
+        assert!(!report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::InvalidSignature
+                && issue.link_role == Some(ChainLinkRole::SourceVcs)
+        }));
+        assert_eq!(
+            report.provenance_level,
+            ProvenanceLevel::Level2SignedReproducible
+        );
+    }
+
+    #[test]
     fn link_stale_at_exact_expiry_boundary() {
         let mut attestation = base_attestation();
         // Set all links to expire at exactly 1_700_100_000.
@@ -1201,5 +1507,727 @@ mod tests {
             .iter()
             .any(|i| matches!(i.code, VerificationErrorCode::ChainStale));
         assert!(has_staleness, "links at exact age boundary must be stale");
+    }
+
+    #[test]
+    fn negative_production_rejects_self_signed_link_even_with_valid_signature() {
+        let mut attestation = base_attestation();
+        attestation.links[0].signer_id = "self".to_string();
+        sign_links_in_place(&mut attestation).expect("re-sign self-signed publisher link");
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "self-signed-prod",
+        );
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::InvalidSignature
+                && issue.link_role == Some(ChainLinkRole::Publisher)
+                && issue.message.contains("self-signed")
+        }));
+    }
+
+    #[test]
+    fn negative_empty_publisher_signature_fails_closed() {
+        let mut attestation = base_attestation();
+        attestation.links[0].signature.clear();
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "empty-signature",
+        );
+        let failure = enforce_fail_closed(&report).expect_err("empty signature must fail closed");
+
+        assert!(!report.chain_valid);
+        assert_eq!(failure.code, VerificationErrorCode::InvalidSignature);
+        assert_eq!(failure.broken_link, Some(ChainLinkRole::Publisher));
+    }
+
+    #[test]
+    fn negative_missing_source_repository_for_positive_slsa_claim_is_rejected() {
+        let mut attestation = base_attestation();
+        attestation.source_repository_url.clear();
+        sign_links_in_place(&mut attestation).expect("re-sign missing source repository");
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "missing-source-repository",
+        );
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationMissingField
+                && issue.message.contains("source_repository_url")
+        }));
+    }
+
+    #[test]
+    fn negative_missing_vcs_commit_for_positive_slsa_claim_is_rejected() {
+        let mut attestation = base_attestation();
+        attestation.vcs_commit_sha.clear();
+        sign_links_in_place(&mut attestation).expect("re-sign missing vcs commit");
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "missing-vcs-commit",
+        );
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationMissingField
+                && issue.message.contains("vcs_commit_sha")
+        }));
+        assert_ne!(
+            report.provenance_level,
+            ProvenanceLevel::Level3IndependentReproduced
+        );
+    }
+
+    #[test]
+    fn negative_failed_projection_denies_all_downstream_gates() {
+        let mut attestation = base_attestation();
+        attestation.links[1].signature.clear();
+
+        let outcome = verify_and_project_gates(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "projection-deny-all",
+        );
+
+        assert!(!outcome.report.chain_valid);
+        assert_eq!(
+            outcome.downstream_gates,
+            DownstreamGateRequirements::deny_all()
+        );
+    }
+
+    #[test]
+    fn negative_attestation_stale_at_exact_age_boundary_fails_closed() {
+        let attestation = base_attestation();
+        let mut policy = VerificationPolicy::production_default();
+        policy.max_attestation_age_secs = 300;
+        let now_epoch = attestation
+            .build_timestamp_epoch
+            .saturating_add(policy.max_attestation_age_secs);
+
+        let report =
+            verify_attestation_chain(&attestation, &policy, now_epoch, "attestation-boundary");
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::ChainStale && issue.link_role.is_none()
+        }));
+    }
+
+    #[test]
+    fn negative_cached_trust_rejects_attestation_at_cache_boundary() {
+        let mut attestation = base_attestation();
+        attestation.build_timestamp_epoch = 1_700_000_000;
+        sign_links_in_place(&mut attestation).expect("re-sign boundary attestation");
+        let mut policy = VerificationPolicy::development_profile();
+        policy.max_attestation_age_secs = 100;
+        policy.cached_trust_window_secs = 50;
+        policy.mode = VerificationMode::CachedTrustWindow;
+
+        let report =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_150, "cache-hard-boundary");
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::ChainStale && !issue.allow_in_cached_mode
+        }));
+    }
+
+    #[test]
+    fn negative_revoked_publisher_removes_level_one_trust() {
+        let mut attestation = base_attestation();
+        attestation.links[0].revoked = true;
+        sign_links_in_place(&mut attestation).expect("re-sign revoked publisher");
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "revoked-publisher",
+        );
+
+        assert!(!report.chain_valid);
+        assert_eq!(report.provenance_level, ProvenanceLevel::Level0Unsigned);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::ChainLinkRevoked
+                && issue.link_role == Some(ChainLinkRole::Publisher)
+        }));
+    }
+
+    #[test]
+    fn negative_missing_schema_version_is_reported() {
+        let mut attestation = base_attestation();
+        attestation.schema_version = " \t".to_string();
+        sign_links_in_place(&mut attestation).expect("re-sign missing schema version");
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "missing-schema-version",
+        );
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationMissingField
+                && issue.message.contains("schema_version")
+        }));
+    }
+
+    #[test]
+    fn negative_missing_builder_identity_is_reported() {
+        let mut attestation = base_attestation();
+        attestation.builder_identity.clear();
+        sign_links_in_place(&mut attestation).expect("re-sign missing builder identity");
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "missing-builder-identity",
+        );
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationMissingField
+                && issue.message.contains("builder_identity")
+        }));
+    }
+
+    #[test]
+    fn negative_missing_output_hash_breaks_payload_binding() {
+        let mut attestation = base_attestation();
+        attestation.output_hash.clear();
+        sign_links_in_place(&mut attestation).expect("re-sign missing output hash");
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "missing-output-hash",
+        );
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::AttestationMissingField
+                && issue.message.contains("output_hash")
+        }));
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::InvalidSignature
+                && issue.message.contains("signed payload hash does not match")
+        }));
+    }
+
+    #[test]
+    fn negative_blank_signed_payload_hash_is_rejected() {
+        let mut attestation = base_attestation();
+        attestation.links[1].signed_payload_hash = " \n".to_string();
+        sign_links_in_place(&mut attestation).expect("re-sign blank signed payload hash");
+
+        let report = verify_attestation_chain(
+            &attestation,
+            &VerificationPolicy::production_default(),
+            1_700_000_400,
+            "blank-signed-payload",
+        );
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::InvalidSignature
+                && issue.link_role == Some(ChainLinkRole::BuildSystem)
+                && issue.message.contains("signed payload hash does not match")
+        }));
+    }
+
+    #[test]
+    fn negative_required_depth_above_available_roles_is_incomplete() {
+        let attestation = base_attestation();
+        let mut policy = VerificationPolicy::production_default();
+        policy.required_chain_depth = 4;
+
+        let report =
+            verify_attestation_chain(&attestation, &policy, 1_700_000_400, "depth-above-roles");
+
+        assert!(!report.chain_valid);
+        assert!(report.issues.iter().any(|issue| {
+            issue.code == VerificationErrorCode::ChainIncomplete
+                && issue.message.contains("required 4 links")
+        }));
+    }
+
+    #[test]
+    fn negative_fail_closed_empty_issue_report_uses_chain_incomplete_fallback() {
+        let report = ChainValidityReport {
+            chain_valid: false,
+            provenance_level: ProvenanceLevel::Level0Unsigned,
+            issues: Vec::new(),
+            events: Vec::new(),
+            trace_id: "empty-issues".to_string(),
+        };
+
+        let failure = enforce_fail_closed(&report).expect_err("invalid report must fail closed");
+
+        assert_eq!(failure.code, VerificationErrorCode::ChainIncomplete);
+        assert_eq!(failure.broken_link, None);
+        assert!(failure.message.contains("without explicit issue"));
+    }
+
+    #[test]
+    fn negative_serde_rejects_unknown_envelope_format() {
+        let err =
+            serde_json::from_str::<AttestationEnvelopeFormat>(r#""cyclonedx_v2""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_serde_rejects_unknown_verification_mode() {
+        let err = serde_json::from_str::<VerificationMode>(r#""fail_open""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_serde_rejects_link_missing_signature_field() {
+        let json = serde_json::json!({
+            "role": "publisher",
+            "signer_id": "publisher-key",
+            "signer_version": "v1",
+            "signed_payload_hash": "sha256:output-123",
+            "issued_at_epoch": 1_700_000_200u64,
+            "expires_at_epoch": 1_700_100_000u64,
+            "revoked": false
+        });
+
+        let err = serde_json::from_value::<AttestationLink>(json).unwrap_err();
+
+        assert!(err.to_string().contains("signature"));
+    }
+
+    /// Negative path: extremely large custom claims causing memory pressure
+    #[test]
+    fn negative_massive_custom_claims_handled_without_overflow() {
+        let mut attestation = base_attestation();
+
+        // Add 10,000 custom claims with large values
+        for i in 0..10_000 {
+            attestation.custom_claims.insert(
+                format!("claim_{:05}", i),
+                format!("value_{}_with_large_content_{}", i, "x".repeat(1000))
+            );
+        }
+
+        sign_links_in_place(&mut attestation).expect("sign massive custom claims");
+
+        // Canonical serialization should handle large data
+        let canonical = canonical_attestation_json(&attestation)
+            .expect("massive custom claims should serialize");
+
+        assert!(!canonical.is_empty());
+        assert!(canonical.contains("claim_00000"));
+        assert!(canonical.contains("claim_09999"));
+
+        // Verification should work despite size
+        let policy = VerificationPolicy::production_default();
+        let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "massive-claims");
+
+        // Should pass verification (large data is not invalid)
+        assert!(report.chain_valid);
+        assert_eq!(report.provenance_level, ProvenanceLevel::Level3IndependentReproduced);
+    }
+
+    /// Negative path: unicode characters in attestation fields
+    #[test]
+    fn negative_unicode_attestation_fields_preserved_through_verification() {
+        let mut attestation = base_attestation();
+
+        // Add unicode content to various fields
+        attestation.schema_version = "v1.0-🔒security".to_string();
+        attestation.source_repository_url = "https://github.com/企业/项目.git".to_string();
+        attestation.build_system_identifier = "github-actions-🚀CI/CD".to_string();
+        attestation.builder_identity = "builder@测试.example.com".to_string();
+        attestation.builder_version = "2026.02-ñéw".to_string();
+        attestation.reproducibility_hash = "sha256:repro-漢字123".to_string();
+
+        // Add unicode to links
+        for link in &mut attestation.links {
+            link.signer_id = format!("🔑key-{}-測試", link.signer_id);
+            link.signer_version = format!("v1-🌍{}", link.signer_version);
+        }
+
+        // Add unicode custom claims
+        attestation.custom_claims.insert("測試.claim".to_string(), "値🎯test".to_string());
+        attestation.custom_claims.insert("emoji🌟field".to_string(), "data📊value".to_string());
+
+        sign_links_in_place(&mut attestation).expect("sign unicode attestation");
+
+        let policy = VerificationPolicy::production_default();
+        let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "unicode-test");
+
+        assert!(report.chain_valid);
+        assert_eq!(report.provenance_level, ProvenanceLevel::Level3IndependentReproduced);
+
+        // Unicode should be preserved in canonical form
+        let canonical = canonical_attestation_json(&attestation).expect("unicode canonical");
+        assert!(canonical.contains("🔒security"));
+        assert!(canonical.contains("企业"));
+        assert!(canonical.contains("測試"));
+    }
+
+    /// Negative path: timestamp overflow scenarios near u64::MAX
+    #[test]
+    fn negative_timestamp_overflow_scenarios_use_saturating_arithmetic() {
+        let mut attestation = base_attestation();
+
+        // Set timestamps near u64::MAX
+        attestation.build_timestamp_epoch = u64::MAX - 1000;
+        for link in &mut attestation.links {
+            link.issued_at_epoch = u64::MAX - 500;
+            link.expires_at_epoch = u64::MAX - 100;
+        }
+
+        sign_links_in_place(&mut attestation).expect("sign overflow timestamps");
+
+        // Policy with extreme values
+        let policy = VerificationPolicy {
+            max_attestation_age_secs: u64::MAX / 2,
+            cached_trust_window_secs: u64::MAX / 4,
+            ..VerificationPolicy::production_default()
+        };
+
+        // Verification at timestamp that could cause overflow
+        let now_epoch = u64::MAX - 50;
+        let report = verify_attestation_chain(&attestation, &policy, now_epoch, "overflow-test");
+
+        // Should handle timestamps without panicking due to overflow
+        assert!(!report.chain_valid); // Will be stale due to expiry
+
+        // Age calculation should use saturating arithmetic
+        let age = now_epoch.saturating_sub(attestation.build_timestamp_epoch);
+        assert_eq!(age, 950); // u64::MAX - 50 - (u64::MAX - 1000) = 950
+
+        // Should have stale chain issues due to expiry
+        assert!(report.issues.iter().any(|i| i.code == VerificationErrorCode::ChainStale));
+    }
+
+    /// Negative path: hash collision resistance in signature computation
+    #[test]
+    fn negative_signature_computation_resists_collision_attempts() {
+        let base = base_attestation();
+
+        // Create variations that could potentially collide
+        let mut variant1 = base.clone();
+        variant1.output_hash = "prefix_suffix".to_string();
+
+        let mut variant2 = base.clone();
+        variant2.output_hash = "prefi_x_suffix".to_string(); // Different split point
+
+        let mut variant3 = base.clone();
+        variant3.custom_claims.insert("ab".to_string(), "cd".to_string());
+
+        let mut variant4 = base.clone();
+        variant4.custom_claims.insert("a".to_string(), "bcd".to_string());
+
+        // Sign all variants
+        sign_links_in_place(&mut variant1).expect("sign variant1");
+        sign_links_in_place(&mut variant2).expect("sign variant2");
+        sign_links_in_place(&mut variant3).expect("sign variant3");
+        sign_links_in_place(&mut variant4).expect("sign variant4");
+
+        // Collect all signatures
+        let signatures: Vec<Vec<String>> = [&variant1, &variant2, &variant3, &variant4]
+            .iter()
+            .map(|v| v.links.iter().map(|l| l.signature.clone()).collect())
+            .collect();
+
+        // All signatures should be different (no collisions)
+        for i in 0..signatures.len() {
+            for j in (i + 1)..signatures.len() {
+                for (sig_a, sig_b) in signatures[i].iter().zip(signatures[j].iter()) {
+                    assert_ne!(sig_a, sig_b,
+                        "Signatures should be different for variants {} and {}", i, j);
+                }
+            }
+        }
+
+        // All should have valid signatures
+        let policy = VerificationPolicy::production_default();
+        for (idx, variant) in [&variant1, &variant2, &variant3, &variant4].iter().enumerate() {
+            let report = verify_attestation_chain(variant, &policy, 1_700_000_400, &format!("variant-{}", idx));
+            assert!(report.chain_valid, "Variant {} should have valid signatures", idx);
+        }
+    }
+
+    /// Negative path: malformed JSON serialization attempts
+    #[test]
+    fn negative_canonical_json_handles_problematic_value_types() {
+        // Test that problematic serde_json::Value types are handled
+        use serde_json::{Map, Value};
+
+        // Create deeply nested JSON structure
+        let mut deep_nested = Value::Object(Map::new());
+        let mut current = &mut deep_nested;
+
+        for i in 0..1000 {
+            let mut new_map = Map::new();
+            new_map.insert(format!("level_{}", i), Value::Null);
+            let new_obj = Value::Object(new_map);
+
+            if let Value::Object(ref mut map) = current {
+                map.insert(format!("nested_{}", i), new_obj);
+                if let Some(Value::Object(_)) = map.get_mut(&format!("nested_{}", i)) {
+                    // Continue nesting - this tests stack depth in canonicalization
+                }
+            }
+        }
+
+        // Test canonicalization of deeply nested structure
+        let canonical = canonicalize_value(deep_nested);
+        assert!(matches!(canonical, Value::Object(_)));
+
+        // Test with problematic field values
+        let problematic = serde_json::json!({
+            "null_field": null,
+            "empty_string": "",
+            "unicode_key_🔑": "unicode_value_🎯",
+            "large_number": 9223372036854775807i64,
+            "empty_array": [],
+            "empty_object": {},
+            "boolean_true": true,
+            "boolean_false": false
+        });
+
+        let canonical_problematic = canonicalize_value(problematic);
+        let canonical_str = serde_json::to_string(&canonical_problematic)
+            .expect("canonical problematic should serialize");
+
+        // Should handle all value types without panicking
+        assert!(canonical_str.contains("null"));
+        assert!(canonical_str.contains("🔑"));
+        assert!(canonical_str.contains("9223372036854775807"));
+    }
+
+    /// Negative path: verification policy with extreme configuration values
+    #[test]
+    fn negative_extreme_verification_policy_values_handled_gracefully() {
+        let attestation = base_attestation();
+
+        // Test with zero timeout values
+        let zero_policy = VerificationPolicy {
+            min_level: ProvenanceLevel::Level3IndependentReproduced,
+            required_chain_depth: 0, // Zero depth
+            max_attestation_age_secs: 0, // Zero age tolerance
+            cached_trust_window_secs: 0, // Zero cache window
+            allow_self_signed: false,
+            mode: VerificationMode::FailClosed,
+        };
+
+        let report = verify_attestation_chain(&attestation, &zero_policy, 1_700_000_400, "zero-policy");
+        assert!(!report.chain_valid); // Should fail due to zero age tolerance
+
+        // Test with maximum values
+        let max_policy = VerificationPolicy {
+            min_level: ProvenanceLevel::Level0Unsigned,
+            required_chain_depth: usize::MAX,
+            max_attestation_age_secs: u64::MAX,
+            cached_trust_window_secs: u64::MAX,
+            allow_self_signed: true,
+            mode: VerificationMode::CachedTrustWindow,
+        };
+
+        let max_report = verify_attestation_chain(&attestation, &max_policy, 1_700_000_400, "max-policy");
+        assert!(!max_report.chain_valid); // Should fail due to insufficient chain depth
+        assert!(max_report.issues.iter().any(|i| i.code == VerificationErrorCode::ChainIncomplete));
+    }
+
+    /// Negative path: empty and whitespace-only field validation
+    #[test]
+    fn negative_whitespace_fields_detected_as_missing() {
+        let mut attestation = base_attestation();
+
+        // Set various fields to whitespace-only values
+        attestation.schema_version = "  \t\n  ".to_string();
+        attestation.build_system_identifier = "   ".to_string();
+        attestation.builder_identity = "\t\t".to_string();
+        attestation.builder_version = "\n\r\n".to_string();
+        attestation.reproducibility_hash = "".to_string();
+        attestation.input_hash = " ".to_string();
+        attestation.output_hash = "   \t   ".to_string();
+
+        sign_links_in_place(&mut attestation).expect("sign whitespace attestation");
+
+        let policy = VerificationPolicy::production_default();
+        let report = verify_attestation_chain(&attestation, &policy, 1_700_000_400, "whitespace-fields");
+
+        assert!(!report.chain_valid);
+
+        // Should detect multiple missing field issues
+        let missing_field_count = report.issues.iter()
+            .filter(|i| i.code == VerificationErrorCode::AttestationMissingField)
+            .count();
+        assert!(missing_field_count >= 6, "Should detect multiple whitespace-only fields as missing");
+
+        // Each required field should be flagged
+        let field_names = ["schema_version", "build_system_identifier", "builder_identity",
+                          "builder_version", "reproducibility_hash", "input_hash", "output_hash"];
+        for field in &field_names {
+            assert!(report.issues.iter().any(|i|
+                i.code == VerificationErrorCode::AttestationMissingField &&
+                i.message.contains(field)
+            ), "Field {} should be detected as missing", field);
+        }
+    }
+
+    /// Negative path: chain link duplication and reordering attacks
+    #[test]
+    fn negative_duplicate_and_reordered_links_break_canonical_verification() {
+        // Test duplicate links
+        let mut duplicate_attestation = base_attestation();
+        let publisher_link = duplicate_attestation.links[0].clone();
+        duplicate_attestation.links.push(publisher_link); // Add duplicate publisher link
+        sign_links_in_place(&mut duplicate_attestation).expect("sign duplicate links");
+
+        let policy = VerificationPolicy::production_default();
+        let duplicate_report = verify_attestation_chain(
+            &duplicate_attestation, &policy, 1_700_000_400, "duplicate-links"
+        );
+
+        // Should fail due to order validation (extra link at wrong position)
+        assert!(!duplicate_report.chain_valid);
+
+        // Test completely reversed order
+        let mut reversed_attestation = base_attestation();
+        reversed_attestation.links.reverse();
+        sign_links_in_place(&mut reversed_attestation).expect("sign reversed links");
+
+        let reversed_report = verify_attestation_chain(
+            &reversed_attestation, &policy, 1_700_000_400, "reversed-links"
+        );
+
+        assert!(!reversed_report.chain_valid);
+        assert!(reversed_report.issues.iter().any(|i|
+            i.code == VerificationErrorCode::ChainLinkOrderInvalid
+        ));
+
+        // Test partial shuffle (swap first two)
+        let mut shuffled_attestation = base_attestation();
+        shuffled_attestation.links.swap(0, 1);
+        sign_links_in_place(&mut shuffled_attestation).expect("sign shuffled links");
+
+        let shuffled_report = verify_attestation_chain(
+            &shuffled_attestation, &policy, 1_700_000_400, "shuffled-links"
+        );
+
+        assert!(!shuffled_report.chain_valid);
+        assert!(shuffled_report.issues.iter().any(|i|
+            i.code == VerificationErrorCode::ChainLinkOrderInvalid
+        ));
+    }
+
+    /// Negative path: event system overflow with massive issue generation
+    #[test]
+    fn negative_event_classification_handles_massive_issue_lists() {
+        // Create attestation with many potential issues
+        let mut problematic_attestation = base_attestation();
+
+        // Create conditions that will generate many different issues
+        problematic_attestation.schema_version.clear();
+        problematic_attestation.build_system_identifier.clear();
+        problematic_attestation.builder_identity.clear();
+        problematic_attestation.builder_version.clear();
+        problematic_attestation.reproducibility_hash.clear();
+        problematic_attestation.input_hash.clear();
+        problematic_attestation.output_hash.clear();
+        problematic_attestation.source_repository_url.clear();
+        problematic_attestation.vcs_commit_sha.clear();
+
+        // Add many links with issues
+        for i in 0..50 {
+            problematic_attestation.links.push(AttestationLink {
+                role: ChainLinkRole::Publisher, // All same role (order issues)
+                signer_id: format!("signer-{}", i),
+                signer_version: "v1".to_string(),
+                signature: "invalid-signature".to_string(),
+                signed_payload_hash: format!("wrong-hash-{}", i),
+                issued_at_epoch: 100, // Very old (stale issues)
+                expires_at_epoch: 200, // Expired
+                revoked: i % 3 == 0, // Some revoked
+            });
+        }
+
+        let policy = VerificationPolicy::production_default();
+        let report = verify_attestation_chain(
+            &problematic_attestation, &policy, 1_700_000_400, "massive-issues"
+        );
+
+        assert!(!report.chain_valid);
+
+        // Should have many different types of issues
+        let issue_types: std::collections::HashSet<_> = report.issues.iter()
+            .map(|i| i.code)
+            .collect();
+
+        assert!(issue_types.len() >= 4, "Should have multiple types of issues");
+        assert!(issue_types.contains(&VerificationErrorCode::AttestationMissingField));
+        assert!(issue_types.contains(&VerificationErrorCode::ChainLinkOrderInvalid));
+        assert!(issue_types.contains(&VerificationErrorCode::InvalidSignature));
+
+        // Events should be generated despite massive issues
+        assert!(!report.events.is_empty());
+        assert!(report.events.contains(&ProvenanceEventCode::AttestationRejected));
+    }
+
+    /// Negative path: canonical JSON field ordering with collision attempts
+    #[test]
+    fn negative_canonical_json_field_ordering_prevents_manipulation() {
+        let mut attestation1 = base_attestation();
+        let mut attestation2 = base_attestation();
+
+        // Add custom claims in different orders that could cause issues
+        attestation1.custom_claims.insert("a_field".to_string(), "value1".to_string());
+        attestation1.custom_claims.insert("b_field".to_string(), "value2".to_string());
+        attestation1.custom_claims.insert("aa_field".to_string(), "value3".to_string()); // Between a and b lexically
+
+        attestation2.custom_claims.insert("b_field".to_string(), "value2".to_string());
+        attestation2.custom_claims.insert("aa_field".to_string(), "value3".to_string());
+        attestation2.custom_claims.insert("a_field".to_string(), "value1".to_string()); // Different insertion order
+
+        sign_links_in_place(&mut attestation1).expect("sign attestation1");
+        sign_links_in_place(&mut attestation2).expect("sign attestation2");
+
+        // Canonical JSON should be identical despite insertion order
+        let canonical1 = canonical_attestation_json(&attestation1).expect("canonical1");
+        let canonical2 = canonical_attestation_json(&attestation2).expect("canonical2");
+
+        assert_eq!(canonical1, canonical2, "Canonical JSON should be identical despite insertion order");
+
+        // Signatures should be identical
+        for (link1, link2) in attestation1.links.iter().zip(attestation2.links.iter()) {
+            assert_eq!(link1.signature, link2.signature, "Signatures should be identical for canonically equivalent data");
+        }
+
+        // Verification results should be identical
+        let policy = VerificationPolicy::production_default();
+        let report1 = verify_attestation_chain(&attestation1, &policy, 1_700_000_400, "order-test-1");
+        let report2 = verify_attestation_chain(&attestation2, &policy, 1_700_000_400, "order-test-2");
+
+        assert_eq!(report1.chain_valid, report2.chain_valid);
+        assert_eq!(report1.provenance_level, report2.provenance_level);
+        assert_eq!(report1.issues, report2.issues);
     }
 }

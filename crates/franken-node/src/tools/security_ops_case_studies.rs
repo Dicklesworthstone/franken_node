@@ -52,11 +52,20 @@ pub const MIN_INDUSTRY_SUBMISSIONS: usize = 1;
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
     }
     items.push(item);
+}
+
+fn contains_nul_byte(value: &str) -> bool {
+    value.contains('\0')
 }
 
 /// Pre/post security and operational metrics used for case-study quantification.
@@ -207,6 +216,10 @@ impl SecurityOpsCaseStudyRegistry {
         mut case_study: CaseStudy,
         trace_id: &str,
     ) -> Result<String, String> {
+        if contains_nul_byte(trace_id) {
+            return Err("trace_id must not contain NUL bytes".to_string());
+        }
+
         validate_case_study(&case_study)?;
 
         if self.case_studies.contains_key(&case_study.case_study_id) {
@@ -438,8 +451,36 @@ fn validate_case_study(case_study: &CaseStudy) -> Result<(), String> {
         return Err("case study identity fields must be non-empty".to_string());
     }
 
+    if contains_nul_byte(&case_study.case_study_id)
+        || contains_nul_byte(&case_study.title)
+        || contains_nul_byte(&case_study.organization_type)
+        || contains_nul_byte(&case_study.industry)
+    {
+        return Err("case study identity fields must not contain NUL bytes".to_string());
+    }
+
     if case_study.lessons_learned.is_empty() || case_study.recommendations.is_empty() {
         return Err("case study must include lessons_learned and recommendations".to_string());
+    }
+
+    if case_study
+        .lessons_learned
+        .iter()
+        .any(|lesson| contains_nul_byte(lesson))
+    {
+        return Err("lessons_learned must not contain NUL bytes".to_string());
+    }
+
+    if case_study
+        .recommendations
+        .iter()
+        .any(|recommendation| contains_nul_byte(recommendation))
+    {
+        return Err("recommendations must not contain NUL bytes".to_string());
+    }
+
+    if contains_nul_byte(&case_study.publication.publication_url) {
+        return Err("publication_url must not contain NUL bytes".to_string());
     }
 
     if !case_study
@@ -463,6 +504,15 @@ fn validate_case_study(case_study: &CaseStudy) -> Result<(), String> {
         );
     }
 
+    if case_study
+        .publication
+        .industry_publication_name
+        .as_ref()
+        .is_some_and(|name| contains_nul_byte(name))
+    {
+        return Err("industry_publication_name must not contain NUL bytes".to_string());
+    }
+
     if case_study.publication.reviewed_by_featured_org
         && case_study
             .publication
@@ -471,6 +521,15 @@ fn validate_case_study(case_study: &CaseStudy) -> Result<(), String> {
             .is_none_or(|timestamp| timestamp.trim().is_empty())
     {
         return Err("reviewed_at required when reviewed_by_featured_org=true".to_string());
+    }
+
+    if case_study
+        .publication
+        .reviewed_at
+        .as_ref()
+        .is_some_and(|timestamp| contains_nul_byte(timestamp))
+    {
+        return Err("reviewed_at must not contain NUL bytes".to_string());
     }
 
     Ok(())
@@ -877,5 +936,278 @@ mod tests {
                 .iter()
                 .any(|record| record.event_code == event_codes::CSC_GATE_PASSED)
         );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_existing_items() {
+        let mut items = vec!["old-case", "old-audit"];
+
+        push_bounded(&mut items, "new-case", 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity bounded buffers must not retain stale case-study records"
+        );
+    }
+
+    #[test]
+    fn missing_recommendations_are_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-no-recommendations", 14, 6);
+        case_study.recommendations.clear();
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("missing recommendations should fail");
+
+        assert!(err.contains("recommendations"));
+        assert!(registry.case_studies().is_empty());
+        assert!(
+            registry.audit_log.is_empty(),
+            "validation failures must not emit registration audit records"
+        );
+    }
+
+    #[test]
+    fn whitespace_industry_publication_name_is_rejected() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-blank-channel", 14, 6);
+        case_study.publication.industry_publication_name = Some("   ".to_string());
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("blank industry publication names should fail");
+
+        assert!(err.contains("industry_publication_name"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn whitespace_review_timestamp_is_rejected() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-blank-reviewed-at", 14, 6);
+        case_study.publication.reviewed_at = Some("\t".to_string());
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("blank review timestamps should fail");
+
+        assert!(err.contains("reviewed_at"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn empty_registry_exports_empty_json_and_jsonl() {
+        let registry = SecurityOpsCaseStudyRegistry::new();
+
+        assert_eq!(
+            registry
+                .export_registry_json()
+                .expect("empty registry should export"),
+            "[]"
+        );
+        assert_eq!(registry.export_audit_log_jsonl(), "");
+    }
+
+    #[test]
+    fn negative_security_delta_is_not_measurable_improvement() {
+        let case_study = sample_case_study("cs-regression", 10, 14);
+
+        assert!(case_study.key_metrics.vulnerability_reduction_bps() < 0);
+        assert!(!case_study.has_measurable_security_improvement());
+    }
+
+    #[test]
+    fn summary_fails_when_studies_are_unreviewed() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        for idx in 1..=MIN_CASE_STUDIES {
+            let mut case_study = sample_case_study(&format!("cs-unreviewed-{idx}"), 20, 10);
+            case_study.publication.reviewed_by_featured_org = false;
+            case_study.publication.reviewed_at = None;
+            registry
+                .register_case_study(case_study, &format!("trace-{idx}"))
+                .expect("registration should succeed without review");
+        }
+
+        let summary = registry.generate_summary("trace-summary");
+
+        assert!(!summary.overall_verdict);
+        assert!(
+            summary
+                .unmet_criteria
+                .iter()
+                .any(|criterion| criterion.contains("reviewed by featured organization"))
+        );
+    }
+
+    #[test]
+    fn summary_fails_when_studies_are_not_website_published() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        for idx in 1..=MIN_CASE_STUDIES {
+            let mut case_study = sample_case_study(&format!("cs-unpublished-{idx}"), 20, 10);
+            case_study.publication.published_on_project_website = false;
+            registry
+                .register_case_study(case_study, &format!("trace-{idx}"))
+                .expect("registration should succeed without website publication");
+        }
+
+        let summary = registry.generate_summary("trace-summary");
+
+        assert!(!summary.overall_verdict);
+        assert!(
+            summary
+                .unmet_criteria
+                .iter()
+                .any(|criterion| criterion.contains("published on project website"))
+        );
+    }
+
+    #[test]
+    fn nul_trace_id_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+
+        let err = registry
+            .register_case_study(sample_case_study("cs-nul-trace", 14, 6), "trace\0hidden")
+            .expect_err("trace ids with embedded NUL bytes should fail");
+
+        assert!(err.contains("trace_id"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_case_study_id_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+
+        let err = registry
+            .register_case_study(sample_case_study("cs\0shadow", 14, 6), "trace-invalid")
+            .expect_err("case study ids with embedded NUL bytes should fail");
+
+        assert!(err.contains("identity fields"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_title_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-nul-title", 14, 6);
+        case_study.title = "Case Study\0Shadow".to_string();
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("titles with embedded NUL bytes should fail");
+
+        assert!(err.contains("identity fields"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_organization_type_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-nul-org", 14, 6);
+        case_study.organization_type = "SaaS\0Internal".to_string();
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("organization types with embedded NUL bytes should fail");
+
+        assert!(err.contains("identity fields"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_industry_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-nul-industry", 14, 6);
+        case_study.industry = "FinTech\0Shadow".to_string();
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("industries with embedded NUL bytes should fail");
+
+        assert!(err.contains("identity fields"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_lesson_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-nul-lesson", 14, 6);
+        case_study.lessons_learned[0] = "Phase rollout\0skip review".to_string();
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("lessons with embedded NUL bytes should fail");
+
+        assert!(err.contains("lessons_learned"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_recommendation_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-nul-recommendation", 14, 6);
+        case_study.recommendations[0] = "Use strict profile\0disable guard".to_string();
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("recommendations with embedded NUL bytes should fail");
+
+        assert!(err.contains("recommendations"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_publication_url_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-nul-url", 14, 6);
+        case_study.publication.publication_url =
+            "https://franken-node.dev/case-studies/cs-nul-url\0http://shadow".to_string();
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("publication URLs with embedded NUL bytes should fail");
+
+        assert!(err.contains("publication_url"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_industry_publication_name_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-nul-channel", 14, 6);
+        case_study.publication.industry_publication_name = Some("SRE Journal\0Private".to_string());
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("industry publication names with embedded NUL bytes should fail");
+
+        assert!(err.contains("industry_publication_name"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nul_review_timestamp_is_rejected_without_audit() {
+        let mut registry = SecurityOpsCaseStudyRegistry::new();
+        let mut case_study = sample_case_study("cs-nul-reviewed-at", 14, 6);
+        case_study.publication.reviewed_at = Some("2026-02-21T10:00:00Z\0unreviewed".to_string());
+
+        let err = registry
+            .register_case_study(case_study, "trace-invalid")
+            .expect_err("review timestamps with embedded NUL bytes should fail");
+
+        assert!(err.contains("reviewed_at"));
+        assert!(registry.case_studies().is_empty());
+        assert!(registry.audit_log.is_empty());
     }
 }

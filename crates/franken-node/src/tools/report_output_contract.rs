@@ -30,11 +30,20 @@ use uuid::Uuid;
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len().saturating_add(1).saturating_sub(cap);
+    if overflow > 0 {
         items.drain(0..overflow);
     }
     items.push(item);
+}
+
+fn contains_nul_byte(value: &str) -> bool {
+    value.contains('\0')
 }
 
 pub mod event_codes {
@@ -166,14 +175,75 @@ impl ReportOutputContract {
         mut bundle: ReportBundle,
         trace_id: &str,
     ) -> Result<String, String> {
-        if bundle.reproduction_command.is_empty() {
+        if contains_nul_byte(trace_id) {
+            return Err("Trace id must not contain NUL bytes".to_string());
+        }
+
+        if bundle.bundle_id.trim().is_empty() {
+            return Err("Bundle id must not be empty".to_string());
+        }
+
+        if contains_nul_byte(&bundle.bundle_id) {
+            return Err("Bundle id must not contain NUL bytes".to_string());
+        }
+
+        if self.bundles.contains_key(&bundle.bundle_id) {
+            return Err(format!("Bundle {} already exists", bundle.bundle_id));
+        }
+
+        if bundle.title.trim().is_empty() {
+            return Err("Bundle title must not be empty".to_string());
+        }
+
+        if contains_nul_byte(&bundle.title) {
+            return Err("Bundle title must not contain NUL bytes".to_string());
+        }
+
+        if bundle.reproduction_command.trim().is_empty() {
             return Err("Reproduction command must not be empty".to_string());
+        }
+
+        if contains_nul_byte(&bundle.reproduction_command) {
+            return Err("Reproduction command must not contain NUL bytes".to_string());
         }
 
         // Check artifact integrity
         for art in &bundle.artifacts {
+            if art.artifact_type.trim().is_empty() {
+                return Err("Artifact type must not be empty".to_string());
+            }
+            if contains_nul_byte(&art.artifact_type) {
+                return Err("Artifact type must not contain NUL bytes".to_string());
+            }
+            if art.path.trim().is_empty() {
+                return Err(format!(
+                    "Artifact path must not be empty: {}",
+                    art.artifact_type
+                ));
+            }
+            if contains_nul_byte(&art.path) {
+                return Err(format!(
+                    "Artifact path must not contain NUL bytes: {}",
+                    art.artifact_type
+                ));
+            }
+            if art.size_bytes == 0 {
+                return Err(format!(
+                    "Artifact size must be positive: {}",
+                    art.artifact_type
+                ));
+            }
+            if contains_nul_byte(&art.content_hash) {
+                return Err(format!(
+                    "Artifact hash must not contain NUL bytes: {}",
+                    art.artifact_type
+                ));
+            }
             if art.content_hash.len() != 64
-                || !art.content_hash.chars().all(|c| c.is_ascii_hexdigit())
+                || !art
+                    .content_hash
+                    .chars()
+                    .all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
             {
                 self.log(
                     event_codes::ROC_ERR_HASH_MISMATCH,
@@ -184,7 +254,14 @@ impl ReportOutputContract {
             }
         }
 
-        self.log(event_codes::ROC_INTEGRITY_VERIFIED, trace_id, serde_json::json!({"bundle_id": &bundle.bundle_id, "artifacts": bundle.artifacts.len()}));
+        self.log(
+            event_codes::ROC_INTEGRITY_VERIFIED,
+            trace_id,
+            serde_json::json!({
+                "bundle_id": &bundle.bundle_id,
+                "artifacts": bundle.artifacts.len(),
+            }),
+        );
 
         // Check completeness
         let present_types: Vec<&str> = bundle
@@ -217,7 +294,12 @@ impl ReportOutputContract {
             serde_json::json!({"command": &bundle.reproduction_command}),
         );
 
-        let hash_input = serde_json::json!({"title": &bundle.title, "type": bundle.report_type.label(), "artifacts": bundle.artifacts.len()}).to_string();
+        let hash_input = serde_json::json!({
+            "title": &bundle.title,
+            "type": bundle.report_type.label(),
+            "artifacts": bundle.artifacts.len(),
+        })
+        .to_string();
         bundle.bundle_hash = hex::encode(Sha256::digest(
             [b"report_output_hash_v1:" as &[u8], hash_input.as_bytes()].concat(),
         ));
@@ -351,6 +433,11 @@ mod tests {
         b.artifacts.truncate(2);
         b
     }
+    fn remove_artifact_type(bundle: &mut ReportBundle, artifact_type: &str) {
+        bundle
+            .artifacts
+            .retain(|artifact| artifact.artifact_type != artifact_type);
+    }
 
     #[test]
     fn five_report_types() {
@@ -385,6 +472,403 @@ mod tests {
         let mut b = complete_bundle("b-1");
         b.artifacts[0].content_hash = "short".to_string();
         assert!(e.create_bundle(b, &trace()).is_err());
+    }
+    #[test]
+    fn push_bounded_zero_capacity_drops_existing_records() {
+        let mut records = vec![1, 2];
+
+        push_bounded(&mut records, 3, 0);
+
+        assert!(records.is_empty());
+    }
+    #[test]
+    fn push_bounded_overfull_input_keeps_newest_record_window() {
+        let mut records = vec![1, 2, 3, 4];
+
+        push_bounded(&mut records, 5, 2);
+
+        assert_eq!(records, vec![4, 5]);
+    }
+    #[test]
+    fn whitespace_reproduction_command_does_not_store_bundle() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-whitespace-command");
+        b.reproduction_command = " \t ".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("whitespace reproduction command should fail");
+
+        assert!(err.contains("Reproduction command"));
+        assert!(!e.bundles().contains_key("b-whitespace-command"));
+    }
+    #[test]
+    fn uppercase_artifact_digest_is_rejected_as_non_canonical() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-uppercase-digest");
+        b.artifacts[0].content_hash = "A".repeat(64);
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("uppercase artifact digest should fail");
+
+        assert!(err.contains("report_pdf"));
+        assert!(!e.bundles().contains_key("b-uppercase-digest"));
+    }
+    #[test]
+    fn report_type_deserialize_rejects_display_case_label() {
+        let result: Result<ReportType, _> = serde_json::from_str("\"TechnicalAnalysis\"");
+
+        assert!(result.is_err(), "report types must use snake_case");
+    }
+    #[test]
+    fn artifact_entry_deserialize_rejects_string_size() {
+        let raw = serde_json::json!({
+            "artifact_type": "report_pdf",
+            "path": "/out/report.pdf",
+            "content_hash": "a".repeat(64),
+            "size_bytes": "1024"
+        });
+
+        let result: Result<ArtifactEntry, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "artifact sizes must remain numeric");
+    }
+    #[test]
+    fn report_bundle_deserialize_rejects_missing_artifacts() {
+        let raw = serde_json::json!({
+            "bundle_id": "b-missing-artifacts",
+            "report_type": "technical_analysis",
+            "title": "Missing artifacts",
+            "reproduction_command": "make reproduce",
+            "contract_version": CONTRACT_VERSION,
+            "is_complete": false,
+            "bundle_hash": "b".repeat(64),
+            "created_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ReportBundle, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "artifacts are required in bundles");
+    }
+    #[test]
+    fn output_catalog_deserialize_rejects_string_bundle_count() {
+        let raw = serde_json::json!({
+            "catalog_id": "catalog-1",
+            "timestamp": "2026-04-17T00:00:00Z",
+            "contract_version": CONTRACT_VERSION,
+            "total_bundles": "1",
+            "complete_bundles": 1_usize,
+            "by_type": {"technical_analysis": 1_usize},
+            "content_hash": "c".repeat(64)
+        });
+
+        let result: Result<OutputCatalog, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "bundle counts must remain numeric");
+    }
+    #[test]
+    fn audit_record_deserialize_rejects_missing_details() {
+        let raw = serde_json::json!({
+            "record_id": "record-1",
+            "event_code": event_codes::ROC_BUNDLE_CREATED,
+            "timestamp": "2026-04-17T00:00:00Z",
+            "trace_id": "trace-1"
+        });
+
+        let result: Result<RocAuditRecord, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "audit details are required");
+    }
+    #[test]
+    fn empty_reproduction_command_does_not_store_bundle() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-empty-command");
+        b.reproduction_command = String::new();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("empty reproduction command should fail");
+
+        assert!(err.contains("Reproduction command"));
+        assert!(!e.bundles().contains_key("b-empty-command"));
+    }
+    #[test]
+    fn invalid_short_artifact_digest_does_not_store_bundle() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-short-digest");
+        b.artifacts[0].content_hash = "short".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("short artifact digest should fail");
+
+        assert!(err.contains("report_pdf"));
+        assert!(!e.bundles().contains_key("b-short-digest"));
+    }
+    #[test]
+    fn invalid_non_hex_artifact_digest_does_not_store_bundle() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-non-hex-digest");
+        b.artifacts[0].content_hash = "z".repeat(64);
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("non-hex artifact digest should fail");
+
+        assert!(err.contains("report_pdf"));
+        assert!(!e.bundles().contains_key("b-non-hex-digest"));
+    }
+    #[test]
+    fn invalid_later_artifact_digest_reports_offending_type() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-late-digest");
+        b.artifacts[3].content_hash = "x".repeat(64);
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("invalid later artifact digest should fail");
+
+        assert!(err.contains("verification_evidence"));
+        assert!(!e.bundles().contains_key("b-late-digest"));
+    }
+    #[test]
+    fn empty_artifact_manifest_is_marked_incomplete() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-empty-manifest");
+        b.artifacts.clear();
+
+        e.create_bundle(b, &trace())
+            .expect("empty manifest is accepted as incomplete evidence");
+
+        assert!(!e.bundles().get("b-empty-manifest").unwrap().is_complete);
+    }
+    #[test]
+    fn missing_each_required_artifact_type_marks_bundle_incomplete() {
+        for artifact_type in REQUIRED_ARTIFACT_TYPES {
+            let mut e = ReportOutputContract::default();
+            let mut b = complete_bundle(&format!("b-missing-{artifact_type}"));
+            remove_artifact_type(&mut b, artifact_type);
+            let id = b.bundle_id.clone();
+
+            e.create_bundle(b, &trace())
+                .expect("missing artifact type should still create incomplete bundle");
+
+            assert!(!e.bundles().get(&id).unwrap().is_complete);
+        }
+    }
+    #[test]
+    fn duplicate_artifact_type_does_not_satisfy_missing_required_type() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-duplicate-type");
+        remove_artifact_type(&mut b, "data_bundle");
+        b.artifacts.push(sample_artifact("report_pdf"));
+
+        e.create_bundle(b, &trace())
+            .expect("duplicate artifact type should create incomplete bundle");
+
+        assert!(!e.bundles().get("b-duplicate-type").unwrap().is_complete);
+    }
+    #[test]
+    fn artifact_type_matching_is_case_sensitive_for_completeness() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-case-sensitive-type");
+        b.artifacts[0].artifact_type = "REPORT_PDF".to_string();
+
+        e.create_bundle(b, &trace())
+            .expect("mis-cased artifact type should create incomplete bundle");
+
+        assert!(
+            !e.bundles()
+                .get("b-case-sensitive-type")
+                .unwrap()
+                .is_complete
+        );
+    }
+    #[test]
+    fn empty_bundle_id_does_not_store_bundle_or_emit_audit() {
+        let mut e = ReportOutputContract::default();
+
+        let err = e
+            .create_bundle(complete_bundle(""), &trace())
+            .expect_err("empty bundle id should fail");
+
+        assert!(err.contains("Bundle id"));
+        assert!(e.bundles().is_empty());
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn whitespace_title_does_not_store_bundle_or_emit_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-blank-title");
+        b.title = " \n ".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("blank title should fail");
+
+        assert!(err.contains("title"));
+        assert!(!e.bundles().contains_key("b-blank-title"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn duplicate_bundle_id_does_not_overwrite_original() {
+        let mut e = ReportOutputContract::default();
+        e.create_bundle(complete_bundle("b-dupe"), &trace())
+            .expect("first bundle should be accepted");
+        let original_hash = e.bundles()["b-dupe"].bundle_hash.clone();
+        let original_created_at = e.bundles()["b-dupe"].created_at.clone();
+        let audit_count_before = e.audit_log().len();
+        let mut duplicate = complete_bundle("b-dupe");
+        duplicate.title = "Replacement report".to_string();
+
+        let err = e
+            .create_bundle(duplicate, &trace())
+            .expect_err("duplicate bundle id should fail");
+
+        assert!(err.contains("already exists"));
+        assert_ne!(e.bundles()["b-dupe"].title, "Replacement report");
+        assert_eq!(e.bundles()["b-dupe"].bundle_hash, original_hash);
+        assert_eq!(e.bundles()["b-dupe"].created_at, original_created_at);
+        assert_eq!(e.audit_log().len(), audit_count_before);
+    }
+    #[test]
+    fn blank_artifact_type_does_not_store_bundle_or_emit_integrity_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-blank-artifact-type");
+        b.artifacts[0].artifact_type = " \t ".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("blank artifact type should fail");
+
+        assert!(err.contains("Artifact type"));
+        assert!(!e.bundles().contains_key("b-blank-artifact-type"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn blank_artifact_path_does_not_store_bundle_or_emit_integrity_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-blank-artifact-path");
+        b.artifacts[0].path = "\n ".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("blank artifact path should fail");
+
+        assert!(err.contains("Artifact path"));
+        assert!(!e.bundles().contains_key("b-blank-artifact-path"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn zero_size_artifact_does_not_store_bundle_or_emit_integrity_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-zero-size-artifact");
+        b.artifacts[0].size_bytes = 0;
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("zero-size artifact should fail");
+
+        assert!(err.contains("Artifact size"));
+        assert!(!e.bundles().contains_key("b-zero-size-artifact"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn nul_trace_id_does_not_store_bundle_or_emit_audit() {
+        let mut e = ReportOutputContract::default();
+
+        let err = e
+            .create_bundle(complete_bundle("b-nul-trace"), "trace\0bad")
+            .expect_err("trace id with embedded NUL should fail");
+
+        assert!(err.contains("Trace id"));
+        assert!(!e.bundles().contains_key("b-nul-trace"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn nul_bundle_id_does_not_store_bundle_or_emit_audit() {
+        let mut e = ReportOutputContract::default();
+
+        let err = e
+            .create_bundle(complete_bundle("b\0nul-id"), &trace())
+            .expect_err("bundle id with embedded NUL should fail");
+
+        assert!(err.contains("Bundle id"));
+        assert!(!e.bundles().contains_key("b\0nul-id"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn nul_title_does_not_store_bundle_or_emit_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-nul-title");
+        b.title = "Title\0Hidden".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("title with embedded NUL should fail");
+
+        assert!(err.contains("title"));
+        assert!(!e.bundles().contains_key("b-nul-title"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn nul_reproduction_command_does_not_store_bundle_or_emit_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-nul-command");
+        b.reproduction_command = "make reproduce\0--skip".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("reproduction command with embedded NUL should fail");
+
+        assert!(err.contains("Reproduction command"));
+        assert!(!e.bundles().contains_key("b-nul-command"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn nul_artifact_type_does_not_store_bundle_or_emit_integrity_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-nul-artifact-type");
+        b.artifacts[0].artifact_type = "report_pdf\0shadow".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("artifact type with embedded NUL should fail");
+
+        assert!(err.contains("Artifact type"));
+        assert!(!e.bundles().contains_key("b-nul-artifact-type"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn nul_artifact_path_does_not_store_bundle_or_emit_integrity_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-nul-artifact-path");
+        b.artifacts[0].path = "/out/report.pdf\0hidden".to_string();
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("artifact path with embedded NUL should fail");
+
+        assert!(err.contains("Artifact path"));
+        assert!(!e.bundles().contains_key("b-nul-artifact-path"));
+        assert!(e.audit_log().is_empty());
+    }
+    #[test]
+    fn nul_artifact_hash_does_not_store_bundle_or_emit_integrity_audit() {
+        let mut e = ReportOutputContract::default();
+        let mut b = complete_bundle("b-nul-artifact-hash");
+        let mut malformed = "a".repeat(63);
+        malformed.push('\0');
+        b.artifacts[0].content_hash = malformed;
+
+        let err = e
+            .create_bundle(b, &trace())
+            .expect_err("artifact hash with embedded NUL should fail before audit logging");
+
+        assert!(err.contains("Artifact hash"));
+        assert!(!e.bundles().contains_key("b-nul-artifact-hash"));
+        assert!(e.audit_log().is_empty());
     }
     #[test]
     fn create_sets_version() {

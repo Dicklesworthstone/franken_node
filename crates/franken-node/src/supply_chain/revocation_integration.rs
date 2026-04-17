@@ -11,9 +11,13 @@ use serde::{Deserialize, Serialize};
 use crate::capacity_defaults::aliases::{MAX_ENTRIES, MAX_EVENTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -915,5 +919,332 @@ mod tests {
             policy.max_age_for_tier(ExtensionSafetyTier::High)
                 <= policy.max_age_for_tier(ExtensionSafetyTier::Low)
         );
+    }
+
+    #[test]
+    fn init_zone_rejects_empty_zone_id_without_events() {
+        let mut engine =
+            RevocationIntegrationEngine::new(RevocationIntegrationPolicy::default_policy());
+
+        let err = engine.init_zone("").unwrap_err();
+
+        match err {
+            RevocationIntegrationError::RegistryUnavailable { code, message } => {
+                assert_eq!(code, "REV_INVALID_INPUT");
+                assert!(message.contains("zone_id"));
+            }
+        }
+        assert!(engine.events.is_empty());
+        assert!(engine.evidence_ledger.is_empty());
+    }
+
+    #[test]
+    fn propagation_rejects_empty_zone_id_without_recording_event() {
+        let mut engine =
+            RevocationIntegrationEngine::new(RevocationIntegrationPolicy::default_policy());
+        let mut update = propagation_update(1, "ext-empty-zone", 1_000, 1_001);
+        update.zone_id.clear();
+
+        let err = engine.process_propagation(&update).unwrap_err();
+
+        match err {
+            RevocationIntegrationError::RegistryUnavailable { code, message } => {
+                assert_eq!(code, "REV_INVALID_INPUT");
+                assert!(message.contains("zone_id"));
+            }
+        }
+        assert!(engine.events.is_empty());
+        assert_eq!(engine.last_seen_heads.get(""), None);
+    }
+
+    #[test]
+    fn propagation_rejects_stale_sequence_and_preserves_last_seen_head() {
+        let mut engine = engine();
+        engine
+            .process_propagation(&propagation_update(2, "ext-a", 1_000, 1_001))
+            .expect("first propagation");
+
+        let err = engine
+            .process_propagation(&propagation_update(1, "ext-b", 1_002, 1_003))
+            .unwrap_err();
+
+        match err {
+            RevocationIntegrationError::RegistryUnavailable { code, message } => {
+                assert_eq!(code, "REV_STALE_HEAD");
+                assert!(message.contains("offered seq 1"));
+            }
+        }
+        assert_eq!(engine.last_seen_heads.get("prod"), Some(&2));
+        assert_eq!(engine.events.len(), 1);
+    }
+
+    #[test]
+    fn evaluate_operation_without_zone_fails_unavailable_and_records_evidence() {
+        let mut engine =
+            RevocationIntegrationEngine::new(RevocationIntegrationPolicy::default_policy());
+        let ctx = operation_context(
+            "ext-no-zone",
+            ExtensionOperation::Load,
+            ExtensionSafetyTier::Medium,
+            30,
+        );
+
+        let decision = engine.evaluate_operation(&ctx);
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.status, RevocationDecisionStatus::FailedUnavailable);
+        assert_eq!(decision.revocation_head, None);
+        assert_eq!(decision.error_code.as_deref(), Some("REV_ZONE_NOT_FOUND"));
+        assert_eq!(engine.evidence_ledger.len(), 1);
+        assert_eq!(engine.events.len(), 2);
+    }
+
+    #[test]
+    fn evaluate_operation_unknown_zone_fails_without_cascade_actions() {
+        let mut engine = engine();
+        let mut ctx = operation_context(
+            "ext-ghost-zone",
+            ExtensionOperation::Invoke,
+            ExtensionSafetyTier::High,
+            10,
+        );
+        ctx.zone_id = "ghost".to_string();
+
+        let decision = engine.evaluate_operation(&ctx);
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.status, RevocationDecisionStatus::FailedUnavailable);
+        assert_eq!(decision.error_code.as_deref(), Some("REV_ZONE_NOT_FOUND"));
+        assert!(decision.cascade_actions.is_empty());
+        assert!(engine.events.iter().any(|event| {
+            event.zone_id == "ghost"
+                && event.event == RevocationIntegrationEvent::ExtensionRevocationCheckFailed
+        }));
+    }
+
+    #[test]
+    fn revoked_extension_denial_precedes_staleness_warning_for_low_tier() {
+        let mut engine = engine();
+        engine
+            .process_propagation(&propagation_update(1, "ext-revoked-low", 1_000, 1_001))
+            .expect("propagation");
+
+        let decision = engine.evaluate_operation(&operation_context(
+            "ext-revoked-low",
+            ExtensionOperation::BackgroundRefresh,
+            ExtensionSafetyTier::Low,
+            99_999,
+        ));
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.status, RevocationDecisionStatus::FailedRevoked);
+        assert_eq!(
+            decision.error_code.as_deref(),
+            Some("REVOCATION_EXTENSION_REVOKED")
+        );
+        assert_eq!(
+            decision.event,
+            RevocationIntegrationEvent::ExtensionRevocationCheckFailed
+        );
+    }
+
+    #[test]
+    fn serde_rejects_unknown_extension_operation() {
+        let err = serde_json::from_str::<ExtensionOperation>(r#""side_load""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_propagation_update_missing_trace_id() {
+        let json = serde_json::json!({
+            "zone_id": "prod",
+            "sequence": 7,
+            "revoked_extension_id": "ext-missing-trace",
+            "reason": "compromised",
+            "published_at_epoch": 1_000,
+            "received_at_epoch": 1_001
+        });
+
+        let err = serde_json::from_value::<PropagationUpdate>(json).unwrap_err();
+
+        assert!(err.to_string().contains("trace_id"));
+    }
+
+    #[test]
+    fn serde_rejects_decision_missing_allowed_flag() {
+        let json = serde_json::json!({
+            "extension_id": "ext-decision",
+            "operation": "load",
+            "safety_tier": "medium",
+            "status": "failed_unavailable",
+            "revocation_head": null,
+            "staleness_secs": 30,
+            "max_allowed_staleness_secs": 60,
+            "error_code": "REV_ZONE_NOT_FOUND",
+            "event": "EXTENSION_REVOCATION_CHECK_FAILED",
+            "cascade_actions": [],
+            "trace_id": "trace-decision"
+        });
+
+        let err = serde_json::from_value::<RevocationCheckDecision>(json).unwrap_err();
+
+        assert!(err.to_string().contains("allowed"));
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_without_retaining_new_event() {
+        let mut events = vec![RevocationEventRecord {
+            event: RevocationIntegrationEvent::ExtensionRevocationCheckPassed,
+            extension_id: Some("ext-old".to_string()),
+            zone_id: "prod".to_string(),
+            revocation_head: Some(1),
+            staleness_secs: Some(0),
+            trace_id: "trace-old".to_string(),
+        }];
+
+        push_bounded(
+            &mut events,
+            RevocationEventRecord {
+                event: RevocationIntegrationEvent::ExtensionRevocationCheckFailed,
+                extension_id: Some("ext-new".to_string()),
+                zone_id: "prod".to_string(),
+                revocation_head: None,
+                staleness_secs: Some(99),
+                trace_id: "trace-new".to_string(),
+            },
+            0,
+        );
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn propagation_rejects_empty_revoked_extension_without_event() {
+        let mut engine = engine();
+        let mut update = propagation_update(1, "", 1_000, 1_001);
+        let events_before = engine.events.len();
+        let last_seen_before = engine.last_seen_heads.get("prod").copied();
+
+        let err = engine.process_propagation(&update).unwrap_err();
+        update.revoked_extension_id = "ext-valid".to_string();
+
+        match err {
+            RevocationIntegrationError::RegistryUnavailable { code, message } => {
+                assert_eq!(code, "REV_INVALID_INPUT");
+                assert!(message.contains("revoked_artifact"));
+            }
+        }
+        assert_eq!(engine.events.len(), events_before);
+        assert_eq!(
+            engine.last_seen_heads.get("prod").copied(),
+            last_seen_before
+        );
+        assert!(engine.process_propagation(&update).is_ok());
+    }
+
+    #[test]
+    fn propagation_rejects_whitespace_revoked_extension_without_head_advance() {
+        let mut engine = engine();
+        let mut update = propagation_update(1, " \t\n ", 1_000, 1_001);
+
+        let err = engine.process_propagation(&update).unwrap_err();
+
+        match err {
+            RevocationIntegrationError::RegistryUnavailable { code, message } => {
+                assert_eq!(code, "REV_INVALID_INPUT");
+                assert!(message.contains("revoked_artifact"));
+            }
+        }
+        assert_eq!(engine.last_seen_heads.get("prod"), Some(&0));
+        assert!(engine.events.is_empty());
+
+        update.revoked_extension_id = "ext-after-whitespace".to_string();
+        let accepted = engine.process_propagation(&update).unwrap();
+        assert_eq!(accepted.revocation_head, 1);
+    }
+
+    #[test]
+    fn propagation_rejects_zero_sequence_without_recording_event() {
+        let mut engine = engine();
+
+        let err = engine
+            .process_propagation(&propagation_update(0, "ext-zero", 1_000, 1_001))
+            .unwrap_err();
+
+        match err {
+            RevocationIntegrationError::RegistryUnavailable { code, message } => {
+                assert_eq!(code, "REV_STALE_HEAD");
+                assert!(message.contains("offered seq 0"));
+            }
+        }
+        assert_eq!(engine.last_seen_heads.get("prod"), Some(&0));
+        assert!(engine.events.is_empty());
+    }
+
+    #[test]
+    fn propagation_clock_skew_does_not_underflow_latency() {
+        let mut engine = engine();
+
+        let result = engine
+            .process_propagation(&propagation_update(1, "ext-skew", 2_000, 1_000))
+            .unwrap();
+
+        assert_eq!(result.latency_secs, 0);
+        assert!(result.within_sla);
+        assert_eq!(result.error_code, None);
+    }
+
+    #[test]
+    fn low_tier_exact_staleness_threshold_warns() {
+        let mut engine = engine();
+        engine
+            .process_propagation(&propagation_update(1, "other-ext", 1_000, 1_001))
+            .unwrap();
+        let threshold = engine.policy.max_age_for_tier(ExtensionSafetyTier::Low);
+
+        let decision = engine.evaluate_operation(&operation_context(
+            "ext-low-boundary",
+            ExtensionOperation::BackgroundRefresh,
+            ExtensionSafetyTier::Low,
+            threshold,
+        ));
+
+        assert!(decision.allowed);
+        assert_eq!(decision.status, RevocationDecisionStatus::WarnStale);
+        assert_eq!(
+            decision.event,
+            RevocationIntegrationEvent::ExtensionRevocationStaleWarning
+        );
+    }
+
+    #[test]
+    fn revoked_extension_denial_precedes_high_tier_staleness_failure() {
+        let mut engine = engine();
+        engine
+            .process_propagation(&propagation_update(1, "ext-revoked-high", 1_000, 1_001))
+            .unwrap();
+
+        let decision = engine.evaluate_operation(&operation_context(
+            "ext-revoked-high",
+            ExtensionOperation::Invoke,
+            ExtensionSafetyTier::High,
+            99_999,
+        ));
+
+        assert!(!decision.allowed);
+        assert_eq!(decision.status, RevocationDecisionStatus::FailedRevoked);
+        assert_eq!(
+            decision.error_code.as_deref(),
+            Some("REVOCATION_EXTENSION_REVOKED")
+        );
+        assert!(!decision.cascade_actions.is_empty());
+    }
+
+    #[test]
+    fn serde_rejects_unknown_decision_status() {
+        let err = serde_json::from_str::<RevocationDecisionStatus>(r#""failed_open""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
     }
 }

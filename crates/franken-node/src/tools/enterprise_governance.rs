@@ -33,8 +33,13 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_ASSESSMENTS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
-    if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
+    let overflow = items.len().saturating_add(1).saturating_sub(cap);
+    if overflow > 0 {
         items.drain(0..overflow);
     }
     items.push(item);
@@ -298,7 +303,13 @@ impl EnterpriseGovernance {
         mut rule: GovernanceRule,
         trace_id: &str,
     ) -> Result<String, String> {
-        if rule.title.is_empty() || rule.description.is_empty() {
+        if rule.rule_id.trim().is_empty() {
+            return Err("Rule id must not be empty".to_string());
+        }
+        if self.rules.contains_key(&rule.rule_id) {
+            return Err(format!("Rule {} already exists", rule.rule_id));
+        }
+        if rule.title.trim().is_empty() || rule.description.trim().is_empty() {
             return Err("Rule title and description must not be empty".to_string());
         }
 
@@ -334,6 +345,25 @@ impl EnterpriseGovernance {
                 }),
             );
             return Err(format!("Rule {} not found", assessment.rule_id));
+        }
+        if assessment.assessment_id.trim().is_empty() {
+            return Err("Assessment id must not be empty".to_string());
+        }
+        if self
+            .assessments
+            .iter()
+            .any(|existing| existing.assessment_id == assessment.assessment_id)
+        {
+            return Err(format!(
+                "Assessment {} already exists",
+                assessment.assessment_id
+            ));
+        }
+        if assessment.evidence.trim().is_empty() {
+            return Err("Assessment evidence must not be empty".to_string());
+        }
+        if assessment.assessor.trim().is_empty() {
+            return Err("Assessment assessor must not be empty".to_string());
         }
 
         assessment.timestamp = Utc::now().to_rfc3339();
@@ -643,6 +673,132 @@ mod tests {
     }
 
     #[test]
+    fn register_empty_title_does_not_store_rule() {
+        let mut engine = EnterpriseGovernance::default();
+        let mut rule = sample_rule(
+            "r-empty-title",
+            RuleCategory::AccessControl,
+            EnforcementLevel::Mandatory,
+        );
+        rule.title = String::new();
+
+        let err = engine
+            .register_rule(rule, &trace())
+            .expect_err("empty title should be rejected");
+
+        assert!(err.contains("must not be empty"));
+        assert!(!engine.rules().contains_key("r-empty-title"));
+    }
+
+    #[test]
+    fn register_empty_description_does_not_store_rule() {
+        let mut engine = EnterpriseGovernance::default();
+        let mut rule = sample_rule(
+            "r-empty-description",
+            RuleCategory::DataRetention,
+            EnforcementLevel::Recommended,
+        );
+        rule.description = String::new();
+
+        let err = engine
+            .register_rule(rule, &trace())
+            .expect_err("empty description should be rejected");
+
+        assert!(err.contains("must not be empty"));
+        assert!(!engine.rules().contains_key("r-empty-description"));
+    }
+
+    #[test]
+    fn register_empty_rule_id_does_not_store_rule() {
+        let mut engine = EnterpriseGovernance::default();
+        let rule = sample_rule(
+            "",
+            RuleCategory::AccessControl,
+            EnforcementLevel::Mandatory,
+        );
+
+        let err = engine
+            .register_rule(rule, "trace-empty-rule-id")
+            .expect_err("empty rule id should be rejected");
+
+        assert!(err.contains("Rule id"));
+        assert!(engine.rules().is_empty());
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn register_whitespace_title_does_not_store_rule() {
+        let mut engine = EnterpriseGovernance::default();
+        let mut rule = sample_rule(
+            "r-whitespace-title",
+            RuleCategory::AuditLogging,
+            EnforcementLevel::Recommended,
+        );
+        rule.title = " \n\t ".to_string();
+
+        let err = engine
+            .register_rule(rule, "trace-whitespace-title")
+            .expect_err("whitespace title should be rejected");
+
+        assert!(err.contains("must not be empty"));
+        assert!(!engine.rules().contains_key("r-whitespace-title"));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn register_whitespace_description_does_not_store_rule() {
+        let mut engine = EnterpriseGovernance::default();
+        let mut rule = sample_rule(
+            "r-whitespace-description",
+            RuleCategory::ChangeManagement,
+            EnforcementLevel::Advisory,
+        );
+        rule.description = " \n\t ".to_string();
+
+        let err = engine
+            .register_rule(rule, "trace-whitespace-description")
+            .expect_err("whitespace description should be rejected");
+
+        assert!(err.contains("must not be empty"));
+        assert!(!engine.rules().contains_key("r-whitespace-description"));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn register_duplicate_rule_id_does_not_overwrite_existing_rule() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-duplicate",
+                    RuleCategory::AccessControl,
+                    EnforcementLevel::Mandatory,
+                ),
+                "trace-original-rule",
+            )
+            .unwrap();
+        let before_audit_len = engine.audit_log().len();
+        let mut replacement = sample_rule(
+            "r-duplicate",
+            RuleCategory::IncidentResponse,
+            EnforcementLevel::Advisory,
+        );
+        replacement.title = "Replacement rule".to_string();
+
+        let err = engine
+            .register_rule(replacement, "trace-duplicate-rule")
+            .expect_err("duplicate rule id should be rejected");
+
+        assert!(err.contains("already exists"));
+        assert_eq!(engine.rules().len(), 1);
+        assert_eq!(
+            engine.rules()["r-duplicate"].category,
+            RuleCategory::AccessControl
+        );
+        assert_eq!(engine.audit_log().len(), before_audit_len);
+    }
+
+    #[test]
     fn register_sets_timestamp() {
         let mut engine = EnterpriseGovernance::default();
         engine
@@ -698,6 +854,45 @@ mod tests {
     }
 
     #[test]
+    fn record_assessment_missing_rule_does_not_store_assessment() {
+        let mut engine = EnterpriseGovernance::default();
+
+        let err = engine
+            .record_assessment(
+                sample_assessment(
+                    "a-missing-rule",
+                    "missing-rule",
+                    ComplianceStatus::Compliant,
+                ),
+                &trace(),
+            )
+            .expect_err("assessment for unknown rule should fail");
+
+        assert!(err.contains("Rule missing-rule not found"));
+        assert!(engine.assessments().is_empty());
+    }
+
+    #[test]
+    fn record_assessment_missing_rule_logs_not_found_event() {
+        let mut engine = EnterpriseGovernance::default();
+
+        let result = engine.record_assessment(
+            sample_assessment(
+                "a-missing-rule",
+                "missing-rule",
+                ComplianceStatus::Compliant,
+            ),
+            &trace(),
+        );
+
+        assert!(result.is_err());
+        assert_eq!(
+            engine.audit_log()[0].event_code,
+            event_codes::EGI_ERR_RULE_NOT_FOUND
+        );
+    }
+
+    #[test]
     fn assessment_sets_timestamp() {
         let mut engine = EnterpriseGovernance::default();
         engine
@@ -717,6 +912,127 @@ mod tests {
             )
             .unwrap();
         assert!(!engine.assessments()[0].timestamp.is_empty());
+    }
+
+    #[test]
+    fn record_empty_assessment_id_does_not_store_assessment() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-1",
+                    RuleCategory::AccessControl,
+                    EnforcementLevel::Mandatory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        let before_audit_len = engine.audit_log().len();
+        let mut assessment = sample_assessment("", "r-1", ComplianceStatus::Compliant);
+
+        let err = engine
+            .record_assessment(assessment.clone(), "trace-empty-assessment-id")
+            .expect_err("empty assessment id should be rejected");
+
+        assert!(err.contains("Assessment id"));
+        assert!(engine.assessments().is_empty());
+        assert_eq!(engine.audit_log().len(), before_audit_len);
+        assessment.assessment_id = "a-valid".to_string();
+        assert!(
+            engine
+                .record_assessment(assessment, "trace-valid-after-empty-id")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn record_whitespace_evidence_does_not_store_assessment() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-1",
+                    RuleCategory::DataRetention,
+                    EnforcementLevel::Recommended,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        let before_audit_len = engine.audit_log().len();
+        let mut assessment =
+            sample_assessment("a-blank-evidence", "r-1", ComplianceStatus::Compliant);
+        assessment.evidence = " \n\t ".to_string();
+
+        let err = engine
+            .record_assessment(assessment, "trace-blank-evidence")
+            .expect_err("blank evidence should be rejected");
+
+        assert!(err.contains("evidence"));
+        assert!(engine.assessments().is_empty());
+        assert_eq!(engine.audit_log().len(), before_audit_len);
+    }
+
+    #[test]
+    fn record_whitespace_assessor_does_not_store_assessment() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-1",
+                    RuleCategory::IncidentResponse,
+                    EnforcementLevel::Mandatory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        let before_audit_len = engine.audit_log().len();
+        let mut assessment =
+            sample_assessment("a-blank-assessor", "r-1", ComplianceStatus::Compliant);
+        assessment.assessor = " \n\t ".to_string();
+
+        let err = engine
+            .record_assessment(assessment, "trace-blank-assessor")
+            .expect_err("blank assessor should be rejected");
+
+        assert!(err.contains("assessor"));
+        assert!(engine.assessments().is_empty());
+        assert_eq!(engine.audit_log().len(), before_audit_len);
+    }
+
+    #[test]
+    fn record_duplicate_assessment_id_does_not_append_or_refresh_timestamp() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-1",
+                    RuleCategory::AuditLogging,
+                    EnforcementLevel::Mandatory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .record_assessment(
+                sample_assessment("a-duplicate", "r-1", ComplianceStatus::Compliant),
+                "trace-original-assessment",
+            )
+            .unwrap();
+        let before_audit_len = engine.audit_log().len();
+        let before_timestamp = engine.assessments()[0].timestamp.clone();
+
+        let err = engine
+            .record_assessment(
+                sample_assessment("a-duplicate", "r-1", ComplianceStatus::NonCompliant),
+                "trace-duplicate-assessment",
+            )
+            .expect_err("duplicate assessment id should be rejected");
+
+        assert!(err.contains("already exists"));
+        assert_eq!(engine.assessments().len(), 1);
+        assert_eq!(engine.assessments()[0].status, ComplianceStatus::Compliant);
+        assert_eq!(engine.assessments()[0].timestamp, before_timestamp);
+        assert_eq!(engine.audit_log().len(), before_audit_len);
     }
 
     // === Report ===
@@ -821,6 +1137,98 @@ mod tests {
             .unwrap();
         let report = engine.generate_report(&trace());
         assert_eq!(report.gate_action, GateAction::Warn);
+    }
+
+    #[test]
+    fn report_mandatory_partial_warns_without_blocked_rule() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-partial-mandatory",
+                    RuleCategory::AuditLogging,
+                    EnforcementLevel::Mandatory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .record_assessment(
+                sample_assessment(
+                    "a-partial-mandatory",
+                    "r-partial-mandatory",
+                    ComplianceStatus::PartiallyCompliant,
+                ),
+                &trace(),
+            )
+            .unwrap();
+
+        let report = engine.generate_report(&trace());
+
+        assert_eq!(report.gate_action, GateAction::Warn);
+        assert!(report.blocked_rules.is_empty());
+    }
+
+    #[test]
+    fn report_recommended_non_compliant_does_not_block() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-recommended-non-compliant",
+                    RuleCategory::ChangeManagement,
+                    EnforcementLevel::Recommended,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .record_assessment(
+                sample_assessment(
+                    "a-recommended-non-compliant",
+                    "r-recommended-non-compliant",
+                    ComplianceStatus::NonCompliant,
+                ),
+                &trace(),
+            )
+            .unwrap();
+
+        let report = engine.generate_report(&trace());
+
+        assert_eq!(report.gate_action, GateAction::Allow);
+        assert!(report.blocked_rules.is_empty());
+    }
+
+    #[test]
+    fn latest_mandatory_non_compliant_assessment_blocks_prior_compliance() {
+        let mut engine = EnterpriseGovernance::default();
+        engine
+            .register_rule(
+                sample_rule(
+                    "r-regressed",
+                    RuleCategory::IncidentResponse,
+                    EnforcementLevel::Mandatory,
+                ),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .record_assessment(
+                sample_assessment("a-before", "r-regressed", ComplianceStatus::Compliant),
+                &trace(),
+            )
+            .unwrap();
+        engine
+            .record_assessment(
+                sample_assessment("a-after", "r-regressed", ComplianceStatus::NonCompliant),
+                &trace(),
+            )
+            .unwrap();
+
+        let report = engine.generate_report(&trace());
+
+        assert_eq!(report.gate_action, GateAction::Block);
+        assert_eq!(report.blocked_rules, vec!["r-regressed".to_string()]);
     }
 
     #[test]

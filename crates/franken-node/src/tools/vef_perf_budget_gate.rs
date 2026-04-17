@@ -206,7 +206,10 @@ impl MeasuredLatency {
     /// True if measurement variance is within noise tolerance.
     #[must_use]
     pub fn is_stable(&self, max_cv_pct: f64) -> bool {
-        self.coefficient_of_variation_pct.is_finite()
+        max_cv_pct.is_finite()
+            && max_cv_pct >= 0.0
+            && self.coefficient_of_variation_pct.is_finite()
+            && self.coefficient_of_variation_pct >= 0.0
             && self.coefficient_of_variation_pct <= max_cv_pct
     }
 }
@@ -269,13 +272,37 @@ impl VefPerfBudgetConfig {
 
     /// Validate configuration: every operation must have budgets for all modes.
     pub fn validate(&self) -> Result<(), VefPerfBudgetError> {
+        if self.schema_version != BUDGET_SCHEMA_VERSION {
+            return Err(VefPerfBudgetError::InvalidConfig(format!(
+                "unsupported schema_version: {}",
+                self.schema_version
+            )));
+        }
         for op in VefOperation::all() {
             for mode in BudgetMode::all() {
-                if self.budget_for(*op, *mode).is_none() {
-                    return Err(VefPerfBudgetError::MissingBudget {
-                        operation: op.label().to_string(),
-                        mode: mode.label().to_string(),
-                    });
+                match self.budget_for(*op, *mode) {
+                    Some(budget) => {
+                        if budget.p95_us == 0 || budget.p99_us == 0 {
+                            return Err(VefPerfBudgetError::InvalidConfig(format!(
+                                "{} in {} mode has a zero latency budget",
+                                op.label(),
+                                mode.label()
+                            )));
+                        }
+                        if budget.p99_us < budget.p95_us {
+                            return Err(VefPerfBudgetError::InvalidConfig(format!(
+                                "{} in {} mode has p99 < p95",
+                                op.label(),
+                                mode.label()
+                            )));
+                        }
+                    }
+                    None => {
+                        return Err(VefPerfBudgetError::MissingBudget {
+                            operation: op.label().to_string(),
+                            mode: mode.label().to_string(),
+                        });
+                    }
                 }
             }
         }
@@ -684,14 +711,14 @@ impl VefPerfBudgetGate {
         baseline: &BaselineSnapshot,
         regression_threshold_pct: f64,
     ) -> Vec<RegressionReport> {
-        // NaN/Inf threshold would cause all `> threshold` comparisons to
-        // return false, silently hiding regressions.  Fail-closed: treat any
-        // non-finite threshold as 0 (every increase is a regression).
-        let regression_threshold_pct = if regression_threshold_pct.is_finite() {
-            regression_threshold_pct
-        } else {
-            0.0
-        };
+        // Invalid thresholds can either hide regressions or create false positives.
+        // Fail closed by treating non-finite or negative thresholds as zero.
+        let regression_threshold_pct =
+            if regression_threshold_pct.is_finite() && regression_threshold_pct >= 0.0 {
+                regression_threshold_pct
+            } else {
+                0.0
+            };
         let mut reports = Vec::new();
 
         for curr in current {
@@ -700,16 +727,8 @@ impl VefPerfBudgetGate {
                 .iter()
                 .find(|b| b.operation == curr.operation && b.mode == curr.mode)
             {
-                let p95_delta_pct = if base.p95_us > 0 {
-                    ((curr.p95_us as f64 - base.p95_us as f64) / base.p95_us as f64) * 100.0
-                } else {
-                    0.0
-                };
-                let p99_delta_pct = if base.p99_us > 0 {
-                    ((curr.p99_us as f64 - base.p99_us as f64) / base.p99_us as f64) * 100.0
-                } else {
-                    0.0
-                };
+                let p95_delta_pct = percent_delta_from_baseline(curr.p95_us, base.p95_us);
+                let p99_delta_pct = percent_delta_from_baseline(curr.p99_us, base.p99_us);
 
                 let regressed = p95_delta_pct > regression_threshold_pct
                     || p99_delta_pct > regression_threshold_pct;
@@ -740,11 +759,17 @@ impl VefPerfBudgetGate {
         details: BTreeMap<String, serde_json::Value>,
     ) {
         let event = VefPerfEvent::new(code, op, mode, corr_id, details);
-        if self.audit_log.len() >= MAX_AUDIT_LOG {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG + 1;
-            self.audit_log.drain(0..overflow);
-        }
-        self.audit_log.push(event);
+        push_bounded(&mut self.audit_log, event, MAX_AUDIT_LOG);
+    }
+}
+
+fn percent_delta_from_baseline(current: u64, baseline: u64) -> f64 {
+    if baseline > 0 {
+        ((current as f64 - baseline as f64) / baseline as f64) * 100.0
+    } else if current > 0 {
+        f64::INFINITY
+    } else {
+        0.0
     }
 }
 
@@ -783,6 +808,15 @@ mod tests {
             max_us: p99 * 2,
             sample_count: 100,
             coefficient_of_variation_pct: 5.0,
+        }
+    }
+
+    fn baseline_with(measurements: Vec<MeasuredLatency>) -> BaselineSnapshot {
+        BaselineSnapshot {
+            schema_version: BUDGET_SCHEMA_VERSION.to_string(),
+            commit_sha: "baseline".to_string(),
+            recorded_at_epoch_secs: 1000,
+            measurements,
         }
     }
 
@@ -885,6 +919,97 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn negative_noise_tolerance_rejected() {
+        let config = VefPerfBudgetConfig {
+            noise_tolerance_cv_pct: -0.01,
+            ..Default::default()
+        };
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn invalid_schema_version_rejected() {
+        let config = VefPerfBudgetConfig {
+            schema_version: "0.9.0".to_string(),
+            ..Default::default()
+        };
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn zero_p95_budget_rejected() {
+        let mut config = VefPerfBudgetConfig::default();
+        config
+            .budgets
+            .get_mut("receipt_emission")
+            .unwrap()
+            .get_mut("normal")
+            .unwrap()
+            .p95_us = 0;
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn p99_below_p95_budget_rejected() {
+        let mut config = VefPerfBudgetConfig::default();
+        let budget = config
+            .budgets
+            .get_mut("chain_append")
+            .unwrap()
+            .get_mut("normal")
+            .unwrap();
+        budget.p95_us = 100;
+        budget.p99_us = 99;
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn missing_nested_mode_budget_detected() {
+        let mut config = VefPerfBudgetConfig::default();
+        config
+            .budgets
+            .get_mut("receipt_emission")
+            .unwrap()
+            .remove("normal");
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            VefPerfBudgetError::MissingBudget { operation, mode }
+                if operation == "receipt_emission" && mode == "normal"
+        ));
+    }
+
+    #[test]
+    fn zero_p99_budget_rejected() {
+        let mut config = VefPerfBudgetConfig::default();
+        config
+            .budgets
+            .get_mut("verification_gate_check")
+            .unwrap()
+            .get_mut("restricted")
+            .unwrap()
+            .p99_us = 0;
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
+    }
+
     // ── Budget check tests ──────────────────────────────────────────────
 
     #[test]
@@ -962,6 +1087,19 @@ mod tests {
         assert!(result.passed);
     }
 
+    #[test]
+    fn zero_budget_rejects_nonzero_measurement() {
+        let budget = LatencyBudget::new(0, 0);
+        let measurement =
+            sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 1, 1);
+
+        let result = budget.check(&measurement);
+
+        assert!(!result.passed);
+        assert!(!result.p95_within_budget);
+        assert!(!result.p99_within_budget);
+    }
+
     // ── Gate engine tests ───────────────────────────────────────────────
 
     #[test]
@@ -1024,6 +1162,152 @@ mod tests {
     }
 
     #[test]
+    fn stable_measurement_rejects_nan_tolerance() {
+        let m = sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
+
+        assert!(!m.is_stable(f64::NAN));
+    }
+
+    #[test]
+    fn stable_measurement_rejects_infinite_tolerance() {
+        let m = sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
+
+        assert!(!m.is_stable(f64::INFINITY));
+    }
+
+    #[test]
+    fn stable_measurement_rejects_negative_tolerance() {
+        let mut m = sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
+        m.coefficient_of_variation_pct = 0.0;
+
+        assert!(!m.is_stable(-0.01));
+    }
+
+    #[test]
+    fn negative_cv_measurement_marked_unstable() {
+        let config = VefPerfBudgetConfig::default();
+        let mut gate = VefPerfBudgetGate::new(config);
+        let mut m = sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
+        m.coefficient_of_variation_pct = -0.1;
+
+        let verdict = gate.evaluate(&[m], "test-negative-cv").unwrap();
+
+        assert_eq!(verdict.results[0].status, VerdictStatus::Unstable);
+        assert_eq!(verdict.skipped_checks, 1);
+    }
+
+    #[test]
+    fn nan_cv_measurement_marked_unstable() {
+        let config = VefPerfBudgetConfig::default();
+        let mut gate = VefPerfBudgetGate::new(config);
+        let mut m = sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
+        m.coefficient_of_variation_pct = f64::NAN;
+
+        let verdict = gate.evaluate(&[m], "test-nan-cv").unwrap();
+
+        assert_eq!(verdict.results[0].status, VerdictStatus::Unstable);
+        assert!(
+            verdict
+                .audit_log
+                .iter()
+                .any(|event| event.code == VEF_PERF_005)
+        );
+    }
+
+    #[test]
+    fn insufficient_samples_over_budget_skips_without_failure() {
+        let config = VefPerfBudgetConfig::default();
+        let mut gate = VefPerfBudgetGate::new(config);
+        let mut m = sample_measurement(
+            VefOperation::ReceiptEmission,
+            BudgetMode::Normal,
+            5000,
+            9000,
+        );
+        m.sample_count = 1;
+
+        let verdict = gate.evaluate(&[m], "test-low-samples-over-budget").unwrap();
+
+        assert!(verdict.passed);
+        assert_eq!(verdict.failed_checks, 0);
+        assert_eq!(verdict.results[0].status, VerdictStatus::Skipped);
+    }
+
+    #[test]
+    fn min_sample_boundary_over_budget_fails_instead_of_skipping() {
+        let config = VefPerfBudgetConfig::default();
+        let min_samples = config.min_samples;
+        let mut gate = VefPerfBudgetGate::new(config);
+        let mut m = sample_measurement(
+            VefOperation::ReceiptEmission,
+            BudgetMode::Normal,
+            5000,
+            9000,
+        );
+        m.sample_count = min_samples;
+
+        let verdict = gate.evaluate(&[m], "test-min-samples-fail").unwrap();
+
+        assert!(!verdict.passed);
+        assert_eq!(verdict.failed_checks, 1);
+        assert_eq!(verdict.results[0].status, VerdictStatus::Fail);
+    }
+
+    #[test]
+    fn invalid_config_evaluate_returns_err_without_audit() {
+        let config = VefPerfBudgetConfig {
+            schema_version: "bad-schema".to_string(),
+            ..Default::default()
+        };
+        let mut gate = VefPerfBudgetGate::new(config);
+        let measurement =
+            sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
+
+        let err = gate
+            .evaluate(&[measurement], "test-invalid-config")
+            .unwrap_err();
+
+        assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
+        assert!(gate.audit_log.is_empty());
+    }
+
+    #[test]
+    fn invalid_noise_tolerance_evaluate_returns_err_without_audit() {
+        let config = VefPerfBudgetConfig {
+            noise_tolerance_cv_pct: -1.0,
+            ..Default::default()
+        };
+        let mut gate = VefPerfBudgetGate::new(config);
+        let measurement =
+            sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
+
+        let err = gate
+            .evaluate(&[measurement], "test-invalid-noise")
+            .unwrap_err();
+
+        assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
+        assert!(gate.audit_log.is_empty());
+    }
+
+    #[test]
+    fn nan_noise_tolerance_evaluate_returns_err_without_audit() {
+        let config = VefPerfBudgetConfig {
+            noise_tolerance_cv_pct: f64::NAN,
+            ..Default::default()
+        };
+        let mut gate = VefPerfBudgetGate::new(config);
+        let measurement =
+            sample_measurement(VefOperation::ReceiptEmission, BudgetMode::Normal, 30, 60);
+
+        let err = gate
+            .evaluate(&[measurement], "test-nan-noise")
+            .unwrap_err();
+
+        assert!(matches!(err, VefPerfBudgetError::InvalidConfig(_)));
+        assert!(gate.audit_log.is_empty());
+    }
+
+    #[test]
     fn audit_events_emitted() {
         let config = VefPerfBudgetConfig::default();
         let mut gate = VefPerfBudgetGate::new(config);
@@ -1056,6 +1340,55 @@ mod tests {
 
         let verdict = gate.evaluate(&measurements, "test-006").unwrap();
         assert!(verdict.audit_log.iter().any(|e| e.code == VEF_PERF_003));
+    }
+
+    #[test]
+    fn audit_log_overflow_drops_oldest_events() {
+        let mut gate = VefPerfBudgetGate::new(VefPerfBudgetConfig::default());
+
+        for i in 0..=MAX_AUDIT_LOG {
+            gate.emit_event(
+                VEF_PERF_001,
+                "receipt_emission",
+                "normal",
+                &format!("corr-{i}"),
+                std::collections::BTreeMap::new(),
+            );
+        }
+
+        assert_eq!(gate.audit_log.len(), MAX_AUDIT_LOG);
+        assert_eq!(gate.audit_log.first().unwrap().correlation_id, "corr-1");
+        assert_eq!(
+            gate.audit_log.last().unwrap().correlation_id,
+            format!("corr-{MAX_AUDIT_LOG}")
+        );
+    }
+
+    #[test]
+    fn audit_log_preexisting_overflow_trims_back_to_cap() {
+        let mut gate = VefPerfBudgetGate::new(VefPerfBudgetConfig::default());
+
+        for i in 0..MAX_AUDIT_LOG.saturating_add(2) {
+            gate.audit_log.push(VefPerfEvent::new(
+                VEF_PERF_001,
+                "receipt_emission",
+                "normal",
+                &format!("old-{i}"),
+                std::collections::BTreeMap::new(),
+            ));
+        }
+
+        gate.emit_event(
+            VEF_PERF_002,
+            "receipt_emission",
+            "normal",
+            "newest",
+            std::collections::BTreeMap::new(),
+        );
+
+        assert_eq!(gate.audit_log.len(), MAX_AUDIT_LOG);
+        assert_eq!(gate.audit_log.first().unwrap().correlation_id, "old-3");
+        assert_eq!(gate.audit_log.last().unwrap().correlation_id, "newest");
     }
 
     #[test]
@@ -1110,6 +1443,16 @@ mod tests {
         assert_eq!(baseline.commit_sha, "abc123");
         assert_eq!(baseline.measurements.len(), 1);
         assert_eq!(baseline.schema_version, BUDGET_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn empty_baseline_recording_emits_no_audit_events() {
+        let mut gate = VefPerfBudgetGate::new(VefPerfBudgetConfig::default());
+
+        let baseline = gate.record_baseline(&[], "abc123", 1000, "empty-baseline");
+
+        assert!(baseline.measurements.is_empty());
+        assert!(gate.audit_log.is_empty());
     }
 
     #[test]
@@ -1170,6 +1513,95 @@ mod tests {
         let reports = gate.detect_regressions(&current, &baseline, 10.0);
         assert_eq!(reports.len(), 1);
         assert!(!reports[0].regressed);
+    }
+
+    #[test]
+    fn negative_regression_threshold_does_not_flag_identical_latency() {
+        let gate = VefPerfBudgetGate::new(VefPerfBudgetConfig::default());
+        let baseline = baseline_with(vec![sample_measurement(
+            VefOperation::ReceiptEmission,
+            BudgetMode::Normal,
+            30,
+            60,
+        )]);
+        let current = baseline.measurements.clone();
+
+        let reports = gate.detect_regressions(&current, &baseline, -1.0);
+
+        assert_eq!(reports.len(), 1);
+        assert!(!reports[0].regressed);
+    }
+
+    #[test]
+    fn negative_regression_threshold_flags_any_increase() {
+        let gate = VefPerfBudgetGate::new(VefPerfBudgetConfig::default());
+        let baseline = baseline_with(vec![sample_measurement(
+            VefOperation::ReceiptEmission,
+            BudgetMode::Normal,
+            30,
+            60,
+        )]);
+        let current = vec![sample_measurement(
+            VefOperation::ReceiptEmission,
+            BudgetMode::Normal,
+            31,
+            60,
+        )];
+
+        let reports = gate.detect_regressions(&current, &baseline, -1.0);
+
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].regressed);
+    }
+
+    #[test]
+    fn zero_baseline_latency_flags_nonzero_current_latency() {
+        let gate = VefPerfBudgetGate::new(VefPerfBudgetConfig::default());
+        let baseline = baseline_with(vec![sample_measurement(
+            VefOperation::ReceiptEmission,
+            BudgetMode::Normal,
+            0,
+            0,
+        )]);
+        let current = vec![sample_measurement(
+            VefOperation::ReceiptEmission,
+            BudgetMode::Normal,
+            1,
+            0,
+        )];
+
+        let reports = gate.detect_regressions(&current, &baseline, 10.0);
+
+        assert_eq!(reports.len(), 1);
+        assert!(reports[0].regressed);
+        assert!(reports[0].p95_delta_pct.is_infinite());
+    }
+
+    #[test]
+    fn regression_without_matching_baseline_is_ignored() {
+        let config = VefPerfBudgetConfig::default();
+        let gate = VefPerfBudgetGate::new(config);
+        let baseline = BaselineSnapshot {
+            schema_version: BUDGET_SCHEMA_VERSION.to_string(),
+            commit_sha: "abc123".to_string(),
+            recorded_at_epoch_secs: 1000,
+            measurements: vec![sample_measurement(
+                VefOperation::ReceiptEmission,
+                BudgetMode::Normal,
+                30,
+                60,
+            )],
+        };
+        let current = vec![sample_measurement(
+            VefOperation::ChainAppend,
+            BudgetMode::Normal,
+            500,
+            900,
+        )];
+
+        let reports = gate.detect_regressions(&current, &baseline, 0.0);
+
+        assert!(reports.is_empty());
     }
 
     // ── Determinism tests ───────────────────────────────────────────────
