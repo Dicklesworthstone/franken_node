@@ -17,8 +17,12 @@ use std::time::Duration;
 const MAX_DECISIONS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1014,5 +1018,237 @@ mod tests {
         assert!(config.yellow_interval_ms > config.red_interval_ms);
         assert!(config.yellow_rejection_threshold < config.red_rejection_threshold);
         assert!(config.hysteresis_threshold > 0);
+    }
+
+    #[test]
+    fn non_finite_degrading_repairability_escalates_to_red() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        let evidence = EvidenceTrajectory::new(0, 0, f64::NAN, Trend::Degrading, 99);
+
+        sched.update_trajectory(&evidence);
+
+        assert_eq!(evidence.avg_repairability, 0.0);
+        assert_eq!(sched.current_band(), PolicyBand::Red);
+        assert_eq!(sched.decisions()[0].epoch_id, 99);
+    }
+
+    #[test]
+    fn negative_infinite_repairability_is_contained_before_classification() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        let evidence = EvidenceTrajectory::new(0, 0, f64::NEG_INFINITY, Trend::Stable, 7);
+
+        sched.update_trajectory(&evidence);
+
+        assert_eq!(evidence.avg_repairability, 0.0);
+        assert_eq!(sched.current_band(), PolicyBand::Green);
+        assert_eq!(sched.current_sweep_depth(), SweepDepth::Quick);
+    }
+
+    #[test]
+    fn zero_interval_config_records_zero_duration_without_panicking() {
+        let config = SweepSchedulerConfig {
+            green_interval_ms: 0,
+            yellow_interval_ms: 0,
+            red_interval_ms: 0,
+            ..SweepSchedulerConfig::default_config()
+        };
+        let mut sched = IntegritySweepScheduler::new(config);
+
+        sched.update_trajectory(&red_evidence(1));
+
+        assert_eq!(sched.next_sweep_interval(), Duration::from_millis(0));
+        assert_eq!(sched.decisions()[0].interval_ms, 0);
+        assert_eq!(sched.current_band(), PolicyBand::Red);
+    }
+
+    #[test]
+    fn zero_hysteresis_deescalates_only_one_band_per_update() {
+        let config = SweepSchedulerConfig {
+            hysteresis_threshold: 0,
+            ..SweepSchedulerConfig::default_config()
+        };
+        let mut sched = IntegritySweepScheduler::new(config);
+        sched.update_trajectory(&red_evidence(1));
+
+        sched.update_trajectory(&green_evidence(2));
+
+        assert_eq!(sched.current_band(), PolicyBand::Yellow);
+        assert_eq!(sched.hysteresis_counter(), 0);
+        assert_eq!(sched.current_sweep_depth(), SweepDepth::Standard);
+    }
+
+    #[test]
+    fn inverted_rejection_thresholds_still_choose_more_severe_band() {
+        let config = SweepSchedulerConfig {
+            yellow_rejection_threshold: 10,
+            red_rejection_threshold: 2,
+            ..SweepSchedulerConfig::default_config()
+        };
+        let sched = IntegritySweepScheduler::new(config);
+        let evidence = EvidenceTrajectory::new(3, 0, 0.9, Trend::Stable, 1);
+
+        assert_eq!(sched.classify_band(&evidence), PolicyBand::Red);
+    }
+
+    #[test]
+    fn stale_epoch_updates_are_recorded_without_reordering_decisions() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        sched.update_trajectory(&red_evidence(10));
+
+        sched.update_trajectory(&green_evidence(1));
+
+        assert_eq!(sched.update_count(), 2);
+        assert_eq!(sched.decisions()[0].epoch_id, 10);
+        assert_eq!(sched.decisions()[1].epoch_id, 1);
+        assert_eq!(sched.current_band(), PolicyBand::Red);
+        assert_eq!(sched.hysteresis_counter(), 1);
+    }
+
+    #[test]
+    fn csv_export_handles_unparseable_decision_summary_as_zeroes() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        sched.decisions.push(SweepScheduleDecision {
+            timestamp: 55,
+            band: PolicyBand::Yellow,
+            interval_ms: 123,
+            depth: SweepDepth::Standard,
+            trajectory_summary: "not a scheduler summary".to_string(),
+            hysteresis_count: 2,
+            epoch_id: 55,
+        });
+
+        let csv = sched.to_csv();
+
+        assert!(csv.contains("55,yellow,123,standard,0,0,0.0,2"));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_on_empty_window_stays_empty() {
+        let mut items: Vec<u8> = Vec::new();
+
+        push_bounded(&mut items, 7, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_sweep_decision_window() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_sweep_decisions() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn high_repairability_above_one_is_clamped_before_red_low_repairability_check() {
+        let sched = IntegritySweepScheduler::with_defaults();
+        let evidence = EvidenceTrajectory::new(0, 0, 7.5, Trend::Degrading, 61);
+
+        assert_eq!(evidence.avg_repairability, 1.0);
+        assert_eq!(sched.classify_band(&evidence), PolicyBand::Yellow);
+    }
+
+    #[test]
+    fn negative_repairability_is_clamped_and_degrading_evidence_fails_closed_red() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        let evidence = EvidenceTrajectory::new(0, 0, -0.25, Trend::Degrading, 62);
+
+        sched.update_trajectory(&evidence);
+
+        assert_eq!(evidence.avg_repairability, 0.0);
+        assert_eq!(sched.current_band(), PolicyBand::Red);
+        assert_eq!(sched.current_sweep_depth(), SweepDepth::Deep);
+    }
+
+    #[test]
+    fn red_band_does_not_drop_on_single_yellow_reading() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        sched.update_trajectory(&red_evidence(63));
+
+        sched.update_trajectory(&yellow_evidence(64));
+
+        assert_eq!(sched.current_band(), PolicyBand::Red);
+        assert_eq!(sched.hysteresis_counter(), 1);
+        assert_eq!(sched.decisions()[1].band, PolicyBand::Red);
+    }
+
+    #[test]
+    fn same_band_red_reading_resets_pending_deescalation() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        sched.update_trajectory(&red_evidence(65));
+        sched.update_trajectory(&green_evidence(66));
+        assert_eq!(sched.hysteresis_counter(), 1);
+
+        sched.update_trajectory(&red_evidence(67));
+
+        assert_eq!(sched.current_band(), PolicyBand::Red);
+        assert_eq!(sched.hysteresis_counter(), 0);
+    }
+
+    #[test]
+    fn zero_red_rejection_threshold_fails_closed_to_red_for_clean_evidence() {
+        let config = SweepSchedulerConfig {
+            red_rejection_threshold: 0,
+            ..SweepSchedulerConfig::default_config()
+        };
+        let sched = IntegritySweepScheduler::new(config);
+
+        assert_eq!(sched.classify_band(&green_evidence(68)), PolicyBand::Red);
+    }
+
+    #[test]
+    fn zero_yellow_rejection_threshold_escalates_clean_evidence_to_yellow() {
+        let config = SweepSchedulerConfig {
+            yellow_rejection_threshold: 0,
+            red_rejection_threshold: 5,
+            ..SweepSchedulerConfig::default_config()
+        };
+        let sched = IntegritySweepScheduler::new(config);
+
+        assert_eq!(sched.classify_band(&green_evidence(69)), PolicyBand::Yellow);
+    }
+
+    #[test]
+    fn update_count_saturates_at_u64_max_without_wrapping() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        sched.update_count = u64::MAX;
+
+        sched.update_trajectory(&green_evidence(70));
+
+        assert_eq!(sched.update_count(), u64::MAX);
+        assert_eq!(sched.decisions().len(), 1);
+    }
+
+    #[test]
+    fn decision_log_at_capacity_evicts_oldest_decision() {
+        let mut sched = IntegritySweepScheduler::with_defaults();
+        sched.decisions = (0..MAX_DECISIONS)
+            .map(|idx| SweepScheduleDecision {
+                timestamp: u64::try_from(idx).expect("test index fits in u64"),
+                band: PolicyBand::Green,
+                interval_ms: 300_000,
+                depth: SweepDepth::Quick,
+                trajectory_summary: "rejections=0, escalations=0, repairability=1.00, trend=stable"
+                    .to_string(),
+                hysteresis_count: 0,
+                epoch_id: u64::try_from(idx).expect("test index fits in u64"),
+            })
+            .collect();
+
+        sched.update_trajectory(&green_evidence(71));
+
+        assert_eq!(sched.decisions().len(), MAX_DECISIONS);
+        assert_eq!(sched.decisions()[0].timestamp, 1);
+        assert_eq!(sched.decisions().last().expect("last decision").epoch_id, 71);
     }
 }

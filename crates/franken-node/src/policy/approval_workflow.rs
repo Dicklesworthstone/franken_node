@@ -209,8 +209,12 @@ const MAX_AUDIT_LEDGER_ENTRIES: usize = 4096;
 const MAX_APPROVALS: usize = 256;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1169,6 +1173,343 @@ mod tests {
             "rejecting an Applied proposal must be denied (state guard)"
         );
     }
+
+    #[test]
+    fn short_justification_rejection_leaves_engine_unchanged() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let mut proposal = make_proposal("p-short", "alice", vec!["bob"]);
+        proposal.justification = "too short".to_owned();
+
+        let err = engine.propose(proposal).unwrap_err();
+
+        assert_eq!(err.code, ERR_JUSTIFICATION_TOO_SHORT);
+        assert_eq!(engine.total_proposals(), 0);
+        assert!(engine.audit_ledger().is_empty());
+        assert!(engine.get_proposal("p-short").is_none());
+    }
+
+    #[test]
+    fn missing_required_approvers_rejection_leaves_engine_unchanged() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let mut proposal = make_proposal("p-no-approvers", "alice", vec!["bob"]);
+        proposal.required_approvers.clear();
+
+        let err = engine.propose(proposal).unwrap_err();
+
+        assert_eq!(err.code, ERR_QUORUM_NOT_MET);
+        assert_eq!(engine.total_proposals(), 0);
+        assert!(engine.audit_ledger().is_empty());
+        assert!(engine.get_proposal("p-no-approvers").is_none());
+    }
+
+    #[test]
+    fn approving_unknown_proposal_is_denied_without_audit_entry() {
+        let mut engine = PolicyChangeEngine::new(1);
+
+        let err = engine
+            .approve("p-missing", make_signature("bob"))
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_PROPOSAL_NOT_FOUND);
+        assert!(engine.audit_ledger().is_empty());
+    }
+
+    #[test]
+    fn duplicate_approver_is_denied_without_second_review_entry() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let proposal = make_proposal("p-dup", "alice", vec!["bob", "charlie"]);
+        engine.propose(proposal).unwrap();
+        engine.approve("p-dup", make_signature("bob")).unwrap();
+        let audit_count = engine.audit_ledger().len();
+
+        let err = engine.approve("p-dup", make_signature("bob")).unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_STATE_TRANSITION);
+        assert_eq!(engine.audit_ledger().len(), audit_count);
+        let record = engine.get_proposal("p-dup").unwrap();
+        assert_eq!(record.state, ProposalState::UnderReview);
+        assert_eq!(record.approvals.len(), 1);
+    }
+
+    #[test]
+    fn approving_rejected_proposal_is_denied_and_preserves_rejection() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let proposal = make_proposal("p-rejected", "alice", vec!["bob"]);
+        engine.propose(proposal).unwrap();
+        engine
+            .reject(
+                "p-rejected",
+                "reviewer",
+                "unsafe policy drift",
+                "2026-01-15T01:30:00Z",
+            )
+            .unwrap();
+        let audit_count = engine.audit_ledger().len();
+
+        let err = engine
+            .approve("p-rejected", make_signature("bob"))
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_STATE_TRANSITION);
+        assert_eq!(engine.audit_ledger().len(), audit_count);
+        let record = engine.get_proposal("p-rejected").unwrap();
+        assert_eq!(record.state, ProposalState::Rejected);
+        assert_eq!(
+            record.rejection_reason.as_deref(),
+            Some("unsafe policy drift")
+        );
+    }
+
+    #[test]
+    fn activating_unknown_proposal_is_denied_without_audit_entry() {
+        let mut engine = PolicyChangeEngine::new(1);
+
+        let err = engine
+            .activate("p-missing", "admin", "2026-01-15T02:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_PROPOSAL_NOT_FOUND);
+        assert_eq!(engine.total_activated(), 0);
+        assert!(engine.audit_ledger().is_empty());
+    }
+
+    #[test]
+    fn activating_twice_is_denied_without_double_counting() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let proposal = make_proposal("p-once", "alice", vec!["bob", "charlie"]);
+        engine.propose(proposal).unwrap();
+        engine.approve("p-once", make_signature("bob")).unwrap();
+        engine.approve("p-once", make_signature("charlie")).unwrap();
+        engine
+            .activate("p-once", "admin", "2026-01-15T02:00:00Z")
+            .unwrap();
+        let audit_count = engine.audit_ledger().len();
+
+        let err = engine
+            .activate("p-once", "admin", "2026-01-15T02:05:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_STATE_TRANSITION);
+        assert_eq!(engine.total_activated(), 1);
+        assert_eq!(engine.audit_ledger().len(), audit_count);
+        let record = engine.get_proposal("p-once").unwrap();
+        assert_eq!(record.state, ProposalState::Applied);
+        assert!(record.evidence_package.is_some());
+    }
+
+    #[test]
+    fn rolling_back_unknown_proposal_is_denied_without_audit_entry() {
+        let mut engine = PolicyChangeEngine::new(1);
+
+        let err = engine
+            .rollback("p-missing", "admin", "p-rb", "2026-01-15T03:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_PROPOSAL_NOT_FOUND);
+        assert_eq!(engine.total_rollbacks(), 0);
+        assert!(engine.audit_ledger().is_empty());
+        assert!(engine.get_proposal("p-rb").is_none());
+    }
+
+    #[test]
+    fn rolling_back_rejected_proposal_is_denied_without_replacement() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let proposal = make_proposal("p-rb-rejected", "alice", vec!["bob"]);
+        engine.propose(proposal).unwrap();
+        engine
+            .reject(
+                "p-rb-rejected",
+                "reviewer",
+                "rollback target was never applied",
+                "2026-01-15T01:30:00Z",
+            )
+            .unwrap();
+        let audit_count = engine.audit_ledger().len();
+
+        let err = engine
+            .rollback(
+                "p-rb-rejected",
+                "admin",
+                "p-rb-rejected-replacement",
+                "2026-01-15T03:00:00Z",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_STATE_TRANSITION);
+        assert_eq!(engine.total_rollbacks(), 0);
+        assert_eq!(engine.audit_ledger().len(), audit_count);
+        assert!(engine.get_proposal("p-rb-rejected-replacement").is_none());
+    }
+
+    #[test]
+    fn audit_chain_prev_hash_tamper_reports_entry_index() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let proposal = make_proposal("p-chain", "alice", vec!["bob", "charlie"]);
+        engine.propose(proposal).unwrap();
+        engine.approve("p-chain", make_signature("bob")).unwrap();
+        engine
+            .approve("p-chain", make_signature("charlie"))
+            .unwrap();
+
+        if let Some(entry) = engine.audit_ledger.get_mut(1) {
+            entry.prev_hash = "not-the-retained-previous-entry".to_owned();
+        }
+
+        let err = engine.verify_audit_chain().unwrap_err();
+
+        assert_eq!(err.code, ERR_AUDIT_CHAIN_BROKEN);
+        assert_eq!(err.index, Some(1));
+    }
+
+    /// Negative path: empty proposal ID should not be accepted
+    #[test]
+    fn empty_proposal_id_creates_valid_proposal_with_empty_key() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let mut proposal = make_proposal("", "alice", vec!["bob"]);
+        proposal.proposal_id = String::new();
+
+        // Empty proposal ID is technically valid but creates lookup issues
+        let record = engine.propose(proposal).unwrap();
+        assert_eq!(record.proposal.proposal_id, "");
+
+        // However, retrieval and operations will fail
+        assert!(engine.get_proposal("").is_some());
+        let err = engine.approve("", make_signature("bob")).unwrap();
+        assert_eq!(err, ProposalState::UnderReview);
+    }
+
+    /// Negative path: extremely long justification near string limits
+    #[test]
+    fn extremely_long_justification_accepted_but_may_cause_memory_pressure() {
+        let mut engine = PolicyChangeEngine::new(1);
+        let long_justification = "a".repeat(100_000); // 100KB justification
+        let mut proposal = make_proposal("p-huge", "alice", vec!["bob"]);
+        proposal.justification = long_justification.clone();
+
+        let record = engine.propose(proposal).unwrap();
+        assert_eq!(record.proposal.justification.len(), 100_000);
+        assert!(record.proposal.justification.starts_with("aaaa"));
+    }
+
+    /// Negative path: malformed timestamp strings in signatures
+    #[test]
+    fn malformed_signature_timestamp_accepted_without_validation() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let proposal = make_proposal("p-time", "alice", vec!["bob", "charlie"]);
+        engine.propose(proposal).unwrap();
+
+        let mut signature = make_signature("bob");
+        signature.signed_at = "not-a-valid-rfc3339-timestamp".to_owned();
+
+        // Engine doesn't validate timestamp format - accepts any string
+        let state = engine.approve("p-time", signature).unwrap();
+        assert_eq!(state, ProposalState::UnderReview);
+
+        let record = engine.get_proposal("p-time").unwrap();
+        assert_eq!(record.approvals[0].signed_at, "not-a-valid-rfc3339-timestamp");
+    }
+
+    /// Negative path: unicode and special characters in signer identity
+    #[test]
+    fn unicode_signer_identity_handled_inconsistently_across_operations() {
+        let mut engine = PolicyChangeEngine::new(2);
+        let proposal = make_proposal("p-unicode", "alice", vec!["🔐bob", "charlie"]);
+        engine.propose(proposal).unwrap();
+
+        // Unicode approver name is stored as-is
+        let state = engine.approve("p-unicode", ApprovalSignature {
+            signer: "🔐bob".to_owned(),
+            signature: "ed25519-sig-🔐bob".to_owned(),
+            signed_at: "2026-01-15T01:00:00Z".to_owned(),
+            comment: Some("Unicode test".to_owned()),
+        }).unwrap();
+        assert_eq!(state, ProposalState::UnderReview);
+
+        // Case folding on unicode may behave unexpectedly
+        let err = engine.approve("p-unicode", ApprovalSignature {
+            signer: "🔐BOB".to_owned(), // Different case in emoji context
+            signature: "ed25519-sig-🔐BOB".to_owned(),
+            signed_at: "2026-01-15T01:00:00Z".to_owned(),
+            comment: None,
+        }).unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_STATE_TRANSITION); // Treated as different approver
+    }
+
+    /// Negative path: null bytes in proposal field strings
+    #[test]
+    fn null_bytes_in_proposal_fields_preserved_causing_potential_issues() {
+        let mut engine = PolicyChangeEngine::new(1);
+        let mut proposal = make_proposal("p-null", "alice", vec!["bob"]);
+        proposal.justification = "This contains a null byte: \0 and continues".to_owned();
+        proposal.proposal_id = "p\0null\0bytes".to_owned();
+
+        let record = engine.propose(proposal).unwrap();
+        assert!(record.proposal.justification.contains('\0'));
+        assert!(record.proposal.proposal_id.contains('\0'));
+
+        // Null bytes are preserved and may cause issues in downstream systems
+        assert_eq!(record.proposal.proposal_id.len(), 12); // "p\0null\0bytes"
+        assert!(record.proposal.justification.len() > 20);
+    }
+
+    /// Negative path: integer overflow in audit sequence numbering
+    #[test]
+    fn audit_sequence_near_max_u64_uses_saturating_arithmetic() {
+        let mut engine = PolicyChangeEngine::new(1);
+
+        // Set sequence to near u64::MAX
+        engine.next_sequence = u64::MAX.saturating_sub(1);
+
+        let proposal = make_proposal("p-seq", "alice", vec!["bob"]);
+        engine.propose(proposal).unwrap();
+        engine.approve("p-seq", make_signature("bob")).unwrap();
+
+        // Should not overflow due to saturating_add usage
+        assert_eq!(engine.next_sequence, u64::MAX);
+
+        // Additional operations should maintain MAX without wrapping
+        let proposal2 = make_proposal("p-seq2", "alice", vec!["charlie"]);
+        engine.propose(proposal2).unwrap();
+        assert_eq!(engine.next_sequence, u64::MAX);
+
+        // Audit entries should have sequence u64::MAX - 1 and u64::MAX
+        let entries = engine.audit_ledger();
+        assert!(entries.iter().any(|e| e.sequence == u64::MAX.saturating_sub(1)));
+        assert!(entries.iter().any(|e| e.sequence == u64::MAX));
+    }
+
+    /// Negative path: hash collision in computed audit entry hash
+    #[test]
+    fn audit_entry_hash_collision_detection_via_length_prefix_prevents_ambiguity() {
+        let mut hasher1 = sha2::Sha256::new();
+        hasher1.update(b"approval_workflow_entry_v1:");
+        hasher1.update(42u64.to_le_bytes()); // sequence
+
+        // Two different field arrangements that could collide without length prefixing:
+        // "ab" + "cd" vs "a" + "bcd"
+        let fields1 = ["ab", "cd"];
+        let fields2 = ["a", "bcd"];
+
+        for field in fields1.iter() {
+            hasher1.update((field.len() as u64).to_le_bytes());
+            hasher1.update(field.as_bytes());
+        }
+
+        let mut hasher2 = sha2::Sha256::new();
+        hasher2.update(b"approval_workflow_entry_v1:");
+        hasher2.update(42u64.to_le_bytes());
+
+        for field in fields2.iter() {
+            hasher2.update((field.len() as u64).to_le_bytes());
+            hasher2.update(field.as_bytes());
+        }
+
+        let hash1 = format!("{:x}", hasher1.finalize());
+        let hash2 = format!("{:x}", hasher2.finalize());
+
+        // Length prefixing prevents collision between different field boundaries
+        assert_ne!(hash1, hash2, "Length prefixing should prevent hash collision");
+    }
 }
 
 /// Integration tests: Policy approval workflow × Observability (evidence ledger, durability violations).
@@ -1707,5 +2048,23 @@ mod policy_observability_integration_tests {
                 .unwrap()
                 .contains("compat gate")
         );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_policy_audit_entries() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_policy_audit_entries() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 }

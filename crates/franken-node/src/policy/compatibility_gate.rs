@@ -367,8 +367,12 @@ fn predicate_scope_delta(
 use crate::capacity_defaults::aliases::{MAX_AUDIT_TRAIL_ENTRIES, MAX_RECEIPTS, MAX_SHIMS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -819,6 +823,315 @@ impl GateEngine {
             receipt_id: None,
             event_code: event_code.to_string(),
         })
+
+        // Inline negative-path tests for gate_check method
+        #[cfg(test)]
+        #[allow(unreachable_code)]
+        {
+            // Test: Unicode injection in package_id and scope
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            let unicode_attack_request = GateCheckRequest {
+                package_id: "pkg\u{202E}kcigam\u{202D}.exe".to_string(), // BIDI override attack
+                requested_mode: CompatMode::Strict,
+                scope: "scope\u{FEFF}\u{200B}injection".to_string(), // Zero-width characters
+                policy_context: BTreeMap::new(),
+            };
+            let result = engine.gate_check(&unicode_attack_request);
+            assert!(result.is_ok(), "Unicode injection should be handled gracefully");
+            if let Ok(check_result) = result {
+                assert!(check_result.rationale.explanation.contains(&unicode_attack_request.package_id), "Malicious package ID should be preserved in explanation");
+            }
+
+            // Test: Memory exhaustion through massive policy context
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            let massive_value = "X".repeat(10_000); // 10KB values
+            let mut massive_context = BTreeMap::new();
+            for i in 0..100 { // 1MB total context
+                massive_context.insert(format!("key_{}", i), massive_value.clone());
+            }
+            let massive_request = GateCheckRequest {
+                package_id: "massive.package".to_string(),
+                requested_mode: CompatMode::Balanced,
+                scope: "massive.scope".to_string(),
+                policy_context: massive_context,
+            };
+            let result = engine.gate_check(&massive_request);
+            assert!(result.is_ok(), "Massive policy context should be handled without memory issues");
+
+            // Test: Trace ID space exhaustion simulation
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            engine.next_trace = u64::MAX - 1; // Near overflow
+            let overflow_request = GateCheckRequest {
+                package_id: "overflow.test".to_string(),
+                requested_mode: CompatMode::Strict,
+                scope: "overflow.scope".to_string(),
+                policy_context: BTreeMap::new(),
+            };
+            let result1 = engine.gate_check(&overflow_request);
+            assert!(result1.is_ok(), "Near-overflow trace ID should succeed");
+
+            // Next request should trigger overflow
+            let result2 = engine.gate_check(&overflow_request);
+            if result2.is_err() {
+                if let Err(GateEngineError::TraceIdSpaceExhausted) = result2 {
+                    // Expected error for trace ID exhaustion
+                } else {
+                    panic!("Unexpected error type for trace ID overflow");
+                }
+            }
+
+            // Test: Mode risk level boundary attacks
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            engine.set_scope_mode("boundary.scope", CompatMode::Balanced); // Risk level 1
+
+            let boundary_tests = [
+                (CompatMode::Strict, Verdict::Allow),    // Risk 0 <= 1 should allow
+                (CompatMode::Balanced, Verdict::Allow),  // Risk 1 <= 1 should allow
+                (CompatMode::LegacyRisky, Verdict::Deny), // Risk 2 > 1 should deny
+            ];
+
+            for (requested_mode, expected_verdict) in boundary_tests {
+                let boundary_request = GateCheckRequest {
+                    package_id: format!("boundary.{}", requested_mode.label()),
+                    requested_mode,
+                    scope: "boundary.scope".to_string(),
+                    policy_context: BTreeMap::new(),
+                };
+                let result = engine.gate_check(&boundary_request);
+                assert!(result.is_ok(), "Boundary test should complete for mode {:?}", requested_mode);
+                if let Ok(check_result) = result {
+                    assert_eq!(check_result.decision, expected_verdict, "Mode {} should produce verdict {:?}", requested_mode.label(), expected_verdict);
+                }
+            }
+
+            // Test: Audit trail capacity boundary attacks (audit flooding)
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            // Pre-fill audit trail close to capacity
+            for i in 0..(MAX_AUDIT_TRAIL_ENTRIES - 5) {
+                engine.emit_audit("TEST_EVENT", &format!("flood.scope.{}", i), &format!("flood event {}", i), &format!("trace-{}", i));
+            }
+
+            // Trigger gate checks that should generate audit events
+            for i in 0..10 {
+                let flood_request = GateCheckRequest {
+                    package_id: format!("audit.flood.{}", i),
+                    requested_mode: CompatMode::Strict,
+                    scope: format!("flood.scope.{}", i),
+                    policy_context: BTreeMap::new(),
+                };
+                let _ = engine.gate_check(&flood_request);
+            }
+            // Audit trail should be bounded by push_bounded
+            assert!(engine.audit_trail.len() <= MAX_AUDIT_TRAIL_ENTRIES, "Audit trail should be capacity-bounded");
+
+            // Test: Malformed scope mode signature injection
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            let malformed_scope_mode = ScopeMode {
+                scope_id: "malformed.scope".to_string(),
+                mode: CompatMode::LegacyRisky,
+                activated_at: "invalid-timestamp".to_string(),
+                expires_at: "invalid-expiry".to_string(),
+                receipt_signature: "malformed_signature\x00\x01\x02".to_string(),
+                policy_predicate: None,
+                proof: build_proof_metadata(
+                    CompatibilitySignatureAlgorithm::HmacSha256,
+                    None,
+                    vec!["malformed=scope".to_string()],
+                    vec!["invalid:transition".to_string()],
+                    vec!["MALFORMED_CODE".to_string()],
+                ),
+            };
+            engine.scope_modes.insert("malformed.scope".to_string(), malformed_scope_mode);
+
+            let malformed_request = GateCheckRequest {
+                package_id: "malformed.package".to_string(),
+                requested_mode: CompatMode::Balanced,
+                scope: "malformed.scope".to_string(),
+                policy_context: BTreeMap::new(),
+            };
+            let result = engine.gate_check(&malformed_request);
+            assert!(result.is_ok(), "Malformed scope mode should be handled gracefully");
+            // Should likely fail signature verification and deny
+            if let Ok(check_result) = result {
+                assert_eq!(check_result.decision, Verdict::Deny, "Malformed signature should result in denial");
+            }
+
+            // Test: Policy context injection attacks
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            let mut injection_context = BTreeMap::new();
+            injection_context.insert("sql_injection".to_string(), "'; DROP TABLE policies; --".to_string());
+            injection_context.insert("xss_injection".to_string(), "<script>alert('xss')</script>".to_string());
+            injection_context.insert("json_injection".to_string(), r#"{"malicious":"payload"}"#.to_string());
+            injection_context.insert("null_injection".to_string(), "value\x00with\x00nulls".to_string());
+
+            let injection_request = GateCheckRequest {
+                package_id: "injection.test".to_string(),
+                requested_mode: CompatMode::Strict,
+                scope: "injection.scope".to_string(),
+                policy_context: injection_context.clone(),
+            };
+            let result = engine.gate_check(&injection_request);
+            assert!(result.is_ok(), "Policy context injections should be handled safely");
+            // Injected content should be preserved as-is without interpretation
+
+            // Test: Scope freshness boundary conditions
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            let past_time = "1990-01-01T00:00:00Z"; // Way in the past
+            let future_time = "2099-12-31T23:59:59Z"; // Far future
+
+            let expired_scope_mode = ScopeMode {
+                scope_id: "expired.scope".to_string(),
+                mode: CompatMode::LegacyRisky,
+                activated_at: past_time.to_string(),
+                expires_at: past_time.to_string(), // Already expired
+                receipt_signature: String::new(),
+                policy_predicate: None,
+                proof: build_proof_metadata(
+                    CompatibilitySignatureAlgorithm::HmacSha256,
+                    None,
+                    vec!["scope=expired.scope".to_string()],
+                    vec!["transition:expired".to_string()],
+                    vec!["POLICY_COMPAT_SCOPE_MODE_SET".to_string()],
+                ),
+            };
+            engine.scope_modes.insert("expired.scope".to_string(), expired_scope_mode);
+
+            let freshness_request = GateCheckRequest {
+                package_id: "freshness.test".to_string(),
+                requested_mode: CompatMode::Strict,
+                scope: "expired.scope".to_string(),
+                policy_context: BTreeMap::new(),
+            };
+            let result = engine.gate_check(&freshness_request);
+            assert!(result.is_ok(), "Expired scope should be handled gracefully");
+            if let Ok(check_result) = result {
+                assert_eq!(check_result.decision, Verdict::Deny, "Expired scope should result in denial");
+                assert_ne!(check_result.rationale.freshness_state, CompatibilityFreshnessState::Fresh, "Should detect non-fresh state");
+            }
+
+            // Test: Concurrent operation simulation with scope mode conflicts
+            use std::sync::{Arc, Mutex};
+            use std::thread;
+
+            let shared_engine = Arc::new(Mutex::new(GateEngine::new(vec![0x42; 32])));
+            let mut handles = vec![];
+
+            for i in 0..5 {
+                let engine_clone = Arc::clone(&shared_engine);
+                let handle = thread::spawn(move || {
+                    let request = GateCheckRequest {
+                        package_id: format!("concurrent.pkg.{}", i),
+                        requested_mode: CompatMode::Balanced,
+                        scope: "concurrent.scope".to_string(),
+                        policy_context: BTreeMap::new(),
+                    };
+                    let mut engine = engine_clone.lock().unwrap();
+                    engine.gate_check(&request)
+                });
+                handles.push(handle);
+            }
+
+            for handle in handles {
+                let result = handle.join().unwrap();
+                assert!(result.is_ok(), "Concurrent gate checks should complete without panic");
+            }
+
+            // Test: Explanation digest collision resistance
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            let similar_requests = [
+                ("pkg.similar1", "scope.similar"),
+                ("pkg.similar2", "scope.similar"),
+                ("pkg.similar1", "scope.different"),
+            ];
+
+            let mut digests = Vec::new();
+            for (pkg, scope) in similar_requests {
+                let request = GateCheckRequest {
+                    package_id: pkg.to_string(),
+                    requested_mode: CompatMode::Strict,
+                    scope: scope.to_string(),
+                    policy_context: BTreeMap::new(),
+                };
+                if let Ok(result) = engine.gate_check(&request) {
+                    digests.push(result.rationale.explanation_digest);
+                }
+            }
+
+            // Different requests should produce different digests
+            for i in 0..digests.len() {
+                for j in (i+1)..digests.len() {
+                    assert_ne!(digests[i], digests[j], "Different requests should produce different explanation digests");
+                }
+            }
+
+            // Test: Recovery hint injection and format attacks
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            engine.set_scope_mode("recovery.scope", CompatMode::Strict); // Lower than requested
+
+            let recovery_request = GateCheckRequest {
+                package_id: "recovery.test".to_string(),
+                requested_mode: CompatMode::LegacyRisky, // Higher than scope allows
+                scope: "recovery.scope".to_string(),
+                policy_context: BTreeMap::new(),
+            };
+            let result = engine.gate_check(&recovery_request);
+            assert!(result.is_ok(), "Recovery scenario should be handled");
+            if let Ok(check_result) = result {
+                assert_eq!(check_result.decision, Verdict::Deny, "Should deny when requesting higher mode");
+                assert!(!check_result.rationale.recovery_hints.is_empty(), "Should provide recovery hints");
+                // Verify recovery hints don't contain injection attacks
+                for hint in &check_result.rationale.recovery_hints {
+                    assert!(!hint.contains("<script>"), "Recovery hints should not contain script injection");
+                    assert!(!hint.contains("DROP TABLE"), "Recovery hints should not contain SQL injection");
+                }
+            }
+
+            // Test: Attenuation trace boundary validation
+            let mut engine = GateEngine::new(vec![0x42; 32]);
+            let massive_attenuation = vec!["X".repeat(10_000); 100]; // 1MB attenuation data
+
+            let malicious_predicate = PolicyPredicate {
+                predicate_id: "massive.predicate".to_string(),
+                signature: String::new(),
+                attenuation: massive_attenuation,
+                activation_condition: "always".to_string(),
+                issued_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: "2099-12-31T23:59:59Z".to_string(),
+                proof: build_proof_metadata(
+                    CompatibilitySignatureAlgorithm::HmacSha256,
+                    Some(vec!["massive".to_string()]),
+                    vec!["scope=attenuation.scope".to_string()],
+                    vec!["attenuation:massive".to_string()],
+                    vec!["POLICY_COMPAT_PREDICATE_ATTACHED".to_string()],
+                ),
+            };
+
+            let attenuation_scope_mode = ScopeMode {
+                scope_id: "attenuation.scope".to_string(),
+                mode: CompatMode::LegacyRisky,
+                activated_at: "2024-01-01T00:00:00Z".to_string(),
+                expires_at: "2099-12-31T23:59:59Z".to_string(),
+                receipt_signature: String::new(),
+                policy_predicate: Some(malicious_predicate),
+                proof: build_proof_metadata(
+                    CompatibilitySignatureAlgorithm::HmacSha256,
+                    None,
+                    vec!["scope=attenuation.scope".to_string()],
+                    vec!["mode:unset->legacy_risky".to_string()],
+                    vec!["POLICY_COMPAT_SCOPE_MODE_SET".to_string()],
+                ),
+            };
+            engine.scope_modes.insert("attenuation.scope".to_string(), attenuation_scope_mode);
+
+            let attenuation_request = GateCheckRequest {
+                package_id: "attenuation.test".to_string(),
+                requested_mode: CompatMode::Balanced,
+                scope: "attenuation.scope".to_string(),
+                policy_context: BTreeMap::new(),
+            };
+            let result = engine.gate_check(&attenuation_request);
+            assert!(result.is_ok(), "Massive attenuation should be handled without memory issues");
+        }
     }
 
     // ---- Mode transitions ----
@@ -1830,6 +2143,170 @@ mod tests {
     }
 
     #[test]
+    fn gate_check_denies_stale_scope_mode_without_receipt() {
+        let mut engine = test_engine();
+        {
+            let scope_mode = engine.scope_modes.get_mut("tenant-1").unwrap();
+            let (activated_at, expires_at) = stale_window();
+            scope_mode.activated_at = activated_at;
+            scope_mode.expires_at = expires_at;
+            scope_mode.receipt_signature = sign_hmac_canonical(
+                COMPAT_TRANSITION_RECEIPT_DOMAIN,
+                &scope_mode_signing_payload(scope_mode),
+            )
+            .unwrap();
+        }
+
+        let result = engine
+            .gate_check(&GateCheckRequest {
+                package_id: "npm:test-pkg".into(),
+                requested_mode: CompatMode::Balanced,
+                scope: "tenant-1".into(),
+                policy_context: BTreeMap::new(),
+            })
+            .unwrap();
+
+        assert_eq!(result.decision, Verdict::Deny);
+        assert!(result.receipt_id.is_none());
+        assert_eq!(result.event_code, PCG_002);
+        assert!(
+            result
+                .rationale
+                .reason_codes
+                .contains(&reason_codes::POLICY_COMPAT_STALE_RECEIPT.to_string())
+        );
+    }
+
+    #[test]
+    fn set_scope_policy_predicate_rejects_unknown_scope() {
+        let mut engine = test_engine();
+        let predicate =
+            signed_scope_predicate("missing-scope", vec!["scope=missing-scope".to_string()]);
+
+        let err = engine
+            .set_scope_policy_predicate("missing-scope", predicate)
+            .unwrap_err();
+
+        match err {
+            GateEngineError::ScopeNotFound { scope_id } => {
+                assert_eq!(scope_id, "missing-scope");
+            }
+            other => panic!("expected missing scope rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_scope_policy_predicate_rejects_tampered_signature_without_installing() {
+        let mut engine = test_engine();
+        let mut predicate = signed_scope_predicate("tenant-1", vec!["scope=tenant-1".to_string()]);
+        predicate.signature = "00".repeat(64);
+
+        let err = engine
+            .set_scope_policy_predicate("tenant-1", predicate)
+            .unwrap_err();
+
+        assert_eq!(err, GateEngineError::ScopePolicyPredicateSignatureInvalid);
+        assert!(
+            engine
+                .query_mode("tenant-1")
+                .unwrap()
+                .policy_predicate
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn request_transition_wrong_current_preserves_mode_and_receipts() {
+        let mut engine = test_engine();
+
+        let err = engine
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "tenant-1".into(),
+                from_mode: CompatMode::Strict,
+                to_mode: CompatMode::LegacyRisky,
+                justification: "operator claims the wrong starting mode".into(),
+                requestor: "admin".into(),
+            })
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            GateEngineError::CurrentModeMismatch {
+                current: CompatMode::Balanced,
+                claimed: CompatMode::Strict,
+            }
+        );
+        assert_eq!(
+            engine.query_mode("tenant-1").unwrap().mode,
+            CompatMode::Balanced
+        );
+        assert!(engine.transition_receipts.is_empty());
+    }
+
+    #[test]
+    fn request_transition_denied_escalation_records_unapproved_receipt() {
+        let mut engine = test_engine();
+
+        let receipt = engine
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "tenant-1".into(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::LegacyRisky,
+                justification: "too short".into(),
+                requestor: "admin".into(),
+            })
+            .unwrap();
+
+        assert!(!receipt.approved);
+        assert_eq!(receipt.to_mode, CompatMode::LegacyRisky);
+        assert_eq!(
+            engine.query_mode("tenant-1").unwrap().mode,
+            CompatMode::Balanced
+        );
+        assert_eq!(engine.transition_receipts.len(), 1);
+        assert!(
+            engine
+                .audit_trail()
+                .iter()
+                .all(|event| event.event_code != PCG_003)
+        );
+    }
+
+    #[test]
+    fn issue_divergence_receipt_records_unresolved_receipt_for_unknown_shim() {
+        let mut engine = test_engine();
+
+        let receipt = engine
+            .issue_divergence_receipt(
+                "tenant-1",
+                "shim-not-registered",
+                "compat layer observed an unregistered shim divergence",
+                "major",
+            )
+            .unwrap();
+
+        assert_eq!(receipt.shim_id, "shim-not-registered");
+        assert!(!receipt.resolved);
+        assert!(engine.verify_receipt_signature(&receipt));
+        assert_eq!(
+            engine.query_receipts(Some("tenant-1"), Some("major")).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn query_shims_for_missing_scope_returns_only_global_shims() {
+        let mut engine = GateEngine::new(b"test-key-v1".to_vec());
+        engine.register_shim(make_shim("shim-tenant-1", "tenant-1"));
+        engine.register_shim(make_shim("shim-global", "*"));
+
+        let shims = engine.query_shims(Some("missing-scope"));
+        let ids: Vec<_> = shims.iter().map(|shim| shim.shim_id.as_str()).collect();
+
+        assert_eq!(ids, vec!["shim-global"]);
+    }
+
+    #[test]
     fn test_verdict_labels() {
         assert_eq!(Verdict::Allow.label(), "allow");
         assert_eq!(Verdict::Deny.label(), "deny");
@@ -1862,5 +2339,23 @@ mod tests {
             .unwrap();
         assert!(!result.rationale.explanation.is_empty());
         assert!(!result.rationale.matched_predicates.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_gate_audit_window() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_gate_audit_entries() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 }

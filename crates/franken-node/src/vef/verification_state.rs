@@ -376,9 +376,13 @@ impl Default for VerificationStateManager {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -479,6 +483,65 @@ mod tests {
     }
 
     #[test]
+    fn test_transition_escalation_unverified_proof_fails_closed() {
+        let mut mgr = setup_manager();
+        mgr.attach_proof(
+            "ext-1",
+            ProofStatus {
+                proof_id: "proof-unverified".into(),
+                verified: false,
+                verified_at_epoch: 1000,
+                max_age_seconds: 3600,
+            },
+        )
+        .unwrap();
+        let req = TransitionRequest {
+            entity_id: "ext-1".into(),
+            target_risk_level: RiskLevel::High,
+            action: "elevate".into(),
+            requested_at_epoch: 1000,
+        };
+
+        assert!(matches!(
+            mgr.request_transition(&req),
+            Err(VefStateError::StaleProof { .. })
+        ));
+        let state = mgr.state("ext-1").expect("entity should remain registered");
+        assert_eq!(state.current_risk_level, RiskLevel::Low);
+        assert_eq!(state.transition_count, 0);
+    }
+
+    #[test]
+    fn test_transition_escalation_boundary_age_is_stale() {
+        let mut mgr = setup_manager();
+        mgr.attach_proof(
+            "ext-1",
+            ProofStatus {
+                proof_id: "proof-boundary".into(),
+                verified: true,
+                verified_at_epoch: 1000,
+                max_age_seconds: 100,
+            },
+        )
+        .unwrap();
+        let req = TransitionRequest {
+            entity_id: "ext-1".into(),
+            target_risk_level: RiskLevel::High,
+            action: "elevate".into(),
+            requested_at_epoch: 1100,
+        };
+
+        assert_eq!(
+            mgr.request_transition(&req),
+            Err(VefStateError::StaleProof {
+                entity_id: "ext-1".into(),
+                age: 100,
+            })
+        );
+        assert_eq!(mgr.state("ext-1").unwrap().transition_count, 0);
+    }
+
+    #[test]
     fn test_downgrade_no_proof_needed() {
         let mut mgr = setup_manager();
         mgr.attach_proof("ext-1", fresh_proof()).unwrap();
@@ -565,6 +628,97 @@ mod tests {
     }
 
     #[test]
+    fn test_authorize_high_risk_without_proof_fails_closed_when_state_is_high() {
+        let mut mgr = setup_manager();
+        mgr.states
+            .get_mut("ext-1")
+            .expect("registered entity should exist")
+            .current_risk_level = RiskLevel::High;
+        let req = ActionRequest {
+            entity_id: "ext-1".into(),
+            action: "deploy".into(),
+            required_risk_level: RiskLevel::High,
+            requested_at_epoch: 1000,
+        };
+
+        assert_eq!(
+            mgr.authorize_action(&req),
+            Err(VefStateError::NoProof {
+                entity_id: "ext-1".into(),
+            })
+        );
+        let last = mgr.audit_log().last().expect("denial should be audited");
+        assert_eq!(last.event_code, VEF_STATE_ACTION_DENIED);
+        assert!(last.detail.contains("no proof"));
+    }
+
+    #[test]
+    fn test_authorize_critical_with_unverified_proof_fails_closed() {
+        let mut mgr = setup_manager();
+        {
+            let state = mgr
+                .states
+                .get_mut("ext-1")
+                .expect("registered entity should exist");
+            state.current_risk_level = RiskLevel::Critical;
+            state.proof = Some(ProofStatus {
+                proof_id: "proof-unverified".into(),
+                verified: false,
+                verified_at_epoch: 1000,
+                max_age_seconds: 3600,
+            });
+        }
+        let req = ActionRequest {
+            entity_id: "ext-1".into(),
+            action: "root-operation".into(),
+            required_risk_level: RiskLevel::Critical,
+            requested_at_epoch: 1000,
+        };
+
+        assert!(matches!(
+            mgr.authorize_action(&req),
+            Err(VefStateError::StaleProof { .. })
+        ));
+        assert!(
+            !mgr.audit_log()
+                .iter()
+                .any(|entry| entry.event_code == VEF_STATE_ACTION_AUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn test_authorize_boundary_age_high_risk_proof_is_stale() {
+        let mut mgr = setup_manager();
+        {
+            let state = mgr
+                .states
+                .get_mut("ext-1")
+                .expect("registered entity should exist");
+            state.current_risk_level = RiskLevel::High;
+            state.proof = Some(ProofStatus {
+                proof_id: "proof-boundary".into(),
+                verified: true,
+                verified_at_epoch: 1000,
+                max_age_seconds: 50,
+            });
+        }
+        let req = ActionRequest {
+            entity_id: "ext-1".into(),
+            action: "deploy".into(),
+            required_risk_level: RiskLevel::High,
+            requested_at_epoch: 1050,
+        };
+
+        assert_eq!(
+            mgr.authorize_action(&req),
+            Err(VefStateError::StaleProof {
+                entity_id: "ext-1".into(),
+                age: 50,
+            })
+        );
+    }
+
+    #[test]
     fn test_audit_log_populated() {
         let mut mgr = setup_manager();
         mgr.attach_proof("ext-1", fresh_proof()).unwrap();
@@ -597,6 +751,230 @@ mod tests {
         let p = fresh_proof();
         assert!(p.is_fresh(1500)); // age 500 < 3600
         assert!(!p.is_fresh(10000)); // age 9000 > 3600
+    }
+
+    #[test]
+    fn test_proof_freshness_rejects_unverified_even_at_issue_epoch() {
+        let p = ProofStatus {
+            proof_id: "proof-unverified".into(),
+            verified: false,
+            verified_at_epoch: 1000,
+            max_age_seconds: 3600,
+        };
+
+        assert!(!p.is_fresh(1000));
+    }
+
+    #[test]
+    fn test_proof_freshness_rejects_exact_expiry_boundary() {
+        let p = ProofStatus {
+            proof_id: "proof-boundary".into(),
+            verified: true,
+            verified_at_epoch: 1000,
+            max_age_seconds: 10,
+        };
+
+        assert!(!p.is_fresh(1010));
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_clears_without_retaining_new_item() {
+        let mut audit = vec![
+            StateAuditEntry {
+                event_code: VEF_STATE_ACTION_AUTHORIZED.into(),
+                entity_id: "old-a".into(),
+                detail: "old".into(),
+            },
+            StateAuditEntry {
+                event_code: VEF_STATE_ACTION_DENIED.into(),
+                entity_id: "old-b".into(),
+                detail: "old".into(),
+            },
+        ];
+
+        push_bounded(
+            &mut audit,
+            StateAuditEntry {
+                event_code: VEF_STATE_TRANSITION_BLOCKED.into(),
+                entity_id: "new".into(),
+                detail: "ignored".into(),
+            },
+            0,
+        );
+
+        assert!(audit.is_empty());
+    }
+
+    #[test]
+    fn test_zero_max_age_proof_blocks_escalation_at_issue_epoch() {
+        let mut mgr = setup_manager();
+        mgr.attach_proof(
+            "ext-1",
+            ProofStatus {
+                proof_id: "proof-zero-age".into(),
+                verified: true,
+                verified_at_epoch: 1000,
+                max_age_seconds: 0,
+            },
+        )
+        .unwrap();
+        let req = TransitionRequest {
+            entity_id: "ext-1".into(),
+            target_risk_level: RiskLevel::Medium,
+            action: "elevate".into(),
+            requested_at_epoch: 1000,
+        };
+
+        assert_eq!(
+            mgr.request_transition(&req),
+            Err(VefStateError::StaleProof {
+                entity_id: "ext-1".into(),
+                age: 0,
+            })
+        );
+        let state = mgr.state("ext-1").expect("entity should remain registered");
+        assert_eq!(state.current_risk_level, RiskLevel::Low);
+        assert_eq!(state.transition_count, 0);
+    }
+
+    #[test]
+    fn test_failed_no_proof_transition_preserves_state_and_audit_order() {
+        let mut mgr = setup_manager();
+        let req = TransitionRequest {
+            entity_id: "ext-1".into(),
+            target_risk_level: RiskLevel::Critical,
+            action: "critical-up".into(),
+            requested_at_epoch: 1100,
+        };
+
+        assert_eq!(
+            mgr.request_transition(&req),
+            Err(VefStateError::NoProof {
+                entity_id: "ext-1".into(),
+            })
+        );
+
+        let state = mgr.state("ext-1").expect("entity should remain registered");
+        assert_eq!(state.current_risk_level, RiskLevel::Low);
+        assert_eq!(state.transition_count, 0);
+        assert_eq!(mgr.audit_log().len(), 2);
+        assert_eq!(
+            mgr.audit_log()[0].event_code,
+            VEF_STATE_TRANSITION_REQUESTED
+        );
+        assert_eq!(mgr.audit_log()[1].event_code, VEF_STATE_TRANSITION_BLOCKED);
+    }
+
+    #[test]
+    fn test_failed_stale_transition_preserves_existing_state() {
+        let mut mgr = setup_manager();
+        {
+            let state = mgr
+                .states
+                .get_mut("ext-1")
+                .expect("registered entity should exist");
+            state.current_risk_level = RiskLevel::Medium;
+            state.transition_count = 3;
+            state.proof = Some(ProofStatus {
+                proof_id: "proof-stale".into(),
+                verified: true,
+                verified_at_epoch: 1000,
+                max_age_seconds: 10,
+            });
+        }
+        let req = TransitionRequest {
+            entity_id: "ext-1".into(),
+            target_risk_level: RiskLevel::Critical,
+            action: "critical-up".into(),
+            requested_at_epoch: 1010,
+        };
+
+        assert_eq!(
+            mgr.request_transition(&req),
+            Err(VefStateError::StaleProof {
+                entity_id: "ext-1".into(),
+                age: 10,
+            })
+        );
+        let state = mgr.state("ext-1").expect("entity should remain registered");
+        assert_eq!(state.current_risk_level, RiskLevel::Medium);
+        assert_eq!(state.transition_count, 3);
+    }
+
+    #[test]
+    fn test_insufficient_risk_denial_precedes_no_proof_error() {
+        let mut mgr = setup_manager();
+        let req = ActionRequest {
+            entity_id: "ext-1".into(),
+            action: "deploy".into(),
+            required_risk_level: RiskLevel::High,
+            requested_at_epoch: 1100,
+        };
+
+        let result = mgr.authorize_action(&req);
+
+        assert!(matches!(result, Ok(ActionResult::Denied { .. })));
+        assert_eq!(mgr.audit_log().len(), 1);
+        assert_eq!(mgr.audit_log()[0].event_code, VEF_STATE_ACTION_DENIED);
+        assert!(mgr.audit_log()[0].detail.contains("need=High have=Low"));
+    }
+
+    #[test]
+    fn test_medium_action_denial_does_not_require_or_consume_proof() {
+        let mut mgr = setup_manager();
+        let req = ActionRequest {
+            entity_id: "ext-1".into(),
+            action: "moderate-change".into(),
+            required_risk_level: RiskLevel::Medium,
+            requested_at_epoch: 1100,
+        };
+
+        let result = mgr.authorize_action(&req);
+
+        assert!(matches!(result, Ok(ActionResult::Denied { .. })));
+        let state = mgr.state("ext-1").expect("entity should remain registered");
+        assert!(state.proof.is_none());
+        assert_eq!(state.current_risk_level, RiskLevel::Low);
+    }
+
+    #[test]
+    fn test_failed_high_risk_action_without_proof_never_authorizes() {
+        let mut mgr = setup_manager();
+        mgr.states
+            .get_mut("ext-1")
+            .expect("registered entity should exist")
+            .current_risk_level = RiskLevel::High;
+        let req = ActionRequest {
+            entity_id: "ext-1".into(),
+            action: "deploy".into(),
+            required_risk_level: RiskLevel::High,
+            requested_at_epoch: 1100,
+        };
+
+        assert!(matches!(
+            mgr.authorize_action(&req),
+            Err(VefStateError::NoProof { .. })
+        ));
+        assert!(
+            !mgr.audit_log()
+                .iter()
+                .any(|entry| entry.event_code == VEF_STATE_ACTION_AUTHORIZED)
+        );
+    }
+
+    #[test]
+    fn test_attach_proof_unknown_entity_does_not_create_state_or_audit() {
+        let mut mgr = setup_manager();
+
+        assert_eq!(
+            mgr.attach_proof("missing-entity", fresh_proof()),
+            Err(VefStateError::PolicyMissing {
+                entity_id: "missing-entity".into(),
+            })
+        );
+
+        assert!(mgr.state("missing-entity").is_none());
+        assert!(mgr.audit_log().is_empty());
     }
 
     #[test]
@@ -661,6 +1039,7 @@ mod tests {
         assert_eq!(last.event_code, VEF_STATE_TRANSITION_BLOCKED);
         assert_eq!(last.entity_id, "nope");
         assert_eq!(last.detail, ERR_VEF_STATE_POLICY_MISSING);
+        assert!(mgr.state("nope").is_none());
     }
 
     #[test]

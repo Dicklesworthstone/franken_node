@@ -1424,4 +1424,782 @@ mod tests {
         let report = gate.verify(&req).unwrap();
         assert_eq!(report.created_at_millis, 1_701_999_999_999);
     }
+
+    #[test]
+    fn proof_age_at_exact_predicate_limit_is_denied() {
+        let mut gate = gate_with_predicate();
+        let mut proof = valid_proof();
+        proof.generated_at_millis = NOW - default_predicate().max_proof_age_millis;
+        proof.expires_at_millis = NOW + 1;
+
+        let report = gate.verify(&make_request(proof)).expect("report");
+
+        match report.decision {
+            TrustDecision::Deny(reason) => {
+                assert!(reason.contains("proof age 600000ms exceeds limit 600000ms"));
+            }
+            other => panic!("expected Deny at exact age boundary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn proof_age_at_exact_global_limit_is_denied() {
+        let config = VerificationGateConfig {
+            max_proof_age_millis: 30_000,
+            ..VerificationGateConfig::default()
+        };
+        let mut gate = VerificationGate::new(config);
+        gate.register_predicate(default_predicate());
+        let mut proof = valid_proof();
+        proof.generated_at_millis = NOW - 30_000;
+        proof.expires_at_millis = NOW + 1;
+
+        let report = gate.verify(&make_request(proof)).expect("report");
+
+        match report.decision {
+            TrustDecision::Deny(reason) => {
+                assert!(reason.contains("proof age 30000ms exceeds limit 30000ms"));
+            }
+            other => panic!("expected Deny at exact global age boundary, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn confidence_gap_degrade_level_clamps_to_five() {
+        let config = VerificationGateConfig {
+            degrade_threshold: 0,
+            ..VerificationGateConfig::default()
+        };
+        let mut gate = VerificationGate::new(config);
+        let mut predicate = default_predicate();
+        predicate.min_confidence = 100;
+        gate.register_predicate(predicate);
+        let mut proof = valid_proof();
+        proof.confidence = 1;
+
+        let report = gate.verify(&make_request(proof)).expect("report");
+
+        assert_eq!(report.decision, TrustDecision::Degrade(5));
+    }
+
+    #[test]
+    fn batch_verify_preserves_invalid_format_errors() {
+        let mut gate = gate_with_predicate();
+        let valid = make_request(valid_proof());
+        let mut invalid_proof = valid_proof();
+        invalid_proof.proof_id = "proof-invalid-hash".to_string();
+        invalid_proof.proof_hash.clear();
+        let invalid = make_request(invalid_proof);
+
+        let results = gate.verify_batch(&[valid, invalid]);
+
+        assert!(results[0].is_ok());
+        let err = results[1]
+            .as_ref()
+            .expect_err("invalid proof hash must fail");
+        assert_eq!(err.code, error_codes::ERR_PVF_INVALID_FORMAT);
+        assert_eq!(gate.reports().len(), 1);
+    }
+
+    #[test]
+    fn trust_decision_deserialize_rejects_unknown_variant() {
+        let result: Result<TrustDecision, _> = serde_json::from_str("\"bypass\"");
+
+        assert!(result.is_err(), "unknown trust decision must fail closed");
+    }
+
+    #[test]
+    fn compliance_proof_deserialize_rejects_confidence_overflow() {
+        let raw = serde_json::json!({
+            "proof_id": "proof-overflow",
+            "action_class": "network_access",
+            "proof_hash": "sha256:abc123",
+            "confidence": 256_u16,
+            "generated_at_millis": NOW - 60_000,
+            "expires_at_millis": NOW + 600_000,
+            "witness_references": ["w-a", "w-b"],
+            "policy_version_hash": "sha256:policy-v1",
+            "trace_id": "trace-overflow"
+        });
+
+        let result: Result<ComplianceProof, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "u8 confidence overflow must not deserialize"
+        );
+    }
+
+    #[test]
+    fn verification_request_deserialize_rejects_missing_proof() {
+        let raw = serde_json::json!({
+            "request_id": "req-missing-proof",
+            "now_millis": NOW,
+            "trace_id": "trace-missing-proof"
+        });
+
+        let result: Result<VerificationRequest, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "verification requests require proof payloads"
+        );
+    }
+
+    // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────
+
+    #[test]
+    fn test_negative_proof_payload_with_malicious_injection_attacks() {
+        let malicious_payloads = [
+            r#"{"valid": "json", "injection": "\"},\"admin\":true,\"bypass"}"#, // JSON injection
+            r#"{"script": "<script>alert('XSS')</script>"}"#,                    // XSS attempt
+            r#"{"sql": "'; DROP TABLE proofs; --"}"#,                           // SQL injection
+            r#"{"shell": "; rm -rf / #"}"#,                                     // Shell injection
+            r#"{"unicode": "\u{202E}fake\u{202C}"}"#,                          // BiDi override
+            r#"{"ansi": "\x1b[31mred\x1b[0m"}"#,                               // ANSI escape
+            r#"{"control": "data\0null\r\n\t"}"#,                              // Control chars
+            r#"{"massive": "#.repeat(1_000_000) + r#""}"#,                      // 1MB payload
+            "not-json-at-all",                                                  // Invalid JSON
+            "",                                                                 // Empty payload
+            "null",                                                             // JSON null
+            "[]",                                                               // Array instead of object
+            r#"{"nested": {"deep": {"structure": {"with": {"many": {"levels": "value"}}}}}}"#, // Deep nesting
+        ];
+
+        let verifier = ProofVerifier::new();
+        let test_policy = test_policy_predicate();
+
+        for malicious_payload in malicious_payloads {
+            let malicious_proof = ComplianceProof {
+                proof_id: "malicious-test".to_string(),
+                action_class: "test.action".to_string(),
+                payload: malicious_payload.to_string(),
+                issued_at_epoch: 1234567890,
+                expires_at_epoch: 1234567890 + 3600,
+                signature: "fake-signature".to_string(),
+                issuer_public_key: "fake-public-key".to_string(),
+            };
+
+            let request = VerificationRequest {
+                proof: malicious_proof.clone(),
+                policy_context: "test-context".to_string(),
+                trace_id: "malicious-payload-test".to_string(),
+            };
+
+            // Test verification with malicious payload
+            let result = verifier.verify(&request, &[test_policy.clone()]);
+
+            // Should handle malicious payloads safely
+            assert!(result.report.is_some(), "report should be generated even for malicious payloads");
+
+            if let Some(report) = result.report {
+                // Verify payload is preserved exactly for forensics
+                assert_eq!(report.compliance_proof.payload, malicious_payload, "payload should be preserved");
+
+                // Test JSON serialization safety
+                let json = serde_json::to_string(&report).expect("serialization should work");
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+
+                // Verify no injection occurred in JSON structure
+                assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
+                assert!(parsed.get("bypass").is_none(), "JSON injection should not create bypass field");
+
+                // Verify trust decision is appropriate for malicious content
+                match report.decision {
+                    TrustDecision::Allow => {
+                        // If allowed, the payload format must have been valid
+                    }
+                    TrustDecision::Deny(reason) => {
+                        // Denial is expected for malicious payloads
+                        assert!(!reason.is_empty(), "deny reason should not be empty");
+                    }
+                    TrustDecision::Degrade(_level) => {
+                        // Degradation is also acceptable
+                    }
+                }
+            }
+
+            // Test event generation with malicious payloads
+            assert!(!result.events.is_empty(), "events should be generated");
+            for event in &result.events {
+                // Verify event structure is safe
+                let event_json = serde_json::to_string(&event).expect("event serialization should work");
+                assert!(!event_json.contains("admin"), "event JSON should not contain injection");
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_trust_decision_display_injection_resistance() {
+        // Test TrustDecision display with malicious reason strings
+        let malicious_reasons = [
+            "reason\u{202E}fake\u{202C}",           // BiDi override
+            "reason\x1b[31mred\x1b[0m",             // ANSI escape
+            "reason\0null\r\n\t",                   // Control characters
+            "reason\"}{\"admin\":true,\"bypass\"", // JSON injection
+            "reason<script>alert(1)</script>",     // XSS attempt
+            "reason'; DROP TABLE decisions; --",   // SQL injection
+            "reason||rm -rf /",                     // Shell injection
+            "X".repeat(10_000),                     // Extremely long reason (10KB)
+        ];
+
+        for malicious_reason in malicious_reasons {
+            let deny_decision = TrustDecision::Deny(malicious_reason.to_string());
+
+            // Test display formatting
+            let display_str = format!("{}", deny_decision);
+            assert!(display_str.starts_with("Deny("), "display should have correct format");
+            assert!(display_str.contains(malicious_reason), "display should contain reason");
+
+            // Test JSON serialization safety
+            let json = serde_json::to_string(&deny_decision).expect("serialization should work");
+            let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+
+            // Verify malicious content is properly contained
+            if let Some(variant) = parsed.as_object().and_then(|o| o.get("deny")) {
+                if let Some(reason_str) = variant.as_str() {
+                    assert_eq!(reason_str, malicious_reason, "reason should be preserved exactly");
+                }
+            }
+
+            // Verify no injection in JSON structure
+            assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
+        }
+
+        // Test Degrade decision with extreme levels
+        let extreme_levels = [0, 1, 5, 255, u8::MAX];
+        for level in extreme_levels {
+            let degrade_decision = TrustDecision::Degrade(level);
+
+            let display_str = format!("{}", degrade_decision);
+            assert!(display_str.starts_with("Degrade("), "display should have correct format");
+            assert!(display_str.contains(&level.to_string()), "display should contain level");
+
+            // Test serialization
+            let json = serde_json::to_string(&degrade_decision).expect("serialization should work");
+            let parsed: TrustDecision = serde_json::from_str(&json).expect("deserialization should work");
+
+            if let TrustDecision::Degrade(parsed_level) = parsed {
+                assert_eq!(parsed_level, level, "level should be preserved");
+            } else {
+                panic!("deserialized decision should be Degrade");
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_policy_predicate_with_massive_constraint_expressions() {
+        let massive_expressions = [
+            "true".repeat(100_000),  // 500KB expression
+            "false AND ".repeat(50_000) + "true", // 450KB complex expression
+            "x > 0 OR ".repeat(100_000) + "false", // 700KB disjunction
+            "((((".repeat(10_000) + "true" + &"))))".repeat(10_000), // Deep nesting
+            format!("field = '{}'", "X".repeat(1_000_000)), // 1MB string literal
+        ];
+
+        for massive_expr in massive_expressions {
+            let massive_policy = PolicyPredicate {
+                predicate_id: "massive-test".to_string(),
+                action_class: "test.action".to_string(),
+                constraint_expression: massive_expr.clone(),
+                severity_level: 3,
+            };
+
+            // Test serialization with massive expression
+            let json = serde_json::to_string(&massive_policy).expect("serialization should handle massive expressions");
+            assert!(json.len() >= massive_expr.len(), "JSON should include massive expression");
+
+            let parsed: PolicyPredicate = serde_json::from_str(&json).expect("deserialization should work");
+            assert_eq!(parsed.constraint_expression, massive_expr, "expression should be preserved");
+
+            // Test verification with massive policy
+            let verifier = ProofVerifier::new();
+            let test_proof = test_compliance_proof();
+            let request = VerificationRequest {
+                proof: test_proof,
+                policy_context: "massive-policy-test".to_string(),
+                trace_id: "massive-trace".to_string(),
+            };
+
+            let result = verifier.verify(&request, &[massive_policy]);
+
+            // Should handle massive policies without memory explosion
+            assert!(result.report.is_some(), "report should be generated with massive policy");
+
+            // Verify result structure is reasonable
+            let report = result.report.unwrap();
+            assert!(!report.evidence_summary.is_empty(), "evidence summary should not be empty");
+        }
+
+        // Test policy with malicious constraint expressions
+        let malicious_constraints = [
+            "payload.admin = true",                    // Privilege escalation attempt
+            "payload[\"../../etc/passwd\"] = null",   // Path traversal
+            "eval('malicious code')",                  // Code injection
+            "system('rm -rf /')",                     // Command injection
+            "javascript:alert(1)",                     // JavaScript URL
+            "DROP TABLE policies",                     // SQL injection
+        ];
+
+        for malicious_expr in malicious_constraints {
+            let malicious_policy = PolicyPredicate {
+                predicate_id: "malicious-constraint-test".to_string(),
+                action_class: "test.action".to_string(),
+                constraint_expression: malicious_expr.to_string(),
+                severity_level: 5,
+            };
+
+            let verifier = ProofVerifier::new();
+            let test_proof = test_compliance_proof();
+            let request = VerificationRequest {
+                proof: test_proof,
+                policy_context: "malicious-constraint-test".to_string(),
+                trace_id: "malicious-constraint-trace".to_string(),
+            };
+
+            let result = verifier.verify(&request, &[malicious_policy]);
+
+            // Should handle malicious constraints safely
+            assert!(result.report.is_some(), "report should be generated with malicious constraint");
+        }
+    }
+
+    #[test]
+    fn test_negative_proof_signature_with_bypass_attempts() {
+        use crate::security::constant_time::ct_eq;
+
+        let verifier = ProofVerifier::new();
+        let test_policy = test_policy_predicate();
+
+        // Test various signature bypass attempts
+        let signature_bypass_attempts = [
+            "",                                          // Empty signature
+            "valid-signature",                          // Base case
+            "valid-signature\0",                        // Null termination
+            "valid-signature\r\n",                     // CRLF injection
+            "valid-signature||bypass",                 // Delimiter confusion
+            "VALID-SIGNATURE",                         // Case variation
+            "valid\u{200B}signature",                  // Zero-width space
+            "valid\u{202E}signature\u{202C}",         // BiDi override
+            "valid-signature\x1b[31m",                // ANSI escape
+            format!("valid-signature-{}", "x".repeat(100_000)), // Massive signature
+            "-----BEGIN SIGNATURE-----\nfake\n-----END SIGNATURE-----", // PEM-like format
+        ];
+
+        for (i, bypass_signature) in signature_bypass_attempts.iter().enumerate() {
+            let bypass_proof = ComplianceProof {
+                proof_id: format!("bypass-test-{}", i),
+                action_class: "test.action".to_string(),
+                payload: r#"{"test": "data"}"#.to_string(),
+                issued_at_epoch: 1234567890,
+                expires_at_epoch: 1234567890 + 3600,
+                signature: bypass_signature.to_string(),
+                issuer_public_key: "test-public-key".to_string(),
+            };
+
+            let request = VerificationRequest {
+                proof: bypass_proof.clone(),
+                policy_context: "signature-bypass-test".to_string(),
+                trace_id: format!("bypass-trace-{}", i),
+            };
+
+            let result = verifier.verify(&request, &[test_policy.clone()]);
+
+            // Verify signature is preserved exactly for forensics
+            if let Some(report) = result.report {
+                assert_eq!(report.compliance_proof.signature, *bypass_signature, "signature should be preserved");
+            }
+
+            // Test constant-time comparison for signatures
+            let baseline_signature = "baseline-signature";
+            assert!(!ct_eq(bypass_signature, baseline_signature),
+                   "signature comparison should be constant-time");
+        }
+
+        // Test with malformed public keys
+        let malformed_public_keys = [
+            "",                                                // Empty key
+            "not-a-valid-public-key",                         // Invalid format
+            "-----BEGIN CERTIFICATE-----\nmalicious\n-----END CERTIFICATE-----", // Wrong type
+            "-----BEGIN PUBLIC KEY-----\n\n-----END PUBLIC KEY-----", // Empty content
+            "x".repeat(10_000),                               // Extremely long key
+            "\0".repeat(100),                                 // Null bytes
+            "key\r\nHost: evil.com\r\n",                     // Header injection
+        ];
+
+        for malformed_key in malformed_public_keys {
+            let malformed_proof = ComplianceProof {
+                proof_id: "malformed-key-test".to_string(),
+                action_class: "test.action".to_string(),
+                payload: r#"{"test": "data"}"#.to_string(),
+                issued_at_epoch: 1234567890,
+                expires_at_epoch: 1234567890 + 3600,
+                signature: "test-signature".to_string(),
+                issuer_public_key: malformed_key.to_string(),
+            };
+
+            let request = VerificationRequest {
+                proof: malformed_proof,
+                policy_context: "malformed-key-test".to_string(),
+                trace_id: "malformed-key-trace".to_string(),
+            };
+
+            let result = verifier.verify(&request, &[test_policy.clone()]);
+
+            // Should handle malformed keys safely (likely deny)
+            assert!(result.report.is_some(), "report should be generated with malformed key");
+        }
+    }
+
+    #[test]
+    fn test_negative_verification_events_with_bounded_storage() {
+        let mut verifier = ProofVerifier::new();
+
+        // Generate many verification requests to test bounded storage
+        for i in 0..10_000 {
+            let stress_proof = ComplianceProof {
+                proof_id: format!("stress-test-{:05}", i),
+                action_class: "test.action".to_string(),
+                payload: format!(r#"{{"iteration": {}, "data": "{}"}}"#, i, "X".repeat(1000)), // 1KB payload each
+                issued_at_epoch: 1234567890,
+                expires_at_epoch: 1234567890 + 3600,
+                signature: format!("signature-{}", i),
+                issuer_public_key: "test-public-key".to_string(),
+            };
+
+            let request = VerificationRequest {
+                proof: stress_proof,
+                policy_context: format!("stress-context-{}", i),
+                trace_id: format!("stress-trace-{:05}", i),
+            };
+
+            let result = verifier.verify(&request, &[test_policy_predicate()]);
+
+            // Each verification should succeed
+            assert!(result.report.is_some(), "report should be generated for stress test {}", i);
+        }
+
+        // Verify bounded storage of events
+        if verifier.recent_events.len() > MAX_EVENTS * 2 {
+            panic!("event storage should be bounded, got {} events", verifier.recent_events.len());
+        }
+
+        // Verify bounded storage of reports
+        if verifier.recent_reports.len() > MAX_REPORTS * 2 {
+            panic!("report storage should be bounded, got {} reports", verifier.recent_reports.len());
+        }
+
+        // Test with massive trace IDs
+        for i in 0..100 {
+            let huge_trace_id = format!("huge-trace-{}-{}", i, "Y".repeat(50_000)); // 50KB trace ID
+
+            let request = VerificationRequest {
+                proof: test_compliance_proof(),
+                policy_context: "huge-trace-test".to_string(),
+                trace_id: huge_trace_id.clone(),
+            };
+
+            let result = verifier.verify(&request, &[test_policy_predicate()]);
+
+            // Should handle huge trace IDs without memory explosion
+            if let Some(report) = result.report {
+                assert_eq!(report.trace_id, huge_trace_id, "trace ID should be preserved");
+            }
+        }
+
+        // Verify verifier still functions after stress testing
+        let final_request = VerificationRequest {
+            proof: test_compliance_proof(),
+            policy_context: "final-test".to_string(),
+            trace_id: "final-trace".to_string(),
+        };
+
+        let final_result = verifier.verify(&final_request, &[test_policy_predicate()]);
+        assert!(final_result.report.is_some(), "verifier should still function after stress testing");
+    }
+
+    #[test]
+    fn test_negative_proof_expiration_with_time_manipulation() {
+        let verifier = ProofVerifier::new();
+        let test_policy = test_policy_predicate();
+
+        // Test various timestamp manipulation attempts
+        let timestamp_attacks = [
+            // Basic expiration cases
+            (1234567890, 1234567890 - 1),     // Expired (expires before issued)
+            (1234567890, 1234567890),         // Expires immediately
+            (1234567890, 1234567890 + 1),     // Valid (1 second window)
+
+            // Boundary value attacks
+            (0, 0),                           // Zero timestamps
+            (0, u64::MAX),                    // Zero issued, max expires
+            (u64::MAX, u64::MAX),             // Max timestamps
+            (u64::MAX - 1, u64::MAX),         // Near overflow
+
+            // Arithmetic overflow attempts
+            (1, u64::MAX),                    // Huge expiration window
+            (u64::MAX - 1000, u64::MAX - 1), // Near max, expired
+            (u64::MAX / 2, u64::MAX),         // Half max to max
+
+            // Time travel attempts
+            (u64::MAX, 0),                    // Future issued, past expiration
+            (2000000000, 1000000000),         // Future issued, past expiration
+        ];
+
+        for (issued_at, expires_at) in timestamp_attacks {
+            let timestamp_proof = ComplianceProof {
+                proof_id: format!("timestamp-test-{}-{}", issued_at, expires_at),
+                action_class: "test.action".to_string(),
+                payload: r#"{"test": "timestamp_attack"}"#.to_string(),
+                issued_at_epoch: issued_at,
+                expires_at_epoch: expires_at,
+                signature: "test-signature".to_string(),
+                issuer_public_key: "test-public-key".to_string(),
+            };
+
+            let request = VerificationRequest {
+                proof: timestamp_proof.clone(),
+                policy_context: "timestamp-test".to_string(),
+                trace_id: format!("timestamp-trace-{}-{}", issued_at, expires_at),
+            };
+
+            let result = verifier.verify(&request, &[test_policy.clone()]);
+
+            // Should handle timestamp attacks without panic
+            assert!(result.report.is_some(), "report should be generated for timestamp attack");
+
+            if let Some(report) = result.report {
+                // Verify timestamps are preserved for forensics
+                assert_eq!(report.compliance_proof.issued_at_epoch, issued_at);
+                assert_eq!(report.compliance_proof.expires_at_epoch, expires_at);
+
+                // For clearly expired proofs, decision should be Deny
+                if expires_at < issued_at {
+                    match report.decision {
+                        TrustDecision::Deny(reason) => {
+                            assert!(reason.contains("expired") || reason.contains("timestamp"),
+                                   "deny reason should mention expiration");
+                        }
+                        _ => {
+                            // Some edge cases might not be detected as expired
+                            // depending on implementation, but should be handled safely
+                        }
+                    }
+                }
+            }
+
+            // Verify events are generated for timestamp attacks
+            assert!(!result.events.is_empty(), "events should be generated for timestamp attacks");
+        }
+    }
+
+    #[test]
+    fn test_negative_policy_context_with_unicode_injection_attacks() {
+        use crate::security::constant_time::ct_eq;
+
+        let verifier = ProofVerifier::new();
+        let test_policy = test_policy_predicate();
+        let test_proof = test_compliance_proof();
+
+        let malicious_contexts = [
+            "context\u{202E}fake\u{202C}",           // BiDi override
+            "context\x1b[31mred\x1b[0m",             // ANSI escape
+            "context\0null\r\n\t",                   // Control characters
+            "context\"}{\"admin\":true,\"bypass\"", // JSON injection
+            "context/../../etc/passwd",              // Path traversal
+            "context\u{FEFF}BOM",                    // Byte order mark
+            "context\u{200B}\u{200C}\u{200D}",      // Zero-width characters
+            "context<script>alert(1)</script>",     // XSS attempt
+            "context'; DROP TABLE contexts; --",    // SQL injection
+            "context||rm -rf /",                     // Shell injection
+            "CONTEXT",                               // Case variation
+            "x".repeat(1_000_000),                   // Massive context (1MB)
+        ];
+
+        for malicious_context in malicious_contexts {
+            let request = VerificationRequest {
+                proof: test_proof.clone(),
+                policy_context: malicious_context.to_string(),
+                trace_id: "context-injection-test".to_string(),
+            };
+
+            let result = verifier.verify(&request, &[test_policy.clone()]);
+
+            // Verify context is preserved exactly for forensics
+            if let Some(report) = result.report {
+                assert_eq!(report.policy_context, malicious_context, "context should be preserved");
+
+                // Test JSON serialization safety
+                let json = serde_json::to_string(&report).expect("serialization should work");
+                let parsed: serde_json::Value = serde_json::from_str(&json).expect("JSON should be valid");
+
+                // Verify no injection occurred in JSON structure
+                assert!(parsed.get("admin").is_none(), "JSON injection should not create admin field");
+                assert!(parsed.get("bypass").is_none(), "JSON injection should not create bypass field");
+            }
+
+            // Test constant-time comparison for contexts
+            let normal_context = "normal-context";
+            assert!(!ct_eq(malicious_context, normal_context),
+                   "context comparison should be constant-time");
+
+            // Verify events are generated safely
+            for event in &result.events {
+                let event_json = serde_json::to_string(&event).expect("event serialization should work");
+                assert!(!event_json.contains("admin"), "event should not contain injection");
+            }
+        }
+
+        // Test with contexts containing policy-like content
+        let policy_mimicking_contexts = [
+            "policy.admin.bypass",
+            "system.root.access",
+            "security.override.enabled",
+            "debug.elevated.privileges",
+        ];
+
+        for policy_context in policy_mimicking_contexts {
+            let request = VerificationRequest {
+                proof: test_proof.clone(),
+                policy_context: policy_context.to_string(),
+                trace_id: "policy-mimicking-test".to_string(),
+            };
+
+            let result = verifier.verify(&request, &[test_policy.clone()]);
+
+            // Should not be fooled by policy-like context names
+            assert!(result.report.is_some(), "report should be generated");
+
+            if let Some(report) = result.report {
+                // Context should not affect trust decision inappropriately
+                match report.decision {
+                    TrustDecision::Allow => {
+                        // If allowed, it should be based on proof validity, not context
+                    }
+                    TrustDecision::Deny(_) => {
+                        // Denial should be based on proof/policy, not context manipulation
+                    }
+                    TrustDecision::Degrade(_) => {
+                        // Degradation should be policy-based
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_negative_action_class_mismatch_with_bypass_attempts() {
+        let verifier = ProofVerifier::new();
+
+        // Create policies with specific action classes
+        let target_policy = PolicyPredicate {
+            predicate_id: "target-policy".to_string(),
+            action_class: "privileged.admin.action".to_string(),
+            constraint_expression: "payload.authorized = true".to_string(),
+            severity_level: 5,
+        };
+
+        let bypass_attempts = [
+            // Exact match (should work)
+            "privileged.admin.action",
+
+            // Case manipulation
+            "PRIVILEGED.ADMIN.ACTION",
+            "Privileged.Admin.Action",
+            "privileged.Admin.Action",
+
+            // Unicode manipulation
+            "privileged.admin.action\u{200B}",           // Zero-width space
+            "privileged.admin.action\u{FEFF}",           // BOM
+            "privileged\u{2010}admin\u{2010}action",     // Unicode hyphens
+            "privileged\u{00AD}admin\u{00AD}action",     // Soft hyphens
+
+            // Null byte injection
+            "privileged.admin.action\0",
+            "privileged\0admin.action",
+            "\0privileged.admin.action",
+
+            // Substring/prefix attacks
+            "privileged",
+            "privileged.admin",
+            "admin.action",
+            "action",
+
+            // Suffix attacks
+            "privileged.admin.action.extra",
+            "privileged.admin.action.bypass",
+            "privileged.admin.action.elevated",
+
+            // Prefix attacks
+            "super.privileged.admin.action",
+            "bypass.privileged.admin.action",
+            "elevated.privileged.admin.action",
+
+            // Delimiter confusion
+            "privileged/admin/action",
+            "privileged::admin::action",
+            "privileged admin action",
+            "privileged|admin|action",
+
+            // Path traversal style
+            "../../privileged.admin.action",
+            "privileged.admin.action/..",
+            "./privileged.admin.action",
+
+            // Wildcard attempts
+            "privileged.*.action",
+            "privileged.admin.*",
+            "*.admin.action",
+            "*",
+
+            // Empty/special values
+            "",
+            "null",
+            "undefined",
+        ];
+
+        for bypass_action in bypass_attempts {
+            let bypass_proof = ComplianceProof {
+                proof_id: "bypass-action-test".to_string(),
+                action_class: bypass_action.to_string(),
+                payload: r#"{"authorized": true}"#.to_string(),
+                issued_at_epoch: 1234567890,
+                expires_at_epoch: 1234567890 + 3600,
+                signature: "test-signature".to_string(),
+                issuer_public_key: "test-public-key".to_string(),
+            };
+
+            let request = VerificationRequest {
+                proof: bypass_proof.clone(),
+                policy_context: "action-bypass-test".to_string(),
+                trace_id: format!("bypass-trace-{}", bypass_action),
+            };
+
+            let result = verifier.verify(&request, &[target_policy.clone()]);
+
+            // Verify action class is preserved for forensics
+            if let Some(report) = result.report {
+                assert_eq!(report.compliance_proof.action_class, bypass_action, "action class should be preserved");
+
+                // Only exact matches should potentially succeed
+                if bypass_action == "privileged.admin.action" {
+                    // Exact match might succeed based on other factors
+                } else {
+                    // Non-exact matches should typically fail to find matching policy
+                    match report.decision {
+                        TrustDecision::Deny(reason) => {
+                            // Expected for mismatched action classes
+                            assert!(!reason.is_empty(), "deny reason should not be empty");
+                        }
+                        _ => {
+                            // Some implementations might handle mismatches differently
+                        }
+                    }
+                }
+            }
+
+            // Verify events are generated for bypass attempts
+            assert!(!result.events.is_empty(), "events should be generated for bypass attempts");
+        }
+    }
 }

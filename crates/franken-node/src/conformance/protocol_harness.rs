@@ -29,6 +29,7 @@ pub struct PolicyOverride {
 pub enum GateErrorCode {
     PublicationBlocked,
     OverrideExpired,
+    OverrideInvalid,
     OverrideScopeMismatch,
     ConnectorIdMismatch,
 }
@@ -38,6 +39,7 @@ impl fmt::Display for GateErrorCode {
         match self {
             Self::PublicationBlocked => write!(f, "PUBLICATION_BLOCKED"),
             Self::OverrideExpired => write!(f, "OVERRIDE_EXPIRED"),
+            Self::OverrideInvalid => write!(f, "OVERRIDE_INVALID"),
             Self::OverrideScopeMismatch => write!(f, "OVERRIDE_SCOPE_MISMATCH"),
             Self::ConnectorIdMismatch => write!(f, "CONNECTOR_ID_MISMATCH"),
         }
@@ -142,6 +144,58 @@ fn apply_override(
 ) -> PublicationGateResult {
     let mut errors = Vec::new();
 
+    if policy.override_id.trim().is_empty() {
+        errors.push(GateError {
+            code: GateErrorCode::OverrideInvalid,
+            message: "Override ID must not be empty".to_string(),
+        });
+    } else if policy.override_id != policy.override_id.trim() {
+        errors.push(GateError {
+            code: GateErrorCode::OverrideInvalid,
+            message: format!(
+                "Override '{}' contains leading or trailing whitespace",
+                policy.override_id
+            ),
+        });
+    }
+
+    if policy.reason.trim().is_empty() {
+        errors.push(GateError {
+            code: GateErrorCode::OverrideInvalid,
+            message: format!("Override '{}' must include a reason", policy.override_id),
+        });
+    }
+
+    if policy.authorized_by.trim().is_empty() {
+        errors.push(GateError {
+            code: GateErrorCode::OverrideInvalid,
+            message: format!(
+                "Override '{}' must include an authorizing principal",
+                policy.override_id
+            ),
+        });
+    }
+
+    if policy.expires_at.trim().is_empty() {
+        errors.push(GateError {
+            code: GateErrorCode::OverrideInvalid,
+            message: format!("Override '{}' must include an expiry", policy.override_id),
+        });
+    }
+
+    for scope in &policy.scope {
+        if scope.trim().is_empty() || scope != scope.trim() {
+            errors.push(GateError {
+                code: GateErrorCode::OverrideInvalid,
+                message: format!(
+                    "Override '{}' contains malformed scope entry {:?}",
+                    policy.override_id, scope
+                ),
+            });
+            break;
+        }
+    }
+
     // Check connector match
     if connector_id != policy.connector_id {
         warn!(
@@ -160,7 +214,7 @@ fn apply_override(
     }
 
     // Check expiry
-    if current_time >= policy.expires_at.as_str() {
+    if !policy.expires_at.trim().is_empty() && current_time >= policy.expires_at.as_str() {
         warn!(
             override_id = %policy.override_id,
             expires_at = %policy.expires_at,
@@ -380,6 +434,30 @@ mod tests {
     }
 
     #[test]
+    fn override_at_exact_expiry_blocks_fail_closed() {
+        let policy = PolicyOverride {
+            expires_at: "2026-01-01T00:00:00Z".to_string(),
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(!result.override_applied);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::OverrideExpired)
+        );
+    }
+
+    #[test]
     fn scope_mismatch_blocks() {
         let policy = PolicyOverride {
             scope: vec!["SCHEMA_MISMATCH:handshake".to_string()], // wrong scope
@@ -401,6 +479,59 @@ mod tests {
     }
 
     #[test]
+    fn empty_override_scope_blocks_and_lists_uncovered_failure() {
+        let policy = PolicyOverride {
+            scope: vec![],
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        let scope_error = result
+            .errors
+            .iter()
+            .find(|e| e.code == GateErrorCode::OverrideScopeMismatch)
+            .expect("scope mismatch");
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(!result.override_applied);
+        assert!(scope_error.message.contains("METHOD_MISSING:handshake"));
+    }
+
+    #[test]
+    fn partial_override_scope_blocks_when_second_failure_is_uncovered() {
+        let mut declarations = missing_handshake_declarations();
+        declarations
+            .iter_mut()
+            .find(|decl| decl.name == "describe")
+            .expect("describe declaration")
+            .has_output_schema = false;
+        let policy = PolicyOverride {
+            scope: vec!["METHOD_MISSING:handshake".to_string()],
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &declarations,
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        let scope_error = result
+            .errors
+            .iter()
+            .find(|e| e.code == GateErrorCode::OverrideScopeMismatch)
+            .expect("scope mismatch");
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(scope_error.message.contains("SCHEMA_MISMATCH:describe"));
+    }
+
+    #[test]
     fn connector_id_mismatch_blocks() {
         let policy = valid_override(); // connector_id is "test-conn"
         let result = check_publication(
@@ -416,6 +547,229 @@ mod tests {
                 .iter()
                 .any(|e| e.code == GateErrorCode::ConnectorIdMismatch)
         );
+    }
+
+    #[test]
+    fn override_with_multiple_defects_reports_each_gate_error() {
+        let policy = PolicyOverride {
+            connector_id: "other-conn".to_string(),
+            expires_at: "2020-01-01T00:00:00Z".to_string(),
+            scope: vec![],
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+        let codes: Vec<&GateErrorCode> = result.errors.iter().map(|error| &error.code).collect();
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert_eq!(result.errors.len(), 3);
+        assert!(codes.contains(&&GateErrorCode::ConnectorIdMismatch));
+        assert!(codes.contains(&&GateErrorCode::OverrideExpired));
+        assert!(codes.contains(&&GateErrorCode::OverrideScopeMismatch));
+    }
+
+    #[test]
+    fn connector_mismatch_error_message_preserves_expected_and_actual_ids() {
+        let policy = valid_override();
+
+        let result = check_publication(
+            "wrong-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        let mismatch = result
+            .errors
+            .iter()
+            .find(|e| e.code == GateErrorCode::ConnectorIdMismatch)
+            .expect("connector mismatch");
+        assert!(mismatch.message.contains("test-conn"));
+        assert!(mismatch.message.contains("wrong-conn"));
+        assert!(!result.override_applied);
+    }
+
+    #[test]
+    fn override_with_empty_id_blocks_even_when_scope_matches() {
+        let policy = PolicyOverride {
+            override_id: String::new(),
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(!result.override_applied);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::OverrideInvalid)
+        );
+    }
+
+    #[test]
+    fn override_with_blank_reason_blocks_even_when_scope_matches() {
+        let policy = PolicyOverride {
+            reason: " \t ".to_string(),
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(result.errors.iter().any(|e| e.message.contains("reason")));
+    }
+
+    #[test]
+    fn override_with_blank_authorizer_blocks_even_when_scope_matches() {
+        let policy = PolicyOverride {
+            authorized_by: String::new(),
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("authorizing principal"))
+        );
+    }
+
+    #[test]
+    fn override_with_empty_expiry_blocks_without_expired_shadow_error() {
+        let policy = PolicyOverride {
+            expires_at: String::new(),
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::OverrideInvalid)
+        );
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| e.code == GateErrorCode::OverrideExpired)
+        );
+    }
+
+    #[test]
+    fn override_with_blank_scope_entry_blocks() {
+        let policy = PolicyOverride {
+            scope: vec!["METHOD_MISSING:handshake".to_string(), " ".to_string()],
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("malformed scope"))
+        );
+    }
+
+    #[test]
+    fn override_with_trim_required_scope_entry_blocks() {
+        let policy = PolicyOverride {
+            scope: vec![" METHOD_MISSING:handshake ".to_string()],
+            ..valid_override()
+        };
+
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            Some(&policy),
+            "2026-01-01T00:00:00Z",
+        );
+
+        let codes: Vec<&GateErrorCode> = result.errors.iter().map(|error| &error.code).collect();
+
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert!(codes.contains(&&GateErrorCode::OverrideInvalid));
+        assert!(codes.contains(&&GateErrorCode::OverrideScopeMismatch));
+    }
+
+    #[test]
+    fn failed_connector_without_override_preserves_failure_context() {
+        let result = check_publication(
+            "test-conn",
+            &missing_handshake_declarations(),
+            None,
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.connector_id, "test-conn");
+        assert_eq!(result.conformance_verdict, "FAIL");
+        assert_eq!(result.gate_decision, "BLOCK");
+        assert_eq!(result.errors.len(), 1);
+        assert!(result.errors[0].message.contains("failed conformance"));
+    }
+
+    #[test]
+    fn harness_with_only_blocked_connectors_fails_and_counts_all_blocks() {
+        let connectors = vec![
+            (
+                "conn-fail-1".to_string(),
+                missing_handshake_declarations(),
+                None,
+            ),
+            (
+                "conn-fail-2".to_string(),
+                missing_handshake_declarations(),
+                None,
+            ),
+        ];
+
+        let report = run_harness(&connectors, "2026-01-01T00:00:00Z");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.total_connectors, 2);
+        assert_eq!(report.passed, 0);
+        assert_eq!(report.overridden, 0);
+        assert_eq!(report.blocked, 2);
     }
 
     #[test]

@@ -19,8 +19,12 @@ use super::correctness_envelope::{CorrectnessEnvelope, InvariantId, PolicyPropos
 const MAX_REJECTED_MUTATIONS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -932,5 +936,137 @@ mod tests {
     fn default_creates_empty_checker() {
         let c = ControllerBoundaryChecker::default();
         assert_eq!(c.rejection_count(), 0);
+    }
+
+    #[test]
+    fn empty_proposal_records_unknown_invariant_audit_entry() {
+        let env = envelope();
+        let mut c = checker();
+
+        let err = c
+            .check_proposal(&empty_proposal(), &env, 11_000)
+            .unwrap_err();
+
+        assert_eq!(err.stable_error_class, ErrorClass::UnknownInvariantTarget);
+        assert_eq!(c.checks_passed(), 0);
+        assert_eq!(c.checks_rejected(), 1);
+        assert_eq!(c.rejection_count(), 1);
+        let record = &c.rejected_mutations()[0];
+        assert_eq!(record.violated_invariant.as_str(), "UNKNOWN");
+        assert_eq!(record.error_class, ErrorClass::UnknownInvariantTarget);
+        assert_eq!(record.controller_id, "controller-gamma");
+        assert_eq!(record.timestamp, 11_000);
+    }
+
+    #[test]
+    fn empty_proposal_report_counts_unknown_class() {
+        let env = envelope();
+        let mut c = checker();
+
+        let _ = c.check_proposal(&empty_proposal(), &env, 11_001);
+        let report = c.rejection_report();
+
+        assert_eq!(report["total_rejections"], 1);
+        assert_eq!(report["total_passed"], 0);
+        assert_eq!(report["per_invariant"]["UNKNOWN"], 1);
+        assert_eq!(report["per_error_class"]["unknown_invariant_target"], 1);
+    }
+
+    #[test]
+    fn empty_proposal_id_records_envelope_bypass_audit_entry() {
+        let env = envelope();
+        let mut c = checker();
+
+        let err = c
+            .check_proposal(&malformed_proposal(), &env, 11_002)
+            .unwrap_err();
+
+        assert_eq!(err.stable_error_class, ErrorClass::EnvelopeBypass);
+        assert_eq!(c.checks_rejected(), 1);
+        let record = &c.rejected_mutations()[0];
+        assert_eq!(record.error_class, ErrorClass::EnvelopeBypass);
+        assert_eq!(record.controller_id, "controller-delta");
+        assert!(record.proposal_summary.contains("proposal=(empty)"));
+    }
+
+    #[test]
+    fn malformed_and_empty_proposals_do_not_increment_pass_count() {
+        let env = envelope();
+        let mut c = checker();
+
+        let _ = c.check_proposal(&empty_proposal(), &env, 11_003);
+        let _ = c.check_proposal(&malformed_proposal(), &env, 11_004);
+
+        assert_eq!(c.checks_passed(), 0);
+        assert_eq!(c.checks_rejected(), 2);
+        assert_eq!(c.rejection_count(), 2);
+    }
+
+    #[test]
+    fn restore_audit_trail_rejects_malformed_json_without_replacing_records() {
+        let env = envelope();
+        let mut c = checker();
+        let _ = c.check_proposal(&violating_proposal("hardening.direction"), &env, 11_005);
+        let before = c.rejected_mutations().to_vec();
+
+        let err = c.restore_audit_trail(b"{not-json");
+
+        assert!(err.is_err());
+        assert_eq!(c.rejected_mutations(), before.as_slice());
+        assert_eq!(c.checks_rejected(), 1);
+    }
+
+    #[test]
+    fn restore_audit_trail_rejects_invalid_error_class_without_replacing_records() {
+        let env = envelope();
+        let mut c = checker();
+        let _ = c.check_proposal(&violating_proposal("evidence.suppress"), &env, 11_006);
+        let before = c.rejected_mutations().to_vec();
+        let bad_payload = br#"[{
+            "timestamp": 1,
+            "proposal_summary": "bad",
+            "violated_invariant": "UNKNOWN",
+            "controller_id": "controller-bad",
+            "error_class": "not_a_real_class",
+            "epoch_id": 1
+        }]"#;
+
+        let err = c.restore_audit_trail(bad_payload);
+
+        assert!(err.is_err());
+        assert_eq!(c.rejected_mutations(), before.as_slice());
+        assert_eq!(c.checks_rejected(), 1);
+    }
+
+    #[test]
+    fn error_class_from_label_rejects_normalized_near_misses() {
+        for label in [
+            "",
+            "CorrectnessSemanticMutation",
+            "correctness-semantic-mutation",
+            " correctness_semantic_mutation",
+            "correctness_semantic_mutation ",
+            "unknown_invariant_target\0",
+        ] {
+            assert!(ErrorClass::from_label(label).is_none());
+        }
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_rejection_window() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_rejections() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 }

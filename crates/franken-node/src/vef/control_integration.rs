@@ -1050,6 +1050,261 @@ mod tests {
         assert_eq!(gate.metrics().pending_count, 0);
     }
 
+    #[test]
+    fn test_exact_expiry_boundary_denied_fail_closed() {
+        let mut gate = default_gate();
+        let mut ev = valid_evidence("ev-boundary-expiry", vec![TransitionType::CapabilityGrant]);
+        ev.expires_at_millis = NOW;
+        let req = make_request(
+            "req-boundary-expiry",
+            TransitionType::CapabilityGrant,
+            vec![ev],
+        );
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_EXPIRED_EVIDENCE);
+            assert_eq!(
+                reason.event_code,
+                event_codes::CTL_004_DENIED_EXPIRED_EVIDENCE
+            );
+        }
+        assert_eq!(gate.metrics().authorized_count, 0);
+        assert_eq!(gate.metrics().denied_expired_evidence, 1);
+    }
+
+    #[test]
+    fn test_exact_max_age_boundary_denied_fail_closed() {
+        let policy = GatePolicy {
+            max_evidence_age_millis: 1_000,
+            ..GatePolicy::default()
+        };
+        let mut gate = ControlTransitionGate::new(policy, NOW);
+        let mut ev = valid_evidence("ev-boundary-age", vec![TransitionType::TrustLevelChange]);
+        ev.created_at_millis = NOW - 1_000;
+        let req = make_request(
+            "req-boundary-age",
+            TransitionType::TrustLevelChange,
+            vec![ev],
+        );
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_EXPIRED_EVIDENCE);
+        }
+        assert_eq!(gate.metrics().denied_expired_evidence, 1);
+    }
+
+    #[test]
+    fn test_zero_min_evidence_override_still_denies_empty_evidence() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            TransitionType::PolicyOverride,
+            TransitionOverride {
+                min_evidence_count: Some(0),
+                max_evidence_age_millis: None,
+                min_trust_level: None,
+            },
+        );
+        let policy = GatePolicy {
+            transition_overrides: overrides,
+            ..GatePolicy::default()
+        };
+        let mut gate = ControlTransitionGate::new(policy, NOW);
+        let req = make_request("req-zero-min", TransitionType::PolicyOverride, vec![]);
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_MISSING_EVIDENCE);
+        }
+        assert_eq!(gate.metrics().denied_missing_evidence, 1);
+    }
+
+    #[test]
+    fn test_trust_denial_precedes_missing_evidence_metric() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            TransitionType::ArtifactPromotion,
+            TransitionOverride {
+                min_evidence_count: None,
+                max_evidence_age_millis: None,
+                min_trust_level: Some(90),
+            },
+        );
+        let policy = GatePolicy {
+            transition_overrides: overrides,
+            ..GatePolicy::default()
+        };
+        let mut gate = ControlTransitionGate::new(policy, NOW);
+        let req = make_request(
+            "req-low-trust-empty",
+            TransitionType::ArtifactPromotion,
+            vec![],
+        );
+        let ctx = ActorTrustContext {
+            actor_identity: "actor-low".to_string(),
+            trust_level: 20,
+            capabilities: vec![],
+        };
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_INSUFFICIENT_TRUST);
+        }
+        assert_eq!(gate.metrics().denied_insufficient_trust, 1);
+        assert_eq!(gate.metrics().denied_missing_evidence, 0);
+    }
+
+    #[test]
+    fn test_pending_evidence_with_empty_hash_is_denied_invalid() {
+        let mut gate = default_gate();
+        let ev = VefEvidenceRef {
+            evidence_id: "ev-pending-empty-hash".to_string(),
+            evidence_hash: String::new(),
+            scope: vec![TransitionType::CapabilityGrant],
+            state: VerificationState::Unverified,
+            created_at_millis: NOW - 500,
+            expires_at_millis: NOW + 3_600_000,
+            trace_id: "trace-test".to_string(),
+        };
+        let req = make_request(
+            "req-pending-empty-hash",
+            TransitionType::CapabilityGrant,
+            vec![ev],
+        );
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_INVALID_HASH);
+        }
+        assert_eq!(gate.metrics().pending_count, 0);
+        assert_eq!(gate.metrics().denied_invalid_hash, 1);
+    }
+
+    #[test]
+    fn test_invalid_evidence_takes_precedence_over_pending_shortfall() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            TransitionType::CapabilityGrant,
+            TransitionOverride {
+                min_evidence_count: Some(2),
+                max_evidence_age_millis: None,
+                min_trust_level: None,
+            },
+        );
+        let policy = GatePolicy {
+            transition_overrides: overrides,
+            ..GatePolicy::default()
+        };
+        let mut gate = ControlTransitionGate::new(policy, NOW);
+        let invalid = VefEvidenceRef {
+            evidence_id: "ev-invalid-shortfall".to_string(),
+            evidence_hash: "sha256:invalid-shortfall".to_string(),
+            scope: vec![TransitionType::CapabilityGrant],
+            state: VerificationState::Invalid,
+            created_at_millis: NOW - 500,
+            expires_at_millis: NOW + 3_600_000,
+            trace_id: "trace-test".to_string(),
+        };
+        let pending = VefEvidenceRef {
+            evidence_id: "ev-pending-shortfall".to_string(),
+            evidence_hash: "sha256:pending-shortfall".to_string(),
+            scope: vec![TransitionType::CapabilityGrant],
+            state: VerificationState::Unverified,
+            created_at_millis: NOW - 500,
+            expires_at_millis: NOW + 3_600_000,
+            trace_id: "trace-test".to_string(),
+        };
+        let req = make_request(
+            "req-invalid-pending-shortfall",
+            TransitionType::CapabilityGrant,
+            vec![invalid, pending],
+        );
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_INVALID_HASH);
+        }
+        assert_eq!(gate.metrics().pending_count, 0);
+        assert_eq!(gate.metrics().denied_invalid_hash, 1);
+    }
+
+    #[test]
+    fn test_scope_mismatch_precedes_unverified_state() {
+        let mut gate = default_gate();
+        let ev = VefEvidenceRef {
+            evidence_id: "ev-wrong-scope-pending".to_string(),
+            evidence_hash: "sha256:wrong-scope-pending".to_string(),
+            scope: vec![TransitionType::TrustLevelChange],
+            state: VerificationState::Unverified,
+            created_at_millis: NOW - 500,
+            expires_at_millis: NOW + 3_600_000,
+            trace_id: "trace-test".to_string(),
+        };
+        let req = make_request(
+            "req-wrong-scope-pending",
+            TransitionType::PolicyOverride,
+            vec![ev],
+        );
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_SCOPE_MISMATCH);
+        }
+        assert_eq!(gate.metrics().pending_count, 0);
+        assert_eq!(gate.metrics().denied_scope_mismatch, 1);
+    }
+
+    #[test]
+    fn test_zero_max_age_override_denies_fresh_evidence() {
+        let mut overrides = BTreeMap::new();
+        overrides.insert(
+            TransitionType::ArtifactPromotion,
+            TransitionOverride {
+                min_evidence_count: None,
+                max_evidence_age_millis: Some(0),
+                min_trust_level: None,
+            },
+        );
+        let policy = GatePolicy {
+            transition_overrides: overrides,
+            ..GatePolicy::default()
+        };
+        let mut gate = ControlTransitionGate::new(policy, NOW);
+        let mut ev = valid_evidence("ev-zero-age", vec![TransitionType::ArtifactPromotion]);
+        ev.created_at_millis = NOW;
+        let req = make_request("req-zero-age", TransitionType::ArtifactPromotion, vec![ev]);
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_EXPIRED_EVIDENCE);
+        }
+        assert_eq!(gate.metrics().denied_expired_evidence, 1);
+    }
+
     // Test 7: All transition types require evidence (INV-CTL-NO-BYPASS).
     #[test]
     fn test_all_transition_types_require_evidence() {
@@ -1544,5 +1799,149 @@ mod tests {
                 .all(|e| e.trace_id == "unique-trace-42"),
             "All events should propagate trace_id"
         );
+    }
+
+    #[test]
+    fn test_expiry_boundary_denies_at_exact_expiration() {
+        let mut gate = default_gate();
+        let ev = VefEvidenceRef {
+            evidence_id: "ev-expiry-boundary".to_string(),
+            evidence_hash: "sha256:boundary".to_string(),
+            scope: vec![TransitionType::CapabilityGrant],
+            state: VerificationState::Verified,
+            created_at_millis: NOW - 1,
+            expires_at_millis: NOW,
+            trace_id: "trace-test".to_string(),
+        };
+        let req = make_request(
+            "req-expiry-boundary",
+            TransitionType::CapabilityGrant,
+            vec![ev],
+        );
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_EXPIRED_EVIDENCE);
+        }
+    }
+
+    #[test]
+    fn test_age_boundary_denies_at_exact_max_age() {
+        let policy = GatePolicy {
+            max_evidence_age_millis: 1_000,
+            ..GatePolicy::default()
+        };
+        let mut gate = ControlTransitionGate::new(policy, NOW);
+        let ev = VefEvidenceRef {
+            evidence_id: "ev-age-boundary".to_string(),
+            evidence_hash: "sha256:age".to_string(),
+            scope: vec![TransitionType::TrustLevelChange],
+            state: VerificationState::Verified,
+            created_at_millis: NOW - 1_000,
+            expires_at_millis: NOW + 10_000,
+            trace_id: "trace-test".to_string(),
+        };
+        let req = make_request(
+            "req-age-boundary",
+            TransitionType::TrustLevelChange,
+            vec![ev],
+        );
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_EXPIRED_EVIDENCE);
+        }
+    }
+
+    #[test]
+    fn test_unverified_evidence_with_empty_hash_denied_not_pending() {
+        let mut gate = default_gate();
+        let ev = VefEvidenceRef {
+            evidence_id: "ev-pending-empty-hash".to_string(),
+            evidence_hash: String::new(),
+            scope: vec![TransitionType::ArtifactPromotion],
+            state: VerificationState::Unverified,
+            created_at_millis: NOW - 1,
+            expires_at_millis: NOW + 10_000,
+            trace_id: "trace-test".to_string(),
+        };
+        let req = make_request(
+            "req-pending-empty-hash",
+            TransitionType::ArtifactPromotion,
+            vec![ev],
+        );
+        let ctx = default_trust_ctx();
+
+        let decision = gate.evaluate(&req, &ctx);
+
+        assert!(decision.is_denied());
+        assert!(!decision.is_pending());
+        if let AuthorizationDecision::Denied { reason, .. } = &decision {
+            assert_eq!(reason.error_code, error_codes::ERR_CTL_INVALID_HASH);
+        }
+        assert_eq!(gate.metrics().pending_count, 0);
+    }
+
+    #[test]
+    fn test_transition_type_deserialize_rejects_unknown_variant() {
+        let result: Result<TransitionType, _> = serde_json::from_str(r#""capability_borrow""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_verification_state_deserialize_rejects_unknown_variant() {
+        let result: Result<VerificationState, _> = serde_json::from_str(r#""stale""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_authorization_decision_deserialize_rejects_unknown_tag() {
+        let json = r#"{
+            "decision": "escalated",
+            "detail": "manual review"
+        }"#;
+
+        let result: Result<AuthorizationDecision, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_transition_request_deserialize_rejects_missing_request_id() {
+        let json = r#"{
+            "transition_type": "capability_grant",
+            "actor_identity": "actor-1",
+            "target_identity": "target-1",
+            "evidence_refs": [],
+            "context": {},
+            "trace_id": "trace-test",
+            "requested_at_millis": 1000000
+        }"#;
+
+        let result: Result<TransitionRequest, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_gate_policy_deserialize_rejects_string_trust_level() {
+        let json = r#"{
+            "max_evidence_age_millis": 3600000,
+            "min_evidence_count": 1,
+            "min_trust_level": "80",
+            "transition_overrides": {}
+        }"#;
+
+        let result: Result<GatePolicy, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
     }
 }

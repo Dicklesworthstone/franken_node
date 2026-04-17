@@ -42,7 +42,7 @@ fn valid_test_proof() -> ComplianceProof {
         proof_hash: "sha256:test-proof-hash".to_string(),
         confidence: 95,
         generated_at_millis: NOW - 60_000, // 1 minute ago
-        expires_at_millis: NOW + 600_000, // 10 minutes from now
+        expires_at_millis: NOW + 600_000,  // 10 minutes from now
         witness_references: vec!["witness1".to_string(), "witness2".to_string()],
         policy_version_hash: "sha256:test-policy-v1".to_string(),
         trace_id: "test-trace".to_string(),
@@ -62,8 +62,10 @@ fn test_time_boundary_fail_closed_semantics() {
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
     let (decision, _) = result.unwrap();
-    assert!(matches!(decision, TrustDecision::Deny(_)),
-        "Proof expiring exactly at current time should be denied (fail-closed)");
+    assert!(
+        matches!(decision, TrustDecision::Deny(_)),
+        "Proof expiring exactly at current time should be denied (fail-closed)"
+    );
 
     // Test 2: Proof expires 1ms before current time (should fail)
     proof.expires_at_millis = NOW - 1;
@@ -79,7 +81,10 @@ fn test_time_boundary_fail_closed_semantics() {
     assert!(result.is_ok());
     let (decision, evidence) = result.unwrap();
     // Should pass expiry check specifically
-    let expiry_evidence = evidence.iter().find(|e| e.reason.contains("expiry")).unwrap();
+    let expiry_evidence = evidence
+        .iter()
+        .find(|e| e.reason.contains("expiry"))
+        .unwrap();
     assert!(expiry_evidence.satisfied);
 }
 
@@ -98,7 +103,10 @@ fn test_freshness_boundary_conditions() {
     let (decision, evidence) = result.unwrap();
     // Should fail freshness check
     let freshness_evidence = evidence.iter().find(|e| e.reason.contains("age")).unwrap();
-    assert!(!freshness_evidence.satisfied, "Proof at exact age limit should fail (fail-closed)");
+    assert!(
+        !freshness_evidence.satisfied,
+        "Proof at exact age limit should fail (fail-closed)"
+    );
 
     // Test 2: Proof age 1ms under limit (should pass)
     proof.generated_at_millis = NOW - predicate.max_proof_age_millis + 1;
@@ -114,7 +122,10 @@ fn test_freshness_boundary_conditions() {
     assert!(result.is_ok());
     let (decision, evidence) = result.unwrap();
     assert!(matches!(decision, TrustDecision::Deny(_)));
-    let freshness_evidence = evidence.iter().find(|e| e.reason.contains("future")).unwrap();
+    let freshness_evidence = evidence
+        .iter()
+        .find(|e| e.reason.contains("future"))
+        .unwrap();
     assert!(!freshness_evidence.satisfied);
 }
 
@@ -131,14 +142,23 @@ fn test_time_calculation_overflow_protection() {
     proof.expires_at_millis = u64::MAX;
 
     let result = verifier.validate_proof(&proof, &predicate, u64::MAX - 500, "test");
-    assert!(result.is_ok(), "Should handle very large timestamps without panic");
+    assert!(
+        result.is_ok(),
+        "Should handle very large timestamps without panic"
+    );
 
     // Test 2: Current time is smaller than generated time (underflow protection)
     proof.generated_at_millis = 1_000_000;
     let result = verifier.validate_proof(&proof, &predicate, 500_000, "test");
-    assert!(result.is_ok(), "Should handle timestamp underflow gracefully with saturating_sub");
+    assert!(
+        result.is_ok(),
+        "Should handle timestamp underflow gracefully with saturating_sub"
+    );
     let (_, evidence) = result.unwrap();
-    let freshness_evidence = evidence.iter().find(|e| e.reason.contains("future")).unwrap();
+    let freshness_evidence = evidence
+        .iter()
+        .find(|e| e.reason.contains("future"))
+        .unwrap();
     assert!(!freshness_evidence.satisfied);
 
     // Test 3: Zero timestamps
@@ -167,7 +187,10 @@ fn test_confidence_score_edge_cases() {
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
     let (decision, evidence) = result.unwrap();
-    let conf_evidence = evidence.iter().find(|e| e.reason.contains("confidence")).unwrap();
+    let conf_evidence = evidence
+        .iter()
+        .find(|e| e.reason.contains("confidence"))
+        .unwrap();
     assert!(conf_evidence.satisfied);
 
     // Test 2: Confidence 1 below minimum but above degrade threshold (should degrade)
@@ -198,7 +221,10 @@ fn test_confidence_score_edge_cases() {
     assert!(result.is_ok());
     let (decision, _) = result.unwrap();
     // Should pass confidence check but may fail others
-    let conf_evidence = evidence.iter().find(|e| e.reason.contains("confidence")).unwrap();
+    let conf_evidence = evidence
+        .iter()
+        .find(|e| e.reason.contains("confidence"))
+        .unwrap();
     assert!(conf_evidence.satisfied);
 }
 
@@ -220,7 +246,10 @@ fn test_witness_count_edge_cases() {
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
     let (_, evidence) = result.unwrap();
-    let witness_evidence = evidence.iter().find(|e| e.reason.contains("witness")).unwrap();
+    let witness_evidence = evidence
+        .iter()
+        .find(|e| e.reason.contains("witness"))
+        .unwrap();
     assert!(witness_evidence.satisfied);
 
     // Test 2: One less than required (should fail)
@@ -230,7 +259,10 @@ fn test_witness_count_edge_cases() {
     assert!(result.is_ok());
     let (decision, evidence) = result.unwrap();
     assert!(matches!(decision, TrustDecision::Deny(_)));
-    let witness_evidence = evidence.iter().find(|e| e.reason.contains("witness")).unwrap();
+    let witness_evidence = evidence
+        .iter()
+        .find(|e| e.reason.contains("witness"))
+        .unwrap();
     assert!(!witness_evidence.satisfied);
 
     // Test 3: Zero witnesses when none required (should pass)
@@ -239,7 +271,10 @@ fn test_witness_count_edge_cases() {
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
     assert!(result.is_ok());
     let (_, evidence) = result.unwrap();
-    let witness_evidence = evidence.iter().find(|e| e.reason.contains("witness")).unwrap();
+    let witness_evidence = evidence
+        .iter()
+        .find(|e| e.reason.contains("witness"))
+        .unwrap();
     assert!(witness_evidence.satisfied);
 
     // Test 4: Very large witness count (stress test)
@@ -290,46 +325,79 @@ fn test_input_validation_edge_cases() {
     proof = valid_test_proof();
     proof.proof_id = "x".repeat(1_000_000);
     let result = verifier.validate_proof(&proof, &predicate, NOW, "test");
-    assert!(result.is_ok(), "Should handle very long strings without crashing");
+    assert!(
+        result.is_ok(),
+        "Should handle very long strings without crashing"
+    );
 }
 
 /// Test cryptographic hash determinism and integrity
 #[test]
 fn test_hash_determinism_and_integrity() {
     // Test that identical inputs produce identical hashes
-    let evidence = vec![
-        PredicateEvidence {
-            predicate_id: "pred1".to_string(),
-            action_class: "action1".to_string(),
-            satisfied: true,
-            reason: "test reason".to_string(),
-        }
-    ];
+    let evidence = vec![PredicateEvidence {
+        predicate_id: "pred1".to_string(),
+        action_class: "action1".to_string(),
+        satisfied: true,
+        reason: "test reason".to_string(),
+    }];
 
     let digest1 = compute_report_digest(
-        "req1", "proof1", "action1", &TrustDecision::Allow, &evidence
-    ).unwrap();
+        "req1",
+        "proof1",
+        "action1",
+        &TrustDecision::Allow,
+        &evidence,
+    )
+    .unwrap();
 
     let digest2 = compute_report_digest(
-        "req1", "proof1", "action1", &TrustDecision::Allow, &evidence
-    ).unwrap();
+        "req1",
+        "proof1",
+        "action1",
+        &TrustDecision::Allow,
+        &evidence,
+    )
+    .unwrap();
 
-    assert_eq!(digest1, digest2, "Identical inputs should produce identical digests");
-    assert!(digest1.starts_with("sha256:"), "Digest should be SHA-256 formatted");
+    assert_eq!(
+        digest1, digest2,
+        "Identical inputs should produce identical digests"
+    );
+    assert!(
+        digest1.starts_with("sha256:"),
+        "Digest should be SHA-256 formatted"
+    );
 
     // Test that different inputs produce different hashes
     let digest3 = compute_report_digest(
-        "req2", "proof1", "action1", &TrustDecision::Allow, &evidence
-    ).unwrap();
+        "req2",
+        "proof1",
+        "action1",
+        &TrustDecision::Allow,
+        &evidence,
+    )
+    .unwrap();
 
-    assert_ne!(digest1, digest3, "Different inputs should produce different digests");
+    assert_ne!(
+        digest1, digest3,
+        "Different inputs should produce different digests"
+    );
 
     // Test decision type changes hash
     let digest4 = compute_report_digest(
-        "req1", "proof1", "action1", &TrustDecision::Deny("reason".to_string()), &evidence
-    ).unwrap();
+        "req1",
+        "proof1",
+        "action1",
+        &TrustDecision::Deny("reason".to_string()),
+        &evidence,
+    )
+    .unwrap();
 
-    assert_ne!(digest1, digest4, "Different decisions should produce different digests");
+    assert_ne!(
+        digest1, digest4,
+        "Different decisions should produce different digests"
+    );
 }
 
 /// Test sequence number overflow protection
@@ -391,25 +459,36 @@ fn test_memory_exhaustion_protection() {
         };
 
         let result = gate.verify(&request);
-        assert!(result.is_ok(), "Verification should not fail due to memory limits");
+        assert!(
+            result.is_ok(),
+            "Verification should not fail due to memory limits"
+        );
 
         // Check that reports are bounded
-        assert!(gate.reports().len() <= MAX_REPORTS,
-            "Reports should be bounded to prevent memory exhaustion");
+        assert!(
+            gate.reports().len() <= MAX_REPORTS,
+            "Reports should be bounded to prevent memory exhaustion"
+        );
     }
 
     // Ensure oldest reports were evicted (FIFO behavior)
-    let report_ids: Vec<String> = gate.reports().iter()
+    let report_ids: Vec<String> = gate
+        .reports()
+        .iter()
         .map(|r| r.request_id.clone())
         .collect();
 
     // Should not contain early requests (they should have been evicted)
-    assert!(!report_ids.contains(&"req-0".to_string()),
-        "Oldest reports should have been evicted");
+    assert!(
+        !report_ids.contains(&"req-0".to_string()),
+        "Oldest reports should have been evicted"
+    );
 
     // Should contain recent requests
-    assert!(report_ids.contains(&format!("req-{}", max_iterations - 1)),
-        "Most recent reports should be retained");
+    assert!(
+        report_ids.contains(&format!("req-{}", max_iterations - 1)),
+        "Most recent reports should be retained"
+    );
 }
 
 /// Test batch verification with mixed valid/invalid proofs
@@ -458,7 +537,10 @@ fn test_batch_verification_mixed_results() {
 
     // Second should succeed but with Deny decision
     assert!(results[1].is_ok());
-    assert!(matches!(results[1].as_ref().unwrap().decision, TrustDecision::Deny(_)));
+    assert!(matches!(
+        results[1].as_ref().unwrap().decision,
+        TrustDecision::Deny(_)
+    ));
 
     // Third should fail with error
     assert!(results[2].is_err());
@@ -494,12 +576,18 @@ fn test_constant_time_policy_comparison() {
 
     // Correct hash should pass policy version check
     let (_, evidence1) = result1.unwrap();
-    let policy_evidence1 = evidence1.iter().find(|e| e.reason.contains("policy version")).unwrap();
+    let policy_evidence1 = evidence1
+        .iter()
+        .find(|e| e.reason.contains("policy version"))
+        .unwrap();
     assert!(policy_evidence1.satisfied);
 
     // Wrong hash should fail policy version check
     let (_, evidence2) = result2.unwrap();
-    let policy_evidence2 = evidence2.iter().find(|e| e.reason.contains("policy version")).unwrap();
+    let policy_evidence2 = evidence2
+        .iter()
+        .find(|e| e.reason.contains("policy version"))
+        .unwrap();
     assert!(!policy_evidence2.satisfied);
 }
 
@@ -589,5 +677,139 @@ fn test_push_bounded_edge_cases() {
     for i in 0..5 {
         push_bounded(&mut items, i, 3);
     }
-    assert_eq!(items, vec![2, 3, 4], "Should maintain FIFO eviction with capacity 3");
+    assert_eq!(
+        items,
+        vec![2, 3, 4],
+        "Should maintain FIFO eviction with capacity 3"
+    );
+}
+
+/// Negative serde cases for external verifier API payloads.
+#[test]
+fn test_trust_decision_deserialize_rejects_unknown_variant() {
+    let result: Result<TrustDecision, _> = serde_json::from_str(r#""quarantine""#);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_compliance_proof_deserialize_rejects_missing_proof_id() {
+    let json = r#"{
+        "action_class": "test_action",
+        "proof_hash": "sha256:test-proof-hash",
+        "confidence": 95,
+        "generated_at_millis": 1700999940000,
+        "expires_at_millis": 1701000600000,
+        "witness_references": ["witness1", "witness2"],
+        "policy_version_hash": "sha256:test-policy-v1",
+        "trace_id": "test-trace"
+    }"#;
+
+    let result: Result<ComplianceProof, _> = serde_json::from_str(json);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_compliance_proof_deserialize_rejects_string_confidence() {
+    let json = r#"{
+        "proof_id": "test-proof-001",
+        "action_class": "test_action",
+        "proof_hash": "sha256:test-proof-hash",
+        "confidence": "95",
+        "generated_at_millis": 1700999940000,
+        "expires_at_millis": 1701000600000,
+        "witness_references": ["witness1", "witness2"],
+        "policy_version_hash": "sha256:test-policy-v1",
+        "trace_id": "test-trace"
+    }"#;
+
+    let result: Result<ComplianceProof, _> = serde_json::from_str(json);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_verification_request_deserialize_rejects_now_type_confusion() {
+    let json = r#"{
+        "request_id": "req-proof-001",
+        "proof": {
+            "proof_id": "test-proof-001",
+            "action_class": "test_action",
+            "proof_hash": "sha256:test-proof-hash",
+            "confidence": 95,
+            "generated_at_millis": 1700999940000,
+            "expires_at_millis": 1701000600000,
+            "witness_references": ["witness1", "witness2"],
+            "policy_version_hash": "sha256:test-policy-v1",
+            "trace_id": "test-trace"
+        },
+        "now_millis": "1701000000000",
+        "trace_id": "test-trace"
+    }"#;
+
+    let result: Result<VerificationRequest, _> = serde_json::from_str(json);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_verification_report_deserialize_rejects_missing_digest() {
+    let json = r#"{
+        "schema_version": "vef-proof-verifier-v1",
+        "request_id": "req-proof-001",
+        "proof_id": "test-proof-001",
+        "action_class": "test_action",
+        "decision": "allow",
+        "evidence": [],
+        "events": [],
+        "trace_id": "test-trace",
+        "created_at_millis": 1701000000000
+    }"#;
+
+    let result: Result<VerificationReport, _> = serde_json::from_str(json);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_verifier_event_deserialize_rejects_missing_event_code() {
+    let json = r#"{
+        "trace_id": "test-trace",
+        "detail": "missing event code"
+    }"#;
+
+    let result: Result<VerifierEvent, _> = serde_json::from_str(json);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_policy_predicate_deserialize_rejects_string_witness_count() {
+    let json = r#"{
+        "predicate_id": "test-predicate",
+        "action_class": "test_action",
+        "max_proof_age_millis": 600000,
+        "min_confidence": 90,
+        "require_witnesses": true,
+        "min_witness_count": "2",
+        "policy_version_hash": "sha256:test-policy-v1"
+    }"#;
+
+    let result: Result<PolicyPredicate, _> = serde_json::from_str(json);
+
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_gate_config_deserialize_rejects_string_degrade_threshold() {
+    let json = r#"{
+        "max_proof_age_millis": 3600000,
+        "degrade_threshold": "80",
+        "enforce_policy_version": true
+    }"#;
+
+    let result: Result<VerificationGateConfig, _> = serde_json::from_str(json);
+
+    assert!(result.is_err());
 }

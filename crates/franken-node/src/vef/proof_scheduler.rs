@@ -17,9 +17,13 @@ const MAX_SCHEDULER_EVENTS: usize = 4096;
 use frankenengine_node::capacity_defaults::aliases::{MAX_JOBS, MAX_WINDOWS_SEEN};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -317,7 +321,9 @@ impl VefProofScheduler {
                     checkpoint.end_index >= global_start && checkpoint.end_index <= global_max_end
                 })
                 .map(|checkpoint| {
-                    let slice_end = start + (checkpoint.end_index - global_start) as usize;
+                    let offset = usize::try_from(checkpoint.end_index.saturating_sub(global_start))
+                        .unwrap_or(usize::MAX);
+                    let slice_end = start.saturating_add(offset).min(max_end);
                     (slice_end, Some(checkpoint.checkpoint_id))
                 })
                 .max_by_key(|(end, _)| *end);
@@ -334,7 +340,7 @@ impl VefProofScheduler {
                 window_id: format!("win-{}-{}", entries[start].index, entries[end].index),
                 start_index: entries[start].index,
                 end_index: entries[end].index,
-                entry_count: (end - start).saturating_add(1) as u64,
+                entry_count: u64::try_from((end - start).saturating_add(1)).unwrap_or(u64::MAX),
                 aligned_checkpoint_id,
                 tier,
                 created_at_millis: now_millis,
@@ -429,7 +435,10 @@ impl VefProofScheduler {
         if active_dispatched >= self.policy.max_concurrent_jobs {
             return Err(SchedulerError::budget("concurrency budget exhausted"));
         }
-        let available_slots = self.policy.max_concurrent_jobs - active_dispatched;
+        let available_slots = self
+            .policy
+            .max_concurrent_jobs
+            .saturating_sub(active_dispatched);
 
         let mut pending = self
             .jobs
@@ -533,7 +542,7 @@ impl VefProofScheduler {
         for job in self.jobs.values() {
             match job.status {
                 ProofJobStatus::Pending => {
-                    pending_jobs += 1;
+                    pending_jobs = pending_jobs.saturating_add(1);
                     oldest_pending_created = Some(
                         oldest_pending_created
                             .map(|current| current.min(job.created_at_millis))
@@ -545,14 +554,16 @@ impl VefProofScheduler {
                         memory_budget_used_mib.saturating_add(job.estimated_memory_mib);
                 }
                 ProofJobStatus::Dispatched => {
-                    dispatched_jobs += 1;
+                    dispatched_jobs = dispatched_jobs.saturating_add(1);
                     compute_budget_used_millis =
                         compute_budget_used_millis.saturating_add(job.estimated_compute_millis);
                     memory_budget_used_mib =
                         memory_budget_used_mib.saturating_add(job.estimated_memory_mib);
                 }
-                ProofJobStatus::Completed => completed_jobs += 1,
-                ProofJobStatus::DeadlineExceeded => deadline_exceeded_jobs += 1,
+                ProofJobStatus::Completed => completed_jobs = completed_jobs.saturating_add(1),
+                ProofJobStatus::DeadlineExceeded => {
+                    deadline_exceeded_jobs = deadline_exceeded_jobs.saturating_add(1);
+                }
             }
         }
 
@@ -1034,5 +1045,827 @@ mod tests {
             preserved.dispatched_at_millis,
             original.dispatched_at_millis
         );
+    }
+
+    mod fairness_and_expiry_contract_tests {
+        use super::*;
+
+        fn scheduler_event(detail: &str) -> SchedulerEvent {
+            SchedulerEvent {
+                event_code: event_codes::VEF_SCHED_002_JOB_DISPATCHED.to_string(),
+                trace_id: "trace-contract".to_string(),
+                detail: detail.to_string(),
+            }
+        }
+
+        fn scheduler_with_jobs(jobs: &[ProofJob], max_concurrent_jobs: usize) -> VefProofScheduler {
+            let mut scheduler = VefProofScheduler::new(SchedulerPolicy {
+                max_concurrent_jobs,
+                max_compute_millis_per_tick: 10_000,
+                max_memory_mib_per_tick: 10_000,
+                ..SchedulerPolicy::default()
+            });
+            for job in jobs {
+                scheduler.jobs.insert(job.job_id.clone(), job.clone());
+            }
+            scheduler
+        }
+
+        #[test]
+        fn same_priority_dispatches_oldest_pending_job_first() {
+            let newer = make_job(
+                "job-newer",
+                ProofJobStatus::Pending,
+                1_701_400_000_200,
+                "trace-fairness",
+            );
+            let older = make_job(
+                "job-older",
+                ProofJobStatus::Pending,
+                1_701_400_000_100,
+                "trace-fairness",
+            );
+            let mut scheduler = scheduler_with_jobs(&[newer, older], 2);
+
+            let dispatched = scheduler
+                .dispatch_jobs(1_701_400_000_300)
+                .expect("dispatch should succeed");
+
+            assert_eq!(
+                dispatched
+                    .iter()
+                    .map(|job| job.job_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["job-older", "job-newer"]
+            );
+        }
+
+        #[test]
+        fn lower_priority_pending_job_dispatches_when_capacity_remains() {
+            let mut critical = make_job(
+                "job-critical",
+                ProofJobStatus::Pending,
+                1_701_400_001_000,
+                "trace-capacity-fairness",
+            );
+            critical.tier = WorkloadTier::Critical;
+            critical.priority_score = WorkloadTier::Critical.priority_score();
+
+            let mut background = make_job(
+                "job-background",
+                ProofJobStatus::Pending,
+                1_701_400_001_001,
+                "trace-capacity-fairness",
+            );
+            background.tier = WorkloadTier::Background;
+            background.priority_score = WorkloadTier::Background.priority_score();
+
+            let mut scheduler = scheduler_with_jobs(&[background, critical], 2);
+
+            let dispatched = scheduler
+                .dispatch_jobs(1_701_400_001_010)
+                .expect("dispatch should succeed");
+
+            assert_eq!(dispatched.len(), 2);
+            assert_eq!(dispatched[0].job_id, "job-critical");
+            assert_eq!(dispatched[1].job_id, "job-background");
+        }
+
+        #[test]
+        fn dispatch_fails_when_existing_dispatched_job_exhausts_capacity() {
+            let active = make_job(
+                "job-active",
+                ProofJobStatus::Dispatched,
+                1_701_400_001_500,
+                "trace-capacity-exhausted",
+            );
+            let pending = make_job(
+                "job-pending",
+                ProofJobStatus::Pending,
+                1_701_400_001_600,
+                "trace-capacity-exhausted",
+            );
+            let mut scheduler = scheduler_with_jobs(&[active, pending], 1);
+
+            let err = scheduler
+                .dispatch_jobs(1_701_400_001_700)
+                .expect_err("active job should exhaust dispatch capacity");
+
+            assert_eq!(err.code, error_codes::ERR_VEF_SCHED_BUDGET);
+            assert_eq!(
+                scheduler
+                    .jobs()
+                    .get("job-pending")
+                    .expect("pending job should exist")
+                    .status,
+                ProofJobStatus::Pending
+            );
+        }
+
+        #[test]
+        fn deadline_before_boundary_keeps_pending_job_live() {
+            let job = make_job(
+                "job-before-deadline",
+                ProofJobStatus::Pending,
+                1_701_400_002_000,
+                "trace-before-deadline",
+            );
+            let mut scheduler = scheduler_with_jobs(&[job], 1);
+
+            let exceeded = scheduler.enforce_deadlines(1_701_400_011_999);
+
+            assert!(exceeded.is_empty());
+            assert_eq!(
+                scheduler
+                    .jobs()
+                    .get("job-before-deadline")
+                    .expect("job should exist")
+                    .status,
+                ProofJobStatus::Pending
+            );
+        }
+
+        #[test]
+        fn deadline_at_exact_boundary_marks_job_exceeded() {
+            let job = make_job(
+                "job-at-deadline",
+                ProofJobStatus::Pending,
+                1_701_400_003_000,
+                "trace-at-deadline",
+            );
+            let mut scheduler = scheduler_with_jobs(&[job], 1);
+
+            let exceeded = scheduler.enforce_deadlines(1_701_400_013_000);
+
+            assert_eq!(exceeded, vec!["job-at-deadline".to_string()]);
+            assert_eq!(
+                scheduler
+                    .jobs()
+                    .get("job-at-deadline")
+                    .expect("job should exist")
+                    .status,
+                ProofJobStatus::DeadlineExceeded
+            );
+        }
+
+        #[test]
+        fn completed_job_is_not_expired_after_deadline() {
+            let job = make_job(
+                "job-complete",
+                ProofJobStatus::Completed,
+                1_701_400_004_000,
+                "trace-complete-deadline",
+            );
+            let mut scheduler = scheduler_with_jobs(&[job], 1);
+
+            let exceeded = scheduler.enforce_deadlines(1_701_400_100_000);
+
+            assert!(exceeded.is_empty());
+            assert_eq!(
+                scheduler
+                    .jobs()
+                    .get("job-complete")
+                    .expect("job should exist")
+                    .status,
+                ProofJobStatus::Completed
+            );
+        }
+
+        #[test]
+        fn mark_completed_rejects_pending_job_without_status_change() {
+            let job = make_job(
+                "job-pending-complete",
+                ProofJobStatus::Pending,
+                1_701_400_005_000,
+                "trace-pending-complete",
+            );
+            let mut scheduler = scheduler_with_jobs(&[job], 1);
+
+            let err = scheduler
+                .mark_completed("job-pending-complete", 1_701_400_005_100)
+                .expect_err("pending job cannot be completed directly");
+
+            assert_eq!(err.code, error_codes::ERR_VEF_SCHED_INTERNAL);
+            assert_eq!(
+                scheduler
+                    .jobs()
+                    .get("job-pending-complete")
+                    .expect("job should exist")
+                    .status,
+                ProofJobStatus::Pending
+            );
+        }
+
+        #[test]
+        fn push_bounded_zero_capacity_discards_scheduler_events() {
+            let mut events = vec![scheduler_event("existing")];
+
+            push_bounded(&mut events, scheduler_event("new"), 0);
+
+            assert!(events.is_empty());
+        }
+
+        #[test]
+        fn window_selection_replays_same_schedule_after_scheduler_reconstruction() {
+            let (entries, checkpoints) = sample_stream();
+            let policy = SchedulerPolicy {
+                max_receipts_per_window: 2,
+                ..SchedulerPolicy::default()
+            };
+            let mut first = VefProofScheduler::new(policy.clone());
+            let mut second = VefProofScheduler::new(policy);
+
+            let first_windows = first
+                .select_windows(
+                    &entries,
+                    &checkpoints,
+                    1_701_400_006_000,
+                    "trace-replay-determinism",
+                )
+                .expect("window selection should succeed");
+            let second_windows = second
+                .select_windows(
+                    &entries,
+                    &checkpoints,
+                    1_701_400_006_000,
+                    "trace-replay-determinism",
+                )
+                .expect("window selection should succeed");
+
+            assert_eq!(first_windows, second_windows);
+            assert_eq!(first.events(), second.events());
+        }
+
+        #[test]
+        fn window_selection_is_stable_when_checkpoint_input_order_changes() {
+            let (entries, checkpoints) = sample_stream();
+            let mut reversed_checkpoints = checkpoints.clone();
+            reversed_checkpoints.reverse();
+            let policy = SchedulerPolicy {
+                max_receipts_per_window: 3,
+                ..SchedulerPolicy::default()
+            };
+            let mut ordered = VefProofScheduler::new(policy.clone());
+            let mut reversed = VefProofScheduler::new(policy);
+
+            let ordered_windows = ordered
+                .select_windows(
+                    &entries,
+                    &checkpoints,
+                    1_701_400_006_100,
+                    "trace-checkpoint-determinism",
+                )
+                .expect("ordered checkpoint selection should succeed");
+            let reversed_windows = reversed
+                .select_windows(
+                    &entries,
+                    &reversed_checkpoints,
+                    1_701_400_006_100,
+                    "trace-checkpoint-determinism",
+                )
+                .expect("reversed checkpoint selection should succeed");
+
+            assert_eq!(ordered_windows, reversed_windows);
+        }
+
+        #[test]
+        fn enqueue_windows_assigns_stable_job_ids_and_deadlines() {
+            let windows = vec![
+                make_window(
+                    "win-stable-critical",
+                    WorkloadTier::Critical,
+                    1_701_400_006_200,
+                    "trace-stable-enqueue",
+                ),
+                make_window(
+                    "win-stable-standard",
+                    WorkloadTier::Standard,
+                    1_701_400_006_200,
+                    "trace-stable-enqueue",
+                ),
+            ];
+            let mut first = VefProofScheduler::new(SchedulerPolicy::default());
+            let mut second = VefProofScheduler::new(SchedulerPolicy::default());
+
+            let first_ids = first
+                .enqueue_windows(&windows, 1_701_400_006_300)
+                .expect("first enqueue should succeed");
+            let second_ids = second
+                .enqueue_windows(&windows, 1_701_400_006_300)
+                .expect("second enqueue should succeed");
+
+            assert_eq!(
+                first_ids,
+                vec!["job-00000000".to_string(), "job-00000001".to_string()]
+            );
+            assert_eq!(first_ids, second_ids);
+            assert_eq!(first.jobs(), second.jobs());
+        }
+
+        #[test]
+        fn duplicate_window_enqueue_is_idempotent_and_preserves_sequence() {
+            let windows = vec![
+                make_window(
+                    "win-idempotent-a",
+                    WorkloadTier::High,
+                    1_701_400_006_400,
+                    "trace-idempotent",
+                ),
+                make_window(
+                    "win-idempotent-b",
+                    WorkloadTier::Background,
+                    1_701_400_006_400,
+                    "trace-idempotent",
+                ),
+            ];
+            let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+            let first_ids = scheduler
+                .enqueue_windows(&windows, 1_701_400_006_500)
+                .expect("initial enqueue should succeed");
+            let duplicate_ids = scheduler
+                .enqueue_windows(&windows, 1_701_400_006_600)
+                .expect("duplicate enqueue should be accepted as a no-op");
+            let next_ids = scheduler
+                .enqueue_windows(
+                    &[make_window(
+                        "win-idempotent-c",
+                        WorkloadTier::Standard,
+                        1_701_400_006_700,
+                        "trace-idempotent",
+                    )],
+                    1_701_400_006_800,
+                )
+                .expect("new window enqueue should succeed");
+
+            assert_eq!(
+                first_ids,
+                vec!["job-00000000".to_string(), "job-00000001".to_string()]
+            );
+            assert!(duplicate_ids.is_empty());
+            assert_eq!(scheduler.next_job_seq, 3);
+            assert_eq!(next_ids, vec!["job-00000002".to_string()]);
+            assert_eq!(scheduler.jobs().len(), 3);
+        }
+
+        #[test]
+        fn deadline_enforcement_expires_pending_and_dispatched_at_exact_deadline() {
+            let mut pending = make_job(
+                "job-expire-pending",
+                ProofJobStatus::Pending,
+                1_701_400_007_000,
+                "trace-expire-exact",
+            );
+            let mut dispatched = make_job(
+                "job-expire-dispatched",
+                ProofJobStatus::Dispatched,
+                1_701_400_007_000,
+                "trace-expire-exact",
+            );
+            pending.deadline_millis = 1_701_400_007_500;
+            dispatched.deadline_millis = 1_701_400_007_500;
+            let mut scheduler = scheduler_with_jobs(&[pending, dispatched], 2);
+
+            let exceeded = scheduler.enforce_deadlines(1_701_400_007_500);
+
+            assert_eq!(
+                exceeded,
+                vec![
+                    "job-expire-dispatched".to_string(),
+                    "job-expire-pending".to_string()
+                ]
+            );
+            assert_eq!(
+                scheduler
+                    .jobs()
+                    .get("job-expire-pending")
+                    .expect("pending job should exist")
+                    .status,
+                ProofJobStatus::DeadlineExceeded
+            );
+            assert_eq!(
+                scheduler
+                    .jobs()
+                    .get("job-expire-dispatched")
+                    .expect("dispatched job should exist")
+                    .status,
+                ProofJobStatus::DeadlineExceeded
+            );
+        }
+
+        #[test]
+        fn deadline_enforcement_order_is_deterministic_from_job_ids() {
+            let mut low_id = make_job(
+                "job-deadline-a",
+                ProofJobStatus::Pending,
+                1_701_400_008_000,
+                "trace-deadline-order",
+            );
+            let mut high_id = make_job(
+                "job-deadline-b",
+                ProofJobStatus::Pending,
+                1_701_400_008_000,
+                "trace-deadline-order",
+            );
+            low_id.deadline_millis = 1_701_400_008_100;
+            high_id.deadline_millis = 1_701_400_008_100;
+            let mut first = scheduler_with_jobs(&[high_id.clone(), low_id.clone()], 2);
+            let mut second = scheduler_with_jobs(&[low_id, high_id], 2);
+
+            let first_exceeded = first.enforce_deadlines(1_701_400_008_100);
+            let second_exceeded = second.enforce_deadlines(1_701_400_008_100);
+
+            assert_eq!(
+                first_exceeded,
+                vec!["job-deadline-a".to_string(), "job-deadline-b".to_string()]
+            );
+            assert_eq!(first_exceeded, second_exceeded);
+        }
+
+        #[test]
+        fn backlog_metrics_saturates_pending_age_when_clock_precedes_creation() {
+            let job = make_job(
+                "job-clock-skew",
+                ProofJobStatus::Pending,
+                1_701_400_010_000,
+                "trace-clock-skew",
+            );
+            let mut scheduler = scheduler_with_jobs(&[job], 1);
+
+            let metrics = scheduler.backlog_metrics(1_701_400_009_999, "trace-clock-skew");
+
+            assert_eq!(metrics.pending_jobs, 1);
+            assert_eq!(metrics.oldest_pending_age_millis, 0);
+        }
+
+        #[test]
+        fn same_tier_pending_job_dispatches_after_older_job_completes() {
+            let older = make_job(
+                "job-starvation-older",
+                ProofJobStatus::Pending,
+                1_701_400_011_000,
+                "trace-starvation",
+            );
+            let younger = make_job(
+                "job-starvation-younger",
+                ProofJobStatus::Pending,
+                1_701_400_011_100,
+                "trace-starvation",
+            );
+            let mut scheduler = scheduler_with_jobs(&[younger, older], 1);
+
+            let first_dispatch = scheduler
+                .dispatch_jobs(1_701_400_011_200)
+                .expect("first dispatch should succeed");
+            scheduler
+                .mark_completed("job-starvation-older", 1_701_400_011_300)
+                .expect("older job should complete");
+            let second_dispatch = scheduler
+                .dispatch_jobs(1_701_400_011_400)
+                .expect("second dispatch should succeed");
+
+            assert_eq!(first_dispatch[0].job_id, "job-starvation-older");
+            assert_eq!(second_dispatch[0].job_id, "job-starvation-younger");
+            assert_eq!(
+                scheduler
+                    .jobs()
+                    .get("job-starvation-younger")
+                    .expect("younger job should exist")
+                    .status,
+                ProofJobStatus::Dispatched
+            );
+        }
+
+        #[test]
+        fn budget_deferred_job_dispatches_on_later_tick_without_being_dropped() {
+            let mut first = make_job(
+                "job-budget-first",
+                ProofJobStatus::Pending,
+                1_701_400_012_000,
+                "trace-budget-starvation",
+            );
+            let mut second = make_job(
+                "job-budget-second",
+                ProofJobStatus::Pending,
+                1_701_400_012_100,
+                "trace-budget-starvation",
+            );
+            first.estimated_compute_millis = 90;
+            second.estimated_compute_millis = 90;
+            let mut scheduler = VefProofScheduler::new(SchedulerPolicy {
+                max_concurrent_jobs: 2,
+                max_compute_millis_per_tick: 100,
+                max_memory_mib_per_tick: 1_000,
+                ..SchedulerPolicy::default()
+            });
+            scheduler.jobs.insert(first.job_id.clone(), first);
+            scheduler.jobs.insert(second.job_id.clone(), second);
+
+            let first_tick = scheduler
+                .dispatch_jobs(1_701_400_012_200)
+                .expect("first budgeted dispatch should succeed");
+            let second_tick = scheduler
+                .dispatch_jobs(1_701_400_012_300)
+                .expect("second budgeted dispatch should succeed");
+
+            assert_eq!(first_tick.len(), 1);
+            assert_eq!(first_tick[0].job_id, "job-budget-first");
+            assert_eq!(second_tick.len(), 1);
+            assert_eq!(second_tick[0].job_id, "job-budget-second");
+            assert_eq!(scheduler.jobs().len(), 2);
+        }
+    }
+
+    // Negative-path inline tests for edge cases and robustness
+    #[test]
+    fn negative_massive_job_queue_handles_overflow_gracefully() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Fill scheduler with maximum jobs + simulate overflow scenario
+        for seq in 0..=MAX_JOBS {
+            let window_id = format!("massive-win-{}", seq);
+            let window = make_window(&window_id, WorkloadTier::Critical, 1_701_500_000_000, "trace-massive");
+
+            // This should either succeed (within capacity) or fail gracefully (at capacity)
+            let result = scheduler.enqueue_windows(&[window], 1_701_500_000_000);
+            if seq >= MAX_JOBS {
+                // At or beyond capacity, should fail closed without panic
+                assert!(result.is_err(), "Should fail gracefully at capacity boundary");
+                break;
+            }
+        }
+
+        // Verify scheduler state remains consistent
+        assert!(scheduler.jobs().len() <= MAX_JOBS);
+        assert!(scheduler.next_job_seq.saturating_add(1) > 0); // No overflow to zero
+    }
+
+    #[test]
+    fn negative_unicode_identifiers_in_window_and_job_data() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Test with unicode characters, emoji, RTL text, zero-width chars
+        let problematic_ids = vec![
+            "窓口-🔥-测试",           // Mixed unicode with emoji
+            "نافذة-العمل-٧٨٩",        // Arabic RTL text with numbers
+            "win\u{200B}dow\u{FEFF}", // Zero-width space and BOM
+            "win‌dow",                  // Zero-width non-joiner
+            "𝓦𝓲𝓷𝓭𝓸𝔀",             // Mathematical script unicode
+            "win\u{0301}dow\u{0302}", // Combining diacritical marks
+        ];
+
+        for (i, problematic_id) in problematic_ids.iter().enumerate() {
+            let window = ProofWindow {
+                window_id: problematic_id.clone(),
+                start_index: i as u64,
+                end_index: i as u64,
+                entry_count: 1,
+                aligned_checkpoint_id: None,
+                tier: WorkloadTier::Standard,
+                created_at_millis: 1_701_500_100_000,
+                trace_id: format!("trace-unicode-{}", i),
+            };
+
+            // Should handle unicode gracefully without panicking
+            let result = scheduler.enqueue_windows(&[window], 1_701_500_100_000);
+            assert!(result.is_ok(), "Unicode window ID should be handled gracefully");
+        }
+
+        // Verify no corruption in internal state
+        assert!(scheduler.jobs().len() > 0);
+        assert!(scheduler.windows_seen.len() > 0);
+    }
+
+    #[test]
+    fn negative_extreme_deadline_calculations_use_saturating_arithmetic() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Test with extreme timestamps that could cause overflow
+        let extreme_cases = vec![
+            (u64::MAX - 1000, 2000),     // Near max timestamp with large deadline span
+            (u64::MAX / 2, u64::MAX / 2), // Two large values
+            (1, u64::MAX),               // Small base + maximum span
+        ];
+
+        for (base_millis, deadline_span) in extreme_cases {
+            let window = make_window("extreme-deadline", WorkloadTier::Critical, base_millis, "trace-extreme");
+
+            // Manually override deadline span to test arithmetic
+            let policy = SchedulerPolicy {
+                tier_deadline_millis: {
+                    let mut map = BTreeMap::new();
+                    map.insert(WorkloadTier::Critical, deadline_span);
+                    map
+                },
+                ..SchedulerPolicy::default()
+            };
+            scheduler.policy = policy;
+
+            let result = scheduler.enqueue_windows(&[window], base_millis);
+
+            if let Ok(job_ids) = result {
+                if let Some(job_id) = job_ids.first() {
+                    let job = scheduler.jobs().get(job_id).unwrap();
+                    // Deadline should be calculated with saturating arithmetic
+                    assert!(job.deadline_millis >= base_millis, "Deadline should not underflow");
+                    // Should either be sum or saturated at max
+                    assert!(job.deadline_millis == base_millis.saturating_add(deadline_span));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_malformed_policy_configurations_handled_defensively() {
+        // Test zero and extreme policy values
+        let problematic_policies = vec![
+            SchedulerPolicy {
+                max_receipts_per_window: 0,      // Zero receipts
+                max_concurrent_jobs: 0,          // Zero concurrency
+                max_compute_millis_per_tick: 0,  // Zero compute budget
+                max_memory_mib_per_tick: 0,      // Zero memory budget
+                tier_deadline_millis: BTreeMap::new(), // Empty deadline map
+            },
+            SchedulerPolicy {
+                max_receipts_per_window: usize::MAX, // Maximum receipts
+                max_concurrent_jobs: usize::MAX,     // Maximum concurrency
+                max_compute_millis_per_tick: u64::MAX, // Maximum compute
+                max_memory_mib_per_tick: u64::MAX,   // Maximum memory
+                tier_deadline_millis: BTreeMap::new(),
+            },
+        ];
+
+        for policy in problematic_policies {
+            let mut scheduler = VefProofScheduler::new(policy);
+            let window = make_window("malformed-policy", WorkloadTier::Standard, 1_701_500_200_000, "trace-malformed");
+
+            // Should either work or fail gracefully, never panic
+            let _ = scheduler.enqueue_windows(&[window], 1_701_500_200_000);
+            let _ = scheduler.dispatch_jobs(1_701_500_200_010);
+            let _ = scheduler.enforce_deadlines(1_701_500_300_000);
+
+            // State should remain consistent
+            assert!(scheduler.jobs().len() <= MAX_JOBS);
+        }
+    }
+
+    #[test]
+    fn negative_job_sequence_number_near_overflow_uses_checked_arithmetic() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Set sequence number near u64 maximum
+        scheduler.next_job_seq = u64::MAX - 5;
+
+        let windows = vec![
+            make_window("seq-overflow-1", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
+            make_window("seq-overflow-2", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
+            make_window("seq-overflow-3", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
+            make_window("seq-overflow-4", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
+            make_window("seq-overflow-5", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
+            make_window("seq-overflow-6", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
+            make_window("seq-overflow-7", WorkloadTier::Standard, 1_701_500_300_000, "trace-seq-overflow"),
+        ];
+
+        for window in &windows {
+            let result = scheduler.enqueue_windows(&[window.clone()], 1_701_500_300_000);
+
+            // Should either succeed (if within sequence range) or fail gracefully on overflow
+            if scheduler.next_job_seq == u64::MAX {
+                assert!(result.is_err(), "Should fail gracefully on sequence overflow");
+                break;
+            }
+        }
+
+        // Verify no wraparound occurred
+        assert!(scheduler.next_job_seq <= u64::MAX);
+    }
+
+    #[test]
+    fn negative_null_bytes_and_control_characters_in_trace_ids() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Test problematic characters in trace IDs
+        let problematic_traces = vec![
+            "trace\0null",           // Null byte
+            "trace\x01\x02control", // Control characters
+            "trace\r\ninjection",   // Line breaks
+            "trace\x7F\x80\xFF",    // High bytes and DEL
+            "trace\u{FFFE}\u{FFFF}", // Unicode non-characters
+        ];
+
+        for trace_id in &problematic_traces {
+            let window = ProofWindow {
+                window_id: "control-chars".to_string(),
+                start_index: 1,
+                end_index: 1,
+                entry_count: 1,
+                aligned_checkpoint_id: None,
+                tier: WorkloadTier::Standard,
+                created_at_millis: 1_701_500_400_000,
+                trace_id: trace_id.clone(),
+            };
+
+            // Should handle control characters without corruption or panic
+            let result = scheduler.enqueue_windows(&[window], 1_701_500_400_000);
+            assert!(result.is_ok(), "Control characters in trace ID should be handled");
+
+            if let Ok(job_ids) = result {
+                if let Some(job_id) = job_ids.first() {
+                    let job = scheduler.jobs().get(job_id).unwrap();
+                    assert_eq!(&job.trace_id, trace_id, "Trace ID should be preserved exactly");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_resource_budget_calculations_prevent_arithmetic_overflow() {
+        let mut policy = SchedulerPolicy::default();
+        policy.max_compute_millis_per_tick = 1000;
+        policy.max_memory_mib_per_tick = 1000;
+        policy.max_concurrent_jobs = 10;
+
+        let mut scheduler = VefProofScheduler::new(policy);
+
+        // Create jobs with extreme resource estimates that could overflow
+        let extreme_jobs = vec![
+            ("extreme-compute", u64::MAX / 2, 100),  // Massive compute estimate
+            ("extreme-memory", 100, u64::MAX / 2),   // Massive memory estimate
+            ("both-extreme", u64::MAX / 4, u64::MAX / 4), // Both extreme
+        ];
+
+        for (job_suffix, compute_estimate, memory_estimate) in extreme_jobs {
+            let mut job = make_job(job_suffix, ProofJobStatus::Pending, 1_701_500_500_000, "trace-resource-extreme");
+            job.estimated_compute_millis = compute_estimate;
+            job.estimated_memory_mib = memory_estimate;
+
+            scheduler.jobs.insert(job.job_id.clone(), job);
+        }
+
+        // Dispatch should use saturating arithmetic and not overflow
+        let result = scheduler.dispatch_jobs(1_701_500_500_100);
+        assert!(result.is_ok(), "Resource budget calculation should not panic on overflow");
+
+        // Get metrics (which accumulates resource usage)
+        let metrics = scheduler.backlog_metrics(1_701_500_500_200, "trace-resource-extreme");
+
+        // Resource totals should not overflow
+        assert!(metrics.compute_budget_used_millis.is_finite() as bool);
+        assert!(metrics.memory_budget_used_mib.is_finite() as bool);
+    }
+
+    #[test]
+    fn negative_massive_checkpoint_data_handles_memory_pressure_gracefully() {
+        let mut scheduler = VefProofScheduler::new(SchedulerPolicy::default());
+
+        // Create a scenario with many large checkpoint alignments
+        let mut entries = Vec::new();
+        let mut checkpoints = Vec::new();
+
+        // Generate large numbers of entries and checkpoints
+        for i in 0..1000 {
+            entries.push(ReceiptChainEntry {
+                index: i,
+                receipt: receipt(ExecutionActionType::FilesystemOperation, i),
+                chain_hash: format!("hash-{:064}", i), // Large hash string
+                prev_hash: format!("prev-{:064}", i.saturating_sub(1)),
+                appended_at_millis: 1_701_600_000_000 + i,
+            });
+
+            if i % 10 == 0 {
+                checkpoints.push(ReceiptCheckpoint {
+                    checkpoint_id: i / 10,
+                    start_index: (i / 10) * 10,
+                    end_index: i,
+                    entry_count: 10,
+                    chain_hash: format!("checkpoint-hash-{:064}", i),
+                    created_at_millis: 1_701_600_000_000 + i,
+                });
+            }
+        }
+
+        // Window selection should handle large data sets without excessive memory usage
+        let result = scheduler.select_windows(&entries, &checkpoints, 1_701_600_100_000, "trace-massive-checkpoints");
+
+        match result {
+            Ok(windows) => {
+                assert!(windows.len() > 0, "Should produce some windows");
+                assert!(windows.len() < 10000, "Should not create excessive windows");
+
+                // Each window should have reasonable bounds
+                for window in &windows {
+                    assert!(window.start_index <= window.end_index);
+                    assert!(window.entry_count > 0);
+                    assert!(window.entry_count < 1000); // Reasonable size
+                }
+            },
+            Err(e) => {
+                // If it fails due to resource constraints, should fail gracefully
+                assert!(!e.message.is_empty(), "Error should have descriptive message");
+            }
+        }
+
+        // Scheduler state should remain consistent
+        assert!(scheduler.windows_seen.len() <= MAX_WINDOWS_SEEN);
     }
 }

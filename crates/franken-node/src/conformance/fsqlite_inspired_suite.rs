@@ -1235,4 +1235,203 @@ mod tests {
             "successful re-registration should reactivate the ID"
         );
     }
+
+    #[test]
+    fn duplicate_registration_does_not_append_fixture_or_audit() {
+        let mut runner = ConformanceSuiteRunner::new();
+        let fixture = ConformanceFixture {
+            conformance_id: ConformanceId::new(ConformanceDomain::Determinism, 77),
+            domain: ConformanceDomain::Determinism,
+            description: "duplicate guard".to_string(),
+            input: serde_json::json!({"case": "first"}),
+            expected: serde_json::json!({"ok": true}),
+        };
+        runner.register_fixture(fixture.clone()).unwrap();
+        let fixture_count = runner.fixture_count();
+        let audit_len = runner.audit_log().len();
+
+        let err = runner.register_fixture(fixture).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CONF_DUPLICATE_ID);
+        assert_eq!(runner.fixture_count(), fixture_count);
+        assert_eq!(runner.audit_log().len(), audit_len);
+    }
+
+    #[test]
+    fn duplicate_registration_preserves_original_fixture_payload() {
+        let mut runner = ConformanceSuiteRunner::new();
+        let id = ConformanceId::new(ConformanceDomain::Idempotency, 88);
+        let original = ConformanceFixture {
+            conformance_id: id.clone(),
+            domain: ConformanceDomain::Idempotency,
+            description: "original".to_string(),
+            input: serde_json::json!({"value": 1}),
+            expected: serde_json::json!({"idempotent": true}),
+        };
+        let duplicate = ConformanceFixture {
+            conformance_id: id,
+            domain: ConformanceDomain::Idempotency,
+            description: "replacement".to_string(),
+            input: serde_json::json!({"value": 2}),
+            expected: serde_json::json!({"idempotent": false}),
+        };
+        runner.register_fixture(original.clone()).unwrap();
+
+        let err = runner.register_fixture(duplicate).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CONF_DUPLICATE_ID);
+        assert_eq!(runner.fixtures, vec![original]);
+    }
+
+    #[test]
+    fn release_gate_counts_multiple_failures_precisely() {
+        let mut runner = ConformanceSuiteRunner::new();
+        let records = vec![
+            ConformanceTestRecord {
+                conformance_id: ConformanceId::new(ConformanceDomain::Determinism, 1),
+                domain: ConformanceDomain::Determinism,
+                description: "pass".to_string(),
+                result: ConformanceTestResult::Pass,
+                elapsed_ms: 1,
+            },
+            ConformanceTestRecord {
+                conformance_id: ConformanceId::new(ConformanceDomain::Idempotency, 1),
+                domain: ConformanceDomain::Idempotency,
+                description: "fail-one".to_string(),
+                result: ConformanceTestResult::Fail {
+                    expected: "same".to_string(),
+                    actual: "different".to_string(),
+                },
+                elapsed_ms: 2,
+            },
+            ConformanceTestRecord {
+                conformance_id: ConformanceId::new(ConformanceDomain::ProofCorrectness, 1),
+                domain: ConformanceDomain::ProofCorrectness,
+                description: "fail-two".to_string(),
+                result: ConformanceTestResult::Fail {
+                    expected: "valid".to_string(),
+                    actual: "invalid".to_string(),
+                },
+                elapsed_ms: 3,
+            },
+        ];
+        for record in records {
+            runner.record_result(record);
+        }
+
+        let err = runner.check_release_gate().unwrap_err();
+
+        assert_eq!(err, ConformanceError::ReleaseBlocked { fail_count: 2 });
+    }
+
+    #[test]
+    fn verify_domain_coverage_empty_runner_fails_without_side_effects() {
+        let runner = ConformanceSuiteRunner::new();
+
+        let err = runner.verify_domain_coverage().unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CONF_MISSING_DOMAIN);
+        assert_eq!(
+            err,
+            ConformanceError::MissingDomain {
+                domain: "determinism".to_string()
+            }
+        );
+        assert_eq!(runner.fixture_count(), 0);
+        assert!(runner.results().is_empty());
+        assert!(runner.audit_log().is_empty());
+    }
+
+    #[test]
+    fn verify_domain_coverage_missing_later_domain_reports_specific_gap() {
+        let mut runner = ConformanceSuiteRunner::new();
+        for (domain, number) in [
+            (ConformanceDomain::Determinism, 1),
+            (ConformanceDomain::Idempotency, 1),
+        ] {
+            runner
+                .register_fixture(ConformanceFixture {
+                    conformance_id: ConformanceId::new(domain, number),
+                    domain,
+                    description: format!("fixture for {domain}"),
+                    input: serde_json::json!({}),
+                    expected: serde_json::json!({}),
+                })
+                .unwrap();
+        }
+
+        let err = runner.verify_domain_coverage().unwrap_err();
+
+        assert_eq!(
+            err,
+            ConformanceError::MissingDomain {
+                domain: "epoch_validity".to_string()
+            }
+        );
+        assert_eq!(runner.fixture_count(), 2);
+    }
+
+    #[test]
+    fn unknown_conformance_id_domain_is_none() {
+        let id = ConformanceId("FSQL-UNKNOWN-001".to_string());
+
+        assert_eq!(id.domain(), None);
+    }
+
+    #[test]
+    fn run_all_failure_records_fail_event_and_preserves_details() {
+        let mut runner = ConformanceSuiteRunner::new();
+        runner
+            .register_fixture(ConformanceFixture {
+                conformance_id: ConformanceId::new(ConformanceDomain::ProofCorrectness, 44),
+                domain: ConformanceDomain::ProofCorrectness,
+                description: "tampered proof must fail".to_string(),
+                input: serde_json::json!({"tampered": true}),
+                expected: serde_json::json!({"proof_valid": false}),
+            })
+            .unwrap();
+
+        let report = runner.run_all(123, "trace-fail", |_| ConformanceTestResult::Fail {
+            expected: "proof_valid=false".to_string(),
+            actual: "proof_valid=true".to_string(),
+        });
+
+        assert!(!report.release_eligible);
+        assert_eq!(report.pass_count, 0);
+        assert_eq!(report.fail_count, 1);
+        assert!(runner.audit_log().iter().any(|record| {
+            record.event_code == event_codes::CONFORMANCE_TEST_FAIL
+                && record.conformance_id == "FSQL-PRF-044"
+                && record.trace_id == "trace-fail"
+        }));
+        assert!(matches!(
+            &runner.results()[0].result,
+            ConformanceTestResult::Fail { expected, actual }
+                if expected == "proof_valid=false" && actual == "proof_valid=true"
+        ));
+    }
+
+    #[test]
+    fn failed_run_then_release_gate_blocks_with_reported_fail_count() {
+        let mut runner = ConformanceSuiteRunner::new();
+        runner
+            .register_fixture(ConformanceFixture {
+                conformance_id: ConformanceId::new(ConformanceDomain::EpochValidity, 45),
+                domain: ConformanceDomain::EpochValidity,
+                description: "stale epoch must not pass".to_string(),
+                input: serde_json::json!({"current_epoch": 10, "artifact_epoch": 1}),
+                expected: serde_json::json!({"accepted": false}),
+            })
+            .unwrap();
+        runner.run_all(456, "trace-release-block", |_| {
+            ConformanceTestResult::Fail {
+                expected: "accepted=false".to_string(),
+                actual: "accepted=true".to_string(),
+            }
+        });
+
+        let err = runner.check_release_gate().unwrap_err();
+
+        assert_eq!(err, ConformanceError::ReleaseBlocked { fail_count: 1 });
+    }
 }

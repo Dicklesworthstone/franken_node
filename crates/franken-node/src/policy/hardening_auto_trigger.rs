@@ -97,15 +97,15 @@ pub struct TriggerEvent {
 impl TriggerEvent {
     /// Serialize as a JSONL line.
     pub fn to_jsonl(&self) -> String {
-        format!(
-            r#"{{"trigger_id":"{}","rejection_id":"{}","evidence_entry_id":"{}","from":"{}","to":"{}","timestamp":{}}}"#,
-            self.trigger_id,
-            self.rejection_id,
-            self.evidence_entry_id,
-            self.from_level.label(),
-            self.to_level.label(),
-            self.timestamp,
-        )
+        serde_json::json!({
+            "trigger_id": &self.trigger_id,
+            "rejection_id": &self.rejection_id,
+            "evidence_entry_id": &self.evidence_entry_id,
+            "from": self.from_level.label(),
+            "to": self.to_level.label(),
+            "timestamp": self.timestamp,
+        })
+        .to_string()
     }
 }
 
@@ -168,8 +168,12 @@ fn next_level(current: HardeningLevel) -> Option<HardeningLevel> {
 const MAX_TRIGGER_EVENTS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -324,6 +328,18 @@ mod tests {
         format!("trace-{n:04}")
     }
 
+    fn rollback_artifact(
+        id: &str,
+    ) -> super::super::hardening_state_machine::GovernanceRollbackArtifact {
+        super::super::hardening_state_machine::GovernanceRollbackArtifact {
+            artifact_id: id.into(),
+            approver_id: "admin".into(),
+            reason: "restore level for duplicate-trigger test".into(),
+            timestamp: 1500,
+            signature: "sig-test".into(),
+        }
+    }
+
     // ── TriggerResult tests ──
 
     #[test]
@@ -391,6 +407,24 @@ mod tests {
         assert!(line.contains("standard"));
     }
 
+    #[test]
+    fn trigger_event_jsonl_escapes_special_characters() {
+        let event = TriggerEvent {
+            trigger_id: "trig-\"quoted\"".into(),
+            rejection_id: "rej-line\nbreak".into(),
+            evidence_entry_id: "evd\\slash".into(),
+            from_level: HardeningLevel::Baseline,
+            to_level: HardeningLevel::Standard,
+            timestamp: 1000,
+        };
+
+        let parsed: serde_json::Value = serde_json::from_str(&event.to_jsonl()).unwrap();
+
+        assert_eq!(parsed["trigger_id"], "trig-\"quoted\"");
+        assert_eq!(parsed["rejection_id"], "rej-line\nbreak");
+        assert_eq!(parsed["evidence_entry_id"], "evd\\slash");
+    }
+
     // ── next_level tests ──
 
     #[test]
@@ -431,6 +465,73 @@ mod tests {
             other => unreachable!("expected Escalated, got {other:?}"),
         }
         assert_eq!(sm.current_level(), HardeningLevel::Standard);
+    }
+
+    #[test]
+    fn empty_trace_id_escalation_records_transition_without_dropping_event() {
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::new();
+        let rej = make_rejection("memory_budget", 1);
+
+        let result = trigger.on_guardrail_rejection(&rej, &mut sm, 1000, "");
+
+        assert!(matches!(result, TriggerResult::Escalated { .. }));
+        assert_eq!(sm.current_level(), HardeningLevel::Standard);
+        assert_eq!(sm.transition_log()[0].trace_id, "");
+        assert_eq!(trigger.event_count(), 1);
+    }
+
+    #[test]
+    fn empty_budget_id_is_still_causally_recorded() {
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::new();
+        let rej = make_rejection("", 1);
+
+        let result = trigger.on_guardrail_rejection(&rej, &mut sm, 1000, &tid(1));
+
+        assert!(matches!(result, TriggerResult::Escalated { .. }));
+        assert_eq!(trigger.dedup_count(), 1);
+        assert_eq!(trigger.events()[0].rejection_id, "rej-TestMonitor--1");
+    }
+
+    #[test]
+    fn empty_monitor_name_is_still_causally_recorded() {
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::new();
+        let rej = GuardrailRejection {
+            monitor_name: String::new(),
+            budget_id: BudgetId::new("memory_budget"),
+            reason: "missing monitor identity".into(),
+            epoch_id: 1,
+        };
+
+        let result = trigger.on_guardrail_rejection(&rej, &mut sm, 1000, &tid(1));
+
+        assert!(matches!(result, TriggerResult::Escalated { .. }));
+        assert_eq!(trigger.events()[0].rejection_id, "rej--memory_budget-1");
+    }
+
+    #[test]
+    fn profile_escalation_records_adjacent_profile_transition() {
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Standard);
+        let rej = make_rejection("evidence_emission", 7);
+
+        let result = trigger.on_guardrail_rejection(&rej, &mut sm, 2000, &tid(7));
+
+        assert_eq!(
+            result,
+            TriggerResult::Escalated {
+                from: HardeningLevel::Standard,
+                to: HardeningLevel::Enhanced,
+                latency_ms: 0,
+            }
+        );
+        assert_eq!(sm.current_level(), HardeningLevel::Enhanced);
+        assert_eq!(sm.transition_count(), 1);
+        assert_eq!(trigger.event_count(), 1);
+        assert_eq!(trigger.events()[0].from_level, HardeningLevel::Standard);
+        assert_eq!(trigger.events()[0].to_level, HardeningLevel::Enhanced);
     }
 
     #[test]
@@ -536,6 +637,36 @@ mod tests {
     }
 
     #[test]
+    fn suppressed_duplicate_bypass_does_not_emit_profile_escalation_event() {
+        use super::super::hardening_state_machine::GovernanceRollbackArtifact;
+
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Enhanced);
+        let rej = make_rejection("evidence_emission", 9);
+
+        let first = trigger.on_guardrail_rejection(&rej, &mut sm, 1000, &tid(1));
+        assert!(matches!(first, TriggerResult::Escalated { .. }));
+        let artifact = GovernanceRollbackArtifact {
+            artifact_id: "GOV-2026-BYPASS-TEST".into(),
+            approver_id: "admin".into(),
+            reason: "restore pre-trigger profile for duplicate-bypass check".into(),
+            timestamp: 1500,
+            signature: "sig-test".into(),
+        };
+        sm.governance_rollback(HardeningLevel::Enhanced, &artifact, 1500, &tid(2))
+            .unwrap();
+        let transitions_before = sm.transition_count();
+        let events_before = trigger.event_count();
+
+        let second = trigger.on_guardrail_rejection(&rej, &mut sm, 2000, &tid(3));
+
+        assert!(matches!(second, TriggerResult::Suppressed { .. }));
+        assert_eq!(sm.current_level(), HardeningLevel::Enhanced);
+        assert_eq!(sm.transition_count(), transitions_before);
+        assert_eq!(trigger.event_count(), events_before);
+    }
+
+    #[test]
     fn same_budget_different_epoch_is_not_deduped() {
         let mut trigger = HardeningAutoTrigger::with_defaults();
         let mut sm = HardeningStateMachine::new();
@@ -615,6 +746,33 @@ mod tests {
         assert_eq!(sm.current_level(), HardeningLevel::Enhanced);
     }
 
+    #[test]
+    fn idempotency_disabled_duplicate_after_rollback_escalates_again() {
+        let config = TriggerConfig {
+            enable_idempotency: false,
+            ..TriggerConfig::default_config()
+        };
+        let mut trigger = HardeningAutoTrigger::new(config);
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Enhanced);
+        let rej = make_rejection("memory_budget", 7);
+
+        let first = trigger.on_guardrail_rejection(&rej, &mut sm, 1000, &tid(1));
+        assert!(matches!(first, TriggerResult::Escalated { .. }));
+        sm.governance_rollback(
+            HardeningLevel::Enhanced,
+            &rollback_artifact("GOV-2026-DISABLED-IDEMPOTENCY"),
+            1500,
+            &tid(2),
+        )
+        .unwrap();
+        let second = trigger.on_guardrail_rejection(&rej, &mut sm, 2000, &tid(3));
+
+        assert!(matches!(second, TriggerResult::Escalated { .. }));
+        assert_eq!(sm.current_level(), HardeningLevel::Maximum);
+        assert_eq!(trigger.event_count(), 2);
+        assert_eq!(trigger.dedup_count(), 0);
+    }
+
     // ── Causal evidence pointers ──
 
     #[test]
@@ -662,6 +820,140 @@ mod tests {
 
         trigger.reset_idempotency();
         assert_eq!(trigger.dedup_count(), 0);
+    }
+
+    #[test]
+    fn reset_idempotency_allows_duplicate_key_after_suppression() {
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Enhanced);
+        let rej = make_rejection("memory_budget", 7);
+
+        let first = trigger.on_guardrail_rejection(&rej, &mut sm, 1000, &tid(1));
+        assert!(matches!(first, TriggerResult::Escalated { .. }));
+        sm.governance_rollback(
+            HardeningLevel::Enhanced,
+            &rollback_artifact("GOV-2026-RESET-IDEMPOTENCY"),
+            1500,
+            &tid(2),
+        )
+        .unwrap();
+        let suppressed = trigger.on_guardrail_rejection(&rej, &mut sm, 2000, &tid(3));
+        assert_eq!(suppressed.event_code(), event_codes::AUTOTRIG_SUPPRESSED);
+
+        trigger.reset_idempotency();
+        let second = trigger.on_guardrail_rejection(&rej, &mut sm, 3000, &tid(4));
+
+        assert!(matches!(second, TriggerResult::Escalated { .. }));
+        assert_eq!(trigger.event_count(), 2);
+        assert_eq!(trigger.events()[1].trigger_id, "trig-0002");
+    }
+
+    #[test]
+    fn zero_latency_bound_config_accepts_synchronous_escalation() {
+        let config = TriggerConfig {
+            max_trigger_latency_ms: 0,
+            enable_idempotency: true,
+        };
+        let mut trigger = HardeningAutoTrigger::new(config);
+        let mut sm = HardeningStateMachine::new();
+        let rej = make_rejection("memory_budget", 1);
+
+        let result = trigger.on_guardrail_rejection(&rej, &mut sm, 1000, &tid(1));
+
+        assert_eq!(
+            result,
+            TriggerResult::Escalated {
+                from: HardeningLevel::Baseline,
+                to: HardeningLevel::Standard,
+                latency_ms: 0,
+            }
+        );
+        assert_eq!(trigger.config().max_trigger_latency_ms, 0);
+    }
+
+    #[test]
+    fn critical_profile_bypass_rejection_does_not_mutate_trigger_state() {
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Critical);
+        let rej = make_rejection("hardening_regression", 11);
+
+        let result = trigger.on_guardrail_rejection(&rej, &mut sm, 3000, &tid(11));
+
+        assert_eq!(result, TriggerResult::AlreadyAtMax);
+        assert_eq!(sm.current_level(), HardeningLevel::Critical);
+        assert_eq!(trigger.event_count(), 0);
+        assert_eq!(trigger.dedup_count(), 0);
+    }
+
+    #[test]
+    fn already_at_max_rejections_are_repeatable_without_side_effects() {
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Critical);
+
+        for rejection in [
+            make_rejection("memory_budget", 1),
+            make_rejection("evidence_emission", 2),
+            make_rejection("hardening_regression", 3),
+        ] {
+            let result = trigger.on_guardrail_rejection(&rejection, &mut sm, 4000, &tid(4));
+            assert_eq!(result, TriggerResult::AlreadyAtMax);
+        }
+
+        assert_eq!(sm.current_level(), HardeningLevel::Critical);
+        assert_eq!(trigger.event_count(), 0);
+        assert_eq!(trigger.dedup_count(), 0);
+    }
+
+    #[test]
+    fn suppressed_duplicate_reason_preserves_idempotency_context() {
+        use super::super::hardening_state_machine::GovernanceRollbackArtifact;
+
+        let mut trigger = HardeningAutoTrigger::with_defaults();
+        let mut sm = HardeningStateMachine::with_level(HardeningLevel::Enhanced);
+        let rej = make_rejection("evidence_emission", 42);
+
+        let first = trigger.on_guardrail_rejection(&rej, &mut sm, 1000, &tid(1));
+        assert!(matches!(first, TriggerResult::Escalated { .. }));
+        let artifact = GovernanceRollbackArtifact {
+            artifact_id: "GOV-2026-IDEMPOTENCY-CHECK".into(),
+            approver_id: "admin".into(),
+            reason: "restore level to check duplicate suppression".into(),
+            timestamp: 1500,
+            signature: "sig-test".into(),
+        };
+        sm.governance_rollback(HardeningLevel::Enhanced, &artifact, 1500, &tid(2))
+            .unwrap();
+
+        let second = trigger.on_guardrail_rejection(&rej, &mut sm, 2000, &tid(3));
+
+        match second {
+            TriggerResult::Suppressed { reason } => {
+                assert!(reason.contains("idempotent dedup"));
+                assert!(reason.contains("evidence_emission"));
+                assert!(reason.contains("epoch 42"));
+            }
+            other => unreachable!("expected duplicate suppression, got {other:?}"),
+        }
+        assert_eq!(sm.current_level(), HardeningLevel::Enhanced);
+        assert_eq!(trigger.event_count(), 1);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_trigger_event_window() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_trigger_events() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 
     // ── Config tests ──

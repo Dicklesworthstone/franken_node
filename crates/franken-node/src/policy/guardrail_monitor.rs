@@ -21,8 +21,12 @@ fn push_bounded_box(
     item: Box<dyn GuardrailMonitor>,
     cap: usize,
 ) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -260,8 +264,8 @@ impl MemoryBudgetGuardrail {
         } else {
             0.0
         };
-        let effective_block = safe_block.max(Self::ENVELOPE_MIN_BLOCK_THRESHOLD);
-        let effective_warn = safe_warn.min(effective_block);
+        let effective_block = safe_block.clamp(Self::ENVELOPE_MIN_BLOCK_THRESHOLD, 1.0);
+        let effective_warn = safe_warn.clamp(0.0, effective_block);
         Self {
             budget_id: BudgetId::new("memory_budget"),
             block_threshold: effective_block,
@@ -605,11 +609,12 @@ impl DurabilityLossGuardrail {
         } else {
             0.0
         };
-        let effective_min = safe_min.max(Self::ENVELOPE_MIN_DURABILITY);
+        let effective_min = safe_min.clamp(Self::ENVELOPE_MIN_DURABILITY, 1.0);
+        let effective_margin = safe_margin.max(0.0);
         Self {
             budget_id: BudgetId::new("durability_budget"),
             min_durability: effective_min,
-            warn_margin: safe_margin,
+            warn_margin: effective_margin,
             min_allowed_durability: Self::ENVELOPE_MIN_DURABILITY,
         }
     }
@@ -1069,6 +1074,73 @@ mod tests {
     }
 
     #[test]
+    fn policy_gate_fails_closed_when_memory_budget_is_zero() {
+        let guard = MemoryBudgetGuardrail::default_guardrail();
+        let mut state = healthy_state();
+        state.memory_budget_bytes = 0;
+
+        match guard.check(&state) {
+            GuardrailVerdict::Block { budget_id, .. } => {
+                assert_eq!(budget_id.as_str(), "memory_budget");
+            }
+            other => unreachable!("expected fail-closed Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_gate_warn_threshold_is_clamped_to_block_threshold() {
+        let guard = MemoryBudgetGuardrail::new(0.75, 0.90);
+        assert!((guard.warn_threshold - guard.block_threshold).abs() < f64::EPSILON);
+
+        let mut state = healthy_state();
+        state.memory_used_bytes = 760_000_000;
+        assert!(guard.check(&state).is_blocked());
+    }
+
+    #[test]
+    fn policy_gate_blocks_non_finite_durability() {
+        let guard = DurabilityLossGuardrail::default_guardrail();
+        let mut state = healthy_state();
+        state.durability_level = f64::NAN;
+
+        match guard.check(&state) {
+            GuardrailVerdict::Block { budget_id, reason } => {
+                assert_eq!(budget_id.as_str(), "durability_budget");
+                assert!(reason.contains("below minimum"));
+            }
+            other => unreachable!("expected durability Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_gate_blocks_conformal_risk_when_counts_exceed_samples() {
+        let guard = ConformalRiskGuardrail::default_guardrail();
+        let mut state = healthy_state();
+        state.reliability_telemetry = Some(reliability_telemetry(64, 6400));
+
+        match guard.check(&state) {
+            GuardrailVerdict::Block { budget_id, .. } => {
+                assert_eq!(budget_id.as_str(), "conformal_risk");
+            }
+            other => unreachable!("expected conformal-risk Block, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn policy_gate_blocks_profile_downgrade_without_other_bypasses() {
+        let set = GuardrailMonitorSet::with_defaults();
+        let mut state = healthy_state();
+        state.hardening_level = HardeningLevel::Enhanced;
+        state.proposed_hardening_level = Some(HardeningLevel::Standard);
+
+        let rejection = set.evaluate(&state).unwrap_err();
+
+        assert_eq!(rejection.budget_id.as_str(), "hardening_regression");
+        assert!(rejection.reason.contains("INV-001"));
+        assert_eq!(rejection.epoch_id, state.epoch_id);
+    }
+
+    #[test]
     fn memory_guard_anytime_valid() {
         let guard = MemoryBudgetGuardrail::default_guardrail();
         assert!(guard.is_valid_at_any_stopping_point());
@@ -1456,6 +1528,107 @@ mod tests {
         assert_eq!(rejection.budget_id.as_str(), "evidence_emission");
     }
 
+    #[test]
+    fn certificate_reports_profile_regression_and_evidence_bypass_together() {
+        let set = GuardrailMonitorSet::with_defaults();
+        let mut state = healthy_state();
+        state.proposed_hardening_level = Some(HardeningLevel::Baseline);
+        state.evidence_emission_active = false;
+
+        let certificate = set.certify(&state);
+        assert!(certificate.dominant_verdict.is_blocked());
+        assert!(
+            certificate
+                .blocking_budget_ids
+                .iter()
+                .any(|id| id.as_str() == "hardening_regression")
+        );
+        assert!(
+            certificate
+                .blocking_budget_ids
+                .iter()
+                .any(|id| id.as_str() == "evidence_emission")
+        );
+        assert!(
+            certificate
+                .findings
+                .iter()
+                .any(|finding| finding.monitor_name == "HardeningRegressionGuardrail"
+                    && matches!(&finding.verdict, GuardrailVerdict::Block { reason, .. } if reason.contains("INV-001")))
+        );
+        assert!(
+            certificate
+                .findings
+                .iter()
+                .any(|finding| finding.monitor_name == "EvidenceEmissionGuardrail"
+                    && matches!(&finding.verdict, GuardrailVerdict::Block { reason, .. } if reason.contains("INV-002")))
+        );
+    }
+
+    #[test]
+    fn blocking_budget_ids_are_sorted_and_deduped_for_repeated_bypass_monitors() {
+        let mut set = GuardrailMonitorSet::new();
+        set.register(Box::new(EvidenceEmissionGuardrail::new()));
+        set.register(Box::new(EvidenceEmissionGuardrail::new()));
+        set.register(Box::new(HardeningRegressionGuardrail::new()));
+        let mut state = healthy_state();
+        state.evidence_emission_active = false;
+        state.proposed_hardening_level = Some(HardeningLevel::Baseline);
+
+        let certificate = set.certify(&state);
+        let ids: Vec<&str> = certificate
+            .blocking_budget_ids
+            .iter()
+            .map(BudgetId::as_str)
+            .collect();
+        assert_eq!(ids, vec!["evidence_emission", "hardening_regression"]);
+    }
+
+    #[test]
+    fn bypass_block_findings_keep_event_codes_and_anytime_validity() {
+        let set = GuardrailMonitorSet::with_defaults();
+        let mut state = healthy_state();
+        state.evidence_emission_active = false;
+
+        let certificate = set.certify(&state);
+        let finding = certificate
+            .findings
+            .iter()
+            .find(|finding| finding.monitor_name == "EvidenceEmissionGuardrail")
+            .expect("evidence guardrail finding should exist");
+        assert_eq!(finding.event_code, event_codes::GUARD_BLOCK);
+        assert!(finding.anytime_valid);
+        assert!(finding.verdict.is_blocked());
+    }
+
+    #[test]
+    fn push_bounded_box_zero_capacity_clears_monitor_window() {
+        let mut monitors: Vec<Box<dyn GuardrailMonitor>> =
+            vec![Box::new(MemoryBudgetGuardrail::default_guardrail())];
+
+        push_bounded_box(&mut monitors, Box::new(EvidenceEmissionGuardrail::new()), 0);
+
+        assert!(monitors.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_box_over_capacity_preserves_latest_monitors() {
+        let mut monitors: Vec<Box<dyn GuardrailMonitor>> = vec![
+            Box::new(MemoryBudgetGuardrail::default_guardrail()),
+            Box::new(EvidenceEmissionGuardrail::new()),
+        ];
+
+        push_bounded_box(
+            &mut monitors,
+            Box::new(HardeningRegressionGuardrail::new()),
+            2,
+        );
+
+        assert_eq!(monitors.len(), 2);
+        assert_eq!(monitors[0].name(), "EvidenceEmissionGuardrail");
+        assert_eq!(monitors[1].name(), "HardeningRegressionGuardrail");
+    }
+
     // ── Optional stopping / anytime-valid tests ──
 
     #[test]
@@ -1603,5 +1776,548 @@ mod tests {
         assert!(g.min_durability.is_finite());
         assert!(g.warn_margin.is_finite());
         assert!(g.min_durability >= DurabilityLossGuardrail::ENVELOPE_MIN_DURABILITY);
+    }
+
+    #[test]
+    fn memory_guard_over_one_block_threshold_clamps_to_budget_boundary() {
+        let guard = MemoryBudgetGuardrail::new(2.0, 0.90);
+        assert!((guard.block_threshold - 1.0).abs() < f64::EPSILON);
+
+        let mut state = healthy_state();
+        state.memory_used_bytes = state.memory_budget_bytes;
+        assert!(guard.check(&state).is_blocked());
+    }
+
+    #[test]
+    fn memory_guard_negative_warn_threshold_clamps_to_zero() {
+        let guard = MemoryBudgetGuardrail::new(0.95, -0.25);
+        assert!((guard.warn_threshold - 0.0).abs() < f64::EPSILON);
+        assert!(guard.warn_threshold <= guard.block_threshold);
+    }
+
+    #[test]
+    fn tail_risk_guard_over_one_block_threshold_clamps_to_budget_boundary() {
+        let guard = MemoryTailRiskGuardrail::new(4.0, 0.90, 0.01, 32);
+        assert!((guard.block_threshold - 1.0).abs() < f64::EPSILON);
+
+        let mut state = healthy_state();
+        state.memory_tail_risk = Some(tail_telemetry(128, 0.10, 0.0, 4.0));
+        assert!(guard.check(&state).is_blocked());
+    }
+
+    #[test]
+    fn tail_risk_guard_negative_alpha_clamps_to_minimum() {
+        let guard = MemoryTailRiskGuardrail::new(0.95, 0.85, -0.5, 0);
+        assert!((guard.alpha - MemoryTailRiskGuardrail::MIN_ALPHA).abs() < f64::EPSILON);
+        assert_eq!(guard.min_samples, MemoryTailRiskGuardrail::MIN_SAMPLES);
+    }
+
+    #[test]
+    fn tail_risk_guard_negative_telemetry_values_sanitize_to_allow() {
+        let guard = MemoryTailRiskGuardrail::new(0.95, 0.85, 0.01, 32);
+        let mut state = healthy_state();
+        state.memory_tail_risk = Some(tail_telemetry(512, -10.0, -3.0, -1.0));
+
+        assert_eq!(guard.check(&state), GuardrailVerdict::Allow);
+    }
+
+    #[test]
+    fn conformal_guard_zero_sample_telemetry_allows_until_min_window() {
+        let guard = ConformalRiskGuardrail::new(0.10, 0.07, 0.01, 0);
+        let mut state = healthy_state();
+        state.reliability_telemetry = Some(reliability_telemetry(0, u64::MAX));
+
+        assert_eq!(guard.check(&state), GuardrailVerdict::Allow);
+    }
+
+    #[test]
+    fn conformal_guard_delta_above_maximum_is_clamped() {
+        let guard = ConformalRiskGuardrail::new(0.10, 0.07, 9.0, 1);
+        assert!((guard.delta - ConformalRiskGuardrail::MAX_DELTA).abs() < f64::EPSILON);
+        assert_eq!(guard.min_samples, ConformalRiskGuardrail::MIN_SAMPLES);
+    }
+
+    #[test]
+    fn durability_guard_negative_warn_margin_is_clamped_to_zero() {
+        let guard = DurabilityLossGuardrail::new(0.90, -0.25);
+        assert!((guard.warn_margin - 0.0).abs() < f64::EPSILON);
+
+        let mut state = healthy_state();
+        state.durability_level = 0.90;
+        assert_eq!(guard.check(&state), GuardrailVerdict::Allow);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Comprehensive negative-path tests
+    // ---------------------------------------------------------------------------
+
+    mod guardrail_monitor_comprehensive_negative_tests {
+        use super::*;
+
+        #[test]
+        fn unicode_injection_in_budget_identifiers_and_reason_strings() {
+            let malicious_budget_ids = [
+                "mem\u{202E}deilav",      // RLO override attack
+                "budget\u{200B}hidden",  // Zero-width space injection
+                "id\u{FEFF}bom",         // BOM insertion
+                "test\u{2028}break",     // Line separator injection
+                "\u{1F4A9}emoji_budget", // Non-ASCII emoji
+                "budget\u{0000}null",    // Null byte injection
+            ];
+
+            for malicious_id in malicious_budget_ids {
+                let budget_id = BudgetId::new(malicious_id);
+                // BudgetId should handle malicious input gracefully
+                assert_eq!(budget_id.as_str(), malicious_id);
+                let display = budget_id.to_string();
+                assert_eq!(display, malicious_id);
+
+                // Test in verdict construction with malicious reason strings
+                let malicious_reason = format!("Attack: {malicious_id}\u{202E}reverse");
+                let verdict = GuardrailVerdict::Block {
+                    reason: malicious_reason.clone(),
+                    budget_id: budget_id.clone(),
+                };
+
+                // Verdict should contain the malicious content but not cause issues in display
+                let display_str = verdict.to_string();
+                assert!(display_str.contains("BLOCK"));
+                assert_eq!(verdict.event_code(), "EVD-GUARD-002");
+                assert_eq!(verdict.severity(), 2);
+            }
+        }
+
+        #[test]
+        fn arithmetic_overflow_protection_in_memory_calculations() {
+            // Test memory utilization calculation with overflow-prone values
+            let overflow_states = [
+                SystemState {
+                    memory_used_bytes: u64::MAX,
+                    memory_budget_bytes: 1,
+                    durability_level: 0.99,
+                    hardening_level: HardeningLevel::Standard,
+                    proposed_hardening_level: None,
+                    evidence_emission_active: true,
+                    memory_tail_risk: None,
+                    reliability_telemetry: None,
+                    epoch_id: u64::MAX,
+                },
+                SystemState {
+                    memory_used_bytes: u64::MAX - 1,
+                    memory_budget_bytes: u64::MAX,
+                    durability_level: 0.99,
+                    hardening_level: HardeningLevel::Standard,
+                    proposed_hardening_level: None,
+                    evidence_emission_active: true,
+                    memory_tail_risk: None,
+                    reliability_telemetry: None,
+                    epoch_id: u64::MAX.saturating_sub(1),
+                },
+            ];
+
+            let guard = MemoryBudgetGuardrail::default_guardrail();
+
+            for state in overflow_states {
+                // Should handle extreme values without panic
+                let utilization = state.memory_utilization();
+                assert!(utilization.is_finite() || utilization >= 0.0);
+
+                let verdict = guard.check(&state);
+                // Should produce a valid verdict even with extreme values
+                assert!(matches!(verdict, GuardrailVerdict::Allow | GuardrailVerdict::Warn { .. } | GuardrailVerdict::Block { .. }));
+            }
+
+            // Test tail-risk calculations with overflow-prone statistical values
+            let tail_guard = MemoryTailRiskGuardrail::default_guardrail();
+            let overflow_telemetry = MemoryTailRiskTelemetry {
+                sample_count: u64::MAX,
+                mean_utilization: f64::MAX,
+                variance_utilization: f64::MAX,
+                peak_utilization: f64::MAX,
+            };
+
+            let mut state = healthy_state();
+            state.memory_tail_risk = Some(overflow_telemetry);
+
+            // Statistical calculations should be bounded and finite
+            let verdict = tail_guard.check(&state);
+            assert!(matches!(verdict, GuardrailVerdict::Allow | GuardrailVerdict::Warn { .. } | GuardrailVerdict::Block { .. }));
+        }
+
+        #[test]
+        fn memory_exhaustion_through_massive_telemetry_datasets() {
+            // Create massive telemetry structures to test memory bounds
+            let massive_sample_count = 1_000_000_u64;
+
+            let massive_tail_telemetry = MemoryTailRiskTelemetry {
+                sample_count: massive_sample_count,
+                mean_utilization: 0.95,
+                variance_utilization: 0.25,
+                peak_utilization: 0.99,
+            };
+
+            let massive_reliability_telemetry = ReliabilityTelemetry {
+                sample_count: massive_sample_count,
+                nonconforming_count: massive_sample_count / 10, // 10% error rate
+            };
+
+            let mut state = healthy_state();
+            state.memory_tail_risk = Some(massive_tail_telemetry);
+            state.reliability_telemetry = Some(massive_reliability_telemetry);
+
+            // Create monitor set and test with massive data
+            let set = GuardrailMonitorSet::with_defaults();
+
+            // Should handle large datasets without crashing
+            let certificate = set.certify(&state);
+            assert_eq!(certificate.epoch_id, state.epoch_id);
+            assert_eq!(certificate.findings.len(), 6); // All default monitors
+
+            // Test detailed check with massive data
+            let detailed = set.check_all_detailed(&state);
+            assert_eq!(detailed.len(), 6);
+
+            // Test evaluation doesn't crash
+            let evaluation_result = set.evaluate(&state);
+            assert!(evaluation_result.is_ok() || evaluation_result.is_err()); // Either is fine, just shouldn't panic
+        }
+
+        #[test]
+        fn concurrent_operations_simulation_on_monitor_sets() {
+            // Simulate concurrent access patterns by rapidly creating and evaluating monitors
+            let mut set = GuardrailMonitorSet::new();
+
+            // Register many monitors to test capacity bounds
+            for i in 0..100 {
+                set.register(Box::new(MemoryBudgetGuardrail::new(
+                    0.50 + (i as f64 * 0.001), // Slightly different thresholds
+                    0.40 + (i as f64 * 0.001),
+                )));
+            }
+
+            // Test that monitor set handles registration properly
+            assert!(set.monitor_count() <= MAX_MONITORS);
+
+            let states = [
+                healthy_state(),
+                {
+                    let mut s = healthy_state();
+                    s.memory_used_bytes = 950_000_000; // High memory
+                    s
+                },
+                {
+                    let mut s = healthy_state();
+                    s.evidence_emission_active = false; // Blocked
+                    s
+                },
+            ];
+
+            // Rapidly evaluate different states (simulating concurrent access)
+            for _ in 0..1000 {
+                for state in &states {
+                    let certificate = set.certify(state);
+                    assert!(certificate.findings.len() <= set.monitor_count());
+
+                    let verdict = set.check_all(state);
+                    assert!(verdict.severity() <= 2);
+
+                    // Test that evaluation is consistent
+                    let eval_result = set.evaluate(state);
+                    if verdict.is_blocked() {
+                        assert!(eval_result.is_err());
+                    } else {
+                        assert!(eval_result.is_ok());
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn floating_point_edge_cases_in_statistical_bounds() {
+            let tail_guard = MemoryTailRiskGuardrail::default_guardrail();
+            let conformal_guard = ConformalRiskGuardrail::default_guardrail();
+
+            // Test with denormal numbers and near-zero values
+            let denormal_telemetry = MemoryTailRiskTelemetry {
+                sample_count: 1000,
+                mean_utilization: f64::MIN_POSITIVE, // Smallest normal positive number
+                variance_utilization: f64::MIN_POSITIVE,
+                peak_utilization: f64::MIN_POSITIVE * 2.0,
+            };
+
+            let zero_variance_telemetry = MemoryTailRiskTelemetry {
+                sample_count: 500,
+                mean_utilization: 0.5,
+                variance_utilization: 0.0, // Zero variance
+                peak_utilization: 0.5,
+            };
+
+            let edge_case_reliability = ReliabilityTelemetry {
+                sample_count: 1000,
+                nonconforming_count: 0, // Zero errors
+            };
+
+            let all_errors_reliability = ReliabilityTelemetry {
+                sample_count: 100,
+                nonconforming_count: 100, // All errors
+            };
+
+            let test_telemetries = [
+                (Some(denormal_telemetry), Some(edge_case_reliability)),
+                (Some(zero_variance_telemetry), Some(all_errors_reliability)),
+                (None, Some(edge_case_reliability)),
+                (Some(denormal_telemetry), None),
+            ];
+
+            for (tail_telem, reliability_telem) in test_telemetries {
+                let mut state = healthy_state();
+                state.memory_tail_risk = tail_telem;
+                state.reliability_telemetry = reliability_telem;
+
+                // All calculations should remain finite and bounded
+                let tail_verdict = tail_guard.check(&state);
+                let conformal_verdict = conformal_guard.check(&state);
+
+                assert!(matches!(tail_verdict, GuardrailVerdict::Allow | GuardrailVerdict::Warn { .. } | GuardrailVerdict::Block { .. }));
+                assert!(matches!(conformal_verdict, GuardrailVerdict::Allow | GuardrailVerdict::Warn { .. } | GuardrailVerdict::Block { .. }));
+
+                // Verify no infinite/NaN values leak into verdict strings
+                if let GuardrailVerdict::Block { reason, .. } | GuardrailVerdict::Warn { reason } = &tail_verdict {
+                    assert!(!reason.contains("inf"));
+                    assert!(!reason.contains("NaN"));
+                }
+                if let GuardrailVerdict::Block { reason, .. } | GuardrailVerdict::Warn { reason } = &conformal_verdict {
+                    assert!(!reason.contains("inf"));
+                    assert!(!reason.contains("NaN"));
+                }
+            }
+        }
+
+        #[test]
+        fn configuration_boundary_attacks_with_extreme_threshold_values() {
+            // Test extreme threshold configurations that could cause issues
+            let extreme_configs = [
+                // Memory guards with extreme values
+                (f64::EPSILON, f64::EPSILON),                    // Tiny thresholds
+                (1.0 - f64::EPSILON, 1.0 - f64::EPSILON),       // Nearly 100%
+                (0.5, 1.5),                                     // Warn > block (should clamp)
+                (f64::MIN_POSITIVE, f64::MAX),                  // Min positive vs max
+            ];
+
+            for (block_thresh, warn_thresh) in extreme_configs {
+                let memory_guard = MemoryBudgetGuardrail::new(block_thresh, warn_thresh);
+                let durability_guard = DurabilityLossGuardrail::new(block_thresh.min(1.0), warn_thresh.min(0.5));
+
+                // Guards should clamp values to safe ranges
+                assert!(memory_guard.block_threshold >= MemoryBudgetGuardrail::ENVELOPE_MIN_BLOCK_THRESHOLD);
+                assert!(memory_guard.block_threshold <= 1.0);
+                assert!(memory_guard.warn_threshold <= memory_guard.block_threshold);
+                assert!(memory_guard.warn_threshold >= 0.0);
+
+                assert!(durability_guard.min_durability >= DurabilityLossGuardrail::ENVELOPE_MIN_DURABILITY);
+                assert!(durability_guard.min_durability <= 1.0);
+                assert!(durability_guard.warn_margin >= 0.0);
+
+                // Test with boundary states
+                let test_states = [
+                    {
+                        let mut s = healthy_state();
+                        s.memory_used_bytes = (s.memory_budget_bytes as f64 * memory_guard.block_threshold) as u64;
+                        s.durability_level = durability_guard.min_durability;
+                        s
+                    },
+                    {
+                        let mut s = healthy_state();
+                        s.memory_used_bytes = (s.memory_budget_bytes as f64 * memory_guard.warn_threshold) as u64;
+                        s.durability_level = durability_guard.min_durability + durability_guard.warn_margin;
+                        s
+                    },
+                ];
+
+                for state in test_states {
+                    let mem_verdict = memory_guard.check(&state);
+                    let dur_verdict = durability_guard.check(&state);
+
+                    // Should produce valid verdicts at all boundary conditions
+                    assert!(mem_verdict.severity() <= 2);
+                    assert!(dur_verdict.severity() <= 2);
+                }
+            }
+        }
+
+        #[test]
+        fn state_consistency_validation_under_error_conditions() {
+            // Test inconsistent system states that could cause logic errors
+            let inconsistent_states = [
+                {
+                    let mut s = healthy_state();
+                    s.memory_used_bytes = s.memory_budget_bytes + 1_000_000; // Usage > budget
+                    s
+                },
+                {
+                    let mut s = healthy_state();
+                    s.hardening_level = HardeningLevel::Enhanced;
+                    s.proposed_hardening_level = Some(HardeningLevel::Baseline); // Regression
+                    s.evidence_emission_active = false; // Multiple violations
+                    s.durability_level = 0.2; // Below minimum
+                    s
+                },
+                {
+                    let mut s = healthy_state();
+                    s.memory_tail_risk = Some(MemoryTailRiskTelemetry {
+                        sample_count: 1000,
+                        mean_utilization: 0.3,
+                        variance_utilization: 0.8, // Inconsistent: high variance, low mean
+                        peak_utilization: 0.1, // Inconsistent: peak < mean
+                    });
+                    s
+                },
+                {
+                    let mut s = healthy_state();
+                    s.reliability_telemetry = Some(ReliabilityTelemetry {
+                        sample_count: 50,
+                        nonconforming_count: 75, // Inconsistent: errors > samples
+                    });
+                    s
+                },
+            ];
+
+            let set = GuardrailMonitorSet::with_defaults();
+
+            for (i, state) in inconsistent_states.iter().enumerate() {
+                // System should handle inconsistent states gracefully
+                let certificate = set.certify(state);
+                assert_eq!(certificate.findings.len(), 6, "State {i} findings count mismatch");
+                assert_eq!(certificate.epoch_id, state.epoch_id, "State {i} epoch mismatch");
+
+                // At least one monitor should detect issues in most inconsistent states
+                let has_blocks = certificate.findings.iter().any(|f| f.verdict.severity() >= 2);
+                if i > 0 { // Skip the first state which might be borderline
+                    assert!(has_blocks, "State {i} should have at least one block verdict");
+                }
+
+                // Certificate should be internally consistent
+                let dominant_severity = certificate.dominant_verdict.severity();
+                let max_finding_severity = certificate.findings.iter().map(|f| f.verdict.severity()).max().unwrap_or(0);
+                assert_eq!(dominant_severity, max_finding_severity, "State {i} dominant verdict mismatch");
+
+                // Blocking budget IDs should match block verdicts
+                let actual_blocks: std::collections::HashSet<_> = certificate.findings
+                    .iter()
+                    .filter_map(|f| if f.verdict.severity() >= 2 { Some(f.budget_id.as_str()) } else { None })
+                    .collect();
+                let reported_blocks: std::collections::HashSet<_> = certificate.blocking_budget_ids
+                    .iter()
+                    .map(|b| b.as_str())
+                    .collect();
+                assert_eq!(actual_blocks, reported_blocks, "State {i} blocking budget ID mismatch");
+            }
+        }
+
+        #[test]
+        fn resource_exhaustion_through_monitor_capacity_attacks() {
+            let mut set = GuardrailMonitorSet::new();
+
+            // Attempt to register more monitors than the capacity limit
+            for i in 0..(MAX_MONITORS + 100) {
+                let memory_guard = MemoryBudgetGuardrail::new(
+                    0.50 + ((i % 500) as f64 * 0.0001), // Vary thresholds to avoid identical monitors
+                    0.40 + ((i % 500) as f64 * 0.0001),
+                );
+                set.register(Box::new(memory_guard));
+            }
+
+            // Should respect capacity limits
+            assert!(set.monitor_count() <= MAX_MONITORS);
+
+            // Should still function normally with capacity-limited set
+            let state = healthy_state();
+            let certificate = set.certify(&state);
+            assert!(certificate.findings.len() <= MAX_MONITORS);
+            assert!(certificate.findings.len() == set.monitor_count());
+
+            // Test push_bounded_box with zero capacity (should clear)
+            let mut test_monitors: Vec<Box<dyn GuardrailMonitor>> = vec![
+                Box::new(MemoryBudgetGuardrail::default_guardrail()),
+                Box::new(EvidenceEmissionGuardrail::new()),
+            ];
+
+            push_bounded_box(&mut test_monitors, Box::new(HardeningRegressionGuardrail::new()), 0);
+            assert!(test_monitors.is_empty(), "Zero capacity should clear all monitors");
+
+            // Test push_bounded_box with capacity overflow
+            let mut overflow_monitors: Vec<Box<dyn GuardrailMonitor>> = Vec::new();
+            for i in 0..10 {
+                overflow_monitors.push(Box::new(MemoryBudgetGuardrail::new(0.5 + i as f64 * 0.01, 0.4)));
+            }
+
+            push_bounded_box(&mut overflow_monitors, Box::new(EvidenceEmissionGuardrail::new()), 5);
+            assert_eq!(overflow_monitors.len(), 5, "Should maintain capacity limit");
+
+            // Should preserve most recent monitors (FIFO eviction)
+            assert_eq!(overflow_monitors.last().unwrap().name(), "EvidenceEmissionGuardrail");
+        }
+
+        #[test]
+        fn serialization_format_injection_resistance_in_verdict_generation() {
+            // Test verdict formatting with various injection attempts
+            let injection_attempts = [
+                "normal reason",
+                "reason\nwith\nnewlines",
+                "reason\twith\ttabs",
+                "reason\rwith\rcarriage\rreturns",
+                "reason with \u{0000} null bytes",
+                "reason with \u{001F} control chars \u{007F}",
+                "reason with unicode \u{202E} direction \u{202D} overrides",
+                "very long reason that exceeds typical buffer sizes".repeat(1000),
+            ];
+
+            let budget_id = BudgetId::new("test_budget\u{200B}hidden");
+
+            for (i, reason) in injection_attempts.iter().enumerate() {
+                let verdicts = [
+                    GuardrailVerdict::Allow,
+                    GuardrailVerdict::Warn { reason: reason.to_string() },
+                    GuardrailVerdict::Block {
+                        reason: reason.to_string(),
+                        budget_id: budget_id.clone(),
+                    },
+                ];
+
+                for verdict in verdicts {
+                    // Test that formatting doesn't panic and produces consistent results
+                    let display_str = verdict.to_string();
+                    let event_code = verdict.event_code();
+                    let severity = verdict.severity();
+
+                    // Basic sanity checks
+                    assert!(!display_str.is_empty(), "Display string should not be empty for injection {i}");
+                    assert!(event_code.starts_with("EVD-GUARD-"), "Event code should follow expected format for injection {i}");
+                    assert!(severity <= 2, "Severity should be valid for injection {i}");
+
+                    // Test in certificate generation
+                    let finding = GuardrailFinding {
+                        monitor_name: format!("TestMonitor{i}"),
+                        budget_id: budget_id.clone(),
+                        verdict: verdict.clone(),
+                        event_code,
+                        anytime_valid: true,
+                    };
+
+                    // Certificate with injection-containing findings should be well-formed
+                    let certificate = GuardrailCertificate {
+                        epoch_id: 12345,
+                        dominant_verdict: verdict.clone(),
+                        findings: vec![finding],
+                        blocking_budget_ids: if verdict.severity() >= 2 { vec![budget_id.clone()] } else { vec![] },
+                    };
+
+                    // Should handle injected content without issues
+                    assert_eq!(certificate.epoch_id, 12345);
+                    assert_eq!(certificate.findings.len(), 1);
+                    assert_eq!(certificate.dominant_verdict.severity(), verdict.severity());
+                }
+            }
+        }
     }
 }

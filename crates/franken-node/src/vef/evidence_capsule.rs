@@ -11,8 +11,13 @@ use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 const MAX_EVIDENCE: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -541,5 +546,243 @@ mod tests {
             .expect("export should succeed");
         assert_eq!(reg.audit_log().len(), 1);
         assert!(reg.audit_log()[0].contains(EVIDENCE_CAPSULE_EXPORTED));
+    }
+
+    #[test]
+    fn seal_rejects_schema_mismatch_without_marking_capsule_sealed() {
+        let mut c = EvidenceCapsule::new("c1".into(), 1000);
+        c.add_evidence(test_evidence()).expect("add should succeed");
+        c.schema_version = "evidence-capsule-v0".into();
+
+        let err = c.seal().expect_err("schema mismatch must fail");
+
+        assert!(matches!(err, CapsuleError::SchemaMismatch { .. }));
+        assert!(
+            !c.is_sealed(),
+            "failed seal must not make capsule immutable"
+        );
+    }
+
+    #[test]
+    fn verify_all_reports_empty_proof_id() {
+        let mut c = EvidenceCapsule::new("c1".into(), 1000);
+        let mut ev = test_evidence();
+        ev.proof_id.clear();
+        c.add_evidence(ev).expect("add should succeed");
+        c.seal().expect("seal should succeed");
+
+        let result = c.verify_all();
+
+        assert!(!result.valid);
+        assert_eq!(result.checked, 1);
+        assert_eq!(result.passed, 0);
+        assert!(result.failures[0].contains("empty proof_id"));
+    }
+
+    #[test]
+    fn verify_all_reports_combined_failure_reasons() {
+        let mut c = EvidenceCapsule::new("c1".into(), 1000);
+        let mut ev = test_evidence();
+        ev.verified = false;
+        ev.receipt_chain_commitment.clear();
+        ev.proof_id.clear();
+        c.add_evidence(ev).expect("add should succeed");
+        c.seal().expect("seal should succeed");
+
+        let result = c.verify_all();
+
+        assert!(!result.valid);
+        assert_eq!(result.failures.len(), 1);
+        assert!(result.failures[0].contains("not verified"));
+        assert!(result.failures[0].contains("empty commitment"));
+        assert!(result.failures[0].contains("empty proof_id"));
+    }
+
+    #[test]
+    fn export_schema_mismatch_does_not_append_audit_log() {
+        let mut reg = VerifierRegistry::new();
+        reg.register(ExternalVerifierEndpoint {
+            name: "ext-1".into(),
+            url: "https://example.com".into(),
+            supported_schemas: vec!["other-v2.0".into()],
+        });
+        let c = sealed_capsule();
+
+        let err = reg
+            .export_capsule(&c, "ext-1")
+            .expect_err("schema mismatch must fail");
+
+        assert!(matches!(err, CapsuleError::SchemaMismatch { .. }));
+        assert!(reg.audit_log().is_empty());
+    }
+
+    #[test]
+    fn export_unknown_endpoint_does_not_append_audit_log() {
+        let mut reg = VerifierRegistry::new();
+        let c = sealed_capsule();
+
+        let err = reg
+            .export_capsule(&c, "missing-endpoint")
+            .expect_err("unknown endpoint must fail");
+
+        assert!(matches!(err, CapsuleError::ExportFailed { .. }));
+        assert!(reg.audit_log().is_empty());
+    }
+
+    #[test]
+    fn export_empty_target_name_is_rejected() {
+        let mut reg = VerifierRegistry::new();
+        reg.register(ExternalVerifierEndpoint {
+            name: "ext-1".into(),
+            url: "https://example.com".into(),
+            supported_schemas: vec![SCHEMA_VERSION.into()],
+        });
+        let c = sealed_capsule();
+
+        let err = reg
+            .export_capsule(&c, "")
+            .expect_err("empty target name must not resolve to an endpoint");
+
+        assert!(matches!(err, CapsuleError::ExportFailed { .. }));
+        assert!(reg.audit_log().is_empty());
+    }
+
+    #[test]
+    fn evidence_capsule_deserialize_rejects_missing_schema_version() {
+        let raw = serde_json::json!({
+            "capsule_id": "cap-missing-schema",
+            "created_at_epoch": 1000_u64,
+            "evidence": [],
+            "metadata": {},
+            "sealed": false
+        });
+
+        let result: Result<EvidenceCapsule, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "schema_version is required");
+    }
+
+    #[test]
+    fn endpoint_deserialize_rejects_supported_schemas_type_confusion() {
+        let raw = serde_json::json!({
+            "name": "ext-1",
+            "url": "https://example.com",
+            "supported_schemas": "evidence-capsule-v1.0"
+        });
+
+        let result: Result<ExternalVerifierEndpoint, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "supported_schemas must be an array, not a scalar"
+        );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_evidence() {
+        let mut items = vec![test_evidence()];
+
+        push_bounded(&mut items, test_evidence(), 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_keeps_latest_evidence() {
+        let mut first = test_evidence();
+        first.proof_id = "proof-old".into();
+        let mut second = test_evidence();
+        second.proof_id = "proof-mid".into();
+        let mut third = test_evidence();
+        third.proof_id = "proof-new".into();
+        let mut items = vec![first, second];
+
+        push_bounded(&mut items, third, 2);
+
+        assert_eq!(items[0].proof_id, "proof-mid");
+        assert_eq!(items[1].proof_id, "proof-new");
+    }
+
+    #[test]
+    fn vef_evidence_deserialize_rejects_missing_proof_id() {
+        let raw = serde_json::json!({
+            "receipt_chain_commitment": "commit-abc",
+            "proof_type": "snark",
+            "window_start": 0_u64,
+            "window_end": 100_u64,
+            "verified": true,
+            "policy_constraints": ["no-network"]
+        });
+
+        let result: Result<VefEvidence, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn vef_evidence_deserialize_rejects_policy_constraints_scalar() {
+        let raw = serde_json::json!({
+            "receipt_chain_commitment": "commit-abc",
+            "proof_id": "proof-1",
+            "proof_type": "snark",
+            "window_start": 0_u64,
+            "window_end": 100_u64,
+            "verified": true,
+            "policy_constraints": "no-network"
+        });
+
+        let result: Result<VefEvidence, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn evidence_capsule_deserialize_rejects_string_created_epoch() {
+        let raw = serde_json::json!({
+            "capsule_id": "cap-string-epoch",
+            "schema_version": SCHEMA_VERSION,
+            "created_at_epoch": "1000",
+            "evidence": [],
+            "metadata": {},
+            "sealed": false
+        });
+
+        let result: Result<EvidenceCapsule, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn export_manifest_deserialize_rejects_missing_target_endpoint() {
+        let raw = serde_json::json!({
+            "capsule_id": "cap-missing-target",
+            "evidence_count": 1_usize,
+            "schema_version": SCHEMA_VERSION
+        });
+
+        let result: Result<ExportManifest, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn capsule_error_deserialize_rejects_unknown_variant() {
+        let result: Result<CapsuleError, _> = serde_json::from_str(r#""Bypass""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn verification_result_deserialize_rejects_failures_scalar() {
+        let raw = serde_json::json!({
+            "valid": false,
+            "checked": 1_usize,
+            "passed": 0_usize,
+            "failures": "not verified"
+        });
+
+        let result: Result<CapsuleVerificationResult, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
     }
 }

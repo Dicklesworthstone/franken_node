@@ -44,6 +44,11 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 use frankenengine_node::capacity_defaults::aliases::{MAX_CHAIN_ENTRIES, MAX_CHECKPOINTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -392,7 +397,10 @@ impl ReceiptChain {
                     checkpoint.checkpoint_id
                 )));
             }
-            let chain_head = entries[usize::try_from(checkpoint.end_index).unwrap_or(usize::MAX.min(entries.len().saturating_sub(1)))].chain_hash.as_str();
+            let chain_head = entries[usize::try_from(checkpoint.end_index)
+                .unwrap_or(usize::MAX.min(entries.len().saturating_sub(1)))]
+            .chain_hash
+            .as_str();
             if !ct_eq_inline(&checkpoint.chain_head_hash, chain_head) {
                 return Err(ChainError::checkpoint(format!(
                     "checkpoint {} chain head mismatch",
@@ -426,7 +434,11 @@ impl ReceiptChain {
         Self::verify_entries_and_checkpoints(&entries, &checkpoints)?;
         let last_checkpoint_entry = checkpoints
             .last()
-            .map(|checkpoint| usize::try_from(checkpoint.end_index).unwrap_or(usize::MAX).saturating_add(1))
+            .map(|checkpoint| {
+                usize::try_from(checkpoint.end_index)
+                    .unwrap_or(usize::MAX)
+                    .saturating_add(1)
+            })
             .unwrap_or(0);
         let next_checkpoint_id = checkpoints
             .iter()
@@ -1067,5 +1079,333 @@ mod tests {
         let err =
             ReceiptChain::verify_entries_and_checkpoints(chain.entries(), &invalid).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+    }
+
+    #[test]
+    fn first_entry_with_nonzero_index_is_rejected() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig::default());
+        chain
+            .append(
+                make_receipt(ExecutionActionType::NetworkAccess, 20),
+                1_700_001_300_000,
+                "trace-bad-first-index",
+            )
+            .unwrap();
+        let mut entries = chain.entries().to_vec();
+        entries[0].index = 1;
+
+        let err = ReceiptChain::verify_entries_and_checkpoints(&entries, chain.checkpoints())
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_SEQUENCE);
+        assert!(err.message.contains("entry index mismatch"));
+    }
+
+    #[test]
+    fn first_entry_with_non_genesis_prev_hash_is_rejected() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig::default());
+        chain
+            .append(
+                make_receipt(ExecutionActionType::FilesystemOperation, 21),
+                1_700_001_300_021,
+                "trace-bad-genesis",
+            )
+            .unwrap();
+        let mut entries = chain.entries().to_vec();
+        entries[0].prev_chain_hash =
+            "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string();
+
+        let err = ReceiptChain::verify_entries_and_checkpoints(&entries, chain.checkpoints())
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_SEQUENCE);
+        assert!(err.message.contains("prev chain hash mismatch"));
+    }
+
+    #[test]
+    fn checkpoint_id_gap_is_rejected() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 2,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 30..32_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::PolicyTransition, seq),
+                    1_700_001_300_000 + seq,
+                    "trace-checkpoint-id-gap",
+                )
+                .unwrap();
+        }
+        let mut checkpoints = chain.checkpoints().to_vec();
+        checkpoints[0].checkpoint_id = 7;
+
+        let err = ReceiptChain::verify_entries_and_checkpoints(chain.entries(), &checkpoints)
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("checkpoint_id mismatch"));
+    }
+
+    #[test]
+    fn checkpoint_end_index_out_of_bounds_is_rejected() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 2,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 40..42_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::SecretAccess, seq),
+                    1_700_001_400_000 + seq,
+                    "trace-checkpoint-oob",
+                )
+                .unwrap();
+        }
+        let mut checkpoints = chain.checkpoints().to_vec();
+        checkpoints[0].end_index = 9;
+
+        let err = ReceiptChain::verify_entries_and_checkpoints(chain.entries(), &checkpoints)
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("out of bounds"));
+    }
+
+    #[test]
+    fn checkpoint_entry_count_mismatch_is_rejected() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 2,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 50..52_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::ArtifactPromotion, seq),
+                    1_700_001_500_000 + seq,
+                    "trace-checkpoint-count",
+                )
+                .unwrap();
+        }
+        let mut checkpoints = chain.checkpoints().to_vec();
+        checkpoints[0].entry_count = 99;
+
+        let err = ReceiptChain::verify_entries_and_checkpoints(chain.entries(), &checkpoints)
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("entry_count mismatch"));
+    }
+
+    #[test]
+    fn checkpoint_chain_head_mismatch_is_rejected() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 2,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 60..62_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::ProcessSpawn, seq),
+                    1_700_001_600_000 + seq,
+                    "trace-checkpoint-head",
+                )
+                .unwrap();
+        }
+        let mut checkpoints = chain.checkpoints().to_vec();
+        checkpoints[0].chain_head_hash = tamper_same_length_hash(&checkpoints[0].chain_head_hash);
+
+        let err = ReceiptChain::verify_entries_and_checkpoints(chain.entries(), &checkpoints)
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("chain head mismatch"));
+    }
+
+    #[test]
+    fn overlapping_checkpoints_are_rejected() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 2,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 70..74_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::PolicyTransition, seq),
+                    1_700_001_700_000 + seq,
+                    "trace-checkpoint-overlap",
+                )
+                .unwrap();
+        }
+        let mut checkpoints = chain.checkpoints().to_vec();
+        checkpoints[1].start_index = checkpoints[0].end_index;
+
+        let err = ReceiptChain::verify_entries_and_checkpoints(chain.entries(), &checkpoints)
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("overlaps previous checkpoint"));
+    }
+
+    #[test]
+    fn resume_from_snapshot_rejects_tampered_receipt_hash() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 0,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 80..83_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::NetworkAccess, seq),
+                    1_700_001_800_000 + seq,
+                    "trace-resume-tamper",
+                )
+                .unwrap();
+        }
+        let mut entries = chain.entries().to_vec();
+        entries[2].receipt_hash = tamper_same_length_hash(&entries[2].receipt_hash);
+
+        let err =
+            ReceiptChain::resume_from_snapshot(chain.config, entries, chain.checkpoints().to_vec())
+                .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_TAMPER);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_appending_entry() {
+        let mut entries = vec![ReceiptChainEntry {
+            index: 0,
+            prev_chain_hash: GENESIS_PREV_HASH.to_string(),
+            receipt_hash: "sha256:old".to_string(),
+            chain_hash: "sha256:old-chain".to_string(),
+            receipt: make_receipt(ExecutionActionType::NetworkAccess, 90),
+            appended_at_millis: 1_700_001_900_000,
+            trace_id: "trace-old".to_string(),
+        }];
+        let replacement = ReceiptChainEntry {
+            index: 1,
+            prev_chain_hash: "sha256:old-chain".to_string(),
+            receipt_hash: "sha256:new".to_string(),
+            chain_hash: "sha256:new-chain".to_string(),
+            receipt: make_receipt(ExecutionActionType::NetworkAccess, 91),
+            appended_at_millis: 1_700_001_900_001,
+            trace_id: "trace-new".to_string(),
+        };
+
+        push_bounded(&mut entries, replacement, 0);
+
+        assert!(entries.is_empty());
+    }
+
+    #[test]
+    fn verify_integrity_rejects_internal_receipt_hash_tamper() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 0,
+            checkpoint_every_millis: 0,
+        });
+        chain
+            .append(
+                make_receipt(ExecutionActionType::SecretAccess, 92),
+                1_700_001_900_092,
+                "trace-integrity-receipt",
+            )
+            .unwrap();
+        chain.entries[0].receipt_hash = tamper_same_length_hash(&chain.entries[0].receipt_hash);
+
+        let err = chain.verify_integrity().unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_TAMPER);
+        assert!(err.message.contains("receipt hash mismatch"));
+    }
+
+    #[test]
+    fn verify_integrity_rejects_internal_checkpoint_commitment_tamper() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 2,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 93..95_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::FilesystemOperation, seq),
+                    1_700_001_900_000 + seq,
+                    "trace-integrity-checkpoint",
+                )
+                .unwrap();
+        }
+        chain.checkpoints[0].commitment_hash =
+            tamper_same_length_hash(&chain.checkpoints[0].commitment_hash);
+
+        let err = chain.verify_integrity().unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("commitment hash mismatch"));
+    }
+
+    #[test]
+    fn checkpoint_without_entries_is_rejected() {
+        let checkpoint = ReceiptCheckpoint {
+            checkpoint_id: 0,
+            start_index: 0,
+            end_index: 0,
+            entry_count: 1,
+            chain_head_hash: "sha256:head".to_string(),
+            commitment_hash: "sha256:commitment".to_string(),
+            created_at_millis: 1_700_001_900_100,
+            trace_id: "trace-empty-checkpoint".to_string(),
+        };
+
+        let err = ReceiptChain::verify_entries_and_checkpoints(&[], &[checkpoint]).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("out of bounds"));
+    }
+
+    #[test]
+    fn checkpoint_commitment_range_out_of_bounds_is_rejected() {
+        let err = compute_checkpoint_commitment(1, 1, "sha256:head", &[]).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("checkpoint range out of bounds"));
+    }
+
+    #[test]
+    fn resume_from_snapshot_rejects_checkpoint_commitment_mismatch() {
+        let mut chain = ReceiptChain::new(ReceiptChainConfig {
+            checkpoint_every_entries: 2,
+            checkpoint_every_millis: 0,
+        });
+        for seq in 96..98_u64 {
+            chain
+                .append(
+                    make_receipt(ExecutionActionType::ArtifactPromotion, seq),
+                    1_700_001_900_000 + seq,
+                    "trace-resume-checkpoint-tamper",
+                )
+                .unwrap();
+        }
+        let mut checkpoints = chain.checkpoints().to_vec();
+        checkpoints[0].commitment_hash = tamper_same_length_hash(&checkpoints[0].commitment_hash);
+
+        let err =
+            ReceiptChain::resume_from_snapshot(chain.config, chain.entries().to_vec(), checkpoints)
+                .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_CHAIN_CHECKPOINT);
+        assert!(err.message.contains("commitment hash mismatch"));
+    }
+
+    #[test]
+    fn ct_eq_inline_rejects_truncated_equal_prefix() {
+        assert!(!ct_eq_inline("sha256:abcdef", "sha256:abc"));
+    }
+
+    #[test]
+    fn constant_time_eq_rejects_same_length_hash_mutation() {
+        let original = "sha256:abcdef0123456789";
+        let mutated = "sha256:abcdef0123456788";
+
+        assert!(!constant_time_eq(original, mutated));
     }
 }

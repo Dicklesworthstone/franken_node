@@ -1032,8 +1032,12 @@ impl std::error::Error for CompatGateError {}
 use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_ENTRIES, MAX_RECEIPTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -2288,6 +2292,31 @@ mod tests {
     }
 
     #[test]
+    fn registry_duplicate_preserves_original_entry() {
+        let mut reg = ShimRegistry::new();
+        reg.register(make_shim(
+            "shim-dupe",
+            CompatibilityBand::Core,
+            ShimRiskCategory::High,
+        ))
+        .unwrap();
+
+        let err = reg
+            .register(make_shim(
+                "shim-dupe",
+                CompatibilityBand::Unsafe,
+                ShimRiskCategory::Critical,
+            ))
+            .unwrap_err();
+
+        assert!(matches!(err, CompatGateError::DuplicateShim { .. }));
+        assert_eq!(reg.len(), 1);
+        let original = reg.get("shim-dupe").unwrap();
+        assert_eq!(original.band, CompatibilityBand::Core);
+        assert_eq!(original.risk_category, ShimRiskCategory::High);
+    }
+
+    #[test]
     fn registry_by_band() {
         let reg = sample_registry();
         assert_eq!(reg.by_band(CompatibilityBand::Core).len(), 1);
@@ -2366,6 +2395,67 @@ mod tests {
         assert!(!pred.verify_signature());
     }
 
+    #[test]
+    fn freshness_rejects_malformed_issued_timestamp() {
+        let state = compute_freshness_state("not-rfc3339", "2099-01-01T01:00:00Z");
+
+        assert_eq!(state, CompatibilityFreshnessState::InvalidTimestamp);
+    }
+
+    #[test]
+    fn freshness_rejects_malformed_expiration_timestamp() {
+        let state = compute_freshness_state("2099-01-01T00:00:00Z", "not-rfc3339");
+
+        assert_eq!(state, CompatibilityFreshnessState::InvalidTimestamp);
+    }
+
+    #[test]
+    fn freshness_rejects_non_increasing_window() {
+        let state = compute_freshness_state("2099-01-01T00:00:00Z", "2099-01-01T00:00:00Z");
+
+        assert_eq!(state, CompatibilityFreshnessState::InvalidTimestamp);
+    }
+
+    #[test]
+    fn predicate_wrong_key_id_rejected() {
+        let mut pred = signed_test_predicate(vec![]);
+        pred.proof.key_id = compatibility_internal_key_id();
+
+        assert!(!pred.verify_signature());
+    }
+
+    #[test]
+    fn predicate_wrong_domain_separator_rejected() {
+        let pred = signed_test_predicate(vec![]);
+
+        assert!(!verify_ed25519_canonical(
+            COMPAT_DIVERGENCE_RECEIPT_DOMAIN,
+            &PolicyPredicateSigningPayload::from(&pred),
+            &pred.signature,
+            &pred.proof.key_id,
+        ));
+    }
+
+    #[test]
+    fn mode_receipt_wrong_key_id_rejected() {
+        let mut receipt = signed_test_receipt();
+        receipt.proof.key_id = compatibility_external_key_id();
+
+        assert!(!receipt.verify_signature());
+    }
+
+    #[test]
+    fn mode_receipt_wrong_domain_separator_rejected() {
+        let receipt = signed_test_receipt();
+
+        assert!(!verify_hmac_canonical(
+            COMPAT_TRANSITION_RECEIPT_DOMAIN,
+            &ModeSelectionReceiptSigningPayload::from(&receipt),
+            &receipt.signature,
+            &receipt.proof.key_id,
+        ));
+    }
+
     // ── GateDecision ──
 
     #[test]
@@ -2423,6 +2513,29 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, CompatGateError::TransitionDenied { .. }));
+    }
+
+    #[test]
+    fn set_mode_denied_escalation_preserves_scope_and_receipts() {
+        let mut eval = CompatGateEvaluator::new(sample_registry());
+        eval.set_mode("scope-1", CompatibilityMode::Strict, "admin", "init", true)
+            .unwrap();
+        let receipt_count = eval.all_receipts().len();
+
+        let err = eval
+            .set_mode(
+                "scope-1",
+                CompatibilityMode::LegacyRisky,
+                "admin",
+                "escalation denied",
+                false,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, CompatGateError::TransitionDenied { .. }));
+        assert_eq!(eval.get_mode("scope-1"), Some(CompatibilityMode::Strict));
+        assert_eq!(eval.all_receipts().len(), receipt_count);
+        assert_eq!(eval.receipts_for_scope("scope-1").len(), 1);
     }
 
     #[test]
@@ -2492,6 +2605,23 @@ mod tests {
             )
             .unwrap_err();
         assert!(matches!(err, CompatGateError::InvalidPredicate { .. }));
+    }
+
+    #[test]
+    fn add_policy_predicate_rejects_unknown_scope_without_side_effects() {
+        let mut eval = CompatGateEvaluator::new(sample_registry());
+        let predicate = signed_test_predicate(vec![]);
+
+        let err = eval
+            .add_policy_predicate("missing-scope", predicate)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            CompatGateError::ScopeNotFound { ref scope_id } if scope_id == "missing-scope"
+        ));
+        assert!(eval.compiled_predicates.is_empty());
+        assert!(eval.validated_predicates.is_empty());
     }
 
     #[test]
@@ -2758,6 +2888,41 @@ mod tests {
             result
                 .reason_codes
                 .contains(&reason_codes::POLICY_COMPAT_SCOPE_WIDENING.to_string())
+        );
+    }
+
+    #[test]
+    fn gate_eval_rejects_cached_predicate_tampering() {
+        let mut eval = evaluator_with_scope();
+        let predicate = signed_test_predicate(vec![AttenuationConstraint {
+            scope_type: "scope".to_string(),
+            scope_value: "project-1".to_string(),
+        }]);
+        eval.add_policy_predicate("project-1", predicate).unwrap();
+        {
+            let predicate = eval
+                .scopes
+                .get_mut("project-1")
+                .unwrap()
+                .policy_predicates
+                .first_mut()
+                .unwrap();
+            predicate.activation_condition = "mode == legacyyy".to_string();
+            assert_eq!(
+                predicate.activation_condition.len(),
+                "mode == balanced".len()
+            );
+        }
+
+        let result = eval
+            .evaluate_gate("shim-edge-1", "project-1", "trace-tampered-predicate")
+            .unwrap();
+
+        assert_eq!(result.decision, GateDecision::Deny);
+        assert!(
+            result
+                .reason_codes
+                .contains(&reason_codes::POLICY_COMPAT_INVALID_PREDICATE_SIGNATURE.to_string())
         );
     }
 
@@ -3271,5 +3436,23 @@ mod tests {
             .unwrap();
         let r = eval_risky.evaluate_gate("shim-unsafe-1", "s", "t").unwrap();
         assert_eq!(r.decision, GateDecision::Audit);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_compat_gate_window() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_compat_gate_entries() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 }

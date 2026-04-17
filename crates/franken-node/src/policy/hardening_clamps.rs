@@ -18,8 +18,12 @@ use super::hardening_state_machine::HardeningLevel;
 const MAX_ESCALATION_HISTORY: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1034,5 +1038,380 @@ mod tests {
             matches!(result, ClampResult::Denied { .. }),
             "NEG_INFINITY max_overhead_pct must deny escalation (fail-closed)"
         );
+    }
+
+    #[test]
+    fn negative_overhead_budget_denies_standard_escalation() {
+        let budget = EscalationBudget {
+            max_overhead_pct: -1.0,
+            ..default_budget()
+        };
+        let policy = HardeningClampPolicy::new(budget);
+
+        let (result, event) =
+            policy.check_escalation(HardeningLevel::Standard, HardeningLevel::Baseline, 1000);
+
+        assert!(matches!(
+            &result,
+            ClampResult::Denied { reason } if reason.contains("overhead limit")
+        ));
+        assert_eq!(event.effective_level, HardeningLevel::Baseline);
+    }
+
+    #[test]
+    fn check_and_record_same_level_denial_does_not_mutate_history() {
+        let mut policy = HardeningClampPolicy::new(default_budget());
+
+        let (result, event) =
+            policy.check_and_record(HardeningLevel::Standard, HardeningLevel::Standard, 1000);
+
+        assert!(matches!(result, ClampResult::Denied { .. }));
+        assert_eq!(policy.history().len(), 0);
+        assert_eq!(event.reason, "not an escalation");
+        assert_eq!(event.effective_level, HardeningLevel::Standard);
+    }
+
+    #[test]
+    fn rate_limit_denial_keeps_current_level_effective() {
+        let budget = EscalationBudget {
+            max_escalations_per_window: 1,
+            ..default_budget()
+        };
+        let mut policy = HardeningClampPolicy::new(budget);
+        policy.record_escalation(10, HardeningLevel::Standard);
+
+        let (result, event) =
+            policy.check_escalation(HardeningLevel::Enhanced, HardeningLevel::Standard, 20);
+
+        assert!(matches!(
+            &result,
+            ClampResult::Denied { reason } if reason.contains("rate limit")
+        ));
+        assert_eq!(event.effective_level, HardeningLevel::Standard);
+        assert!((event.budget_utilization_pct - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn set_budget_to_zero_max_denies_without_erasing_history() {
+        let mut policy = HardeningClampPolicy::new(default_budget());
+        let (first, _) =
+            policy.check_and_record(HardeningLevel::Standard, HardeningLevel::Baseline, 1000);
+        assert_eq!(first, ClampResult::Allowed);
+        let history_before = policy.history().len();
+
+        policy.set_budget(EscalationBudget {
+            max_escalations_per_window: 0,
+            ..default_budget()
+        });
+        let (second, _) =
+            policy.check_and_record(HardeningLevel::Enhanced, HardeningLevel::Standard, 2000);
+
+        assert!(matches!(second, ClampResult::Denied { .. }));
+        assert_eq!(policy.history().len(), history_before);
+    }
+
+    #[test]
+    fn overhead_clamp_denies_when_best_level_is_not_above_current() {
+        let budget = EscalationBudget {
+            max_overhead_pct: 20.0,
+            ..default_budget()
+        };
+        let policy = HardeningClampPolicy::new(budget);
+
+        let (result, event) =
+            policy.check_escalation(HardeningLevel::Critical, HardeningLevel::Enhanced, 1000);
+
+        assert!(matches!(
+            &result,
+            ClampResult::Denied { reason } if reason.contains("not above current")
+        ));
+        assert_eq!(event.effective_level, HardeningLevel::Enhanced);
+    }
+
+    #[test]
+    fn zero_window_duration_with_zero_max_still_denies() {
+        let budget = EscalationBudget {
+            max_escalations_per_window: 0,
+            window_duration_ms: 0,
+            ..default_budget()
+        };
+        let mut policy = HardeningClampPolicy::new(budget);
+        policy.record_escalation(500, HardeningLevel::Standard);
+
+        let (result, event) =
+            policy.check_escalation(HardeningLevel::Enhanced, HardeningLevel::Standard, 700);
+
+        assert!(matches!(result, ClampResult::Denied { .. }));
+        assert_eq!(event.effective_level, HardeningLevel::Standard);
+        assert!((event.budget_utilization_pct - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn saturated_window_start_still_counts_epoch_zero_record() {
+        let budget = EscalationBudget {
+            max_escalations_per_window: 1,
+            window_duration_ms: u64::MAX,
+            ..default_budget()
+        };
+        let mut policy = HardeningClampPolicy::new(budget);
+        policy.record_escalation(0, HardeningLevel::Standard);
+
+        let (result, event) =
+            policy.check_escalation(HardeningLevel::Enhanced, HardeningLevel::Standard, 5);
+
+        assert!(matches!(
+            &result,
+            ClampResult::Denied { reason } if reason.contains("rate limit")
+        ));
+        assert_eq!(event.effective_level, HardeningLevel::Standard);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_escalation_history() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_escalations() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
+    }
+}
+
+#[cfg(test)]
+mod hardening_clamps_boundary_negative_tests {
+    use super::*;
+
+    fn malicious_config() -> HardeningClampConfig {
+        HardeningClampConfig {
+            max_escalations_per_window: 10,
+            window_size_ms: 5000,
+            max_overhead_pct: 25.0,
+            min_level: HardeningLevel::Baseline,
+            max_level: HardeningLevel::Enhanced,
+        }
+    }
+
+    #[test]
+    fn negative_clamp_config_rejects_zero_window_size() {
+        let config = HardeningClampConfig {
+            window_size_ms: 0,
+            ..malicious_config()
+        };
+
+        let err = config.validate()
+            .expect_err("zero window size should be rejected");
+
+        assert!(matches!(err, HardeningClampError::InvalidWindowSize { value: 0 }));
+    }
+
+    #[test]
+    fn negative_clamp_config_rejects_negative_max_overhead_percentage() {
+        let config = HardeningClampConfig {
+            max_overhead_pct: -10.0,
+            ..malicious_config()
+        };
+
+        let err = config.validate()
+            .expect_err("negative max overhead percentage should be rejected");
+
+        assert!(matches!(
+            err,
+            HardeningClampError::InvalidOverheadPercentage { value } if value < 0.0
+        ));
+    }
+
+    #[test]
+    fn negative_clamp_config_rejects_nan_max_overhead_percentage() {
+        let config = HardeningClampConfig {
+            max_overhead_pct: f64::NAN,
+            ..malicious_config()
+        };
+
+        let err = config.validate()
+            .expect_err("NaN max overhead percentage should be rejected");
+
+        assert!(matches!(
+            err,
+            HardeningClampError::InvalidOverheadPercentage { .. }
+        ));
+    }
+
+    #[test]
+    fn negative_clamp_config_rejects_infinite_max_overhead_percentage() {
+        let config = HardeningClampConfig {
+            max_overhead_pct: f64::INFINITY,
+            ..malicious_config()
+        };
+
+        let err = config.validate()
+            .expect_err("infinite max overhead percentage should be rejected");
+
+        assert!(matches!(
+            err,
+            HardeningClampError::InvalidOverheadPercentage { .. }
+        ));
+    }
+
+    #[test]
+    fn negative_clamp_config_rejects_min_level_above_max_level() {
+        let config = HardeningClampConfig {
+            min_level: HardeningLevel::Maximum,
+            max_level: HardeningLevel::Standard,
+            ..malicious_config()
+        };
+
+        let err = config.validate()
+            .expect_err("min_level > max_level should be rejected");
+
+        assert!(matches!(
+            err,
+            HardeningClampError::InvalidLevelRange { .. }
+        ));
+    }
+
+    #[test]
+    fn negative_clamp_config_rejects_zero_max_escalations_per_window() {
+        let config = HardeningClampConfig {
+            max_escalations_per_window: 0,
+            ..malicious_config()
+        };
+
+        let err = config.validate()
+            .expect_err("zero max escalations per window should be rejected");
+
+        assert!(matches!(
+            err,
+            HardeningClampError::InvalidEscalationLimit { value: 0 }
+        ));
+    }
+
+    #[test]
+    fn negative_hardening_clamp_rejects_past_timestamp() {
+        let config = malicious_config().validate().expect("config should be valid");
+        let mut clamp = HardeningClamp::new(config);
+
+        // Record a current escalation
+        let current_timestamp = 10000;
+        clamp.record_escalation(
+            HardeningLevel::Standard,
+            current_timestamp,
+            "current-escalation",
+        ).expect("current escalation should succeed");
+
+        // Try to record an escalation in the past
+        let past_timestamp = current_timestamp.saturating_sub(1000);
+        let err = clamp.record_escalation(
+            HardeningLevel::Enhanced,
+            past_timestamp,
+            "past-escalation",
+        ).expect_err("past timestamp should be rejected");
+
+        assert!(matches!(
+            err,
+            HardeningClampError::InvalidTimestamp { .. }
+        ));
+    }
+
+    #[test]
+    fn negative_hardening_clamp_rejects_empty_trace_id() {
+        let config = malicious_config().validate().expect("config should be valid");
+        let mut clamp = HardeningClamp::new(config);
+
+        let err = clamp.record_escalation(
+            HardeningLevel::Standard,
+            1000,
+            "",
+        ).expect_err("empty trace ID should be rejected");
+
+        assert!(matches!(
+            err,
+            HardeningClampError::EmptyTraceId
+        ));
+    }
+
+    #[test]
+    fn negative_hardening_clamp_rejects_trace_id_with_nul_bytes() {
+        let config = malicious_config().validate().expect("config should be valid");
+        let mut clamp = HardeningClamp::new(config);
+
+        let err = clamp.record_escalation(
+            HardeningLevel::Standard,
+            1000,
+            "trace\0injection",
+        ).expect_err("trace ID with nul bytes should be rejected");
+
+        assert!(matches!(
+            err,
+            HardeningClampError::InvalidTraceId { .. }
+        ));
+    }
+
+    #[test]
+    fn negative_try_escalate_rejects_escalation_beyond_configured_max_level() {
+        let config = malicious_config().validate().expect("config should be valid");
+        let mut clamp = HardeningClamp::new(config);
+
+        let result = clamp.try_escalate(
+            HardeningLevel::Critical, // Beyond max_level (Enhanced)
+            1000,
+            "beyond-max-level",
+        );
+
+        match result {
+            Ok(ClampDecision::Denied { reason }) => {
+                assert!(reason.contains("exceeds maximum level"));
+            }
+            other => panic!("expected denied escalation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_try_escalate_rejects_escalation_below_configured_min_level() {
+        let config = HardeningClampConfig {
+            min_level: HardeningLevel::Standard,
+            ..malicious_config()
+        }.validate().expect("config should be valid");
+        let mut clamp = HardeningClamp::new(config);
+
+        let result = clamp.try_escalate(
+            HardeningLevel::Baseline, // Below min_level (Standard)
+            1000,
+            "below-min-level",
+        );
+
+        match result {
+            Ok(ClampDecision::Denied { reason }) => {
+                assert!(reason.contains("below minimum level"));
+            }
+            other => panic!("expected denied escalation, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_serde_rejects_unknown_clamp_decision_variant() {
+        let result: Result<ClampDecision, _> = serde_json::from_str(r#""Bypassed""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_estimated_overhead_percentage_remains_deterministic_for_repeated_queries() {
+        let level = HardeningLevel::Enhanced;
+
+        let first = estimated_overhead_pct(level);
+        let second = estimated_overhead_pct(level);
+        let third = estimated_overhead_pct(level);
+
+        assert_eq!(first, second);
+        assert_eq!(second, third);
+        assert_eq!(first, 15.0); // Expected value for Enhanced level
     }
 }

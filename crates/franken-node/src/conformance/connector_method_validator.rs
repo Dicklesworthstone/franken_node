@@ -264,9 +264,24 @@ pub fn validate_contract(connector_id: &str, declarations: &[MethodDeclaration])
 ///
 /// Uses major-version compatibility: major versions must match.
 fn is_version_compatible(pinned: &str, declared: &str) -> bool {
-    let pinned_major = pinned.split('.').next().unwrap_or("0");
-    let declared_major = declared.split('.').next().unwrap_or("0");
+    let Some(pinned_major) = parse_major_version(pinned) else {
+        return false;
+    };
+    let Some(declared_major) = parse_major_version(declared) else {
+        return false;
+    };
     pinned_major == declared_major
+}
+
+fn parse_major_version(version: &str) -> Option<&str> {
+    if version.trim() != version {
+        return None;
+    }
+    let major = version.split('.').next()?;
+    if major.is_empty() || !major.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some(major)
 }
 
 /// Return the list of required method names.
@@ -420,6 +435,379 @@ mod tests {
         assert_eq!(report.verdict, "FAIL");
         assert_eq!(report.summary.failing, 8); // 8 required missing
         assert_eq!(report.summary.skipped, 1); // simulate optional
+    }
+
+    #[test]
+    fn case_mismatched_required_method_name_is_treated_as_missing() {
+        let mut decls = full_declarations();
+        decls
+            .iter_mut()
+            .find(|decl| decl.name == "handshake")
+            .expect("handshake declaration")
+            .name = "Handshake".to_string();
+
+        let report = validate_contract("test-conn", &decls);
+        let handshake = report
+            .methods
+            .iter()
+            .find(|method| method.method == "handshake")
+            .expect("handshake result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(handshake.status, "FAIL");
+        assert_eq!(handshake.version_found, None);
+        assert_eq!(handshake.errors[0].code, MethodErrorCode::MethodMissing);
+    }
+
+    #[test]
+    fn whitespace_suffixed_required_method_name_is_treated_as_missing() {
+        let mut decls = full_declarations();
+        decls
+            .iter_mut()
+            .find(|decl| decl.name == "invoke")
+            .expect("invoke declaration")
+            .name = "invoke ".to_string();
+
+        let report = validate_contract("test-conn", &decls);
+        let invoke = report
+            .methods
+            .iter()
+            .find(|method| method.method == "invoke")
+            .expect("invoke result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(invoke.status, "FAIL");
+        assert_eq!(invoke.errors[0].code, MethodErrorCode::MethodMissing);
+    }
+
+    #[test]
+    fn blank_version_fails_version_compatibility() {
+        let mut decls = full_declarations();
+        decls
+            .iter_mut()
+            .find(|decl| decl.name == "describe")
+            .expect("describe declaration")
+            .version = String::new();
+
+        let report = validate_contract("test-conn", &decls);
+        let describe = report
+            .methods
+            .iter()
+            .find(|method| method.method == "describe")
+            .expect("describe result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(describe.status, "FAIL");
+        assert!(
+            describe
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
+        );
+    }
+
+    #[test]
+    fn leading_whitespace_version_fails_version_compatibility() {
+        let mut decls = full_declarations();
+        decls
+            .iter_mut()
+            .find(|decl| decl.name == "capabilities")
+            .expect("capabilities declaration")
+            .version = " 1.0.0".to_string();
+
+        let report = validate_contract("test-conn", &decls);
+        let capabilities = report
+            .methods
+            .iter()
+            .find(|method| method.method == "capabilities")
+            .expect("capabilities result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert!(
+            capabilities
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
+        );
+    }
+
+    #[test]
+    fn optional_simulate_with_invalid_schema_fails_when_declared() {
+        let mut decls = required_only_declarations();
+        decls.push(MethodDeclaration {
+            name: "simulate".to_string(),
+            version: "1.0.0".to_string(),
+            has_input_schema: false,
+            has_output_schema: true,
+        });
+
+        let report = validate_contract("test-conn", &decls);
+        let simulate = report
+            .methods
+            .iter()
+            .find(|method| method.method == "simulate")
+            .expect("simulate result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(simulate.required, false);
+        assert_eq!(simulate.status, "FAIL");
+        assert!(
+            simulate
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::SchemaMismatch)
+        );
+    }
+
+    #[test]
+    fn duplicate_method_declaration_with_bad_later_entry_fails() {
+        let mut decls = full_declarations();
+        decls.push(MethodDeclaration {
+            name: "health".to_string(),
+            version: "2.0.0".to_string(),
+            has_input_schema: true,
+            has_output_schema: true,
+        });
+
+        let report = validate_contract("test-conn", &decls);
+        let health = report
+            .methods
+            .iter()
+            .find(|method| method.method == "health")
+            .expect("health result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(health.version_found.as_deref(), Some("2.0.0"));
+        assert!(
+            health
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
+        );
+    }
+
+    #[test]
+    fn unknown_only_declaration_does_not_satisfy_required_methods() {
+        let decls = vec![MethodDeclaration {
+            name: "custom_extension".to_string(),
+            version: "1.0.0".to_string(),
+            has_input_schema: true,
+            has_output_schema: true,
+        }];
+
+        let report = validate_contract("test-conn", &decls);
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.summary.failing, 8);
+        assert_eq!(report.summary.skipped, 1);
+        assert!(
+            report
+                .methods
+                .iter()
+                .all(|method| method.method != "custom_extension")
+        );
+    }
+
+    #[test]
+    fn version_and_schema_errors_accumulate_for_same_method() {
+        let mut decls = full_declarations();
+        let configure = decls
+            .iter_mut()
+            .find(|decl| decl.name == "configure")
+            .expect("configure declaration");
+        configure.version = "2.0.0".to_string();
+        configure.has_output_schema = false;
+
+        let report = validate_contract("test-conn", &decls);
+        let configure = report
+            .methods
+            .iter()
+            .find(|method| method.method == "configure")
+            .expect("configure result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(configure.errors.len(), 2);
+        assert!(
+            configure
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
+        );
+        assert!(
+            configure
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::SchemaMismatch)
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_version_fails_version_compatibility() {
+        let mut decls = full_declarations();
+        decls
+            .iter_mut()
+            .find(|decl| decl.name == "health")
+            .expect("health declaration")
+            .version = "1.0.0 ".to_string();
+
+        let report = validate_contract("test-conn", &decls);
+        let health = report
+            .methods
+            .iter()
+            .find(|method| method.method == "health")
+            .expect("health result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert!(
+            health
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
+        );
+    }
+
+    #[test]
+    fn non_numeric_major_version_fails_version_compatibility() {
+        let mut decls = full_declarations();
+        decls
+            .iter_mut()
+            .find(|decl| decl.name == "shutdown")
+            .expect("shutdown declaration")
+            .version = "one.0.0".to_string();
+
+        let report = validate_contract("test-conn", &decls);
+        let shutdown = report
+            .methods
+            .iter()
+            .find(|method| method.method == "shutdown")
+            .expect("shutdown result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert!(
+            shutdown
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
+        );
+    }
+
+    #[test]
+    fn zero_major_version_fails_version_compatibility() {
+        let mut decls = full_declarations();
+        decls
+            .iter_mut()
+            .find(|decl| decl.name == "introspect")
+            .expect("introspect declaration")
+            .version = "0.9.0".to_string();
+
+        let report = validate_contract("test-conn", &decls);
+        let introspect = report
+            .methods
+            .iter()
+            .find(|method| method.method == "introspect")
+            .expect("introspect result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert!(
+            introspect
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
+        );
+    }
+
+    #[test]
+    fn optional_simulate_with_incompatible_version_fails_when_declared() {
+        let mut decls = required_only_declarations();
+        decls.push(MethodDeclaration {
+            name: "simulate".to_string(),
+            version: "2.0.0".to_string(),
+            has_input_schema: true,
+            has_output_schema: true,
+        });
+
+        let report = validate_contract("test-conn", &decls);
+        let simulate = report
+            .methods
+            .iter()
+            .find(|method| method.method == "simulate")
+            .expect("simulate result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(simulate.required, false);
+        assert_eq!(simulate.status, "FAIL");
+        assert!(
+            simulate
+                .errors
+                .iter()
+                .any(|error| error.code == MethodErrorCode::VersionIncompatible)
+        );
+    }
+
+    #[test]
+    fn required_method_missing_both_schemas_reports_schema_mismatch() {
+        let mut decls = full_declarations();
+        let invoke = decls
+            .iter_mut()
+            .find(|decl| decl.name == "invoke")
+            .expect("invoke declaration");
+        invoke.has_input_schema = false;
+        invoke.has_output_schema = false;
+
+        let report = validate_contract("test-conn", &decls);
+        let invoke = report
+            .methods
+            .iter()
+            .find(|method| method.method == "invoke")
+            .expect("invoke result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(invoke.status, "FAIL");
+        assert_eq!(invoke.errors.len(), 1);
+        assert_eq!(invoke.errors[0].code, MethodErrorCode::SchemaMismatch);
+    }
+
+    #[test]
+    fn multiple_missing_required_methods_are_reported_independently() {
+        let decls: Vec<MethodDeclaration> = full_declarations()
+            .into_iter()
+            .filter(|decl| decl.name != "handshake" && decl.name != "health")
+            .collect();
+
+        let report = validate_contract("test-conn", &decls);
+        let missing: Vec<&str> = report
+            .methods
+            .iter()
+            .filter(|method| method.status == "FAIL")
+            .map(|method| method.method.as_str())
+            .collect();
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.summary.failing, 2);
+        assert!(missing.contains(&"handshake"));
+        assert!(missing.contains(&"health"));
+    }
+
+    #[test]
+    fn required_method_prefix_lookalike_does_not_satisfy_contract() {
+        let mut decls = full_declarations();
+        decls
+            .iter_mut()
+            .find(|decl| decl.name == "handshake")
+            .expect("handshake declaration")
+            .name = "handshake.extra".to_string();
+
+        let report = validate_contract("test-conn", &decls);
+        let handshake = report
+            .methods
+            .iter()
+            .find(|method| method.method == "handshake")
+            .expect("handshake result");
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(handshake.status, "FAIL");
+        assert_eq!(handshake.version_found, None);
+        assert_eq!(handshake.errors[0].code, MethodErrorCode::MethodMissing);
     }
 
     #[test]

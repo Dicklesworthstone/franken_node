@@ -854,6 +854,51 @@ mod tests {
         assert_eq!(err.code, error_codes::ERR_VSI_BINDING_MISMATCH);
     }
 
+    #[test]
+    fn validate_embedding_fails_for_tampered_binding() {
+        let mut embedder = VefCapsuleEmbed::new();
+        let mut embedding = embedder
+            .embed(
+                "proof-tamper",
+                "payload-stable",
+                BTreeMap::new(),
+                1_000,
+                "t-tamper",
+            )
+            .unwrap();
+        embedding.binding_hash = "sha256:tampered".to_string();
+
+        let err = embedder
+            .validate_embedding(&embedding, "payload-stable", "t-tamper-validate")
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_BINDING_MISMATCH);
+        assert_eq!(
+            embedder.events().last().unwrap().event_code,
+            event_codes::VSI_005_EMBED_VALIDATED
+        );
+    }
+
+    #[test]
+    fn validate_embedding_fails_for_empty_payload_after_valid_embed() {
+        let mut embedder = VefCapsuleEmbed::new();
+        let embedding = embedder
+            .embed(
+                "proof-empty-validate",
+                "nonempty",
+                BTreeMap::new(),
+                1_000,
+                "t-valid",
+            )
+            .unwrap();
+
+        let err = embedder
+            .validate_embedding(&embedding, "", "t-empty-validate")
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_BINDING_MISMATCH);
+    }
+
     // ── 8. Embed events are emitted ──
 
     #[test]
@@ -987,6 +1032,19 @@ mod tests {
         assert_eq!(err.code, error_codes::ERR_VSI_VERSION_UNSUPPORTED);
     }
 
+    #[test]
+    fn endpoint_rejects_unsupported_version_without_side_effects() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        let mut sub = sample_submission("sub-bad-version-side-effect", "proof-bad-version");
+        sub.format_version = "0.0.0".to_string();
+
+        let err = endpoint.submit(&sub).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_VERSION_UNSUPPORTED);
+        assert!(endpoint.store().is_empty());
+        assert!(endpoint.events().is_empty());
+    }
+
     // ── 17. ExternalVerificationEndpoint rejects duplicate ──
 
     #[test]
@@ -996,6 +1054,21 @@ mod tests {
         endpoint.submit(&sub).unwrap();
         let err = endpoint.submit(&sub).unwrap_err();
         assert_eq!(err.code, error_codes::ERR_VSI_SUBMISSION_REJECTED);
+    }
+
+    #[test]
+    fn endpoint_duplicate_rejection_preserves_original_record() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        let original = sample_submission("sub-dup-preserve", "proof-original");
+        let duplicate = sample_submission("sub-dup-preserve", "proof-duplicate");
+        endpoint.submit(&original).unwrap();
+
+        let err = endpoint.submit(&duplicate).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_SUBMISSION_REJECTED);
+        assert_eq!(endpoint.store().len(), 1);
+        let stored = endpoint.store().get("sub-dup-preserve").unwrap();
+        assert_eq!(stored.proof_ref.as_str(), "proof-original");
     }
 
     // ── 18. Query by proof_ref ──
@@ -1067,6 +1140,29 @@ mod tests {
         assert_eq!(results.len(), 2);
     }
 
+    #[test]
+    fn query_zero_limit_returns_empty_records() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        endpoint
+            .submit(&sample_submission("s-zero-limit", "proof-zero-limit"))
+            .unwrap();
+
+        let results = endpoint.query(
+            &EvidenceQuery {
+                proof_ref: None,
+                status_filter: None,
+                limit: 0,
+            },
+            "t-zero-limit",
+        );
+
+        assert!(results.is_empty());
+        assert_eq!(
+            endpoint.events().last().unwrap().event_code,
+            event_codes::VSI_003_EVIDENCE_QUERIED
+        );
+    }
+
     // ── 21. Export evidence bundle ──
 
     #[test]
@@ -1099,6 +1195,21 @@ mod tests {
         let bundle = endpoint.export_evidence(1_700_000_002_000, "t-exp-exc");
         assert_eq!(bundle.records.len(), 1);
         assert_eq!(bundle.records[0].submission_id, "s-exc-1");
+    }
+
+    #[test]
+    fn export_excludes_expired_records() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        endpoint
+            .submit(&sample_submission("s-expired-only", "proof-expired-only"))
+            .unwrap();
+        endpoint
+            .update_status("s-expired-only", EvidenceStatus::Expired, "t-expired")
+            .unwrap();
+
+        let bundle = endpoint.export_evidence(1_700_000_003_000, "t-export-expired");
+
+        assert!(bundle.records.is_empty());
     }
 
     // ── 23. Update status of unknown submission fails ──
@@ -1141,6 +1252,26 @@ mod tests {
         let err = endpoint
             .update_status("s-rej", EvidenceStatus::Pending, "t-reg")
             .unwrap_err();
+        assert_eq!(err.code, error_codes::ERR_VSI_SUBMISSION_REJECTED);
+    }
+
+    #[test]
+    fn update_status_rejects_reapplying_terminal_expired() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        endpoint
+            .submit(&sample_submission(
+                "s-expired-terminal",
+                "proof-expired-terminal",
+            ))
+            .unwrap();
+        endpoint
+            .update_status("s-expired-terminal", EvidenceStatus::Expired, "t-exp")
+            .unwrap();
+
+        let err = endpoint
+            .update_status("s-expired-terminal", EvidenceStatus::Expired, "t-exp-again")
+            .unwrap_err();
+
         assert_eq!(err.code, error_codes::ERR_VSI_SUBMISSION_REJECTED);
     }
 
@@ -1382,5 +1513,177 @@ mod tests {
             .submit(&overflow_sub)
             .expect("should evict and accept");
         assert_eq!(endpoint.store().len(), MAX_EVIDENCE_RECORDS);
+    }
+
+    #[test]
+    fn negative_embed_empty_proof_ref_does_not_emit_event() {
+        let mut embedder = VefCapsuleEmbed::new();
+
+        let err = embedder
+            .embed("", "payload", BTreeMap::new(), 1_000, "t-neg-empty-proof")
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_PROOF_REF_MISSING);
+        assert!(embedder.events().is_empty());
+    }
+
+    #[test]
+    fn negative_embed_empty_payload_does_not_emit_event() {
+        let mut embedder = VefCapsuleEmbed::new();
+
+        let err = embedder
+            .embed(
+                "proof-empty-payload",
+                "",
+                BTreeMap::new(),
+                1_000,
+                "t-neg-empty-payload",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_CAPSULE_INVALID);
+        assert!(embedder.events().is_empty());
+    }
+
+    #[test]
+    fn negative_validate_embedding_rejects_corrupted_binding() {
+        let mut embedder = VefCapsuleEmbed::new();
+        let mut embedding = embedder
+            .embed(
+                "proof-corrupt-binding",
+                "payload-corrupt-binding",
+                BTreeMap::new(),
+                1_000,
+                "t-neg-corrupt-binding",
+            )
+            .unwrap();
+        embedding.binding_hash = "sha256:corrupted".to_string();
+
+        let err = embedder
+            .validate_embedding(
+                &embedding,
+                "payload-corrupt-binding",
+                "t-neg-corrupt-binding-check",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_BINDING_MISMATCH);
+        assert_eq!(
+            embedder.events().last().unwrap().event_code,
+            event_codes::VSI_005_EMBED_VALIDATED
+        );
+    }
+
+    #[test]
+    fn negative_validate_embedding_rejects_tampered_proof_ref() {
+        let mut embedder = VefCapsuleEmbed::new();
+        let mut embedding = embedder
+            .embed(
+                "proof-before-tamper",
+                "payload-before-tamper",
+                BTreeMap::new(),
+                1_000,
+                "t-neg-proof-tamper",
+            )
+            .unwrap();
+        embedding.proof_ref = "proof-after-tamper".to_string();
+
+        let err = embedder
+            .validate_embedding(
+                &embedding,
+                "payload-before-tamper",
+                "t-neg-proof-tamper-check",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_BINDING_MISMATCH);
+    }
+
+    #[test]
+    fn negative_submit_empty_format_version_does_not_store_or_emit_event() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        let mut sub = sample_submission("sub-empty-version", "proof-empty-version");
+        sub.format_version.clear();
+
+        let err = endpoint.submit(&sub).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_VERSION_UNSUPPORTED);
+        assert!(endpoint.store().is_empty());
+        assert!(endpoint.events().is_empty());
+    }
+
+    #[test]
+    fn negative_duplicate_submission_after_expiry_keeps_original_record() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        let original = sample_submission("sub-expired-dupe", "proof-original");
+        endpoint.submit(&original).unwrap();
+        endpoint
+            .update_status("sub-expired-dupe", EvidenceStatus::Expired, "t-neg-expire")
+            .unwrap();
+
+        let replacement = sample_submission("sub-expired-dupe", "proof-replacement");
+        let err = endpoint.submit(&replacement).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_SUBMISSION_REJECTED);
+        let stored = endpoint.store().get("sub-expired-dupe").unwrap();
+        assert_eq!(stored.proof_ref, "proof-original");
+        assert_eq!(stored.status, EvidenceStatus::Expired);
+    }
+
+    #[test]
+    fn negative_terminal_status_update_does_not_emit_new_event() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        endpoint
+            .submit(&sample_submission("sub-terminal-event", "proof-terminal"))
+            .unwrap();
+        endpoint
+            .update_status(
+                "sub-terminal-event",
+                EvidenceStatus::Rejected,
+                "t-neg-terminal",
+            )
+            .unwrap();
+        let events_before_rejected_update = endpoint.events().len();
+
+        let err = endpoint
+            .update_status(
+                "sub-terminal-event",
+                EvidenceStatus::Accepted,
+                "t-neg-terminal-regress",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VSI_SUBMISSION_REJECTED);
+        assert_eq!(endpoint.events().len(), events_before_rejected_update);
+        assert_eq!(
+            endpoint.store().get("sub-terminal-event").unwrap().status,
+            EvidenceStatus::Rejected
+        );
+    }
+
+    #[test]
+    fn negative_export_omits_expired_records() {
+        let mut endpoint = ExternalVerificationEndpoint::new();
+        endpoint
+            .submit(&sample_submission("sub-export-ok", "proof-export-ok"))
+            .unwrap();
+        endpoint
+            .submit(&sample_submission(
+                "sub-export-expired",
+                "proof-export-expired",
+            ))
+            .unwrap();
+        endpoint
+            .update_status(
+                "sub-export-expired",
+                EvidenceStatus::Expired,
+                "t-neg-export-expire",
+            )
+            .unwrap();
+
+        let bundle = endpoint.export_evidence(1_700_000_003_000, "t-neg-export");
+
+        assert_eq!(bundle.records.len(), 1);
+        assert_eq!(bundle.records[0].submission_id, "sub-export-ok");
     }
 }

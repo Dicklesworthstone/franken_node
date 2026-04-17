@@ -247,8 +247,12 @@ pub fn default_tuning(class: &ObjectClass) -> Option<ClassTuning> {
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -552,6 +556,30 @@ mod tests {
         assert_eq!(err.code, ERR_INVALID_OVERHEAD_RATIO);
     }
 
+    #[test]
+    fn test_validate_negative_inf_overhead_rejected() {
+        let tuning = ClassTuning {
+            symbol_size_bytes: 1024,
+            encoding_overhead_ratio: f64::NEG_INFINITY,
+            fetch_priority: FetchPriority::Normal,
+            prefetch_policy: PrefetchPolicy::Lazy,
+        };
+        let err = tuning.validate().unwrap_err();
+        assert_eq!(err.code, ERR_INVALID_OVERHEAD_RATIO);
+    }
+
+    #[test]
+    fn test_zero_symbol_size_error_precedes_bad_overhead() {
+        let tuning = ClassTuning {
+            symbol_size_bytes: 0,
+            encoding_overhead_ratio: f64::NAN,
+            fetch_priority: FetchPriority::Normal,
+            prefetch_policy: PrefetchPolicy::Lazy,
+        };
+        let err = tuning.validate().unwrap_err();
+        assert_eq!(err.code, ERR_ZERO_SYMBOL_SIZE);
+    }
+
     // -- Engine resolve --
 
     #[test]
@@ -640,6 +668,67 @@ mod tests {
         assert_eq!(reject_events.len(), 1);
     }
 
+    #[test]
+    fn test_invalid_override_does_not_replace_default() {
+        let mut engine = ObjectClassTuningEngine::new();
+        let before = engine.resolve(&ObjectClass::TrustReceipt).unwrap();
+        let tuning = ClassTuning {
+            symbol_size_bytes: 2048,
+            encoding_overhead_ratio: 1.25,
+            fetch_priority: FetchPriority::Critical,
+            prefetch_policy: PrefetchPolicy::Eager,
+        };
+
+        let err = engine
+            .apply_override(ObjectClass::TrustReceipt, tuning)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_OVERHEAD_RATIO);
+        assert!(!engine.has_override(&ObjectClass::TrustReceipt));
+        assert_eq!(engine.resolve(&ObjectClass::TrustReceipt).unwrap(), before);
+    }
+
+    #[test]
+    fn test_invalid_custom_override_does_not_create_class() {
+        let mut engine = ObjectClassTuningEngine::new();
+        let class = ObjectClass::Custom("unregistered".into());
+        let tuning = ClassTuning {
+            symbol_size_bytes: 0,
+            encoding_overhead_ratio: 0.25,
+            fetch_priority: FetchPriority::Background,
+            prefetch_policy: PrefetchPolicy::None,
+        };
+
+        let err = engine.apply_override(class.clone(), tuning).unwrap_err();
+
+        assert_eq!(err.code, ERR_ZERO_SYMBOL_SIZE);
+        assert!(!engine.has_override(&class));
+        assert!(engine.resolve(&class).is_none());
+    }
+
+    #[test]
+    fn test_multiple_invalid_overrides_accumulate_rejections_without_overrides() {
+        let mut engine = ObjectClassTuningEngine::new();
+        for ratio in [-0.1, 1.1, f64::INFINITY] {
+            let tuning = ClassTuning {
+                symbol_size_bytes: 1024,
+                encoding_overhead_ratio: ratio,
+                fetch_priority: FetchPriority::Normal,
+                prefetch_policy: PrefetchPolicy::Lazy,
+            };
+            let _ = engine.apply_override(ObjectClass::TelemetryArtifact, tuning);
+        }
+
+        let reject_events = engine
+            .events()
+            .iter()
+            .filter(|event| event.code == OC_POLICY_OVERRIDE_REJECTED)
+            .count();
+
+        assert_eq!(reject_events, 3);
+        assert!(engine.active_overrides().is_empty());
+    }
+
     // -- Override management --
 
     #[test]
@@ -660,6 +749,17 @@ mod tests {
         // Should revert to default
         let resolved = engine.resolve(&ObjectClass::CriticalMarker).unwrap();
         assert_eq!(resolved.symbol_size_bytes, 256);
+    }
+
+    #[test]
+    fn test_remove_missing_override_returns_false_without_event() {
+        let mut engine = ObjectClassTuningEngine::new();
+
+        let removed = engine.remove_override(&ObjectClass::ReplayBundle);
+
+        assert!(!removed);
+        assert!(engine.events().is_empty());
+        assert!(engine.active_overrides().is_empty());
     }
 
     #[test]
@@ -711,6 +811,20 @@ mod tests {
         assert_eq!(baseline_events.len(), 1);
     }
 
+    #[test]
+    fn test_empty_benchmark_baseline_still_records_zero_count() {
+        let mut engine = ObjectClassTuningEngine::new();
+
+        engine.load_benchmark_baseline(&[]);
+
+        assert_eq!(engine.events().len(), 1);
+        assert!(
+            engine.events()[0]
+                .detail
+                .contains("Loaded 0 benchmark measurements")
+        );
+    }
+
     // -- CSV export --
 
     #[test]
@@ -736,6 +850,24 @@ mod tests {
         let csv = engine.to_csv();
         let lines: Vec<&str> = csv.trim().lines().collect();
         assert_eq!(lines.len(), 5); // header + 4 classes
+    }
+
+    #[test]
+    fn test_csv_export_excludes_custom_override_rows() {
+        let mut engine = ObjectClassTuningEngine::new();
+        let class = ObjectClass::Custom("custom_bundle".into());
+        let tuning = ClassTuning {
+            symbol_size_bytes: 777,
+            encoding_overhead_ratio: 0.10,
+            fetch_priority: FetchPriority::Background,
+            prefetch_policy: PrefetchPolicy::Lazy,
+        };
+        engine.apply_override(class, tuning).unwrap();
+
+        let csv = engine.to_csv();
+
+        assert!(!csv.contains("custom_bundle"));
+        assert!(!csv.contains("777"));
     }
 
     // -- Labels --
@@ -824,5 +956,23 @@ mod tests {
     #[test]
     fn test_four_canonical_classes() {
         assert_eq!(ObjectClass::canonical_classes().len(), 4);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_tuning_event_window() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_tuning_events() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 }

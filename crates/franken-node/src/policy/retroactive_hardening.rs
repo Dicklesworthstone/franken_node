@@ -451,18 +451,21 @@ pub fn verify_identity_stable(before: &CanonicalObject, after: &CanonicalObject)
 ///
 /// [EVD-RETROHARDEN-004] on score computed.
 pub fn measure_repairability(
-    _object: &CanonicalObject,
+    object: &CanonicalObject,
     artifacts: &[ProtectionArtifact],
 ) -> RepairabilityScore {
     // Deduplicate by protection type (same type doesn't stack)
     let mut seen = std::collections::BTreeSet::new();
     let mut score = 0.0;
-    let mut count = 0;
+    let mut count: usize = 0;
 
     for artifact in artifacts {
+        if !ct_eq(artifact.covers_object.as_str(), object.object_id.as_str()) {
+            continue;
+        }
         if seen.insert(artifact.artifact_type.label()) {
             score += artifact.artifact_type.repairability_weight();
-            count += 1;
+            count = count.saturating_add(1);
         }
     }
 
@@ -510,6 +513,19 @@ mod tests {
 
     fn test_object_with_content(id: &str, content: Vec<u8>) -> CanonicalObject {
         CanonicalObject::new(id, content, HardeningLevel::Baseline)
+    }
+
+    fn manual_artifact(
+        covers_object: ObjectId,
+        artifact_type: ProtectionType,
+    ) -> ProtectionArtifact {
+        ProtectionArtifact {
+            artifact_id: format!("manual-{}", artifact_type.label()),
+            artifact_type,
+            data: vec![0xAA; 8],
+            covers_object,
+            hardening_level: HardeningLevel::Critical,
+        }
     }
 
     // ── ObjectId tests ──
@@ -692,6 +708,25 @@ mod tests {
     }
 
     #[test]
+    fn test_harden_creation_level_above_target_no_artifacts() {
+        let obj = CanonicalObject::new("obj-critical", vec![0x00; 32], HardeningLevel::Critical);
+
+        let artifacts = pipeline().harden(&obj, HardeningLevel::Baseline, HardeningLevel::Maximum);
+
+        assert!(artifacts.is_empty());
+    }
+
+    #[test]
+    fn test_harden_from_below_creation_only_adds_missing_above_creation_level() {
+        let obj = CanonicalObject::new("obj-standard", vec![0x11; 32], HardeningLevel::Standard);
+
+        let artifacts = pipeline().harden(&obj, HardeningLevel::Baseline, HardeningLevel::Enhanced);
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].artifact_type, ProtectionType::Parity);
+    }
+
+    #[test]
     fn test_harden_artifact_ids_contain_object_id() {
         let obj = test_object("obj-xyz");
         let artifacts = pipeline().harden(&obj, HardeningLevel::Baseline, HardeningLevel::Standard);
@@ -750,6 +785,22 @@ mod tests {
         let obj1 = test_object_with_content("obj-001", vec![0x00; 32]);
         let obj2 = test_object_with_content("obj-001", vec![0xFF; 32]);
         assert!(!verify_identity_stable(&obj1, &obj2));
+    }
+
+    #[test]
+    fn test_verify_identity_unstable_direct_hash_tamper() {
+        let before = test_object("obj-001");
+        let mut after = before.clone();
+        after.content_hash[0] ^= 0xFF;
+        assert!(!verify_identity_stable(&before, &after));
+    }
+
+    #[test]
+    fn test_verify_identity_unstable_direct_id_tamper() {
+        let before = test_object("obj-001");
+        let mut after = before.clone();
+        after.object_id = ObjectId::new("obj-002");
+        assert!(!verify_identity_stable(&before, &after));
     }
 
     #[test]
@@ -845,6 +896,123 @@ mod tests {
         assert_eq!(score.artifact_count, 1);
     }
 
+    #[test]
+    fn test_repairability_ignores_artifacts_for_other_object() {
+        let target = test_object("obj-target");
+        let foreign = test_object("obj-foreign");
+        let artifacts =
+            pipeline().harden(&foreign, HardeningLevel::Baseline, HardeningLevel::Critical);
+
+        let score = measure_repairability(&target, &artifacts);
+
+        assert!((score.score - 0.0).abs() < 1e-10);
+        assert_eq!(score.artifact_count, 0);
+    }
+
+    #[test]
+    fn test_repairability_counts_only_matching_artifacts() {
+        let target = test_object("obj-target");
+        let foreign = test_object("obj-foreign");
+        let mut artifacts =
+            pipeline().harden(&target, HardeningLevel::Baseline, HardeningLevel::Standard);
+        artifacts.extend(pipeline().harden(
+            &foreign,
+            HardeningLevel::Standard,
+            HardeningLevel::Enhanced,
+        ));
+
+        let score = measure_repairability(&target, &artifacts);
+
+        assert!((score.score - 0.1).abs() < 1e-10);
+        assert_eq!(score.artifact_count, 1);
+    }
+
+    #[test]
+    fn test_repairability_rejects_forged_cover_object_on_valid_data() {
+        let target = test_object("obj-target");
+        let foreign = test_object("obj-foreign");
+        let mut artifacts =
+            pipeline().harden(&target, HardeningLevel::Baseline, HardeningLevel::Standard);
+        artifacts[0].covers_object = foreign.object_id;
+
+        let score = measure_repairability(&target, &artifacts);
+
+        assert!((score.score - 0.0).abs() < 1e-10);
+        assert_eq!(score.artifact_count, 0);
+    }
+
+    #[test]
+    fn test_repairability_foreign_duplicate_does_not_mask_local_artifact() {
+        let target = test_object("obj-target");
+        let foreign = test_object("obj-foreign");
+        let mut artifacts =
+            pipeline().harden(&foreign, HardeningLevel::Baseline, HardeningLevel::Standard);
+        artifacts.extend(pipeline().harden(
+            &target,
+            HardeningLevel::Baseline,
+            HardeningLevel::Standard,
+        ));
+
+        let score = measure_repairability(&target, &artifacts);
+
+        assert!((score.score - 0.1).abs() < 1e-10);
+        assert_eq!(score.artifact_count, 1);
+    }
+
+    #[test]
+    fn test_repairability_mixed_foreign_full_set_does_not_reach_full_score() {
+        let target = test_object("obj-target");
+        let foreign = test_object("obj-foreign");
+        let mut artifacts =
+            pipeline().harden(&target, HardeningLevel::Baseline, HardeningLevel::Standard);
+        artifacts.extend(pipeline().harden(
+            &foreign,
+            HardeningLevel::Baseline,
+            HardeningLevel::Critical,
+        ));
+
+        let score = measure_repairability(&target, &artifacts);
+
+        assert!((score.score - 0.1).abs() < 1e-10);
+        assert_eq!(score.artifact_count, 1);
+    }
+
+    #[test]
+    fn test_repairability_ignores_empty_cover_object_id() {
+        let target = test_object("obj-target");
+        let artifact = manual_artifact(ObjectId::new(""), ProtectionType::RedundantCopy);
+
+        let score = measure_repairability(&target, &[artifact]);
+
+        assert!((score.score - 0.0).abs() < 1e-10);
+        assert_eq!(score.artifact_count, 0);
+    }
+
+    #[test]
+    fn test_repairability_ignores_prefix_cover_object_id() {
+        let target = test_object("obj-target");
+        let artifact = manual_artifact(
+            ObjectId::new("obj-target.extra"),
+            ProtectionType::RedundantCopy,
+        );
+
+        let score = measure_repairability(&target, &[artifact]);
+
+        assert!((score.score - 0.0).abs() < 1e-10);
+        assert_eq!(score.artifact_count, 0);
+    }
+
+    #[test]
+    fn test_repairability_ignores_case_mismatched_cover_object_id() {
+        let target = test_object("Obj-Target");
+        let artifact = manual_artifact(ObjectId::new("obj-target"), ProtectionType::Checksum);
+
+        let score = measure_repairability(&target, &[artifact]);
+
+        assert!((score.score - 0.0).abs() < 1e-10);
+        assert_eq!(score.artifact_count, 0);
+    }
+
     // ── Corpus hardening tests ──
 
     #[test]
@@ -882,6 +1050,21 @@ mod tests {
         let result =
             pipeline().harden_corpus(&objects, HardeningLevel::Standard, HardeningLevel::Standard);
         assert_eq!(result.total_artifacts_created, 0);
+    }
+
+    #[test]
+    fn test_harden_corpus_reverse_direction_no_artifacts() {
+        let objects = vec![test_object("obj-001"), test_object("obj-002")];
+
+        let result =
+            pipeline().harden_corpus(&objects, HardeningLevel::Critical, HardeningLevel::Standard);
+
+        assert_eq!(result.objects_processed, 2);
+        assert_eq!(result.total_artifacts_created, 0);
+        assert!(result.artifacts.is_empty());
+        assert!(result.progress.iter().all(|record| {
+            (record.repairability_after - record.repairability_before).abs() < 1e-10
+        }));
     }
 
     #[test]
@@ -969,6 +1152,39 @@ mod tests {
         let json = serde_json::to_string(&score).unwrap();
         let parsed: RepairabilityScore = serde_json::from_str(&json).unwrap();
         assert!((parsed.score - 0.75).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_protection_artifact_deserialization_rejects_missing_fields() {
+        let err = serde_json::from_str::<ProtectionArtifact>(r#"{"artifact_id":"broken"}"#)
+            .expect_err("missing artifact fields must not deserialize");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn test_protection_artifact_deserialization_rejects_unknown_type() {
+        let json = serde_json::json!({
+            "artifact_id": "broken",
+            "artifact_type": "NotAProtection",
+            "data": [],
+            "covers_object": "obj-001",
+            "hardening_level": "Critical"
+        })
+        .to_string();
+
+        let err = serde_json::from_str::<ProtectionArtifact>(&json)
+            .expect_err("unknown artifact type must not deserialize");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn test_hardening_result_deserialization_rejects_truncated_json() {
+        let err = serde_json::from_str::<HardeningResult>(r#"{"artifacts":["#)
+            .expect_err("truncated hardening result must not deserialize");
+
+        assert!(err.is_eof() || err.is_syntax());
     }
 
     // ── Event codes test ──

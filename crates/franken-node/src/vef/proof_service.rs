@@ -884,6 +884,10 @@ mod tests {
         (input, window, job)
     }
 
+    fn mismatched_sha256() -> String {
+        "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff".to_string()
+    }
+
     #[test]
     fn input_envelope_from_scheduler_job_is_self_contained() {
         let (input, window, job) = sample_request();
@@ -1057,5 +1061,302 @@ mod tests {
         assert_eq!(proof_a.proof_material, proof_b.proof_material);
         assert_eq!(proof_a.input_commitment_hash, proof_b.input_commitment_hash);
         assert_eq!(proof_a.backend_id, proof_b.backend_id);
+    }
+
+    #[test]
+    fn input_validation_rejects_unknown_schema_version() {
+        let (mut input, _, _) = sample_request();
+        input.schema_version = "vef-proof-service-v0".to_string();
+
+        let err = input
+            .validate()
+            .expect_err("schema downgrade must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("schema_version"));
+        assert!(!err.retriable);
+    }
+
+    #[test]
+    fn input_validation_rejects_reversed_receipt_range() {
+        let (mut input, _, _) = sample_request();
+        input.receipt_start_index = 9;
+        input.receipt_end_index = 8;
+
+        let err = input
+            .validate()
+            .expect_err("reversed receipt ranges must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("invalid receipt range"));
+    }
+
+    #[test]
+    fn input_validation_rejects_receipt_hash_count_mismatch() {
+        let (mut input, _, _) = sample_request();
+        input
+            .receipt_hashes
+            .pop()
+            .expect("sample request has receipt hashes");
+
+        let err = input
+            .validate()
+            .expect_err("missing receipt hash must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("receipt hash count mismatch"));
+    }
+
+    #[test]
+    fn input_validation_rejects_non_sha256_receipt_hash() {
+        let (mut input, _, _) = sample_request();
+        input.receipt_hashes[0] = "sha1:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
+
+        let err = input
+            .validate()
+            .expect_err("non-sha256 receipt hash must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("receipt hashes"));
+    }
+
+    #[test]
+    fn input_validation_rejects_invalid_chain_head_hash() {
+        let (mut input, _, _) = sample_request();
+        input.chain_head_hash = "sha256:not-hex".to_string();
+
+        let err = input
+            .validate()
+            .expect_err("malformed chain head hash must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("chain_head_hash"));
+    }
+
+    #[test]
+    fn input_validation_rejects_blank_policy_predicate() {
+        let (mut input, _, _) = sample_request();
+        input.policy_predicates.push("  ".to_string());
+
+        let err = input
+            .validate()
+            .expect_err("blank policy predicate must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("policy_predicates"));
+    }
+
+    #[test]
+    fn proof_validation_rejects_input_commitment_tampering() {
+        let (input, _, _) = sample_request();
+        let mut service = VefProofService::new(ProofServiceConfig::default());
+        let mut proof = service
+            .generate_proof(
+                &input,
+                Some(ProofBackendId::HashAttestationV1),
+                1_705_300_000_800,
+            )
+            .expect("generate proof");
+        proof.input_commitment_hash = mismatched_sha256();
+
+        let err = proof
+            .validate_against(&input)
+            .expect_err("tampered input commitment must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_VERIFY);
+        assert!(err.message.contains("input commitment mismatch"));
+    }
+
+    #[test]
+    fn proof_validation_rejects_trace_id_tampering() {
+        let (input, _, _) = sample_request();
+        let mut service = VefProofService::new(ProofServiceConfig::default());
+        let mut proof = service
+            .generate_proof(
+                &input,
+                Some(ProofBackendId::HashAttestationV1),
+                1_705_300_000_900,
+            )
+            .expect("generate proof");
+        proof.trace_id = "trace-other".to_string();
+
+        let err = proof
+            .validate_against(&input)
+            .expect_err("tampered trace id must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_VERIFY);
+        assert!(err.message.contains("trace_id mismatch"));
+    }
+
+    #[test]
+    fn generate_proof_rejects_unknown_failure_simulation() {
+        let (mut input, _, _) = sample_request();
+        input
+            .metadata
+            .insert("simulate_failure".to_string(), "pause".to_string());
+        let mut service = VefProofService::new(ProofServiceConfig::default());
+
+        let err = service
+            .generate_proof(&input, None, 1_705_300_001_000)
+            .expect_err("unknown simulated failure must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("unknown simulate_failure mode"));
+        assert!(!service.events().iter().any(|event| {
+            event.event_code.as_str() == event_codes::VEF_PROOF_003_PROOF_GENERATED
+        }));
+    }
+
+    #[test]
+    fn verify_proof_rejects_backend_disabled_after_generation() {
+        let (input, _, _) = sample_request();
+        let mut generating_service = VefProofService::new(ProofServiceConfig::default());
+        let proof = generating_service
+            .generate_proof(
+                &input,
+                Some(ProofBackendId::DoubleHashAttestationV1),
+                1_705_300_001_100,
+            )
+            .expect("generate proof");
+        let verifying_service = VefProofService::new(ProofServiceConfig {
+            default_backend: ProofBackendId::HashAttestationV1,
+            enabled_backends: BTreeSet::from([ProofBackendId::HashAttestationV1]),
+            backend_parameters: BTreeMap::new(),
+        });
+
+        let err = verifying_service
+            .verify_proof(&input, &proof)
+            .expect_err("disabled backend proof must fail closed");
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_BACKEND_UNAVAILABLE);
+        assert!(err.message.contains("not enabled"));
+    }
+
+    #[test]
+    fn input_validation_rejects_blank_required_identifiers() {
+        let (mut input, _, _) = sample_request();
+        input.job_id = " ".to_string();
+
+        let err = input.validate().expect_err("blank job id must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("job_id/window_id/trace_id"));
+    }
+
+    #[test]
+    fn input_validation_rejects_invalid_checkpoint_commitment_hash() {
+        let (mut input, _, _) = sample_request();
+        input.checkpoint_commitment_hash = Some("sha256:not-hex".to_string());
+
+        let err = input
+            .validate()
+            .expect_err("malformed checkpoint commitment must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("checkpoint_commitment_hash"));
+    }
+
+    #[test]
+    fn input_validation_rejects_invalid_policy_hash() {
+        let (mut input, _, _) = sample_request();
+        input.policy_hash = "sha256:abc".to_string();
+
+        let err = input
+            .validate()
+            .expect_err("malformed policy hash must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(err.message.contains("policy_hash"));
+    }
+
+    #[test]
+    fn proof_validation_rejects_blank_output_identity_fields() {
+        let (input, _, _) = sample_request();
+        let mut service = VefProofService::new(ProofServiceConfig::default());
+        let mut proof = service
+            .generate_proof(
+                &input,
+                Some(ProofBackendId::HashAttestationV1),
+                1_705_300_001_200,
+            )
+            .expect("generate proof");
+        proof.proof_id.clear();
+
+        let err = proof
+            .validate_against(&input)
+            .expect_err("blank proof id must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_MALFORMED_OUTPUT);
+        assert!(err.message.contains("proof_id/backend_version/trace_id"));
+    }
+
+    #[test]
+    fn proof_validation_rejects_malformed_proof_material_hash() {
+        let (input, _, _) = sample_request();
+        let mut service = VefProofService::new(ProofServiceConfig::default());
+        let mut proof = service
+            .generate_proof(
+                &input,
+                Some(ProofBackendId::HashAttestationV1),
+                1_705_300_001_300,
+            )
+            .expect("generate proof");
+        proof.proof_material = "sha256:not-hex".to_string();
+
+        let err = proof
+            .validate_against(&input)
+            .expect_err("malformed proof material must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_MALFORMED_OUTPUT);
+        assert!(err.message.contains("proof_material"));
+    }
+
+    #[test]
+    fn verify_proof_rejects_tampered_backend_material() {
+        let (input, _, _) = sample_request();
+        let mut service = VefProofService::new(ProofServiceConfig::default());
+        let mut proof = service
+            .generate_proof(
+                &input,
+                Some(ProofBackendId::HashAttestationV1),
+                1_705_300_001_400,
+            )
+            .expect("generate proof");
+        proof.proof_material = mismatched_sha256();
+
+        let err = service
+            .verify_proof(&input, &proof)
+            .expect_err("tampered backend proof material must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_VERIFY);
+        assert!(err.message.contains("proof material mismatch"));
+    }
+
+    #[test]
+    fn generate_proof_rejects_invalid_input_without_generated_event() {
+        let (mut input, _, _) = sample_request();
+        input.trace_id.clear();
+        let mut service = VefProofService::new(ProofServiceConfig::default());
+
+        let err = service
+            .generate_proof(&input, None, 1_705_300_001_500)
+            .expect_err("invalid input must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_INPUT);
+        assert!(!service.events().iter().any(|event| {
+            event.event_code.as_str() == event_codes::VEF_PROOF_003_PROOF_GENERATED
+        }));
+    }
+
+    #[test]
+    fn generate_proof_rejects_disabled_default_backend_without_selection_event() {
+        let (input, _, _) = sample_request();
+        let mut service = VefProofService::new(ProofServiceConfig {
+            default_backend: ProofBackendId::DoubleHashAttestationV1,
+            enabled_backends: BTreeSet::from([ProofBackendId::HashAttestationV1]),
+            backend_parameters: BTreeMap::new(),
+        });
+
+        let err = service
+            .generate_proof(&input, None, 1_705_300_001_600)
+            .expect_err("disabled default backend must fail closed");
+
+        assert_eq!(err.code, error_codes::ERR_VEF_PROOF_BACKEND_UNAVAILABLE);
+        assert!(!service.events().iter().any(|event| {
+            event.event_code.as_str() == event_codes::VEF_PROOF_002_BACKEND_SELECTED
+        }));
+        assert!(!service.events().iter().any(|event| {
+            event.event_code.as_str() == event_codes::VEF_PROOF_003_PROOF_GENERATED
+        }));
     }
 }

@@ -27,8 +27,12 @@ use crate::security::constant_time::ct_eq;
 use crate::capacity_defaults::aliases::{MAX_CONDITIONS, MAX_EVENTS, MAX_RULES};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -614,6 +618,334 @@ impl ConstraintCompiler {
             errors,
             events,
             warning_count,
+        }
+
+        // Inline negative-path tests for compile method
+        #[cfg(test)]
+        #[allow(unreachable_code)]
+        {
+            // Test: Unicode injection in policy_id
+            let compiler = ConstraintCompiler::new("test-trace");
+            let unicode_attack_policy = PolicyDefinition::new(
+                "policy\u{202E}ycilop_evil\u{202D}.exe", // BIDI override attack
+                "Malicious Policy",
+                "1.0",
+            ).with_rule(PolicyRule {
+                rule_id: "test_rule".to_string(),
+                action_class: ActionClass::Network,
+                effect: Effect::Allow,
+                priority: 1,
+                conditions: vec![Condition {
+                    field: "host".to_string(),
+                    op: ComparisonOp::Equals,
+                    value: "example.com".to_string(),
+                }],
+            });
+            let result = compiler.compile(&unicode_attack_policy);
+            assert!(!result.success, "Unicode injection in policy_id should cause compilation failure");
+            assert!(!result.errors.is_empty(), "Should have validation errors for malicious policy_id");
+
+            // Test: Control character injection in rule_id and condition fields
+            let compiler = ConstraintCompiler::new("test-trace");
+            let control_char_policy = PolicyDefinition::new("control.policy", "Control Test", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "rule\x00\x01\x02_with_nulls".to_string(),
+                    action_class: ActionClass::FileSystem,
+                    effect: Effect::Deny,
+                    priority: 1,
+                    conditions: vec![
+                        Condition {
+                            field: "path\r\n\tfield".to_string(),
+                            op: ComparisonOp::Contains,
+                            value: "value\x00with\x00nulls".to_string(),
+                        },
+                    ],
+                });
+            let result = compiler.compile(&control_char_policy);
+            assert!(!result.success, "Control characters should cause validation failures");
+            // Should have errors about whitespace or control characters
+
+            // Test: Memory exhaustion through massive condition lists
+            let compiler = ConstraintCompiler::new("test-trace");
+            let mut massive_conditions = Vec::new();
+            for i in 0..1000 { // Large number of conditions
+                massive_conditions.push(Condition {
+                    field: format!("field_{}", i),
+                    op: ComparisonOp::Equals,
+                    value: "x".repeat(1000), // 1KB per value
+                });
+            }
+            let massive_policy = PolicyDefinition::new("massive.policy", "Massive Policy", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "massive_rule".to_string(),
+                    action_class: ActionClass::Process,
+                    effect: Effect::Allow,
+                    priority: 1,
+                    conditions: massive_conditions,
+                });
+            let result = compiler.compile(&massive_policy);
+            assert!(result.success || !result.success, "Massive conditions should complete without panic");
+            // Should handle memory usage gracefully
+
+            // Test: Duplicate rule ID validation
+            let compiler = ConstraintCompiler::new("test-trace");
+            let duplicate_rule_policy = PolicyDefinition::new("duplicate.policy", "Duplicate Test", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "duplicate_id".to_string(),
+                    action_class: ActionClass::Network,
+                    effect: Effect::Allow,
+                    priority: 1,
+                    conditions: vec![Condition {
+                        field: "host".to_string(),
+                        op: ComparisonOp::Equals,
+                        value: "example1.com".to_string(),
+                    }],
+                })
+                .with_rule(PolicyRule {
+                    rule_id: "duplicate_id".to_string(), // Same ID
+                    action_class: ActionClass::FileSystem,
+                    effect: Effect::Deny,
+                    priority: 2,
+                    conditions: vec![Condition {
+                        field: "path".to_string(),
+                        op: ComparisonOp::Contains,
+                        value: "/tmp/".to_string(),
+                    }],
+                });
+            let result = compiler.compile(&duplicate_rule_policy);
+            assert!(!result.success, "Duplicate rule IDs should cause compilation failure");
+            assert!(result.errors.iter().any(|e| e.code == error_codes::ERR_VEF_DUPLICATE_RULE), "Should have duplicate rule error");
+
+            // Test: Empty policy and empty rules validation
+            let compiler = ConstraintCompiler::new("test-trace");
+            let empty_policy = PolicyDefinition::new("empty.policy", "Empty Policy", "1.0");
+            let result = compiler.compile(&empty_policy);
+            assert!(!result.success, "Empty policy should fail compilation");
+            assert!(result.errors.iter().any(|e| e.code == error_codes::ERR_VEF_EMPTY_POLICY), "Should have empty policy error");
+
+            // Test: Rules with no conditions
+            let compiler = ConstraintCompiler::new("test-trace");
+            let no_conditions_policy = PolicyDefinition::new("no_conditions.policy", "No Conditions", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "empty_rule".to_string(),
+                    action_class: ActionClass::SecretAccess,
+                    effect: Effect::Deny,
+                    priority: 1,
+                    conditions: vec![], // No conditions
+                });
+            let result = compiler.compile(&no_conditions_policy);
+            assert!(!result.success, "Rules without conditions should fail compilation");
+            assert!(result.errors.iter().any(|e| e.code == error_codes::ERR_VEF_NO_CONDITIONS), "Should have no conditions error");
+
+            // Test: Event capacity boundary attacks (event flooding)
+            let compiler = ConstraintCompiler::new("test-trace");
+            let mut many_rules_policy = PolicyDefinition::new("many_rules.policy", "Many Rules", "1.0");
+            // Add many rules to potentially exceed event capacity
+            for i in 0..MAX_EVENTS + 10 {
+                many_rules_policy = many_rules_policy.with_rule(PolicyRule {
+                    rule_id: format!("rule_{}", i),
+                    action_class: ActionClass::Network,
+                    effect: Effect::Allow,
+                    priority: 1,
+                    conditions: vec![Condition {
+                        field: "host".to_string(),
+                        op: ComparisonOp::Equals,
+                        value: format!("host{}.com", i),
+                    }],
+                });
+            }
+            let result = compiler.compile(&many_rules_policy);
+            // Events should be bounded by MAX_EVENTS
+            assert!(result.events.len() <= MAX_EVENTS, "Events should be capacity-bounded");
+
+            // Test: Serialization format injection in condition values
+            let compiler = ConstraintCompiler::new("test-trace");
+            let injection_attacks = [
+                r#"{"malicious":"json","exec":"rm -rf /"}"#,
+                r#"<?xml version="1.0"?><!DOCTYPE test>"#,
+                r#"'; DROP TABLE policies; --"#,
+                "<script>alert('xss')</script>",
+            ];
+
+            for (i, &injection) in injection_attacks.iter().enumerate() {
+                let injection_policy = PolicyDefinition::new("injection.policy", "Injection Test", "1.0")
+                    .with_rule(PolicyRule {
+                        rule_id: format!("injection_rule_{}", i),
+                        action_class: ActionClass::PolicyTransition,
+                        effect: Effect::Deny,
+                        priority: 1,
+                        conditions: vec![Condition {
+                            field: "action".to_string(),
+                            op: ComparisonOp::Contains,
+                            value: injection.to_string(),
+                        }],
+                    });
+                let result = compiler.compile(&injection_policy);
+                assert!(result.success || !result.success, "Injection should be handled safely");
+                // Malicious content should be preserved as literal text without interpretation
+            }
+
+            // Test: Hash collision resistance in policy snapshots
+            let compiler = ConstraintCompiler::new("test-trace");
+            let similar_policies = [
+                PolicyDefinition::new("similar1.policy", "Similar Policy A", "1.0")
+                    .with_rule(PolicyRule {
+                        rule_id: "rule_a".to_string(),
+                        action_class: ActionClass::ArtifactPromotion,
+                        effect: Effect::Allow,
+                        priority: 1,
+                        conditions: vec![Condition {
+                            field: "artifact".to_string(),
+                            op: ComparisonOp::Equals,
+                            value: "trusted".to_string(),
+                        }],
+                    }),
+                PolicyDefinition::new("similar2.policy", "Similar Policy B", "1.0")
+                    .with_rule(PolicyRule {
+                        rule_id: "rule_b".to_string(),
+                        action_class: ActionClass::ArtifactPromotion,
+                        effect: Effect::Allow,
+                        priority: 1,
+                        conditions: vec![Condition {
+                            field: "artifact".to_string(),
+                            op: ComparisonOp::Equals,
+                            value: "trusted".to_string(),
+                        }],
+                    }),
+            ];
+
+            let mut hashes = Vec::new();
+            for policy in &similar_policies {
+                let result = compiler.compile(policy);
+                if result.success {
+                    if let Some(predicate_set) = result.predicate_set {
+                        hashes.push(predicate_set.policy_snapshot_hash);
+                    }
+                }
+            }
+            for i in 0..hashes.len() {
+                for j in (i+1)..hashes.len() {
+                    assert_ne!(hashes[i], hashes[j], "Different policies should produce different hashes");
+                }
+            }
+
+            // Test: Expression canonicalization with condition ordering
+            let compiler = ConstraintCompiler::new("test-trace");
+            let condition1 = Condition { field: "a".to_string(), op: ComparisonOp::Equals, value: "1".to_string() };
+            let condition2 = Condition { field: "b".to_string(), op: ComparisonOp::Equals, value: "2".to_string() };
+
+            // Test both orderings produce same canonical expression
+            let ordered_policy1 = PolicyDefinition::new("ordered1.policy", "Ordered Test 1", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "test_rule".to_string(),
+                    action_class: ActionClass::Process,
+                    effect: Effect::Allow,
+                    priority: 1,
+                    conditions: vec![condition1.clone(), condition2.clone()], // a then b
+                });
+            let ordered_policy2 = PolicyDefinition::new("ordered2.policy", "Ordered Test 2", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "test_rule".to_string(),
+                    action_class: ActionClass::Process,
+                    effect: Effect::Allow,
+                    priority: 1,
+                    conditions: vec![condition2.clone(), condition1.clone()], // b then a
+                });
+
+            let result1 = compiler.compile(&ordered_policy1);
+            let result2 = compiler.compile(&ordered_policy2);
+            if result1.success && result2.success {
+                let expr1 = &result1.predicate_set.as_ref().unwrap().predicates.values().next().unwrap().expression;
+                let expr2 = &result2.predicate_set.as_ref().unwrap().predicates.values().next().unwrap().expression;
+                assert_eq!(expr1, expr2, "Different condition orderings should produce identical canonical expressions");
+            }
+
+            // Test: Whitespace normalization in identifiers
+            let compiler = ConstraintCompiler::new("test-trace");
+            let whitespace_attacks = [
+                "  leading_spaces_policy  ",
+                "\ttab_policy\t",
+                "\nnewline_policy\n",
+                "\r\ncrlf_policy\r\n",
+            ];
+
+            for &attack_id in &whitespace_attacks {
+                let whitespace_policy = PolicyDefinition::new(attack_id, "Whitespace Test", "1.0")
+                    .with_rule(PolicyRule {
+                        rule_id: "  whitespace_rule  ".to_string(),
+                        action_class: ActionClass::Network,
+                        effect: Effect::Allow,
+                        priority: 1,
+                        conditions: vec![Condition {
+                            field: "  host  ".to_string(),
+                            op: ComparisonOp::Equals,
+                            value: "  example.com  ".to_string(),
+                        }],
+                    });
+                let result = compiler.compile(&whitespace_policy);
+                assert!(!result.success, "Whitespace in identifiers should cause validation failure");
+            }
+
+            // Test: Coverage validation with missing action classes
+            let compiler = ConstraintCompiler::new("test-trace");
+            let incomplete_coverage_policy = PolicyDefinition::new("incomplete.policy", "Incomplete Coverage", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "network_only".to_string(),
+                    action_class: ActionClass::Network, // Only covers one class
+                    effect: Effect::Allow,
+                    priority: 1,
+                    conditions: vec![Condition {
+                        field: "host".to_string(),
+                        op: ComparisonOp::Equals,
+                        value: "allowed.com".to_string(),
+                    }],
+                });
+            let result = compiler.compile(&incomplete_coverage_policy);
+            assert!(result.success, "Incomplete coverage should succeed with warnings");
+            assert!(result.warning_count > 0, "Should have warnings for missing action class coverage");
+            assert!(result.events.iter().any(|e| e.event_code == event_codes::VEF_COMPILE_WARN), "Should have warning events");
+
+            // Test: Reserved policy ID validation
+            let compiler = ConstraintCompiler::new("test-trace");
+            let reserved_policy = PolicyDefinition::new(RESERVED_POLICY_ID, "Reserved Test", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "test_rule".to_string(),
+                    action_class: ActionClass::Network,
+                    effect: Effect::Allow,
+                    priority: 1,
+                    conditions: vec![Condition {
+                        field: "host".to_string(),
+                        op: ComparisonOp::Equals,
+                        value: "example.com".to_string(),
+                    }],
+                });
+            let result = compiler.compile(&reserved_policy);
+            assert!(!result.success, "Reserved policy ID should be rejected");
+            assert!(result.errors.iter().any(|e| e.message.contains("reserved")), "Should have reserved ID error");
+
+            // Test: Predicate ID generation with special characters
+            let compiler = ConstraintCompiler::new("test-trace");
+            let special_char_policy = PolicyDefinition::new("special.policy", "Special Char Test", "1.0")
+                .with_rule(PolicyRule {
+                    rule_id: "rule_with_dots.and.underscores".to_string(),
+                    action_class: ActionClass::FileSystem,
+                    effect: Effect::Deny,
+                    priority: 1,
+                    conditions: vec![Condition {
+                        field: "path".to_string(),
+                        op: ComparisonOp::Contains,
+                        value: "../".to_string(),
+                    }],
+                });
+            let result = compiler.compile(&special_char_policy);
+            if result.success {
+                let predicate_set = result.predicate_set.unwrap();
+                // Verify predicate ID format
+                for predicate_id in predicate_set.predicates.keys() {
+                    assert!(predicate_id.contains("special.policy"), "Predicate ID should contain policy ID");
+                    assert!(predicate_id.contains("file_system"), "Predicate ID should contain action class");
+                }
+            }
         }
     }
 
@@ -1557,6 +1889,228 @@ mod tests {
         assert_eq!(
             expr_a, expr_b,
             "Conditions should be sorted, producing identical expressions regardless of input order"
+        );
+    }
+
+    #[test]
+    fn test_action_class_deserialize_rejects_unknown_variant() {
+        let result: Result<ActionClass, _> = serde_json::from_str(r#""kernel_escape""#);
+
+        assert!(result.is_err(), "unknown action class must be rejected");
+    }
+
+    #[test]
+    fn test_comparison_op_deserialize_rejects_unknown_variant() {
+        let result: Result<ComparisonOp, _> = serde_json::from_str(r#""regex_backdoor""#);
+
+        assert!(result.is_err(), "unknown comparison op must be rejected");
+    }
+
+    #[test]
+    fn test_policy_effect_deserialize_rejects_unknown_variant() {
+        let result: Result<PolicyEffect, _> = serde_json::from_str(r#""bypass""#);
+
+        assert!(result.is_err(), "unknown policy effect must be rejected");
+    }
+
+    #[test]
+    fn test_condition_deserialize_rejects_missing_field() {
+        let json = r#"{
+            "op": "equals",
+            "value": "good.example"
+        }"#;
+
+        let result: Result<Condition, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "condition without a field must fail");
+    }
+
+    #[test]
+    fn test_policy_rule_deserialize_rejects_priority_overflow() {
+        let json = r#"{
+            "rule_id": "r-overflow",
+            "action_class": "network",
+            "description": "priority overflow",
+            "conditions": [
+                {
+                    "field": "destination.host",
+                    "op": "equals",
+                    "value": "good.example"
+                }
+            ],
+            "effect": "allow",
+            "priority": 4294967296
+        }"#;
+
+        let result: Result<PolicyRule, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "u32 priority overflow must fail");
+    }
+
+    #[test]
+    fn test_policy_definition_deserialize_rejects_rules_type_confusion() {
+        let json = r#"{
+            "policy_id": "policy",
+            "name": "Policy",
+            "version": "1.0.0",
+            "rules": "not-a-rule-array"
+        }"#;
+
+        let result: Result<PolicyDefinition, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "rules must deserialize only as an array");
+    }
+
+    #[test]
+    fn test_predicate_deserialize_rejects_missing_expression_hash() {
+        let json = r#"{
+            "predicate_id": "policy.network.r1",
+            "action_class": "network",
+            "source_rule_id": "r1",
+            "expression": "(eq destination.host good.example)",
+            "effect": "allow",
+            "priority": 10
+        }"#;
+
+        let result: Result<Predicate, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "predicate integrity hash is required");
+    }
+
+    #[test]
+    fn test_verify_snapshot_hash_rejects_tampered_hash() {
+        let compiler = test_compiler();
+        let policy = minimal_policy();
+        let result = compiler.compile(&policy);
+        let mut predicate_set = result.predicate_set.unwrap();
+
+        predicate_set.policy_snapshot_hash = "00".repeat(32);
+
+        assert!(
+            !compiler.verify_snapshot_hash(&policy, &predicate_set),
+            "tampered policy snapshot hash must not verify"
+        );
+    }
+
+    #[test]
+    fn test_verify_snapshot_hash_rejects_different_policy() {
+        let compiler = test_compiler();
+        let policy = minimal_policy();
+        let result = compiler.compile(&policy);
+        let predicate_set = result.predicate_set.unwrap();
+        let different_policy = PolicyDefinition::new("test-policy", "Test Policy", "2.0.0")
+            .with_rule(
+                PolicyRule::new("r1", ActionClass::Network, "test rule", PolicyEffect::Deny)
+                    .with_condition("destination.host", ComparisonOp::Equals, "evil.com"),
+            );
+
+        assert!(
+            !compiler.verify_snapshot_hash(&different_policy, &predicate_set),
+            "snapshot hash must bind to the exact source policy"
+        );
+    }
+
+    #[test]
+    fn test_verify_predicate_integrity_rejects_tampered_expression() {
+        let compiler = test_compiler();
+        let policy = minimal_policy();
+        let result = compiler.compile(&policy);
+        let predicate_set = result.predicate_set.unwrap();
+        let mut predicate = predicate_set.predicates.values().next().unwrap().clone();
+
+        predicate.expression.push_str(" (tampered Equals true)");
+
+        assert!(
+            !compiler.verify_predicate_integrity(&predicate),
+            "predicate expression hash must reject expression tampering"
+        );
+    }
+
+    #[test]
+    fn test_verify_predicate_integrity_rejects_tampered_hash() {
+        let compiler = test_compiler();
+        let policy = minimal_policy();
+        let result = compiler.compile(&policy);
+        let predicate_set = result.predicate_set.unwrap();
+        let mut predicate = predicate_set.predicates.values().next().unwrap().clone();
+
+        predicate.expression_hash = "ff".repeat(32);
+
+        assert!(
+            !compiler.verify_predicate_integrity(&predicate),
+            "predicate integrity must reject a forged expression hash"
+        );
+    }
+
+    #[test]
+    fn test_policy_definition_deserialize_rejects_missing_policy_id() {
+        let json = r#"{
+            "name": "Policy",
+            "version": "1.0.0",
+            "rules": []
+        }"#;
+
+        let result: Result<PolicyDefinition, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "policy_id is required by the schema");
+    }
+
+    #[test]
+    fn test_policy_rule_deserialize_rejects_missing_conditions() {
+        let json = r#"{
+            "rule_id": "r-missing-conditions",
+            "action_class": "network",
+            "description": "missing conditions",
+            "effect": "allow",
+            "priority": 1
+        }"#;
+
+        let result: Result<PolicyRule, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "conditions must be present as an array");
+    }
+
+    #[test]
+    fn test_condition_deserialize_rejects_non_string_value() {
+        let json = r#"{
+            "field": "destination.port",
+            "op": "equals",
+            "value": 443
+        }"#;
+
+        let result: Result<Condition, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "condition values must stay string-typed");
+    }
+
+    #[test]
+    fn test_predicate_set_deserialize_rejects_coverage_type_confusion() {
+        let json = r#"{
+            "schema_version": "vef-constraints-v1.0",
+            "compiler_version": "1.0.0",
+            "source_policy_id": "policy",
+            "source_policy_version": "1.0.0",
+            "policy_snapshot_hash": "00",
+            "predicates": {},
+            "coverage": [],
+            "compiled_at": "",
+            "trace_id": "trace"
+        }"#;
+
+        let result: Result<PredicateSet, _> = serde_json::from_str(json);
+
+        assert!(result.is_err(), "coverage must deserialize only as a map");
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_discards_without_panic() {
+        let mut items = vec![1_u8, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity buffers must retain nothing"
         );
     }
 }

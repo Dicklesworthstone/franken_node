@@ -17,8 +17,12 @@ use crate::observability::evidence_ledger::{DecisionKind, EvidenceEntry, Evidenc
 use crate::capacity_defaults::aliases::MAX_ACTION_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -987,5 +991,208 @@ mod tests {
         let checker = EvidenceConformanceChecker::default();
         assert_eq!(checker.executed_count(), 0);
         assert_eq!(checker.rejected_count(), 0);
+    }
+
+    #[test]
+    fn missing_evidence_records_rejected_action_log_entry() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+        let action_id = ActionId::new("ACT-MISSING-001");
+
+        let outcome =
+            checker.verify_and_execute(PolicyAction::Commit, &action_id, None, &mut ledger);
+
+        match outcome {
+            PolicyActionOutcome::Rejected {
+                action,
+                error:
+                    ConformanceError::MissingEvidence {
+                        action: missing_action,
+                        action_id: missing_action_id,
+                    },
+            } => {
+                assert_eq!(action, PolicyAction::Commit);
+                assert_eq!(missing_action, PolicyAction::Commit);
+                assert_eq!(missing_action_id, action_id);
+            }
+            other => unreachable!("expected missing-evidence rejection, got {other:?}"),
+        }
+        assert_eq!(checker.executed_count(), 0);
+        assert_eq!(checker.rejected_count(), 1);
+        assert_eq!(checker.action_log().len(), 1);
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn decision_kind_mismatch_does_not_append_to_ledger() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+        let action_id = ActionId::new("ACT-KIND-001");
+        let evidence = make_evidence(PolicyAction::Abort, "ACT-KIND-001");
+
+        let outcome = checker.verify_and_execute(
+            PolicyAction::Commit,
+            &action_id,
+            Some(&evidence),
+            &mut ledger,
+        );
+
+        assert!(matches!(
+            outcome,
+            PolicyActionOutcome::Rejected {
+                error: ConformanceError::DecisionKindMismatch { .. },
+                ..
+            }
+        ));
+        assert_eq!(checker.executed_count(), 0);
+        assert_eq!(checker.rejected_count(), 1);
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn action_id_mismatch_preserves_expected_and_actual_ids() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+        let action_id = ActionId::new("ACT-EXPECTED-001");
+        let evidence = make_evidence(PolicyAction::Release, "ACT-ACTUAL-001");
+
+        let outcome = checker.verify_and_execute(
+            PolicyAction::Release,
+            &action_id,
+            Some(&evidence),
+            &mut ledger,
+        );
+
+        match outcome {
+            PolicyActionOutcome::Rejected {
+                error: ConformanceError::ActionIdMismatch { expected, actual },
+                ..
+            } => {
+                assert_eq!(expected, action_id);
+                assert_eq!(actual, "ACT-ACTUAL-001");
+            }
+            other => unreachable!("expected action-id mismatch, got {other:?}"),
+        }
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn empty_trace_id_rejection_prevents_later_linkage_checks() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+        let action_id = ActionId::new("ACT-TRACE-001");
+        let mut evidence = make_evidence(PolicyAction::Abort, "DIFFERENT-ID");
+        evidence.trace_id = String::new();
+
+        let outcome = checker.verify_and_execute(
+            PolicyAction::Abort,
+            &action_id,
+            Some(&evidence),
+            &mut ledger,
+        );
+
+        assert!(matches!(
+            outcome,
+            PolicyActionOutcome::Rejected {
+                error: ConformanceError::MalformedEvidence { ref reason },
+                ..
+            } if reason.contains("trace_id")
+        ));
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn empty_decision_id_rejection_prevents_kind_mismatch_checks() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+        let action_id = ActionId::new("ACT-DECISION-001");
+        let mut evidence = make_evidence(PolicyAction::Abort, "ACT-DECISION-001");
+        evidence.decision_id = String::new();
+
+        let outcome = checker.verify_and_execute(
+            PolicyAction::Commit,
+            &action_id,
+            Some(&evidence),
+            &mut ledger,
+        );
+
+        assert!(matches!(
+            outcome,
+            PolicyActionOutcome::Rejected {
+                error: ConformanceError::MalformedEvidence { ref reason },
+                ..
+            } if reason.contains("decision_id")
+        ));
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn zero_capacity_ledger_rejects_valid_evidence_without_execution_count() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(0, 100_000));
+        let action_id = ActionId::new("ACT-ZERO-CAPACITY");
+        let evidence = make_evidence(PolicyAction::Quarantine, "ACT-ZERO-CAPACITY");
+
+        let outcome = checker.verify_and_execute(
+            PolicyAction::Quarantine,
+            &action_id,
+            Some(&evidence),
+            &mut ledger,
+        );
+
+        assert!(matches!(
+            outcome,
+            PolicyActionOutcome::Rejected {
+                error: ConformanceError::LedgerAppendFailed { .. },
+                ..
+            }
+        ));
+        assert_eq!(checker.executed_count(), 0);
+        assert_eq!(checker.rejected_count(), 1);
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn tiny_byte_budget_ledger_rejects_valid_evidence() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = EvidenceLedger::new(LedgerCapacity::new(1, 1));
+        let action_id = ActionId::new("ACT-TINY-BUDGET");
+        let evidence = make_evidence(PolicyAction::Commit, "ACT-TINY-BUDGET");
+
+        let outcome = checker.verify_and_execute(
+            PolicyAction::Commit,
+            &action_id,
+            Some(&evidence),
+            &mut ledger,
+        );
+
+        assert!(matches!(
+            outcome,
+            PolicyActionOutcome::Rejected {
+                error: ConformanceError::LedgerAppendFailed { ref reason },
+                ..
+            } if reason.contains("exceeds max_bytes")
+        ));
+        assert_eq!(checker.executed_count(), 0);
+        assert_eq!(checker.rejected_count(), 1);
+        assert_eq!(ledger.len(), 0);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_action_log_window() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_action_log_entries() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 }

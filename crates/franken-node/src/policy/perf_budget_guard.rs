@@ -251,8 +251,12 @@ use crate::capacity_defaults::aliases::MAX_EVENTS;
 const MAX_TIMING_SAMPLES: usize = 8192;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -984,6 +988,16 @@ mod tests {
         assert_eq!(err.code, ERR_NO_MEASUREMENTS);
     }
 
+    #[test]
+    fn test_empty_measurements_error_leaves_event_log_empty() {
+        let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-e-empty");
+
+        let err = guard.evaluate(&[]).unwrap_err();
+
+        assert_eq!(err.code, ERR_NO_MEASUREMENTS);
+        assert!(guard.events().is_empty());
+    }
+
     // -- Flamegraph capture --
 
     #[test]
@@ -1207,6 +1221,64 @@ mod tests {
         ];
         let result = guard.evaluate(&measurements).unwrap();
         assert!(!result.overall_pass, "exact boundary must fail closed");
+    }
+
+    #[test]
+    fn test_exactly_at_p99_budget_fails_closed() {
+        let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-p99-boundary");
+        let measurements = vec![BenchmarkMeasurement {
+            hot_path: "lifecycle_transition".into(),
+            baseline_p50_us: 70.0,
+            baseline_p95_us: 100.0,
+            baseline_p99_us: 200.0,
+            integrated_p50_us: 77.0,
+            integrated_p95_us: 110.0,
+            integrated_p99_us: 250.0,
+            cold_start_ms: 10.0,
+        }];
+
+        let result = guard.evaluate(&measurements).unwrap();
+
+        assert!(!result.overall_pass);
+        assert!(
+            result.path_results[0]
+                .violations
+                .iter()
+                .any(|violation| violation.contains("p99"))
+        );
+    }
+
+    #[test]
+    fn test_exactly_at_cold_start_budget_fails_closed() {
+        let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-cold-boundary");
+        let measurements = vec![make_measurement(
+            "health_gate_evaluation",
+            100.0,
+            110.0,
+            50.0,
+        )];
+
+        let result = guard.evaluate(&measurements).unwrap();
+
+        assert!(!result.overall_pass);
+        assert!(
+            result.path_results[0]
+                .violations
+                .iter()
+                .any(|violation| violation.contains("cold-start"))
+        );
+    }
+
+    #[test]
+    fn test_custom_hot_path_uses_default_budget_fail_closed() {
+        let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-custom");
+        let measurements = vec![make_measurement("custom_hot_path", 100.0, 120.0, 10.0)];
+
+        let result = guard.evaluate(&measurements).unwrap();
+
+        assert!(!result.overall_pass);
+        assert_eq!(result.path_results[0].hot_path, "custom_hot_path");
+        assert_eq!(result.paths_over_budget, 1);
     }
 
     #[test]
@@ -1627,6 +1699,31 @@ mod tests {
     }
 
     #[test]
+    fn test_inf_cold_start_fails_closed() {
+        let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-inf-cs");
+        let m = BenchmarkMeasurement {
+            hot_path: "lifecycle_transition".into(),
+            baseline_p50_us: 70.0,
+            baseline_p95_us: 100.0,
+            baseline_p99_us: 130.0,
+            integrated_p50_us: 77.0,
+            integrated_p95_us: 105.0,
+            integrated_p99_us: 135.0,
+            cold_start_ms: f64::INFINITY,
+        };
+
+        let result = guard.evaluate(&[m]).unwrap();
+
+        assert!(!result.overall_pass, "Inf cold-start must fail closed");
+        assert!(
+            result.path_results[0]
+                .violations
+                .iter()
+                .any(|violation| violation.contains("cold-start"))
+        );
+    }
+
+    #[test]
     fn test_inf_overhead_fails_closed() {
         let mut guard = PerformanceBudgetGuard::new(BudgetPolicy::default(), "trace-inf");
         let m = BenchmarkMeasurement {
@@ -1676,5 +1773,47 @@ mod tests {
         c.record_baseline("test", f64::NEG_INFINITY);
         c.record_baseline("test", 100.0);
         assert_eq!(c.baseline_count("test"), 1);
+    }
+
+    #[test]
+    fn test_collector_only_nonfinite_baseline_does_not_measure_path() {
+        let mut c = TimingCollector::new("trace-nonfinite-only");
+        c.record_baseline("test", f64::NAN);
+        c.record_baseline("test", f64::INFINITY);
+        c.record_integrated("test", 110.0);
+
+        assert_eq!(c.baseline_count("test"), 0);
+        assert!(c.measured_paths().is_empty());
+        assert!(c.to_measurements().is_empty());
+    }
+
+    #[test]
+    fn test_collector_evaluate_only_baseline_returns_no_measurements_error() {
+        let mut c = TimingCollector::new("trace-only-baseline");
+        c.record_baseline("lifecycle_transition", 100.0);
+
+        let err = c
+            .evaluate_against_policy(BudgetPolicy::default())
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_NO_MEASUREMENTS);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_perf_event_window() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_preserves_latest_perf_events() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 3);
+
+        assert_eq!(items, vec![2, 3, 4]);
     }
 }
