@@ -221,12 +221,22 @@ pub enum AcknowledgementDecision {
 
 impl AcknowledgementReceipt {
     pub fn validate(&self) -> Result<(), CopilotError> {
-        if self.operator_identity.is_empty() {
+        if self.receipt_id.trim().is_empty() {
+            return Err(CopilotError::AcknowledgementRejected(
+                "receipt_id required".to_string(),
+            ));
+        }
+        if self.proposal_id.trim().is_empty() {
+            return Err(CopilotError::AcknowledgementRejected(
+                "proposal_id required".to_string(),
+            ));
+        }
+        if self.operator_identity.trim().is_empty() {
             return Err(CopilotError::AcknowledgementRejected(
                 "operator_identity required".to_string(),
             ));
         }
-        if self.signature_hex.is_empty() {
+        if self.signature_hex.trim().is_empty() {
             return Err(CopilotError::AcknowledgementRejected(
                 "signature required".to_string(),
             ));
@@ -766,8 +776,12 @@ impl UpdateCopilot {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1279,5 +1293,349 @@ mod tests {
         let rec = copilot.evaluate_proposal(&proposal, &make_trace_id());
 
         assert!(rec.playbook.is_none());
+    }
+
+    #[test]
+    fn process_acknowledgement_rejects_empty_identity_without_logging() {
+        let mut copilot = UpdateCopilot::default();
+        let mut ack = make_valid_ack("proposal-empty-identity");
+        ack.operator_identity.clear();
+
+        let err = copilot
+            .process_acknowledgement(ack, "trace-invalid-ack")
+            .expect_err("empty identity must reject");
+
+        assert!(matches!(err, CopilotError::AcknowledgementRejected(_)));
+        assert!(err.to_string().contains("operator_identity required"));
+        assert!(!copilot.is_acknowledged("proposal-empty-identity"));
+        assert!(copilot.interactions().is_empty());
+    }
+
+    #[test]
+    fn process_acknowledgement_rejects_empty_signature_without_logging() {
+        let mut copilot = UpdateCopilot::default();
+        let mut ack = make_valid_ack("proposal-empty-signature");
+        ack.signature_hex.clear();
+
+        let err = copilot
+            .process_acknowledgement(ack, "trace-invalid-ack")
+            .expect_err("empty signature must reject");
+
+        assert!(matches!(err, CopilotError::AcknowledgementRejected(_)));
+        assert!(err.to_string().contains("signature required"));
+        assert!(!copilot.is_acknowledged("proposal-empty-signature"));
+        assert!(copilot.interactions().is_empty());
+    }
+
+    #[test]
+    fn acknowledgement_validation_reports_identity_before_signature() {
+        let mut ack = make_valid_ack("proposal-both-empty");
+        ack.operator_identity.clear();
+        ack.signature_hex.clear();
+
+        let err = ack.validate().expect_err("identity should fail first");
+
+        assert!(matches!(err, CopilotError::AcknowledgementRejected(_)));
+        assert!(err.to_string().contains("operator_identity required"));
+        assert!(!err.to_string().contains("signature required"));
+    }
+
+    #[test]
+    fn rejected_acknowledgement_is_stored_as_rejected_decision() {
+        let mut copilot = UpdateCopilot::default();
+        let mut ack = make_valid_ack("proposal-rejected");
+        ack.decision = AcknowledgementDecision::Rejected;
+        ack.reason = "risk exceeds operator budget".to_string();
+
+        copilot
+            .process_acknowledgement(ack, "trace-rejected")
+            .expect("valid rejected acknowledgement should be recorded");
+
+        let stored = copilot
+            .get_acknowledgement("proposal-rejected")
+            .expect("stored acknowledgement");
+        assert_eq!(stored.decision, AcknowledgementDecision::Rejected);
+        assert_eq!(
+            copilot.interactions()[0].event_code,
+            event_codes::COPILOT_UPDATE_REJECTED
+        );
+    }
+
+    #[test]
+    fn serde_rejects_unknown_acknowledgement_decision() {
+        let err = serde_json::from_str::<AcknowledgementDecision>(r#""escalated""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_acknowledgement_receipt_missing_signature() {
+        let json = serde_json::json!({
+            "receipt_id": "receipt-missing-signature",
+            "proposal_id": "proposal-missing-signature",
+            "operator_identity": "admin@example.com",
+            "decision": "approved",
+            "reason": "ok",
+            "timestamp": Utc::now().to_rfc3339()
+        });
+
+        let err = serde_json::from_value::<AcknowledgementReceipt>(json).unwrap_err();
+
+        assert!(err.to_string().contains("signature_hex"));
+    }
+
+    #[test]
+    fn serde_rejects_update_proposal_missing_package_name() {
+        let json = serde_json::json!({
+            "proposal_id": "proposal-missing-package",
+            "from_version": "1.0.0",
+            "to_version": "2.0.0",
+            "pre_update_metrics": make_low_risk_metrics(),
+            "post_update_metrics": make_high_risk_metrics(),
+            "directly_affected_nodes": ["app-core"]
+        });
+
+        let err = serde_json::from_value::<UpdateProposal>(json).unwrap_err();
+
+        assert!(err.to_string().contains("package_name"));
+    }
+
+    #[test]
+    fn serde_rejects_interaction_missing_event_code() {
+        let json = serde_json::json!({
+            "interaction_id": "interaction-missing-event",
+            "proposal_id": "proposal-1",
+            "timestamp": Utc::now().to_rfc3339(),
+            "trace_id": "trace-1",
+            "recommendation_id": null,
+            "operator_decision": null,
+            "risk_level": null,
+            "risk_delta": null,
+            "details": {}
+        });
+
+        let err = serde_json::from_value::<CopilotInteraction>(json).unwrap_err();
+
+        assert!(err.to_string().contains("event_code"));
+    }
+
+    fn assert_value_rejected<T>(value: serde_json::Value)
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        assert!(
+            serde_json::from_value::<T>(value).is_err(),
+            "malformed value should be rejected"
+        );
+    }
+
+    #[test]
+    fn serde_rejects_topology_metrics_string_dependency_count() {
+        assert_value_rejected::<TopologyRiskMetrics>(serde_json::json!({
+            "fan_out": 5.0,
+            "betweenness_centrality": 0.1,
+            "articulation_point": false,
+            "trust_bottleneck_score": 0.2,
+            "transitive_dependency_count": "10",
+            "max_depth_in_graph": 3
+        }));
+    }
+
+    #[test]
+    fn serde_rejects_blast_radius_negative_recovery_time() {
+        assert_value_rejected::<BlastRadiusEstimate>(serde_json::json!({
+            "directly_affected_nodes": ["app-core"],
+            "transitively_affected_count": 10,
+            "critical_path_affected": false,
+            "estimated_recovery_time_seconds": -1
+        }));
+    }
+
+    #[test]
+    fn serde_rejects_confidence_output_string_score() {
+        assert_value_rejected::<ConfidenceOutput>(serde_json::json!({
+            "confidence_score": "0.8",
+            "lower_bound": 0.6,
+            "upper_bound": 0.9,
+            "data_quality_factors": {},
+            "calibration_note": "ok"
+        }));
+    }
+
+    #[test]
+    fn serde_rejects_unknown_update_risk_level() {
+        assert_value_rejected::<UpdateRiskLevel>(serde_json::json!("severe"));
+    }
+
+    #[test]
+    fn serde_rejects_rollout_phase_spec_string_traffic_percentage() {
+        assert_value_rejected::<RolloutPhaseSpec>(serde_json::json!({
+            "phase_name": "canary",
+            "traffic_percentage": "1.0",
+            "min_soak_seconds": 3600,
+            "success_criteria": "healthy",
+            "rollback_trigger": "error"
+        }));
+    }
+
+    #[test]
+    fn serde_rejects_mitigation_playbook_missing_rollback_instructions() {
+        assert_value_rejected::<MitigationPlaybook>(serde_json::json!({
+            "playbook_id": "playbook-1",
+            "proposal_id": "proposal-1",
+            "barrier_configurations": [],
+            "staged_rollout_plan": {
+                "phases": [],
+                "total_estimated_duration_seconds": 0
+            },
+            "monitoring_recommendations": []
+        }));
+    }
+
+    #[test]
+    fn serde_rejects_copilot_config_string_threshold() {
+        assert_value_rejected::<CopilotConfig>(serde_json::json!({
+            "high_risk_threshold": "0.3",
+            "critical_risk_threshold": 0.6,
+            "low_confidence_threshold": 0.5,
+            "require_ack_above_threshold": true
+        }));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_items_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_drops_oldest_batch() {
+        let mut items = vec!["a", "b", "c", "d"];
+
+        push_bounded(&mut items, "e", 3);
+
+        assert_eq!(items, vec!["c", "d", "e"]);
+    }
+
+    #[test]
+    fn acknowledgement_validation_rejects_empty_receipt_id_first() {
+        let mut ack = make_valid_ack("proposal-empty-receipt");
+        ack.receipt_id.clear();
+        ack.proposal_id.clear();
+        ack.operator_identity.clear();
+
+        let err = ack.validate().expect_err("receipt_id should fail first");
+
+        assert!(matches!(err, CopilotError::AcknowledgementRejected(_)));
+        assert!(err.to_string().contains("receipt_id required"));
+        assert!(!err.to_string().contains("proposal_id required"));
+    }
+
+    #[test]
+    fn process_acknowledgement_rejects_empty_proposal_id_without_logging() {
+        let mut copilot = UpdateCopilot::default();
+        let mut ack = make_valid_ack("proposal-empty-id");
+        ack.proposal_id.clear();
+
+        let err = copilot
+            .process_acknowledgement(ack, "trace-empty-proposal")
+            .expect_err("empty proposal_id must reject");
+
+        assert!(matches!(err, CopilotError::AcknowledgementRejected(_)));
+        assert!(err.to_string().contains("proposal_id required"));
+        assert!(copilot.interactions().is_empty());
+        assert!(!copilot.is_acknowledged(""));
+    }
+
+    #[test]
+    fn process_acknowledgement_rejects_whitespace_proposal_id_without_logging() {
+        let mut copilot = UpdateCopilot::default();
+        let mut ack = make_valid_ack("proposal-whitespace-id");
+        ack.proposal_id = " \t ".to_string();
+
+        let err = copilot
+            .process_acknowledgement(ack, "trace-whitespace-proposal")
+            .expect_err("whitespace proposal_id must reject");
+
+        assert!(matches!(err, CopilotError::AcknowledgementRejected(_)));
+        assert!(err.to_string().contains("proposal_id required"));
+        assert!(copilot.interactions().is_empty());
+        assert!(copilot.get_acknowledgement(" \t ").is_none());
+    }
+
+    #[test]
+    fn process_acknowledgement_rejects_whitespace_identity_without_logging() {
+        let mut copilot = UpdateCopilot::default();
+        let mut ack = make_valid_ack("proposal-whitespace-identity");
+        ack.operator_identity = "\n\t".to_string();
+
+        let err = copilot
+            .process_acknowledgement(ack, "trace-whitespace-identity")
+            .expect_err("whitespace identity must reject");
+
+        assert!(matches!(err, CopilotError::AcknowledgementRejected(_)));
+        assert!(err.to_string().contains("operator_identity required"));
+        assert!(!copilot.is_acknowledged("proposal-whitespace-identity"));
+        assert!(copilot.interactions().is_empty());
+    }
+
+    #[test]
+    fn process_acknowledgement_rejects_whitespace_signature_without_logging() {
+        let mut copilot = UpdateCopilot::default();
+        let mut ack = make_valid_ack("proposal-whitespace-signature");
+        ack.signature_hex = "   ".to_string();
+
+        let err = copilot
+            .process_acknowledgement(ack, "trace-whitespace-signature")
+            .expect_err("whitespace signature must reject");
+
+        assert!(matches!(err, CopilotError::AcknowledgementRejected(_)));
+        assert!(err.to_string().contains("signature required"));
+        assert!(!copilot.is_acknowledged("proposal-whitespace-signature"));
+        assert!(copilot.interactions().is_empty());
+    }
+
+    #[test]
+    fn deferred_acknowledgement_is_not_logged_as_approved_or_rejected() {
+        let mut copilot = UpdateCopilot::default();
+        let mut ack = make_valid_ack("proposal-deferred");
+        ack.decision = AcknowledgementDecision::Deferred;
+        ack.reason = "waiting for risk council".to_string();
+
+        copilot
+            .process_acknowledgement(ack, "trace-deferred")
+            .expect("deferred acknowledgement should be accepted as a pending operator decision");
+
+        let stored = copilot
+            .get_acknowledgement("proposal-deferred")
+            .expect("deferred acknowledgement should be stored");
+        assert_eq!(stored.decision, AcknowledgementDecision::Deferred);
+        assert_eq!(
+            copilot.interactions()[0].event_code,
+            event_codes::COPILOT_ACKNOWLEDGEMENT_RECEIVED
+        );
+        assert_ne!(
+            copilot.interactions()[0].event_code,
+            event_codes::COPILOT_UPDATE_APPROVED
+        );
+        assert_ne!(
+            copilot.interactions()[0].event_code,
+            event_codes::COPILOT_UPDATE_REJECTED
+        );
+    }
+
+    #[test]
+    fn whitespace_identity_and_signature_reports_identity_first() {
+        let mut ack = make_valid_ack("proposal-whitespace-both");
+        ack.operator_identity = " ".to_string();
+        ack.signature_hex = "\n".to_string();
+
+        let err = ack.validate().expect_err("identity should fail before signature");
+
+        assert!(err.to_string().contains("operator_identity required"));
+        assert!(!err.to_string().contains("signature required"));
     }
 }

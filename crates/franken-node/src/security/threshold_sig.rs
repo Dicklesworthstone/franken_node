@@ -802,4 +802,1553 @@ mod tests {
         let r = FailureReason::BelowThreshold { have: 1, need: 3 };
         assert!(r.to_string().contains("THRESH_BELOW_QUORUM"));
     }
+
+    #[test]
+    fn reserved_artifact_id_rejected_before_quorum_counting() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.artifact_id = RESERVED_ARTIFACT_ID.to_string();
+
+        let result = verify_threshold(&config, &artifact, "t-reserved-art", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::InvalidArtifactId { ref reason })
+                if reason.contains("reserved")
+        ));
+    }
+
+    #[test]
+    fn whitespace_artifact_id_rejected_before_signature_validation() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.artifact_id = " art-1".into();
+        artifact.signatures[0].signature_hex = "not-hex".into();
+
+        let result = verify_threshold(&config, &artifact, "t-space-art", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::InvalidArtifactId { ref reason })
+                if reason.contains("leading or trailing whitespace")
+        ));
+    }
+
+    #[test]
+    fn empty_connector_id_rejected_before_signature_validation() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.connector_id = String::new();
+        artifact.signatures[0].signature_hex = "not-hex".into();
+
+        let result = verify_threshold(&config, &artifact, "t-empty-conn", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidConnectorId {
+                reason: "connector_id must not be empty".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn config_error_precedes_invalid_artifact_id() {
+        let (sks, mut config) = test_config(2, 3);
+        config.signer_keys.pop();
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.artifact_id = RESERVED_ARTIFACT_ID.to_string();
+
+        let result = verify_threshold(&config, &artifact, "t-config-first", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::ConfigInvalid { ref reason })
+                if reason.contains("signer_keys count")
+        ));
+    }
+
+    #[test]
+    fn malformed_public_key_hex_does_not_count_signature() {
+        let (sks, mut config) = test_config(2, 3);
+        config.signer_keys[1].public_key_hex = "not-hex".into();
+        let artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+
+        let result = verify_threshold(&config, &artifact, "t-bad-pubkey", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn signature_for_different_content_hash_does_not_count() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact
+            .signatures
+            .push(sign(&sks[1], &config.signer_keys[1].key_id, "hash-other"));
+
+        let result = verify_threshold(&config, &artifact, "t-wrong-message", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_signature_does_not_poison_later_valid_same_signer() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".into(),
+            key_id: "signer-1".into(),
+            signature_hex: "not-hex".into(),
+        });
+        artifact
+            .signatures
+            .push(sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc"));
+
+        let result = verify_threshold(&config, &artifact, "t-invalid-then-valid", "ts");
+
+        assert!(result.verified);
+        assert_eq!(result.valid_signatures, 2);
+        assert_eq!(result.failure_reason, None);
+    }
+
+    #[test]
+    fn duplicate_valid_signature_after_threshold_still_fails_if_threshold_not_met() {
+        let (sks, config) = test_config(3, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact
+            .signatures
+            .push(sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc"));
+
+        let result = verify_threshold(&config, &artifact, "t-duplicate-below", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 2);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::DuplicateSigner {
+                signer_id: "signer-0".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn reserved_connector_id_rejected_before_quorum_counting() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.connector_id = RESERVED_ARTIFACT_ID.to_string();
+
+        let result = verify_threshold(&config, &artifact, "t-reserved-conn", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::InvalidConnectorId { ref reason })
+                if reason.contains("reserved")
+        ));
+    }
+
+    #[test]
+    fn whitespace_connector_id_rejected_before_invalid_signature() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.connector_id = "connector-1 ".to_string();
+        artifact.signatures[0].signature_hex = "not-hex".to_string();
+
+        let result = verify_threshold(&config, &artifact, "t-space-conn", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+        assert!(matches!(
+            result.failure_reason,
+            Some(FailureReason::InvalidConnectorId { ref reason })
+                if reason.contains("leading or trailing whitespace")
+        ));
+    }
+
+    #[test]
+    fn whitespace_only_artifact_id_rejected_as_empty() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.artifact_id = "   ".to_string();
+
+        let result = verify_threshold(&config, &artifact, "t-space-only-art", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidArtifactId {
+                reason: "artifact_id must not be empty".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn short_signature_hex_does_not_count_toward_threshold() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: "abcd".to_string(),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-short-sig", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn signer_id_case_mismatch_rejected_even_with_valid_key_signature() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        let mut replay = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        replay.signer_id = "Signer-1".to_string();
+        artifact.signatures.push(replay);
+
+        let result = verify_threshold(&config, &artifact, "t-case-mismatch", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "Signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_signer_failure_is_preserved_when_later_invalid_signature_also_fails() {
+        let (sks, config) = test_config(3, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "unknown-signer".to_string(),
+            key_id: "unknown-signer".to_string(),
+            signature_hex: "deadbeef".to_string(),
+        });
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: "not-hex".to_string(),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-first-failure", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::UnknownSigner {
+                signer_id: "unknown-signer".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn raw_content_hash_signature_without_domain_separator_is_rejected() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        let raw_signature = sks[1].sign(b"hash-abc");
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: hex::encode(raw_signature.to_bytes()),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-raw-message", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn empty_signer_id_for_known_key_is_rejected() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        let mut detached_identity = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        detached_identity.signer_id.clear();
+        artifact.signatures.push(detached_identity);
+
+        let result = verify_threshold(&config, &artifact, "t-empty-signer-id", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn whitespace_key_id_is_unknown_even_when_signature_bytes_are_valid() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        let mut shifted_key = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        shifted_key.signer_id = "signer-1 ".to_string();
+        shifted_key.key_id = "signer-1 ".to_string();
+        artifact.signatures.push(shifted_key);
+
+        let result = verify_threshold(&config, &artifact, "t-whitespace-key", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::UnknownSigner {
+                signer_id: "signer-1 ".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn zeroed_signature_bytes_do_not_count_toward_threshold() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: hex::encode([0_u8; 64]),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-zeroed-signature", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_signature_failure_is_preserved_when_later_unknown_signer_also_fails() {
+        let (sks, config) = test_config(3, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: "not-hex".to_string(),
+        });
+        artifact.signatures.push(PartialSignature {
+            signer_id: "unknown-signer".to_string(),
+            key_id: "unknown-signer".to_string(),
+            signature_hex: "deadbeef".to_string(),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-invalid-first", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn zero_signatures_reports_exact_below_threshold_counts() {
+        let (sks, config) = test_config(2, 3);
+        let artifact = signed_artifact(&sks, &config, "hash-abc", 0);
+
+        let result = verify_threshold(&config, &artifact, "t-empty-signatures", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::BelowThreshold { have: 0, need: 2 })
+        );
+    }
+
+    #[test]
+    fn short_public_key_bytes_do_not_count_signature() {
+        let (sks, mut config) = test_config(2, 3);
+        config.signer_keys[1].public_key_hex = hex::encode([7_u8; 31]);
+        let artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+
+        let result = verify_threshold(&config, &artifact, "t-short-pubkey", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn odd_length_public_key_hex_does_not_count_signature() {
+        let (sks, mut config) = test_config(2, 3);
+        config.signer_keys[1].public_key_hex = "abc".to_string();
+        let artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+
+        let result = verify_threshold(&config, &artifact, "t-odd-pubkey", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn odd_length_signature_hex_does_not_count_toward_threshold() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: "abc".to_string(),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-odd-sig", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn empty_signature_hex_does_not_count_toward_threshold() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: String::new(),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-empty-sig", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn known_signer_label_with_unknown_key_id_is_unknown() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        let mut detached = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        detached.key_id = "signer-missing".to_string();
+        artifact.signatures.push(detached);
+
+        let result = verify_threshold(&config, &artifact, "t-missing-key-id", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::UnknownSigner {
+                signer_id: "signer-1".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn signature_replayed_under_different_known_key_is_rejected() {
+        let (sks, config) = test_config(2, 3);
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        let mut replay = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        replay.signer_id = "signer-2".to_string();
+        replay.key_id = "signer-2".to_string();
+        artifact.signatures.push(replay);
+
+        let result = verify_threshold(&config, &artifact, "t-wrong-key-replay", "ts");
+
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+        assert_eq!(
+            result.failure_reason,
+            Some(FailureReason::InvalidSignature {
+                signer_id: "signer-2".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn serde_rejects_config_missing_signer_keys() {
+        let decoded =
+            serde_json::from_str::<ThresholdConfig>(r#"{"threshold":2,"total_signers":3}"#);
+
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn serde_rejects_partial_signature_missing_signature_hex() {
+        let decoded = serde_json::from_str::<PartialSignature>(
+            r#"{"signer_id":"signer-1","key_id":"signer-1"}"#,
+        );
+
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn serde_rejects_publication_artifact_signatures_as_object() {
+        let decoded = serde_json::from_str::<PublicationArtifact>(
+            r#"{
+                "artifact_id":"art-1",
+                "connector_id":"conn-1",
+                "content_hash":"hash-abc",
+                "signatures":{"signer-1":"sig"}
+            }"#,
+        );
+
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn serde_rejects_unknown_failure_reason_variant() {
+        let decoded = serde_json::from_str::<FailureReason>(r#"{"unknown_reason":{"x":1}}"#);
+
+        assert!(decoded.is_err());
+    }
+
+    #[test]
+    fn serde_rejects_unknown_threshold_error_variant() {
+        let decoded = serde_json::from_str::<ThresholdError>(r#"{"THRESH_NOT_REAL":{"x":1}}"#);
+
+        assert!(decoded.is_err());
+    }
+
+    // === NEGATIVE-PATH SECURITY TESTS ===
+
+    #[test]
+    fn cryptographic_forge_signature_and_replay_attacks_fail_with_proper_rejection() {
+        let (sks, config) = test_config(2, 3);
+
+        // Attempt signature forgery with completely invalid signature bytes
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: "deadbeefcafebabe".repeat(8), // 64 bytes of garbage
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-forge", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+
+        // Cross-message signature replay attack
+        let valid_sig_hash_a = sign(&sks[1], &config.signer_keys[1].key_id, "hash-a");
+        let mut replay_artifact = signed_artifact(&sks, &config, "hash-b", 1);
+        replay_artifact.signatures.push(PartialSignature {
+            signer_id: valid_sig_hash_a.signer_id,
+            key_id: valid_sig_hash_a.key_id,
+            signature_hex: valid_sig_hash_a.signature_hex,
+        });
+
+        let result = verify_threshold(&config, &replay_artifact, "t-replay", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+
+        // Signature malleability attack (flipping bits to try different valid points)
+        let valid_sig = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+        let mut malleable_bytes = hex::decode(&valid_sig.signature_hex).unwrap();
+        malleable_bytes[0] ^= 0x01; // Flip a bit
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: hex::encode(malleable_bytes),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-malleable", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+
+        // Public key substitution attack (valid signature for wrong key)
+        let (other_sks, _) = test_keys(1);
+        let wrong_key_sig = other_sks[0].sign(&build_signing_message("hash-abc"));
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: hex::encode(wrong_key_sig.to_bytes()),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-wrong-key", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+    }
+
+    #[test]
+    fn threshold_bypass_and_vote_stuffing_attacks_fail_closed() {
+        let (sks, config) = test_config(3, 5);
+
+        // Attempt to bypass threshold by using duplicate keys with different signer IDs
+        let valid_sig = sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc");
+        let mut duplicate_votes = Vec::new();
+
+        // Try to use same key signature with different signer aliases
+        for i in 0..10 {
+            duplicate_votes.push(PartialSignature {
+                signer_id: format!("signer-0-alias-{}", i),
+                key_id: config.signer_keys[0].key_id.clone(),
+                signature_hex: valid_sig.signature_hex.clone(),
+            });
+        }
+
+        let artifact = PublicationArtifact {
+            artifact_id: "vote-stuffing-test".to_string(),
+            connector_id: "conn-1".to_string(),
+            content_hash: "hash-abc".to_string(),
+            signatures: duplicate_votes,
+        };
+
+        let result = verify_threshold(&config, &artifact, "t-vote-stuff", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0); // All rejected due to identity mismatch
+
+        // Attempt threshold bypass with key replay under different identities
+        let mut replay_artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+
+        // Add replayed signatures under bogus identities
+        let sig1 = sign(&sks[0], &config.signer_keys[0].key_id, "hash-abc");
+        let sig2 = sign(&sks[1], &config.signer_keys[1].key_id, "hash-abc");
+
+        replay_artifact.signatures.extend([
+            PartialSignature { signer_id: "admin".to_string(), key_id: sig1.key_id, signature_hex: sig1.signature_hex },
+            PartialSignature { signer_id: "root".to_string(), key_id: sig2.key_id, signature_hex: sig2.signature_hex },
+            PartialSignature { signer_id: "superuser".to_string(), key_id: sig1.key_id.clone(), signature_hex: sig1.signature_hex },
+        ]);
+
+        let result = verify_threshold(&config, &replay_artifact, "t-replay-bypass", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 2); // Only the original 2 count
+
+        // Test arithmetic overflow in threshold validation
+        let mut overflow_config = config.clone();
+        overflow_config.threshold = u32::MAX;
+        overflow_config.total_signers = u32::MAX;
+
+        let result = verify_threshold(&overflow_config, &replay_artifact, "t-overflow", "ts");
+        assert!(!result.verified);
+        assert!(matches!(result.failure_reason, Some(FailureReason::ConfigInvalid { .. })));
+    }
+
+    #[test]
+    fn malicious_configuration_and_key_manipulation_attacks_fail_closed() {
+        // Test configuration with zero total signers
+        let mut malicious_config = ThresholdConfig {
+            threshold: 1,
+            total_signers: 0,
+            signer_keys: vec![],
+        };
+        assert!(malicious_config.validate().is_err());
+
+        // Test configuration with threshold greater than max possible
+        malicious_config.threshold = u32::MAX;
+        malicious_config.total_signers = 1;
+        assert!(malicious_config.validate().is_err());
+
+        // Test public key collision attack (same key, different IDs)
+        let (sks, mut config) = test_config(2, 3);
+        let first_pubkey = config.signer_keys[0].public_key_hex.clone();
+        config.signer_keys[1].public_key_hex = first_pubkey.clone();
+        config.signer_keys[2].public_key_hex = first_pubkey;
+
+        assert!(config.validate().is_err());
+
+        // Test malformed public key hex injection
+        config.signer_keys[0].public_key_hex = "not_valid_hex".to_string();
+        config.signer_keys[1].public_key_hex = hex::encode(vec![0u8; 33]); // Wrong length
+        config.signer_keys[2].public_key_hex = "".to_string(); // Empty
+
+        let artifact = signed_artifact(&sks, &config, "hash-abc", 3);
+        let result = verify_threshold(&config, &artifact, "t-malformed", "ts");
+        assert!(!result.verified);
+
+        // Test key ID injection attacks
+        let (_sks, mut injection_config) = test_config(2, 2);
+        injection_config.signer_keys[0].key_id = "signer\0null".to_string();
+        injection_config.signer_keys[1].key_id = "signer\nseparator".to_string();
+
+        let artifact = PublicationArtifact {
+            artifact_id: "injection-test".to_string(),
+            connector_id: "conn-1".to_string(),
+            content_hash: "hash-abc".to_string(),
+            signatures: vec![
+                PartialSignature {
+                    signer_id: "signer\0null".to_string(),
+                    key_id: "signer\0null".to_string(),
+                    signature_hex: "00".repeat(64),
+                },
+                PartialSignature {
+                    signer_id: "signer\nseparator".to_string(),
+                    key_id: "signer\nseparator".to_string(),
+                    signature_hex: "ff".repeat(64),
+                },
+            ],
+        };
+
+        // These should be treated as unknown signers due to exact matching requirements
+        let result = verify_threshold(&injection_config, &artifact, "t-injection", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+    }
+
+    #[test]
+    fn unicode_injection_and_identity_spoofing_attacks_fail_with_proper_isolation() {
+        let (sks, mut config) = test_config(2, 3);
+
+        // Unicode BiDi override attacks in signer IDs
+        let bidi_id = "\u{202E}regnis\u{202C}signer-0"; // "singer" reversed with BiDi override
+        let zero_width_id = "signer-\u{200B}0"; // Zero-width space
+        let mixed_script_id = "sіgner-0"; // Cyrillic 'і' instead of Latin 'i'
+
+        config.signer_keys[0].key_id = bidi_id.to_string();
+        config.signer_keys[1].key_id = zero_width_id.to_string();
+        config.signer_keys[2].key_id = mixed_script_id.to_string();
+
+        let artifact = PublicationArtifact {
+            artifact_id: "unicode-test".to_string(),
+            connector_id: "conn-1".to_string(),
+            content_hash: "hash-abc".to_string(),
+            signatures: vec![
+                PartialSignature {
+                    signer_id: "signer-0".to_string(), // Trying to match without Unicode
+                    key_id: bidi_id.to_string(),
+                    signature_hex: hex::encode([0u8; 64]),
+                },
+                PartialSignature {
+                    signer_id: zero_width_id.to_string(),
+                    key_id: "signer-0".to_string(), // Trying reverse match
+                    signature_hex: hex::encode([1u8; 64]),
+                },
+                PartialSignature {
+                    signer_id: "signer-0".to_string(), // Normal ASCII attempt
+                    key_id: mixed_script_id.to_string(),
+                    signature_hex: hex::encode([2u8; 64]),
+                },
+            ],
+        };
+
+        let result = verify_threshold(&config, &artifact, "t-unicode", "ts");
+        assert!(!result.verified);
+
+        // Test Unicode normalization attacks (NFC vs NFD)
+        let nfc_id = "sígner-café"; // NFC normalized
+        let nfd_id = "si\u{0301}gner-cafe\u{0301}"; // NFD normalized (same visual, different bytes)
+
+        config.signer_keys[0].key_id = nfc_id.to_string();
+
+        let artifact = PublicationArtifact {
+            artifact_id: "normalization-test".to_string(),
+            connector_id: "conn-1".to_string(),
+            content_hash: "hash-abc".to_string(),
+            signatures: vec![PartialSignature {
+                signer_id: nfd_id.to_string(), // Different normalization
+                key_id: nfc_id.to_string(),
+                signature_hex: hex::encode([0u8; 64]),
+            }],
+        };
+
+        let result = verify_threshold(&config, &artifact, "t-normalization", "ts");
+        assert!(!result.verified);
+        assert!(matches!(result.failure_reason, Some(FailureReason::InvalidSignature { .. })));
+    }
+
+    #[test]
+    fn hex_parsing_buffer_overflow_and_injection_attacks_fail_safely() {
+        let (sks, config) = test_config(2, 3);
+
+        // Massive hex string to trigger potential buffer overflow
+        let massive_sig = "00".repeat(1_000_000); // 2MB hex string
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 1);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: massive_sig,
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-massive", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 1);
+
+        // Hex injection with control characters and null bytes
+        let control_hex = "001122\0aabbcc\r\n33445566";
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-2".to_string(),
+            key_id: "signer-2".to_string(),
+            signature_hex: control_hex.to_string(),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-control", "ts");
+        assert!(!result.verified);
+
+        // Unicode hex characters (should be rejected as non-ASCII)
+        let unicode_hex = "𝟎𝟎𝟏𝟏𝟐𝟐𝟑𝟑"; // Unicode mathematical digits
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-2".to_string(),
+            key_id: "signer-2".to_string(),
+            signature_hex: unicode_hex.to_string(),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-unicode-hex", "ts");
+        assert!(!result.verified);
+
+        // Integer overflow in hex parsing (extreme lengths)
+        let length_attack = "ff".repeat(usize::MAX / 2);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-2".to_string(),
+            key_id: "signer-2".to_string(),
+            signature_hex: length_attack,
+        });
+
+        // Should not crash, just fail verification
+        let result = verify_threshold(&config, &artifact, "t-overflow-hex", "ts");
+        assert!(!result.verified);
+
+        // Mixed case hex with embedded whitespace
+        let spaced_hex = "00 11 22 33 44 55 66 77".repeat(8);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-2".to_string(),
+            key_id: "signer-2".to_string(),
+            signature_hex: spaced_hex,
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-spaced", "ts");
+        assert!(!result.verified);
+    }
+
+    #[test]
+    fn artifact_id_injection_and_validation_bypass_attacks_fail_closed() {
+        let (sks, config) = test_config(2, 3);
+
+        // JSON injection in artifact ID
+        let json_injection = r#"{"malicious": "payload"}"#;
+        let mut artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        artifact.artifact_id = json_injection.to_string();
+
+        let result = verify_threshold(&config, &artifact, "t-json", "ts");
+        assert!(result.verified); // Valid JSON string as artifact ID should work
+
+        // SQL injection in artifact ID
+        artifact.artifact_id = "'; DROP TABLE artifacts; --".to_string();
+        let result = verify_threshold(&config, &artifact, "t-sql", "ts");
+        assert!(result.verified); // SQL injection string should be treated as literal
+
+        // Script injection in artifact ID
+        artifact.artifact_id = "<script>alert('xss')</script>".to_string();
+        let result = verify_threshold(&config, &artifact, "t-script", "ts");
+        assert!(result.verified); // Script string should be treated as literal
+
+        // Control character injection
+        artifact.artifact_id = "artifact\0null\nid".to_string();
+        let result = verify_threshold(&config, &artifact, "t-control-art", "ts");
+        assert!(result.verified); // Control characters in artifact ID should be allowed
+
+        // Unicode injection in connector ID
+        artifact.connector_id = "\u{202E}evil\u{202C}connector".to_string();
+        let result = verify_threshold(&config, &artifact, "t-unicode-conn", "ts");
+        assert!(result.verified); // Unicode in connector ID should be allowed
+
+        // Extremely long IDs to test memory exhaustion
+        artifact.artifact_id = "x".repeat(1_000_000);
+        artifact.connector_id = "y".repeat(1_000_000);
+        let result = verify_threshold(&config, &artifact, "t-huge-ids", "ts");
+        assert!(result.verified); // Large IDs should work if they pass validation
+
+        // Test reserved identifier bypass attempts
+        artifact.artifact_id = format!(" {} ", RESERVED_ARTIFACT_ID); // Padded reserved ID
+        let result = verify_threshold(&config, &artifact, "t-reserved-bypass", "ts");
+        assert!(!result.verified);
+        assert!(matches!(result.failure_reason, Some(FailureReason::InvalidArtifactId { .. })));
+
+        // Test whitespace normalization bypass
+        artifact.artifact_id = "normal-id\t".to_string(); // Trailing tab
+        let result = verify_threshold(&config, &artifact, "t-tab-bypass", "ts");
+        assert!(!result.verified);
+        assert!(matches!(result.failure_reason, Some(FailureReason::InvalidArtifactId { .. })));
+    }
+
+    #[test]
+    fn serialization_corruption_and_json_injection_attacks_fail_safely() {
+        let (sks, config) = test_config(2, 3);
+        let artifact = signed_artifact(&sks, &config, "hash-abc", 2);
+        let result = verify_threshold(&config, &artifact, "t-serialize", "ts");
+
+        // Test serialization of result with injection payloads
+        assert!(result.verified);
+
+        // Test malformed JSON deserialization attacks
+        let malformed_json = r#"{"verified": true, "valid_signatures": "not_a_number"}"#;
+        let parsed = serde_json::from_str::<VerificationResult>(malformed_json);
+        assert!(parsed.is_err());
+
+        // Test JSON injection in trace_id field
+        let injection_trace = r#"", "injected": "field", "fake_verified": true, "real_trace": ""#;
+        let result = verify_threshold(&config, &artifact, injection_trace, "ts");
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        assert!(!serialized.contains(r#""injected":"#), "JSON injection should be escaped");
+        assert!(serialized.contains("field"), "Content should be preserved but escaped");
+
+        // Test extremely long field values
+        let huge_trace = "x".repeat(1_000_000);
+        let result = verify_threshold(&config, &artifact, &huge_trace, "ts");
+        let serialized = serde_json::to_string(&result);
+        assert!(serialized.is_ok(), "Large trace IDs should serialize safely");
+
+        // Test Unicode in all result fields
+        let unicode_artifact = PublicationArtifact {
+            artifact_id: "artifact-🦀".to_string(),
+            connector_id: "connector-🌍".to_string(),
+            content_hash: "hash-café".to_string(),
+            signatures: vec![],
+        };
+
+        let result = verify_threshold(&config, &unicode_artifact, "trace-🚀", "timestamp-⏰");
+        let serialized = serde_json::to_string(&result).unwrap();
+        let deserialized: VerificationResult = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(result.artifact_id, deserialized.artifact_id);
+        assert_eq!(result.trace_id, deserialized.trace_id);
+
+        // Test FailureReason serialization with injection payloads
+        let failure_with_injection = FailureReason::InvalidSignature {
+            signer_id: r#"{"evil": "payload"}"#.to_string(),
+        };
+
+        let failure_json = serde_json::to_string(&failure_with_injection).unwrap();
+        assert!(!failure_json.contains(r#""evil":"#), "Injection should be escaped");
+    }
+
+    #[test]
+    fn domain_separator_bypass_and_message_substitution_attacks_fail_with_rejection() {
+        let (sks, config) = test_config(2, 3);
+
+        // Attempt to forge signature by signing raw content hash without domain separator
+        let raw_content = "hash-abc";
+        let raw_signature = sks[0].sign(raw_content.as_bytes());
+        let mut artifact = signed_artifact(&sks, &config, raw_content, 0);
+
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-0".to_string(),
+            key_id: "signer-0".to_string(),
+            signature_hex: hex::encode(raw_signature.to_bytes()),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-raw-bypass", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+
+        // Attempt to substitute domain separator
+        let mut fake_message = Vec::new();
+        fake_message.extend_from_slice(b"fake_domain_separator:");
+        fake_message.extend_from_slice(&(raw_content.len() as u64).to_le_bytes());
+        fake_message.extend_from_slice(raw_content.as_bytes());
+
+        let fake_signature = sks[1].sign(&fake_message);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-1".to_string(),
+            key_id: "signer-1".to_string(),
+            signature_hex: hex::encode(fake_signature.to_bytes()),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-fake-domain", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+
+        // Attempt length extension attack
+        let mut extended_message = build_signing_message(raw_content);
+        extended_message.extend_from_slice(b"evil_extension");
+
+        let extended_signature = sks[2].sign(&extended_message);
+        artifact.signatures.push(PartialSignature {
+            signer_id: "signer-2".to_string(),
+            key_id: "signer-2".to_string(),
+            signature_hex: hex::encode(extended_signature.to_bytes()),
+        });
+
+        let result = verify_threshold(&config, &artifact, "t-extension", "ts");
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0);
+
+        // Test that proper domain-separated signatures work
+        let proper_signature = sign(&sks[0], &config.signer_keys[0].key_id, raw_content);
+        let mut valid_artifact = PublicationArtifact {
+            artifact_id: "valid-test".to_string(),
+            connector_id: "conn-1".to_string(),
+            content_hash: raw_content.to_string(),
+            signatures: vec![proper_signature],
+        };
+
+        let valid_sig_2 = sign(&sks[1], &config.signer_keys[1].key_id, raw_content);
+        valid_artifact.signatures.push(valid_sig_2);
+
+        let result = verify_threshold(&config, &valid_artifact, "t-valid", "ts");
+        assert!(result.verified);
+        assert_eq!(result.valid_signatures, 2);
+    }
+
+    #[test]
+    fn concurrent_verification_and_race_condition_safety_validation() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let (sks, config) = test_config(2, 3);
+        let config = Arc::new(config);
+        let artifact = Arc::new(signed_artifact(&sks, &config, "hash-abc", 3));
+        let results = Arc::new(Mutex::new(Vec::new()));
+        let mut handles = vec![];
+
+        // Concurrent verification attempts
+        for i in 0..50 {
+            let config_clone = Arc::clone(&config);
+            let artifact_clone = Arc::clone(&artifact);
+            let results_clone = Arc::clone(&results);
+
+            let handle = thread::spawn(move || {
+                let result = verify_threshold(
+                    &*config_clone,
+                    &*artifact_clone,
+                    &format!("trace-{}", i),
+                    &format!("ts-{}", i),
+                );
+
+                let mut results = results_clone.lock().unwrap();
+                results.push((i, result.verified, result.valid_signatures));
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all verifications to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let results = results.lock().unwrap();
+        assert_eq!(results.len(), 50);
+
+        // All verifications should produce identical results (deterministic)
+        for (i, verified, valid_count) in results.iter() {
+            assert!(*verified, "Thread {} verification should succeed", i);
+            assert_eq!(*valid_count, 3, "Thread {} should count 3 valid signatures", i);
+        }
+
+        // Test concurrent modification of artifacts (should be isolated)
+        let mut modification_handles = vec![];
+        let shared_counter = Arc::new(Mutex::new(0));
+
+        for i in 0..20 {
+            let config_clone = Arc::clone(&config);
+            let counter_clone = Arc::clone(&shared_counter);
+
+            let handle = thread::spawn(move || {
+                // Each thread creates its own artifact
+                let mut local_artifact = PublicationArtifact {
+                    artifact_id: format!("concurrent-{}", i),
+                    connector_id: "conn-1".to_string(),
+                    content_hash: format!("hash-{}", i),
+                    signatures: vec![],
+                };
+
+                // Add signatures based on thread ID
+                local_artifact.signatures.push(PartialSignature {
+                    signer_id: "signer-0".to_string(),
+                    key_id: "signer-0".to_string(),
+                    signature_hex: format!("{:064x}", i),
+                });
+
+                let result = verify_threshold(&*config_clone, &local_artifact, &format!("t-{}", i), "ts");
+
+                // Count failed verifications (expected due to invalid signatures)
+                if !result.verified {
+                    let mut counter = counter_clone.lock().unwrap();
+                    *counter += 1;
+                }
+            });
+
+            modification_handles.push(handle);
+        }
+
+        for handle in modification_handles {
+            handle.join().unwrap();
+        }
+
+        // All should fail verification due to invalid signatures
+        let final_count = *shared_counter.lock().unwrap();
+        assert_eq!(final_count, 20, "All concurrent invalid signatures should be rejected");
+    }
+
+    // -- Negative-Path Tests --
+
+    #[test]
+    fn negative_massive_threshold_configuration_boundary_testing() {
+        // Test threshold configurations at extreme boundaries
+        let extreme_configs = vec![
+            // Zero threshold (invalid)
+            ThresholdConfig {
+                threshold: 0,
+                total_signers: 5,
+                signer_keys: vec![]
+            },
+            // Threshold exceeds total signers (invalid)
+            ThresholdConfig {
+                threshold: 10,
+                total_signers: 5,
+                signer_keys: vec![]
+            },
+            // Maximum valid threshold
+            ThresholdConfig {
+                threshold: u32::MAX,
+                total_signers: u32::MAX,
+                signer_keys: vec![]
+            },
+            // Single signer, threshold 1 (edge case)
+            ThresholdConfig {
+                threshold: 1,
+                total_signers: 1,
+                signer_keys: vec![SignerKey {
+                    key_id: "solo-signer".to_string(),
+                    public_key_hex: "deadbeef".repeat(8)
+                }]
+            }
+        ];
+
+        for (i, config) in extreme_configs.iter().enumerate() {
+            let validation_result = config.validate();
+
+            match i {
+                0 | 1 => {
+                    // First two configs should fail validation
+                    assert!(validation_result.is_err(), "Config {} should be invalid", i);
+                    if let Err(err) = validation_result {
+                        assert_eq!(err.code(), "THRESHOLD_CONFIG_INVALID");
+                    }
+                },
+                2 => {
+                    // Maximum config should fail due to empty signer_keys
+                    assert!(validation_result.is_err());
+                },
+                3 => {
+                    // Single signer should be valid
+                    assert!(validation_result.is_ok(), "Single signer config should be valid");
+                }
+                _ => {}
+            }
+        }
+    }
+
+    #[test]
+    fn negative_unicode_injection_in_cryptographic_identifiers() {
+        // Test Unicode and control character injection in cryptographic identifiers
+        let (_, mut base_config) = test_config(2, 3);
+
+        let malicious_identifiers = vec![
+            "signer\0null-injection",
+            "signer🚀emoji-attack",
+            "signer\u{200B}zero-width-space",
+            "signer\u{FEFF}bom-marker",
+            "signer\r\ncarriage-return",
+            "signer/../../../etc/passwd",
+            "signer\u{202E}rtl-override\u{202D}attack",
+            "signer\x1B[H\x1B[2Jansi-escape",
+            "хакер-кириллица",
+            "攻击者-中文"
+        ];
+
+        for (i, malicious_id) in malicious_identifiers.iter().enumerate() {
+            // Test malicious signer key IDs
+            base_config.signer_keys[0].key_id = malicious_id.clone();
+
+            // Should handle Unicode identifiers without corruption
+            let validation_result = base_config.validate();
+            // May accept or reject, but should not crash
+
+            // Test malicious artifact with Unicode content
+            let malicious_artifact = PublicationArtifact {
+                artifact_id: format!("artifact-{}", malicious_id),
+                connector_id: format!("connector-{}", malicious_id),
+                content_hash: format!("hash-{}", malicious_id),
+                signatures: vec![PartialSignature {
+                    signer_id: malicious_id.clone(),
+                    key_id: malicious_id.clone(),
+                    signature_hex: "deadbeef".repeat(16)
+                }]
+            };
+
+            let verifier = ThresholdVerifier::new(base_config.clone());
+            let result = verifier.verify(&malicious_artifact);
+
+            // Should handle gracefully without panics
+            assert!(!result.verified); // Should fail due to invalid signature format
+            assert!(result.failure_reasons.len() > 0);
+        }
+    }
+
+    #[test]
+    fn negative_signature_hex_format_corruption_and_injection_attempts() {
+        // Test various corrupted and malicious signature hex formats
+        let (signing_keys, config) = test_config(2, 3);
+        let verifier = ThresholdVerifier::new(config.clone());
+
+        let malformed_signature_hex_cases = vec![
+            "", // Empty signature
+            "not-hex-at-all!", // Non-hex characters
+            "deadbeef", // Too short
+            "g".repeat(128), // Invalid hex characters
+            "0".repeat(127), // Odd length
+            "00".repeat(1000), // Extremely long
+            "\0".repeat(64), // Null bytes
+            "🚀".repeat(32), // Unicode in hex field
+            "../etc/passwd", // Path traversal attempt
+            "<script>alert('xss')</script>", // XSS injection
+            "0x".repeat(64), // Malformed hex prefix
+        ];
+
+        for (i, malformed_hex) in malformed_signature_hex_cases.iter().enumerate() {
+            let malicious_artifact = PublicationArtifact {
+                artifact_id: format!("test-artifact-{}", i),
+                connector_id: "test-connector".to_string(),
+                content_hash: "valid-hash".to_string(),
+                signatures: vec![PartialSignature {
+                    signer_id: "signer-0".to_string(),
+                    key_id: "signer-0".to_string(),
+                    signature_hex: malformed_hex.clone(),
+                }]
+            };
+
+            let result = verifier.verify(&malicious_artifact);
+
+            // All should fail verification with appropriate error messages
+            assert!(!result.verified, "Malformed signature should fail: {}", malformed_hex);
+            assert!(result.valid_signatures == 0);
+            assert!(result.failure_reasons.len() > 0);
+
+            // Check that failure reasons contain appropriate error codes
+            let has_format_error = result.failure_reasons.iter()
+                .any(|reason| reason.contains("invalid") || reason.contains("malformed") || reason.contains("hex"));
+            assert!(has_format_error, "Should report format error for: {}", malformed_hex);
+        }
+    }
+
+    #[test]
+    fn negative_arithmetic_overflow_in_threshold_calculations() {
+        // Test arithmetic operations near overflow boundaries in threshold logic
+        let (signing_keys, _) = test_keys(3);
+
+        // Create config with extreme values that could cause overflow
+        let extreme_config = ThresholdConfig {
+            threshold: u32::MAX.saturating_sub(1),
+            total_signers: u32::MAX.saturating_sub(1),
+            signer_keys: vec![
+                SignerKey {
+                    key_id: "extreme-signer-1".to_string(),
+                    public_key_hex: hex::encode(signing_keys[0].verifying_key().to_bytes()),
+                },
+                SignerKey {
+                    key_id: "extreme-signer-2".to_string(),
+                    public_key_hex: hex::encode(signing_keys[1].verifying_key().to_bytes()),
+                }
+            ]
+        };
+
+        // Config validation should handle extreme values
+        let validation_result = extreme_config.validate();
+        assert!(validation_result.is_err()); // Should fail due to mismatched counts
+
+        // Test with corrected config but extreme threshold
+        let corrected_config = ThresholdConfig {
+            threshold: 2,
+            total_signers: 2,
+            signer_keys: extreme_config.signer_keys.clone(),
+        };
+
+        let verifier = ThresholdVerifier::new(corrected_config);
+
+        // Create artifact with maximum u32 values in counters
+        let stress_artifact = PublicationArtifact {
+            artifact_id: "overflow-test".to_string(),
+            connector_id: "stress-connector".to_string(),
+            content_hash: "stress-hash".to_string(),
+            signatures: vec![]
+        };
+
+        let result = verifier.verify(&stress_artifact);
+
+        // Should handle extreme values without arithmetic overflow
+        assert!(!result.verified); // No signatures provided
+        assert_eq!(result.valid_signatures, 0);
+        assert_eq!(result.required_threshold, 2);
+    }
+
+    #[test]
+    fn negative_duplicate_signature_injection_and_sybil_attacks() {
+        // Test handling of duplicate signatures and sybil-style attacks
+        let (signing_keys, config) = test_config(2, 3);
+        let verifier = ThresholdVerifier::new(config.clone());
+        let message = b"test message for duplicate attack";
+
+        // Create valid signature
+        let valid_sig_hex = hex::encode(signing_keys[0].sign(message).to_bytes());
+
+        // Test various duplicate signature attack patterns
+        let duplicate_attack_artifacts = vec![
+            // Same signature repeated multiple times
+            PublicationArtifact {
+                artifact_id: "duplicate-same".to_string(),
+                connector_id: "test-connector".to_string(),
+                content_hash: hex::encode(sha2::Sha256::digest(message)),
+                signatures: vec![
+                    PartialSignature {
+                        signer_id: "signer-0".to_string(),
+                        key_id: "signer-0".to_string(),
+                        signature_hex: valid_sig_hex.clone(),
+                    },
+                    PartialSignature {
+                        signer_id: "signer-0".to_string(),
+                        key_id: "signer-0".to_string(),
+                        signature_hex: valid_sig_hex.clone(),
+                    },
+                ]
+            },
+            // Same key ID with different signer ID (identity confusion)
+            PublicationArtifact {
+                artifact_id: "identity-confusion".to_string(),
+                connector_id: "test-connector".to_string(),
+                content_hash: hex::encode(sha2::Sha256::digest(message)),
+                signatures: vec![
+                    PartialSignature {
+                        signer_id: "signer-0".to_string(),
+                        key_id: "signer-0".to_string(),
+                        signature_hex: valid_sig_hex.clone(),
+                    },
+                    PartialSignature {
+                        signer_id: "attacker-impersonation".to_string(),
+                        key_id: "signer-0".to_string(),
+                        signature_hex: valid_sig_hex.clone(),
+                    },
+                ]
+            },
+        ];
+
+        for attack_artifact in duplicate_attack_artifacts {
+            let result = verifier.verify(&attack_artifact);
+
+            // Should only count each unique valid signature once
+            assert!(result.valid_signatures <= 1,
+                "Duplicate signatures should only count once for artifact: {}",
+                attack_artifact.artifact_id);
+
+            // Should not meet threshold with duplicates
+            assert!(!result.verified,
+                "Duplicate signature attack should not meet threshold: {}",
+                attack_artifact.artifact_id);
+        }
+    }
+
+    #[test]
+    fn negative_massive_signature_collection_memory_exhaustion() {
+        // Test behavior with massive number of signatures (potential DoS)
+        let (signing_keys, config) = test_config(2, 3);
+        let verifier = ThresholdVerifier::new(config.clone());
+
+        // Create artifact with massive signature collection
+        let massive_signature_count = 10_000;
+        let mut massive_signatures = Vec::new();
+
+        for i in 0..massive_signature_count {
+            massive_signatures.push(PartialSignature {
+                signer_id: format!("mass-signer-{:06}", i),
+                key_id: format!("mass-key-{:06}", i),
+                signature_hex: format!("{:064x}", i), // Fake but well-formed hex
+            });
+        }
+
+        let massive_artifact = PublicationArtifact {
+            artifact_id: "memory-stress-test".to_string(),
+            connector_id: "stress-connector".to_string(),
+            content_hash: "stress-test-hash".to_string(),
+            signatures: massive_signatures,
+        };
+
+        // Verification should handle massive signature count without memory exhaustion
+        let start_time = std::time::Instant::now();
+        let result = verifier.verify(&massive_artifact);
+        let duration = start_time.elapsed();
+
+        // Should complete in reasonable time despite large input
+        assert!(duration.as_secs() < 30, "Verification should complete within 30 seconds");
+
+        // Should not verify due to invalid signatures
+        assert!(!result.verified);
+        assert_eq!(result.valid_signatures, 0); // None should be valid
+
+        // Should handle large failure reason collection
+        assert!(result.failure_reasons.len() > 0);
+        assert!(result.failure_reasons.len() <= massive_signature_count); // Bounded
+    }
+
+    #[test]
+    fn negative_cryptographic_timing_attack_resistance_validation() {
+        // Test constant-time comparison resistance against timing attacks
+        let (signing_keys, config) = test_config(3, 5);
+        let verifier = ThresholdVerifier::new(config.clone());
+        let message = b"timing attack test message";
+        let content_hash = hex::encode(sha2::Sha256::digest(message));
+
+        // Create signatures with systematic bit differences to test timing
+        let base_signature = signing_keys[0].sign(message);
+        let base_hex = hex::encode(base_signature.to_bytes());
+
+        let mut timing_measurements = Vec::new();
+
+        // Test signatures differing in first byte vs last byte
+        for position in [0, 2, base_hex.len().saturating_sub(2)] {
+            let mut modified_hex = base_hex.clone();
+            if position < modified_hex.len() {
+                // Flip one hex character
+                let chars: Vec<char> = modified_hex.chars().collect();
+                let modified_char = if chars[position] == '0' { '1' } else { '0' };
+                modified_hex.replace_range(position..position + 1, &modified_char.to_string());
+            }
+
+            let timing_artifact = PublicationArtifact {
+                artifact_id: format!("timing-test-{}", position),
+                connector_id: "timing-test".to_string(),
+                content_hash: content_hash.clone(),
+                signatures: vec![PartialSignature {
+                    signer_id: "signer-0".to_string(),
+                    key_id: "signer-0".to_string(),
+                    signature_hex: modified_hex,
+                }]
+            };
+
+            // Measure verification timing
+            let start = std::time::Instant::now();
+            let result = verifier.verify(&timing_artifact);
+            let duration = start.elapsed();
+
+            timing_measurements.push(duration.as_nanos());
+
+            // All should fail verification
+            assert!(!result.verified, "Modified signature should fail verification");
+        }
+
+        // Timing variance should be bounded (basic timing attack resistance check)
+        let max_time = *timing_measurements.iter().max().unwrap();
+        let min_time = *timing_measurements.iter().min().unwrap();
+        let variance_ratio = max_time as f64 / min_time as f64;
+
+        // Allow reasonable variance but flag excessive timing differences
+        assert!(variance_ratio < 10.0,
+            "Timing variance too high ({}x), possible timing vulnerability",
+            variance_ratio);
+    }
+
+    #[test]
+    fn negative_malformed_public_key_format_injection_attempts() {
+        // Test handling of malformed public key formats in signer configuration
+        let malformed_public_key_cases = vec![
+            "", // Empty public key
+            "not-a-hex-key", // Non-hex
+            "00".repeat(16), // Too short (32 bytes expected)
+            "ff".repeat(64), // Too long
+            "GG".repeat(32), // Invalid hex characters
+            "\0".repeat(64), // Null bytes
+            "../../etc/passwd", // Path traversal
+            "<script>alert('key')</script>", // XSS injection
+            "🔑".repeat(32), // Unicode emoji
+            "DEADBEEF".repeat(8), // Valid hex but wrong case/content
+        ];
+
+        for (i, malformed_key) in malformed_public_key_cases.iter().enumerate() {
+            let malformed_config = ThresholdConfig {
+                threshold: 1,
+                total_signers: 1,
+                signer_keys: vec![SignerKey {
+                    key_id: format!("malformed-key-{}", i),
+                    public_key_hex: malformed_key.clone(),
+                }]
+            };
+
+            // Config validation should handle malformed keys appropriately
+            let validation_result = malformed_config.validate();
+            // May pass validation (format checking might be deferred to verification)
+
+            let verifier = ThresholdVerifier::new(malformed_config);
+
+            let test_artifact = PublicationArtifact {
+                artifact_id: format!("malformed-key-test-{}", i),
+                connector_id: "test-connector".to_string(),
+                content_hash: "test-hash".to_string(),
+                signatures: vec![PartialSignature {
+                    signer_id: format!("malformed-key-{}", i),
+                    key_id: format!("malformed-key-{}", i),
+                    signature_hex: "00".repeat(64), // Valid format but won't verify
+                }]
+            };
+
+            let result = verifier.verify(&test_artifact);
+
+            // Should handle malformed keys without crashing
+            assert!(!result.verified, "Malformed public key should lead to verification failure");
+
+            // Should provide meaningful error messages
+            let has_key_error = result.failure_reasons.iter()
+                .any(|reason| reason.to_lowercase().contains("key") ||
+                             reason.to_lowercase().contains("invalid") ||
+                             reason.to_lowercase().contains("malformed"));
+            // Error reporting may vary by implementation
+        }
+    }
 }

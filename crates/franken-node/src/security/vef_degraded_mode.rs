@@ -293,9 +293,14 @@ struct DegradedContext {
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -1405,6 +1410,146 @@ mod tests {
     }
 
     #[test]
+    fn exact_restricted_threshold_escalates_fail_closed() {
+        let mut engine = default_engine();
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 300,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+
+        engine.observe_metrics(&metrics, 1000, "corr-threshold-restricted");
+
+        assert_eq!(engine.mode(), VefMode::Restricted);
+    }
+
+    #[test]
+    fn exact_quarantine_backlog_threshold_escalates_fail_closed() {
+        let mut engine = default_engine();
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 0,
+            backlog_depth: 500,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+
+        engine.observe_metrics(&metrics, 1000, "corr-threshold-quarantine");
+
+        assert_eq!(engine.mode(), VefMode::Quarantine);
+    }
+
+    #[test]
+    fn exact_halt_heartbeat_timeout_escalates_fail_closed() {
+        let mut engine = default_engine();
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 0,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 60,
+        };
+
+        engine.observe_metrics(&metrics, 1000, "corr-threshold-halt");
+
+        assert_eq!(engine.mode(), VefMode::Halt);
+    }
+
+    #[test]
+    fn negative_halt_multiplier_does_not_hide_halt_breach() {
+        let config = VefDegradedModeConfig {
+            halt_multiplier: -5.0,
+            ..VefDegradedModeConfig::default()
+        };
+        let mut engine = VefDegradedModeEngine::new(config);
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 900,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+
+        engine.observe_metrics(&metrics, 1000, "corr-negative-multiplier");
+
+        assert_eq!(engine.mode(), VefMode::Halt);
+    }
+
+    #[test]
+    fn recovery_window_does_not_complete_when_clock_moves_backward() {
+        let mut engine = default_engine();
+        let bad = ProofLagMetrics {
+            proof_lag_secs: 300,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&bad, 1000, "corr-clock");
+        let healthy = ProofLagMetrics::healthy();
+        engine.observe_metrics(&healthy, 1100, "corr-clock");
+
+        engine.observe_metrics(&healthy, 1099, "corr-clock");
+
+        assert_eq!(engine.mode(), VefMode::Restricted);
+    }
+
+    #[test]
+    fn recovery_window_does_not_complete_one_second_early() {
+        let mut engine = default_engine();
+        let bad = ProofLagMetrics {
+            proof_lag_secs: 300,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&bad, 1000, "corr-early");
+        let healthy = ProofLagMetrics::healthy();
+        engine.observe_metrics(&healthy, 1050, "corr-early");
+
+        engine.observe_metrics(&healthy, 1169, "corr-early");
+
+        assert_eq!(engine.mode(), VefMode::Restricted);
+    }
+
+    #[test]
+    fn quarantine_recovery_does_not_skip_restricted_tier() {
+        let mut engine = default_engine();
+        let quarantine = ProofLagMetrics {
+            proof_lag_secs: 900,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&quarantine, 1000, "corr-stepdown");
+        let healthy = ProofLagMetrics::healthy();
+        engine.observe_metrics(&healthy, 1050, "corr-stepdown");
+
+        engine.observe_metrics(&healthy, 1170, "corr-stepdown");
+
+        assert_eq!(engine.mode(), VefMode::Restricted);
+    }
+
+    #[test]
+    fn halt_mode_rejects_low_risk_actions_without_recovery() {
+        let mut engine = default_engine();
+        let halt = ProofLagMetrics {
+            proof_lag_secs: 1800,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&halt, 1000, "corr-halt-action");
+
+        let decision = engine.evaluate_action(ActionRisk::LowRisk, "read.snapshot");
+
+        assert!(!decision.permitted);
+        assert_eq!(decision.mode, VefMode::Halt);
+        assert!(
+            decision
+                .annotation
+                .is_some_and(|text| text.contains("blocked"))
+        );
+    }
+
+    #[test]
     fn halt_slo_sanitizes_nan_halt_error_rate() {
         let config = VefDegradedModeConfig {
             halt_error_rate: f64::NAN,
@@ -1440,5 +1585,328 @@ mod tests {
             VefMode::Halt,
             "NaN halt_error_rate config must cause escalation to Halt"
         );
+    }
+
+    #[test]
+    fn zero_restricted_lag_threshold_escalates_healthy_metrics() {
+        let config = VefDegradedModeConfig {
+            restricted_slo: ProofLagSlo::new(0, u64::MAX, 1.0),
+            quarantine_slo: ProofLagSlo::new(u64::MAX, u64::MAX, 1.0),
+            halt_heartbeat_timeout_secs: u64::MAX,
+            ..VefDegradedModeConfig::default()
+        };
+        let mut engine = VefDegradedModeEngine::new(config);
+
+        engine.observe_metrics(
+            &ProofLagMetrics::healthy(),
+            1000,
+            "corr-zero-restricted-lag",
+        );
+
+        assert_eq!(engine.mode(), VefMode::Restricted);
+        assert!(
+            engine
+                .audit_log()
+                .iter()
+                .any(|event| event.code() == VEF_DEGRADE_002)
+        );
+    }
+
+    #[test]
+    fn zero_heartbeat_timeout_escalates_healthy_metrics_to_halt() {
+        let config = VefDegradedModeConfig {
+            halt_heartbeat_timeout_secs: 0,
+            ..VefDegradedModeConfig::default()
+        };
+        let mut engine = VefDegradedModeEngine::new(config);
+
+        engine.observe_metrics(&ProofLagMetrics::healthy(), 1000, "corr-zero-heartbeat");
+
+        assert_eq!(engine.mode(), VefMode::Halt);
+        let breach = engine
+            .audit_log()
+            .iter()
+            .find_map(|event| match event {
+                VefDegradedModeEvent::SloBreach(breach) => Some(breach),
+                _ => None,
+            })
+            .expect("halt breach should be audited");
+        assert_eq!(breach.metric_name, "heartbeat_age_secs");
+        assert_eq!(breach.threshold, 0.0);
+    }
+
+    #[test]
+    fn nan_halt_multiplier_does_not_hide_halt_breach() {
+        let config = VefDegradedModeConfig {
+            halt_multiplier: f64::NAN,
+            ..VefDegradedModeConfig::default()
+        };
+        let mut engine = VefDegradedModeEngine::new(config);
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 900,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+
+        engine.observe_metrics(&metrics, 1000, "corr-nan-multiplier");
+
+        assert_eq!(engine.mode(), VefMode::Halt);
+    }
+
+    #[test]
+    fn infinite_halt_multiplier_does_not_hide_halt_breach() {
+        let config = VefDegradedModeConfig {
+            halt_multiplier: f64::INFINITY,
+            ..VefDegradedModeConfig::default()
+        };
+        let mut engine = VefDegradedModeEngine::new(config);
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 900,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+
+        engine.observe_metrics(&metrics, 1000, "corr-inf-multiplier");
+
+        assert_eq!(engine.mode(), VefMode::Halt);
+    }
+
+    #[test]
+    fn restricted_recovery_regression_clears_pending_deescalation() {
+        let mut engine = default_engine();
+        let restricted = ProofLagMetrics {
+            proof_lag_secs: 300,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&restricted, 1000, "corr-regress");
+        let healthy = ProofLagMetrics::healthy();
+        engine.observe_metrics(&healthy, 1050, "corr-regress");
+
+        engine.observe_metrics(&restricted, 1100, "corr-regress");
+        engine.observe_metrics(&healthy, 1170, "corr-regress");
+
+        assert_eq!(engine.mode(), VefMode::Restricted);
+        assert!(!engine.audit_log().iter().any(|event| matches!(
+            event,
+            VefDegradedModeEvent::RecoveryComplete(receipt)
+                if receipt.to_mode == VefMode::Normal
+        )));
+    }
+
+    #[test]
+    fn nonfinite_recovery_metrics_escalate_instead_of_deescalating() {
+        let mut engine = default_engine();
+        let restricted = ProofLagMetrics {
+            proof_lag_secs: 300,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&restricted, 1000, "corr-nonfinite-recovery");
+        let nonfinite = ProofLagMetrics {
+            proof_lag_secs: 0,
+            backlog_depth: 0,
+            error_rate: f64::NEG_INFINITY,
+            heartbeat_age_secs: 0,
+        };
+
+        engine.observe_metrics(&nonfinite, 1100, "corr-nonfinite-recovery");
+
+        assert_eq!(engine.mode(), VefMode::Halt);
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, VefDegradedModeEvent::RecoveryComplete(_)))
+        );
+    }
+
+    #[test]
+    fn halt_empty_low_risk_action_still_blocked() {
+        let mut engine = default_engine();
+        let halt = ProofLagMetrics {
+            proof_lag_secs: 1800,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&halt, 1000, "corr-empty-action");
+
+        let decision = engine.evaluate_action(ActionRisk::LowRisk, "");
+
+        assert!(!decision.permitted);
+        assert_eq!(decision.mode, VefMode::Halt);
+        assert!(
+            decision
+                .annotation
+                .is_some_and(|text| text.contains("blocked"))
+        );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_existing_and_new_items() {
+        let mut values = vec![1_u8, 2, 3];
+
+        push_bounded(&mut values, 4, 0);
+
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_one_capacity_replaces_oldest_item() {
+        let mut values = vec!["old"];
+
+        push_bounded(&mut values, "new", 1);
+
+        assert_eq!(values, vec!["new"]);
+    }
+
+    #[test]
+    fn repeated_same_degraded_target_does_not_emit_duplicate_transition() {
+        let mut engine = default_engine();
+        let restricted = ProofLagMetrics {
+            proof_lag_secs: 300,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&restricted, 1000, "corr-repeat-target");
+        let transition_count = engine
+            .audit_log()
+            .iter()
+            .filter(|event| event.code() == VEF_DEGRADE_001)
+            .count();
+
+        engine.observe_metrics(&restricted, 1010, "corr-repeat-target");
+
+        assert_eq!(engine.mode(), VefMode::Restricted);
+        assert_eq!(
+            engine
+                .audit_log()
+                .iter()
+                .filter(|event| event.code() == VEF_DEGRADE_001)
+                .count(),
+            transition_count
+        );
+    }
+
+    #[test]
+    fn recovery_initiated_event_is_not_repeated_before_window_completion() {
+        let mut engine = default_engine();
+        let restricted = ProofLagMetrics {
+            proof_lag_secs: 300,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&restricted, 1000, "corr-recovery-once");
+        let healthy = ProofLagMetrics::healthy();
+
+        engine.observe_metrics(&healthy, 1010, "corr-recovery-once");
+        engine.observe_metrics(&healthy, 1020, "corr-recovery-once");
+
+        assert_eq!(engine.mode(), VefMode::Restricted);
+        assert_eq!(
+            engine
+                .audit_log()
+                .iter()
+                .filter(|event| event.code() == VEF_DEGRADE_003)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn heartbeat_breach_preempts_halt_lag_breach_in_audit_detail() {
+        let mut engine = default_engine();
+        let metrics = ProofLagMetrics {
+            proof_lag_secs: 1800,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 60,
+        };
+
+        engine.observe_metrics(&metrics, 1000, "corr-heartbeat-first");
+
+        let breach = engine
+            .audit_log()
+            .iter()
+            .find_map(|event| match event {
+                VefDegradedModeEvent::SloBreach(breach) => Some(breach),
+                _ => None,
+            })
+            .expect("halt breach should be audited");
+        assert_eq!(engine.mode(), VefMode::Halt);
+        assert_eq!(breach.metric_name, "heartbeat_age_secs");
+        assert_eq!(breach.observed_value, 60.0);
+    }
+
+    #[test]
+    fn quarantine_empty_high_risk_action_is_blocked() {
+        let mut engine = default_engine();
+        let quarantine = ProofLagMetrics {
+            proof_lag_secs: 900,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&quarantine, 1000, "corr-empty-high-risk");
+
+        let decision = engine.evaluate_action(ActionRisk::HighRisk, "");
+
+        assert!(!decision.permitted);
+        assert_eq!(decision.mode, VefMode::Quarantine);
+        assert!(
+            decision
+                .annotation
+                .is_some_and(|text| text.contains("high-risk") && text.contains("blocked"))
+        );
+    }
+
+    #[test]
+    fn affected_action_count_saturates_in_recovery_receipt() {
+        let mut engine = default_engine();
+        let restricted = ProofLagMetrics {
+            proof_lag_secs: 300,
+            backlog_depth: 0,
+            error_rate: 0.0,
+            heartbeat_age_secs: 0,
+        };
+        engine.observe_metrics(&restricted, 1000, "corr-saturated-actions");
+        engine
+            .context
+            .as_mut()
+            .expect("restricted mode should create context")
+            .actions_affected = u64::MAX;
+
+        let decision = engine.evaluate_action(ActionRisk::LowRisk, "read.snapshot");
+
+        assert!(decision.permitted);
+        assert_eq!(
+            engine
+                .context
+                .as_ref()
+                .expect("context remains while restricted")
+                .actions_affected,
+            u64::MAX
+        );
+
+        let healthy = ProofLagMetrics::healthy();
+        engine.observe_metrics(&healthy, 1010, "corr-saturated-actions");
+        engine.observe_metrics(&healthy, 1130, "corr-saturated-actions");
+
+        let receipt = engine
+            .audit_log()
+            .iter()
+            .find_map(|event| match event {
+                VefDegradedModeEvent::RecoveryComplete(receipt) => Some(receipt),
+                _ => None,
+            })
+            .expect("recovery receipt should be emitted");
+        assert_eq!(receipt.actions_affected, u64::MAX);
     }
 }

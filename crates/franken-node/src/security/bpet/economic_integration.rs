@@ -173,14 +173,14 @@ impl CompromisePricing {
             ));
         }
 
-        // Guard non-finite inputs fail-closed: NaN/Inf → zero loss/confidence.
+        // Guard invalid inputs fail-closed: NaN/Inf/negative values cannot create negative risk.
         let expected_loss = if expected_loss.is_finite() {
-            expected_loss
+            expected_loss.max(0.0)
         } else {
             0.0
         };
         let confidence = if confidence.is_finite() {
-            confidence
+            confidence.clamp(0.0, 1.0)
         } else {
             0.0
         };
@@ -236,14 +236,14 @@ impl InterventionRoi {
             return Err(BpetEconError::InvalidCost(cost));
         }
 
-        // Clamp non-finite inputs to 0.0 to prevent NaN propagation.
+        // Clamp invalid inputs to prevent NaN propagation or negative avoided-loss math.
         let risk_reduction = if risk_reduction.is_finite() {
-            risk_reduction
+            risk_reduction.clamp(0.0, 1.0)
         } else {
             0.0
         };
         let current_expected_loss = if current_expected_loss.is_finite() {
-            current_expected_loss
+            current_expected_loss.max(0.0)
         } else {
             0.0
         };
@@ -778,9 +778,14 @@ pub fn default_motif_library() -> Vec<CompromiseMotif> {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -865,6 +870,25 @@ mod tests {
         assert!((0.0..=1.0).contains(&p));
     }
 
+    #[test]
+    fn non_finite_observation_scores_fail_closed_without_nan() {
+        let mut obs = make_healthy_observation();
+        obs.maintainer_activity_score = f64::NAN;
+        obs.commit_velocity = f64::INFINITY;
+        obs.issue_response_time_hours = f64::NEG_INFINITY;
+        obs.contributor_diversity_index = f64::NAN;
+        let traj = PhenotypeTrajectory {
+            package_name: "non-finite".to_string(),
+            observations: vec![obs],
+        };
+
+        let propensity = traj.compromise_propensity();
+
+        assert!(propensity.is_finite());
+        assert!((0.0..=1.0).contains(&propensity));
+        assert!(propensity > 0.99);
+    }
+
     // === Compromise pricing ===
 
     #[test]
@@ -884,6 +908,37 @@ mod tests {
         };
         let result = CompromisePricing::compute(&traj, 100_000.0, 0.8);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn pricing_clamps_non_finite_loss_and_confidence() {
+        let traj = make_declining_trajectory();
+        let pricing = CompromisePricing::compute(&traj, f64::INFINITY, f64::NAN).unwrap();
+
+        assert_eq!(pricing.expected_loss_if_compromised, 0.0);
+        assert_eq!(pricing.risk_adjusted_cost, 0.0);
+        assert_eq!(pricing.insurance_premium_equivalent, 0.0);
+        assert_eq!(pricing.confidence, 0.0);
+    }
+
+    #[test]
+    fn pricing_clamps_negative_expected_loss_to_zero() {
+        let traj = make_declining_trajectory();
+        let pricing = CompromisePricing::compute(&traj, -50_000.0, 0.7).unwrap();
+
+        assert_eq!(pricing.expected_loss_if_compromised, 0.0);
+        assert_eq!(pricing.risk_adjusted_cost, 0.0);
+        assert_eq!(pricing.insurance_premium_equivalent, 0.0);
+    }
+
+    #[test]
+    fn pricing_clamps_confidence_to_unit_interval() {
+        let traj = make_declining_trajectory();
+        let high = CompromisePricing::compute(&traj, 10_000.0, 2.5).unwrap();
+        let low = CompromisePricing::compute(&traj, 10_000.0, -0.25).unwrap();
+
+        assert_eq!(high.confidence, 1.0);
+        assert_eq!(low.confidence, 0.0);
     }
 
     #[test]
@@ -909,6 +964,66 @@ mod tests {
     fn intervention_rejects_zero_cost() {
         let result = InterventionRoi::compute("bad", 0.0, 0.5, 100_000.0);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn intervention_rejects_negative_cost() {
+        let err = InterventionRoi::compute("bad", -1.0, 0.5, 100_000.0)
+            .expect_err("negative intervention cost must be rejected");
+
+        assert!(matches!(err, BpetEconError::InvalidCost(value) if value < 0.0));
+    }
+
+    #[test]
+    fn intervention_rejects_nan_cost() {
+        let err = InterventionRoi::compute("bad", f64::NAN, 0.5, 100_000.0)
+            .expect_err("NaN intervention cost must be rejected");
+
+        assert!(matches!(err, BpetEconError::InvalidCost(value) if value.is_nan()));
+    }
+
+    #[test]
+    fn intervention_clamps_non_finite_risk_inputs() {
+        let roi = InterventionRoi::compute("sandbox", 500.0, f64::NAN, f64::INFINITY).unwrap();
+
+        assert_eq!(roi.risk_reduction, 0.0);
+        assert_eq!(roi.expected_loss_avoided, 0.0);
+        assert_eq!(roi.roi_ratio, 0.0);
+        assert!(roi.payback_period_days.is_infinite());
+        assert_eq!(
+            roi.recommendation,
+            InterventionRecommendation::NotRecommended
+        );
+    }
+
+    #[test]
+    fn intervention_clamps_negative_risk_reduction_to_zero() {
+        let roi = InterventionRoi::compute("bad-signal", 500.0, -0.4, 100_000.0).unwrap();
+
+        assert_eq!(roi.risk_reduction, 0.0);
+        assert_eq!(roi.expected_loss_avoided, 0.0);
+        assert_eq!(roi.roi_ratio, 0.0);
+        assert_eq!(
+            roi.recommendation,
+            InterventionRecommendation::NotRecommended
+        );
+    }
+
+    #[test]
+    fn intervention_clamps_negative_expected_loss_to_zero() {
+        let roi = InterventionRoi::compute("bad-loss", 500.0, 0.5, -100_000.0).unwrap();
+
+        assert_eq!(roi.expected_loss_avoided, 0.0);
+        assert_eq!(roi.roi_ratio, 0.0);
+        assert!(roi.payback_period_days.is_infinite());
+    }
+
+    #[test]
+    fn intervention_caps_risk_reduction_at_one() {
+        let roi = InterventionRoi::compute("impossible-reduction", 500.0, 4.0, 1_000.0).unwrap();
+
+        assert_eq!(roi.risk_reduction, 1.0);
+        assert_eq!(roi.expected_loss_avoided, 1_000.0);
     }
 
     #[test]
@@ -958,6 +1073,95 @@ mod tests {
         };
         let matches = match_motifs(&traj, &default_motif_library());
         assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn unknown_motif_indicators_do_not_match() {
+        let traj = make_declining_trajectory();
+        let motifs = vec![CompromiseMotif {
+            motif_id: "unknown".to_string(),
+            name: "Unknown Signal".to_string(),
+            description: "Unsupported signal must not be treated as a hit".to_string(),
+            indicators: vec![MotifIndicator {
+                indicator_name: "unsupported_indicator".to_string(),
+                threshold: 0.0,
+                direction: ThresholdDirection::Above,
+            }],
+            historical_frequency: 1.0,
+            typical_time_to_compromise_days: 1.0,
+        }];
+
+        assert!(match_motifs(&traj, &motifs).is_empty());
+    }
+
+    #[test]
+    fn low_signal_motif_below_half_match_threshold_is_rejected() {
+        let traj = make_declining_trajectory();
+        let motifs = vec![CompromiseMotif {
+            motif_id: "weak".to_string(),
+            name: "Weak Signal".to_string(),
+            description: "Only one of three indicators matches".to_string(),
+            indicators: vec![
+                MotifIndicator {
+                    indicator_name: "maintainer_activity".to_string(),
+                    threshold: 0.2,
+                    direction: ThresholdDirection::Below,
+                },
+                MotifIndicator {
+                    indicator_name: "issue_response_time".to_string(),
+                    threshold: 1.0,
+                    direction: ThresholdDirection::Below,
+                },
+                MotifIndicator {
+                    indicator_name: "commit_velocity".to_string(),
+                    threshold: 999.0,
+                    direction: ThresholdDirection::Above,
+                },
+            ],
+            historical_frequency: 1.0,
+            typical_time_to_compromise_days: 1.0,
+        }];
+
+        assert!(match_motifs(&traj, &motifs).is_empty());
+    }
+
+    #[test]
+    fn motif_with_no_indicators_does_not_match() {
+        let traj = make_declining_trajectory();
+        let motifs = vec![CompromiseMotif {
+            motif_id: "empty".to_string(),
+            name: "Empty Motif".to_string(),
+            description: "No indicators means no evidence".to_string(),
+            indicators: Vec::new(),
+            historical_frequency: 1.0,
+            typical_time_to_compromise_days: 1.0,
+        }];
+
+        assert!(match_motifs(&traj, &motifs).is_empty());
+    }
+
+    #[test]
+    fn motif_nan_observation_value_does_not_match_threshold() {
+        let mut obs = make_declining_observation();
+        obs.dependency_churn_rate = f64::NAN;
+        let traj = PhenotypeTrajectory {
+            package_name: "nan-motif".to_string(),
+            observations: vec![obs],
+        };
+        let motifs = vec![CompromiseMotif {
+            motif_id: "nan".to_string(),
+            name: "NaN Signal".to_string(),
+            description: "NaN comparisons must not become hits".to_string(),
+            indicators: vec![MotifIndicator {
+                indicator_name: "dependency_churn".to_string(),
+                threshold: 0.1,
+                direction: ThresholdDirection::Above,
+            }],
+            historical_frequency: 1.0,
+            typical_time_to_compromise_days: 1.0,
+        }];
+
+        assert!(match_motifs(&traj, &motifs).is_empty());
     }
 
     #[test]
@@ -1012,6 +1216,38 @@ mod tests {
     }
 
     #[test]
+    fn engine_rejects_empty_trajectory_without_audit_side_effect() {
+        let mut engine = BpetEconomicEngine::default();
+        let traj = PhenotypeTrajectory {
+            package_name: "empty".to_string(),
+            observations: Vec::new(),
+        };
+
+        let err = engine
+            .generate_guidance(&traj, 50_000.0, 0.8, &make_trace())
+            .expect_err("empty trajectory must not generate guidance");
+
+        assert!(matches!(err, BpetEconError::InvalidTrajectory(_)));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn engine_with_empty_motif_library_does_not_invent_matches() {
+        let mut engine = BpetEconomicEngine::new(Vec::new());
+        let guidance = engine
+            .generate_guidance(
+                &make_declining_trajectory(),
+                50_000.0,
+                0.8,
+                &make_trace(),
+            )
+            .unwrap();
+
+        assert!(guidance.motif_matches.is_empty());
+        assert_eq!(engine.audit_log().len(), 1);
+    }
+
+    #[test]
     fn engine_exports_jsonl() {
         let mut engine = BpetEconomicEngine::default();
         let traj = make_healthy_trajectory();
@@ -1058,5 +1294,45 @@ mod tests {
             .generate_guidance(&traj, 100_000.0, 0.7, &make_trace())
             .unwrap();
         assert!(guidance.summary.contains("declining-pkg"));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_existing_and_new_items() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_overfull_input_uses_saturating_eviction_math() {
+        let mut items = vec![1, 2, 3, 4, 5];
+
+        push_bounded(&mut items, 6, 3);
+
+        assert_eq!(items, vec![4, 5, 6]);
+    }
+
+    #[test]
+    fn threshold_direction_deserialize_rejects_unknown_variant() {
+        let result: Result<ThresholdDirection, _> = serde_json::from_str(r#""sideways""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn intervention_recommendation_deserialize_rejects_unknown_variant() {
+        let result: Result<InterventionRecommendation, _> =
+            serde_json::from_str(r#""always_recommended""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn playbook_urgency_deserialize_rejects_unknown_variant() {
+        let result: Result<PlaybookUrgency, _> = serde_json::from_str(r#""panic""#);
+
+        assert!(result.is_err());
     }
 }

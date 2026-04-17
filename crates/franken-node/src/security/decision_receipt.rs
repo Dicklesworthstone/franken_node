@@ -22,8 +22,12 @@ use uuid::Uuid;
 use crate::capacity_defaults::aliases::MAX_RECEIPT_CHAIN;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -511,7 +515,7 @@ fn canonicalize_value(value: Value) -> Value {
 fn sha256_hex(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
     hasher.update(b"decision_receipt_hash_v1:");
-    hasher.update((bytes.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(bytes.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(bytes);
     hex::encode(hasher.finalize())
 }
@@ -520,9 +524,13 @@ fn compute_chain_hash(previous_hash: Option<&str>, payload: &str) -> String {
     let prev = previous_hash.unwrap_or("GENESIS");
     let mut hasher = Sha256::new();
     hasher.update(b"decision_receipt_chain_v1:");
-    hasher.update((prev.len() as u64).to_le_bytes());
+    hasher.update(u64::try_from(prev.len()).unwrap_or(u64::MAX).to_le_bytes());
     hasher.update(prev.as_bytes());
-    hasher.update((payload.len() as u64).to_le_bytes());
+    hasher.update(
+        u64::try_from(payload.len())
+            .unwrap_or(u64::MAX)
+            .to_le_bytes(),
+    );
     hasher.update(payload.as_bytes());
     hex::encode(hasher.finalize())
 }
@@ -596,6 +604,58 @@ mod tests {
     }
 
     #[test]
+    fn receipt_new_rejects_nan_confidence() {
+        let err = Receipt::new(
+            "quarantine",
+            "control-plane@prod",
+            &json!({"z": 1, "a": 2}),
+            &json!({"result": "ok"}),
+            Decision::Approved,
+            "policy gate evaluated",
+            vec!["ledger-001".to_string()],
+            vec!["rule-A".to_string()],
+            f64::NAN,
+            "franken-node trust release --incident INC-001",
+        )
+        .expect_err("NaN confidence must fail");
+
+        assert!(matches!(err, ReceiptError::InvalidConfidence { value } if value.is_nan()));
+    }
+
+    #[test]
+    fn sign_receipt_rejects_negative_confidence() {
+        let key = demo_signing_key();
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.confidence = -0.01;
+
+        let err = sign_receipt(&receipt, &key).expect_err("negative confidence must fail");
+
+        assert!(matches!(err, ReceiptError::InvalidConfidence { value } if value == -0.01));
+    }
+
+    #[test]
+    fn sign_receipt_rejects_infinite_confidence() {
+        let key = demo_signing_key();
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.confidence = f64::INFINITY;
+
+        let err = sign_receipt(&receipt, &key).expect_err("infinite confidence must fail");
+
+        assert!(matches!(err, ReceiptError::InvalidConfidence { value } if value.is_infinite()));
+    }
+
+    #[test]
+    fn sign_receipt_rejects_above_one_confidence_after_mutation() {
+        let key = demo_signing_key();
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.confidence = 1.01;
+
+        let err = sign_receipt(&receipt, &key).expect_err("confidence above one must fail");
+
+        assert!(matches!(err, ReceiptError::InvalidConfidence { value } if value == 1.01));
+    }
+
+    #[test]
     fn sign_and_verify_roundtrip() {
         let key = demo_signing_key();
         let public_key = key.verifying_key();
@@ -630,6 +690,19 @@ mod tests {
     }
 
     #[test]
+    fn verify_receipt_rejects_whitespace_signer_key_id() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.signer_key_id = format!(" {} ", signed.signer_key_id);
+
+        let verified = verify_receipt(&signed, &public_key).expect("verify");
+
+        assert!(!verified);
+    }
+
+    #[test]
     fn tamper_detection_fails_verification() {
         let key = demo_signing_key();
         let public_key = key.verifying_key();
@@ -637,6 +710,100 @@ mod tests {
         let mut signed = sign_receipt(&receipt, &key).expect("sign");
         signed.receipt.rationale = "tampered".to_string();
         let verified = verify_receipt(&signed, &public_key).expect("verify");
+        assert!(!verified);
+    }
+
+    #[test]
+    fn verify_receipt_rejects_invalid_base64_signature() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.signature = "not base64!!!".to_string();
+
+        let err = verify_receipt(&signed, &public_key)
+            .expect_err("invalid base64 signature should error");
+
+        assert!(matches!(err, ReceiptError::SignatureDecode(_)));
+    }
+
+    #[test]
+    fn verify_receipt_rejects_wrong_signature_length() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.signature = BASE64_STANDARD.encode([0_u8; 31]);
+
+        let err =
+            verify_receipt(&signed, &public_key).expect_err("wrong signature length should error");
+
+        assert!(matches!(err, ReceiptError::SignatureBytes));
+    }
+
+    #[test]
+    fn verify_receipt_with_wrong_public_key_returns_false() {
+        let key = demo_signing_key();
+        let wrong_public_key = SigningKey::from_bytes(&[7_u8; 32]).verifying_key();
+        let signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+
+        let verified = verify_receipt(&signed, &wrong_public_key).expect("verify");
+
+        assert!(!verified);
+    }
+
+    #[test]
+    fn verify_receipt_rejects_tampered_chain_hash() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.chain_hash = "00".repeat(32);
+
+        let verified = verify_receipt(&signed, &public_key).expect("verify");
+
+        assert!(!verified);
+    }
+
+    #[test]
+    fn verify_receipt_rejects_empty_signature_bytes() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.signature = BASE64_STANDARD.encode([]);
+
+        let err =
+            verify_receipt(&signed, &public_key).expect_err("empty signature bytes must fail");
+
+        assert!(matches!(err, ReceiptError::SignatureBytes));
+    }
+
+    #[test]
+    fn verify_receipt_rejects_action_name_tampering_after_signing() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let mut signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        signed.receipt.action_name = "revocation".to_string();
+
+        let verified = verify_receipt(&signed, &public_key).expect("verify");
+
+        assert!(!verified);
+    }
+
+    #[test]
+    fn verify_receipt_rejects_previous_hash_tampering_after_signing() {
+        let key = demo_signing_key();
+        let public_key = key.verifying_key();
+        let receipt = make_receipt("quarantine", Decision::Approved)
+            .with_previous_hash(Some("prior-link".to_string()));
+        let mut signed = sign_receipt(&receipt, &key).expect("sign");
+        signed.receipt.previous_receipt_hash = Some("other-link".to_string());
+
+        let verified = verify_receipt(&signed, &public_key).expect("verify");
+
         assert!(!verified);
     }
 
@@ -666,6 +833,96 @@ mod tests {
     }
 
     #[test]
+    fn hash_chain_rejects_genesis_receipt_with_previous_hash() {
+        let key = demo_signing_key();
+        let receipt = make_receipt("quarantine", Decision::Approved)
+            .with_previous_hash(Some("unexpected-previous".to_string()));
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+
+        let err = verify_hash_chain(&[signed]).expect_err("genesis previous hash must fail");
+
+        assert!(matches!(
+            err,
+            ReceiptError::HashChainMismatch { expected, actual }
+                if expected == "<none>" && actual == "unexpected-previous"
+        ));
+    }
+
+    #[test]
+    fn hash_chain_rejects_out_of_order_receipts() {
+        let key = demo_signing_key();
+        let mut chain = Vec::new();
+        append_signed_receipt(
+            &mut chain,
+            make_receipt("quarantine", Decision::Approved),
+            &key,
+        )
+        .expect("append #1");
+        append_signed_receipt(
+            &mut chain,
+            make_receipt("revocation", Decision::Denied),
+            &key,
+        )
+        .expect("append #2");
+
+        chain.swap(0, 1);
+        let err = verify_hash_chain(&chain).expect_err("reordered chain must fail");
+
+        assert!(matches!(err, ReceiptError::HashChainMismatch { .. }));
+    }
+
+    #[test]
+    fn hash_chain_rejects_second_receipt_missing_previous_hash() {
+        let key = demo_signing_key();
+        let mut chain = Vec::new();
+        append_signed_receipt(
+            &mut chain,
+            make_receipt("quarantine", Decision::Approved),
+            &key,
+        )
+        .expect("append #1");
+        append_signed_receipt(
+            &mut chain,
+            make_receipt("revocation", Decision::Denied),
+            &key,
+        )
+        .expect("append #2");
+
+        let expected_previous = chain[0].chain_hash.clone();
+        chain[1].receipt.previous_receipt_hash = None;
+        let err = verify_hash_chain(&chain).expect_err("missing second link must fail");
+
+        assert!(matches!(
+            err,
+            ReceiptError::HashChainMismatch { expected, actual }
+                if expected == expected_previous && actual == "<none>"
+        ));
+    }
+
+    #[test]
+    fn hash_chain_rejects_second_receipt_tampered_chain_hash() {
+        let key = demo_signing_key();
+        let mut chain = Vec::new();
+        append_signed_receipt(
+            &mut chain,
+            make_receipt("quarantine", Decision::Approved),
+            &key,
+        )
+        .expect("append #1");
+        append_signed_receipt(
+            &mut chain,
+            make_receipt("revocation", Decision::Denied),
+            &key,
+        )
+        .expect("append #2");
+
+        chain[1].chain_hash = "ff".repeat(32);
+        let err = verify_hash_chain(&chain).expect_err("tampered chain hash must fail");
+
+        assert!(matches!(err, ReceiptError::HashChainMismatch { .. }));
+    }
+
+    #[test]
     fn cbor_roundtrip_preserves_receipts() {
         let key = demo_signing_key();
         let mut chain = Vec::new();
@@ -680,6 +937,26 @@ mod tests {
         let encoded = export_receipts_cbor(&chain, &filter).expect("encode CBOR");
         let decoded = import_receipts_cbor(&encoded).expect("decode CBOR");
         assert_eq!(decoded, chain);
+    }
+
+    #[test]
+    fn import_receipts_cbor_rejects_invalid_bytes() {
+        let err = import_receipts_cbor(b"not-cbor").expect_err("invalid CBOR must fail");
+
+        assert!(matches!(err, ReceiptError::CborDecode(_)));
+    }
+
+    #[test]
+    fn import_receipts_cbor_rejects_partially_shaped_receipt_list() {
+        let encoded = serde_cbor::to_vec(&vec![json!({
+            "receipt_id": "receipt-1",
+            "action_name": "quarantine"
+        })])
+        .expect("encode partial receipt");
+
+        let err = import_receipts_cbor(&encoded).expect_err("partial receipt list must fail");
+
+        assert!(matches!(err, ReceiptError::CborDecode(_)));
     }
 
     #[test]
@@ -705,6 +982,79 @@ mod tests {
     }
 
     #[test]
+    fn export_filter_excludes_receipts_with_invalid_timestamps() {
+        let key = demo_signing_key();
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.timestamp = "not-a-timestamp".to_string();
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+
+        let exported = export_receipts(&[signed], &ReceiptQuery::default());
+
+        assert!(exported.is_empty());
+    }
+
+    #[test]
+    fn export_filter_action_name_is_exact_and_not_normalized() {
+        let key = demo_signing_key();
+        let signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        let chain = vec![signed];
+
+        for action_name in [" quarantine", "quarantine ", "QUARANTINE"] {
+            let exported = export_receipts(
+                &chain,
+                &ReceiptQuery {
+                    action_name: Some(action_name.to_string()),
+                    ..ReceiptQuery::default()
+                },
+            );
+
+            assert!(exported.is_empty());
+        }
+    }
+
+    #[test]
+    fn export_filter_reversed_time_window_returns_empty() {
+        let key = demo_signing_key();
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.timestamp = "2026-02-20T10:00:00Z".to_string();
+        let signed = sign_receipt(&receipt, &key).expect("sign");
+        let filter = ReceiptQuery {
+            from_timestamp: Some("2026-02-20T11:00:00Z".to_string()),
+            to_timestamp: Some("2026-02-20T09:00:00Z".to_string()),
+            ..ReceiptQuery::default()
+        };
+
+        let exported = export_receipts(&[signed], &filter);
+
+        assert!(exported.is_empty());
+    }
+
+    #[test]
+    fn export_filter_zero_limit_returns_empty() {
+        let key = demo_signing_key();
+        let signed =
+            sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+        let filter = ReceiptQuery {
+            limit: Some(0),
+            ..ReceiptQuery::default()
+        };
+
+        let exported = export_receipts(&[signed], &filter);
+
+        assert!(exported.is_empty());
+    }
+
+    #[test]
+    fn import_receipts_cbor_rejects_non_receipt_shape() {
+        let encoded = serde_cbor::to_vec(&json!({"not": "a receipt list"})).expect("encode");
+
+        let err = import_receipts_cbor(&encoded).expect_err("non-receipt CBOR shape must fail");
+
+        assert!(matches!(err, ReceiptError::CborDecode(_)));
+    }
+
+    #[test]
     fn high_impact_registry_requires_receipt() {
         let registry = HighImpactActionRegistry::with_defaults();
         let err =
@@ -724,6 +1074,34 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    #[test]
+    fn high_impact_registry_rejects_receipt_for_different_action() {
+        let registry = HighImpactActionRegistry::with_defaults();
+        let signed = sign_receipt(
+            &make_receipt("revocation", Decision::Approved),
+            &demo_signing_key(),
+        )
+        .expect("sign");
+
+        let err = enforce_high_impact_receipt("quarantine", &registry, Some(&signed))
+            .expect_err("mismatched high-impact receipt must fail");
+
+        assert!(matches!(
+            err,
+            ReceiptError::MissingHighImpactReceipt { action_name }
+                if action_name == "quarantine"
+        ));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_item_without_panic() {
+        let mut values = vec![1, 2, 3];
+
+        push_bounded(&mut values, 4, 0);
+
+        assert!(values.is_empty());
     }
 
     #[test]
@@ -764,5 +1142,203 @@ mod tests {
         let markdown = std::fs::read_to_string(&output_path).expect("read");
         assert!(markdown.contains("Signed Decision Receipts"));
         assert!(markdown.contains("revocation"));
+    }
+
+    /// Negative path: empty receipt ID accepted but may cause lookup issues
+    #[test]
+    fn receipt_with_empty_id_field_constructed_successfully() {
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.receipt_id = String::new();
+
+        let key = demo_signing_key();
+        let signed = sign_receipt(&receipt, &key).expect("empty receipt_id should be signable");
+
+        assert_eq!(signed.receipt.receipt_id, "");
+        assert!(!signed.signature.is_empty());
+    }
+
+    /// Negative path: unicode and special characters in action names
+    #[test]
+    fn unicode_action_name_preserved_through_signature_process() {
+        let mut receipt = make_receipt("🔥quarantine🚫", Decision::Denied);
+        receipt.actor_identity = "用户@🌍.example.com".to_string();
+        receipt.rationale = "Policy violation: 漢字 and émoji mixed content".to_string();
+
+        let key = demo_signing_key();
+        let signed = sign_receipt(&receipt, &key).expect("unicode content should be signable");
+
+        assert_eq!(signed.receipt.action_name, "🔥quarantine🚫");
+        assert!(signed.receipt.rationale.contains("漢字"));
+
+        // Verification should still work with unicode content
+        let verified = verify_receipt(&signed, &key.verifying_key()).expect("verify");
+        assert!(verified);
+    }
+
+    /// Negative path: extremely long string fields approaching memory limits
+    #[test]
+    fn extremely_long_rationale_field_accepted_despite_memory_pressure() {
+        let huge_rationale = "A".repeat(1_000_000); // 1MB rationale
+        let mut receipt = make_receipt("quarantine", Decision::Escalated);
+        receipt.rationale = huge_rationale.clone();
+
+        let key = demo_signing_key();
+        let signed = sign_receipt(&receipt, &key).expect("huge rationale should be signable");
+
+        assert_eq!(signed.receipt.rationale.len(), 1_000_000);
+        assert!(signed.receipt.rationale.starts_with("AAAA"));
+
+        // Hash computation should handle large inputs
+        assert!(!signed.chain_hash.is_empty());
+        assert_eq!(signed.chain_hash.len(), 64); // SHA-256 hex length
+    }
+
+    /// Negative path: null bytes embedded in string fields
+    #[test]
+    fn null_bytes_in_receipt_fields_preserved_causing_downstream_issues() {
+        let mut receipt = make_receipt("quarantine", Decision::Approved);
+        receipt.actor_identity = "admin\0@example.com".to_string();
+        receipt.rollback_command = "franken-node\0 --incident \0 INC-\0001".to_string();
+        receipt.evidence_refs = vec!["EVD\0-001".to_string(), "ref\0with\0nulls".to_string()];
+
+        let key = demo_signing_key();
+        let signed = sign_receipt(&receipt, &key).expect("null bytes should be preserved");
+
+        assert!(signed.receipt.actor_identity.contains('\0'));
+        assert!(signed.receipt.rollback_command.contains('\0'));
+        assert!(signed.receipt.evidence_refs[0].contains('\0'));
+
+        // Canonical JSON serialization preserves null bytes which may break downstream parsers
+        let canonical = canonical_json(&signed.receipt).expect("canonical JSON");
+        assert!(canonical.contains("\\u0000"));
+    }
+
+    /// Negative path: malformed file path handling in export operations
+    #[test]
+    fn export_to_invalid_file_path_returns_write_error() {
+        let key = demo_signing_key();
+        let signed = sign_receipt(&make_receipt("quarantine", Decision::Approved), &key).expect("sign");
+
+        // Attempt to write to invalid path (contains null byte on Unix systems)
+        let invalid_path = std::path::Path::new("receipts\0.json");
+        let err = export_receipts_to_path(&[signed], &ReceiptQuery::default(), invalid_path)
+            .expect_err("invalid path should fail");
+
+        assert!(matches!(err, ReceiptError::WriteFailed { .. }));
+    }
+
+    /// Negative path: hash chain computation with pathological inputs
+    #[test]
+    fn hash_chain_computation_handles_extremely_long_payload_without_overflow() {
+        let huge_payload = "x".repeat(100_000_000); // 100MB payload
+        let chain_hash = compute_chain_hash(Some("previous-hash"), &huge_payload);
+
+        // Should not panic or overflow despite massive input
+        assert_eq!(chain_hash.len(), 64); // SHA-256 hex output length
+        assert!(chain_hash.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Different huge payloads should produce different hashes
+        let other_payload = "y".repeat(100_000_000);
+        let other_hash = compute_chain_hash(Some("previous-hash"), &other_payload);
+        assert_ne!(chain_hash, other_hash);
+    }
+
+    /// Negative path: confidence validation edge cases around floating-point precision
+    #[test]
+    fn confidence_validation_rejects_values_just_outside_bounds_due_to_precision() {
+        // Slightly above 1.0 due to floating-point precision
+        let just_over_one = 1.0 + f64::EPSILON * 2.0;
+        let err = Receipt::new(
+            "quarantine",
+            "actor",
+            &json!({}),
+            &json!({}),
+            Decision::Approved,
+            "rationale exceeding bounds",
+            vec![],
+            vec![],
+            just_over_one,
+            "rollback command",
+        ).expect_err("just over 1.0 should fail");
+
+        assert!(matches!(err, ReceiptError::InvalidConfidence { .. }));
+
+        // Slightly below 0.0
+        let just_under_zero = 0.0 - f64::EPSILON * 2.0;
+        let err = Receipt::new(
+            "quarantine",
+            "actor",
+            &json!({}),
+            &json!({}),
+            Decision::Denied,
+            "rationale below bounds check",
+            vec![],
+            vec![],
+            just_under_zero,
+            "rollback command",
+        ).expect_err("just under 0.0 should fail");
+
+        assert!(matches!(err, ReceiptError::InvalidConfidence { .. }));
+    }
+
+    /// Negative path: circular reference in input/output serialization
+    #[test]
+    fn receipt_creation_with_self_referential_json_value_handled_gracefully() {
+        // Create a JSON value that would cause issues in naive serialization
+        let problematic_input = json!({
+            "data": "test",
+            "nested": {
+                "recursive": null  // Not actually recursive, but simulating the pattern
+            }
+        });
+
+        // Self-referential structures can't be created directly in serde_json::Value,
+        // but we can test with deeply nested structures that might cause stack overflow
+        let deeply_nested = (0..10000).fold(json!({}), |acc, i| {
+            json!({ format!("level_{}", i): acc })
+        });
+
+        let receipt = Receipt::new(
+            "test_action",
+            "test_actor",
+            &deeply_nested,
+            &problematic_input,
+            Decision::Approved,
+            "Testing deeply nested structure handling during hash computation",
+            vec!["test-evidence".to_string()],
+            vec!["test-rule".to_string()],
+            0.95,
+            "test rollback command",
+        ).expect("deeply nested input should be handled without stack overflow");
+
+        assert!(!receipt.input_hash.is_empty());
+        assert!(!receipt.output_hash.is_empty());
+        assert_ne!(receipt.input_hash, receipt.output_hash);
+    }
+
+    /// Negative path: timestamp parsing edge cases with malformed formats
+    #[test]
+    fn export_filter_handles_malformed_timestamps_in_various_formats_gracefully() {
+        let key = demo_signing_key();
+
+        let malformed_timestamps = vec![
+            "",                           // Empty string
+            "2026",                       // Year only
+            "2026-13-45T25:70:90Z",      // Invalid date/time components
+            "not-a-date-at-all",         // Non-date string
+            "2026-02-20T10:00:00",       // Missing timezone
+            "2026-02-20T10:00:00+25:00", // Invalid timezone offset
+            "\x00\x01\x02",             // Binary data
+        ];
+
+        for malformed_ts in malformed_timestamps {
+            let mut receipt = make_receipt("test", Decision::Approved);
+            receipt.timestamp = malformed_ts.to_string();
+            let signed = sign_receipt(&receipt, &key).expect("should sign despite malformed timestamp");
+
+            // Export filter should exclude receipts with unparseable timestamps
+            let exported = export_receipts(&[signed], &ReceiptQuery::default());
+            assert!(exported.is_empty(), "malformed timestamp '{}' should be excluded", malformed_ts);
+        }
     }
 }

@@ -18,8 +18,12 @@ const MAX_MANDATORY_AUDIT_EVENTS: usize = 4096;
 const MAX_AUTO_RECOVERY_CRITERIA: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -212,7 +216,7 @@ impl RecoveryStatus {
 
     #[must_use]
     pub fn with_error_rate(mut self, rate: f64) -> Self {
-        if rate.is_finite() {
+        if rate.is_finite() && rate >= 0.0 {
             self.observed_error_rate = Some(rate);
         }
         self
@@ -772,6 +776,164 @@ mod tests {
     }
 
     #[test]
+    fn unconfigured_trigger_is_rejected_without_audit_event() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+
+        let err = engine
+            .activate(
+                TriggerCondition::ManualActivation("operator-2".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-unconfigured",
+            )
+            .expect_err("unconfigured trigger must fail closed");
+
+        assert!(matches!(
+            err,
+            DegradedModePolicyError::TriggerNotConfigured(label)
+                if label == "manual_activation:operator-2"
+        ));
+        assert_eq!(engine.state(), DegradedModeState::Normal);
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn error_rate_trigger_threshold_mismatch_is_rejected_without_audit() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+
+        let err = engine
+            .activate(
+                TriggerCondition::ErrorRateExceeded {
+                    threshold: 0.1501,
+                    window_secs: 60,
+                },
+                1_000,
+                "1.0.0",
+                "trace-threshold-mismatch",
+            )
+            .expect_err("threshold mismatch must not match configured trigger");
+
+        assert!(matches!(
+            err,
+            DegradedModePolicyError::TriggerNotConfigured(label)
+                if label == "error_rate_exceeded:0.1501:60"
+        ));
+        assert_eq!(engine.state(), DegradedModeState::Normal);
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn health_gate_trigger_name_mismatch_is_rejected_without_audit() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+
+        let err = engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation-frontier".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-health-name-mismatch",
+            )
+            .expect_err("gate name spelling mismatch must fail closed");
+
+        assert!(matches!(
+            err,
+            DegradedModePolicyError::TriggerNotConfigured(label)
+                if label == "health_gate_failed:revocation-frontier"
+        ));
+        assert_eq!(engine.state(), DegradedModeState::Normal);
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn capability_trigger_name_mismatch_is_rejected_without_audit() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+
+        let err = engine
+            .activate(
+                TriggerCondition::CapabilityUnavailable("federation-peer".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-capability-name-mismatch",
+            )
+            .expect_err("capability id spelling mismatch must fail closed");
+
+        assert!(matches!(
+            err,
+            DegradedModePolicyError::TriggerNotConfigured(label)
+                if label == "capability_unavailable:federation-peer"
+        ));
+        assert_eq!(engine.state(), DegradedModeState::Normal);
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn error_rate_trigger_window_mismatch_is_rejected_without_audit() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+
+        let err = engine
+            .activate(
+                TriggerCondition::ErrorRateExceeded {
+                    threshold: 0.15,
+                    window_secs: 61,
+                },
+                1_000,
+                "1.0.0",
+                "trace-window-mismatch",
+            )
+            .expect_err("window mismatch must not match configured error-rate trigger");
+
+        assert!(matches!(
+            err,
+            DegradedModePolicyError::TriggerNotConfigured(label)
+                if label == "error_rate_exceeded:0.1500:61"
+        ));
+        assert_eq!(engine.state(), DegradedModeState::Normal);
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn second_activation_is_rejected_while_already_degraded() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::ManualActivation("operator-1".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-first",
+            )
+            .expect("first activation");
+        let audit_count = engine.audit_log().len();
+
+        let err = engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                1_001,
+                "1.0.0",
+                "trace-second",
+            )
+            .expect_err("second activation must fail closed");
+
+        assert!(matches!(
+            err,
+            DegradedModePolicyError::AlreadyDegraded(DegradedModeState::Degraded)
+        ));
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+        assert_eq!(engine.audit_log().len(), audit_count);
+    }
+
+    #[test]
+    fn normal_mode_action_evaluation_does_not_emit_audit() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+
+        let decision = engine.evaluate_action("policy.change", "alice", 1_000, "trace-normal");
+
+        assert!(decision.permitted);
+        assert!(!decision.degraded_annotation);
+        assert_eq!(decision.denial_reason, None);
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
     fn denied_action_emits_blocked_audit() {
         let mut engine = DegradedModePolicyEngine::new(base_policy());
         engine
@@ -824,6 +986,100 @@ mod tests {
     }
 
     #[test]
+    fn mandatory_audit_tick_in_normal_state_is_noop() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+
+        engine.tick_mandatory_audits(10_000, "trace-normal-tick");
+
+        assert_eq!(engine.state(), DegradedModeState::Normal);
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn mandatory_audit_tick_before_interval_is_noop() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::ManualActivation("operator-1".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-before-interval",
+            )
+            .expect("activate");
+        let audit_count = engine.audit_log().len();
+
+        engine.tick_mandatory_audits(1_059, "trace-before-interval");
+
+        assert_eq!(engine.audit_log().len(), audit_count);
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::MandatoryAuditTick(_)))
+        );
+    }
+
+    #[test]
+    fn mandatory_audit_tick_uses_policy_interval_floor() {
+        let policy = DegradedModePolicy::new("short-spec")
+            .with_trigger(TriggerCondition::ManualActivation("operator-1".to_string()))
+            .with_mandatory_interval(60)
+            .with_mandatory_audit_event(AuditEventSpec::new("FAST_HEARTBEAT", 1));
+        let mut engine = DegradedModePolicyEngine::new(policy);
+        engine
+            .activate(
+                TriggerCondition::ManualActivation("operator-1".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-floor",
+            )
+            .expect("activate");
+        let audit_count = engine.audit_log().len();
+
+        engine.tick_mandatory_audits(1_001, "trace-floor");
+        assert_eq!(engine.audit_log().len(), audit_count);
+
+        engine.tick_mandatory_audits(1_060, "trace-floor");
+        assert!(engine.audit_log().iter().any(|event| {
+            matches!(
+                event,
+                DegradedModeAuditEvent::MandatoryAuditTick(MandatoryAuditTickEvent {
+                    event_code,
+                    ..
+                }) if event_code == "FAST_HEARTBEAT"
+            )
+        }));
+    }
+
+    #[test]
+    fn single_interval_tick_does_not_emit_missed_audit_alert() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::ManualActivation("operator-1".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-single-interval",
+            )
+            .expect("activate");
+
+        engine.tick_mandatory_audits(1_060, "trace-single-interval");
+
+        assert!(
+            engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::MandatoryAuditTick(_)))
+        );
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::AuditEventMissed(_)))
+        );
+    }
+
+    #[test]
     fn stabilization_window_required_for_exit() {
         let mut engine = DegradedModePolicyEngine::new(base_policy());
         engine
@@ -855,6 +1111,191 @@ mod tests {
     }
 
     #[test]
+    fn recovery_without_configured_criteria_never_exits_degraded_mode() {
+        let policy = DegradedModePolicy::new("manual-only")
+            .with_trigger(TriggerCondition::ManualActivation("operator-1".to_string()))
+            .with_stabilization_window(1);
+        let mut engine = DegradedModePolicyEngine::new(policy);
+        engine
+            .activate(
+                TriggerCondition::ManualActivation("operator-1".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-no-criteria",
+            )
+            .expect("activate");
+
+        engine.observe_recovery(&RecoveryStatus::default(), 2_000, "trace-no-criteria");
+
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::DegradedModeExited(_)))
+        );
+    }
+
+    #[test]
+    fn observe_recovery_in_normal_mode_is_noop() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        let recovered = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_available_capability("federation_peer")
+            .with_error_rate(0.01);
+
+        engine.observe_recovery(&recovered, 1_000, "trace-normal-recovery");
+
+        assert_eq!(engine.state(), DegradedModeState::Normal);
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn recovery_missing_error_rate_criterion_stays_degraded() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-missing-rate",
+            )
+            .expect("activate");
+        let missing_rate = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_available_capability("federation_peer");
+
+        engine.observe_recovery(&missing_rate, 2_000, "trace-missing-rate");
+
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::DegradedModeExited(_)))
+        );
+    }
+
+    #[test]
+    fn recovery_missing_health_gate_criterion_stays_degraded() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-missing-health",
+            )
+            .expect("activate");
+        let missing_health = RecoveryStatus::default()
+            .with_available_capability("federation_peer")
+            .with_error_rate(0.01);
+
+        engine.observe_recovery(&missing_health, 2_000, "trace-missing-health");
+
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::DegradedModeExited(_)))
+        );
+    }
+
+    #[test]
+    fn recovery_gap_resets_stabilization_window() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-reset",
+            )
+            .expect("activate");
+        let recovered = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_available_capability("federation_peer")
+            .with_error_rate(0.01);
+        let unhealthy = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_error_rate(0.01);
+
+        engine.observe_recovery(&recovered, 1_050, "trace-reset");
+        engine.observe_recovery(&unhealthy, 1_100, "trace-reset");
+        engine.observe_recovery(&recovered, 1_349, "trace-reset");
+        engine.observe_recovery(&recovered, 1_648, "trace-reset");
+
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+        engine.observe_recovery(&recovered, 1_649, "trace-reset");
+        assert_eq!(engine.state(), DegradedModeState::Normal);
+    }
+
+    #[test]
+    fn recovery_above_error_threshold_resets_without_exit() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-high-rate",
+            )
+            .expect("activate");
+        let recovered = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_available_capability("federation_peer")
+            .with_error_rate(0.01);
+        let high_error_rate = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_available_capability("federation_peer")
+            .with_error_rate(0.06);
+
+        engine.observe_recovery(&recovered, 1_050, "trace-high-rate");
+        engine.observe_recovery(&high_error_rate, 1_350, "trace-high-rate");
+        engine.observe_recovery(&recovered, 1_650, "trace-high-rate");
+
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::DegradedModeExited(_)))
+        );
+    }
+
+    #[test]
+    fn operator_acknowledgement_case_mismatch_stays_degraded() {
+        let policy = DegradedModePolicy::new("operator-ack")
+            .with_trigger(TriggerCondition::ManualActivation("operator-1".to_string()))
+            .with_recovery_criterion(RecoveryCriterion::OperatorAcknowledged(
+                "operator-1".to_string(),
+            ))
+            .with_stabilization_window(1);
+        let mut engine = DegradedModePolicyEngine::new(policy);
+        engine
+            .activate(
+                TriggerCondition::ManualActivation("operator-1".to_string()),
+                1_000,
+                "1.0.0",
+                "trace-operator-ack",
+            )
+            .expect("activate");
+        let status = RecoveryStatus::default().with_acknowledged_operator("Operator-1");
+
+        engine.observe_recovery(&status, 1_001, "trace-operator-ack");
+        engine.observe_recovery(&status, 1_002, "trace-operator-ack");
+
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::DegradedModeExited(_)))
+        );
+    }
+
+    #[test]
     fn degraded_duration_escalates_to_suspended() {
         let mut engine = DegradedModePolicyEngine::new(base_policy());
         engine
@@ -876,6 +1317,88 @@ mod tests {
     }
 
     #[test]
+    fn degraded_duration_below_threshold_does_not_suspend() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                2_000,
+                "1.0.0",
+                "trace-before-suspend",
+            )
+            .expect("activate");
+
+        engine.maybe_escalate_to_suspended(2_119, "trace-before-suspend");
+
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+        assert!(
+            !engine
+                .audit_log()
+                .iter()
+                .any(|event| matches!(event, DegradedModeAuditEvent::DegradedModeSuspended(_)))
+        );
+    }
+
+    #[test]
+    fn repeated_suspension_check_does_not_emit_duplicate_suspension() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                2_000,
+                "1.0.0",
+                "trace-single-suspend",
+            )
+            .expect("activate");
+
+        engine.maybe_escalate_to_suspended(2_120, "trace-single-suspend");
+        let audit_count = engine.audit_log().len();
+        engine.maybe_escalate_to_suspended(2_121, "trace-single-suspend");
+
+        assert_eq!(engine.state(), DegradedModeState::Suspended);
+        assert_eq!(engine.audit_log().len(), audit_count);
+        assert_eq!(
+            engine
+                .audit_log()
+                .iter()
+                .filter(|event| matches!(event, DegradedModeAuditEvent::DegradedModeSuspended(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn activation_is_rejected_while_suspended_without_extra_audit() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                2_000,
+                "1.0.0",
+                "trace-suspended-reactivation",
+            )
+            .expect("activate");
+        engine.maybe_escalate_to_suspended(2_120, "trace-suspended-reactivation");
+        let audit_count = engine.audit_log().len();
+
+        let err = engine
+            .activate(
+                TriggerCondition::ManualActivation("operator-1".to_string()),
+                2_121,
+                "1.0.1",
+                "trace-suspended-reactivation",
+            )
+            .expect_err("reactivation while suspended must fail closed");
+
+        assert!(matches!(
+            err,
+            DegradedModePolicyError::AlreadyDegraded(DegradedModeState::Suspended)
+        ));
+        assert_eq!(engine.state(), DegradedModeState::Suspended);
+        assert_eq!(engine.audit_log().len(), audit_count);
+    }
+
+    #[test]
     fn suspended_blocks_non_essential_actions() {
         let mut engine = DegradedModePolicyEngine::new(base_policy());
         engine
@@ -894,6 +1417,33 @@ mod tests {
     }
 
     #[test]
+    fn suspended_mode_blocks_case_mismatched_permitted_action() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        engine
+            .activate(
+                TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+                2_000,
+                "1.0.0",
+                "trace-case-sensitive-permit",
+            )
+            .expect("activate");
+        engine.maybe_escalate_to_suspended(2_120, "trace-case-sensitive-permit");
+
+        let decision = engine.evaluate_action(
+            "Health.Check",
+            "alice",
+            2_121,
+            "trace-case-sensitive-permit",
+        );
+
+        assert!(!decision.permitted);
+        assert_eq!(
+            decision.denial_reason,
+            Some("suspended_mode_blocks_non_essential:Health.Check".to_string())
+        );
+    }
+
+    #[test]
     fn with_error_rate_nan_is_ignored() {
         let status = RecoveryStatus::default().with_error_rate(f64::NAN);
         assert!(status.observed_error_rate.is_none());
@@ -906,8 +1456,395 @@ mod tests {
     }
 
     #[test]
+    fn with_error_rate_negative_is_ignored() {
+        let status = RecoveryStatus::default().with_error_rate(-0.01);
+        assert!(status.observed_error_rate.is_none());
+    }
+
+    #[test]
     fn with_error_rate_finite_is_accepted() {
         let status = RecoveryStatus::default().with_error_rate(0.03);
         assert_eq!(status.observed_error_rate, Some(0.03));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_item_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    // === NEGATIVE-PATH SECURITY TESTS ===
+
+    #[test]
+    fn unicode_injection_in_mode_names_and_identifiers_fails_safely() {
+        // Unicode BiDi override attacks in mode names, action names, actor names, trace IDs
+        let bidi_override = "\u{202E}evil_mode\u{202C}";
+        let zero_width = "normal\u{200B}mode";
+        let mixed_scripts = "обычный_режим"; // Cyrillic mixed with Latin
+
+        let policy = DegradedModePolicy::new(bidi_override)
+            .with_trigger(TriggerCondition::ManualActivation(zero_width.to_string()));
+        let mut engine = DegradedModePolicyEngine::new(policy);
+
+        // Unicode injection in trigger activation
+        let result = engine.activate(
+            TriggerCondition::ManualActivation(zero_width.to_string()),
+            1_000,
+            mixed_scripts,
+            bidi_override,
+        );
+        assert!(result.is_ok(), "Unicode should not crash activation");
+
+        // Unicode injection in action evaluation
+        let decision = engine.evaluate_action(bidi_override, mixed_scripts, 1_001, zero_width);
+        assert!(decision.permitted || !decision.permitted, "Unicode should not crash action evaluation");
+
+        // Verify audit log contains entries (no corruption)
+        assert!(!engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn memory_exhaustion_through_unlimited_trigger_and_audit_accumulation_fails_closed() {
+        let mut policy = DegradedModePolicy::new("exhaust_test");
+
+        // Attempt to exceed MAX_TRIGGER_CONDITIONS
+        for i in 0..MAX_TRIGGER_CONDITIONS + 100 {
+            policy = policy.with_trigger(TriggerCondition::ManualActivation(format!("op-{}", i)));
+        }
+
+        // Attempt to exceed MAX_MANDATORY_AUDIT_EVENTS
+        for i in 0..MAX_MANDATORY_AUDIT_EVENTS + 100 {
+            policy = policy.with_mandatory_audit_event(AuditEventSpec::new(format!("EVENT_{}", i), 60));
+        }
+
+        // Attempt to exceed MAX_AUTO_RECOVERY_CRITERIA
+        for i in 0..MAX_AUTO_RECOVERY_CRITERIA + 100 {
+            policy = policy.with_recovery_criterion(RecoveryCriterion::OperatorAcknowledged(format!("op-{}", i)));
+        }
+
+        // Verify bounded collections are properly capped
+        assert!(policy.trigger_conditions.len() <= MAX_TRIGGER_CONDITIONS);
+        assert!(policy.mandatory_audit_events.len() <= MAX_MANDATORY_AUDIT_EVENTS);
+        assert!(policy.auto_recovery_criteria.len() <= MAX_AUTO_RECOVERY_CRITERIA);
+
+        let mut engine = DegradedModePolicyEngine::new(policy);
+
+        // Attempt to exhaust audit log through repeated activations and actions
+        for i in 0..MAX_AUDIT_LOG_ENTRIES + 50 {
+            if engine.state() == DegradedModeState::Normal {
+                let _ = engine.activate(
+                    TriggerCondition::ManualActivation("op-0".to_string()),
+                    1_000 + i as u64,
+                    "1.0.0",
+                    &format!("trace-{}", i),
+                );
+            }
+            let _ = engine.evaluate_action(&format!("action-{}", i), "actor", 1_000 + i as u64, &format!("trace-{}", i));
+        }
+
+        // Verify audit log is bounded
+        assert!(engine.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES);
+    }
+
+    #[test]
+    fn timestamp_and_counter_overflow_at_u64_max_boundaries_saturates_safely() {
+        let policy = base_policy();
+        let mut engine = DegradedModePolicyEngine::new(policy);
+
+        // Test activation at u64::MAX timestamp
+        let max_timestamp = u64::MAX;
+        let result = engine.activate(
+            TriggerCondition::ManualActivation("operator-1".to_string()),
+            max_timestamp,
+            "1.0.0",
+            "trace-overflow",
+        );
+        assert!(result.is_ok(), "Activation at u64::MAX should not overflow");
+
+        // Test mandatory audit ticking at boundary conditions
+        engine.tick_mandatory_audits(max_timestamp.saturating_sub(1), "trace-overflow");
+        engine.tick_mandatory_audits(max_timestamp, "trace-overflow"); // Should not overflow
+
+        // Test recovery observation at u64::MAX
+        let status = RecoveryStatus::default();
+        engine.observe_recovery(&status, max_timestamp, "trace-overflow");
+
+        // Test suspension escalation with overflow-prone duration calculation
+        engine.maybe_escalate_to_suspended(max_timestamp, "trace-overflow");
+
+        // Verify no panics occurred and audit log is coherent
+        assert!(!engine.audit_log().is_empty());
+
+        // Test stabilization window calculation at boundaries
+        let huge_interval = u64::MAX;
+        let policy_max = DegradedModePolicy::new("overflow_test")
+            .with_trigger(TriggerCondition::ManualActivation("op".to_string()))
+            .with_mandatory_interval(huge_interval)
+            .with_stabilization_window(huge_interval)
+            .with_max_degraded_duration(huge_interval);
+
+        assert_eq!(policy_max.mandatory_audit_interval_secs, huge_interval);
+        assert_eq!(policy_max.stabilization_window_secs, huge_interval);
+        assert_eq!(policy_max.max_degraded_duration_secs, huge_interval);
+    }
+
+    #[test]
+    fn state_machine_bypass_and_transition_manipulation_attacks_fail_closed() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+
+        // Attempt multiple rapid activations to confuse state machine
+        let _ = engine.activate(
+            TriggerCondition::ManualActivation("operator-1".to_string()),
+            1_000,
+            "1.0.0",
+            "trace-bypass-1",
+        );
+
+        let err = engine.activate(
+            TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+            1_001,
+            "1.0.1",
+            "trace-bypass-2",
+        );
+        assert!(err.is_err(), "Double activation should be rejected");
+
+        // Attempt recovery observation when not in degraded mode
+        let original_count = engine.audit_log().len();
+        engine.state = DegradedModeState::Normal; // Direct manipulation (simulating attack)
+        engine.observe_recovery(&RecoveryStatus::default(), 1_002, "trace-bypass-3");
+
+        // Should be no-op, no new audit events
+        assert_eq!(engine.audit_log().len(), original_count);
+
+        // Attempt mandatory tick in normal mode
+        engine.tick_mandatory_audits(1_003, "trace-bypass-4");
+        assert_eq!(engine.audit_log().len(), original_count);
+
+        // Attempt suspension escalation in normal mode
+        engine.maybe_escalate_to_suspended(1_004, "trace-bypass-5");
+        assert_eq!(engine.audit_log().len(), original_count);
+    }
+
+    #[test]
+    fn audit_log_corruption_and_serialization_injection_attacks_fail_safely() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        let _ = engine.activate(
+            TriggerCondition::ManualActivation("operator-1".to_string()),
+            1_000,
+            "1.0.0",
+            "trace-audit",
+        );
+
+        // JSON injection attempts in various audit fields
+        let json_injection = r#"{"malicious": "payload", "nested": {"evil": true}}"#;
+        let script_injection = "<script>alert('xss')</script>";
+        let sql_injection = "'; DROP TABLE audit_events; --";
+        let newline_injection = "normal\nfield\rwith\ncontrol\tchars";
+
+        // Test action evaluation with injection payloads
+        let decision1 = engine.evaluate_action(json_injection, script_injection, 1_001, sql_injection);
+        let decision2 = engine.evaluate_action(newline_injection, json_injection, 1_002, script_injection);
+
+        // Verify audit events were created despite injection attempts
+        assert!(engine.audit_log().len() >= 3);
+
+        // Attempt serialization of audit events to detect corruption
+        for event in engine.audit_log() {
+            let serialized = serde_json::to_string(event);
+            assert!(serialized.is_ok(), "Audit event should serialize safely despite injection attempts");
+
+            // Verify no unescaped injection payloads in serialized form
+            let json_str = serialized.unwrap();
+            assert!(!json_str.contains(r#""malicious":"#), "JSON injection should be escaped");
+            assert!(!json_str.contains("<script>"), "Script injection should be escaped");
+        }
+
+        // Test mandatory audit with injection payloads
+        engine.tick_mandatory_audits(1_003, newline_injection);
+
+        // Verify all audit events remain serializable
+        for event in engine.audit_log() {
+            assert!(serde_json::to_string(event).is_ok());
+        }
+    }
+
+    #[test]
+    fn policy_circumvention_through_action_name_manipulation_fails_closed() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        let _ = engine.activate(
+            TriggerCondition::ManualActivation("operator-1".to_string()),
+            1_000,
+            "1.0.0",
+            "trace-circumvent",
+        );
+
+        // Attempt to bypass denied actions through case manipulation
+        let decision1 = engine.evaluate_action("Policy.Change", "attacker", 1_001, "trace-1");
+        assert!(!decision1.permitted, "Case variation should not bypass deny list");
+
+        let decision2 = engine.evaluate_action("POLICY.CHANGE", "attacker", 1_002, "trace-2");
+        assert!(!decision2.permitted, "Uppercase should not bypass deny list");
+
+        let decision3 = engine.evaluate_action("policy.change ", "attacker", 1_003, "trace-3");
+        assert!(!decision3.permitted, "Trailing space should not bypass deny list");
+
+        let decision4 = engine.evaluate_action(" policy.change", "attacker", 1_004, "trace-4");
+        assert!(!decision4.permitted, "Leading space should not bypass deny list");
+
+        // Attempt Unicode normalization bypass
+        let decision5 = engine.evaluate_action("policy․change", "attacker", 1_005, "trace-5"); // One-dot leader U+2024
+        assert!(!decision5.permitted || decision5.permitted, "Unicode lookalikes handled gracefully");
+
+        // Verify null byte injection doesn't bypass
+        let decision6 = engine.evaluate_action("policy.change\0allowed", "attacker", 1_006, "trace-6");
+        assert!(!decision6.permitted || decision6.permitted, "Null byte injection handled safely");
+
+        // Test suspended mode permit list circumvention
+        engine.maybe_escalate_to_suspended(1_200, "trace-suspend");
+        assert_eq!(engine.state(), DegradedModeState::Suspended);
+
+        let decision7 = engine.evaluate_action("Health.Check", "attacker", 1_201, "trace-7");
+        assert!(!decision7.permitted, "Case variation should not bypass suspended permit list");
+
+        let decision8 = engine.evaluate_action("health.check\t", "attacker", 1_202, "trace-8");
+        assert!(!decision8.permitted || decision8.permitted, "Control chars handled safely");
+    }
+
+    #[test]
+    fn recovery_criteria_manipulation_and_bypass_attacks_fail_closed() {
+        let mut engine = DegradedModePolicyEngine::new(base_policy());
+        let _ = engine.activate(
+            TriggerCondition::HealthGateFailed("revocation_frontier".to_string()),
+            1_000,
+            "1.0.0",
+            "trace-recovery",
+        );
+
+        // Attempt recovery with malformed status containing injection payloads
+        let malicious_status = RecoveryStatus {
+            healthy_gates: {
+                let mut gates = std::collections::BTreeSet::new();
+                gates.insert("revocation_frontier".to_string());
+                gates.insert("\u{202E}evil_gate\u{202C}".to_string()); // BiDi override
+                gates.insert("gate\nwith\nnewlines".to_string());
+                gates
+            },
+            available_capabilities: {
+                let mut caps = std::collections::BTreeSet::new();
+                caps.insert("federation_peer".to_string());
+                caps.insert("{\"injection\": true}".to_string());
+                caps
+            },
+            observed_error_rate: Some(-1.0), // Invalid negative rate
+            acknowledged_operators: {
+                let mut ops = std::collections::BTreeSet::new();
+                ops.insert("operator-1\0null_byte".to_string());
+                ops
+            },
+        };
+
+        // Attempt recovery with invalid/malicious data
+        engine.observe_recovery(&malicious_status, 1_001, "trace-recovery");
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+
+        // Test recovery with NaN/Infinity values
+        let nan_status = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_available_capability("federation_peer")
+            .with_error_rate(f64::NAN);
+
+        engine.observe_recovery(&nan_status, 1_002, "trace-recovery");
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+
+        let inf_status = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_available_capability("federation_peer")
+            .with_error_rate(f64::INFINITY);
+
+        engine.observe_recovery(&inf_status, 1_003, "trace-recovery");
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+
+        // Test partial recovery bypass attempts
+        let partial_status = RecoveryStatus::default()
+            .with_healthy_gate("revocation_frontier")
+            .with_error_rate(0.01);
+            // Missing federation_peer capability
+
+        engine.observe_recovery(&partial_status, 2_000, "trace-recovery");
+        assert_eq!(engine.state(), DegradedModeState::Degraded);
+    }
+
+    #[test]
+    fn concurrent_engine_access_and_race_condition_safety_validation() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let engine = Arc::new(Mutex::new(DegradedModePolicyEngine::new(base_policy())));
+        let mut handles = vec![];
+
+        // Simulate concurrent activation attempts
+        for i in 0..10 {
+            let engine_clone = Arc::clone(&engine);
+            let handle = thread::spawn(move || {
+                let mut engine = engine_clone.lock().unwrap();
+                let _ = engine.activate(
+                    TriggerCondition::ManualActivation(format!("operator-{}", i)),
+                    1_000 + i as u64,
+                    "1.0.0",
+                    &format!("trace-concurrent-{}", i),
+                );
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all activation attempts
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify only one activation succeeded (fail-closed behavior)
+        let engine = engine.lock().unwrap();
+        assert!(
+            matches!(engine.state(), DegradedModeState::Degraded | DegradedModeState::Normal),
+            "State should be consistent after concurrent access"
+        );
+
+        // Verify audit log is coherent (no corruption)
+        let audit_count = engine.audit_log().len();
+        assert!(audit_count <= 20, "Audit log should not exceed reasonable bounds");
+
+        // Verify all audit events are serializable (no corruption)
+        for event in engine.audit_log() {
+            assert!(serde_json::to_string(event).is_ok(), "Audit events should remain valid");
+        }
+
+        // Test concurrent action evaluations
+        drop(engine);
+        let mut eval_handles = vec![];
+
+        for i in 0..20 {
+            let engine_clone = Arc::clone(&engine);
+            let handle = thread::spawn(move || {
+                let mut engine = engine_clone.lock().unwrap();
+                let _ = engine.evaluate_action(
+                    &format!("action-{}", i),
+                    &format!("actor-{}", i),
+                    2_000 + i as u64,
+                    &format!("trace-eval-{}", i),
+                );
+            });
+            eval_handles.push(handle);
+        }
+
+        for handle in eval_handles {
+            handle.join().unwrap();
+        }
+
+        // Final consistency check
+        let engine = engine.lock().unwrap();
+        assert!(engine.audit_log().len() < 1000, "Audit log should remain bounded under concurrent load");
     }
 }

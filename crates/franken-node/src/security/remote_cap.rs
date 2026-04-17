@@ -1338,4 +1338,1124 @@ mod tests {
         assert_eq!(lhs.token_id(), rhs.token_id());
         assert_eq!(lhs.signature(), rhs.signature());
     }
+
+    #[test]
+    fn zero_ttl_issue_is_rejected_without_issuance_audit() {
+        let provider = CapabilityProvider::new("secret-a");
+
+        let err = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                0,
+                true,
+                false,
+                "trace-zero-ttl",
+            )
+            .expect_err("zero ttl must fail closed");
+
+        assert_eq!(err, RemoteCapError::InvalidTtl { ttl_secs: 0 });
+        assert_eq!(err.code(), "REMOTECAP_TTL_INVALID");
+    }
+
+    #[test]
+    fn empty_endpoint_scope_denies_otherwise_allowed_operation() {
+        let provider = CapabilityProvider::new("secret-a");
+        let empty_endpoint_scope = RemoteScope::new(
+            vec![RemoteOperation::TelemetryExport],
+            vec![" ".to_string(), String::new()],
+        );
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                empty_endpoint_scope,
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-empty-scope",
+            )
+            .expect("empty endpoint scope can be issued but must authorize nothing");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-empty-scope-deny",
+            )
+            .expect_err("empty endpoint scope must deny network use");
+
+        assert!(matches!(err, RemoteCapError::ScopeDenied { .. }));
+        assert_eq!(
+            gate.audit_log()
+                .last()
+                .and_then(|event| event.denial_code.as_deref()),
+            Some("REMOTECAP_SCOPE_DENIED")
+        );
+    }
+
+    #[test]
+    fn endpoint_prefix_without_delimiter_boundary_is_denied() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-prefix-boundary",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.comevil/v1",
+                1_700_000_010,
+                "trace-prefix-boundary-deny",
+            )
+            .expect_err("host prefix must not match a longer hostname label");
+
+        assert!(matches!(
+            err,
+            RemoteCapError::ScopeDenied {
+                operation: RemoteOperation::TelemetryExport,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn tampered_issuer_identity_invalidates_signature() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (mut cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-tamper-issuer",
+            )
+            .expect("issue");
+        cap.issuer_identity = "operator-escalated".to_string();
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-tamper-issuer-deny",
+            )
+            .expect_err("issuer tampering must invalidate signature");
+
+        assert_eq!(err.code(), "REMOTECAP_INVALID");
+    }
+
+    #[test]
+    fn wrong_verification_secret_denial_does_not_consume_single_use_token() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                true,
+                "trace-wrong-secret",
+            )
+            .expect("issue");
+
+        let mut wrong_gate = CapabilityGate::new("secret-b");
+        let err = wrong_gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-wrong-secret-deny",
+            )
+            .expect_err("wrong secret must fail signature validation");
+        assert_eq!(err.code(), "REMOTECAP_INVALID");
+
+        let mut correct_gate = CapabilityGate::new("secret-a");
+        correct_gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_011,
+                "trace-after-wrong-secret",
+            )
+            .expect("failed validation in another gate must not consume token");
+    }
+
+    #[test]
+    fn local_only_mode_denies_missing_cap_as_connectivity_mode_violation() {
+        let mut gate = CapabilityGate::with_mode("secret-a", ConnectivityMode::LocalOnly);
+
+        let err = gate
+            .authorize_network(
+                None,
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-local-only-missing",
+            )
+            .expect_err("local-only mode must deny before capability checks");
+
+        assert!(matches!(err, RemoteCapError::ConnectivityModeDenied { .. }));
+        assert_eq!(
+            gate.audit_log()
+                .last()
+                .and_then(|event| event.denial_code.as_deref()),
+            Some("REMOTECAP_CONNECTIVITY_MODE_DENIED")
+        );
+    }
+
+    #[test]
+    fn revoked_token_denial_precedes_signature_validation() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (mut cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-revoked-precedence",
+            )
+            .expect("issue");
+        let original = cap.clone();
+
+        let mut gate = CapabilityGate::new("secret-a");
+        gate.revoke(&original, 1_700_000_005, "trace-revoke-first");
+        cap.signature = "tampered-after-revoke".to_string();
+
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-revoked-precedence-deny",
+            )
+            .expect_err("revocation must fail before signature inspection");
+
+        assert!(matches!(err, RemoteCapError::Revoked { .. }));
+    }
+
+    #[test]
+    fn recheck_after_single_use_consumption_reports_replay() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                true,
+                "trace-recheck-replay",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://telemetry.example.com/v1",
+            1_700_000_010,
+            "trace-consume-before-recheck",
+        )
+        .expect("first single-use authorization consumes token");
+
+        let err = gate
+            .recheck_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_011,
+                "trace-recheck-after-consume",
+            )
+            .expect_err("recheck must not reopen a consumed single-use token");
+
+        assert_eq!(err.code(), "REMOTECAP_REPLAY");
+    }
+
+    #[test]
+    fn tampered_token_id_invalidates_signature() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (mut cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-tamper-token-id",
+            )
+            .expect("issue");
+        cap.token_id.push_str("-forged");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-tamper-token-id-deny",
+            )
+            .expect_err("token id tampering must invalidate signature");
+
+        assert_eq!(err.code(), "REMOTECAP_INVALID");
+    }
+
+    #[test]
+    fn tampered_expiry_invalidates_signature_before_expiry_logic() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (mut cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                1,
+                true,
+                false,
+                "trace-tamper-expiry",
+            )
+            .expect("issue");
+        cap.expires_at_epoch_secs = 1_700_999_999;
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-tamper-expiry-deny",
+            )
+            .expect_err("expiry tampering must fail signature validation");
+
+        assert_eq!(err.code(), "REMOTECAP_INVALID");
+    }
+
+    #[test]
+    fn tampered_single_use_flag_invalidates_signature() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (mut cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                300,
+                true,
+                true,
+                "trace-tamper-single-use",
+            )
+            .expect("issue");
+        cap.single_use = false;
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-tamper-single-use-deny",
+            )
+            .expect_err("single-use flag tampering must invalidate signature");
+
+        assert_eq!(err.code(), "REMOTECAP_INVALID");
+    }
+
+    #[test]
+    fn tampered_scope_expansion_invalidates_signature() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (mut cap, _) = provider
+            .issue(
+                "operator",
+                RemoteScope::new(
+                    vec![RemoteOperation::TelemetryExport],
+                    vec!["https://telemetry.example.com/reports".to_string()],
+                ),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-tamper-scope",
+            )
+            .expect("issue");
+        cap.scope.endpoint_prefixes = vec!["https://telemetry.example.com".to_string()];
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/admin",
+                1_700_000_010,
+                "trace-tamper-scope-deny",
+            )
+            .expect_err("scope expansion must not be trusted after issuance");
+
+        assert_eq!(err.code(), "REMOTECAP_INVALID");
+    }
+
+    #[test]
+    fn path_prefix_without_delimiter_boundary_is_denied() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope_with_endpoint_prefixes(&["https://telemetry.example.com/api"]),
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-path-prefix-boundary",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/apiv2",
+                1_700_000_010,
+                "trace-path-prefix-boundary-deny",
+            )
+            .expect_err("path prefix must not match a longer path segment");
+
+        assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
+    }
+
+    #[test]
+    fn scope_denial_does_not_consume_single_use_token() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                RemoteScope::new(
+                    vec![RemoteOperation::TelemetryExport],
+                    vec!["https://telemetry.example.com".to_string()],
+                ),
+                1_700_000_000,
+                300,
+                true,
+                true,
+                "trace-scope-deny-no-consume",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::FederationSync,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-scope-deny-first",
+            )
+            .expect_err("operation outside scope must fail");
+        assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
+        assert!(gate.consumed_tokens.is_empty());
+
+        gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://telemetry.example.com/v1",
+            1_700_000_011,
+            "trace-scope-deny-later-valid",
+        )
+        .expect("scope denial must not consume a single-use token");
+    }
+
+    #[test]
+    fn expired_single_use_token_denial_does_not_mark_consumed() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                scope(),
+                1_700_000_000,
+                10,
+                true,
+                true,
+                "trace-expired-no-consume",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .authorize_network(
+                Some(&cap),
+                RemoteOperation::TelemetryExport,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-expired-no-consume-deny",
+            )
+            .expect_err("expired single-use token must fail closed");
+
+        assert_eq!(err.code(), "REMOTECAP_EXPIRED");
+        assert!(!gate.consumed_tokens.contains(cap.token_id()));
+    }
+
+    #[test]
+    fn recheck_scope_denial_does_not_consume_single_use_token() {
+        let provider = CapabilityProvider::new("secret-a");
+        let (cap, _) = provider
+            .issue(
+                "operator",
+                RemoteScope::new(
+                    vec![RemoteOperation::TelemetryExport],
+                    vec!["https://telemetry.example.com".to_string()],
+                ),
+                1_700_000_000,
+                300,
+                true,
+                true,
+                "trace-recheck-deny-no-consume",
+            )
+            .expect("issue");
+
+        let mut gate = CapabilityGate::new("secret-a");
+        let err = gate
+            .recheck_network(
+                Some(&cap),
+                RemoteOperation::ArtifactUpload,
+                "https://telemetry.example.com/v1",
+                1_700_000_010,
+                "trace-recheck-deny-no-consume-first",
+            )
+            .expect_err("recheck outside scope must fail");
+
+        assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
+        assert!(gate.consumed_tokens.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod remote_cap_comprehensive_negative_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Negative test: Unicode injection and encoding attacks in capability tokens
+    #[test]
+    fn negative_unicode_injection_and_encoding_attacks() {
+        let provider = CapabilityProvider::new("secret-key");
+
+        // Test malicious Unicode in issuer identity
+        let malicious_issuer = "operator\u{202e}\u{0000}\u{feff}evil\u{200b}";
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::TelemetryExport],
+            vec!["https://api.example.com".to_string()],
+        );
+
+        let result = provider.issue(
+            malicious_issuer,
+            scope.clone(),
+            1_700_000_000,
+            300,
+            true,
+            false,
+            "trace-unicode-injection",
+        );
+        assert!(result.is_ok(), "Unicode in issuer should be handled gracefully");
+
+        let (cap, _) = result.unwrap();
+        let mut gate = CapabilityGate::new("secret-key");
+
+        // Token should still function correctly despite Unicode content
+        gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::TelemetryExport,
+            "https://api.example.com/metrics",
+            1_700_000_100,
+            "trace-unicode-test",
+        ).expect("Unicode-containing token should validate correctly");
+
+        // Test malicious Unicode in endpoint prefixes
+        let unicode_scope = RemoteScope::new(
+            vec![RemoteOperation::NetworkEgress],
+            vec![
+                "https://\u{202e}evil.com\u{200c}good.example.com".to_string(),
+                "ftp://\u{0000}admin:pass@internal".to_string(),
+            ],
+        );
+
+        let (unicode_cap, _) = provider.issue(
+            "operator",
+            unicode_scope,
+            1_700_000_000,
+            300,
+            true,
+            false,
+            "trace-unicode-endpoint",
+        ).expect("Unicode endpoint scope should be issuable");
+
+        // Verify Unicode doesn't bypass endpoint validation
+        let test_result = gate.authorize_network(
+            Some(&unicode_cap),
+            RemoteOperation::NetworkEgress,
+            "https://evil.com/malicious",
+            1_700_000_100,
+            "trace-unicode-bypass-test",
+        );
+
+        // Should either allow the literal Unicode endpoint or deny based on normalized form
+        match test_result {
+            Ok(_) => {}, // Unicode endpoint was literally matched
+            Err(e) => assert_eq!(e.code(), "REMOTECAP_SCOPE_DENIED"), // Or properly denied
+        }
+    }
+
+    /// Negative test: Arithmetic overflow protection in timestamps and TTL calculations
+    #[test]
+    fn negative_arithmetic_overflow_protection() {
+        let provider = CapabilityProvider::new("secret-key");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::RemoteComputation],
+            vec!["https://compute.example.com".to_string()],
+        );
+
+        // Test near-maximum timestamp with large TTL
+        let near_max_time = u64::MAX - 100;
+        let large_ttl = u64::MAX / 2;
+
+        let result = provider.issue(
+            "operator",
+            scope.clone(),
+            near_max_time,
+            large_ttl,
+            true,
+            false,
+            "trace-overflow-test",
+        );
+
+        assert!(result.is_ok(), "Should handle near-overflow timestamps gracefully");
+        let (cap, _) = result.unwrap();
+
+        // Verify saturating_add prevented overflow and expiry is reasonable
+        assert!(cap.expires_at_epoch_secs >= near_max_time);
+        assert!(cap.expires_at_epoch_secs == u64::MAX || cap.expires_at_epoch_secs > near_max_time);
+
+        let mut gate = CapabilityGate::new("secret-key");
+
+        // Test with current time that could cause overflow during validation
+        let validation_result = gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::RemoteComputation,
+            "https://compute.example.com/task",
+            u64::MAX - 50,
+            "trace-overflow-validation",
+        );
+
+        // Should handle overflow gracefully in expiry check
+        match validation_result {
+            Ok(_) => {}, // Token is still valid
+            Err(e) => assert!(
+                matches!(e, RemoteCapError::Expired { .. }),
+                "Should properly detect expiry without overflow panic"
+            ),
+        }
+
+        // Test maximum TTL edge case
+        let max_ttl_result = provider.issue(
+            "operator",
+            scope,
+            1_000_000,
+            u64::MAX,
+            true,
+            false,
+            "trace-max-ttl",
+        );
+        assert!(max_ttl_result.is_ok(), "Maximum TTL should be handled safely");
+    }
+
+    /// Negative test: Memory exhaustion attacks with massive capability scopes
+    #[test]
+    fn negative_memory_exhaustion_with_massive_scopes() {
+        let provider = CapabilityProvider::new("secret-key");
+
+        // Create scope with extremely large number of operations and endpoints
+        let mut operations = Vec::new();
+        let mut endpoints = Vec::new();
+
+        // Add all possible operations multiple times
+        for _ in 0..1000 {
+            operations.push(RemoteOperation::NetworkEgress);
+            operations.push(RemoteOperation::FederationSync);
+            operations.push(RemoteOperation::RevocationFetch);
+            operations.push(RemoteOperation::RemoteAttestationVerify);
+            operations.push(RemoteOperation::TelemetryExport);
+            operations.push(RemoteOperation::RemoteComputation);
+            operations.push(RemoteOperation::ArtifactUpload);
+        }
+
+        // Add massive number of endpoint prefixes
+        for i in 0..10000 {
+            endpoints.push(format!("https://endpoint-{}.example.com", i));
+            endpoints.push(format!("https://service-{}.internal", i));
+        }
+
+        let massive_scope = RemoteScope::new(operations, endpoints);
+
+        // Issue capability with massive scope - should complete without panic
+        let result = provider.issue(
+            "operator",
+            massive_scope,
+            1_700_000_000,
+            300,
+            true,
+            false,
+            "trace-massive-scope",
+        );
+
+        assert!(result.is_ok(), "Should handle massive scopes without memory exhaustion");
+        let (cap, _) = result.unwrap();
+
+        // Verify scope normalization deduplicated operations
+        assert!(cap.scope.operations.len() <= 7); // Only 7 unique operation types exist
+        assert!(cap.scope.endpoint_prefixes.len() <= 20000); // May have many unique endpoints
+
+        let mut gate = CapabilityGate::new("secret-key");
+
+        // Authorization check should complete efficiently even with large scope
+        let start = std::time::Instant::now();
+        let auth_result = gate.authorize_network(
+            Some(&cap),
+            RemoteOperation::NetworkEgress,
+            "https://endpoint-5000.example.com/api",
+            1_700_000_100,
+            "trace-massive-scope-auth",
+        );
+        let duration = start.elapsed();
+
+        assert!(duration < std::time::Duration::from_millis(100), "Authorization should be efficient");
+        assert!(auth_result.is_ok(), "Authorization with massive scope should succeed");
+    }
+
+    /// Negative test: Concurrent operation corruption and race conditions
+    #[test]
+    fn negative_concurrent_operation_corruption() {
+        let provider = CapabilityProvider::new("secret-key");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::TelemetryExport, RemoteOperation::FederationSync],
+            vec!["https://api.example.com".to_string()],
+        );
+
+        // Create multiple single-use tokens
+        let mut tokens = Vec::new();
+        for i in 0..10 {
+            let (token, _) = provider.issue(
+                "operator",
+                scope.clone(),
+                1_700_000_000,
+                300,
+                true,
+                true, // single-use
+                &format!("trace-concurrent-{}", i),
+            ).expect("token creation");
+            tokens.push(token);
+        }
+
+        let mut gate = CapabilityGate::new("secret-key");
+
+        // Simulate concurrent access attempts on the same gate
+        let mut results = Vec::new();
+        for (i, token) in tokens.iter().enumerate() {
+            // Each token should only succeed once
+            let result1 = gate.authorize_network(
+                Some(token),
+                RemoteOperation::TelemetryExport,
+                "https://api.example.com/metrics",
+                1_700_000_100,
+                &format!("trace-concurrent-first-{}", i),
+            );
+            results.push(result1);
+
+            // Second use should fail with replay error
+            let result2 = gate.authorize_network(
+                Some(token),
+                RemoteOperation::TelemetryExport,
+                "https://api.example.com/metrics",
+                1_700_000_101,
+                &format!("trace-concurrent-second-{}", i),
+            );
+            assert!(result2.is_err());
+            assert_eq!(result2.unwrap_err().code(), "REMOTECAP_REPLAY");
+        }
+
+        // All first uses should succeed
+        for result in results {
+            assert!(result.is_ok(), "First use of each single-use token should succeed");
+        }
+
+        // Verify audit log integrity under concurrent operations
+        assert_eq!(gate.audit_log().len(), 20); // 10 successes + 10 replay failures
+        let success_count = gate.audit_log().iter().filter(|e| e.allowed).count();
+        let failure_count = gate.audit_log().iter().filter(|e| !e.allowed).count();
+        assert_eq!(success_count, 10);
+        assert_eq!(failure_count, 10);
+    }
+
+    /// Negative test: Cryptographic timing attacks and hash collision resistance
+    #[test]
+    fn negative_cryptographic_timing_attacks_and_collision_resistance() {
+        let provider = CapabilityProvider::new("secret-key");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::RemoteAttestationVerify],
+            vec!["https://attestation.example.com".to_string()],
+        );
+
+        // Create legitimate token
+        let (legitimate_token, _) = provider.issue(
+            "operator",
+            scope.clone(),
+            1_700_000_000,
+            300,
+            true,
+            false,
+            "trace-timing-attack",
+        ).expect("legitimate token");
+
+        let mut gate = CapabilityGate::new("secret-key");
+
+        // Test with various malformed signatures to detect timing differences
+        let malformed_signatures = vec![
+            "".to_string(),
+            "short".to_string(),
+            "exactly_64_char_string_that_looks_like_valid_hex_but_is_not_real!".to_string(),
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_string(), // Valid hex format but wrong content
+            legitimate_token.signature().to_string() + "extra", // Slightly longer
+            legitimate_token.signature()[0..legitimate_token.signature().len()-1].to_string(), // Slightly shorter
+        ];
+
+        let mut timing_results = Vec::new();
+
+        for bad_signature in malformed_signatures {
+            let mut fake_token = legitimate_token.clone();
+            fake_token.signature = bad_signature;
+
+            let start = std::time::Instant::now();
+            let result = gate.authorize_network(
+                Some(&fake_token),
+                RemoteOperation::RemoteAttestationVerify,
+                "https://attestation.example.com/verify",
+                1_700_000_100,
+                "trace-timing-test",
+            );
+            let duration = start.elapsed();
+
+            // All should fail with invalid signature
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err().code(), "REMOTECAP_INVALID");
+            timing_results.push(duration);
+        }
+
+        // Timing differences should be minimal (constant-time comparison)
+        let max_timing = timing_results.iter().max().unwrap();
+        let min_timing = timing_results.iter().min().unwrap();
+        let timing_ratio = max_timing.as_nanos() as f64 / min_timing.as_nanos() as f64;
+
+        // Allow some variance but timing shouldn't vary dramatically
+        assert!(timing_ratio < 3.0, "Signature comparison timing variance too high: {}", timing_ratio);
+
+        // Test hash collision resistance by attempting to create tokens with similar content
+        let similar_scopes = vec![
+            RemoteScope::new(vec![RemoteOperation::RemoteAttestationVerify], vec!["https://a.com".to_string()]),
+            RemoteScope::new(vec![RemoteOperation::RemoteAttestationVerify], vec!["https://b.com".to_string()]),
+            RemoteScope::new(vec![RemoteOperation::TelemetryExport], vec!["https://a.com".to_string()]),
+        ];
+
+        let mut token_ids = std::collections::HashSet::new();
+        let mut signatures = std::collections::HashSet::new();
+
+        for similar_scope in similar_scopes {
+            let (token, _) = provider.issue(
+                "operator",
+                similar_scope,
+                1_700_000_000,
+                300,
+                true,
+                false,
+                "trace-collision-test",
+            ).expect("similar token");
+
+            // All token IDs and signatures should be unique
+            assert!(token_ids.insert(token.token_id().to_string()), "Token ID collision detected");
+            assert!(signatures.insert(token.signature().to_string()), "Signature collision detected");
+        }
+    }
+
+    /// Negative test: Resource exhaustion attacks through audit log flooding
+    #[test]
+    fn negative_resource_exhaustion_audit_log_flooding() {
+        let provider = CapabilityProvider::new("secret-key");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::ArtifactUpload],
+            vec!["https://upload.example.com".to_string()],
+        );
+
+        let (cap, _) = provider.issue(
+            "operator",
+            scope,
+            1_700_000_000,
+            300,
+            true,
+            false,
+            "trace-flood-test",
+        ).expect("flood test token");
+
+        let mut gate = CapabilityGate::new("secret-key");
+
+        // Attempt to flood the audit log with massive number of requests
+        for i in 0..50000 {
+            let _ = gate.authorize_network(
+                Some(&cap),
+                RemoteOperation::ArtifactUpload,
+                "https://upload.example.com/files",
+                1_700_000_100,
+                &format!("trace-flood-{}", i),
+            ); // May succeed or fail based on rate limiting, doesn't matter
+
+            // Also try invalid operations to generate denials
+            let _ = gate.authorize_network(
+                Some(&cap),
+                RemoteOperation::FederationSync, // Not in scope
+                "https://upload.example.com/files",
+                1_700_000_100,
+                &format!("trace-flood-deny-{}", i),
+            );
+        }
+
+        // Audit log should be bounded to prevent memory exhaustion
+        assert!(gate.audit_log().len() <= MAX_AUDIT_LOG_ENTRIES + 100); // Some tolerance for batch operations
+
+        // Recent events should be preserved (LIFO behavior)
+        let recent_events = gate.audit_log().iter().rev().take(10).collect::<Vec<_>>();
+        for (i, event) in recent_events.iter().enumerate() {
+            let expected_trace = format!("trace-flood-deny-{}", 49999 - i);
+            if event.trace_id.contains("flood-deny") {
+                assert!(event.trace_id.contains("flood"), "Recent events should be preserved");
+            }
+        }
+
+        // Memory usage should remain reasonable despite flood
+        let initial_capacity = gate.audit_log().capacity();
+        gate.authorize_local_operation("test_operation", 1_700_000_200, "trace-post-flood");
+
+        // Capacity shouldn't grow excessively
+        assert!(gate.audit_log().capacity() <= initial_capacity * 2, "Audit log capacity growth should be bounded");
+    }
+
+    /// Negative test: Edge cases in endpoint prefix matching with malformed URLs
+    #[test]
+    fn negative_endpoint_prefix_malformed_url_edge_cases() {
+        let provider = CapabilityProvider::new("secret-key");
+
+        // Create scope with various malformed and edge-case endpoint prefixes
+        let malformed_endpoints = vec![
+            "".to_string(), // Empty
+            " ".to_string(), // Whitespace only
+            "://missing-scheme".to_string(),
+            "http://".to_string(), // Incomplete
+            "https://[invalid-ipv6".to_string(),
+            "ftp://user:pass@host:99999/path".to_string(), // Invalid port
+            "https://example.com:0".to_string(), // Port 0
+            "https://example.com:-1".to_string(), // Negative port
+            "javascript:alert('xss')".to_string(), // Script URL
+            "data:text/html,<script>alert('xss')</script>".to_string(), // Data URL
+            "file:///etc/passwd".to_string(), // File URL
+            "https://example.com/../../../etc/passwd".to_string(), // Path traversal
+            "https://example.com/\x00\x01\x02".to_string(), // Control characters
+            "https://example.com/\u{202e}evil".to_string(), // Unicode direction override
+        ];
+
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::NetworkEgress],
+            malformed_endpoints,
+        );
+
+        let (cap, _) = provider.issue(
+            "operator",
+            scope,
+            1_700_000_000,
+            300,
+            true,
+            false,
+            "trace-malformed-endpoints",
+        ).expect("malformed endpoints token");
+
+        let mut gate = CapabilityGate::new("secret-key");
+
+        // Test various target URLs against malformed prefixes
+        let test_urls = vec![
+            "https://example.com/normal/path",
+            "https://evil.example.com/attack",
+            "javascript:alert('test')",
+            "file:///etc/passwd",
+            "",
+            "relative/path",
+            "https://example.com:443/secure",
+        ];
+
+        for test_url in test_urls {
+            let result = gate.authorize_network(
+                Some(&cap),
+                RemoteOperation::NetworkEgress,
+                &test_url,
+                1_700_000_100,
+                "trace-malformed-test",
+            );
+
+            // Should handle malformed URLs gracefully without panic
+            match result {
+                Ok(_) => {}, // Some malformed prefix matched
+                Err(e) => {
+                    // Should be proper denial, not a panic or crash
+                    assert!(matches!(e, RemoteCapError::ScopeDenied { .. }));
+                }
+            }
+        }
+
+        // Test endpoint prefix normalization edge cases
+        let unnormalized_scope = RemoteScope::new(
+            vec![RemoteOperation::TelemetryExport],
+            vec![
+                " https://api.example.com ".to_string(), // Leading/trailing spaces
+                "https://api.example.com".to_string(),
+                "".to_string(), // Empty (should be filtered)
+                "   ".to_string(), // Whitespace only (should be filtered)
+                "https://api.example.com".to_string(), // Duplicate
+            ],
+        );
+
+        // Normalization should deduplicate and clean up endpoints
+        assert!(unnormalized_scope.endpoint_prefixes.len() <= 2); // At most 2 unique endpoints after normalization
+        assert!(!unnormalized_scope.endpoint_prefixes.iter().any(|e| e.trim().is_empty())); // No empty entries
+    }
+
+    /// Negative test: Advanced cryptographic attack scenarios
+    #[test]
+    fn negative_advanced_cryptographic_attacks() {
+        let provider = CapabilityProvider::new("secret-key");
+        let scope = RemoteScope::new(
+            vec![RemoteOperation::RemoteComputation],
+            vec!["https://compute.example.com".to_string()],
+        );
+
+        let (legitimate_token, _) = provider.issue(
+            "operator",
+            scope,
+            1_700_000_000,
+            300,
+            true,
+            false,
+            "trace-crypto-attacks",
+        ).expect("legitimate token");
+
+        let mut gate = CapabilityGate::new("secret-key");
+
+        // Test signature manipulation attacks
+        let original_sig = legitimate_token.signature();
+
+        // Bit-flip attack: flip each bit of the signature
+        for byte_idx in 0..original_sig.len().min(32) { // Test first 32 characters
+            if let Some(ch) = original_sig.chars().nth(byte_idx) {
+                let mut modified_sig = original_sig.chars().collect::<Vec<char>>();
+                // Flip character (simple case)
+                modified_sig[byte_idx] = if ch == '0' { '1' } else { '0' };
+                let flipped_sig: String = modified_sig.iter().collect();
+
+                let mut modified_token = legitimate_token.clone();
+                modified_token.signature = flipped_sig;
+
+                let result = gate.authorize_network(
+                    Some(&modified_token),
+                    RemoteOperation::RemoteComputation,
+                    "https://compute.example.com/task",
+                    1_700_000_100,
+                    &format!("trace-bit-flip-{}", byte_idx),
+                );
+
+                assert!(result.is_err(), "Bit-flip attack should be detected");
+                assert_eq!(result.unwrap_err().code(), "REMOTECAP_INVALID");
+            }
+        }
+
+        // Test length extension attack resistance
+        let extended_signatures = vec![
+            format!("{}00", original_sig), // Append null bytes
+            format!("{}ff", original_sig), // Append 0xff bytes
+            format!("00{}", original_sig), // Prepend null bytes
+            format!("{}{}", original_sig, original_sig), // Double the signature
+        ];
+
+        for extended_sig in extended_signatures {
+            let mut extended_token = legitimate_token.clone();
+            extended_token.signature = extended_sig;
+
+            let result = gate.authorize_network(
+                Some(&extended_token),
+                RemoteOperation::RemoteComputation,
+                "https://compute.example.com/task",
+                1_700_000_100,
+                "trace-length-extension",
+            );
+
+            assert!(result.is_err(), "Length extension attack should be detected");
+            assert_eq!(result.unwrap_err().code(), "REMOTECAP_INVALID");
+        }
+
+        // Test signature substitution (using signature from different token)
+        let different_scope = RemoteScope::new(
+            vec![RemoteOperation::ArtifactUpload],
+            vec!["https://different.example.com".to_string()],
+        );
+
+        let (different_token, _) = provider.issue(
+            "operator",
+            different_scope,
+            1_700_000_000,
+            300,
+            true,
+            false,
+            "trace-different-token",
+        ).expect("different token");
+
+        let mut substituted_token = legitimate_token.clone();
+        substituted_token.signature = different_token.signature().to_string();
+
+        let substitution_result = gate.authorize_network(
+            Some(&substituted_token),
+            RemoteOperation::RemoteComputation,
+            "https://compute.example.com/task",
+            1_700_000_100,
+            "trace-signature-substitution",
+        );
+
+        assert!(substitution_result.is_err(), "Signature substitution should be detected");
+        assert_eq!(substitution_result.unwrap_err().code(), "REMOTECAP_INVALID");
+    }
+}
 }

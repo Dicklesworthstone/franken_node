@@ -202,6 +202,8 @@ pub fn evaluate_freshness(
 
     // Stale: check for override
     if let Some(receipt) = override_receipt {
+        validate_override_receipt(check, receipt)?;
+
         // INV-RF-OVERRIDE-RECEIPT: override produces receipt
         return Ok(FreshnessDecision {
             action_id: check.action_id.clone(),
@@ -222,6 +224,29 @@ pub fn evaluate_freshness(
         age_secs: check.revocation_age_secs,
         max_age_secs,
     })
+}
+
+fn validate_override_receipt(
+    check: &FreshnessCheck,
+    receipt: &OverrideReceipt,
+) -> Result<(), FreshnessError> {
+    let invalid = check.action_id.trim().is_empty()
+        || receipt.action_id.trim().is_empty()
+        || receipt.action_id != check.action_id
+        || receipt.trace_id != check.trace_id
+        || receipt.actor.trim().is_empty()
+        || receipt.reason.trim().is_empty()
+        || receipt.timestamp.trim().is_empty()
+        || receipt.trace_id.trim().is_empty();
+
+    if invalid {
+        return Err(FreshnessError::OverrideRequired {
+            tier: check.tier.to_string(),
+            age_secs: check.revocation_age_secs,
+        });
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -344,10 +369,71 @@ mod tests {
     }
 
     #[test]
+    fn risky_boundary_denial_reports_exact_age_and_limit() {
+        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3600), None)
+            .expect_err("boundary should fail closed");
+
+        assert_eq!(
+            err,
+            FreshnessError::StaleFrontier {
+                tier: "Risky".to_string(),
+                age_secs: 3600,
+                max_age_secs: 3600,
+            }
+        );
+    }
+
+    #[test]
+    fn dangerous_boundary_denial_reports_exact_age_and_limit() {
+        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Dangerous, 300), None)
+            .expect_err("boundary should fail closed");
+
+        assert_eq!(
+            err,
+            FreshnessError::StaleFrontier {
+                tier: "Dangerous".to_string(),
+                age_secs: 300,
+                max_age_secs: 300,
+            }
+        );
+    }
+
+    #[test]
     fn just_over_boundary_denied() {
         let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 3601), None)
             .expect_err("should fail");
         assert_eq!(err.code(), "RF_STALE_FRONTIER");
+    }
+
+    #[test]
+    fn stale_error_display_includes_observed_age_and_max_age() {
+        let err = evaluate_freshness(&policy(), &check_action(SafetyTier::Risky, 7200), None)
+            .expect_err("stale action should be denied");
+        let message = err.to_string();
+
+        assert!(message.contains("Risky action denied"));
+        assert!(message.contains("age 7200s"));
+        assert!(message.contains("max 3600s"));
+    }
+
+    #[test]
+    fn dangerous_zero_max_age_fails_closed_even_at_zero_age() {
+        let p = FreshnessPolicy {
+            risky_max_age_secs: 1,
+            dangerous_max_age_secs: 0,
+        };
+
+        let err = evaluate_freshness(&p, &check_action(SafetyTier::Dangerous, 0), None)
+            .expect_err("zero max age should fail closed at the boundary");
+
+        assert_eq!(
+            err,
+            FreshnessError::StaleFrontier {
+                tier: "Dangerous".to_string(),
+                age_secs: 0,
+                max_age_secs: 0,
+            }
+        );
     }
 
     #[test]
@@ -375,6 +461,23 @@ mod tests {
     }
 
     #[test]
+    fn policy_validate_invalid_dangerous_gt_risky_reason_is_specific() {
+        let p = FreshnessPolicy {
+            risky_max_age_secs: 100,
+            dangerous_max_age_secs: 101,
+        };
+
+        let err = p.validate().expect_err("policy should be invalid");
+
+        assert_eq!(
+            err,
+            FreshnessError::PolicyInvalid {
+                reason: "dangerous_max_age must be <= risky_max_age".to_string(),
+            }
+        );
+    }
+
+    #[test]
     fn policy_validate_zero_risky() {
         let p = FreshnessPolicy {
             risky_max_age_secs: 0,
@@ -384,6 +487,42 @@ mod tests {
             p.validate().expect_err("should fail").code(),
             "RF_POLICY_INVALID"
         );
+    }
+
+    #[test]
+    fn policy_validate_zero_risky_reason_is_specific() {
+        let p = FreshnessPolicy {
+            risky_max_age_secs: 0,
+            dangerous_max_age_secs: 0,
+        };
+
+        let err = p.validate().expect_err("policy should be invalid");
+
+        assert_eq!(
+            err,
+            FreshnessError::PolicyInvalid {
+                reason: "risky_max_age must be > 0".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn stale_without_override_does_not_emit_decision_record() {
+        let err = evaluate_freshness(
+            &policy(),
+            &check_action(SafetyTier::Dangerous, u64::MAX),
+            None,
+        )
+        .expect_err("stale dangerous action should be denied");
+
+        assert!(matches!(
+            err,
+            FreshnessError::StaleFrontier {
+                tier,
+                age_secs: u64::MAX,
+                max_age_secs: 300,
+            } if tier == "Dangerous"
+        ));
     }
 
     #[test]
@@ -441,5 +580,416 @@ mod tests {
         assert_eq!(p.max_age_for_tier(SafetyTier::Standard), None);
         assert_eq!(p.max_age_for_tier(SafetyTier::Risky), Some(3600));
         assert_eq!(p.max_age_for_tier(SafetyTier::Dangerous), Some(300));
+    }
+}
+
+#[cfg(test)]
+mod override_receipt_negative_tests {
+    use super::*;
+
+    fn policy() -> FreshnessPolicy {
+        FreshnessPolicy {
+            risky_max_age_secs: 3600,
+            dangerous_max_age_secs: 300,
+        }
+    }
+
+    fn stale_check(tier: SafetyTier) -> FreshnessCheck {
+        FreshnessCheck {
+            action_id: "action-a".to_string(),
+            tier,
+            revocation_age_secs: 7200,
+            trace_id: "trace-a".to_string(),
+            timestamp: "2026-04-17T00:00:00Z".to_string(),
+        }
+    }
+
+    fn receipt() -> OverrideReceipt {
+        OverrideReceipt {
+            action_id: "action-a".to_string(),
+            actor: "operator-a".to_string(),
+            reason: "break-glass maintenance".to_string(),
+            timestamp: "2026-04-17T00:01:00Z".to_string(),
+            trace_id: "trace-a".to_string(),
+        }
+    }
+
+    fn expect_override_required(err: FreshnessError, tier: SafetyTier, age_secs: u64) {
+        assert_eq!(
+            err,
+            FreshnessError::OverrideRequired {
+                tier: tier.to_string(),
+                age_secs,
+            }
+        );
+    }
+
+    #[test]
+    fn stale_override_rejects_mismatched_action_id() {
+        let check = stale_check(SafetyTier::Risky);
+        let mut override_receipt = receipt();
+        override_receipt.action_id = "other-action".to_string();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_empty_actor() {
+        let check = stale_check(SafetyTier::Risky);
+        let mut override_receipt = receipt();
+        override_receipt.actor = String::new();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_whitespace_actor() {
+        let check = stale_check(SafetyTier::Dangerous);
+        let mut override_receipt = receipt();
+        override_receipt.actor = "   ".to_string();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Dangerous, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_empty_reason() {
+        let check = stale_check(SafetyTier::Risky);
+        let mut override_receipt = receipt();
+        override_receipt.reason = String::new();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_empty_receipt_timestamp() {
+        let check = stale_check(SafetyTier::Risky);
+        let mut override_receipt = receipt();
+        override_receipt.timestamp = String::new();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_empty_receipt_trace_id() {
+        let check = stale_check(SafetyTier::Dangerous);
+        let mut override_receipt = receipt();
+        override_receipt.trace_id = String::new();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Dangerous, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_whitespace_reason() {
+        let check = stale_check(SafetyTier::Risky);
+        let mut override_receipt = receipt();
+        override_receipt.reason = "   ".to_string();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_whitespace_receipt_timestamp() {
+        let check = stale_check(SafetyTier::Dangerous);
+        let mut override_receipt = receipt();
+        override_receipt.timestamp = "\t  ".to_string();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Dangerous, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_whitespace_receipt_trace_id() {
+        let check = stale_check(SafetyTier::Risky);
+        let mut override_receipt = receipt();
+        override_receipt.trace_id = " \n ".to_string();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_trace_id_mismatch() {
+        let check = stale_check(SafetyTier::Dangerous);
+        let mut override_receipt = receipt();
+        override_receipt.trace_id = "other-trace".to_string();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Dangerous, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_empty_action_id_even_when_receipt_matches() {
+        let mut check = stale_check(SafetyTier::Risky);
+        check.action_id.clear();
+        let mut override_receipt = receipt();
+        override_receipt.action_id.clear();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_whitespace_action_id_even_when_receipt_matches() {
+        let mut check = stale_check(SafetyTier::Dangerous);
+        check.action_id = "   ".to_string();
+        let mut override_receipt = receipt();
+        override_receipt.action_id = "   ".to_string();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Dangerous, 7200);
+    }
+
+    #[test]
+    fn stale_override_rejects_trailing_space_action_id_alias() {
+        let check = stale_check(SafetyTier::Risky);
+        let mut override_receipt = receipt();
+        override_receipt.action_id = "action-a ".to_string();
+
+        let err = evaluate_freshness(&policy(), &check, Some(&override_receipt)).unwrap_err();
+
+        expect_override_required(err, SafetyTier::Risky, 7200);
+    }
+
+    #[test]
+    fn standard_tier_drops_invalid_override_receipt_instead_of_recording_bypass() {
+        let check = FreshnessCheck {
+            tier: SafetyTier::Standard,
+            ..stale_check(SafetyTier::Risky)
+        };
+        let mut override_receipt = receipt();
+        override_receipt.trace_id = "other-trace".to_string();
+
+        let decision =
+            evaluate_freshness(&policy(), &check, Some(&override_receipt)).expect("standard pass");
+
+        assert!(decision.allowed);
+        assert!(decision.override_receipt.is_none());
+        assert!(decision.max_age_secs.is_none());
+    }
+
+    #[test]
+    fn valid_override_still_allows_stale_action() {
+        let check = stale_check(SafetyTier::Dangerous);
+        let override_receipt = receipt();
+
+        let decision =
+            evaluate_freshness(&policy(), &check, Some(&override_receipt)).expect("valid override");
+
+        assert!(decision.allowed);
+        assert!(decision.override_receipt.is_some());
+    }
+}
+
+#[cfg(test)]
+mod revocation_freshness_boundary_negative_tests {
+    use super::*;
+
+    fn strict_policy_for_boundary_negatives() -> FreshnessPolicy {
+        FreshnessPolicy {
+            risky_max_age_secs: 10,
+            dangerous_max_age_secs: 5,
+        }
+    }
+
+    fn boundary_check(tier: SafetyTier, age: u64) -> FreshnessCheck {
+        FreshnessCheck {
+            action_id: "boundary-action".to_string(),
+            tier,
+            revocation_age_secs: age,
+            trace_id: "boundary-trace".to_string(),
+            timestamp: "2026-04-17T00:00:00Z".to_string(),
+        }
+    }
+
+    fn boundary_receipt() -> OverrideReceipt {
+        OverrideReceipt {
+            action_id: "boundary-action".to_string(),
+            actor: "operator-boundary".to_string(),
+            reason: "boundary override".to_string(),
+            timestamp: "2026-04-17T00:01:00Z".to_string(),
+            trace_id: "boundary-trace".to_string(),
+        }
+    }
+
+    #[test]
+    fn risky_zero_max_age_fails_closed_at_exact_zero_age() {
+        let policy = FreshnessPolicy {
+            risky_max_age_secs: 0,
+            dangerous_max_age_secs: 0,
+        };
+
+        let err = evaluate_freshness(&policy, &boundary_check(SafetyTier::Risky, 0), None)
+            .expect_err("zero max age should fail closed at exact boundary");
+
+        assert_eq!(
+            err,
+            FreshnessError::StaleFrontier {
+                tier: "Risky".to_string(),
+                age_secs: 0,
+                max_age_secs: 0,
+            }
+        );
+    }
+
+    #[test]
+    fn risky_exact_boundary_rejects_invalid_override_receipt() {
+        let mut receipt = boundary_receipt();
+        receipt.reason.clear();
+
+        let err = evaluate_freshness(
+            &strict_policy_for_boundary_negatives(),
+            &boundary_check(SafetyTier::Risky, 10),
+            Some(&receipt),
+        )
+        .expect_err("invalid override receipt should be rejected at stale boundary");
+
+        assert_eq!(
+            err,
+            FreshnessError::OverrideRequired {
+                tier: "Risky".to_string(),
+                age_secs: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn dangerous_exact_boundary_rejects_action_id_case_alias() {
+        let mut receipt = boundary_receipt();
+        receipt.action_id = "BOUNDARY-ACTION".to_string();
+
+        let err = evaluate_freshness(
+            &strict_policy_for_boundary_negatives(),
+            &boundary_check(SafetyTier::Dangerous, 5),
+            Some(&receipt),
+        )
+        .expect_err("action_id matching must be exact");
+
+        assert_eq!(
+            err,
+            FreshnessError::OverrideRequired {
+                tier: "Dangerous".to_string(),
+                age_secs: 5,
+            }
+        );
+    }
+
+    #[test]
+    fn dangerous_stale_rejects_nul_suffixed_action_id_alias() {
+        let mut receipt = boundary_receipt();
+        receipt.action_id = "boundary-action\0".to_string();
+
+        let err = evaluate_freshness(
+            &strict_policy_for_boundary_negatives(),
+            &boundary_check(SafetyTier::Dangerous, 500),
+            Some(&receipt),
+        )
+        .expect_err("nul-suffixed action alias must not satisfy override");
+
+        assert_eq!(
+            err,
+            FreshnessError::OverrideRequired {
+                tier: "Dangerous".to_string(),
+                age_secs: 500,
+            }
+        );
+    }
+
+    #[test]
+    fn risky_stale_rejects_trace_id_with_trailing_space_alias() {
+        let mut receipt = boundary_receipt();
+        receipt.trace_id = "boundary-trace ".to_string();
+
+        let err = evaluate_freshness(
+            &strict_policy_for_boundary_negatives(),
+            &boundary_check(SafetyTier::Risky, 11),
+            Some(&receipt),
+        )
+        .expect_err("trace_id matching must be exact");
+
+        assert_eq!(
+            err,
+            FreshnessError::OverrideRequired {
+                tier: "Risky".to_string(),
+                age_secs: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn risky_stale_rejects_actor_with_carriage_return_only() {
+        let mut receipt = boundary_receipt();
+        receipt.actor = "\r".to_string();
+
+        let err = evaluate_freshness(
+            &strict_policy_for_boundary_negatives(),
+            &boundary_check(SafetyTier::Risky, 11),
+            Some(&receipt),
+        )
+        .expect_err("blank actor should not authorize stale override");
+
+        assert_eq!(
+            err,
+            FreshnessError::OverrideRequired {
+                tier: "Risky".to_string(),
+                age_secs: 11,
+            }
+        );
+    }
+
+    #[test]
+    fn dangerous_stale_rejects_reason_with_newline_only() {
+        let mut receipt = boundary_receipt();
+        receipt.reason = "\n".to_string();
+
+        let err = evaluate_freshness(
+            &strict_policy_for_boundary_negatives(),
+            &boundary_check(SafetyTier::Dangerous, 6),
+            Some(&receipt),
+        )
+        .expect_err("blank reason should not authorize stale override");
+
+        assert_eq!(
+            err,
+            FreshnessError::OverrideRequired {
+                tier: "Dangerous".to_string(),
+                age_secs: 6,
+            }
+        );
+    }
+
+    #[test]
+    fn policy_validation_reports_dangerous_over_risky_before_zero_risky() {
+        let policy = FreshnessPolicy {
+            risky_max_age_secs: 0,
+            dangerous_max_age_secs: 1,
+        };
+
+        let err = policy.validate().expect_err("policy should fail closed");
+
+        assert_eq!(
+            err,
+            FreshnessError::PolicyInvalid {
+                reason: "dangerous_max_age must be <= risky_max_age".to_string(),
+            }
+        );
     }
 }

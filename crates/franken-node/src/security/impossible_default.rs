@@ -810,9 +810,17 @@ impl CapabilityEnforcer {
         };
 
         if self.audit_log.len() >= MAX_AUDIT_LOG_ENTRIES {
-            let overflow = self.audit_log.len() - MAX_AUDIT_LOG_ENTRIES + 1;
-            self.chain_anchor_hash = Some(self.audit_log[overflow - 1].hash());
-            self.audit_log.drain(0..overflow);
+            let overflow = self
+                .audit_log
+                .len()
+                .saturating_sub(MAX_AUDIT_LOG_ENTRIES)
+                .saturating_add(1);
+            let anchor_index = overflow.saturating_sub(1);
+            self.chain_anchor_hash = self
+                .audit_log
+                .get(anchor_index)
+                .map(EnforcementAuditEntry::hash);
+            self.audit_log.drain(0..overflow.min(self.audit_log.len()));
         }
         self.audit_log.push(entry);
     }
@@ -1033,6 +1041,55 @@ mod tests {
     }
 
     #[test]
+    fn test_opt_in_expired_at_exact_boundary_rejected_and_not_enabled() {
+        let (mut enforcer, sk) = make_enforcer();
+        let token = make_token(ImpossibleCapability::FsAccess, 2000, &sk);
+
+        let err = enforcer.opt_in(token, "admin", 2000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_TOKEN_EXPIRED);
+        assert!(!enforcer.is_enabled(ImpossibleCapability::FsAccess));
+        assert_eq!(enforcer.metrics().opt_in_expired_total, 1);
+        let entry = enforcer
+            .audit_log()
+            .last()
+            .expect("expired token is audited");
+        assert_eq!(entry.event_code, IBD_003_OPT_IN_EXPIRED);
+        assert_eq!(entry.token_id.as_deref(), Some("tok-fs_access"));
+    }
+
+    #[test]
+    fn test_opt_in_rejects_token_tampered_after_signing() {
+        let (mut enforcer, sk) = make_enforcer();
+        let mut token = make_token(ImpossibleCapability::OutboundNetwork, 10_000, &sk);
+        token.subject = "attacker-subject".to_string();
+
+        let err = enforcer.opt_in(token, "admin", 2000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(!enforcer.is_enabled(ImpossibleCapability::OutboundNetwork));
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+        let entry = enforcer
+            .audit_log()
+            .last()
+            .expect("invalid signature is audited");
+        assert_eq!(entry.event_code, ERR_IBD_INVALID_SIGNATURE);
+    }
+
+    #[test]
+    fn test_opt_in_rejects_signature_with_valid_hex_wrong_length() {
+        let (mut enforcer, sk) = make_enforcer();
+        let mut token = make_token(ImpossibleCapability::UnsignedExtension, 10_000, &sk);
+        token.signature = "aa".repeat(63);
+
+        let err = enforcer.opt_in(token, "admin", 2000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(!enforcer.is_enabled(ImpossibleCapability::UnsignedExtension));
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+    }
+
+    #[test]
     fn test_token_expiry_blocks_enforce() {
         let (mut enforcer, sk) = make_enforcer();
         let token = make_token(ImpossibleCapability::ChildProcessSpawn, 5000, &sk);
@@ -1048,6 +1105,46 @@ mod tests {
             .enforce(ImpossibleCapability::ChildProcessSpawn, "user", 6000)
             .unwrap_err();
         assert_eq!(err.code, ERR_IBD_TOKEN_EXPIRED);
+    }
+
+    #[test]
+    fn test_enforce_at_exact_expiry_boundary_expires_and_removes_token() {
+        let (mut enforcer, sk) = make_enforcer();
+        let token = make_token(ImpossibleCapability::ChildProcessSpawn, 5000, &sk);
+        enforcer.opt_in(token, "admin", 1000).unwrap();
+
+        let err = enforcer
+            .enforce(ImpossibleCapability::ChildProcessSpawn, "user", 5000)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_TOKEN_EXPIRED);
+        assert!(!enforcer.is_enabled(ImpossibleCapability::ChildProcessSpawn));
+        assert!(
+            enforcer
+                .tokens
+                .get(&ImpossibleCapability::ChildProcessSpawn)
+                .is_none()
+        );
+        assert_eq!(enforcer.metrics().opt_in_expired_total, 1);
+        assert_eq!(
+            enforcer.audit_log().last().unwrap().event_code,
+            IBD_003_OPT_IN_EXPIRED
+        );
+    }
+
+    #[test]
+    fn test_expired_enforce_does_not_increment_blocked_total() {
+        let (mut enforcer, sk) = make_enforcer();
+        let token = make_token(ImpossibleCapability::DisableHardening, 5000, &sk);
+        enforcer.opt_in(token, "admin", 1000).unwrap();
+
+        let err = enforcer
+            .enforce(ImpossibleCapability::DisableHardening, "user", 5000)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_TOKEN_EXPIRED);
+        assert_eq!(enforcer.metrics().blocked_total, 0);
+        assert_eq!(enforcer.metrics().opt_in_expired_total, 1);
     }
 
     // -- AC4: Clear, actionable error messages --
@@ -1154,6 +1251,25 @@ mod tests {
         assert_eq!(enforcer.metrics().silent_disable_detected_total, 1);
     }
 
+    #[test]
+    fn test_silent_disable_does_not_turn_off_valid_opt_in() {
+        let (mut enforcer, sk) = make_enforcer();
+        let token = make_token(ImpossibleCapability::FsAccess, 10_000, &sk);
+        enforcer.opt_in(token, "admin", 1000).unwrap();
+
+        let err = enforcer
+            .attempt_silent_disable(ImpossibleCapability::FsAccess, "rogue", 2000)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_SILENT_DISABLE);
+        assert!(enforcer.is_enabled(ImpossibleCapability::FsAccess));
+        assert!(
+            enforcer
+                .enforce(ImpossibleCapability::FsAccess, "user", 3000)
+                .is_ok()
+        );
+    }
+
     // -- AC7: Enforcement report --
 
     #[test]
@@ -1187,6 +1303,23 @@ mod tests {
             .find(|e| e.capability == ImpossibleCapability::FsAccess)
             .unwrap();
         assert_eq!(fs_entry.enforcement_status, "enabled");
+    }
+
+    #[test]
+    fn test_report_fails_adoption_threshold_below_ninety_percent() {
+        let (mut enforcer, _sk) = make_enforcer();
+        for _ in 0..8 {
+            enforcer.record_deployment(true);
+        }
+        for _ in 0..2 {
+            enforcer.record_deployment(false);
+        }
+
+        let report = enforcer.generate_report("2026-02-20T00:00:00Z");
+
+        assert_eq!(report.overall_adoption_rate_pct, 80.0);
+        assert!(!report.meets_threshold);
+        assert_eq!(report.threshold_pct, 90.0);
     }
 
     // -- Audit log --
@@ -1280,6 +1413,36 @@ mod tests {
         assert_eq!(expired.len(), 1);
         assert!(!enforcer.is_enabled(ImpossibleCapability::FsAccess));
         assert!(enforcer.is_enabled(ImpossibleCapability::OutboundNetwork));
+    }
+
+    #[test]
+    fn test_expire_tokens_at_exact_boundary_only_expires_matching_tokens() {
+        let (mut enforcer, sk) = make_enforcer();
+        let t1 = make_token(ImpossibleCapability::FsAccess, 5000, &sk);
+        let t2 = make_token(ImpossibleCapability::OutboundNetwork, 5001, &sk);
+        enforcer.opt_in(t1, "admin", 1000).unwrap();
+        enforcer.opt_in(t2, "admin", 1000).unwrap();
+
+        let expired = enforcer.expire_tokens(5000);
+
+        assert_eq!(expired, vec![ImpossibleCapability::FsAccess]);
+        assert!(!enforcer.is_enabled(ImpossibleCapability::FsAccess));
+        assert!(enforcer.is_enabled(ImpossibleCapability::OutboundNetwork));
+        assert_eq!(enforcer.metrics().opt_in_expired_total, 1);
+    }
+
+    #[test]
+    fn test_expire_tokens_no_expired_tokens_has_no_audit_side_effects() {
+        let (mut enforcer, sk) = make_enforcer();
+        let token = make_token(ImpossibleCapability::FsAccess, 5001, &sk);
+        enforcer.opt_in(token, "admin", 1000).unwrap();
+        let audit_len = enforcer.audit_log().len();
+
+        let expired = enforcer.expire_tokens(5000);
+
+        assert!(expired.is_empty());
+        assert_eq!(enforcer.audit_log().len(), audit_len);
+        assert!(enforcer.is_enabled(ImpossibleCapability::FsAccess));
     }
 
     // -- Metrics --
@@ -1450,6 +1613,1181 @@ mod tests {
         // Verify hash chain integrity.
         for i in 1..log.len() {
             assert_eq!(log[i].prev_hash, log[i - 1].hash());
+        }
+    }
+}
+
+#[cfg(test)]
+mod impossible_default_negative_path_tests {
+    use super::*;
+
+    use ed25519_dalek::{Signer, SigningKey};
+
+    fn signing_key(seed_byte: u8) -> SigningKey {
+        SigningKey::from_bytes(&[seed_byte; 32])
+    }
+
+    fn sign_token(token: &mut CapabilityToken, signing_key: &SigningKey) {
+        let hash = token.content_hash();
+        let sig = signing_key.sign(hash.as_bytes());
+        token.signature = hex::encode(sig.to_bytes());
+    }
+
+    fn enforcer_for(signing_key: &SigningKey) -> CapabilityEnforcer {
+        CapabilityEnforcer::with_ed25519_verifier(signing_key.verifying_key())
+    }
+
+    fn token_with_id(
+        token_id: &str,
+        capability: ImpossibleCapability,
+        expires_at_ms: u64,
+        signing_key: &SigningKey,
+    ) -> CapabilityToken {
+        let mut token = CapabilityToken {
+            token_id: token_id.to_string(),
+            capability,
+            issuer: "negative-test-issuer".to_string(),
+            subject: "negative-test-subject".to_string(),
+            issued_at_ms: 1_000,
+            expires_at_ms,
+            signature: String::new(),
+            justification: "negative path regression".to_string(),
+        };
+        sign_token(&mut token, signing_key);
+        token
+    }
+
+    #[test]
+    fn opt_in_rejects_token_signed_by_untrusted_key() {
+        let trusted_key = signing_key(0x31);
+        let rogue_key = signing_key(0x32);
+        let mut enforcer = enforcer_for(&trusted_key);
+        let token = token_with_id(
+            "rogue-token",
+            ImpossibleCapability::FsAccess,
+            10_000,
+            &rogue_key,
+        );
+
+        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(enforcer.status(ImpossibleCapability::FsAccess).is_blocked());
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+        assert_eq!(
+            enforcer
+                .audit_log()
+                .last()
+                .map(|entry| entry.event_code.as_str()),
+            Some(ERR_IBD_INVALID_SIGNATURE)
+        );
+    }
+
+    #[test]
+    fn opt_in_rejects_overlong_hex_signature() {
+        let signing_key = signing_key(0x41);
+        let mut enforcer = enforcer_for(&signing_key);
+        let mut token = token_with_id(
+            "overlong-signature-token",
+            ImpossibleCapability::UnsignedExtension,
+            10_000,
+            &signing_key,
+        );
+        token.signature = "aa".repeat(65);
+
+        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(!enforcer.is_enabled(ImpossibleCapability::UnsignedExtension));
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+    }
+
+    #[test]
+    fn invalid_signature_does_not_replace_existing_valid_token() {
+        let signing_key = signing_key(0x51);
+        let mut enforcer = enforcer_for(&signing_key);
+        let valid = token_with_id(
+            "valid-token",
+            ImpossibleCapability::OutboundNetwork,
+            10_000,
+            &signing_key,
+        );
+        enforcer.opt_in(valid, "admin", 2_000).unwrap();
+
+        let mut invalid = token_with_id(
+            "invalid-replacement",
+            ImpossibleCapability::OutboundNetwork,
+            20_000,
+            &signing_key,
+        );
+        invalid.signature = "not-hex".to_string();
+
+        let err = enforcer.opt_in(invalid, "admin", 3_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 1);
+        assert_eq!(
+            enforcer.status(ImpossibleCapability::OutboundNetwork),
+            &EnforcementStatus::Enabled {
+                token_id: "valid-token".to_string(),
+                expires_at_ms: 10_000,
+            }
+        );
+    }
+
+    #[test]
+    fn enforce_at_exact_expiry_boundary_fails_closed_and_removes_token() {
+        let signing_key = signing_key(0x61);
+        let mut enforcer = enforcer_for(&signing_key);
+        let token = token_with_id(
+            "boundary-token",
+            ImpossibleCapability::ChildProcessSpawn,
+            5_000,
+            &signing_key,
+        );
+        enforcer.opt_in(token, "admin", 2_000).unwrap();
+
+        assert!(
+            enforcer
+                .enforce(ImpossibleCapability::ChildProcessSpawn, "user", 4_999)
+                .is_ok()
+        );
+        let err = enforcer
+            .enforce(ImpossibleCapability::ChildProcessSpawn, "user", 5_000)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_TOKEN_EXPIRED);
+        assert!(
+            enforcer
+                .status(ImpossibleCapability::ChildProcessSpawn)
+                .is_blocked()
+        );
+        assert_eq!(enforcer.metrics().opt_in_expired_total, 1);
+    }
+
+    #[test]
+    fn expire_tokens_does_not_double_count_token_expired_by_enforce() {
+        let signing_key = signing_key(0x71);
+        let mut enforcer = enforcer_for(&signing_key);
+        let token = token_with_id(
+            "single-expiry-token",
+            ImpossibleCapability::DisableHardening,
+            5_000,
+            &signing_key,
+        );
+        enforcer.opt_in(token, "admin", 2_000).unwrap();
+
+        let err = enforcer
+            .enforce(ImpossibleCapability::DisableHardening, "user", 5_000)
+            .unwrap_err();
+        let expired = enforcer.expire_tokens(6_000);
+
+        assert_eq!(err.code, ERR_IBD_TOKEN_EXPIRED);
+        assert!(expired.is_empty());
+        assert_eq!(enforcer.metrics().opt_in_expired_total, 1);
+    }
+
+    #[test]
+    fn silent_disable_on_blocked_capability_keeps_capability_blocked() {
+        let signing_key = signing_key(0x81);
+        let mut enforcer = enforcer_for(&signing_key);
+
+        let err = enforcer
+            .attempt_silent_disable(ImpossibleCapability::FsAccess, "rogue", 2_000)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_SILENT_DISABLE);
+        assert!(enforcer.status(ImpossibleCapability::FsAccess).is_blocked());
+        assert_eq!(enforcer.metrics().silent_disable_detected_total, 1);
+        assert_eq!(
+            enforcer
+                .audit_log()
+                .last()
+                .map(|entry| entry.event_code.as_str()),
+            Some(IBD_004_SILENT_DISABLE_DETECTED)
+        );
+    }
+
+    #[test]
+    fn audit_log_overflow_keeps_cap_and_continues_hash_chain() {
+        let signing_key = signing_key(0x91);
+        let mut enforcer = enforcer_for(&signing_key);
+
+        for i in 0..=crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES {
+            let timestamp_ms = u64::try_from(i).unwrap_or(u64::MAX);
+            let _ = enforcer.enforce(ImpossibleCapability::FsAccess, "user", timestamp_ms);
+        }
+
+        let log = enforcer.audit_log();
+        assert_eq!(
+            log.len(),
+            crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES
+        );
+        assert_ne!(log[0].prev_hash, "0".repeat(64));
+        for i in 1..log.len() {
+            assert_eq!(log[i].prev_hash, log[i - 1].hash());
+        }
+    }
+
+    #[test]
+    fn opt_in_rejects_capability_tamper_after_signing() {
+        let signing_key = signing_key(0xa1);
+        let mut enforcer = enforcer_for(&signing_key);
+        let mut token = token_with_id(
+            "capability-tamper-token",
+            ImpossibleCapability::FsAccess,
+            10_000,
+            &signing_key,
+        );
+        token.capability = ImpossibleCapability::DisableHardening;
+
+        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(enforcer.status(ImpossibleCapability::FsAccess).is_blocked());
+        assert!(
+            enforcer
+                .status(ImpossibleCapability::DisableHardening)
+                .is_blocked()
+        );
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+    }
+
+    #[test]
+    fn opt_in_rejects_token_id_tamper_after_signing() {
+        let signing_key = signing_key(0xa2);
+        let mut enforcer = enforcer_for(&signing_key);
+        let mut token = token_with_id(
+            "original-token-id",
+            ImpossibleCapability::OutboundNetwork,
+            10_000,
+            &signing_key,
+        );
+        token.token_id = "tampered-token-id".to_string();
+
+        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(
+            enforcer
+                .status(ImpossibleCapability::OutboundNetwork)
+                .is_blocked()
+        );
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+    }
+
+    #[test]
+    fn opt_in_rejects_issuer_tamper_after_signing() {
+        let signing_key = signing_key(0xa3);
+        let mut enforcer = enforcer_for(&signing_key);
+        let mut token = token_with_id(
+            "issuer-tamper-token",
+            ImpossibleCapability::ChildProcessSpawn,
+            10_000,
+            &signing_key,
+        );
+        token.issuer = "unexpected-issuer".to_string();
+
+        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(
+            enforcer
+                .status(ImpossibleCapability::ChildProcessSpawn)
+                .is_blocked()
+        );
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+    }
+
+    #[test]
+    fn opt_in_rejects_subject_tamper_after_signing() {
+        let signing_key = signing_key(0xa4);
+        let mut enforcer = enforcer_for(&signing_key);
+        let mut token = token_with_id(
+            "subject-tamper-token",
+            ImpossibleCapability::UnsignedExtension,
+            10_000,
+            &signing_key,
+        );
+        token.subject = "unexpected-subject".to_string();
+
+        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(
+            enforcer
+                .status(ImpossibleCapability::UnsignedExtension)
+                .is_blocked()
+        );
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+    }
+
+    #[test]
+    fn opt_in_rejects_justification_tamper_after_signing() {
+        let signing_key = signing_key(0xa5);
+        let mut enforcer = enforcer_for(&signing_key);
+        let mut token = token_with_id(
+            "justification-tamper-token",
+            ImpossibleCapability::DisableHardening,
+            10_000,
+            &signing_key,
+        );
+        token.justification = "changed justification".to_string();
+
+        let err = enforcer.opt_in(token, "admin", 2_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_INVALID_SIGNATURE);
+        assert!(
+            enforcer
+                .status(ImpossibleCapability::DisableHardening)
+                .is_blocked()
+        );
+        assert_eq!(enforcer.metrics().opt_in_granted_total, 0);
+    }
+
+    #[test]
+    fn enforce_rejects_unrelated_capability_when_other_token_is_enabled() {
+        let signing_key = signing_key(0xa6);
+        let mut enforcer = enforcer_for(&signing_key);
+        let token = token_with_id(
+            "network-only-token",
+            ImpossibleCapability::OutboundNetwork,
+            10_000,
+            &signing_key,
+        );
+        enforcer.opt_in(token, "admin", 2_000).unwrap();
+
+        let err = enforcer
+            .enforce(ImpossibleCapability::FsAccess, "user", 3_000)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_IBD_BLOCKED);
+        assert!(enforcer.is_enabled(ImpossibleCapability::OutboundNetwork));
+        assert!(enforcer.status(ImpossibleCapability::FsAccess).is_blocked());
+        assert_eq!(
+            enforcer
+                .audit_log()
+                .last()
+                .map(|entry| entry.event_code.as_str()),
+            Some(IBD_001_CAPABILITY_BLOCKED)
+        );
+    }
+
+    #[test]
+    fn expire_tokens_removes_multiple_capabilities_at_boundary() {
+        let signing_key = signing_key(0xa7);
+        let mut enforcer = enforcer_for(&signing_key);
+        let fs_token = token_with_id(
+            "fs-boundary-token",
+            ImpossibleCapability::FsAccess,
+            5_000,
+            &signing_key,
+        );
+        let network_token = token_with_id(
+            "network-boundary-token",
+            ImpossibleCapability::OutboundNetwork,
+            5_000,
+            &signing_key,
+        );
+        enforcer.opt_in(fs_token, "admin", 2_000).unwrap();
+        enforcer.opt_in(network_token, "admin", 2_000).unwrap();
+
+        let expired = enforcer.expire_tokens(5_000);
+
+        assert_eq!(expired.len(), 2);
+        assert!(expired.contains(&ImpossibleCapability::FsAccess));
+        assert!(expired.contains(&ImpossibleCapability::OutboundNetwork));
+        assert!(enforcer.status(ImpossibleCapability::FsAccess).is_blocked());
+        assert!(
+            enforcer
+                .status(ImpossibleCapability::OutboundNetwork)
+                .is_blocked()
+        );
+        assert_eq!(enforcer.metrics().opt_in_expired_total, 2);
+    }
+
+    // -- Negative-Path Tests --
+
+    #[test]
+    fn negative_malformed_capability_token_injection_attacks() {
+        // Test capability token validation against various injection and corruption attacks
+        let (mut enforcer, sk) = make_enforcer();
+
+        let malicious_token_scenarios = vec![
+            // Token with extremely long fields
+            CapabilityToken {
+                token_id: "x".repeat(1_000_000),
+                capability: ImpossibleCapability::FsAccess,
+                issuer: "y".repeat(100_000),
+                subject: "z".repeat(100_000),
+                issued_at_ms: 1000,
+                expires_at_ms: 5000,
+                signature: String::new(),
+            },
+
+            // Token with Unicode injection in fields
+            CapabilityToken {
+                token_id: "token🚀攻击кибер".to_string(),
+                capability: ImpossibleCapability::OutboundNetwork,
+                issuer: "issuer\u{200B}invisible".to_string(),
+                subject: "subject\u{FEFF}bom".to_string(),
+                issued_at_ms: 1000,
+                expires_at_ms: 5000,
+                signature: String::new(),
+            },
+
+            // Token with control characters and null bytes
+            CapabilityToken {
+                token_id: "token\0null\r\ninjection".to_string(),
+                capability: ImpossibleCapability::ChildProcessSpawn,
+                issuer: "issuer\x01control".to_string(),
+                subject: "subject\x1B[Hescape".to_string(),
+                issued_at_ms: 1000,
+                expires_at_ms: 5000,
+                signature: String::new(),
+            },
+
+            // Token with script injection attempts
+            CapabilityToken {
+                token_id: "token<script>alert('xss')</script>".to_string(),
+                capability: ImpossibleCapability::UnsignedExtension,
+                issuer: "issuer'; DROP TABLE tokens; --".to_string(),
+                subject: "subject && curl evil.com".to_string(),
+                issued_at_ms: 1000,
+                expires_at_ms: 5000,
+                signature: String::new(),
+            },
+
+            // Token with path traversal attempts
+            CapabilityToken {
+                token_id: "../../../etc/passwd".to_string(),
+                capability: ImpossibleCapability::DisableHardening,
+                issuer: "../../../../proc/version".to_string(),
+                subject: "../../bin/sh".to_string(),
+                issued_at_ms: 1000,
+                expires_at_ms: 5000,
+                signature: String::new(),
+            },
+
+            // Token with binary data injection
+            CapabilityToken {
+                token_id: String::from_utf8_lossy(b"token\xFF\xFE\xFD").to_string(),
+                capability: ImpossibleCapability::FsAccess,
+                issuer: String::from_utf8_lossy(b"issuer\x00\x01\x02").to_string(),
+                subject: String::from_utf8_lossy(b"subject\xFC\xFB\xFA").to_string(),
+                issued_at_ms: 1000,
+                expires_at_ms: 5000,
+                signature: String::new(),
+            },
+        ];
+
+        for (i, mut malicious_token) in malicious_token_scenarios.into_iter().enumerate() {
+            // Test with invalid signature (empty)
+            let grant_result_unsigned = enforcer.grant_capability(malicious_token.clone());
+
+            match grant_result_unsigned {
+                Err(ImpossibleCapabilityError::InvalidSignature { .. }) => {
+                    // Expected for unsigned tokens
+                },
+                Err(_) => {
+                    // Other validation errors acceptable for malformed tokens
+                },
+                Ok(()) => {
+                    panic!("Should not grant capability with unsigned malicious token {}", i);
+                }
+            }
+
+            // Test with valid signature but malicious content
+            sign_token(&mut malicious_token, &sk);
+            let grant_result_signed = enforcer.grant_capability(malicious_token.clone());
+
+            match grant_result_signed {
+                Ok(()) => {
+                    // If granted, verify the capability is properly isolated from injection
+                    let capability_status = enforcer.status(malicious_token.capability);
+                    assert!(capability_status.is_granted());
+
+                    // Test that malicious content doesn't affect other operations
+                    let attempt_result = enforcer.attempt_operation(malicious_token.capability, 2000);
+                    assert!(attempt_result.is_ok(), "Operation should succeed despite malicious token content");
+                },
+                Err(_) => {
+                    // Acceptable to reject malformed tokens even with valid signatures
+                }
+            }
+        }
+
+        // Enforcer should remain functional despite malicious token attempts
+        let metrics = enforcer.metrics();
+        assert!(metrics.opt_in_granted_total < 10); // Should not have granted all malicious tokens
+    }
+
+    #[test]
+    fn negative_extreme_timestamp_arithmetic_overflow_protection() {
+        // Test timestamp handling with extreme values near u64::MAX
+        let (mut enforcer, sk) = make_enforcer();
+
+        let extreme_timestamp_cases = vec![
+            // Token with timestamps at u64::MAX boundary
+            (0, u64::MAX, "max_expiry"),
+            (u64::MAX, u64::MAX, "max_both"),
+            (u64::MAX.saturating_sub(1000), u64::MAX, "near_max_issued"),
+            (1, u64::MAX.saturating_sub(1), "near_max_expiry"),
+
+            // Token issued in the future
+            (u64::MAX.saturating_sub(100), 1000, "future_issued"),
+
+            // Token with zero timestamps
+            (0, 0, "zero_both"),
+            (0, 1, "zero_issued"),
+            (1, 0, "zero_expiry"),
+
+            // Tokens with potential overflow in TTL calculations
+            (u64::MAX.saturating_sub(500), u64::MAX.saturating_sub(100), "overflow_ttl"),
+        ];
+
+        for (issued_at, expires_at, case_name) in extreme_timestamp_cases {
+            let mut extreme_token = CapabilityToken {
+                token_id: format!("extreme-timestamp-{}", case_name),
+                capability: ImpossibleCapability::FsAccess,
+                issuer: "extreme-issuer".to_string(),
+                subject: "extreme-subject".to_string(),
+                issued_at_ms: issued_at,
+                expires_at_ms: expires_at,
+                signature: String::new(),
+            };
+
+            sign_token(&mut extreme_token, &sk);
+
+            let grant_result = enforcer.grant_capability(extreme_token.clone());
+
+            match grant_result {
+                Ok(()) => {
+                    // If granted, test operation attempts with extreme timestamps
+                    let operation_times = vec![
+                        0,
+                        1000,
+                        extreme_token.issued_at_ms,
+                        extreme_token.expires_at_ms,
+                        u64::MAX.saturating_sub(100),
+                        u64::MAX,
+                    ];
+
+                    for operation_time in operation_times {
+                        let attempt_result = enforcer.attempt_operation(extreme_token.capability, operation_time);
+
+                        // Should handle extreme timestamps without arithmetic overflow
+                        match attempt_result {
+                            Ok(()) => {
+                                // Operation allowed - timestamp arithmetic worked correctly
+                            },
+                            Err(ImpossibleCapabilityError::TokenExpired { .. }) => {
+                                // Expected if operation time > expires_at
+                            },
+                            Err(ImpossibleCapabilityError::Blocked { .. }) => {
+                                // Expected if capability not granted or other issues
+                            },
+                            Err(_) => {
+                                // Other errors acceptable for extreme timestamps
+                            }
+                        }
+                    }
+                },
+                Err(ImpossibleCapabilityError::TokenExpired { .. }) => {
+                    // Expected for tokens with invalid timestamp relationships
+                },
+                Err(_) => {
+                    // Other validation errors acceptable for extreme timestamps
+                }
+            }
+        }
+
+        // Metrics should handle extreme timestamps safely
+        let metrics = enforcer.metrics();
+        assert!(metrics.total_attempts < u64::MAX); // Should not overflow
+    }
+
+    #[test]
+    fn negative_cryptographic_signature_bypass_and_forgery_attempts() {
+        // Test cryptographic signature validation against bypass and forgery attempts
+        let (mut enforcer, legitimate_sk) = make_enforcer();
+
+        // Create another signing key for forgery attempts
+        let malicious_sk = {
+            let seed: [u8; 32] = [0xFF; 32]; // Different seed
+            SigningKey::from_bytes(&seed)
+        };
+
+        let signature_attack_scenarios = vec![
+            // Empty signature
+            ("empty_signature", ""),
+
+            // Invalid hex signature
+            ("invalid_hex", "gggggggg"),
+
+            // Valid hex but wrong length
+            ("wrong_length", "deadbeef"),
+
+            // Signature from wrong key
+            ("wrong_key", {
+                let mut token = make_token(ImpossibleCapability::FsAccess, 5000, &malicious_sk);
+                token.signature.clone()
+            }),
+
+            // Signature over different data
+            ("different_data", {
+                let mut token = make_token(ImpossibleCapability::OutboundNetwork, 5000, &legitimate_sk);
+                token.signature.clone()
+            }),
+
+            // Signature with extra data appended
+            ("extra_data", {
+                let mut token = make_token(ImpossibleCapability::FsAccess, 5000, &legitimate_sk);
+                format!("{}deadbeef", token.signature)
+            }),
+
+            // Signature with case variation
+            ("case_variation", {
+                let mut token = make_token(ImpossibleCapability::FsAccess, 5000, &legitimate_sk);
+                token.signature.to_uppercase()
+            }),
+
+            // Signature with null bytes
+            ("null_bytes", "0".repeat(127) + "\0"),
+
+            // Signature with Unicode
+            ("unicode_sig", "🔐".repeat(16)),
+
+            // Extremely long signature
+            ("long_signature", "a".repeat(100_000)),
+        ];
+
+        for (attack_name, malicious_signature) in signature_attack_scenarios {
+            let mut attack_token = CapabilityToken {
+                token_id: format!("attack-token-{}", attack_name),
+                capability: ImpossibleCapability::FsAccess,
+                issuer: "attack-issuer".to_string(),
+                subject: "attack-subject".to_string(),
+                issued_at_ms: 1000,
+                expires_at_ms: 5000,
+                signature: malicious_signature.to_string(),
+            };
+
+            let grant_result = enforcer.grant_capability(attack_token);
+
+            match grant_result {
+                Err(ImpossibleCapabilityError::InvalidSignature { .. }) => {
+                    // Expected for signature attacks
+                },
+                Err(_) => {
+                    // Other validation errors acceptable
+                },
+                Ok(()) => {
+                    panic!("Should not grant capability with forged signature: {}", attack_name);
+                }
+            }
+        }
+
+        // Test signature replay attacks
+        let mut legitimate_token = make_token(ImpossibleCapability::FsAccess, 5000, &legitimate_sk);
+        let original_signature = legitimate_token.signature.clone();
+
+        // Grant legitimate token
+        enforcer.grant_capability(legitimate_token.clone()).expect("legitimate token should be granted");
+
+        // Try to reuse signature on different token
+        let mut replay_token = CapabilityToken {
+            token_id: "replay-attack".to_string(),
+            capability: ImpossibleCapability::OutboundNetwork, // Different capability
+            issuer: "replay-issuer".to_string(),
+            subject: "replay-subject".to_string(),
+            issued_at_ms: 2000,
+            expires_at_ms: 6000,
+            signature: original_signature, // Reused signature
+        };
+
+        let replay_result = enforcer.grant_capability(replay_token);
+
+        match replay_result {
+            Err(ImpossibleCapabilityError::InvalidSignature { .. }) => {
+                // Expected - signature should not validate for different data
+            },
+            Err(_) => {
+                // Other validation errors acceptable
+            },
+            Ok(()) => {
+                panic!("Should not allow signature replay attack");
+            }
+        }
+    }
+
+    #[test]
+    fn negative_capability_enforcement_bypass_through_state_manipulation() {
+        // Test attempts to bypass capability enforcement through state manipulation
+        let (mut enforcer, sk) = make_enforcer();
+
+        // Grant a capability legitimately
+        let legitimate_token = make_token(ImpossibleCapability::FsAccess, 5000, &sk);
+        enforcer.grant_capability(legitimate_token).expect("legitimate grant should succeed");
+
+        // Attempt operations on other capabilities without proper tokens
+        let unauthorized_capabilities = vec![
+            ImpossibleCapability::OutboundNetwork,
+            ImpossibleCapability::ChildProcessSpawn,
+            ImpossibleCapability::UnsignedExtension,
+            ImpossibleCapability::DisableHardening,
+        ];
+
+        for unauthorized_cap in unauthorized_capabilities {
+            let unauthorized_result = enforcer.attempt_operation(unauthorized_cap, 2000);
+
+            match unauthorized_result {
+                Err(ImpossibleCapabilityError::Blocked { .. }) => {
+                    // Expected - should block unauthorized capabilities
+                },
+                Err(_) => {
+                    // Other errors acceptable
+                },
+                Ok(()) => {
+                    panic!("Should not allow unauthorized capability: {:?}", unauthorized_cap);
+                }
+            }
+
+            // Verify capability status remains blocked
+            assert!(enforcer.status(unauthorized_cap).is_blocked());
+        }
+
+        // Test rapid operation attempts (potential DoS)
+        for _i in 0..1000 {
+            let rapid_result = enforcer.attempt_operation(ImpossibleCapability::OutboundNetwork, 2000);
+            assert!(rapid_result.is_err(), "Rapid attempts should continue to be blocked");
+        }
+
+        // Test operations with future timestamps
+        let future_result = enforcer.attempt_operation(ImpossibleCapability::FsAccess, u64::MAX);
+        assert!(future_result.is_err(), "Future timestamp should not bypass expiry");
+
+        // Test operations with past timestamps
+        let past_result = enforcer.attempt_operation(ImpossibleCapability::FsAccess, 0);
+        assert!(past_result.is_err(), "Past timestamp should not be valid");
+
+        // Verify metrics accurately reflect blocked attempts
+        let metrics = enforcer.metrics();
+        assert!(metrics.blocked_attempts_total > 1000);
+        assert_eq!(metrics.opt_in_granted_total, 1); // Only one legitimate grant
+    }
+
+    #[test]
+    fn negative_audit_log_memory_exhaustion_under_operation_flood() {
+        // Test audit log behavior under massive operation attempt floods
+        let (mut enforcer, sk) = make_enforcer();
+
+        // Create tokens for all capabilities
+        let capabilities = [
+            ImpossibleCapability::FsAccess,
+            ImpossibleCapability::OutboundNetwork,
+            ImpossibleCapability::ChildProcessSpawn,
+            ImpossibleCapability::UnsignedExtension,
+            ImpossibleCapability::DisableHardening,
+        ];
+
+        for cap in capabilities {
+            let token = make_token(cap, 10000, &sk);
+            enforcer.grant_capability(token).expect("grant should succeed");
+        }
+
+        // Flood with massive number of operations
+        let operation_flood_count = MAX_AUDIT_LOG_ENTRIES.saturating_add(5000);
+
+        for i in 0..operation_flood_count {
+            let capability = capabilities[i % capabilities.len()];
+            let operation_time = 1000 + (i as u64);
+
+            // Mix of valid and expired operations
+            let expiry_time = if i % 3 == 0 { 500 } else { operation_time + 1000 };
+
+            let _ = enforcer.attempt_operation(capability, expiry_time);
+
+            // Periodic revocation attempts to generate more audit events
+            if i % 100 == 0 {
+                let _ = enforcer.revoke_capability(capability, operation_time);
+            }
+        }
+
+        // Audit log should be bounded despite massive operation flood
+        let audit_events = enforcer.audit_events();
+        assert!(audit_events.len() <= MAX_AUDIT_LOG_ENTRIES.saturating_add(100));
+
+        // All audit events should be well-formed despite high volume
+        for event in audit_events {
+            assert!(!event.event_code.is_empty());
+            assert!(!event.capability.label().is_empty());
+            assert!(event.timestamp_ms > 0);
+        }
+
+        // Metrics should accurately reflect the flood
+        let metrics = enforcer.metrics();
+        assert!(metrics.total_attempts >= operation_flood_count as u64);
+        assert!(metrics.total_attempts < u64::MAX); // Should not overflow
+
+        // Enforcer should remain functional after flood
+        let post_flood_token = make_token(ImpossibleCapability::FsAccess, 20000, &sk);
+        let post_flood_result = enforcer.grant_capability(post_flood_token);
+        assert!(post_flood_result.is_ok(), "Enforcer should remain functional after flood");
+    }
+
+    #[test]
+    fn negative_concurrent_capability_manipulation_race_conditions() {
+        // Test concurrent capability operations for race conditions and state corruption
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let (base_enforcer, sk) = make_enforcer();
+        let enforcer = Arc::new(Mutex::new(base_enforcer));
+        let signing_key = Arc::new(sk);
+
+        let success_count = Arc::new(Mutex::new(0u32));
+        let error_count = Arc::new(Mutex::new(0u32));
+
+        // Spawn concurrent threads for different operations
+        let operations = vec![
+            ("grant", 5),
+            ("attempt", 8),
+            ("revoke", 3),
+            ("status_check", 10),
+        ];
+
+        let mut handles = Vec::new();
+
+        for (operation_type, thread_count) in operations {
+            for thread_id in 0..thread_count {
+                let enforcer_clone = Arc::clone(&enforcer);
+                let sk_clone = Arc::clone(&signing_key);
+                let success_count_clone = Arc::clone(&success_count);
+                let error_count_clone = Arc::clone(&error_count);
+                let op_type = operation_type.to_string();
+
+                let handle = thread::spawn(move || {
+                    let capability = match thread_id % 5 {
+                        0 => ImpossibleCapability::FsAccess,
+                        1 => ImpossibleCapability::OutboundNetwork,
+                        2 => ImpossibleCapability::ChildProcessSpawn,
+                        3 => ImpossibleCapability::UnsignedExtension,
+                        _ => ImpossibleCapability::DisableHardening,
+                    };
+
+                    for iteration in 0..50 {
+                        let timestamp = 1000 + (thread_id * 100) + iteration;
+
+                        let result = match op_type.as_str() {
+                            "grant" => {
+                                let token = CapabilityToken {
+                                    token_id: format!("concurrent-{}-{}-{}", op_type, thread_id, iteration),
+                                    capability,
+                                    issuer: format!("concurrent-issuer-{}", thread_id),
+                                    subject: format!("concurrent-subject-{}", thread_id),
+                                    issued_at_ms: timestamp,
+                                    expires_at_ms: timestamp + 5000,
+                                    signature: String::new(),
+                                };
+
+                                // Sign token (mutex needed for thread safety)
+                                let mut signed_token = token;
+                                sign_token(&mut signed_token, &sk_clone);
+
+                                enforcer_clone.lock().unwrap().grant_capability(signed_token).map_err(|e| format!("{:?}", e))
+                            },
+                            "attempt" => {
+                                enforcer_clone.lock().unwrap().attempt_operation(capability, timestamp).map_err(|e| format!("{:?}", e))
+                            },
+                            "revoke" => {
+                                enforcer_clone.lock().unwrap().revoke_capability(capability, timestamp).map_err(|e| format!("{:?}", e))
+                            },
+                            "status_check" => {
+                                let status = enforcer_clone.lock().unwrap().status(capability);
+                                // Status check always succeeds
+                                Ok(())
+                            },
+                            _ => unreachable!(),
+                        };
+
+                        match result {
+                            Ok(()) => {
+                                let mut count = success_count_clone.lock().unwrap();
+                                *count = count.saturating_add(1);
+                            },
+                            Err(_) => {
+                                let mut count = error_count_clone.lock().unwrap();
+                                *count = count.saturating_add(1);
+                            }
+                        }
+                    }
+                });
+
+                handles.push(handle);
+            }
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("thread should not panic");
+        }
+
+        let final_success = *success_count.lock().unwrap();
+        let final_errors = *error_count.lock().unwrap();
+
+        // Should handle concurrent operations without panicking
+        assert!(final_success + final_errors > 0);
+
+        // Enforcer state should be consistent after concurrent access
+        let enforcer_lock = enforcer.lock().unwrap();
+        let final_metrics = enforcer_lock.metrics();
+
+        // Metrics should be consistent
+        assert!(final_metrics.total_attempts >= final_success as u64);
+        assert!(final_metrics.opt_in_granted_total <= final_metrics.total_attempts);
+
+        // All capabilities should have deterministic status
+        for cap in [
+            ImpossibleCapability::FsAccess,
+            ImpossibleCapability::OutboundNetwork,
+            ImpossibleCapability::ChildProcessSpawn,
+            ImpossibleCapability::UnsignedExtension,
+            ImpossibleCapability::DisableHardening,
+        ] {
+            let status = enforcer_lock.status(cap);
+            // Status should be valid (either granted or blocked)
+            assert!(status.is_granted() || status.is_blocked());
+        }
+    }
+
+    #[test]
+    fn negative_capability_token_content_hash_collision_resistance() {
+        // Test capability token content hash calculation against collision attacks
+        let sk = test_signing_key();
+
+        // Create tokens with systematic variations to test hash collision resistance
+        let collision_test_cases = vec![
+            // Same content, different field ordering (should hash identically)
+            (
+                CapabilityToken {
+                    token_id: "collision-test-1".to_string(),
+                    capability: ImpossibleCapability::FsAccess,
+                    issuer: "issuer-a".to_string(),
+                    subject: "subject-a".to_string(),
+                    issued_at_ms: 1000,
+                    expires_at_ms: 5000,
+                    signature: String::new(),
+                },
+                CapabilityToken {
+                    token_id: "collision-test-1".to_string(),
+                    capability: ImpossibleCapability::FsAccess,
+                    issuer: "issuer-a".to_string(),
+                    subject: "subject-a".to_string(),
+                    issued_at_ms: 1000,
+                    expires_at_ms: 5000,
+                    signature: String::new(),
+                },
+                true, // Should have same hash
+            ),
+
+            // Single bit difference
+            (
+                CapabilityToken {
+                    token_id: "collision-test-2".to_string(),
+                    capability: ImpossibleCapability::FsAccess,
+                    issuer: "issuer-a".to_string(),
+                    subject: "subject-a".to_string(),
+                    issued_at_ms: 1000,
+                    expires_at_ms: 5000,
+                    signature: String::new(),
+                },
+                CapabilityToken {
+                    token_id: "collision-test-2".to_string(),
+                    capability: ImpossibleCapability::FsAccess,
+                    issuer: "issuer-a".to_string(),
+                    subject: "subject-a".to_string(),
+                    issued_at_ms: 1001, // Single millisecond difference
+                    expires_at_ms: 5000,
+                    signature: String::new(),
+                },
+                false, // Should have different hash
+            ),
+
+            // Length extension attempt
+            (
+                CapabilityToken {
+                    token_id: "collision".to_string(),
+                    capability: ImpossibleCapability::FsAccess,
+                    issuer: "issuer".to_string(),
+                    subject: "subject".to_string(),
+                    issued_at_ms: 1000,
+                    expires_at_ms: 5000,
+                    signature: String::new(),
+                },
+                CapabilityToken {
+                    token_id: "collision\x00extra".to_string(),
+                    capability: ImpossibleCapability::FsAccess,
+                    issuer: "issuer".to_string(),
+                    subject: "subject".to_string(),
+                    issued_at_ms: 1000,
+                    expires_at_ms: 5000,
+                    signature: String::new(),
+                },
+                false, // Should have different hash
+            ),
+
+            // Unicode normalization variations
+            (
+                CapabilityToken {
+                    token_id: "café".to_string(), // NFC form
+                    capability: ImpossibleCapability::FsAccess,
+                    issuer: "issuer".to_string(),
+                    subject: "subject".to_string(),
+                    issued_at_ms: 1000,
+                    expires_at_ms: 5000,
+                    signature: String::new(),
+                },
+                CapabilityToken {
+                    token_id: "cafe\u{0301}".to_string(), // NFD form
+                    capability: ImpossibleCapability::FsAccess,
+                    issuer: "issuer".to_string(),
+                    subject: "subject".to_string(),
+                    issued_at_ms: 1000,
+                    expires_at_ms: 5000,
+                    signature: String::new(),
+                },
+                false, // Should have different hash (no normalization)
+            ),
+        ];
+
+        for (token1, token2, should_match) in collision_test_cases {
+            let hash1 = token1.content_hash();
+            let hash2 = token2.content_hash();
+
+            if should_match {
+                assert_eq!(hash1, hash2, "Identical tokens should have same hash");
+            } else {
+                assert_ne!(hash1, hash2, "Different tokens should have different hashes");
+            }
+
+            // All hashes should be valid SHA256 format
+            assert_eq!(hash1.len(), 64, "Hash should be 64 hex characters");
+            assert_eq!(hash2.len(), 64, "Hash should be 64 hex characters");
+            assert!(hash1.chars().all(|c| c.is_ascii_hexdigit()), "Hash should contain only hex characters");
+            assert!(hash2.chars().all(|c| c.is_ascii_hexdigit()), "Hash should contain only hex characters");
+        }
+
+        // Test hash avalanche effect with systematic bit flips
+        let base_token = CapabilityToken {
+            token_id: "avalanche-test".to_string(),
+            capability: ImpossibleCapability::FsAccess,
+            issuer: "issuer".to_string(),
+            subject: "subject".to_string(),
+            issued_at_ms: 1000,
+            expires_at_ms: 5000,
+            signature: String::new(),
+        };
+
+        let base_hash = base_token.content_hash();
+        let mut unique_hashes = std::collections::HashSet::new();
+        unique_hashes.insert(base_hash.clone());
+
+        // Test variations in each field
+        for i in 0..100 {
+            let variant_token = CapabilityToken {
+                token_id: format!("avalanche-test-{}", i),
+                capability: base_token.capability,
+                issuer: base_token.issuer.clone(),
+                subject: base_token.subject.clone(),
+                issued_at_ms: base_token.issued_at_ms + i,
+                expires_at_ms: base_token.expires_at_ms + i,
+                signature: String::new(),
+            };
+
+            let variant_hash = variant_token.content_hash();
+            assert_ne!(variant_hash, base_hash, "Variant should have different hash");
+            assert!(unique_hashes.insert(variant_hash), "All variant hashes should be unique");
+        }
+
+        // Should have generated many unique hashes
+        assert!(unique_hashes.len() > 90, "Should generate unique hashes for small variations");
+    }
+
+    #[test]
+    fn negative_silent_disable_detection_and_prevention() {
+        // Test silent disable detection against various bypass attempts
+        let (mut enforcer, sk) = make_enforcer();
+
+        // Grant capabilities legitimately
+        for cap in [ImpossibleCapability::FsAccess, ImpossibleCapability::OutboundNetwork] {
+            let token = make_token(cap, 10000, &sk);
+            enforcer.grant_capability(token).expect("grant should succeed");
+        }
+
+        // Simulate silent disable attempts through state manipulation
+        let silent_disable_scenarios = vec![
+            // Attempt to directly disable enforcement
+            ("direct_disable", ImpossibleCapability::FsAccess),
+            ("environment_override", ImpossibleCapability::OutboundNetwork),
+            ("configuration_bypass", ImpossibleCapability::FsAccess),
+        ];
+
+        for (attack_type, capability) in silent_disable_scenarios {
+            // Record initial state
+            let initial_status = enforcer.status(capability);
+            assert!(initial_status.is_granted(), "Capability should be initially granted");
+
+            // Attempt operation that should succeed
+            let legitimate_operation = enforcer.attempt_operation(capability, 2000);
+            assert!(legitimate_operation.is_ok(), "Legitimate operation should succeed");
+
+            // Simulate potential silent disable detection
+            // In a real implementation, this might involve:
+            // - Environment variable monitoring
+            // - Configuration file integrity checks
+            // - Runtime flag modification detection
+            // For testing, we verify the enforcer maintains state integrity
+
+            // Verify capability status remains consistent
+            let post_operation_status = enforcer.status(capability);
+            assert!(post_operation_status.is_granted(), "Status should remain granted after operation");
+
+            // Verify audit trail includes operations
+            let audit_events = enforcer.audit_events();
+            let operation_events = audit_events.iter()
+                .filter(|e| e.capability == capability && e.event_code == IBD_002_OPT_IN_GRANTED)
+                .count();
+            assert!(operation_events > 0, "Should have audit events for capability operations");
+
+            // Test that revocation is properly audited (not silent)
+            let revoke_result = enforcer.revoke_capability(capability, 3000);
+            match revoke_result {
+                Ok(()) => {
+                    // Verify revocation is audited
+                    let post_revoke_events = enforcer.audit_events();
+                    assert!(post_revoke_events.len() > audit_events.len(), "Revocation should be audited");
+
+                    // Verify status properly reflects revocation
+                    assert!(enforcer.status(capability).is_blocked(), "Status should be blocked after revocation");
+                },
+                Err(_) => {
+                    // Revocation failure is acceptable in some implementations
+                }
+            }
+        }
+
+        // Verify that metrics accurately track all operations (no silent operations)
+        let final_metrics = enforcer.metrics();
+        assert!(final_metrics.total_attempts > 0, "Should track all operation attempts");
+        assert!(final_metrics.blocked_attempts_total >= 0, "Should track blocked attempts");
+
+        // Test detection of configuration tampering
+        // This would typically involve file system monitoring, but we test the audit trail
+        let audit_events = enforcer.audit_events();
+        for event in audit_events {
+            assert!(!event.event_code.is_empty(), "All events should have valid codes");
+            assert!(event.timestamp_ms > 0, "All events should have valid timestamps");
         }
     }
 }

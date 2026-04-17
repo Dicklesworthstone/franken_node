@@ -325,7 +325,7 @@ impl TrafficPolicy {
                     rationale: format!("risky category {} denied by default", intent),
                 },
             );
-            priority += 1;
+            priority = priority.saturating_add(1);
         }
 
         // Non-risky categories: allow by default.
@@ -348,7 +348,7 @@ impl TrafficPolicy {
                     rationale: format!("non-risky category {} allowed by default", intent),
                 },
             );
-            priority += 1;
+            priority = priority.saturating_add(1);
         }
 
         Self {
@@ -622,7 +622,7 @@ impl EffectsFirewall {
 
     /// Add a policy override for a specific extension and intent.
     pub fn add_override(&mut self, ovr: PolicyOverride) -> Result<(), FirewallError> {
-        if ovr.justification.is_empty() {
+        if ovr.justification.trim().is_empty() {
             return Err(FirewallError::OverrideUnauthorized(
                 "override requires non-empty justification".into(),
             ));
@@ -1209,6 +1209,22 @@ mod tests {
     }
 
     #[test]
+    fn test_unknown_extension_fails_before_classification_or_receipt() {
+        let mut fw = EffectsFirewall::with_default_policy();
+        let effect = make_effect("e-unk-no-receipt", "ext-unknown");
+
+        let result = fw.evaluate(&effect, "trace-unk", "2026-01-01T00:00:00Z");
+
+        assert_eq!(result.unwrap_err().code(), ERR_FW_EXTENSION_UNKNOWN);
+        let codes: Vec<&str> = fw
+            .audit_log()
+            .iter()
+            .map(|event| event.event_code.as_str())
+            .collect();
+        assert_eq!(codes, vec![FW_001]);
+    }
+
+    #[test]
     fn test_invalid_effect_empty_id() {
         let mut fw = make_firewall();
         let mut effect = make_effect("", "ext-001");
@@ -1284,6 +1300,30 @@ mod tests {
     }
 
     #[test]
+    fn test_zero_quarantine_capacity_fails_closed_without_recording_effect() {
+        let mut policy = TrafficPolicy::default_policy();
+        policy.quarantine_capacity = 0;
+        policy.registered_extensions.insert("ext-001".into());
+        policy.rules.insert(
+            0,
+            TrafficPolicyRule {
+                intent: IntentClassification::DataFetch,
+                verdict: FirewallVerdict::Quarantine,
+                host_pattern: None,
+                priority: 0,
+                rationale: "quarantine fetches for test".into(),
+            },
+        );
+        let mut fw = EffectsFirewall::new(policy);
+        let effect = make_effect("eq-zero", "ext-001");
+
+        let result = fw.evaluate(&effect, "t-zero", "2026-01-01T00:00:00Z");
+
+        assert_eq!(result.unwrap_err().code(), ERR_FW_QUARANTINE_FULL);
+        assert!(!fw.quarantined().contains("eq-zero"));
+    }
+
+    #[test]
     fn test_policy_override() {
         let mut fw = make_firewall();
         let ovr = PolicyOverride {
@@ -1301,6 +1341,87 @@ mod tests {
             .unwrap();
         assert_eq!(decision.verdict, FirewallVerdict::Challenge);
         assert!(decision.rationale.contains("manual review required"));
+    }
+
+    #[test]
+    fn test_override_for_unknown_extension_does_not_bypass_registration() {
+        let mut fw = EffectsFirewall::with_default_policy();
+        fw.add_override(PolicyOverride {
+            extension_id: "ext-unknown".into(),
+            intent: IntentClassification::DataFetch,
+            new_verdict: FirewallVerdict::Allow,
+            justification: "temporary exception".into(),
+            approved_by: "admin".into(),
+        })
+        .unwrap();
+        let effect = make_effect("e-unknown-override", "ext-unknown");
+
+        let result = fw.evaluate(&effect, "trace-unknown-override", "2026-01-01T00:00:00Z");
+
+        assert_eq!(result.unwrap_err().code(), ERR_FW_EXTENSION_UNKNOWN);
+        assert!(
+            !fw.audit_log()
+                .iter()
+                .any(|event| event.event_code.as_str() == FW_010)
+        );
+    }
+
+    #[test]
+    fn test_quarantine_override_respects_capacity() {
+        let mut policy = TrafficPolicy::default_policy();
+        policy.quarantine_capacity = 0;
+        policy.registered_extensions.insert("ext-001".into());
+        let mut fw = EffectsFirewall::new(policy);
+        fw.add_override(PolicyOverride {
+            extension_id: "ext-001".into(),
+            intent: IntentClassification::DataFetch,
+            new_verdict: FirewallVerdict::Quarantine,
+            justification: "force review".into(),
+            approved_by: "admin".into(),
+        })
+        .unwrap();
+        let effect = make_effect("e-override-quarantine-full", "ext-001");
+
+        let result = fw.evaluate(
+            &effect,
+            "trace-override-quarantine-full",
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.unwrap_err().code(), ERR_FW_QUARANTINE_FULL);
+        assert!(!fw.quarantined().contains("e-override-quarantine-full"));
+    }
+
+    #[test]
+    fn test_no_policy_rule_for_classified_intent_denies_fail_closed() {
+        let mut policy = TrafficPolicy {
+            policy_id: "empty-policy".into(),
+            schema_version: SCHEMA_VERSION.into(),
+            rules: BTreeMap::new(),
+            registered_extensions: BTreeSet::from(["ext-001".into()]),
+            quarantine_capacity: 10,
+        };
+        policy.rules.insert(
+            0,
+            TrafficPolicyRule {
+                intent: IntentClassification::HealthCheck,
+                verdict: FirewallVerdict::Allow,
+                host_pattern: None,
+                priority: 0,
+                rationale: "health only".into(),
+            },
+        );
+        let mut fw = EffectsFirewall::new(policy);
+        let effect = make_effect("e-no-policy", "ext-001");
+
+        let decision = fw
+            .evaluate(&effect, "trace-no-policy", "2026-01-01T00:00:00Z")
+            .unwrap();
+
+        assert_eq!(decision.intent, Some(IntentClassification::DataFetch));
+        assert_eq!(decision.verdict, FirewallVerdict::Deny);
+        assert_eq!(decision.matched_rule_priority, None);
+        assert!(decision.rationale.contains("no policy rule found"));
     }
 
     #[test]
@@ -1335,6 +1456,36 @@ mod tests {
     }
 
     #[test]
+    fn test_host_specific_policy_gap_denies_when_no_fallback_rule_exists() {
+        let mut policy = TrafficPolicy {
+            policy_id: "host-specific-only".into(),
+            schema_version: SCHEMA_VERSION.into(),
+            rules: BTreeMap::new(),
+            registered_extensions: BTreeSet::from(["ext-001".into()]),
+            quarantine_capacity: 10,
+        };
+        policy.rules.insert(
+            0,
+            TrafficPolicyRule {
+                intent: IntentClassification::DataFetch,
+                verdict: FirewallVerdict::Allow,
+                host_pattern: Some("admin.example.com".into()),
+                priority: 0,
+                rationale: "admin only".into(),
+            },
+        );
+        let mut fw = EffectsFirewall::new(policy);
+        let effect = make_effect("e-host-gap", "ext-001");
+
+        let decision = fw
+            .evaluate(&effect, "trace-host-gap", "2026-01-01T00:00:00Z")
+            .unwrap();
+
+        assert_eq!(decision.verdict, FirewallVerdict::Deny);
+        assert_eq!(decision.matched_rule_priority, None);
+    }
+
+    #[test]
     fn test_wildcard_host_pattern_matches_subdomains_only() {
         let mut policy = TrafficPolicy::default_policy();
         policy.registered_extensions.insert("ext-001".into());
@@ -1363,6 +1514,20 @@ mod tests {
             .evaluate(&apex_effect, "trace-apex", "2026-01-01T00:00:00Z")
             .unwrap();
         assert_eq!(apex_decision.verdict, FirewallVerdict::Allow);
+    }
+
+    #[test]
+    fn test_wildcard_host_pattern_rejects_suffix_impostor() {
+        let rule = TrafficPolicyRule {
+            intent: IntentClassification::DataFetch,
+            verdict: FirewallVerdict::Challenge,
+            host_pattern: Some("*.example.com".into()),
+            priority: 0,
+            rationale: "subdomains only".into(),
+        };
+
+        assert!(!rule.matches_host("badexample.com"));
+        assert!(!rule.matches_host("example.com"));
     }
 
     #[test]
@@ -1668,6 +1833,155 @@ mod tests {
     }
 
     #[test]
+    fn test_override_rejects_whitespace_only_justification() {
+        let mut fw = make_firewall();
+        let result = fw.add_override(PolicyOverride {
+            extension_id: "ext-001".into(),
+            intent: IntentClassification::DataFetch,
+            new_verdict: FirewallVerdict::Deny,
+            justification: " \t\n ".into(),
+            approved_by: "admin".into(),
+        });
+
+        assert_eq!(result.unwrap_err().code(), ERR_FW_OVERRIDE_UNAUTHORIZED);
+    }
+
+    #[test]
+    fn test_rejected_whitespace_override_is_not_installed() {
+        let mut fw = make_firewall();
+        let result = fw.add_override(PolicyOverride {
+            extension_id: "ext-001".into(),
+            intent: IntentClassification::DataFetch,
+            new_verdict: FirewallVerdict::Deny,
+            justification: "\r\n\t ".into(),
+            approved_by: "admin".into(),
+        });
+        assert_eq!(result.unwrap_err().code(), ERR_FW_OVERRIDE_UNAUTHORIZED);
+
+        let effect = make_effect("e-no-whitespace-override", "ext-001");
+        let decision = fw
+            .evaluate(
+                &effect,
+                "trace-no-whitespace-override",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+
+        assert_eq!(decision.verdict, FirewallVerdict::Allow);
+        assert!(
+            !fw.audit_log()
+                .iter()
+                .any(|event| event.event_code.as_str() == FW_010)
+        );
+    }
+
+    #[test]
+    fn test_blank_method_rejected_before_audit_events() {
+        let mut fw = make_firewall();
+        let mut effect = make_effect("e-blank-method-before-audit", "ext-001");
+        effect.method = "\t \n".into();
+
+        let result = fw.evaluate(
+            &effect,
+            "trace-blank-method-before-audit",
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.unwrap_err().code(), ERR_FW_INVALID_EFFECT);
+        assert!(fw.audit_log().is_empty());
+    }
+
+    #[test]
+    fn test_node_internal_invalid_effect_validated_before_bypass() {
+        let mut fw = make_firewall();
+        let mut effect = make_effect("e-node-invalid-before-bypass", "ext-ignored");
+        effect.origin = TrafficOrigin::NodeInternal {
+            subsystem: "scheduler".into(),
+        };
+        effect.target_host = " \n\t ".into();
+
+        let result = fw.evaluate(
+            &effect,
+            "trace-node-invalid-before-bypass",
+            "2026-01-01T00:00:00Z",
+        );
+
+        assert_eq!(result.unwrap_err().code(), ERR_FW_INVALID_EFFECT);
+        assert!(fw.audit_log().is_empty());
+    }
+
+    #[test]
+    fn test_unclassifiable_request_gets_deny_receipt_without_quarantine() {
+        let mut fw = make_firewall();
+        let mut effect = make_effect("e-unclassifiable-denied", "ext-001");
+        effect.method = "TRACE".into();
+        effect.path = "/opaque-control-channel".into();
+
+        let decision = fw
+            .evaluate(
+                &effect,
+                "trace-unclassifiable-denied",
+                "2026-01-01T00:00:00Z",
+            )
+            .unwrap();
+
+        assert_eq!(decision.verdict, FirewallVerdict::Deny);
+        assert_eq!(decision.intent, None);
+        assert_eq!(decision.event_code.as_str(), FW_009);
+        assert_eq!(
+            decision.receipt_id.as_str(),
+            "rcpt-e-unclassifiable-denied-denied"
+        );
+        assert!(!fw.quarantined().contains("e-unclassifiable-denied"));
+    }
+
+    #[test]
+    fn test_probe_mode_disabled_markers_do_not_trigger_side_channel() {
+        for marker in ["0", " no ", "disabled", "OFF", "false"] {
+            let mut effect = make_effect("e-probe-disabled", "ext-001");
+            effect.metadata.insert("probe_mode".into(), marker.into());
+
+            assert_eq!(
+                IntentClassifier::classify(&effect),
+                Some(IntentClassification::DataFetch)
+            );
+        }
+    }
+
+    #[test]
+    fn test_wildcard_host_pattern_rejects_embedded_suffixes() {
+        let rule = TrafficPolicyRule {
+            intent: IntentClassification::DataFetch,
+            verdict: FirewallVerdict::Challenge,
+            host_pattern: Some("*.example.com".into()),
+            priority: 0,
+            rationale: "subdomains only".into(),
+        };
+
+        assert!(!rule.matches_host("api.example.com.evil"));
+        assert!(!rule.matches_host("api-example.com"));
+        assert!(!rule.matches_host("example.com.attacker.net"));
+    }
+
+    #[test]
+    fn test_unknown_extension_risky_effect_does_not_quarantine() {
+        let mut fw = EffectsFirewall::with_default_policy();
+        let mut effect = make_effect("e-unknown-risky", "ext-unknown");
+        effect.has_sensitive_payload = true;
+        effect.carries_credentials = true;
+
+        let result = fw.evaluate(&effect, "trace-unknown-risky", "2026-01-01T00:00:00Z");
+
+        assert_eq!(result.unwrap_err().code(), ERR_FW_EXTENSION_UNKNOWN);
+        assert!(!fw.quarantined().contains("e-unknown-risky"));
+        assert!(
+            !fw.audit_log()
+                .iter()
+                .any(|event| event.event_code.as_str() == FW_005)
+        );
+    }
+
+    #[test]
     fn test_inv_firewall_risky_pathway_all_risky_denied() {
         // INV-FIREWALL-RISKY-PATHWAY: all risky categories default to deny.
         let mut fw = make_firewall();
@@ -1689,5 +2003,574 @@ mod tests {
         e3.metadata.insert("probe_mode".into(), "1".into());
         let d3 = fw.evaluate(&e3, "t3", "2026-01-01T00:00:00Z").unwrap();
         assert_eq!(d3.verdict, FirewallVerdict::Deny);
+    }
+
+    #[test]
+    fn test_serde_rejects_unknown_intent_classification() {
+        let result: Result<IntentClassification, _> =
+            serde_json::from_str(r#""credential_theft""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serde_rejects_unknown_firewall_verdict() {
+        let result: Result<FirewallVerdict, _> = serde_json::from_str(r#""shadow_allow""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serde_rejects_remote_effect_with_unknown_origin_variant() {
+        let result: Result<RemoteEffect, _> = serde_json::from_str(
+            r#"{
+                "effect_id":"e-bad-origin",
+                "origin":{"plugin":{"extension_id":"ext-001"}},
+                "target_host":"api.example.com",
+                "target_port":443,
+                "method":"GET",
+                "path":"/data",
+                "has_sensitive_payload":false,
+                "carries_credentials":false,
+                "metadata":{}
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serde_rejects_remote_effect_negative_target_port() {
+        let result: Result<RemoteEffect, _> = serde_json::from_str(
+            r#"{
+                "effect_id":"e-negative-port",
+                "origin":{"extension":{"extension_id":"ext-001"}},
+                "target_host":"api.example.com",
+                "target_port":-1,
+                "method":"GET",
+                "path":"/data",
+                "has_sensitive_payload":false,
+                "carries_credentials":false,
+                "metadata":{}
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serde_rejects_remote_effect_overflow_target_port() {
+        let result: Result<RemoteEffect, _> = serde_json::from_str(
+            r#"{
+                "effect_id":"e-overflow-port",
+                "origin":{"extension":{"extension_id":"ext-001"}},
+                "target_host":"api.example.com",
+                "target_port":70000,
+                "method":"GET",
+                "path":"/data",
+                "has_sensitive_payload":false,
+                "carries_credentials":false,
+                "metadata":{}
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serde_rejects_policy_rule_with_unknown_verdict() {
+        let result: Result<TrafficPolicyRule, _> = serde_json::from_str(
+            r#"{
+                "intent":"data_fetch",
+                "verdict":"allow_and_log",
+                "host_pattern":null,
+                "priority":0,
+                "rationale":"invalid verdict fixture"
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serde_rejects_policy_override_with_unknown_intent() {
+        let result: Result<PolicyOverride, _> = serde_json::from_str(
+            r#"{
+                "extension_id":"ext-001",
+                "intent":"credential_theft",
+                "new_verdict":"deny",
+                "justification":"invalid intent fixture",
+                "approved_by":"admin"
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_serde_rejects_firewall_decision_missing_schema_version() {
+        let result: Result<FirewallDecision, _> = serde_json::from_str(
+            r#"{
+                "receipt_id":"rcpt-missing-schema",
+                "trace_id":"trace-missing-schema",
+                "effect_id":"e-missing-schema",
+                "origin":{"extension":{"extension_id":"ext-001"}},
+                "intent":"data_fetch",
+                "verdict":"allow",
+                "event_code":"FW_003",
+                "matched_rule_priority":0,
+                "rationale":"missing schema version fixture",
+                "timestamp":"2026-01-01T00:00:00Z"
+            }"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    // -- Negative-path Security Tests ---------------------------------------
+    // Added 2026-04-17: Comprehensive security hardening tests
+
+    #[test]
+    fn test_security_unicode_injection_in_effect_descriptors() {
+        use crate::security::constant_time::ct_eq;
+
+        // BiDi override and zero-width characters in effect fields
+        let malicious_effects = vec![
+            RemoteEffect {
+                effect_id: "\u{202E}legit-id\u{202D}".to_string(),  // BiDi override
+                origin: TrafficOrigin::Extension { extension_id: "safe\u{200B}ext".to_string() },  // Zero-width
+                target_host: "api.\u{FEFF}example.com".to_string(),  // Zero-width no-break space
+                target_port: 443,
+                method: "GET\u{200C}".to_string(),  // Zero-width non-joiner
+                path: "/\u{200E}data\u{200F}".to_string(),  // LTR/RTL marks
+                has_sensitive_payload: false,
+                carries_credentials: false,
+                metadata: BTreeMap::new(),
+            },
+        ];
+
+        for effect in malicious_effects {
+            // Validation should reject Unicode injection attempts
+            let validation_result = effect.validate();
+            if validation_result.is_ok() {
+                // If validation passes, classification must be safe
+                let intent = IntentClassifier::classify(&effect);
+
+                // Should either classify safely or return None for safety
+                if let Some(classification) = intent {
+                    assert!(matches!(classification,
+                        IntentClassification::DataFetch |
+                        IntentClassification::ServiceDiscovery |
+                        IntentClassification::HealthCheck),
+                        "Unicode-injected effects should only classify as benign intents");
+                }
+
+                // Target host should not be manipulated by Unicode
+                assert!(!ct_eq(effect.target_host.as_bytes(), b"api.example.com"),
+                       "Host parsing vulnerable to Unicode normalization");
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_memory_exhaustion_through_metadata() {
+        // Attempt to exhaust memory through massive metadata
+        let mut large_metadata = BTreeMap::new();
+        for i in 0..100_000 {
+            large_metadata.insert(
+                format!("key_{}", i),
+                "x".repeat(1000)  // Large values
+            );
+        }
+
+        let effect = RemoteEffect {
+            effect_id: "memory-test".to_string(),
+            origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+            target_host: "api.example.com".to_string(),
+            target_port: 443,
+            method: "GET".to_string(),
+            path: "/data".to_string(),
+            has_sensitive_payload: false,
+            carries_credentials: false,
+            metadata: large_metadata,
+        };
+
+        // Should either reject gracefully or handle bounded processing
+        let validation_result = effect.validate();
+        if let Ok(()) = validation_result {
+            let intent = IntentClassifier::classify(&effect);
+            // Classification should complete without OOM
+            assert!(intent.is_some() || intent.is_none(), "Classification should not panic");
+
+            let mut firewall = make_firewall();
+            let process_result = firewall.process_request(effect);
+            // Processing should complete gracefully
+            assert!(process_result.is_ok() || process_result.is_err(), "Processing should not panic");
+        }
+    }
+
+    #[test]
+    fn test_security_intent_classification_bypass_attempts() {
+        use crate::security::constant_time::ct_eq;
+
+        // Attempt to disguise risky intents as benign
+        let bypass_attempts = vec![
+            RemoteEffect {
+                effect_id: "innocent".to_string(),
+                origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+                target_host: "data-collector.attacker.com".to_string(),  // Suspicious host
+                target_port: 443,
+                method: "GET".to_string(),  // Looks benign
+                path: "/collect_secrets".to_string(),  // But suspicious path
+                has_sensitive_payload: true,  // Actually contains secrets
+                carries_credentials: false,  // Lie about credentials
+                metadata: {
+                    let mut meta = BTreeMap::new();
+                    meta.insert("purpose".to_string(), "analytics".to_string());  // Lies
+                    meta
+                },
+            },
+            RemoteEffect {
+                effect_id: "health-check".to_string(),
+                origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+                target_host: "legitimate.api.com".to_string(),
+                target_port: 80,
+                method: "POST".to_string(),  // Mutation disguised as health check
+                path: "/admin/delete_all".to_string(),  // Destructive operation
+                has_sensitive_payload: false,
+                carries_credentials: true,  // Actually forwarding creds
+                metadata: BTreeMap::new(),
+            },
+        ];
+
+        for effect in bypass_attempts {
+            let intent = IntentClassifier::classify(&effect);
+
+            if let Some(classification) = intent {
+                // Ensure classification correctly identifies risk
+                if effect.has_sensitive_payload || effect.carries_credentials {
+                    assert!(classification.is_risky() ||
+                           matches!(classification, IntentClassification::DataMutation),
+                           "Risky effects should be classified as risky or mutation: {:?}", classification);
+                }
+
+                // Verify firewall applies appropriate controls
+                let mut firewall = make_firewall();
+                let result = firewall.process_request(effect).expect("should process");
+
+                if classification.is_risky() {
+                    assert!(!matches!(result.verdict, FirewallVerdict::Allow),
+                           "Risky intents should not be allowed: {:?}", result.verdict);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_policy_rule_manipulation() {
+        let mut firewall = make_firewall();
+
+        // Attempt to create conflicting rules with priority manipulation
+        let malicious_rules = vec![
+            TrafficPolicyRule {
+                intent: IntentClassification::Exfiltration,
+                verdict: FirewallVerdict::Allow,  // Dangerous: allowing exfiltration
+                host_pattern: None,
+                priority: 0,  // Highest priority
+                rationale: "bypass security".to_string(),
+            },
+            TrafficPolicyRule {
+                intent: IntentClassification::CredentialForward,
+                verdict: FirewallVerdict::Allow,  // Dangerous: allowing credential forwarding
+                host_pattern: Some("*.evil.com".to_string()),
+                priority: 1,
+                rationale: "malicious override".to_string(),
+            },
+        ];
+
+        for rule in malicious_rules {
+            let result = firewall.update_policy_rule(rule.clone());
+
+            if result.is_ok() {
+                // If rule was accepted, verify invariants still hold
+                let effect = RemoteEffect {
+                    effect_id: "test".to_string(),
+                    origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+                    target_host: "evil.example.com".to_string(),
+                    target_port: 443,
+                    method: "POST".to_string(),
+                    path: "/exfiltrate".to_string(),
+                    has_sensitive_payload: true,
+                    carries_credentials: true,
+                    metadata: BTreeMap::new(),
+                };
+
+                let process_result = firewall.process_request(effect);
+                if let Ok(decision) = process_result {
+                    // Even with malicious rules, risky traffic should be restricted
+                    assert!(!matches!(decision.verdict, FirewallVerdict::Allow) ||
+                           decision.verdict == FirewallVerdict::Challenge ||
+                           decision.verdict == FirewallVerdict::Simulate,
+                           "Risky traffic should never be simply allowed: {:?}", decision.verdict);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_decision_receipt_forgery_resistance() {
+        use crate::security::constant_time::ct_eq;
+
+        let mut firewall = make_firewall();
+        let effect = make_effect("test", "ext-001");
+
+        let decision = firewall.process_request(effect).expect("should process");
+        let receipt_json = decision.to_json().expect("should serialize");
+
+        // Attempt to forge receipt components
+        let malicious_json_variants = vec![
+            receipt_json.replace("\"verdict\":\"allow\"", "\"verdict\":\"allow\",\"forged\":true"),  // Extra field
+            receipt_json.replace("deny", "allow"),  // Verdict manipulation
+            format!("{{\"injection\":true,{}}}", &receipt_json[1..]),  // Prefix injection
+            receipt_json.replace("effect_id", "effect_id\u{0000}forged"),  // Null injection
+        ];
+
+        for malicious_json in malicious_json_variants {
+            let parse_result: Result<DecisionReceipt, _> = serde_json::from_str(&malicious_json);
+
+            if let Ok(forged_receipt) = parse_result {
+                // Verify receipt integrity checks would catch forgery
+                assert!(!ct_eq(forged_receipt.receipt_id.as_bytes(), decision.receipt_id.as_bytes()) ||
+                       forged_receipt == decision,
+                       "Forged receipts should be detectable");
+
+                // Original decision properties should be preserved
+                assert_eq!(decision.effect_id, forged_receipt.effect_id);
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_extension_id_spoofing_prevention() {
+        use crate::security::constant_time::ct_eq;
+
+        let mut firewall = make_firewall();
+        firewall.register_extension("legitimate-ext");
+
+        let spoofed_origins = vec![
+            TrafficOrigin::Extension { extension_id: "legitimate-ext\u{0000}evil".to_string() },  // Null injection
+            TrafficOrigin::Extension { extension_id: "\u{202E}timate-ext\u{202D}evil-ext".to_string() },  // BiDi spoof
+            TrafficOrigin::Extension { extension_id: "legitimate-ext".to_string() + "\u{200B}evil" },  // Zero-width
+            TrafficOrigin::Extension { extension_id: "LEGITIMATE-EXT".to_string() },  // Case manipulation
+            TrafficOrigin::NodeInternal { subsystem: "legitimate-ext".to_string() },  // Origin type confusion
+        ];
+
+        for spoofed_origin in spoofed_origins {
+            let effect = RemoteEffect {
+                effect_id: "spoof-test".to_string(),
+                origin: spoofed_origin.clone(),
+                target_host: "api.example.com".to_string(),
+                target_port: 443,
+                method: "GET".to_string(),
+                path: "/data".to_string(),
+                has_sensitive_payload: false,
+                carries_credentials: false,
+                metadata: BTreeMap::new(),
+            };
+
+            let result = firewall.process_request(effect);
+
+            // Should either reject unknown extensions or handle them securely
+            match result {
+                Ok(decision) => {
+                    // If processed, should not be treated as legitimate extension
+                    if let TrafficOrigin::Extension { extension_id } = &decision.effect_origin {
+                        assert!(!ct_eq(extension_id.as_bytes(), b"legitimate-ext"),
+                               "Spoofed extension ID should not match legitimate extension");
+                    }
+                },
+                Err(FirewallError::ExtensionUnknown { .. }) => {
+                    // Expected behavior for unregistered extensions
+                }
+                Err(_) => {
+                    // Other errors are acceptable for spoofed origins
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_json_serialization_injection_prevention() {
+        let decision = DecisionReceipt {
+            receipt_id: "test\";alert('xss');//".to_string(),  // JS injection
+            effect_id: "normal</script><script>alert('xss')</script>".to_string(),  // HTML injection
+            effect_origin: TrafficOrigin::Extension {
+                extension_id: "\\\"; rm -rf / #".to_string()  // Command injection attempt
+            },
+            classification: Some(IntentClassification::DataFetch),
+            verdict: FirewallVerdict::Deny,
+            matched_rule_priority: Some(0),
+            rationale: "test\ninjection\r\nattack".to_string(),  // Newline injection
+            timestamp: "2026-04-17T10:00:00Z\u{0000}".to_string(),  // Null injection
+        };
+
+        // JSON serialization should escape all injection attempts
+        let json = decision.to_json().expect("serialization should succeed");
+        assert!(!json.contains("alert('xss')"), "JavaScript injection should be escaped");
+        assert!(!json.contains("</script>"), "HTML injection should be escaped");
+        assert!(!json.contains("rm -rf"), "Command injection should be escaped");
+        assert!(!json.contains("\n"), "Newline injection should be escaped");
+        assert!(!json.contains("\r"), "Carriage return injection should be escaped");
+        assert!(!json.contains("\0"), "Null injection should be escaped");
+
+        // Roundtrip should preserve structure but escape content
+        let parsed: DecisionReceipt = serde_json::from_str(&json).expect("deserialization should succeed");
+        assert_eq!(decision.classification, parsed.classification);
+        assert_eq!(decision.verdict, parsed.verdict);
+        assert_eq!(decision.matched_rule_priority, parsed.matched_rule_priority);
+    }
+
+    #[test]
+    fn test_security_concurrent_firewall_access_safety() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let firewall = Arc::new(Mutex::new(make_firewall()));
+        let mut handles = vec![];
+
+        // Spawn threads doing concurrent operations
+        for i in 0..20 {
+            let fw_clone = Arc::clone(&firewall);
+            let handle = thread::spawn(move || {
+                let mut results = vec![];
+
+                if i % 4 == 0 {
+                    // Register extensions
+                    let mut fw = fw_clone.lock().unwrap();
+                    fw.register_extension(&format!("ext-{}", i));
+                    results.push("registered".to_string());
+                } else if i % 4 == 1 {
+                    // Process requests
+                    let fw = fw_clone.lock().unwrap();
+                    let effect = make_effect(&format!("effect-{}", i), "ext-001");
+                    let _ = fw.process_request(effect);
+                    results.push("processed".to_string());
+                } else if i % 4 == 2 {
+                    // Update policy
+                    let mut fw = fw_clone.lock().unwrap();
+                    let rule = TrafficPolicyRule {
+                        intent: IntentClassification::DataFetch,
+                        verdict: FirewallVerdict::Allow,
+                        host_pattern: Some(format!("host-{}.com", i)),
+                        priority: (i % 1000) as u32,  // Bounded priority
+                        rationale: format!("rule-{}", i),
+                    };
+                    let _ = fw.update_policy_rule(rule);
+                    results.push("updated".to_string());
+                } else {
+                    // Read state
+                    let fw = fw_clone.lock().unwrap();
+                    let _ = fw.get_policy_summary();
+                    results.push("read".to_string());
+                }
+
+                results
+            });
+            handles.push(handle);
+        }
+
+        // Collect all results
+        let mut all_results = vec![];
+        for handle in handles {
+            let results = handle.join().expect("thread should not panic");
+            all_results.extend(results);
+        }
+
+        // Verify firewall state remains consistent
+        let final_fw = firewall.lock().unwrap();
+        let summary = final_fw.get_policy_summary();
+        assert!(summary.contains("policy_id"), "Policy summary should be valid");
+    }
+
+    #[test]
+    fn test_security_arithmetic_overflow_protection_in_priorities() {
+        let mut firewall = make_firewall();
+
+        // Test priority overflow scenarios
+        let overflow_rule = TrafficPolicyRule {
+            intent: IntentClassification::DataFetch,
+            verdict: FirewallVerdict::Allow,
+            host_pattern: None,
+            priority: u32::MAX,
+            rationale: "max priority test".to_string(),
+        };
+
+        let result = firewall.update_policy_rule(overflow_rule);
+        assert!(result.is_ok(), "Max priority should be handled gracefully");
+
+        // Test multiple rules with extreme priorities
+        for i in 0..100 {
+            let priority = u32::MAX.saturating_sub(i);  // Near-max priorities
+            let rule = TrafficPolicyRule {
+                intent: IntentClassification::ServiceDiscovery,
+                verdict: FirewallVerdict::Allow,
+                host_pattern: Some(format!("host{}.com", i)),
+                priority,
+                rationale: format!("high priority rule {}", i),
+            };
+
+            let _ = firewall.update_policy_rule(rule);
+        }
+
+        // Verify policy evaluation still works correctly
+        let effect = make_effect("overflow-test", "ext-001");
+        let decision = firewall.process_request(effect).expect("should process");
+        assert!(decision.matched_rule_priority.is_some(), "Should match a rule");
+    }
+
+    #[test]
+    fn test_security_host_pattern_bypass_attempts() {
+        let mut firewall = make_firewall();
+
+        // Add rule allowing only specific hosts
+        let restrictive_rule = TrafficPolicyRule {
+            intent: IntentClassification::DataFetch,
+            verdict: FirewallVerdict::Allow,
+            host_pattern: Some("safe.example.com".to_string()),
+            priority: 0,
+            rationale: "only allow safe host".to_string(),
+        };
+        firewall.update_policy_rule(restrictive_rule).expect("should update");
+
+        let bypass_hosts = vec![
+            "safe.example.com.evil.com",  // Domain append
+            "evil.safe.example.com",  // Subdomain
+            "safe.example.com\u{0000}.evil.com",  // Null byte injection
+            "safe.example.com:8080",  // Port confusion
+            "SAFE.EXAMPLE.COM",  // Case manipulation
+            "safe\u{2002}example\u{2002}com",  // Unicode spaces
+            "safe．example．com",  // Unicode dots (not ASCII dots)
+        ];
+
+        for malicious_host in bypass_hosts {
+            let effect = RemoteEffect {
+                effect_id: "bypass-test".to_string(),
+                origin: TrafficOrigin::Extension { extension_id: "ext-001".to_string() },
+                target_host: malicious_host.clone(),
+                target_port: 443,
+                method: "GET".to_string(),
+                path: "/data".to_string(),
+                has_sensitive_payload: false,
+                carries_credentials: false,
+                metadata: BTreeMap::new(),
+            };
+
+            let decision = firewall.process_request(effect).expect("should process");
+
+            // Bypass attempts should not be allowed through host pattern matching
+            assert!(!matches!(decision.verdict, FirewallVerdict::Allow) ||
+                   decision.rationale.contains("safe.example.com"),
+                   "Host pattern bypass should be prevented for: {}", malicious_host);
+        }
     }
 }

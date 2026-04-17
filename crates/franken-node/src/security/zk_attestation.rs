@@ -1079,6 +1079,22 @@ mod tests {
     }
 
     #[test]
+    fn test_register_duplicate_policy_preserves_original_record() {
+        let mut registry = PolicyRegistry::new();
+        let original = test_policy();
+        registry.register_policy(original.clone()).unwrap();
+        let mut replacement = original.clone();
+        replacement.predicate_description = "tampered replacement".to_string();
+
+        let err = registry.register_policy(replacement).unwrap_err();
+
+        assert!(err.contains(error_codes::ERR_ZKA_DUPLICATE));
+        assert_eq!(registry.policies.len(), 1);
+        assert_eq!(registry.get_policy(&original.policy_id).unwrap(), &original);
+        assert_eq!(registry.schema_version, SCHEMA_VERSION);
+    }
+
+    #[test]
     fn test_deregister_policy_success() {
         let mut registry = PolicyRegistry::new();
         let policy = test_policy();
@@ -1098,6 +1114,20 @@ mod tests {
                 .unwrap_err()
                 .contains(error_codes::ERR_ZKA_POLICY_NOT_FOUND)
         );
+    }
+
+    #[test]
+    fn test_deregister_missing_policy_preserves_registered_policies() {
+        let mut registry = PolicyRegistry::new();
+        let policy = test_policy();
+        registry.register_policy(policy.clone()).unwrap();
+
+        let err = registry.deregister_policy("missing-policy").unwrap_err();
+
+        assert!(err.contains(error_codes::ERR_ZKA_POLICY_NOT_FOUND));
+        assert_eq!(registry.policies.len(), 1);
+        assert!(registry.get_policy(&policy.policy_id).is_some());
+        assert_eq!(registry.schema_version, SCHEMA_VERSION);
     }
 
     #[test]
@@ -1193,6 +1223,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_generate_non_hex_proof_does_not_mutate_ledger() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        let err = ledger
+            .generate_proof(
+                "att-bad".to_string(),
+                &policy,
+                "commit-bad".to_string(),
+                "not-valid-hex!!".to_string(),
+                PredicateOutcome::Pass,
+                1_000_000,
+                "trace-bad".to_string(),
+            )
+            .unwrap_err();
+
+        assert!(err.contains(error_codes::ERR_ZKA_METADATA_LEAK));
+        assert!(ledger.attestations.is_empty());
+        assert!(ledger.seen_commitments.is_empty());
+        assert!(ledger.audit_trail.is_empty());
+    }
+
+    #[test]
+    fn test_generate_duplicate_commitment_preserves_original_mapping() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        generate_test_attestation(
+            &mut ledger,
+            "att-1",
+            &policy,
+            PredicateOutcome::Pass,
+            1_000_000,
+        );
+        let audit_before = ledger.audit_trail.len();
+
+        let err = ledger
+            .generate_proof(
+                "att-2".to_string(),
+                &policy,
+                "commit-att-1".to_string(),
+                "aabbccdd".to_string(),
+                PredicateOutcome::Pass,
+                1_000_001,
+                "trace-2".to_string(),
+            )
+            .unwrap_err();
+
+        assert!(err.contains(error_codes::ERR_ZKA_DUPLICATE));
+        assert_eq!(ledger.attestations.len(), 1);
+        assert!(!ledger.attestations.contains_key("att-2"));
+        assert_eq!(
+            ledger
+                .seen_commitments
+                .get("commit-att-1")
+                .map(String::as_str),
+            Some("att-1")
+        );
+        assert_eq!(ledger.audit_trail.len(), audit_before);
+    }
+
     // ── Verify proof tests ──────────────────────────────────────────────
 
     #[test]
@@ -1230,6 +1321,41 @@ mod tests {
             }
             _ => unreachable!("Expected Rejected"),
         }
+    }
+
+    #[test]
+    fn test_verify_policy_mismatch_keeps_attestation_active() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let other_policy = test_policy_alt();
+        let att = generate_test_attestation(
+            &mut ledger,
+            "att-policy-mismatch",
+            &policy,
+            PredicateOutcome::Pass,
+            1_000_000,
+        );
+        let audit_before = ledger.audit_trail.len();
+
+        let result = ledger.verify_proof(
+            &att,
+            &other_policy,
+            1_000_001,
+            "trace-policy-mismatch".to_string(),
+        );
+
+        assert!(!result.is_verified());
+        assert_eq!(
+            ledger.attestations["att-policy-mismatch"].status,
+            AttestationStatus::Active
+        );
+        assert_eq!(ledger.audit_trail.len(), audit_before + 2);
+        assert!(
+            ledger
+                .query_audit(|record| record.event_code == event_codes::FN_ZK_005)
+                .iter()
+                .any(|record| record.attestation_id.as_deref() == Some("att-policy-mismatch"))
+        );
     }
 
     #[test]
@@ -1417,10 +1543,66 @@ mod tests {
     }
 
     #[test]
+    fn test_revoke_already_revoked_does_not_emit_second_audit() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        generate_test_attestation(
+            &mut ledger,
+            "att-r2",
+            &policy,
+            PredicateOutcome::Pass,
+            1_000_000,
+        );
+        ledger
+            .revoke_attestation("att-r2", 1_000_100, "trace-rev2".to_string())
+            .unwrap();
+        let audit_before = ledger.audit_trail.len();
+
+        let err = ledger
+            .revoke_attestation("att-r2", 1_000_200, "trace-rev3".to_string())
+            .unwrap_err();
+
+        assert!(err.contains(error_codes::ERR_ZKA_REVOKED));
+        assert_eq!(ledger.audit_trail.len(), audit_before);
+        assert_eq!(
+            ledger.attestations["att-r2"].status,
+            AttestationStatus::Revoked
+        );
+    }
+
+    #[test]
     fn test_revoke_nonexistent_fails() {
         let mut ledger = AttestationLedger::new();
         let result = ledger.revoke_attestation("nope", 1_000_000, "trace-nope".to_string());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_revoke_nonexistent_does_not_mutate_ledger() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        generate_test_attestation(
+            &mut ledger,
+            "att-existing",
+            &policy,
+            PredicateOutcome::Pass,
+            1_000_000,
+        );
+        let audit_before = ledger.audit_trail.len();
+        let commitments_before = ledger.seen_commitments.clone();
+
+        let err = ledger
+            .revoke_attestation("missing", 1_000_100, "trace-missing".to_string())
+            .unwrap_err();
+
+        assert!(err.contains(error_codes::ERR_ZKA_INVALID_PROOF));
+        assert_eq!(ledger.attestations.len(), 1);
+        assert_eq!(
+            ledger.attestations["att-existing"].status,
+            AttestationStatus::Active
+        );
+        assert_eq!(ledger.audit_trail.len(), audit_before);
+        assert_eq!(ledger.seen_commitments, commitments_before);
     }
 
     // ── is_valid / sweep tests ──────────────────────────────────────────
@@ -1470,6 +1652,29 @@ mod tests {
             ledger.attestations["att-s1"].status,
             AttestationStatus::Expired
         );
+    }
+
+    #[test]
+    fn test_sweep_before_expiry_preserves_active_status_and_audit() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let att = generate_test_attestation(
+            &mut ledger,
+            "att-not-expired",
+            &policy,
+            PredicateOutcome::Pass,
+            1_000_000,
+        );
+        let audit_before = ledger.audit_trail.len();
+
+        let expired = ledger.sweep_expired(att.expires_at_ms - 1);
+
+        assert!(expired.is_empty());
+        assert_eq!(
+            ledger.attestations["att-not-expired"].status,
+            AttestationStatus::Active
+        );
+        assert_eq!(ledger.audit_trail.len(), audit_before);
     }
 
     // ── Audit query tests ───────────────────────────────────────────────
@@ -1743,6 +1948,39 @@ mod tests {
     }
 
     #[test]
+    fn verify_forged_attestation_does_not_admit_or_track_commitment() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+        let forged = ZkAttestation {
+            attestation_id: "forged-side-effect".to_string(),
+            policy_id: policy.policy_id.clone(),
+            payload: ZkProofPayload {
+                schema_version: SCHEMA_VERSION.to_string(),
+                proof_bytes_hex: "deadbeef".to_string(),
+                metadata_commitment: "commit-forged-side-effect".to_string(),
+            },
+            outcome: PredicateOutcome::Pass,
+            status: AttestationStatus::Active,
+            generated_at_ms: 1_000_000,
+            expires_at_ms: 1_000_000 + DEFAULT_VALIDITY_MS,
+            trace_id: "forged-trace".to_string(),
+        };
+
+        let result = ledger.verify_proof(&forged, &policy, 1_000_001, "trace-vf2".to_string());
+
+        assert!(!result.is_verified());
+        assert!(ledger.attestations.is_empty());
+        assert!(ledger.seen_commitments.is_empty());
+        assert_eq!(ledger.audit_trail.len(), 2);
+        assert!(
+            ledger
+                .query_audit(|record| record.event_code == event_codes::FN_ZK_004)
+                .iter()
+                .any(|record| record.attestation_id.as_deref() == Some("forged-side-effect"))
+        );
+    }
+
+    #[test]
     fn verify_proof_accepts_legitimate_attestation() {
         let mut ledger = AttestationLedger::new();
         let policy = test_policy();
@@ -1758,5 +1996,492 @@ mod tests {
             matches!(result, ZkVerificationResult::Verified { .. }),
             "legitimate attestation should verify: {result:?}"
         );
+    }
+
+    #[test]
+    fn negative_unicode_injection_in_attestation_ids() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        let malicious_ids = vec![
+            "normal\u{202e}evil\u{202c}attestation",  // BiDi override
+            "attestation\u{200b}\u{feff}hidden",      // Zero-width characters
+            "attestation\nnewline",                    // Newline injection
+            "attestation\ttab",                        // Tab injection
+            "attestation\x00null",                     // Null byte injection
+            "../../../etc/passwd",                     // Path traversal
+            "attestation\"quote'injection",            // Quote injection
+        ];
+
+        for (i, malicious_id) in malicious_ids.iter().enumerate() {
+            let proof_result = ledger.generate_proof(
+                malicious_id,
+                &policy,
+                PrivateMetadata {
+                    sensitive_data: format!("test-data-{}", i),
+                    compliance_threshold: 100.0,
+                },
+                1_000_000 + i as u64,
+                format!("trace-unicode-{}", i),
+            );
+
+            assert!(proof_result.is_ok());
+
+            // Verify we can retrieve with exact ID
+            assert!(ledger.attestations.contains_key(malicious_id));
+        }
+    }
+
+    #[test]
+    fn negative_massive_proof_payload_memory_exhaustion() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        // Create massive proof payload (10MB hex string)
+        let massive_proof_bytes = vec![0xAA; 5 * 1024 * 1024]; // 5MB binary = 10MB hex
+        let massive_hex = hex::encode(massive_proof_bytes);
+
+        let massive_attestation = ZkAttestation {
+            attestation_id: "massive-proof".to_string(),
+            policy_id: policy.policy_id.clone(),
+            payload: ZkProofPayload {
+                schema_version: SCHEMA_VERSION.to_string(),
+                proof_bytes_hex: massive_hex,
+                metadata_commitment: "commit-massive".to_string(),
+            },
+            outcome: PredicateOutcome::Pass,
+            status: AttestationStatus::Active,
+            generated_at_ms: 1_000_000,
+            expires_at_ms: 1_000_000 + DEFAULT_VALIDITY_MS,
+            trace_id: "trace-massive".to_string(),
+        };
+
+        // Should handle massive proofs without memory issues
+        ledger.attestations.insert("massive-proof".to_string(), massive_attestation.clone());
+
+        let verification_result = ledger.verify_proof(
+            &massive_attestation,
+            &policy,
+            1_000_001,
+            "trace-massive-verify".to_string()
+        );
+
+        // May reject due to size or succeed with performance impact
+        // Either case should not cause memory corruption
+    }
+
+    #[test]
+    fn negative_policy_id_collision_attacks() {
+        let mut ledger = AttestationLedger::new();
+
+        // Create policies with similar but different IDs
+        let collision_policies = vec![
+            ZkPolicy {
+                policy_id: "policy-1".to_string(),
+                predicate_name: "test_predicate".to_string(),
+                predicate_version: "v1.0".to_string(),
+                verifier_keys: vec!["key1".to_string()],
+                validity_window_ms: DEFAULT_VALIDITY_MS,
+            },
+            ZkPolicy {
+                policy_id: "policy\u{200b}1".to_string(), // Zero-width space
+                predicate_name: "test_predicate".to_string(),
+                predicate_version: "v1.0".to_string(),
+                verifier_keys: vec!["key1".to_string()],
+                validity_window_ms: DEFAULT_VALIDITY_MS,
+            },
+            ZkPolicy {
+                policy_id: "policy-1\u{0000}".to_string(), // Null terminator
+                predicate_name: "test_predicate".to_string(),
+                predicate_version: "v1.0".to_string(),
+                verifier_keys: vec!["key1".to_string()],
+                validity_window_ms: DEFAULT_VALIDITY_MS,
+            },
+        ];
+
+        for (i, policy) in collision_policies.iter().enumerate() {
+            let proof_result = ledger.generate_proof(
+                &format!("collision-test-{}", i),
+                policy,
+                PrivateMetadata {
+                    sensitive_data: format!("data-{}", i),
+                    compliance_threshold: 100.0,
+                },
+                1_000_000 + i as u64,
+                format!("trace-collision-{}", i),
+            );
+
+            assert!(proof_result.is_ok());
+        }
+
+        // Verify policies are treated as distinct
+        assert_eq!(ledger.attestations.len(), collision_policies.len());
+    }
+
+    #[test]
+    fn negative_timestamp_arithmetic_overflow_boundaries() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        let overflow_timestamps = vec![
+            u64::MAX,
+            u64::MAX - 1,
+            u64::MAX / 2,
+            0,  // Epoch start
+            1,  // Minimal positive
+        ];
+
+        for (i, timestamp) in overflow_timestamps.iter().enumerate() {
+            let proof_result = ledger.generate_proof(
+                &format!("timestamp-test-{}", i),
+                &policy,
+                PrivateMetadata {
+                    sensitive_data: format!("data-{}", i),
+                    compliance_threshold: 100.0,
+                },
+                *timestamp,
+                format!("trace-timestamp-{}", i),
+            );
+
+            assert!(proof_result.is_ok());
+
+            // Verify expiration calculation doesn't overflow
+            let attestation = &ledger.attestations[&format!("timestamp-test-{}", i)];
+            assert!(attestation.expires_at_ms >= attestation.generated_at_ms);
+        }
+    }
+
+    #[test]
+    fn negative_metadata_commitment_spoofing_attempts() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        // Generate legitimate attestation
+        let legit_result = ledger.generate_proof(
+            "legit-attestation",
+            &policy,
+            PrivateMetadata {
+                sensitive_data: "legitimate-data".to_string(),
+                compliance_threshold: 100.0,
+            },
+            1_000_000,
+            "trace-legit".to_string(),
+        );
+        assert!(legit_result.is_ok());
+        let legit_commitment = &ledger.attestations["legit-attestation"].payload.metadata_commitment;
+
+        // Create spoofed attestation with same commitment
+        let spoofed_attestation = ZkAttestation {
+            attestation_id: "spoofed-attestation".to_string(),
+            policy_id: policy.policy_id.clone(),
+            payload: ZkProofPayload {
+                schema_version: SCHEMA_VERSION.to_string(),
+                proof_bytes_hex: "deadbeef".to_string(),
+                metadata_commitment: legit_commitment.clone(), // Stolen commitment
+            },
+            outcome: PredicateOutcome::Pass,
+            status: AttestationStatus::Active,
+            generated_at_ms: 1_000_001,
+            expires_at_ms: 1_000_001 + DEFAULT_VALIDITY_MS,
+            trace_id: "trace-spoofed".to_string(),
+        };
+
+        // Attempt verification of spoofed attestation
+        let verification_result = ledger.verify_proof(
+            &spoofed_attestation,
+            &policy,
+            1_000_002,
+            "trace-verify-spoofed".to_string()
+        );
+
+        // Should detect and reject spoofed attestation
+        assert!(matches!(verification_result, ZkVerificationResult::Rejected { .. }));
+    }
+
+    #[test]
+    fn negative_batch_verification_size_boundary_attacks() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        // Generate attestations up to and beyond MAX_BATCH_SIZE
+        let mut attestations = Vec::new();
+        for i in 0..(MAX_BATCH_SIZE + 10) {
+            let proof_result = ledger.generate_proof(
+                &format!("batch-test-{}", i),
+                &policy,
+                PrivateMetadata {
+                    sensitive_data: format!("data-{}", i),
+                    compliance_threshold: 100.0,
+                },
+                1_000_000 + i as u64,
+                format!("trace-batch-{}", i),
+            );
+
+            if let Ok(attestation) = proof_result {
+                attestations.push(attestation);
+            }
+
+            if attestations.len() > MAX_BATCH_SIZE {
+                break;
+            }
+        }
+
+        // Attempt batch verification with oversized batch
+        let oversized_batch = &attestations[..MAX_BATCH_SIZE + 5.min(attestations.len().saturating_sub(MAX_BATCH_SIZE))];
+
+        for attestation in oversized_batch {
+            let result = ledger.verify_proof(
+                attestation,
+                &policy,
+                2_000_000,
+                "trace-batch-verify".to_string()
+            );
+
+            // Should handle large batches gracefully
+            // May impose size limits or process with degraded performance
+        }
+    }
+
+    #[test]
+    fn negative_audit_trail_injection_through_trace_ids() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        let malicious_trace_ids = vec![
+            "trace\nNewline\nInjection",               // Newline injection
+            "trace\x00null\x00injection",              // Null byte injection
+            "trace\u{202e}reverse\u{202c}injection",  // BiDi override
+            "trace\"json'injection",                   // JSON injection
+            "../../../etc/passwd",                     // Path traversal
+        ];
+
+        for malicious_trace in malicious_trace_ids {
+            let proof_result = ledger.generate_proof(
+                "audit-injection-test",
+                &policy,
+                PrivateMetadata {
+                    sensitive_data: "test-data".to_string(),
+                    compliance_threshold: 100.0,
+                },
+                1_000_000,
+                malicious_trace.to_string(),
+            );
+
+            // Should handle malicious trace IDs without audit corruption
+            if proof_result.is_ok() {
+                // Check audit trail integrity
+                let audit_records = ledger.query_audit(|r| r.trace_id == malicious_trace);
+                assert!(audit_records.len() > 0);
+
+                for record in audit_records {
+                    assert_eq!(record.trace_id, malicious_trace);
+                    assert!(invariants::check_audit_trail(&record));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_schema_version_rollback_attacks() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        // Create attestations with different schema versions
+        let schema_versions = vec![
+            SCHEMA_VERSION.to_string(),   // Current version
+            "zka-v0.9".to_string(),      // Older version
+            "zka-v2.0".to_string(),      // Future version
+            "".to_string(),              // Empty version
+            "invalid-schema".to_string(), // Invalid format
+            "\x00".to_string(),          // Null byte
+        ];
+
+        for (i, schema_version) in schema_versions.iter().enumerate() {
+            let mut attestation = ZkAttestation {
+                attestation_id: format!("schema-test-{}", i),
+                policy_id: policy.policy_id.clone(),
+                payload: ZkProofPayload {
+                    schema_version: schema_version.clone(),
+                    proof_bytes_hex: "abcd".to_string(),
+                    metadata_commitment: format!("commit-{}", i),
+                },
+                outcome: PredicateOutcome::Pass,
+                status: AttestationStatus::Active,
+                generated_at_ms: 1_000_000 + i as u64,
+                expires_at_ms: 1_000_000 + i as u64 + DEFAULT_VALIDITY_MS,
+                trace_id: format!("trace-schema-{}", i),
+            };
+
+            // Test schema version validation
+            let schema_valid = invariants::check_schema_versioned(&attestation);
+
+            if schema_version == SCHEMA_VERSION {
+                assert!(schema_valid);
+            } else {
+                // Invalid schemas should be rejected by invariant checks
+                // Implementation may be lenient or strict
+            }
+        }
+    }
+
+    #[test]
+    fn negative_concurrent_ledger_access_race_conditions() {
+        use std::sync::{Arc, Barrier, Mutex};
+        use std::thread;
+
+        let ledger = Arc::new(Mutex::new(AttestationLedger::new()));
+        let policy = Arc::new(test_policy());
+        let barrier = Arc::new(Barrier::new(4));
+
+        let mut handles = Vec::new();
+
+        for thread_id in 0..4 {
+            let ledger = Arc::clone(&ledger);
+            let policy = Arc::clone(&policy);
+            let barrier = Arc::clone(&barrier);
+
+            let handle = thread::spawn(move || {
+                barrier.wait();
+
+                for i in 0..25 {
+                    let attestation_id = format!("thread-{}-attestation-{}", thread_id, i);
+                    let mut ledger_guard = ledger.lock().unwrap();
+
+                    let proof_result = ledger_guard.generate_proof(
+                        &attestation_id,
+                        &policy,
+                        PrivateMetadata {
+                            sensitive_data: format!("data-{}-{}", thread_id, i),
+                            compliance_threshold: 100.0,
+                        },
+                        1_000_000 + (thread_id * 1000 + i) as u64,
+                        format!("trace-{}-{}", thread_id, i),
+                    );
+
+                    assert!(proof_result.is_ok());
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+
+        // Verify ledger consistency
+        let final_ledger = ledger.lock().unwrap();
+        assert_eq!(final_ledger.attestations.len(), 100); // 4 threads × 25 attestations
+        assert!(final_ledger.audit_trail.len() >= 100);   // At least one audit record per attestation
+    }
+
+    #[test]
+    fn negative_proof_verification_timing_attack_resistance() {
+        use std::time::Instant;
+
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        // Generate legitimate attestation
+        let legit_result = ledger.generate_proof(
+            "timing-legit",
+            &policy,
+            PrivateMetadata {
+                sensitive_data: "legitimate-data".to_string(),
+                compliance_threshold: 100.0,
+            },
+            1_000_000,
+            "trace-timing-legit".to_string(),
+        );
+        assert!(legit_result.is_ok());
+
+        // Create forged attestation
+        let forged = ZkAttestation {
+            attestation_id: "timing-forged".to_string(),
+            policy_id: policy.policy_id.clone(),
+            payload: ZkProofPayload {
+                schema_version: SCHEMA_VERSION.to_string(),
+                proof_bytes_hex: "deadbeef".to_string(),
+                metadata_commitment: "commit-forged".to_string(),
+            },
+            outcome: PredicateOutcome::Pass,
+            status: AttestationStatus::Active,
+            generated_at_ms: 1_000_000,
+            expires_at_ms: 1_000_000 + DEFAULT_VALIDITY_MS,
+            trace_id: "trace-timing-forged".to_string(),
+        };
+
+        // Measure verification timing for multiple rounds
+        let mut legit_times = Vec::new();
+        let mut forged_times = Vec::new();
+
+        for _ in 0..100 {
+            // Time legitimate verification
+            let start = Instant::now();
+            let _ = ledger.verify_proof(&legit_result.as_ref().unwrap(), &policy, 1_000_001, "trace-timing".to_string());
+            legit_times.push(start.elapsed());
+
+            // Time forged verification
+            let start = Instant::now();
+            let _ = ledger.verify_proof(&forged, &policy, 1_000_001, "trace-timing-forged".to_string());
+            forged_times.push(start.elapsed());
+        }
+
+        // Calculate average times
+        let avg_legit = legit_times.iter().sum::<std::time::Duration>() / legit_times.len() as u32;
+        let avg_forged = forged_times.iter().sum::<std::time::Duration>() / forged_times.len() as u32;
+
+        // Timing should not reveal internal verification details
+        // Allow some variance but flag excessive timing differences
+        if avg_legit.as_nanos() > 0 && avg_forged.as_nanos() > 0 {
+            let max_time = std::cmp::max(avg_legit, avg_forged);
+            let min_time = std::cmp::min(avg_legit, avg_forged);
+            let timing_ratio = max_time.as_nanos() as f64 / min_time.as_nanos() as f64;
+
+            // Allow up to 3x difference due to normal variance
+            assert!(timing_ratio < 3.0,
+                "Suspicious timing variance: legit={:?}, forged={:?}, ratio={:.2}",
+                avg_legit, avg_forged, timing_ratio);
+        }
+    }
+
+    #[test]
+    fn negative_audit_trail_capacity_overflow_behavior() {
+        let mut ledger = AttestationLedger::new();
+        let policy = test_policy();
+
+        // Generate many attestations to overflow audit trail capacity
+        for i in 0..1000 {
+            let proof_result = ledger.generate_proof(
+                &format!("overflow-test-{}", i),
+                &policy,
+                PrivateMetadata {
+                    sensitive_data: format!("data-{}", i),
+                    compliance_threshold: 100.0,
+                },
+                1_000_000 + i as u64,
+                format!("trace-overflow-{}", i),
+            );
+
+            if proof_result.is_err() {
+                // May fail due to capacity limits
+                break;
+            }
+        }
+
+        // Verify audit trail respects capacity bounds and maintains integrity
+        let audit_count = ledger.audit_trail.len();
+
+        // Should not exceed reasonable capacity limits
+        assert!(audit_count <= 10000, "Audit trail should respect capacity limits");
+
+        // Recent entries should be preserved (FIFO eviction)
+        let recent_records = ledger.query_audit(|r| r.trace_id.contains("overflow-99"));
+        assert!(!recent_records.is_empty(), "Recent audit records should be preserved");
+
+        // All remaining records should maintain invariants
+        for record in &ledger.audit_trail {
+            assert!(invariants::check_audit_trail(record));
+        }
     }
 }

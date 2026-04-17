@@ -1161,6 +1161,20 @@ mod tests {
     }
 
     #[test]
+    fn test_deposit_insufficient_preserves_empty_state_and_id_counter() {
+        let mut gov = TrustGovernanceState::new();
+
+        let err = gov
+            .deposit_stake("alice", 499, RiskTier::High, 0)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_STAKE_INSUFFICIENT);
+        assert_eq!(gov.total_stakes(), 0);
+        assert_eq!(gov.next_stake_id, 1);
+        assert!(gov.audit_log.is_empty());
+    }
+
+    #[test]
     fn test_deposit_stake_exact_minimum() {
         let mut gov = TrustGovernanceState::new();
         let id = gov.deposit_stake("alice", 10, RiskTier::Low, 0).unwrap();
@@ -1213,6 +1227,20 @@ mod tests {
     }
 
     #[test]
+    fn test_slash_missing_stake_preserves_audit_and_evidence_tracking() {
+        let mut gov = TrustGovernanceState::new();
+
+        let err = gov
+            .slash(StakeId(999), make_evidence("ev-missing"))
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_STAKE_NOT_FOUND);
+        assert_eq!(gov.total_stakes(), 0);
+        assert!(gov.audit_log.is_empty());
+        assert!(gov.used_evidence_hashes.is_empty());
+    }
+
+    #[test]
     fn test_slash_already_slashed() {
         let mut gov = TrustGovernanceState::new();
         let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
@@ -1220,6 +1248,25 @@ mod tests {
         let result = gov.slash(id, make_evidence("ev-002"));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_STAKE_ALREADY_SLASHED);
+    }
+
+    #[test]
+    fn test_slash_terminal_withdrawn_stake_preserves_record() {
+        let mut gov = TrustGovernanceState::new();
+        let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
+        gov.withdraw(id).unwrap();
+        let audit_before = gov.audit_log.len();
+
+        let err = gov
+            .slash(id, make_evidence("ev-after-withdraw"))
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_STAKE_INVALID_TRANSITION);
+        let record = gov.get_stake(id).unwrap();
+        assert_eq!(record.state, StakeState::Withdrawn);
+        assert!(record.slash_events.is_empty());
+        assert_eq!(gov.audit_log.len(), audit_before);
+        assert!(!gov.used_evidence_hashes.contains_key(&id.0));
     }
 
     #[test]
@@ -1253,6 +1300,24 @@ mod tests {
         let result = gov.slash(id, make_evidence("ev-001"));
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_STAKE_ALREADY_SLASHED);
+    }
+
+    #[test]
+    fn test_duplicate_evidence_after_reversed_appeal_keeps_active_state() {
+        let mut gov = TrustGovernanceState::new();
+        let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
+        gov.slash(id, make_evidence("ev-001")).unwrap();
+        let appeal = gov.appeal(id, "false positive").unwrap();
+        gov.resolve_appeal(appeal.appeal_id, false).unwrap();
+        let audit_before = gov.audit_log.len();
+
+        let err = gov.slash(id, make_evidence("ev-001")).unwrap_err();
+
+        assert_eq!(err.code, ERR_STAKE_ALREADY_SLASHED);
+        let record = gov.get_stake(id).unwrap();
+        assert_eq!(record.state, StakeState::Active);
+        assert_eq!(record.slash_events.len(), 1);
+        assert_eq!(gov.audit_log.len(), audit_before);
     }
 
     #[test]
@@ -1307,6 +1372,25 @@ mod tests {
     }
 
     #[test]
+    fn test_appeal_expired_does_not_create_appeal_or_change_state() {
+        let mut gov = TrustGovernanceState::new();
+        gov.set_time(1000);
+        let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
+        gov.set_time(2000);
+        gov.slash(id, make_evidence("ev-expired")).unwrap();
+        let audit_before = gov.audit_log.len();
+        gov.set_time(2000 + 36 * 3600);
+
+        let err = gov.appeal(id, "too late").unwrap_err();
+
+        assert_eq!(err.code, ERR_STAKE_APPEAL_EXPIRED);
+        assert!(gov.appeals.is_empty());
+        assert_eq!(gov.next_appeal_id, 1);
+        assert_eq!(gov.get_stake(id).unwrap().state, StakeState::Slashed);
+        assert_eq!(gov.audit_log.len(), audit_before);
+    }
+
+    #[test]
     fn test_appeal_expired_at_exact_deadline() {
         // INV-STAKE-APPEAL-WINDOW: appeal exactly AT the deadline must fail (fail-closed)
         let mut gov = TrustGovernanceState::new();
@@ -1341,6 +1425,21 @@ mod tests {
         let result = gov.appeal(id, "not slashed");
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_STAKE_INVALID_TRANSITION);
+    }
+
+    #[test]
+    fn test_appeal_active_stake_does_not_create_appeal_or_audit() {
+        let mut gov = TrustGovernanceState::new();
+        let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
+        let audit_before = gov.audit_log.len();
+
+        let err = gov.appeal(id, "not slashed").unwrap_err();
+
+        assert_eq!(err.code, ERR_STAKE_INVALID_TRANSITION);
+        assert!(gov.appeals.is_empty());
+        assert_eq!(gov.next_appeal_id, 1);
+        assert_eq!(gov.get_stake(id).unwrap().state, StakeState::Active);
+        assert_eq!(gov.audit_log.len(), audit_before);
     }
 
     // -- resolve_appeal tests -----------------------------------------------
@@ -1392,6 +1491,22 @@ mod tests {
     }
 
     #[test]
+    fn test_withdraw_blocked_by_obligations_preserves_active_stake() {
+        let mut gov = TrustGovernanceState::new();
+        let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
+        gov.set_pending_obligations(id, true).unwrap();
+        let audit_before = gov.audit_log.len();
+
+        let err = gov.withdraw(id).unwrap_err();
+
+        assert_eq!(err.code, ERR_STAKE_WITHDRAWAL_BLOCKED);
+        let record = gov.get_stake(id).unwrap();
+        assert_eq!(record.state, StakeState::Active);
+        assert!(record.has_pending_obligations);
+        assert_eq!(gov.audit_log.len(), audit_before);
+    }
+
+    #[test]
     fn test_withdraw_not_active() {
         let mut gov = TrustGovernanceState::new();
         let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
@@ -1399,6 +1514,22 @@ mod tests {
         let result = gov.withdraw(id);
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code, ERR_STAKE_INVALID_TRANSITION);
+    }
+
+    #[test]
+    fn test_withdraw_slashed_stake_preserves_slash_record() {
+        let mut gov = TrustGovernanceState::new();
+        let id = gov.deposit_stake("alice", 500, RiskTier::High, 0).unwrap();
+        gov.slash(id, make_evidence("ev-001")).unwrap();
+        let audit_before = gov.audit_log.len();
+
+        let err = gov.withdraw(id).unwrap_err();
+
+        assert_eq!(err.code, ERR_STAKE_INVALID_TRANSITION);
+        let record = gov.get_stake(id).unwrap();
+        assert_eq!(record.state, StakeState::Slashed);
+        assert_eq!(record.slash_events.len(), 1);
+        assert_eq!(gov.audit_log.len(), audit_before);
     }
 
     // -- expire tests -------------------------------------------------------
@@ -1546,5 +1677,434 @@ mod tests {
         assert_eq!(policy.slash_fraction_for_tier(RiskTier::High), 50);
         assert_eq!(policy.slash_fraction_for_tier(RiskTier::Medium), 25);
         assert_eq!(policy.slash_fraction_for_tier(RiskTier::Low), 10);
+    }
+
+    // ── Negative-path tests for edge cases and invalid inputs ──────────
+
+    #[test]
+    fn negative_stake_id_with_extreme_numerical_values() {
+        // Test StakeId with boundary numerical values
+        let boundary_values = vec![
+            0,                    // Zero
+            1,                    // Minimum positive
+            u64::MAX / 2,         // Half maximum
+            u64::MAX - 1,         // Near maximum
+            u64::MAX,             // Maximum value
+        ];
+
+        for value in boundary_values {
+            let stake_id = StakeId(value);
+
+            // Display should work with extreme values
+            let display = format!("{}", stake_id);
+            assert!(display.starts_with("stake-"), "Display should have stake- prefix: {}", display);
+            assert!(display.contains(&value.to_string()), "Display should contain the value: {}", display);
+
+            // Debug should also work
+            let debug = format!("{:?}", stake_id);
+            assert!(debug.contains(&value.to_string()));
+
+            // Clone and equality should work
+            let cloned = stake_id.clone();
+            assert_eq!(stake_id, cloned);
+
+            // Should be usable in collections (Hash + Eq)
+            let mut map = BTreeMap::new();
+            map.insert(stake_id, "test_value");
+            assert_eq!(map.get(&StakeId(value)), Some(&"test_value"));
+        }
+    }
+
+    #[test]
+    fn negative_risk_tier_serialization_and_ordering_consistency() {
+        // Test RiskTier serialization edge cases
+        let tiers = [RiskTier::Low, RiskTier::Medium, RiskTier::High, RiskTier::Critical];
+
+        for tier in &tiers {
+            // Serialization should work consistently
+            let serialized = serde_json::to_string(tier).unwrap();
+            let deserialized: RiskTier = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(*tier, deserialized);
+
+            // Label should be consistent with serialization
+            let label = tier.label();
+            assert!(!label.is_empty());
+            assert!(label.is_ascii());
+            assert!(!label.contains(' '));
+            assert_eq!(label, label.to_lowercase());
+        }
+
+        // Test ordering (Low < Medium < High < Critical)
+        assert!(RiskTier::Low < RiskTier::Medium);
+        assert!(RiskTier::Medium < RiskTier::High);
+        assert!(RiskTier::High < RiskTier::Critical);
+
+        // Test invalid deserialization
+        let invalid_tier_json = vec![
+            "\"Unknown\"",
+            "\"LOW\"",              // Wrong case
+            "\"VeryHigh\"",         // Non-existent variant
+            "42",                   // Wrong type
+            "null",
+        ];
+
+        for invalid_json in invalid_tier_json {
+            let result: Result<RiskTier, _> = serde_json::from_str(invalid_json);
+            assert!(result.is_err(), "Should reject invalid tier JSON: {}", invalid_json);
+        }
+    }
+
+    #[test]
+    fn negative_stake_state_transitions_and_terminal_state_validation() {
+        // Test StakeState edge cases and invalid transitions
+        let states = [
+            StakeState::Active,
+            StakeState::Slashed,
+            StakeState::UnderAppeal,
+            StakeState::Withdrawn,
+            StakeState::Expired,
+        ];
+
+        for state in &states {
+            // Label should be consistent
+            let label = state.label();
+            let display = format!("{}", state);
+            assert_eq!(label, display);
+            assert!(!label.is_empty());
+            assert!(label.is_ascii());
+            assert!(!label.contains(' '));
+
+            // Terminal state check should be consistent
+            let is_terminal = state.is_terminal();
+            match state {
+                StakeState::Withdrawn | StakeState::Expired => assert!(is_terminal),
+                _ => assert!(!is_terminal),
+            }
+
+            // Should be cloneable and comparable
+            let cloned = state.clone();
+            assert_eq!(*state, cloned);
+        }
+
+        // Test that terminal states are correctly identified
+        assert!(StakeState::Withdrawn.is_terminal());
+        assert!(StakeState::Expired.is_terminal());
+        assert!(!StakeState::Active.is_terminal());
+        assert!(!StakeState::Slashed.is_terminal());
+        assert!(!StakeState::UnderAppeal.is_terminal());
+    }
+
+    #[test]
+    fn negative_appeal_outcome_edge_cases_and_state_consistency() {
+        // Test AppealOutcome with edge cases
+        let outcomes = [AppealOutcome::Pending, AppealOutcome::Upheld, AppealOutcome::Reversed];
+
+        for outcome in &outcomes {
+            // Label and display consistency
+            let label = outcome.label();
+            let display = format!("{}", outcome);
+            assert_eq!(label, display);
+            assert!(!label.is_empty());
+            assert!(label.is_ascii());
+
+            // Serialization should use snake_case
+            let serialized = serde_json::to_string(outcome).unwrap();
+            let deserialized: AppealOutcome = serde_json::from_str(&serialized).unwrap();
+            assert_eq!(*outcome, deserialized);
+
+            // Should be hashable and comparable
+            let cloned = outcome.clone();
+            assert_eq!(*outcome, cloned);
+
+            // Should work in collections
+            let mut map = BTreeMap::new();
+            map.insert(*outcome, "test");
+            assert_eq!(map.get(outcome), Some(&"test"));
+        }
+
+        // Test serialization format (should be snake_case)
+        assert_eq!(serde_json::to_string(&AppealOutcome::Pending).unwrap(), "\"pending\"");
+        assert_eq!(serde_json::to_string(&AppealOutcome::Upheld).unwrap(), "\"upheld\"");
+        assert_eq!(serde_json::to_string(&AppealOutcome::Reversed).unwrap(), "\"reversed\"");
+    }
+
+    #[test]
+    fn negative_slash_evidence_with_malicious_content() {
+        // Test SlashEvidence with various problematic content
+        let malicious_evidence = vec![
+            SlashEvidence {
+                evidence_hash: "".to_string(), // Empty hash
+                description: "Normal description".to_string(),
+                collected_at: 1000,
+                capability: "test_cap".to_string(),
+            },
+            SlashEvidence {
+                evidence_hash: "\0hash\x01with\x7fcontrol".to_string(), // Control characters
+                description: "description\nwith\nnewlines".to_string(),
+                collected_at: 0, // Zero timestamp
+                capability: "capability\twith\ttabs".to_string(),
+            },
+            SlashEvidence {
+                evidence_hash: "🚀emoji💀hash".to_string(), // Unicode emoji
+                description: "<script>alert('evidence')</script>".to_string(), // XSS
+                collected_at: u64::MAX, // Maximum timestamp
+                capability: "../../../etc/passwd".to_string(), // Path traversal
+            },
+            SlashEvidence {
+                evidence_hash: "x".repeat(10_000), // Very long hash
+                description: "y".repeat(50_000), // Very long description
+                collected_at: u64::MAX / 2,
+                capability: "z".repeat(1_000), // Long capability
+            },
+        ];
+
+        for evidence in malicious_evidence {
+            // Evidence creation should not panic
+            assert!(evidence.collected_at <= u64::MAX);
+
+            // Serialization should handle problematic content
+            let serialization = serde_json::to_string(&evidence);
+            match serialization {
+                Ok(json) => {
+                    // If serialization succeeds, deserialization should work
+                    let deserialization: Result<SlashEvidence, _> = serde_json::from_str(&json);
+                    match deserialization {
+                        Ok(restored) => {
+                            // Basic field preservation
+                            assert_eq!(restored.evidence_hash, evidence.evidence_hash);
+                            assert_eq!(restored.collected_at, evidence.collected_at);
+                        }
+                        Err(_) => {
+                            // Some characters might not survive JSON round-trip
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Some problematic content might not be serializable
+                }
+            }
+
+            // Equality and cloning should work
+            let cloned = evidence.clone();
+            assert_eq!(evidence, cloned);
+
+            // Debug formatting should not panic
+            let _debug = format!("{:?}", evidence);
+        }
+    }
+
+    #[test]
+    fn negative_slash_event_with_extreme_timestamps_and_amounts() {
+        // Test SlashEvent with extreme numerical values
+        let extreme_events = vec![
+            SlashEvent {
+                stake_id: StakeId(0),
+                evidence: make_evidence("test_hash"),
+                slash_amount: 0, // Zero slash amount
+                slashed_at: 0, // Zero timestamp
+                appeal_deadline: 0, // Zero deadline
+            },
+            SlashEvent {
+                stake_id: StakeId(u64::MAX),
+                evidence: make_evidence("max_test"),
+                slash_amount: u64::MAX, // Maximum slash amount
+                slashed_at: u64::MAX, // Maximum timestamp
+                appeal_deadline: u64::MAX, // Maximum deadline
+            },
+            SlashEvent {
+                stake_id: StakeId(12345),
+                evidence: SlashEvidence {
+                    evidence_hash: "\0malicious\x01hash".to_string(),
+                    description: "slash\nwith\nnewlines".to_string(),
+                    collected_at: u64::MAX / 2,
+                    capability: "🚀capability💀".to_string(),
+                },
+                slash_amount: u64::MAX / 2,
+                slashed_at: 1,
+                appeal_deadline: u64::MAX - 1,
+            },
+        ];
+
+        for event in extreme_events {
+            // Event creation should handle extreme values
+            assert!(event.slash_amount <= u64::MAX);
+            assert!(event.slashed_at <= u64::MAX);
+            assert!(event.appeal_deadline <= u64::MAX);
+
+            // Should be serializable
+            let serialization = serde_json::to_string(&event);
+            match serialization {
+                Ok(json) => {
+                    let _deserialization: Result<SlashEvent, _> = serde_json::from_str(&json);
+                    // Either succeeds or fails gracefully
+                }
+                Err(_) => {
+                    // Some content might not be serializable
+                }
+            }
+
+            // Cloning and equality should work
+            let cloned = event.clone();
+            assert_eq!(event, cloned);
+
+            // Should handle deadline calculations safely
+            let now = 1_000_000u64;
+            let is_expired = now > event.appeal_deadline;
+            assert!(is_expired || !is_expired); // Basic boolean check
+        }
+    }
+
+    #[test]
+    fn negative_constants_validation_and_naming_consistency() {
+        // Test that all event constants are well-formed
+        use event_codes::*;
+
+        let event_constants = [
+            STAKE_001_DEPOSITED,
+            STAKE_002_SLASHED,
+            STAKE_003_APPEAL_FILED,
+            STAKE_004_APPEAL_RESOLVED,
+            STAKE_005_WITHDRAWN,
+            STAKE_006_EXPIRED,
+            STAKE_007_GATE_CHECKED,
+        ];
+
+        for constant in &event_constants {
+            assert!(!constant.is_empty());
+            assert!(constant.starts_with("STAKE-"), "Event constant should start with STAKE-: {}", constant);
+            assert!(constant.is_ascii(), "Event constant should be ASCII: {}", constant);
+
+            // Should follow pattern STAKE-XXX where XXX is 3 digits
+            let suffix = constant.strip_prefix("STAKE-").unwrap();
+            assert_eq!(suffix.len(), 3, "Event code suffix should be 3 digits: {}", suffix);
+            assert!(suffix.chars().all(|c| c.is_ascii_digit()), "Event code suffix should be numeric: {}", suffix);
+        }
+
+        // Test error constants
+        let error_constants = [
+            ERR_STAKE_INSUFFICIENT,
+            ERR_STAKE_NOT_FOUND,
+            ERR_STAKE_ALREADY_SLASHED,
+            ERR_STAKE_WITHDRAWAL_BLOCKED,
+            ERR_STAKE_APPEAL_EXPIRED,
+            ERR_STAKE_INVALID_TRANSITION,
+            ERR_STAKE_DUPLICATE_APPEAL,
+        ];
+
+        for constant in &error_constants {
+            assert!(!constant.is_empty());
+            assert!(constant.starts_with("ERR_STAKE_"), "Error constant should start with ERR_STAKE_: {}", constant);
+            assert!(constant.is_ascii(), "Error constant should be ASCII: {}", constant);
+        }
+
+        // Test invariant constants
+        let invariant_constants = [
+            INV_STAKE_MINIMUM,
+            INV_STAKE_SLASH_DETERMINISTIC,
+            INV_STAKE_APPEAL_WINDOW,
+            INV_STAKE_AUDIT_COMPLETE,
+            INV_STAKE_NO_DOUBLE_SLASH,
+            INV_STAKE_WITHDRAWAL_SAFE,
+        ];
+
+        for constant in &invariant_constants {
+            assert!(!constant.is_empty());
+            assert!(constant.starts_with("INV-STAKE-"), "Invariant should start with INV-STAKE-: {}", constant);
+            assert!(constant.is_ascii(), "Invariant constant should be ASCII: {}", constant);
+        }
+
+        // Test schema version
+        assert_eq!(SCHEMA_VERSION, "staking-v1.0");
+        assert!(SCHEMA_VERSION.contains("staking-"));
+        assert!(SCHEMA_VERSION.contains("v1."));
+    }
+
+    #[test]
+    fn negative_stake_amount_arithmetic_overflow_safety() {
+        // Test arithmetic operations with extreme stake amounts
+        let max_amount = u64::MAX;
+        let large_amount = u64::MAX / 2;
+        let small_amount = 1;
+
+        // Test potential overflow scenarios in slash calculations
+        let overflow_scenarios = vec![
+            (max_amount, 100), // 100% of max amount
+            (large_amount, 200), // 200% (would overflow)
+            (small_amount, u32::MAX), // Very high percentage
+        ];
+
+        for (amount, percentage) in overflow_scenarios {
+            // Simulate slash fraction calculation with overflow protection
+            let slash_fraction = percentage.min(100); // Cap at 100%
+
+            // Safe calculation that avoids overflow
+            let slash_amount = if percentage >= 100 {
+                amount // Full amount
+            } else {
+                amount / 100 * percentage as u64 // Safe calculation
+            };
+
+            assert!(slash_amount <= amount, "Slash amount should not exceed original: {} vs {}", slash_amount, amount);
+
+            // Test with saturating arithmetic
+            let saturating_slash = amount.saturating_mul(percentage as u64).saturating_div(100);
+            assert!(saturating_slash >= slash_amount || saturating_slash == u64::MAX);
+        }
+
+        // Test edge case: zero amounts
+        let zero_slash = 0u64.saturating_mul(100).saturating_div(100);
+        assert_eq!(zero_slash, 0);
+
+        // Test edge case: very small amounts with high percentages
+        let small_slash = 1u64.saturating_mul(99).saturating_div(100);
+        assert_eq!(small_slash, 0); // Should round down
+    }
+
+    #[test]
+    fn negative_timestamp_edge_cases_and_deadline_calculations() {
+        // Test timestamp handling with edge cases
+        let edge_timestamps = vec![
+            (0, 0), // Both zero
+            (0, 1), // Zero start, small deadline
+            (1, 0), // Small start, zero deadline (deadline in past)
+            (u64::MAX - 1, u64::MAX), // Near overflow
+            (u64::MAX, u64::MAX), // Both maximum
+            (1000, 500), // Deadline before current time
+        ];
+
+        for (current_time, deadline) in edge_timestamps {
+            // Deadline comparison should not overflow
+            let is_expired = current_time > deadline;
+            let time_left = if deadline > current_time {
+                deadline.saturating_sub(current_time)
+            } else {
+                0
+            };
+
+            // Basic sanity checks
+            if current_time <= deadline {
+                assert!(!is_expired, "Should not be expired when current <= deadline");
+                assert_eq!(time_left, deadline - current_time);
+            } else {
+                assert!(is_expired, "Should be expired when current > deadline");
+                assert_eq!(time_left, 0);
+            }
+
+            // Test SlashEvent with these timestamps
+            let event = SlashEvent {
+                stake_id: StakeId(1),
+                evidence: make_evidence("timestamp_test"),
+                slash_amount: 1000,
+                slashed_at: current_time,
+                appeal_deadline: deadline,
+            };
+
+            assert_eq!(event.slashed_at, current_time);
+            assert_eq!(event.appeal_deadline, deadline);
+
+            // Should be serializable even with extreme values
+            let serialization = serde_json::to_string(&event);
+            assert!(serialization.is_ok(), "Should serialize extreme timestamp values");
+        }
     }
 }

@@ -24,8 +24,12 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::capacity_defaults::aliases::MAX_EVENTS;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -371,16 +375,17 @@ impl Default for StakeWeighter {
 impl StakeWeighter {
     /// Create a new stake weighter with custom parameters.
     pub fn new(established_threshold: u64, base_weight: f64, max_weight: f64) -> Self {
-        let safe_base = if base_weight.is_finite() {
+        let safe_base = if base_weight.is_finite() && base_weight >= 0.0 {
             base_weight
         } else {
             0.01
         };
-        let safe_max = if max_weight.is_finite() {
+        let safe_max = if max_weight.is_finite() && max_weight >= 0.0 {
             max_weight
         } else {
             1.0
         };
+        let safe_max = safe_max.max(safe_base);
         Self {
             established_threshold,
             base_weight: safe_base,
@@ -508,11 +513,12 @@ impl Default for SybilDetector {
 impl SybilDetector {
     /// Create a new detector with custom parameters.
     pub fn new(burst_threshold: usize, burst_window_ms: u64, similarity_threshold: f64) -> Self {
-        let safe_sim = if similarity_threshold.is_finite() {
-            similarity_threshold
-        } else {
-            0.95
-        };
+        let safe_sim =
+            if similarity_threshold.is_finite() && (0.0..=1.0).contains(&similarity_threshold) {
+                similarity_threshold
+            } else {
+                0.95
+            };
         Self {
             burst_threshold,
             burst_window_ms,
@@ -1793,5 +1799,920 @@ mod tests {
     fn sybil_detector_nan_threshold_falls_back_to_default() {
         let d = SybilDetector::new(5, 60_000, f64::NAN);
         assert!((d.similarity_threshold - 0.95).abs() < f64::EPSILON);
+    }
+}
+
+#[cfg(test)]
+mod sybil_defense_negative_path_tests {
+    use super::*;
+
+    fn signal(id: &str, source: &str, value: f64) -> TrustSignal {
+        TrustSignal {
+            signal_id: id.to_string(),
+            source_node_id: source.to_string(),
+            target_id: "target-a".to_string(),
+            value,
+            timestamp_ms: 1_700_000_000,
+        }
+    }
+
+    fn established_node(id: &str) -> TrustNode {
+        TrustNode::established(id, 75.0, 150, 1_600_000_000)
+    }
+
+    #[test]
+    fn weighted_average_rejects_empty_signal_batch() {
+        let weighter = StakeWeighter::default();
+        let nodes = BTreeMap::new();
+
+        let err = weighter.weighted_average(&[], &nodes).unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(err.message.contains("no signals"));
+    }
+
+    #[test]
+    fn weighted_average_rejects_zero_total_weight() {
+        let weighter = StakeWeighter::new(100, 0.0, 0.0);
+        let nodes = BTreeMap::new();
+        let signals = vec![signal("signal-1", "unknown-node", 0.5)];
+
+        let err = weighter.weighted_average(&signals, &nodes).unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(err.message.contains("total weight"));
+    }
+
+    #[test]
+    fn weighted_average_rejects_non_finite_weighted_sum() {
+        let weighter = StakeWeighter::default();
+        let nodes = BTreeMap::from([("node-a".to_string(), established_node("node-a"))]);
+        let signals = vec![signal("signal-1", "node-a", f64::INFINITY)];
+
+        let err = weighter.weighted_average(&signals, &nodes).unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(err.message.contains("non-finite weighted sum"));
+    }
+
+    #[test]
+    fn process_signals_rejects_empty_batch() {
+        let mut pipeline = SybilDefensePipeline::new();
+
+        let err = pipeline.process_signals(&[], 1_700_000_000).unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(pipeline.pipeline_events().is_empty());
+    }
+
+    #[test]
+    fn process_signals_rejects_non_finite_signal_value() {
+        let mut pipeline = SybilDefensePipeline::new();
+        pipeline.register_node(established_node("node-a"));
+        let signals = vec![signal("signal-1", "node-a", f64::NAN)];
+
+        let err = pipeline
+            .process_signals(&signals, 1_700_000_000)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(pipeline.pipeline_events().is_empty());
+    }
+
+    #[test]
+    fn trimmed_mean_rejects_negative_infinity_input() {
+        let aggregator = TrustAggregator::default();
+
+        let err = aggregator
+            .trimmed_mean(&[0.25, f64::NEG_INFINITY, 0.75])
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(err.message.contains("non-finite value"));
+    }
+
+    #[test]
+    fn median_rejects_quiet_nan_input() {
+        let aggregator = TrustAggregator::default();
+
+        let err = aggregator.median(&[0.25, f64::NAN, 0.75]).unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(err.message.contains("non-finite value"));
+    }
+
+    #[test]
+    fn threshold_sized_burst_is_not_reported_as_sybil() {
+        let mut detector = SybilDetector::new(3, 60_000, 0.95);
+        let nodes = BTreeMap::from([("node-a".to_string(), TrustNode::new("node-a", 1))]);
+        let signals = vec![
+            signal("signal-1", "node-a", 0.9),
+            signal("signal-2", "node-a", 0.91),
+            signal("signal-3", "node-a", 0.92),
+        ];
+
+        let detected = detector.detect_sybil_cluster(&signals, &nodes, 1_700_000_000);
+
+        assert!(detected.is_empty());
+        assert!(detector.events().is_empty());
+    }
+
+    #[test]
+    fn stake_weighter_negative_base_weight_falls_back_to_default() {
+        let weighter = StakeWeighter::new(100, -0.5, 1.0);
+        let new_node = TrustNode::new("new-node", 1);
+
+        assert!((weighter.base_weight - 0.01).abs() < f64::EPSILON);
+        assert!((weighter.compute_weight(&new_node) - 0.01).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn stake_weighter_negative_max_weight_falls_back_to_default() {
+        let weighter = StakeWeighter::new(100, 0.01, -1.0);
+        let established = established_node("established-node");
+
+        assert!((weighter.max_weight - 1.0).abs() < f64::EPSILON);
+        assert!(weighter.compute_weight(&established) >= weighter.base_weight);
+    }
+
+    #[test]
+    fn stake_weighter_max_below_base_preserves_monotonic_weight() {
+        let weighter = StakeWeighter::new(100, 0.5, 0.1);
+        let new_node = TrustNode::new("new-node", 1);
+        let established = established_node("established-node");
+
+        assert!((weighter.max_weight - weighter.base_weight).abs() < f64::EPSILON);
+        assert!(weighter.compute_weight(&established) >= weighter.compute_weight(&new_node));
+    }
+
+    #[test]
+    fn apply_weights_never_returns_negative_weight_from_negative_config() {
+        let weighter = StakeWeighter::new(100, -10.0, -1.0);
+        let nodes = BTreeMap::from([("node-a".to_string(), established_node("node-a"))]);
+        let weighted = weighter.apply_weights(&[signal("signal-1", "node-a", 0.7)], &nodes);
+
+        assert_eq!(weighted.len(), 1);
+        assert!(weighted[0].0 >= 0.0);
+        assert!(weighted[0].1 >= 0.0);
+    }
+
+    #[test]
+    fn sybil_detector_negative_similarity_threshold_falls_back_to_default() {
+        let detector = SybilDetector::new(5, 60_000, -0.1);
+
+        assert!((detector.similarity_threshold - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn sybil_detector_above_one_similarity_threshold_falls_back_to_default() {
+        let detector = SybilDetector::new(5, 60_000, 1.1);
+
+        assert!((detector.similarity_threshold - 0.95).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_items_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_drops_oldest_batch() {
+        let mut items = vec![1, 2, 3, 4];
+
+        push_bounded(&mut items, 5, 2);
+
+        assert_eq!(items, vec![4, 5]);
+    }
+
+    #[test]
+    fn detector_empty_signal_batch_does_not_log_sybil_event() {
+        let mut detector = SybilDetector::default();
+        let nodes = BTreeMap::new();
+
+        let detected = detector.detect_sybil_cluster(&[], &nodes, 1_700_000_000);
+
+        assert!(detected.is_empty());
+        assert!(detector.events().is_empty());
+    }
+
+    #[test]
+    fn detector_zero_window_rejects_nearby_but_distinct_burst() {
+        let mut detector = SybilDetector::new(1, 0, 0.95);
+        let nodes = BTreeMap::from([("node-a".to_string(), TrustNode::new("node-a", 1))]);
+        let signals = vec![
+            TrustSignal {
+                timestamp_ms: 1000,
+                ..signal("signal-1", "node-a", 0.9)
+            },
+            TrustSignal {
+                timestamp_ms: 1001,
+                ..signal("signal-2", "node-a", 0.91)
+            },
+        ];
+
+        let detected = detector.detect_sybil_cluster(&signals, &nodes, 1_700_000_000);
+
+        assert!(detected.is_empty());
+        assert!(detector.events().is_empty());
+    }
+
+    #[test]
+    fn attenuate_empty_sybil_set_keeps_all_weights_at_one() {
+        let detector = SybilDetector::default();
+        let signals = vec![
+            signal("signal-1", "node-a", 0.4),
+            signal("signal-2", "node-b", 0.6),
+        ];
+
+        let attenuated = detector.attenuate_sybil_signals(&signals, &BTreeSet::new());
+
+        assert_eq!(attenuated.len(), 2);
+        assert!(attenuated.iter().all(|(_, weight)| {
+            (*weight - 1.0).abs() < f64::EPSILON
+        }));
+    }
+
+    #[test]
+    fn compute_influence_absent_node_ids_have_zero_influence() {
+        let detector = SybilDetector::default();
+        let weighter = StakeWeighter::default();
+        let nodes = BTreeMap::from([("node-a".to_string(), established_node("node-a"))]);
+        let signals = vec![signal("signal-1", "node-a", 0.9)];
+        let missing_nodes = vec!["node-missing".to_string()];
+
+        let influence = detector.compute_influence(&signals, &missing_nodes, &weighter, &nodes);
+
+        assert!((influence - 0.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn aggregator_negative_trim_ratio_clamps_to_zero() {
+        let aggregator = TrustAggregator::new(-0.25);
+
+        let result = aggregator.trimmed_mean(&[0.0, 1.0]).unwrap();
+
+        assert!((aggregator.trim_ratio - 0.0).abs() < f64::EPSILON);
+        assert!((result.value - 0.5).abs() < f64::EPSILON);
+        assert_eq!(result.trimmed_count, 0);
+    }
+
+    #[test]
+    fn aggregator_excessive_trim_ratio_clamps_to_half_without_empty_slice() {
+        let aggregator = TrustAggregator::new(0.75);
+
+        let result = aggregator.trimmed_mean(&[0.1, 0.9]).unwrap();
+
+        assert!((aggregator.trim_ratio - 0.5).abs() < f64::EPSILON);
+        assert!((result.value - 0.5).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn median_rejects_positive_infinity_input() {
+        let aggregator = TrustAggregator::default();
+
+        let err = aggregator
+            .median(&[0.25, f64::INFINITY, 0.75])
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(err.message.contains("non-finite value"));
+    }
+
+    #[test]
+    fn weighted_average_rejects_nan_weighted_sum() {
+        let weighter = StakeWeighter::default();
+        let nodes = BTreeMap::from([("node-a".to_string(), established_node("node-a"))]);
+        let signals = vec![signal("signal-1", "node-a", f64::NAN)];
+
+        let err = weighter.weighted_average(&signals, &nodes).unwrap_err();
+
+        assert_eq!(err.code, ERR_SPS_AGGREGATION_FAILED);
+        assert!(err.message.contains("non-finite weighted sum"));
+    }
+
+    #[test]
+    fn established_threshold_zero_does_not_divide_by_zero() {
+        let weighter = StakeWeighter::new(0, 0.05, 1.0);
+        let established = established_node("established-node");
+
+        let weight = weighter.compute_weight(&established);
+
+        assert!((weight - weighter.base_weight).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn coordinated_values_outside_similarity_threshold_are_not_sybil() {
+        let mut detector = SybilDetector::new(100, 60_000, 0.99);
+        let nodes = BTreeMap::from([
+            ("node-a".to_string(), TrustNode::new("node-a", 1)),
+            ("node-b".to_string(), TrustNode::new("node-b", 1)),
+            ("node-c".to_string(), TrustNode::new("node-c", 1)),
+        ]);
+        let signals = vec![
+            signal("signal-1", "node-a", 0.80),
+            signal("signal-2", "node-b", 0.82),
+            signal("signal-3", "node-c", 0.84),
+        ];
+
+        let detected = detector.detect_sybil_cluster(&signals, &nodes, 1_700_000_000);
+
+        assert!(detected.is_empty());
+        assert!(detector.events().is_empty());
+    }
+
+    #[test]
+    fn coordinated_established_nodes_are_not_flagged_as_sybil_cluster() {
+        let mut detector = SybilDetector::new(100, 60_000, 0.95);
+        let nodes = BTreeMap::from([
+            ("node-a".to_string(), established_node("node-a")),
+            ("node-b".to_string(), established_node("node-b")),
+            ("node-c".to_string(), established_node("node-c")),
+        ]);
+        let signals = vec![
+            signal("signal-1", "node-a", 0.91),
+            signal("signal-2", "node-b", 0.91),
+            signal("signal-3", "node-c", 0.91),
+        ];
+
+        let detected = detector.detect_sybil_cluster(&signals, &nodes, 1_700_000_000);
+
+        assert!(detected.is_empty());
+        assert!(detector.events().is_empty());
+    }
+
+    #[test]
+    fn compute_influence_duplicate_node_ids_do_not_double_count_signal() {
+        let detector = SybilDetector::default();
+        let weighter = StakeWeighter::default();
+        let nodes = BTreeMap::from([("node-a".to_string(), established_node("node-a"))]);
+        let signals = vec![signal("signal-1", "node-a", 0.9)];
+        let duplicated_nodes = vec!["node-a".to_string(), "node-a".to_string()];
+
+        let influence = detector.compute_influence(&signals, &duplicated_nodes, &weighter, &nodes);
+        let single_influence =
+            detector.compute_influence(&signals, &["node-a".to_string()], &weighter, &nodes);
+
+        assert!((influence - single_influence).abs() < f64::EPSILON);
+    }
+
+    /// Extreme adversarial test: Precision-based timing attack exploiting floating-point
+    /// arithmetic weaknesses in stake weight calculations to manipulate trust rankings
+    #[test]
+    fn sybil_defense_floating_point_precision_stake_weight_manipulation_attack() {
+        let weighter = StakeWeighter::default();
+
+        // Attack vectors targeting floating-point precision edge cases
+        let precision_attack_nodes = [
+            (0, f64::MIN_POSITIVE),                    // Minimal positive reputation
+            (1, f64::EPSILON),                         // Machine epsilon
+            (u64::MAX, f64::MAX),                      // Maximum values
+            (1_000_000_000_000, 1e-100),              // Very large history, tiny rep
+            (1, 1.0 + f64::EPSILON),                   // Slightly above 1.0
+            (100, std::f64::consts::PI / 1e10),        // Irrational tiny number
+            (50, 1.0 / 3.0),                          // Repeating decimal
+            (999_999_999_999, 0.999_999_999_999),     // Near-maximum values
+        ];
+
+        for (history_len, reputation_score) in precision_attack_nodes {
+            let attack_node = TrustNode::established(
+                "precision-attacker",
+                reputation_score,
+                history_len,
+                1_000_000_000
+            );
+
+            let weight = weighter.compute_weight(&attack_node);
+
+            // Weight calculations must remain finite and bounded
+            assert!(weight.is_finite(),
+                "Weight calculation resulted in non-finite value for history={}, rep={}",
+                history_len, reputation_score);
+            assert!(weight >= 0.0,
+                "Weight calculation resulted in negative value: {}", weight);
+            assert!(weight <= weighter.max_weight * 2.0,
+                "Weight {} exceeded reasonable bounds for max_weight {}",
+                weight, weighter.max_weight);
+
+            // Verify monotonicity isn't broken by precision issues
+            if history_len > 0 {
+                let smaller_node = TrustNode::established(
+                    "smaller-history",
+                    reputation_score,
+                    history_len.saturating_sub(1),
+                    1_000_000_000
+                );
+                let smaller_weight = weighter.compute_weight(&smaller_node);
+
+                assert!(weight >= smaller_weight - f64::EPSILON,
+                    "Monotonicity violated: weight decreased from {} to {} at history change {}->{}",
+                    smaller_weight, weight, history_len.saturating_sub(1), history_len);
+            }
+        }
+    }
+
+    /// Extreme adversarial test: Algorithmic complexity explosion via carefully crafted
+    /// Sybil cluster patterns designed to maximize computational cost in detection logic
+    #[test]
+    fn sybil_defense_algorithmic_complexity_explosion_detection_dos_attack() {
+        use std::time::Instant;
+
+        let mut detector = SybilDetector::new(3, 60_000, 0.95);
+        let mut nodes = BTreeMap::new();
+        let mut signals = Vec::new();
+
+        // Generate pathological input designed to maximize comparison operations
+        let complexity_multiplier = 100; // Limit to prevent actual DoS in test
+
+        for i in 0..complexity_multiplier {
+            let node_id = format!("complexity-node-{}", i);
+            nodes.insert(node_id.clone(), TrustNode::new(&node_id, 1));
+
+            // Create overlapping value patterns that force maximum pairwise comparisons
+            for j in 0..10 {
+                signals.push(TrustSignal {
+                    signal_id: format!("complex-signal-{}-{}", i, j),
+                    source_node_id: node_id.clone(),
+                    target_id: format!("target-{}", i % 5), // Limited target diversity
+                    value: 0.95 + (i as f64 / 100_000.0), // Very similar values
+                    timestamp_ms: 5_000 + (j as u64), // Clustered timestamps
+                });
+            }
+        }
+
+        let start = Instant::now();
+        let detected = detector.detect_sybil_cluster(&signals, &nodes, 10_000);
+        let elapsed = start.elapsed();
+
+        // Detection must complete in reasonable time despite adversarial input complexity
+        assert!(elapsed.as_millis() < 5_000,
+            "Sybil detection took {}ms for {} signals, should be <5000ms",
+            elapsed.as_millis(), signals.len());
+
+        // Results should be deterministic regardless of complexity
+        assert!(detected.len() <= nodes.len(),
+            "Detected more Sybils ({}) than total nodes ({})",
+            detected.len(), nodes.len());
+
+        // Event logging should remain bounded
+        assert!(detector.events().len() <= 100,
+            "Event log grew to {} entries, should be bounded", detector.events().len());
+    }
+
+    /// Extreme adversarial test: Memory exhaustion attack via massive trust signal batches
+    /// designed to overwhelm pipeline processing and exhaust available system resources
+    #[test]
+    fn sybil_defense_memory_exhaustion_massive_signal_batch_dos_attack() {
+        let mut pipeline = SybilDefensePipeline::new();
+
+        // Register realistic number of nodes
+        for i in 0..100 {
+            pipeline.register_node(TrustNode::established(
+                format!("node-{}", i),
+                50.0 + (i as f64 / 10.0),
+                100 + i * 5,
+                1_000_000_000 + i as u64 * 86400,
+            ));
+        }
+
+        // Generate massive signal batch to stress memory usage
+        let massive_signal_count = 10_000; // Limited to prevent actual resource exhaustion
+        let mut massive_signals = Vec::with_capacity(massive_signal_count);
+
+        for i in 0..massive_signal_count {
+            massive_signals.push(TrustSignal {
+                signal_id: format!("massive-signal-{}", i),
+                source_node_id: format!("node-{}", i % 100),
+                target_id: format!("target-{}", i % 50),
+                value: 0.5 + ((i % 1000) as f64 / 2000.0),
+                timestamp_ms: 1_700_000_000 + (i as u64),
+            });
+        }
+
+        let start_memory = std::mem::size_of_val(&massive_signals);
+
+        // Process massive batch - should not crash or exhaust memory
+        let result = pipeline.process_signals(&massive_signals, 1_700_000_000);
+
+        // Processing should either succeed or fail gracefully
+        match result {
+            Ok(aggregation_result) => {
+                assert!(aggregation_result.value.is_finite(),
+                    "Massive batch processing resulted in non-finite aggregation");
+                assert!(aggregation_result.signal_count <= massive_signal_count,
+                    "Signal count {} exceeds input size {}",
+                    aggregation_result.signal_count, massive_signal_count);
+            },
+            Err(error) => {
+                // Graceful failure due to resource limits is acceptable
+                assert_eq!(error.code, ERR_SPS_AGGREGATION_FAILED,
+                    "Unexpected error type for massive batch: {}", error.code);
+            }
+        }
+
+        // Pipeline should remain functional after stress test
+        let simple_signals = vec![TrustSignal {
+            signal_id: "post-stress-signal".to_string(),
+            source_node_id: "node-0".to_string(),
+            target_id: "recovery-target".to_string(),
+            value: 0.8,
+            timestamp_ms: 1_700_001_000,
+        }];
+
+        let recovery_result = pipeline.process_signals(&simple_signals, 1_700_001_000);
+        assert!(recovery_result.is_ok(),
+            "Pipeline should remain functional after stress test");
+    }
+
+    /// Extreme adversarial test: Concurrent trust signal injection race condition attack
+    /// targeting shared state corruption in pipeline processing during parallel operations
+    #[test]
+    fn sybil_defense_concurrent_signal_injection_state_corruption_race_attack() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let pipeline = Arc::new(Mutex::new(SybilDefensePipeline::new()));
+
+        // Register shared nodes
+        {
+            let mut p = pipeline.lock().unwrap();
+            for i in 0..20 {
+                p.register_node(TrustNode::established(
+                    format!("shared-node-{}", i),
+                    60.0 + (i as f64 * 2.0),
+                    150 + i * 10,
+                    1_600_000_000 + i as u64 * 3600,
+                ));
+            }
+        }
+
+        // Spawn multiple threads performing concurrent signal injection
+        let handles: Vec<_> = (0..8).map(|thread_id| {
+            let pipeline_clone = Arc::clone(&pipeline);
+
+            thread::spawn(move || {
+                for batch_id in 0..25 {
+                    let mut thread_signals = Vec::new();
+
+                    // Generate varied signal patterns to stress different code paths
+                    for signal_id in 0..10 {
+                        thread_signals.push(TrustSignal {
+                            signal_id: format!("thread-{}-batch-{}-signal-{}", thread_id, batch_id, signal_id),
+                            source_node_id: format!("shared-node-{}", signal_id % 20),
+                            target_id: format!("race-target-{}-{}", thread_id, batch_id % 3),
+                            value: 0.3 + (thread_id as f64 / 20.0) + (signal_id as f64 / 100.0),
+                            timestamp_ms: 1_700_000_000 + (thread_id as u64 * 1000) + (batch_id as u64 * 100) + signal_id as u64,
+                        });
+                    }
+
+                    if let Ok(mut pipeline_lock) = pipeline_clone.try_lock() {
+                        let _result = pipeline_lock.process_signals(
+                            &thread_signals,
+                            1_700_000_000 + (thread_id as u64 * 1000) + batch_id as u64
+                        );
+                        // Note: Results may vary due to race conditions, we're testing for safety not correctness
+                    }
+
+                    // Brief yield to encourage race conditions
+                    thread::yield_now();
+                }
+            })
+        }).collect();
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify pipeline remains in valid state after concurrent stress
+        let final_pipeline = pipeline.lock().unwrap();
+        assert_eq!(final_pipeline.nodes().len(), 20,
+            "Node count changed during concurrent processing");
+
+        // Pipeline should still be able to process signals normally
+        let test_signals = vec![TrustSignal {
+            signal_id: "post-concurrency-test".to_string(),
+            source_node_id: "shared-node-0".to_string(),
+            target_id: "final-test-target".to_string(),
+            value: 0.75,
+            timestamp_ms: 1_700_002_000,
+        }];
+
+        drop(final_pipeline);  // Release lock before reacquiring
+        let mut final_pipeline = pipeline.lock().unwrap();
+        let final_result = final_pipeline.process_signals(&test_signals, 1_700_002_000);
+        assert!(final_result.is_ok(),
+            "Pipeline should function normally after concurrent stress test");
+    }
+
+    /// Extreme adversarial test: Statistical manipulation via crafted outlier patterns
+    /// designed to exploit trimmed-mean aggregation boundary conditions and bias results
+    #[test]
+    fn sybil_defense_statistical_manipulation_trimmed_mean_boundary_exploitation() {
+        let test_cases = [
+            // Test case: trimmed-mean vs median boundary conditions
+            (0.15, vec![0.1; 70], vec![0.9; 15], vec![0.95; 15]), // 15% trim
+            (0.20, vec![0.2; 60], vec![0.0; 20], vec![1.0; 20]),  // 20% trim (boundary)
+            (0.25, vec![0.3; 50], vec![0.0; 25], vec![1.0; 25]),  // 25% trim
+            (0.30, vec![0.4; 40], vec![0.0; 30], vec![0.8; 30]),  // 30% trim
+        ];
+
+        for (trim_ratio, honest_values, low_outliers, high_outliers) in test_cases {
+            let aggregator = TrustAggregator::new(trim_ratio);
+            let expected_honest_mean = honest_values[0];
+
+            // Combine honest signals with adversarial outliers
+            let mut combined_values = honest_values;
+            combined_values.extend(low_outliers);
+            combined_values.extend(high_outliers);
+
+            let result = aggregator.trimmed_mean(&combined_values).unwrap();
+
+            // Verify outlier resistance: result should stay close to honest mean
+            let deviation = (result.value - expected_honest_mean).abs() / expected_honest_mean;
+            assert!(deviation <= 0.10,
+                "Trimmed-mean with {:.2} trim ratio deviated {:.4} from honest mean {:.2} (result: {:.4})",
+                trim_ratio, deviation, expected_honest_mean, result.value);
+
+            // Verify trim count calculation
+            let expected_trim_count = (combined_values.len() as f64 * trim_ratio).floor() as usize * 2;
+            let actual_trim_count = result.trimmed_count;
+
+            // Allow for edge cases where trimming would eliminate all values
+            if actual_trim_count < combined_values.len() {
+                assert!(actual_trim_count <= expected_trim_count + 2,
+                    "Trim count {} exceeds expected {} for trim ratio {:.2}",
+                    actual_trim_count, expected_trim_count, trim_ratio);
+            }
+
+            // Compare with median for cross-validation
+            let median_result = aggregator.median(&combined_values).unwrap();
+            let trimmed_median_diff = (result.value - median_result.value).abs();
+
+            // Trimmed-mean and median should generally agree on outlier-resistant aggregation
+            assert!(trimmed_median_diff <= 0.3,
+                "Trimmed-mean ({:.4}) and median ({:.4}) disagree significantly with trim ratio {:.2}",
+                result.value, median_result.value, trim_ratio);
+        }
+    }
+
+    /// Extreme adversarial test: Temporal clustering exploit via carefully timed signal
+    /// bursts designed to evade Sybil detection through burst window manipulation
+    #[test]
+    fn sybil_defense_temporal_clustering_burst_window_evasion_exploit() {
+        let window_ms = 60_000;
+        let burst_threshold = 5;
+        let mut detector = SybilDetector::new(burst_threshold, window_ms, 0.95);
+        let mut nodes = BTreeMap::new();
+
+        // Register attack nodes
+        for i in 0..3 {
+            let node_id = format!("temporal-attacker-{}", i);
+            nodes.insert(node_id.clone(), TrustNode::new(&node_id, 1));
+        }
+
+        // Test various temporal evasion patterns
+        let evasion_patterns = [
+            // Pattern 1: Just under burst threshold
+            (burst_threshold - 1, 1_000),
+
+            // Pattern 2: Burst threshold exactly at window boundary
+            (burst_threshold + 1, window_ms + 1),
+
+            // Pattern 3: Multiple micro-bursts within separate windows
+            (2, window_ms / 3),
+
+            // Pattern 4: Slow sustained rate just under detection
+            (burst_threshold - 2, window_ms / 2),
+        ];
+
+        for (pattern_id, (signal_count, time_spacing)) in evasion_patterns.iter().enumerate() {
+            let attacker_id = format!("temporal-attacker-{}", pattern_id % 3);
+            let mut pattern_signals = Vec::new();
+
+            let base_timestamp = 1_700_000_000 + (pattern_id as u64 * 1_000_000);
+
+            for i in 0..*signal_count {
+                pattern_signals.push(TrustSignal {
+                    signal_id: format!("temporal-evasion-{}-{}", pattern_id, i),
+                    source_node_id: attacker_id.clone(),
+                    target_id: format!("evasion-target-{}", pattern_id),
+                    value: 0.95 + (i as f64 / 1000.0), // Slightly varying values
+                    timestamp_ms: base_timestamp + (i as u64 * time_spacing),
+                });
+            }
+
+            let detected = detector.detect_sybil_cluster(
+                &pattern_signals,
+                &nodes,
+                base_timestamp + 100_000
+            );
+
+            // Analyze detection results based on expected behavior
+            if *signal_count >= burst_threshold + 1 {
+                // Patterns exceeding burst threshold should be detected if within window
+                let spans_single_window = (*time_spacing as u64 * (*signal_count as u64 - 1)) <= window_ms;
+                if spans_single_window {
+                    assert!(detected.contains(&attacker_id),
+                        "Pattern {} with {} signals over {}ms should be detected as burst",
+                        pattern_id, signal_count, *time_spacing as u64 * (*signal_count as u64));
+                }
+            } else {
+                // Patterns under threshold should generally evade detection
+                // (unless caught by other heuristics)
+                if detected.contains(&attacker_id) {
+                    // If detected, it should be due to coordination detection, not burst
+                    assert!(!detector.events().is_empty(),
+                        "Pattern {} detected without logging events", pattern_id);
+                }
+            }
+        }
+
+        // Verify detector state remains consistent after evasion attempts
+        assert!(detector.events().len() <= 20,
+            "Event log grew excessively to {} entries", detector.events().len());
+    }
+
+    /// Extreme adversarial test: Reputation score manipulation via edge case reputation
+    /// values designed to exploit stake weighting calculation vulnerabilities
+    #[test]
+    fn sybil_defense_reputation_score_manipulation_stake_weight_exploit() {
+        let weighter = StakeWeighter::default();
+
+        // Edge case reputation scores targeting calculation vulnerabilities
+        let reputation_exploits = [
+            (f64::MIN_POSITIVE, 100),       // Minimal positive reputation
+            (f64::EPSILON, 1000),           // Machine epsilon reputation
+            (1e-100, 500),                  // Extremely small positive
+            (f64::MAX, 0),                  // Maximum reputation, no history
+            (f64::INFINITY, 1000),          // Infinite reputation (should be sanitized)
+            (f64::NAN, 500),                // NaN reputation (should be sanitized)
+            (-0.0, 100),                    // Negative zero
+            (-f64::MIN_POSITIVE, 200),      // Smallest negative
+            (1.0 / 0.0, 300),              // Division by zero result
+            (0.0 / 0.0, 400),              // NaN from division
+        ];
+
+        for (reputation_score, history_len) in reputation_exploits {
+            let exploit_node = TrustNode {
+                node_id: format!("reputation-exploit-{:.2e}", reputation_score),
+                reputation_score,
+                verified_history_len: history_len,
+                sybil_flagged: false,
+                created_at_ms: 1_600_000_000,
+            };
+
+            let weight = weighter.compute_weight(&exploit_node);
+
+            // Weight must remain finite and positive regardless of reputation exploits
+            assert!(weight.is_finite(),
+                "Weight calculation with reputation {} resulted in non-finite value: {}",
+                reputation_score, weight);
+            assert!(weight >= 0.0,
+                "Weight calculation with reputation {} resulted in negative value: {}",
+                reputation_score, weight);
+            assert!(weight <= weighter.max_weight * 1.1, // Small tolerance for rounding
+                "Weight {} exceeds maximum bound {} with reputation {}",
+                weight, weighter.max_weight, reputation_score);
+
+            // Compare with baseline established node
+            let baseline_node = TrustNode::established("baseline", 75.0, history_len, 1_600_000_000);
+            let baseline_weight = weighter.compute_weight(&baseline_node);
+
+            // Extreme reputation values should not provide unfair advantage
+            if !reputation_score.is_finite() || reputation_score <= 0.0 {
+                assert!(weight <= baseline_weight * 1.1,
+                    "Invalid reputation {} should not exceed baseline weight {:.6} (got {:.6})",
+                    reputation_score, baseline_weight, weight);
+            }
+
+            // Test weight ratio calculation resilience
+            let ratio = weighter.weight_ratio_new_vs_established(&exploit_node, &baseline_node);
+            assert!(ratio.is_finite() && ratio >= 0.0,
+                "Weight ratio with exploit reputation {} resulted in invalid ratio: {}",
+                reputation_score, ratio);
+        }
+    }
+
+    /// Extreme adversarial test: Pipeline state corruption via malformed signal injection
+    /// targeting internal data structure integrity during complex processing scenarios
+    #[test]
+    fn sybil_defense_pipeline_state_corruption_malformed_signal_injection() {
+        let mut pipeline = SybilDefensePipeline::new();
+
+        // Register mix of normal and edge-case nodes
+        pipeline.register_node(TrustNode::established("normal-node", 80.0, 200, 1_600_000_000));
+        pipeline.register_node(TrustNode {
+            node_id: "edge-node".to_string(),
+            reputation_score: f64::EPSILON,
+            verified_history_len: u64::MAX,
+            sybil_flagged: false,
+            created_at_ms: 0,
+        });
+
+        // Malformed signal injection vectors
+        let malformed_signals = vec![
+            // Signal with extreme timestamp
+            TrustSignal {
+                signal_id: "extreme-timestamp".to_string(),
+                source_node_id: "normal-node".to_string(),
+                target_id: "target-1".to_string(),
+                value: 0.5,
+                timestamp_ms: u64::MAX,
+            },
+
+            // Signal with zero timestamp
+            TrustSignal {
+                signal_id: "zero-timestamp".to_string(),
+                source_node_id: "edge-node".to_string(),
+                target_id: "target-2".to_string(),
+                value: 0.6,
+                timestamp_ms: 0,
+            },
+
+            // Signal from non-existent node
+            TrustSignal {
+                signal_id: "phantom-node-signal".to_string(),
+                source_node_id: "non-existent-node".to_string(),
+                target_id: "target-3".to_string(),
+                value: 0.7,
+                timestamp_ms: 1_700_000_000,
+            },
+
+            // Signal with boundary value
+            TrustSignal {
+                signal_id: "boundary-value".to_string(),
+                source_node_id: "normal-node".to_string(),
+                target_id: "target-4".to_string(),
+                value: 1.0, // Exact boundary
+                timestamp_ms: 1_700_000_000,
+            },
+
+            // Signal with very long string IDs (potential buffer issues)
+            TrustSignal {
+                signal_id: "x".repeat(10_000),
+                source_node_id: "normal-node".to_string(),
+                target_id: "y".repeat(5_000),
+                value: 0.8,
+                timestamp_ms: 1_700_000_000,
+            },
+        ];
+
+        // Process malformed signals - should handle gracefully without corruption
+        let processing_result = pipeline.process_signals(&malformed_signals, 1_700_000_000);
+
+        match processing_result {
+            Ok(result) => {
+                // If processing succeeds, results should be mathematically sound
+                assert!(result.value.is_finite(),
+                    "Pipeline processing with malformed signals resulted in non-finite aggregation");
+                assert!(result.signal_count <= malformed_signals.len(),
+                    "Signal count {} exceeds input size {}",
+                    result.signal_count, malformed_signals.len());
+                assert!(result.trimmed_count <= result.signal_count,
+                    "Trimmed count {} exceeds total signal count {}",
+                    result.trimmed_count, result.signal_count);
+            },
+            Err(error) => {
+                // Graceful failure is acceptable for malformed input
+                assert!(!error.message.is_empty(),
+                    "Error processing malformed signals should have descriptive message");
+                assert!(!error.code.is_empty(),
+                    "Error processing malformed signals should have error code");
+            }
+        }
+
+        // Verify pipeline state integrity after malformed signal processing
+        assert_eq!(pipeline.nodes().len(), 2,
+            "Node count should remain unchanged after malformed signal processing");
+
+        // Pipeline should remain functional for normal signals
+        let normal_signals = vec![TrustSignal {
+            signal_id: "recovery-signal".to_string(),
+            source_node_id: "normal-node".to_string(),
+            target_id: "recovery-target".to_string(),
+            value: 0.75,
+            timestamp_ms: 1_700_001_000,
+        }];
+
+        let recovery_result = pipeline.process_signals(&normal_signals, 1_700_001_000);
+        assert!(recovery_result.is_ok(),
+            "Pipeline should process normal signals after malformed input: {:?}",
+            recovery_result);
+
+        // Event log should remain bounded and coherent
+        let events = pipeline.pipeline_events();
+        assert!(events.len() <= 100,
+            "Event log grew excessively to {} entries", events.len());
+
+        for event in events {
+            assert!(!event.event_code.is_empty(),
+                "Event should have non-empty code");
+            assert!(!event.detail.is_empty(),
+                "Event should have non-empty detail");
+        }
     }
 }
