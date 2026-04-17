@@ -11,12 +11,8 @@
 #[cfg(test)]
 mod tests {
     use super::super::{
-        computation_registry::*,
-        eviction_saga::*,
-        idempotency::*,
-        idempotency_store::*,
-        remote_bulkhead::*,
-        virtual_transport_faults::*,
+        computation_registry::*, eviction_saga::*, idempotency::*, idempotency_store::*,
+        remote_bulkhead::*, virtual_transport_faults::*,
     };
     use crate::{
         capacity_defaults::aliases::MAX_SAGAS,
@@ -81,7 +77,11 @@ mod tests {
         // Should not panic, should only corrupt bits within payload bounds
         assert_eq!(corrupted.len(), 1000);
         // Original payload should be mostly unchanged since bit positions are out of bounds
-        let diff_count = payload.iter().zip(corrupted.iter()).filter(|(a, b)| a != b).count();
+        let diff_count = payload
+            .iter()
+            .zip(corrupted.iter())
+            .filter(|(a, b)| a != b)
+            .count();
         assert_eq!(diff_count, 0); // No changes since all bit positions are out of bounds
     }
 
@@ -150,7 +150,9 @@ mod tests {
         let mut keys = BTreeSet::new();
 
         for &epoch in &epochs {
-            let key = deriver.derive_key("test.action.v1", epoch, b"payload").unwrap();
+            let key = deriver
+                .derive_key("test.action.v1", epoch, b"payload")
+                .unwrap();
             assert!(keys.insert(key.to_hex())); // All should be unique
         }
     }
@@ -215,7 +217,9 @@ mod tests {
             output_schema: "{}".to_string(),
         };
 
-        let err = registry.register_computation(overflow_entry, "test").unwrap_err();
+        let err = registry
+            .register_computation(overflow_entry, "test")
+            .unwrap_err();
         assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
     }
 
@@ -254,27 +258,31 @@ mod tests {
         let mut gate = CapabilityGate::new("test-secret");
 
         // Test with insufficient capabilities
-        let (limited_cap, _) = provider.issue(
-            "test-principal",
-            RemoteScope::new(
-                vec![RemoteOperation::RemoteComputation], // Missing TelemetryExport
-                vec!["https://test.example.com".to_string()],
-            ),
-            1700000000,
-            3600,
-            true,
-            false,
-            "test",
-        ).unwrap();
+        let (limited_cap, _) = provider
+            .issue(
+                "test-principal",
+                RemoteScope::new(
+                    vec![RemoteOperation::RemoteComputation], // Missing TelemetryExport
+                    vec!["https://test.example.com".to_string()],
+                ),
+                1700000000,
+                3600,
+                true,
+                false,
+                "test",
+            )
+            .unwrap();
 
-        let err = registry.authorize_dispatch(
-            "complex.operation.v1",
-            "https://test.example.com/compute",
-            Some(&limited_cap),
-            &mut gate,
-            1700000050,
-            "test"
-        ).unwrap_err();
+        let err = registry
+            .authorize_dispatch(
+                "complex.operation.v1",
+                "https://test.example.com/compute",
+                Some(&limited_cap),
+                &mut gate,
+                1700000050,
+                "test",
+            )
+            .unwrap_err();
 
         assert_eq!(err.code(), "REMOTECAP_SCOPE_DENIED");
     }
@@ -359,14 +367,14 @@ mod tests {
 
         // Test various invalid artifact IDs
         let invalid_ids = [
-            "",                    // Empty
-            " ",                  // Whitespace only
-            "  artifact  ",       // Leading/trailing whitespace
-            "<unknown>",          // Reserved
-            " <unknown> ",        // Reserved with whitespace
-            "\0artifact",         // Null byte
-            "artifact\n",         // Newline
-            "artifact\t",         // Tab
+            "",             // Empty
+            " ",            // Whitespace only
+            "  artifact  ", // Leading/trailing whitespace
+            "<unknown>",    // Reserved
+            " <unknown> ",  // Reserved with whitespace
+            "\0artifact",   // Null byte
+            "artifact\n",   // Newline
+            "artifact\t",   // Tab
         ];
 
         for invalid_id in invalid_ids {
@@ -393,7 +401,9 @@ mod tests {
         let result = store.check_or_insert(key, payload, 1000, "test");
         assert_eq!(result, DedupeResult::New);
 
-        store.complete(key, b"result".to_vec(), 1001, "test").unwrap();
+        store
+            .complete(key, b"result".to_vec(), 1001, "test")
+            .unwrap();
 
         // At t=1099 (within TTL), should get cached result
         let result = store.check_or_insert(key, payload, 1099, "test");
@@ -412,13 +422,19 @@ mod tests {
 
         // Insert with first payload
         store.check_or_insert(key, b"payload1", 1000, "test");
-        store.complete(key, b"result1".to_vec(), 1001, "test").unwrap();
+        store
+            .complete(key, b"result1".to_vec(), 1001, "test")
+            .unwrap();
 
         // Try with different payload - should use constant-time comparison
         let result = store.check_or_insert(key, b"payload2", 1002, "test");
 
         match result {
-            DedupeResult::Conflict { expected_hash, actual_hash, .. } => {
+            DedupeResult::Conflict {
+                expected_hash,
+                actual_hash,
+                ..
+            } => {
                 // Hashes should be different
                 assert_ne!(expected_hash, actual_hash);
 
@@ -461,11 +477,13 @@ mod tests {
         let mut store = IdempotencyDedupeStore::new(3600);
 
         // Create various in-flight entries
-        let keys: Vec<_> = (0..10).map(|i| {
-            let mut bytes = [0u8; 32];
-            bytes[0] = i;
-            IdempotencyKey::from_bytes(bytes)
-        }).collect();
+        let keys: Vec<_> = (0..10)
+            .map(|i| {
+                let mut bytes = [0u8; 32];
+                bytes[0] = i;
+                IdempotencyKey::from_bytes(bytes)
+            })
+            .collect();
 
         // Insert some entries
         for (i, &key) in keys.iter().enumerate() {
@@ -473,7 +491,9 @@ mod tests {
 
             // Complete half of them
             if i % 2 == 0 {
-                store.complete(key, vec![i as u8; 10], 1001, "test").unwrap();
+                store
+                    .complete(key, vec![i as u8; 10], 1001, "test")
+                    .unwrap();
             }
         }
 
@@ -499,11 +519,7 @@ mod tests {
 
     #[test]
     fn bulkhead_permit_id_exhaustion_boundary() {
-        let mut bulkhead = RemoteBulkhead::new(
-            2,
-            BackpressurePolicy::Reject,
-            50
-        ).unwrap();
+        let mut bulkhead = RemoteBulkhead::new(2, BackpressurePolicy::Reject, 50).unwrap();
 
         // Set permit ID close to exhaustion
         bulkhead.next_permit_id = u64::MAX - 1;
@@ -529,9 +545,13 @@ mod tests {
     fn bulkhead_queue_timeout_precision_boundary() {
         let mut bulkhead = RemoteBulkhead::new(
             1,
-            BackpressurePolicy::Queue { max_depth: 2, timeout_ms: 1 }, // 1ms timeout
-            50
-        ).unwrap();
+            BackpressurePolicy::Queue {
+                max_depth: 2,
+                timeout_ms: 1,
+            }, // 1ms timeout
+            50,
+        )
+        .unwrap();
 
         // Acquire permit to fill capacity
         let permit = bulkhead.acquire(true, "active", 1000).unwrap();
@@ -552,11 +572,7 @@ mod tests {
 
     #[test]
     fn bulkhead_capacity_change_race_conditions() {
-        let mut bulkhead = RemoteBulkhead::new(
-            3,
-            BackpressurePolicy::Reject,
-            50
-        ).unwrap();
+        let mut bulkhead = RemoteBulkhead::new(3, BackpressurePolicy::Reject, 50).unwrap();
 
         // Fill to capacity
         let permit1 = bulkhead.acquire(true, "req1", 1000).unwrap();
@@ -569,7 +585,13 @@ mod tests {
 
         // New acquires should be blocked by draining
         let drain_err = bulkhead.acquire(true, "req4", 1004).unwrap_err();
-        assert!(matches!(drain_err, BulkheadError::Draining { in_flight: 3, target_cap: 1 }));
+        assert!(matches!(
+            drain_err,
+            BulkheadError::Draining {
+                in_flight: 3,
+                target_cap: 1
+            }
+        ));
 
         // Release permits one by one
         bulkhead.release(permit1, 1005).unwrap();
@@ -625,12 +647,12 @@ mod tests {
 
         // Test various invalid request IDs
         let invalid_ids = [
-            "",           // Empty
-            " ",          // Whitespace only
-            "  ",         // Multiple whitespace
-            "\t",         // Tab only
-            "\n",         // Newline only
-            "\t\n ",      // Mixed whitespace
+            "",      // Empty
+            " ",     // Whitespace only
+            "  ",    // Multiple whitespace
+            "\t",    // Tab only
+            "\n",    // Newline only
+            "\t\n ", // Mixed whitespace
         ];
 
         for invalid_id in invalid_ids {
@@ -640,12 +662,12 @@ mod tests {
 
         // Test valid request IDs with edge case content
         let valid_ids = [
-            "a",                          // Single character
-            "req-123",                   // Normal ID
-            "测试-request",               // Unicode
-            "request with spaces",       // Internal spaces (should be valid)
-            " leading-space",           // Leading space should be invalid
-            "trailing-space ",          // Trailing space should be invalid
+            "a",                   // Single character
+            "req-123",             // Normal ID
+            "测试-request",        // Unicode
+            "request with spaces", // Internal spaces (should be valid)
+            " leading-space",      // Leading space should be invalid
+            "trailing-space ",     // Trailing space should be invalid
         ];
 
         // Only the internal spaces one should succeed
@@ -684,9 +706,15 @@ mod tests {
     #[test]
     fn remote_config_integration_boundary_values() {
         let configs = [
-            RemoteConfig { idempotency_ttl_secs: 0 },         // Zero TTL
-            RemoteConfig { idempotency_ttl_secs: 1 },         // Minimum TTL
-            RemoteConfig { idempotency_ttl_secs: u64::MAX },  // Maximum TTL
+            RemoteConfig {
+                idempotency_ttl_secs: 0,
+            }, // Zero TTL
+            RemoteConfig {
+                idempotency_ttl_secs: 1,
+            }, // Minimum TTL
+            RemoteConfig {
+                idempotency_ttl_secs: u64::MAX,
+            }, // Maximum TTL
         ];
 
         for config in configs {
@@ -706,7 +734,15 @@ mod tests {
         let mut registry = ComputationRegistry::new(1, "stress");
         let mut saga_mgr = EvictionSagaManager::new();
         let mut store = IdempotencyDedupeStore::new(3600);
-        let mut bulkhead = RemoteBulkhead::new(100, BackpressurePolicy::Queue { max_depth: 1000, timeout_ms: 1000 }, 50).unwrap();
+        let mut bulkhead = RemoteBulkhead::new(
+            100,
+            BackpressurePolicy::Queue {
+                max_depth: 1000,
+                timeout_ms: 1000,
+            },
+            50,
+        )
+        .unwrap();
 
         // Create many entries across all components
         for i in 0..1000 {
@@ -770,5 +806,166 @@ mod tests {
         // Different payloads should produce different hashes
         let different_hash = hash_payload(b"different-payload");
         assert_ne!(ids_hash, different_hash);
+    }
+
+    #[test]
+    fn negative_idempotency_empty_domain_prefix_rejected() {
+        let err = IdempotencyKeyDeriver::new(&[]).unwrap_err();
+
+        assert_eq!(err.code(), "IK_ERR_EMPTY_DOMAIN_PREFIX");
+    }
+
+    #[test]
+    fn negative_idempotency_empty_computation_name_rejected() {
+        let deriver = IdempotencyKeyDeriver::default();
+        let err = deriver.derive_key("", 7, b"payload").unwrap_err();
+
+        assert_eq!(err.code(), "IK_ERR_EMPTY_COMPUTATION_NAME");
+    }
+
+    #[test]
+    fn negative_idempotency_key_from_short_hex_rejected() {
+        let err = IdempotencyKey::from_hex("00").unwrap_err();
+
+        assert_eq!(err.code(), "IK_ERR_INVALID_HEX");
+    }
+
+    #[test]
+    fn negative_registry_empty_description_does_not_insert() {
+        let mut registry = ComputationRegistry::new(1, "negative-registry");
+        let entry = ComputationEntry {
+            name: "domain.action.v1".to_string(),
+            description: String::new(),
+            required_capabilities: vec![RemoteOperation::RemoteComputation],
+            input_schema: "{}".to_string(),
+            output_schema: "{}".to_string(),
+        };
+
+        let err = registry
+            .register_computation(entry, "negative-registry")
+            .unwrap_err();
+
+        assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
+        assert_eq!(registry.list_computations().len(), 0);
+    }
+
+    #[test]
+    fn negative_registry_malformed_lookup_does_not_insert() {
+        let mut registry = ComputationRegistry::new(1, "negative-registry");
+
+        let err = registry
+            .validate_computation_name("not-canonical", "negative-registry")
+            .unwrap_err();
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+        assert_eq!(registry.list_computations().len(), 0);
+    }
+
+    #[test]
+    fn negative_saga_start_without_remote_cap_rejected() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr
+            .start_saga("artifact-no-cap", false, "negative-saga")
+            .unwrap_err();
+
+        assert!(err.contains("RemoteCap required"));
+        assert_eq!(mgr.saga_count(), 0);
+    }
+
+    #[test]
+    fn negative_saga_invalid_transition_leaves_phase_created() {
+        let mut mgr = EvictionSagaManager::new();
+        let saga_id = mgr
+            .start_saga("artifact-invalid-transition", true, "negative-saga")
+            .unwrap();
+
+        let err = mgr
+            .complete_upload(&saga_id, 1_000, "negative-saga")
+            .unwrap_err();
+
+        assert!(err.contains("invalid transition"));
+        assert_eq!(mgr.get_saga(&saga_id).unwrap().phase, SagaPhase::Created);
+    }
+
+    #[test]
+    fn negative_saga_failed_cap_recheck_blocks_upload() {
+        let mut mgr = EvictionSagaManager::new();
+        let saga_id = mgr
+            .start_saga("artifact-cap-recheck", true, "negative-saga")
+            .unwrap();
+
+        let err = mgr
+            .recheck_remote_cap(&saga_id, false, "negative-saga")
+            .unwrap_err();
+        assert!(err.contains("RemoteCap recheck failed"));
+
+        let err = mgr
+            .begin_upload(&saga_id, 2_000, "negative-saga")
+            .unwrap_err();
+        assert!(err.contains("RemoteCap recheck failed"));
+        assert_eq!(mgr.get_saga(&saga_id).unwrap().phase, SagaPhase::Created);
+    }
+
+    #[test]
+    fn negative_idempotency_complete_unknown_key_rejected() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let unknown_key = IdempotencyKey::from_bytes([9; 32]);
+
+        let err = store
+            .complete(unknown_key, b"result".to_vec(), 1_000, "negative-store")
+            .unwrap_err();
+
+        assert!(err.contains("no entry for key"));
+        assert_eq!(store.entry_count(), 0);
+    }
+
+    #[test]
+    fn negative_bulkhead_zero_queue_depth_rejected() {
+        let err = RemoteBulkhead::new(
+            1,
+            BackpressurePolicy::Queue {
+                max_depth: 0,
+                timeout_ms: 10,
+            },
+            50,
+        )
+        .unwrap_err();
+
+        assert_eq!(err.code(), "RB_ERR_INVALID_CONFIG");
+    }
+
+    #[test]
+    fn negative_bulkhead_duplicate_active_request_rejected() {
+        let mut bulkhead = RemoteBulkhead::new(2, BackpressurePolicy::Reject, 50).unwrap();
+        let permit = bulkhead.acquire(true, "duplicate-active", 1_000).unwrap();
+
+        let err = bulkhead
+            .acquire(true, "duplicate-active", 1_001)
+            .unwrap_err();
+
+        assert_eq!(err.code(), "RB_ERR_DUPLICATE_REQUEST");
+        assert_eq!(bulkhead.current_in_flight(), 1);
+        bulkhead.release(permit, 1_002).unwrap();
+    }
+
+    #[test]
+    fn negative_bulkhead_unknown_queued_request_rejected() {
+        let mut bulkhead = RemoteBulkhead::new(
+            1,
+            BackpressurePolicy::Queue {
+                max_depth: 1,
+                timeout_ms: 10,
+            },
+            50,
+        )
+        .unwrap();
+
+        let err = bulkhead
+            .poll_queued("missing-queued-request", 1_000)
+            .unwrap_err();
+
+        assert_eq!(err.code(), "RB_ERR_UNKNOWN_REQUEST");
+        assert_eq!(bulkhead.queue_depth(), 0);
     }
 }

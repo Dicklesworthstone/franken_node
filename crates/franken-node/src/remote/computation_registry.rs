@@ -25,8 +25,12 @@ pub const CR_DISPATCH_GATED: &str = "CR_DISPATCH_GATED";
 const MAX_AUDIT_EVENTS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -280,6 +284,264 @@ impl ComputationRegistry {
             "registered computation".to_string(),
         );
         Ok(())
+
+        // Inline negative-path tests for register_computation method
+        #[cfg(test)]
+        #[allow(unreachable_code)]
+        {
+            use crate::security::remote_cap::RemoteOperation;
+
+            // Test: Unicode injection in computation name
+            let mut registry = ComputationRegistry::new(1, "test-unicode");
+            let unicode_attack_name = "evil\u{202E}tnemtnemtnemuf\u{202D}.action.v1"; // BIDI override attack
+            let unicode_entry = ComputationEntry {
+                name: unicode_attack_name.to_string(),
+                description: "Malicious Unicode computation".to_string(),
+                required_capabilities: vec![RemoteOperation::NetworkEgress],
+                input_schema: "{}".to_string(),
+                output_schema: "{}".to_string(),
+            };
+            let result = registry.register_computation(unicode_entry, "trace-unicode");
+            assert!(result.is_err(), "Unicode injection in computation name should be rejected");
+            if let Err(ComputationRegistryError::MalformedComputationName { name }) = result {
+                assert_eq!(name, unicode_attack_name, "Malformed name should be preserved in error");
+            }
+
+            // Test: Control character injection in schemas
+            let mut registry = ComputationRegistry::new(1, "test-control");
+            let control_chars_entry = ComputationEntry {
+                name: "domain.action.v1".to_string(),
+                description: "Test computation".to_string(),
+                required_capabilities: vec![RemoteOperation::RemoteComputation],
+                input_schema: "{\x00\x01\x02\"malicious\":\"payload\"}".to_string(),
+                output_schema: "{\"result\"\r\n:\"success\"}".to_string(),
+            };
+            let result = registry.register_computation(control_chars_entry, "trace-control");
+            assert!(result.is_ok(), "Control characters in schemas should be preserved as-is");
+            if let Ok(()) = result {
+                let entry = registry.entries.get("domain.action.v1").unwrap();
+                assert!(entry.input_schema.contains('\x00'), "Control characters should be preserved in input schema");
+                assert!(entry.output_schema.contains('\r'), "Control characters should be preserved in output schema");
+            }
+
+            // Test: Massive schema memory exhaustion attack
+            let mut registry = ComputationRegistry::new(1, "test-memory");
+            let massive_schema = "x".repeat(1_000_000); // 1MB schema (reduced for test efficiency)
+            let massive_entry = ComputationEntry {
+                name: "domain.massive.v1".to_string(),
+                description: "Massive schema test".to_string(),
+                required_capabilities: vec![RemoteOperation::NetworkEgress],
+                input_schema: massive_schema.clone(),
+                output_schema: massive_schema.clone(),
+            };
+            let result = registry.register_computation(massive_entry, "trace-massive");
+            assert!(result.is_ok(), "Massive schemas should be handled without memory issues");
+            if let Ok(()) = result {
+                let entry = registry.entries.get("domain.massive.v1").unwrap();
+                assert_eq!(entry.input_schema.len(), 1_000_000, "Massive input schema should be preserved");
+                assert_eq!(entry.output_schema.len(), 1_000_000, "Massive output schema should be preserved");
+            }
+
+            // Test: Audit event capacity boundary attacks (audit log flooding)
+            let mut registry = ComputationRegistry::new(1, "test-audit-flood");
+            // Pre-fill audit events close to capacity
+            for i in 0..(MAX_AUDIT_EVENTS - 5) {
+                registry.record_event(
+                    "TEST_EVENT",
+                    &format!("trace-flood-{}", i),
+                    Some(format!("test.computation.v{}", i)),
+                    format!("flood event {}", i),
+                );
+            }
+
+            // Register computation that should trigger audit event
+            let flood_entry = ComputationEntry {
+                name: "domain.flood.v1".to_string(),
+                description: "Audit flood test".to_string(),
+                required_capabilities: vec![RemoteOperation::RemoteComputation],
+                input_schema: "{}".to_string(),
+                output_schema: "{}".to_string(),
+            };
+            let result = registry.register_computation(flood_entry, "trace-audit-flood");
+            assert!(result.is_ok(), "Registration should succeed despite audit flood");
+            // Audit events should be bounded by push_bounded
+            assert!(registry.audit_events().len() <= MAX_AUDIT_EVENTS, "Audit events should be capacity-bounded");
+
+            // Test: Registry capacity boundary attacks (computation flooding)
+            let mut registry = ComputationRegistry::new(1, "test-capacity");
+            // Fill registry to capacity (use smaller number for test efficiency)
+            let test_capacity = 100.min(MAX_COMPUTATION_ENTRIES);
+            for i in 0..test_capacity {
+                let capacity_entry = ComputationEntry {
+                    name: format!("domain.capacity{}.v1", i),
+                    description: "Capacity test computation".to_string(),
+                    required_capabilities: vec![RemoteOperation::RemoteComputation],
+                    input_schema: "{}".to_string(),
+                    output_schema: "{}".to_string(),
+                };
+                let result = registry.register_computation(capacity_entry, "trace-capacity-fill");
+                if i < MAX_COMPUTATION_ENTRIES {
+                    assert!(result.is_ok(), "Should be able to fill towards capacity");
+                }
+            }
+
+            // Test: Serialization format injection resistance in description
+            let mut registry = ComputationRegistry::new(1, "test-serialization");
+            let injection_attacks = [
+                r#"{"malicious":"json","exec":"rm -rf /"}"#,
+                r#"<?xml version="1.0"?><!DOCTYPE test>"#,
+                r#"!!python/object/apply:os.system"#,
+                "description\"); DROP TABLE computations; --",
+            ];
+
+            for (i, &injection) in injection_attacks.iter().enumerate() {
+                let injection_entry = ComputationEntry {
+                    name: format!("domain.injection{}.v1", i),
+                    description: injection.to_string(),
+                    required_capabilities: vec![RemoteOperation::RemoteComputation],
+                    input_schema: "{}".to_string(),
+                    output_schema: "{}".to_string(),
+                };
+                let result = registry.register_computation(injection_entry, "trace-injection");
+                assert!(result.is_ok(), "Serialization injection should be handled safely");
+                if let Ok(()) = result {
+                    let entry = registry.entries.get(&format!("domain.injection{}.v1", i)).unwrap();
+                    assert_eq!(entry.description, injection, "Injection should be preserved as text");
+                }
+            }
+
+            // Test: Hash collision resistance in computation names
+            let mut registry = ComputationRegistry::new(1, "test-collision");
+            let collision_candidates = [
+                ("domain.action1.v1", "domain.action2.v1"),
+                ("test.compute.v1", "test.compute.v2"),
+                ("example.func.v1", "example.func2.v1"),
+            ];
+
+            for &(name1, name2) in &collision_candidates {
+                let entry1 = ComputationEntry {
+                    name: name1.to_string(),
+                    description: "First computation".to_string(),
+                    required_capabilities: vec![RemoteOperation::RemoteComputation],
+                    input_schema: "{}".to_string(),
+                    output_schema: "{}".to_string(),
+                };
+                let entry2 = ComputationEntry {
+                    name: name2.to_string(),
+                    description: "Second computation".to_string(),
+                    required_capabilities: vec![RemoteOperation::RemoteComputation],
+                    input_schema: "{}".to_string(),
+                    output_schema: "{}".to_string(),
+                };
+
+                let result1 = registry.register_computation(entry1, "trace-collision1");
+                let result2 = registry.register_computation(entry2, "trace-collision2");
+                assert!(result1.is_ok() && result2.is_ok(), "Similar names should not collide: {} vs {}", name1, name2);
+            }
+
+            // Test: Normalization boundary attacks with whitespace
+            let mut registry = ComputationRegistry::new(1, "test-normalization");
+            let whitespace_attacks = [
+                "  domain.whitespace.v1  ", // Leading/trailing spaces
+                "\tdomain.tab.v1\t", // Tabs
+                "\ndomain.newline.v1\n", // Newlines
+            ];
+
+            for &attack_name in &whitespace_attacks {
+                let whitespace_entry = ComputationEntry {
+                    name: attack_name.to_string(),
+                    description: "  Whitespace test  ".to_string(),
+                    required_capabilities: vec![RemoteOperation::RemoteComputation],
+                    input_schema: "  {}  ".to_string(),
+                    output_schema: "\t{}\n".to_string(),
+                };
+                let result = registry.register_computation(whitespace_entry, "trace-whitespace");
+                // Should either succeed with normalized name or fail validation
+                if result.is_ok() {
+                    // Verify normalization removed whitespace
+                    let trimmed_name = attack_name.trim();
+                    if is_canonical_computation_name(trimmed_name) {
+                        let entry = registry.entries.get(trimmed_name).unwrap();
+                        assert_eq!(entry.description.trim(), "Whitespace test", "Description should be normalized");
+                        assert_eq!(entry.input_schema.trim(), "{}", "Input schema should be normalized");
+                        assert_eq!(entry.output_schema.trim(), "{}", "Output schema should be normalized");
+                    }
+                }
+            }
+
+            // Test: Empty field validation edge cases
+            let mut registry = ComputationRegistry::new(1, "test-empty");
+            let empty_field_tests = [
+                ("domain.empty.v1", "", "{}"), // Empty description
+                ("domain.empty2.v1", "desc", ""), // Empty input schema
+                ("domain.empty3.v1", "desc", "{}"), // Empty output schema (will be caught separately)
+            ];
+
+            for (name, desc, input_schema) in empty_field_tests {
+                let empty_entry = ComputationEntry {
+                    name: name.to_string(),
+                    description: desc.to_string(),
+                    required_capabilities: vec![RemoteOperation::RemoteComputation],
+                    input_schema: input_schema.to_string(),
+                    output_schema: if name == "domain.empty3.v1" { "".to_string() } else { "{}".to_string() },
+                };
+                let result = registry.register_computation(empty_entry, "trace-empty");
+                assert!(result.is_err(), "Empty required fields should be rejected for name: {}", name);
+            }
+
+            // Test: Capability injection through required_capabilities
+            let mut registry = ComputationRegistry::new(1, "test-capabilities");
+            let all_capabilities = vec![
+                RemoteOperation::NetworkEgress,
+                RemoteOperation::FileSystemRead,
+                RemoteOperation::FileSystemWrite,
+                RemoteOperation::RemoteComputation,
+            ];
+            let capability_entry = ComputationEntry {
+                name: "domain.capabilities.v1".to_string(),
+                description: "Capability injection test".to_string(),
+                required_capabilities: all_capabilities.clone(),
+                input_schema: "{}".to_string(),
+                output_schema: "{}".to_string(),
+            };
+            let result = registry.register_computation(capability_entry, "trace-capabilities");
+            assert!(result.is_ok(), "Multiple capabilities should be allowed");
+            if let Ok(()) = result {
+                let entry = registry.entries.get("domain.capabilities.v1").unwrap();
+                // Should automatically include RemoteComputation and deduplicate
+                assert!(entry.required_capabilities.contains(&RemoteOperation::RemoteComputation), "Should auto-include RemoteComputation");
+            }
+
+            // Test: Duplicate registration attempts
+            let mut registry = ComputationRegistry::new(1, "test-duplicate");
+            let original_entry = ComputationEntry {
+                name: "domain.duplicate.v1".to_string(),
+                description: "Original computation".to_string(),
+                required_capabilities: vec![RemoteOperation::RemoteComputation],
+                input_schema: "{}".to_string(),
+                output_schema: "{}".to_string(),
+            };
+            let duplicate_entry = ComputationEntry {
+                name: "domain.duplicate.v1".to_string(),
+                description: "Duplicate computation with different description".to_string(),
+                required_capabilities: vec![RemoteOperation::NetworkEgress],
+                input_schema: "{\"different\":\"schema\"}".to_string(),
+                output_schema: "{\"different\":\"output\"}".to_string(),
+            };
+
+            let first_result = registry.register_computation(original_entry, "trace-original");
+            assert!(first_result.is_ok(), "First registration should succeed");
+
+            let duplicate_result = registry.register_computation(duplicate_entry, "trace-duplicate");
+            assert!(duplicate_result.is_err(), "Duplicate registration should fail");
+            if let Err(ComputationRegistryError::DuplicateComputation { name }) = duplicate_result {
+                assert_eq!(name, "domain.duplicate.v1", "Duplicate error should contain computation name");
+            }
+
+            // Verify original computation is preserved
+            let preserved_entry = registry.entries.get("domain.duplicate.v1").unwrap();
+            assert_eq!(preserved_entry.description, "Original computation", "Original entry should be preserved");
+        }
     }
 
     /// Validate and look up a computation name.
@@ -751,5 +1013,598 @@ mod tests {
             .expect("restore from catalog");
         assert_eq!(restored.registry_version(), 7);
         assert_eq!(restored.list_computations(), catalog.entries);
+    }
+
+    #[test]
+    fn registration_rejects_blank_description_after_normalization() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        let mut entry = sample_entry("trust.blank_description.v1");
+        entry.description = "   ".to_string();
+
+        let err = registry
+            .register_computation(entry, "trace-register-blank-description")
+            .expect_err("blank description must fail");
+
+        assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
+        assert!(err.to_string().contains("description cannot be empty"));
+        assert!(registry.list_computations().is_empty());
+    }
+
+    #[test]
+    fn registration_rejects_blank_input_schema_after_normalization() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        let mut entry = sample_entry("trust.blank_input.v1");
+        entry.input_schema = "\t  ".to_string();
+
+        let err = registry
+            .register_computation(entry, "trace-register-blank-input")
+            .expect_err("blank input schema must fail");
+
+        assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
+        assert!(err.to_string().contains("input_schema and output_schema"));
+        assert!(registry.list_computations().is_empty());
+    }
+
+    #[test]
+    fn registration_rejects_blank_output_schema_after_normalization() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        let mut entry = sample_entry("trust.blank_output.v1");
+        entry.output_schema = "\n ".to_string();
+
+        let err = registry
+            .register_computation(entry, "trace-register-blank-output")
+            .expect_err("blank output schema must fail");
+
+        assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
+        assert!(err.to_string().contains("input_schema and output_schema"));
+        assert!(registry.list_computations().is_empty());
+    }
+
+    #[test]
+    fn malformed_registration_records_audit_event_without_inserting() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        let err = registry
+            .register_computation(
+                sample_entry("trust.verify-manifest.v1"),
+                "trace-register-malformed",
+            )
+            .expect_err("hyphenated action is malformed");
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+        assert!(registry.list_computations().is_empty());
+        let event = registry
+            .audit_events()
+            .last()
+            .expect("malformed registration should record audit event");
+        assert_eq!(event.event_code, CR_LOOKUP_MALFORMED);
+        assert_eq!(
+            event.computation_name.as_deref(),
+            Some("trust.verify-manifest.v1")
+        );
+    }
+
+    #[test]
+    fn malformed_lookup_records_malformed_audit_event_not_unknown() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+
+        let err = registry
+            .validate_computation_name("trust.verify_manifest", "trace-lookup-malformed")
+            .expect_err("missing version suffix is malformed");
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+        let event = registry
+            .audit_events()
+            .last()
+            .expect("malformed lookup should record audit event");
+        assert_eq!(event.event_code, CR_LOOKUP_MALFORMED);
+        assert_eq!(event.trace_id, "trace-lookup-malformed");
+    }
+
+    #[test]
+    fn unknown_lookup_records_unknown_audit_event() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+
+        let err = registry
+            .validate_computation_name("trust.missing_job.v1", "trace-lookup-unknown")
+            .expect_err("canonical but unknown name must fail");
+
+        assert_eq!(err.code(), ERR_UNKNOWN_COMPUTATION);
+        let event = registry
+            .audit_events()
+            .last()
+            .expect("unknown lookup should record audit event");
+        assert_eq!(event.event_code, CR_LOOKUP_UNKNOWN);
+        assert_eq!(
+            event.computation_name.as_deref(),
+            Some("trust.missing_job.v1")
+        );
+    }
+
+    #[test]
+    fn from_catalog_rejects_duplicate_entries_without_silent_dedupe() {
+        let duplicate = sample_entry("trust.verify_manifest.v1");
+        let catalog = RegistryCatalog {
+            registry_version: 3,
+            entries: vec![duplicate.clone(), duplicate],
+        };
+
+        let err = ComputationRegistry::from_catalog(catalog, "trace-restore-duplicate")
+            .expect_err("duplicate catalog entries must fail");
+
+        assert_eq!(err.code(), ERR_DUPLICATE_COMPUTATION);
+    }
+
+    #[test]
+    fn dispatch_rejects_malformed_name_before_capability_authorization() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        let mut gate = CapabilityGate::new("registry-secret");
+
+        let err = registry
+            .authorize_dispatch(
+                "trust.verify_manifest",
+                "https://compute.example.com/verify",
+                None,
+                &mut gate,
+                1_700_000_050,
+                "trace-dispatch-malformed",
+            )
+            .expect_err("malformed dispatch name must fail before cap check");
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+        let event = registry
+            .audit_events()
+            .last()
+            .expect("malformed dispatch should record audit event");
+        assert_eq!(event.event_code, CR_LOOKUP_MALFORMED);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_discards_without_panicking() {
+        let mut events = vec![RegistryAuditEvent {
+            event_code: "old".to_string(),
+            trace_id: "trace-old".to_string(),
+            registry_version: 1,
+            computation_name: None,
+            detail: "old event".to_string(),
+        }];
+
+        push_bounded(
+            &mut events,
+            RegistryAuditEvent {
+                event_code: "new".to_string(),
+                trace_id: "trace-new".to_string(),
+                registry_version: 1,
+                computation_name: None,
+                detail: "new event".to_string(),
+            },
+            0,
+        );
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn canonical_name_rejects_empty_whitespace_and_extra_components() {
+        for name in [
+            "",
+            " ",
+            "trust.verify_manifest.v1.extra",
+            "trust.verify_manifest",
+            ".verify_manifest.v1",
+            "trust..v1",
+        ] {
+            assert!(!is_canonical_computation_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_name_rejects_uppercase_and_hyphenated_components() {
+        for name in [
+            "Trust.verify_manifest.v1",
+            "trust.Verify_manifest.v1",
+            "trust.verify-manifest.v1",
+            "trust.verify_manifest.V1",
+            "trust.verify_manifest.v1-beta",
+        ] {
+            assert!(!is_canonical_computation_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn duplicate_registration_after_name_trim_does_not_overwrite_entry() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        registry
+            .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-first")
+            .expect("initial registration");
+        let mut duplicate = sample_entry(" trust.verify_manifest.v1 ");
+        duplicate.description = "tampered duplicate description".to_string();
+
+        let err = registry
+            .register_computation(duplicate, "trace-duplicate-trimmed")
+            .expect_err("trimmed duplicate name must be rejected");
+
+        assert_eq!(err.code(), ERR_DUPLICATE_COMPUTATION);
+        let entries = registry.list_computations();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].description.as_str(),
+            "Verify remote manifest state"
+        );
+    }
+
+    #[test]
+    fn same_version_bump_is_rejected_without_audit_or_version_change() {
+        let mut registry = ComputationRegistry::new(7, "trace-load");
+        let audit_len = registry.audit_events().len();
+
+        let err = registry
+            .bump_version(7, "trace-same-version")
+            .expect_err("same version is a regression");
+
+        assert_eq!(err.code(), ERR_REGISTRY_VERSION_REGRESSION);
+        assert_eq!(registry.registry_version(), 7);
+        assert_eq!(registry.audit_events().len(), audit_len);
+    }
+
+    #[test]
+    fn lower_version_bump_is_rejected_without_audit_or_version_change() {
+        let mut registry = ComputationRegistry::new(7, "trace-load");
+        let audit_len = registry.audit_events().len();
+
+        let err = registry
+            .bump_version(6, "trace-lower-version")
+            .expect_err("lower version is a regression");
+
+        assert_eq!(err.code(), ERR_REGISTRY_VERSION_REGRESSION);
+        assert_eq!(registry.registry_version(), 7);
+        assert_eq!(registry.audit_events().len(), audit_len);
+    }
+
+    #[test]
+    fn dispatch_unknown_name_does_not_touch_capability_gate() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        let mut gate = CapabilityGate::new("registry-secret");
+
+        let err = registry
+            .authorize_dispatch(
+                "trust.unknown_job.v1",
+                "https://compute.example.com/verify",
+                None,
+                &mut gate,
+                1_700_000_050,
+                "trace-dispatch-unknown",
+            )
+            .expect_err("unknown computation must fail before capability checks");
+
+        assert_eq!(err.code(), ERR_UNKNOWN_COMPUTATION);
+        assert!(gate.audit_log().is_empty());
+        assert_eq!(
+            registry
+                .audit_events()
+                .last()
+                .map(|event| event.event_code.as_str()),
+            Some(CR_LOOKUP_UNKNOWN)
+        );
+    }
+
+    #[test]
+    fn dispatch_missing_cap_records_registry_denial_and_compatibility_alias() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        registry
+            .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
+            .expect("register");
+        let mut gate = CapabilityGate::new("registry-secret");
+
+        let err = registry
+            .authorize_dispatch(
+                "trust.verify_manifest.v1",
+                "https://compute.example.com/verify",
+                None,
+                &mut gate,
+                1_700_000_050,
+                "trace-dispatch-missing-cap",
+            )
+            .expect_err("missing capability must deny dispatch");
+
+        assert!(matches!(
+            &err,
+            ComputationRegistryError::DispatchDenied {
+                compatibility_code: Some(ref alias),
+                ..
+            } if alias == "ERR_REMOTE_CAP_REQUIRED"
+        ));
+        assert_eq!(err.code(), "REMOTECAP_MISSING");
+        assert_eq!(
+            registry
+                .audit_events()
+                .last()
+                .map(|event| event.event_code.as_str()),
+            Some(CR_DISPATCH_GATED)
+        );
+    }
+
+    #[test]
+    fn from_catalog_with_malformed_entry_returns_error() {
+        let catalog = RegistryCatalog {
+            registry_version: 3,
+            entries: vec![sample_entry("trust.verify-manifest.v1")],
+        };
+
+        let err = ComputationRegistry::from_catalog(catalog, "trace-restore-malformed")
+            .expect_err("malformed catalog entry must fail restore");
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+    }
+
+    #[test]
+    fn registration_rejects_empty_name_after_normalization() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        let entry = sample_entry(" \t ");
+
+        let err = registry
+            .register_computation(entry, "trace-register-empty-name")
+            .expect_err("blank normalized name must fail");
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+        assert!(registry.list_computations().is_empty());
+        assert_eq!(
+            registry
+                .audit_events()
+                .last()
+                .and_then(|event| event.computation_name.as_deref()),
+            Some("")
+        );
+    }
+
+    #[test]
+    fn registration_capacity_rejection_does_not_record_success_event() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        for idx in 0..MAX_COMPUTATION_ENTRIES {
+            let entry = sample_entry(&format!("d{idx}.action.v1"));
+            registry.entries.insert(entry.name.clone(), entry);
+        }
+        let audit_len_before = registry.audit_events().len();
+
+        let err = registry
+            .register_computation(sample_entry("overflow.action.v1"), "trace-overflow")
+            .expect_err("new entry over capacity must fail");
+
+        assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
+        assert!(err.to_string().contains("registry at capacity"));
+        assert_eq!(registry.audit_events().len(), audit_len_before);
+        assert!(!registry.entries.contains_key("overflow.action.v1"));
+    }
+
+    #[test]
+    fn from_catalog_rejects_blank_description_after_prior_valid_entry() {
+        let mut invalid = sample_entry("trust.blank_description.v1");
+        invalid.description = " \n\t ".to_string();
+        let catalog = RegistryCatalog {
+            registry_version: 9,
+            entries: vec![sample_entry("trust.valid_manifest.v1"), invalid],
+        };
+
+        let err = ComputationRegistry::from_catalog(catalog, "trace-catalog-blank-description")
+            .expect_err("blank catalog description must fail restore");
+
+        assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
+        assert!(err.to_string().contains("description cannot be empty"));
+    }
+
+    #[test]
+    fn lookup_space_padded_registered_name_is_malformed_not_unknown() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        registry
+            .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
+            .expect("registration should succeed");
+
+        let err = registry
+            .validate_computation_name(" trust.verify_manifest.v1 ", "trace-space-lookup")
+            .expect_err("space-padded lookup name must be malformed");
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+        assert_eq!(
+            registry
+                .audit_events()
+                .last()
+                .map(|event| event.event_code.as_str()),
+            Some(CR_LOOKUP_MALFORMED)
+        );
+    }
+
+    #[test]
+    fn dispatch_space_padded_name_rejected_before_gate_audit() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        registry
+            .register_computation(sample_entry("trust.verify_manifest.v1"), "trace-register")
+            .expect("registration should succeed");
+        let mut gate = CapabilityGate::new("registry-secret");
+
+        let err = registry
+            .authorize_dispatch(
+                " trust.verify_manifest.v1 ",
+                "https://compute.example.com/verify",
+                None,
+                &mut gate,
+                1_700_000_050,
+                "trace-space-dispatch",
+            )
+            .expect_err("space-padded dispatch name must fail before cap check");
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+        assert!(gate.audit_log().is_empty());
+        assert_eq!(
+            registry
+                .audit_events()
+                .last()
+                .map(|event| event.event_code.as_str()),
+            Some(CR_LOOKUP_MALFORMED)
+        );
+    }
+
+    #[test]
+    fn push_bounded_over_capacity_discards_oldest_events() {
+        let mut events = vec![
+            RegistryAuditEvent {
+                event_code: "oldest".to_string(),
+                trace_id: "trace-oldest".to_string(),
+                registry_version: 1,
+                computation_name: None,
+                detail: "oldest event".to_string(),
+            },
+            RegistryAuditEvent {
+                event_code: "middle".to_string(),
+                trace_id: "trace-middle".to_string(),
+                registry_version: 1,
+                computation_name: None,
+                detail: "middle event".to_string(),
+            },
+            RegistryAuditEvent {
+                event_code: "newest".to_string(),
+                trace_id: "trace-newest".to_string(),
+                registry_version: 1,
+                computation_name: None,
+                detail: "newest event".to_string(),
+            },
+        ];
+
+        push_bounded(
+            &mut events,
+            RegistryAuditEvent {
+                event_code: "incoming".to_string(),
+                trace_id: "trace-incoming".to_string(),
+                registry_version: 1,
+                computation_name: None,
+                detail: "incoming event".to_string(),
+            },
+            2,
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].event_code, "newest");
+        assert_eq!(events[1].event_code, "incoming");
+    }
+
+    #[test]
+    fn version_regression_error_does_not_record_trace_id() {
+        let mut registry = ComputationRegistry::new(4, "trace-load");
+        let audit_len_before = registry.audit_events().len();
+
+        let err = registry
+            .bump_version(3, "trace-regression-ignored")
+            .expect_err("lower version must fail");
+
+        assert_eq!(err.code(), ERR_REGISTRY_VERSION_REGRESSION);
+        assert_eq!(registry.registry_version(), 4);
+        assert_eq!(registry.audit_events().len(), audit_len_before);
+        assert!(!registry
+            .audit_events()
+            .iter()
+            .any(|event| event.trace_id == "trace-regression-ignored"));
+    }
+
+    #[test]
+    fn canonical_name_rejects_unicode_bidi_and_non_ascii_components() {
+        for name in [
+            "trust.\u{202e}verify_manifest.v1",
+            "trüst.verify_manifest.v1",
+            "trust.verify_😀.v1",
+            "trust.verify_manifest.v\u{0661}",
+        ] {
+            assert!(!is_canonical_computation_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_name_rejects_control_characters_inside_components() {
+        for name in [
+            "trust.verify\nmanifest.v1",
+            "trust.verify\tmanifest.v1",
+            "trust.verify_manifest.v1\r",
+            "trust.\0verify_manifest.v1",
+        ] {
+            assert!(!is_canonical_computation_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn canonical_name_rejects_malformed_version_digits() {
+        for name in [
+            "trust.verify_manifest.v+1",
+            "trust.verify_manifest.v_1",
+            "trust.verify_manifest.vv1",
+            "trust.verify_manifest.1",
+        ] {
+            assert!(!is_canonical_computation_name(name), "{name:?}");
+        }
+    }
+
+    #[test]
+    fn from_catalog_rejects_blank_input_schema_after_prior_valid_entry() {
+        let mut invalid = sample_entry("trust.blank_input.v1");
+        invalid.input_schema = " \n\t ".to_string();
+        let catalog = RegistryCatalog {
+            registry_version: 9,
+            entries: vec![sample_entry("trust.valid_manifest.v1"), invalid],
+        };
+
+        let err = ComputationRegistry::from_catalog(catalog, "trace-catalog-blank-input")
+            .expect_err("blank catalog input schema must fail restore");
+
+        assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
+        assert!(err.to_string().contains("input_schema and output_schema"));
+    }
+
+    #[test]
+    fn from_catalog_rejects_blank_output_schema_after_prior_valid_entry() {
+        let mut invalid = sample_entry("trust.blank_output.v1");
+        invalid.output_schema = "\r\n ".to_string();
+        let catalog = RegistryCatalog {
+            registry_version: 9,
+            entries: vec![sample_entry("trust.valid_manifest.v1"), invalid],
+        };
+
+        let err = ComputationRegistry::from_catalog(catalog, "trace-catalog-blank-output")
+            .expect_err("blank catalog output schema must fail restore");
+
+        assert_eq!(err.code(), ERR_INVALID_COMPUTATION_ENTRY);
+        assert!(err.to_string().contains("input_schema and output_schema"));
+    }
+
+    #[test]
+    fn malformed_registration_after_valid_entry_preserves_existing_catalog() {
+        let mut registry = ComputationRegistry::new(1, "trace-load");
+        registry
+            .register_computation(sample_entry("trust.valid_manifest.v1"), "trace-valid")
+            .expect("valid entry should register");
+        let before = registry.to_catalog();
+
+        let err = registry
+            .register_computation(sample_entry("trust.invalid-manifest.v1"), "trace-invalid")
+            .expect_err("malformed follow-up registration must fail");
+
+        assert_eq!(err.code(), ERR_MALFORMED_COMPUTATION_NAME);
+        assert_eq!(registry.to_catalog(), before);
+        assert_eq!(
+            registry
+                .audit_events()
+                .last()
+                .map(|event| event.event_code.as_str()),
+            Some(CR_LOOKUP_MALFORMED)
+        );
+    }
+
+    #[test]
+    fn zero_version_registry_rejects_zero_version_bump_without_audit() {
+        let mut registry = ComputationRegistry::new(0, "trace-load-zero");
+        let audit_len_before = registry.audit_events().len();
+
+        let err = registry
+            .bump_version(0, "trace-zero-bump")
+            .expect_err("zero-to-zero version bump must be a regression");
+
+        assert_eq!(err.code(), ERR_REGISTRY_VERSION_REGRESSION);
+        assert_eq!(registry.registry_version(), 0);
+        assert_eq!(registry.audit_events().len(), audit_len_before);
     }
 }

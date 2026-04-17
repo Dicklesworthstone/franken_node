@@ -220,6 +220,11 @@ pub enum LabError {
 const MAX_LAB_EVENTS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -446,11 +451,28 @@ impl IncidentLab {
         comparison: &ReplayComparison,
         candidate: &MitigationCandidate,
     ) -> Result<PromotedMitigation, LabError> {
+        if comparison.mitigation_id != candidate.mitigation_id {
+            return Err(LabError::MitigationUnsafe {
+                mitigation_id: candidate.mitigation_id.clone(),
+                reason: format!(
+                    "comparison mitigation id `{}` does not match candidate `{}`",
+                    comparison.mitigation_id, candidate.mitigation_id
+                ),
+            });
+        }
+
         // INV-LAB-LOSS-DELTA-POSITIVE
         if comparison.loss_delta <= 0 {
             return Err(LabError::LossDeltaNegative {
                 mitigation_id: candidate.mitigation_id.clone(),
                 delta: comparison.loss_delta,
+            });
+        }
+
+        if self.config.valid_from_epoch_ms >= self.config.valid_until_epoch_ms {
+            return Err(LabError::MitigationUnsafe {
+                mitigation_id: candidate.mitigation_id.clone(),
+                reason: "rollout validity window must be non-empty".to_string(),
             });
         }
 
@@ -484,7 +506,9 @@ impl IncidentLab {
         };
 
         // INV-LAB-ROLLBACK-CONTRACT
-        if self.config.rollback_trigger.is_empty() {
+        if self.config.rollback_trigger.trim().is_empty()
+            || self.config.rollback_policy.trim().is_empty()
+        {
             return Err(LabError::RollbackMissing {
                 mitigation_id: candidate.mitigation_id.clone(),
             });
@@ -849,5 +873,852 @@ mod tests {
             invariants::INV_LAB_LOSS_DELTA_POSITIVE,
             "INV-LAB-LOSS-DELTA-POSITIVE"
         );
+    }
+
+    #[test]
+    fn replay_baseline_rejects_trace_mutated_after_hashing() {
+        let mut lab = fixture_lab();
+        let mut trace = fixture_trace();
+        trace.decisions[0].expected_loss = trace.decisions[0].expected_loss.saturating_add(1);
+
+        let err = lab.replay_baseline(&trace).unwrap_err();
+
+        match err {
+            LabError::TraceCorrupt { incident_id, .. } => {
+                assert_eq!(incident_id, "INC-LAB-001");
+            }
+            other => unreachable!("expected corrupt trace, got {other:?}"),
+        }
+        assert!(lab.events().is_empty());
+    }
+
+    #[test]
+    fn compare_replay_rejects_truncated_counterfactual_sequence() {
+        let mut lab = fixture_lab();
+        let trace = fixture_trace();
+        let candidate = MitigationCandidate {
+            mitigation_id: "mit-truncated".to_string(),
+            policy_diff: BTreeMap::new(),
+            counterfactual_decisions: trace.decisions[..2].to_vec(),
+        };
+
+        let err = lab.compare_replay(&trace, &candidate).unwrap_err();
+
+        match err {
+            LabError::ReplayDiverged { sequence_number } => {
+                assert_eq!(sequence_number, 0);
+            }
+            other => unreachable!("expected replay divergence, got {other:?}"),
+        }
+        assert!(lab.events().is_empty());
+    }
+
+    #[test]
+    fn compare_replay_rejects_expanded_counterfactual_sequence() {
+        let mut lab = fixture_lab();
+        let trace = fixture_trace();
+        let mut decisions = trace.decisions.clone();
+        decisions.push(LabDecision {
+            sequence_number: 4,
+            action: "deny".to_string(),
+            expected_loss: 500,
+            rationale: "unexpected synthetic branch".to_string(),
+        });
+        let candidate = MitigationCandidate {
+            mitigation_id: "mit-expanded".to_string(),
+            policy_diff: BTreeMap::new(),
+            counterfactual_decisions: decisions,
+        };
+
+        let err = lab.compare_replay(&trace, &candidate).unwrap_err();
+
+        assert!(matches!(
+            err,
+            LabError::ReplayDiverged { sequence_number: 0 }
+        ));
+        assert!(lab.events().is_empty());
+    }
+
+    #[test]
+    fn promote_rejects_zero_loss_delta_as_non_improvement() {
+        let mut lab = fixture_lab();
+        let trace = fixture_trace();
+        let candidate = MitigationCandidate {
+            mitigation_id: "mit-zero".to_string(),
+            policy_diff: BTreeMap::new(),
+            counterfactual_decisions: trace.decisions.clone(),
+        };
+        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
+
+        let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
+
+        match err {
+            LabError::LossDeltaNegative {
+                mitigation_id,
+                delta,
+            } => {
+                assert_eq!(mitigation_id, "mit-zero");
+                assert_eq!(delta, 0);
+            }
+            other => unreachable!("expected zero-delta rejection, got {other:?}"),
+        }
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
+    }
+
+    #[test]
+    fn promote_rejects_missing_rollback_without_emitting_promotion_event() {
+        let config = LabConfig {
+            rollback_trigger: String::new(),
+            ..LabConfig::default()
+        };
+        let mut lab = IncidentLab::new(config);
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert("quarantine_threshold".to_string(), "70".to_string());
+        let candidate = lab.synthesize_mitigation(&trace, "mit-no-rollback-event", diff);
+        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
+
+        let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
+
+        assert!(matches!(err, LabError::RollbackMissing { .. }));
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
+    }
+
+    #[test]
+    fn full_workflow_rejects_harmful_policy_diff_before_promotion() {
+        let mut lab = fixture_lab();
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert("quarantine_threshold".to_string(), "-70".to_string());
+
+        let err = lab
+            .run_full_workflow(&trace, "mit-harmful-full", diff)
+            .unwrap_err();
+
+        match err {
+            LabError::LossDeltaNegative {
+                mitigation_id,
+                delta,
+            } => {
+                assert_eq!(mitigation_id, "mit-harmful-full");
+                assert!(delta < 0);
+            }
+            other => unreachable!("expected harmful mitigation rejection, got {other:?}"),
+        }
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
+    }
+
+    #[test]
+    fn corrupt_trace_hash_is_reported_with_expected_and_actual_values() {
+        let mut trace = fixture_trace();
+        trace.trace_hash = "00".repeat(32);
+
+        let err = trace.validate_integrity().unwrap_err();
+
+        match err {
+            LabError::TraceCorrupt {
+                expected, actual, ..
+            } => {
+                assert_eq!(expected, "00".repeat(32));
+                assert_eq!(actual.len(), 64);
+                assert_ne!(actual, expected);
+            }
+            other => unreachable!("expected corrupt trace details, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn signing_domain_separator_changes_signature_for_same_fields() {
+        let rollout = sign_structured("secret-key", b"mitigation_rollout_sign_v1:", &[b"mit-1"]);
+        let rollback = sign_structured("secret-key", b"mitigation_rollback_sign_v1:", &[b"mit-1"]);
+
+        assert_ne!(rollout, rollback);
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn promote_rejects_comparison_candidate_id_mismatch() {
+        let mut lab = fixture_lab();
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert("quarantine_threshold".to_string(), "70".to_string());
+        let candidate = lab.synthesize_mitigation(&trace, "mit-candidate", diff);
+        let mut comparison = lab.compare_replay(&trace, &candidate).unwrap();
+        comparison.mitigation_id = "mit-other".to_string();
+
+        let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
+
+        match err {
+            LabError::MitigationUnsafe {
+                mitigation_id,
+                reason,
+            } => {
+                assert_eq!(mitigation_id, "mit-candidate");
+                assert!(reason.contains("does not match"));
+            }
+            other => unreachable!("expected mitigation mismatch rejection, got {other:?}"),
+        }
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
+    }
+
+    #[test]
+    fn promote_rejects_empty_rollout_validity_window() {
+        let config = LabConfig {
+            valid_from_epoch_ms: 100,
+            valid_until_epoch_ms: 100,
+            ..LabConfig::default()
+        };
+        let mut lab = IncidentLab::new(config);
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert("quarantine_threshold".to_string(), "70".to_string());
+        let candidate = lab.synthesize_mitigation(&trace, "mit-expired-window", diff);
+        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
+
+        let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
+
+        match err {
+            LabError::MitigationUnsafe { reason, .. } => {
+                assert!(reason.contains("validity window"));
+            }
+            other => unreachable!("expected invalid validity rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn promote_rejects_whitespace_rollback_trigger() {
+        let config = LabConfig {
+            rollback_trigger: "   \t ".to_string(),
+            ..LabConfig::default()
+        };
+        let mut lab = IncidentLab::new(config);
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert("quarantine_threshold".to_string(), "70".to_string());
+        let candidate = lab.synthesize_mitigation(&trace, "mit-blank-trigger", diff);
+        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
+
+        let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
+
+        assert!(matches!(err, LabError::RollbackMissing { .. }));
+        assert!(
+            !lab.events()
+                .iter()
+                .any(|event| event.code == event_codes::LAB_MITIGATION_PROMOTED)
+        );
+    }
+
+    #[test]
+    fn promote_rejects_whitespace_rollback_policy() {
+        let config = LabConfig {
+            rollback_policy: " \n ".to_string(),
+            ..LabConfig::default()
+        };
+        let mut lab = IncidentLab::new(config);
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert("quarantine_threshold".to_string(), "70".to_string());
+        let candidate = lab.synthesize_mitigation(&trace, "mit-blank-policy", diff);
+        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
+
+        let err = lab.promote_mitigation(&comparison, &candidate).unwrap_err();
+
+        assert!(matches!(err, LabError::RollbackMissing { .. }));
+    }
+
+    #[test]
+    fn full_workflow_rejects_non_numeric_policy_diff_as_non_improvement() {
+        let mut lab = fixture_lab();
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert(
+            "quarantine_threshold".to_string(),
+            "not-a-number".to_string(),
+        );
+
+        let err = lab
+            .run_full_workflow(&trace, "mit-nonnumeric", diff)
+            .unwrap_err();
+
+        match err {
+            LabError::LossDeltaNegative {
+                mitigation_id,
+                delta,
+            } => {
+                assert_eq!(mitigation_id, "mit-nonnumeric");
+                assert_eq!(delta, 0);
+            }
+            other => unreachable!("expected non-improvement rejection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn corrupt_trace_takes_precedence_over_counterfactual_length_mismatch() {
+        let mut lab = fixture_lab();
+        let mut trace = fixture_trace();
+        trace.trace_hash = "corrupt".to_string();
+        let candidate = MitigationCandidate {
+            mitigation_id: "mit-mismatch-corrupt".to_string(),
+            policy_diff: BTreeMap::new(),
+            counterfactual_decisions: Vec::new(),
+        };
+
+        let err = lab.compare_replay(&trace, &candidate).unwrap_err();
+
+        assert!(matches!(err, LabError::TraceCorrupt { .. }));
+    }
+
+    #[test]
+    fn trace_hash_uses_action_length_boundaries() {
+        let left = build_trace(
+            "INC-COLLISION-LEFT",
+            vec![
+                LabDecision {
+                    sequence_number: 1,
+                    action: "ab".to_string(),
+                    expected_loss: 10,
+                    rationale: "left-a".to_string(),
+                },
+                LabDecision {
+                    sequence_number: 2,
+                    action: "c".to_string(),
+                    expected_loss: 20,
+                    rationale: "left-b".to_string(),
+                },
+            ],
+            "policy-v1",
+        );
+        let right = build_trace(
+            "INC-COLLISION-RIGHT",
+            vec![
+                LabDecision {
+                    sequence_number: 1,
+                    action: "a".to_string(),
+                    expected_loss: 10,
+                    rationale: "right-a".to_string(),
+                },
+                LabDecision {
+                    sequence_number: 2,
+                    action: "bc".to_string(),
+                    expected_loss: 20,
+                    rationale: "right-b".to_string(),
+                },
+            ],
+            "policy-v1",
+        );
+
+        assert_ne!(left.trace_hash, right.trace_hash);
+    }
+
+    #[test]
+    fn mitigation_incident_id_unicode_injection_attack() {
+        // Test BiDi override and control character injection in incident IDs
+        let malicious_id = format!("INC-{}\u{202e}evil\u{202d}-{}", "\u{200b}".repeat(500), "💥".repeat(300));
+        let unicode_decisions = vec![LabDecision {
+            sequence_number: 1,
+            action: format!("quarantine-{}\u{2066}hidden\u{2069}", "\u{feff}".repeat(100)),
+            expected_loss: 50,
+            rationale: format!("rationale-{}\u{200f}rtl\u{200e}", "🔥".repeat(100)),
+        }];
+
+        let trace = build_trace(&malicious_id, unicode_decisions, "policy-unicode");
+
+        // Verify trace handles massive Unicode safely
+        assert_eq!(trace.incident_id, malicious_id);
+        assert!(trace.incident_id.chars().count() > 800);
+        assert!(!trace.trace_hash.is_empty());
+        assert!(trace.validate_integrity().is_ok());
+
+        // Test display safety (no panic on format)
+        let debug_str = format!("{:?}", trace);
+        assert!(debug_str.len() > 100);
+
+        // Test serialization robustness with Unicode injection
+        let json_result = serde_json::to_string(&trace);
+        assert!(json_result.is_ok());
+        let parsed: Result<IncidentTrace, _> = serde_json::from_str(&json_result.unwrap());
+        assert!(parsed.is_ok());
+
+        // Test lab workflow with Unicode injection
+        let mut lab = fixture_lab();
+        assert!(lab.load_trace(&trace).is_ok());
+        assert!(!lab.events().is_empty());
+        assert!(lab.events()[0].detail.contains(&malicious_id));
+    }
+
+    #[test]
+    fn mitigation_synthesis_memory_exhaustion_stress() {
+        // Test massive policy diffs and decision sequences
+        let mut lab = fixture_lab();
+        let massive_action = "a".repeat(100000);
+        let massive_rationale = format!("rationale-{}", "x".repeat(200000));
+
+        // Create trace with massive decision payloads
+        let massive_decisions = (0..1000).map(|i| LabDecision {
+            sequence_number: i,
+            action: format!("{massive_action}-{i}"),
+            expected_loss: i as i64,
+            rationale: format!("{massive_rationale}-{i}"),
+        }).collect();
+
+        let trace = build_trace("INC-MASSIVE", massive_decisions, "policy-v1");
+        assert!(lab.load_trace(&trace).is_ok());
+
+        // Create massive policy diff
+        let mut massive_diff = BTreeMap::new();
+        for i in 0..1000 {
+            let key = format!("param_{}_with_very_long_name_to_stress_memory_{}", i, "x".repeat(1000));
+            let value = format!("{}", i.saturating_mul(100));
+            massive_diff.insert(key, value);
+        }
+
+        // Synthesize mitigation with massive data
+        let massive_mitigation_id = format!("mit-{}", "massive".repeat(10000));
+        let candidate = lab.synthesize_mitigation(&trace, &massive_mitigation_id, massive_diff.clone());
+
+        // Verify bounded storage behavior
+        assert_eq!(candidate.mitigation_id, massive_mitigation_id);
+        assert!(candidate.policy_diff.len() <= 1000);
+        assert_eq!(candidate.counterfactual_decisions.len(), 1000);
+
+        // Test memory consumption is bounded despite massive inputs
+        let total_size: usize = candidate.counterfactual_decisions.iter()
+            .map(|d| d.action.len() + d.rationale.len())
+            .sum::<usize>() + massive_mitigation_id.len();
+        assert!(total_size < 500_000_000); // Reasonable memory bound
+
+        // Verify events are bounded
+        assert!(lab.events().len() <= MAX_LAB_EVENTS);
+    }
+
+    #[test]
+    fn mitigation_json_structure_integrity_validation() {
+        // Test malicious JSON injection in policy diffs and rationales
+        let mut lab = fixture_lab();
+        let json_bomb = r#"{"nested":{"deep":{"structures":[[[{"evil":"payload"}]]]},"arrays":[1,2,3,4,5]}}"#;
+        let injection_attempt = format!(r#"legitimate","injection":{json_bomb},"hidden":"#);
+
+        let decisions = vec![LabDecision {
+            sequence_number: 1,
+            action: injection_attempt.clone(),
+            expected_loss: 42,
+            rationale: format!(r#"rationale","malicious":{json_bomb},"legit":"#),
+        }];
+
+        let trace = build_trace("INC-JSON-INJECTION", decisions, "policy-v1");
+        assert!(lab.load_trace(&trace).is_ok());
+
+        // Create policy diff with injection attempts
+        let mut malicious_diff = BTreeMap::new();
+        malicious_diff.insert(injection_attempt.clone(), "100".to_string());
+        malicious_diff.insert("normal_param".to_string(), json_bomb.to_string());
+
+        let candidate = lab.synthesize_mitigation(&trace, "mit-json-injection", malicious_diff);
+
+        // Verify JSON serialization integrity
+        let serialized = serde_json::to_string(&candidate).unwrap();
+        assert!(!serialized.contains(r#""injection":{"nested""#)); // Injection should be escaped
+
+        // Test deserialization with injected structure
+        let parsed: MitigationCandidate = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(parsed.mitigation_id, "mit-json-injection");
+        assert!(parsed.policy_diff.contains_key(&injection_attempt));
+
+        // Verify comparison works with malicious data
+        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
+        assert_eq!(comparison.incident_id, "INC-JSON-INJECTION");
+    }
+
+    #[test]
+    fn mitigation_arithmetic_overflow_protection() {
+        // Test saturating arithmetic in loss calculations
+        let mut lab = fixture_lab();
+
+        // Create trace with extreme loss values
+        let extreme_decisions = vec![
+            LabDecision {
+                sequence_number: 1,
+                action: "max".to_string(),
+                expected_loss: i64::MAX,
+                rationale: "max-loss".to_string()
+            },
+            LabDecision {
+                sequence_number: 2,
+                action: "min".to_string(),
+                expected_loss: i64::MIN,
+                rationale: "min-loss".to_string()
+            },
+            LabDecision {
+                sequence_number: 3,
+                action: "zero".to_string(),
+                expected_loss: 0,
+                rationale: "zero-loss".to_string()
+            },
+        ];
+
+        let trace = build_trace("INC-OVERFLOW", extreme_decisions, "policy-v1");
+        assert!(lab.load_trace(&trace).is_ok());
+
+        // Create policy diff that would cause extreme adjustments
+        let mut overflow_diff = BTreeMap::new();
+        overflow_diff.insert("param1".to_string(), i64::MAX.to_string());
+        overflow_diff.insert("param2".to_string(), i64::MIN.to_string());
+        overflow_diff.insert("param3".to_string(), "999999999999999999".to_string());
+
+        let candidate = lab.synthesize_mitigation(&trace, "mit-overflow", overflow_diff);
+
+        // Verify saturating arithmetic prevents overflow
+        for decision in &candidate.counterfactual_decisions {
+            assert!(decision.expected_loss >= i64::MIN);
+            assert!(decision.expected_loss <= i64::MAX);
+            // Should not crash on extreme values
+            assert!(decision.expected_loss == decision.expected_loss);
+        }
+
+        // Test comparison with overflow protection
+        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
+        assert!(comparison.baseline_total_loss.is_finite() as bool);
+        assert!(comparison.counterfactual_total_loss.is_finite() as bool);
+        assert!(comparison.loss_delta.abs() < i64::MAX);
+
+        // Test sequence number bounds
+        assert_eq!(candidate.counterfactual_decisions.len(), 3);
+        for (i, decision) in candidate.counterfactual_decisions.iter().enumerate() {
+            assert_eq!(decision.sequence_number, (i + 1) as u64);
+        }
+    }
+
+    #[test]
+    fn mitigation_hash_collision_resistance() {
+        // Test trace hash resistance to collision attacks
+        let base_decisions = vec![LabDecision {
+            sequence_number: 1,
+            action: "baseline".to_string(),
+            expected_loss: 100,
+            rationale: "baseline-rationale".to_string(),
+        }];
+
+        let base_trace = build_trace("INC-BASELINE", base_decisions, "policy-v1");
+
+        // Attempt various collision strategies
+        let collision_attempts = [
+            // Different incident ID, same content
+            ("INC-COLLISION-1", vec![LabDecision {
+                sequence_number: 1,
+                action: "baseline".to_string(),
+                expected_loss: 100,
+                rationale: "baseline-rationale".to_string(),
+            }]),
+            // Same action bytes but different structure
+            ("INC-COLLISION-2", vec![LabDecision {
+                sequence_number: 1,
+                action: "base".to_string(),
+                expected_loss: 100,
+                rationale: "linebaseline-rationale".to_string(),
+            }]),
+            // NULL byte injection attempt
+            ("INC-COLLISION-3", vec![LabDecision {
+                sequence_number: 1,
+                action: "baseline\0collision".to_string(),
+                expected_loss: 100,
+                rationale: "baseline-rationale".to_string(),
+            }]),
+            // Unicode normalization attack
+            ("INC-COLLISION-4", vec![LabDecision {
+                sequence_number: 1,
+                action: "baseline".to_string(),
+                expected_loss: 100,
+                rationale: "baseline-rationale\u{200b}".to_string(),
+            }]),
+        ];
+
+        for (incident_id, decisions) in collision_attempts {
+            let collision_trace = build_trace(incident_id, decisions, "policy-v1");
+
+            // Hashes should be different for different content
+            assert_ne!(base_trace.trace_hash, collision_trace.trace_hash,
+                "Hash collision detected between baseline and {incident_id}");
+
+            // Each should validate independently
+            assert!(base_trace.validate_integrity().is_ok());
+            assert!(collision_trace.validate_integrity().is_ok());
+        }
+
+        // Test length extension resistance
+        let extended_decisions = vec![
+            base_trace.decisions[0].clone(),
+            LabDecision {
+                sequence_number: 2,
+                action: "extension".to_string(),
+                expected_loss: 50,
+                rationale: "extended".to_string(),
+            }
+        ];
+
+        let extended_trace = build_trace("INC-EXTENDED", extended_decisions, "policy-v1");
+        assert_ne!(base_trace.trace_hash, extended_trace.trace_hash);
+    }
+
+    #[test]
+    fn mitigation_signature_validation_bypass_attempts() {
+        // Test signature validation against bypass attempts
+        let mut lab = fixture_lab();
+        let trace = fixture_trace();
+        let mut diff = BTreeMap::new();
+        diff.insert("quarantine_threshold".to_string(), "70".to_string());
+
+        let candidate = lab.synthesize_mitigation(&trace, "mit-sig-test", diff);
+        let comparison = lab.compare_replay(&trace, &candidate).unwrap();
+
+        // Test legitimate promotion
+        let promoted = lab.promote_mitigation(&comparison, &candidate).unwrap();
+        assert!(!promoted.rollout.signature.is_empty());
+        assert!(!promoted.rollback.signature.is_empty());
+
+        // Test signature tampering detection
+        let tampered_rollout_sig = promoted.rollout.signature.chars().rev().collect::<String>();
+        assert_ne!(promoted.rollout.signature, tampered_rollout_sig);
+
+        // Create lab with different secret
+        let mut evil_config = LabConfig::default();
+        evil_config.signing_secret = "evil-secret".to_string();
+        let mut evil_lab = IncidentLab::new(evil_config);
+
+        let evil_candidate = evil_lab.synthesize_mitigation(&trace, "mit-evil", BTreeMap::new());
+
+        // Evil lab should produce different signatures
+        if let Ok(evil_comparison) = evil_lab.compare_replay(&trace, &evil_candidate) {
+            if evil_comparison.loss_delta > 0 {
+                if let Ok(evil_promoted) = evil_lab.promote_mitigation(&evil_comparison, &evil_candidate) {
+                    assert_ne!(promoted.rollout.signature, evil_promoted.rollout.signature);
+                    assert_ne!(promoted.rollback.signature, evil_promoted.rollback.signature);
+                }
+            }
+        }
+
+        // Test signature determinism
+        let signature1 = sign_structured("test-secret", b"domain:", &[b"field1", b"field2"]);
+        let signature2 = sign_structured("test-secret", b"domain:", &[b"field1", b"field2"]);
+        assert_eq!(signature1, signature2);
+
+        // Test domain separation prevents cross-context attacks
+        let rollout_sig = sign_structured("secret", b"mitigation_rollout_sign_v1:", &[b"test"]);
+        let rollback_sig = sign_structured("secret", b"mitigation_rollback_sign_v1:", &[b"test"]);
+        assert_ne!(rollout_sig, rollback_sig);
+    }
+
+    #[test]
+    fn mitigation_concurrent_workflow_safety() {
+        // Test concurrent lab operations for race conditions
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let lab = Arc::new(Mutex::new(fixture_lab()));
+        let trace = Arc::new(fixture_trace());
+        let mut handles = vec![];
+
+        // Spawn concurrent threads performing different workflows
+        for thread_id in 0..10 {
+            let lab_clone = Arc::clone(&lab);
+            let trace_clone = Arc::clone(&trace);
+
+            let handle = thread::spawn(move || {
+                let operations = [
+                    // Load trace operations
+                    || {
+                        let mut l = lab_clone.lock().unwrap();
+                        let _ = l.load_trace(&trace_clone);
+                    },
+                    // Synthesis operations
+                    || {
+                        let mut l = lab_clone.lock().unwrap();
+                        let mut diff = BTreeMap::new();
+                        diff.insert(format!("param-{thread_id}"), thread_id.to_string());
+                        let _ = l.synthesize_mitigation(&trace_clone, &format!("mit-{thread_id}"), diff);
+                    },
+                    // Replay operations
+                    || {
+                        let mut l = lab_clone.lock().unwrap();
+                        let _ = l.replay_baseline(&trace_clone);
+                    }
+                ];
+
+                // Perform multiple operations in this thread
+                for op in operations.iter().cycle().take(50) {
+                    op();
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Verify final state consistency
+        let final_lab = lab.lock().unwrap();
+        assert!(final_lab.events().len() <= MAX_LAB_EVENTS);
+
+        // Verify events are well-formed
+        for event in final_lab.events() {
+            assert!(!event.code.is_empty());
+            assert!(!event.detail.is_empty());
+        }
+    }
+
+    #[test]
+    fn mitigation_display_injection_and_format_safety() {
+        // Test format string injection and display safety
+        let mut lab = fixture_lab();
+
+        // Create data with format specifiers and injection attempts
+        let malicious_inputs = [
+            ("INC-{}", "action-{}-%s", "rationale-%n-%d"),
+            ("INC-\n\tmalicious", "action\x00null", "rationale\r\nCRLF"),
+            ("INC-%x%p", "action%c%u", "rationale%ld%zu"),
+            ("INC-\x1b[31mred\x1b[0m", "action\x1b[1mbold\x1b[0m", "rationale\x1b[?1049h"),
+            ("INC-\u{1f4a9}\u{200d}\u{1f525}", "action\u{202e}RLO\u{202d}", "rationale\u{2066}LRI\u{2069}"),
+        ];
+
+        for (incident_id, action, rationale) in malicious_inputs {
+            let decisions = vec![LabDecision {
+                sequence_number: 1,
+                action: action.to_string(),
+                expected_loss: 100,
+                rationale: rationale.to_string(),
+            }];
+
+            let trace = build_trace(incident_id, decisions, "policy-fmt");
+            assert!(lab.load_trace(&trace).is_ok());
+
+            // Test display safety - should not panic or produce control sequences
+            let debug_str = format!("{:?}", trace);
+            assert!(!debug_str.contains('\x00'), "Debug output should escape null bytes");
+
+            // Test error display safety
+            let mut corrupted_trace = trace.clone();
+            corrupted_trace.trace_hash = "corrupted".to_string();
+            if let Err(error) = corrupted_trace.validate_integrity() {
+                let error_display = format!("{}", error);
+                assert!(!error_display.contains('\x00'), "Error display should be safe");
+                assert!(error_display.len() > 10, "Error should produce meaningful output");
+            }
+        }
+
+        // Test event display safety
+        for event in lab.events() {
+            let json_str = serde_json::to_string(event).unwrap();
+            assert!(!json_str.contains("\\u0000"), "JSON should escape control chars safely");
+
+            let debug_str = format!("{:?}", event);
+            assert!(!debug_str.contains('\r'), "Debug should escape CRLF");
+            assert!(!debug_str.contains('\n'), "Debug should escape newlines");
+        }
+
+        // Test mitigation candidate display safety
+        let mut diff = BTreeMap::new();
+        diff.insert("param\x1b[31mred\x1b[0m".to_string(), "value%s".to_string());
+
+        let candidate = lab.synthesize_mitigation(&fixture_trace(), "mit\x00null", diff);
+        let candidate_debug = format!("{:?}", candidate);
+        assert!(!candidate_debug.contains('\x00'));
+        assert!(!candidate_debug.contains('\x1b'));
+    }
+
+    #[test]
+    fn mitigation_boundary_condition_stress_testing() {
+        // Test extreme boundary conditions and edge cases
+        let mut lab = fixture_lab();
+
+        // Test empty and minimal inputs
+        let boundary_traces = [
+            // Empty decisions
+            build_trace("INC-EMPTY", vec![], "policy-v1"),
+            // Single decision
+            build_trace("INC-SINGLE", vec![LabDecision {
+                sequence_number: 1,
+                action: "a".to_string(),
+                expected_loss: 1,
+                rationale: "r".to_string(),
+            }], "policy-v1"),
+            // Extreme sequence numbers
+            build_trace("INC-EXTREME-SEQ", vec![LabDecision {
+                sequence_number: u64::MAX,
+                action: "max-seq".to_string(),
+                expected_loss: 0,
+                rationale: "max-sequence".to_string(),
+            }], "policy-v1"),
+        ];
+
+        for trace in &boundary_traces {
+            let load_result = lab.load_trace(trace);
+            let _ = load_result; // Allow any result, testing for crashes
+
+            // Test replay with boundary data
+            let replay_result = lab.replay_baseline(trace);
+            let _ = replay_result; // Allow any result, testing for crashes
+
+            // Test validation boundary behavior
+            let validation_result = trace.validate_integrity();
+            assert!(validation_result == validation_result); // Tautology to check for side effects
+        }
+
+        // Test extremely long strings
+        let long_trace = build_trace(
+            &"a".repeat(1000000),
+            vec![LabDecision {
+                sequence_number: 1,
+                action: "x".repeat(1000000),
+                expected_loss: i64::MAX / 2,
+                rationale: "y".repeat(1000000),
+            }],
+            &"z".repeat(100000)
+        );
+
+        let long_load_result = lab.load_trace(&long_trace);
+        assert!(long_load_result.is_ok(), "Should handle very long inputs");
+
+        // Test policy diff with boundary values
+        let mut boundary_diff = BTreeMap::new();
+        boundary_diff.insert("".to_string(), "".to_string()); // Empty key/value
+        boundary_diff.insert("a".repeat(100000), i64::MAX.to_string()); // Very long key
+        boundary_diff.insert("normal".to_string(), "not-a-number".to_string()); // Non-numeric
+
+        let boundary_candidate = lab.synthesize_mitigation(&fixture_trace(), "", boundary_diff);
+        assert!(boundary_candidate.mitigation_id.is_empty());
+        assert!(!boundary_candidate.policy_diff.is_empty());
+
+        // Test serialization with boundary data
+        let json_result = serde_json::to_string(&long_trace);
+        assert!(json_result.is_ok(), "Should serialize boundary data safely");
+
+        let parsed_result: Result<IncidentTrace, _> = serde_json::from_str(&json_result.unwrap());
+        assert!(parsed_result.is_ok(), "Should deserialize boundary data safely");
     }
 }

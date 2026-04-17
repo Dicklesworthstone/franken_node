@@ -31,6 +31,11 @@ use sha2::{Digest, Sha256};
 use super::idempotency::IdempotencyKey;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -538,7 +543,7 @@ impl IdempotencyDedupeStore {
         for entry in self.entries.values_mut() {
             if entry.status == EntryStatus::Processing {
                 entry.status = EntryStatus::Abandoned;
-                count += 1;
+                count = count.saturating_add(1);
             }
         }
         self.total_recovered = self.total_recovered.saturating_add(count as u64);
@@ -1203,5 +1208,489 @@ mod tests {
         );
         // One second before, entry is NOT expired.
         assert!(!entry.is_expired(1099));
+    }
+
+    #[test]
+    fn conflict_against_processing_entry_does_not_replace_inflight_payload() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(101);
+
+        assert_eq!(
+            store.check_or_insert(key, b"original-payload", 1000, "trace-processing-conflict"),
+            DedupeResult::New
+        );
+        let conflict =
+            store.check_or_insert(key, b"different-payload", 1001, "trace-processing-conflict");
+
+        assert!(matches!(conflict, DedupeResult::Conflict { .. }));
+        assert_eq!(store.entry_count(), 1);
+        assert_eq!(
+            store.check_or_insert(key, b"original-payload", 1002, "trace-processing-conflict"),
+            DedupeResult::InFlight
+        );
+        let (_new, _dup, conflicts, _expired) = store.stats();
+        assert_eq!(conflicts, 1);
+    }
+
+    #[test]
+    fn conflicting_payload_after_completion_keeps_cached_outcome_for_original_payload() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(102);
+
+        assert_eq!(
+            store.check_or_insert(key, b"stable-request", 1000, "trace-complete-conflict"),
+            DedupeResult::New
+        );
+        store
+            .complete(
+                key,
+                b"stable-result".to_vec(),
+                1001,
+                "trace-complete-conflict",
+            )
+            .expect("initial completion should succeed");
+        assert!(matches!(
+            store.check_or_insert(key, b"changed-request", 1002, "trace-complete-conflict"),
+            DedupeResult::Conflict { .. }
+        ));
+        let duplicate =
+            store.check_or_insert(key, b"stable-request", 1003, "trace-complete-conflict");
+
+        match duplicate {
+            DedupeResult::Duplicate(outcome) => {
+                assert_eq!(outcome.result_data, b"stable-result");
+            }
+            other => unreachable!("expected Duplicate after conflict, got {other:?}"),
+        }
+        assert_eq!(store.entry_count(), 1);
+    }
+
+    #[test]
+    fn abandoned_entry_with_different_payload_conflicts_instead_of_retrying() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(103);
+
+        assert_eq!(
+            store.check_or_insert(key, b"retry-original", 1000, "trace-abandoned-conflict"),
+            DedupeResult::New
+        );
+        assert_eq!(store.recover_inflight("trace-abandoned-conflict"), 1);
+        let result =
+            store.check_or_insert(key, b"retry-different", 1001, "trace-abandoned-conflict");
+
+        assert!(matches!(result, DedupeResult::Conflict { .. }));
+        assert_eq!(
+            store
+                .entries
+                .get(&key.to_hex())
+                .expect("abandoned entry should remain present")
+                .status,
+            EntryStatus::Abandoned
+        );
+    }
+
+    #[test]
+    fn complete_abandoned_entry_errors_without_changing_status() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(104);
+
+        assert_eq!(
+            store.check_or_insert(key, b"abandoned-complete", 1000, "trace-complete-abandoned"),
+            DedupeResult::New
+        );
+        assert_eq!(store.recover_inflight("trace-complete-abandoned"), 1);
+        let err = store
+            .complete(
+                key,
+                b"should-not-complete".to_vec(),
+                1001,
+                "trace-complete-abandoned",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("not Processing"));
+        let entry = store
+            .entries
+            .get(&key.to_hex())
+            .expect("entry should remain present");
+        assert_eq!(entry.status, EntryStatus::Abandoned);
+        assert!(entry.outcome.is_none());
+    }
+
+    #[test]
+    fn complete_unknown_key_does_not_emit_audit_record() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+
+        let err = store
+            .complete(
+                test_key(105),
+                b"missing".to_vec(),
+                1000,
+                "trace-missing-complete",
+            )
+            .unwrap_err();
+
+        assert!(err.contains("no entry"));
+        assert_eq!(store.entry_count(), 0);
+        assert_eq!(store.audit_log_len(), 0);
+    }
+
+    #[test]
+    fn duplicate_at_exact_ttl_boundary_is_not_returned_from_cache() {
+        let mut store = IdempotencyDedupeStore::new(100);
+        let key = test_key(106);
+
+        assert_eq!(
+            store.check_or_insert(key, b"ttl-boundary", 1000, "trace-ttl-boundary"),
+            DedupeResult::New
+        );
+        store
+            .complete(key, b"ttl-result".to_vec(), 1001, "trace-ttl-boundary")
+            .expect("initial completion should succeed");
+        let result = store.check_or_insert(key, b"ttl-boundary", 1100, "trace-ttl-boundary");
+
+        assert_eq!(result, DedupeResult::New);
+        let (_new, duplicates, _conflicts, expired) = store.stats();
+        assert_eq!(duplicates, 0);
+        assert_eq!(expired, 1);
+    }
+
+    #[test]
+    fn zero_ttl_entry_is_immediately_replaced_instead_of_deduped() {
+        let mut store = IdempotencyDedupeStore::new(0);
+        let key = test_key(107);
+
+        assert_eq!(
+            store.check_or_insert(key, b"zero-ttl", 1000, "trace-zero-ttl"),
+            DedupeResult::New
+        );
+        store
+            .complete(key, b"zero-result".to_vec(), 1000, "trace-zero-ttl")
+            .expect("initial completion should succeed");
+        let result = store.check_or_insert(key, b"zero-ttl", 1000, "trace-zero-ttl");
+
+        assert_eq!(result, DedupeResult::New);
+        assert_eq!(store.entry_count(), 1);
+    }
+
+    #[test]
+    fn empty_sweep_removes_nothing_but_records_sweep_event() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+
+        let swept = store.sweep_expired(1000, "trace-empty-sweep");
+
+        assert_eq!(swept, 0);
+        assert_eq!(store.entry_count(), 0);
+        assert_eq!(store.audit_log_len(), 1);
+        assert_eq!(
+            store.audit_log()[0].event_code,
+            event_codes::ID_SWEEP_COMPLETE
+        );
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn in_flight_same_payload_does_not_emit_duplicate_audit_or_increment_duplicate_count() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(108);
+
+        assert_eq!(
+            store.check_or_insert(key, b"inflight", 1000, "trace-inflight-no-dup"),
+            DedupeResult::New
+        );
+        let audit_len_before = store.audit_log_len();
+        let result = store.check_or_insert(key, b"inflight", 1001, "trace-inflight-no-dup");
+
+        assert_eq!(result, DedupeResult::InFlight);
+        let (_new, duplicates, _conflicts, _expired) = store.stats();
+        assert_eq!(duplicates, 0);
+        assert_eq!(store.audit_log_len(), audit_len_before);
+    }
+
+    #[test]
+    fn corrupt_complete_entry_remains_unmodified_after_fail_closed_check() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(109);
+        let payload = b"corrupt-stable";
+        let key_hex = key.to_hex();
+        store.entries.insert(
+            key_hex.clone(),
+            DedupeEntry {
+                key,
+                payload_hash: hash_payload(payload),
+                status: EntryStatus::Complete,
+                outcome: None,
+                created_at_secs: 1000,
+                ttl_secs: 3600,
+            },
+        );
+
+        let result = store.check_or_insert(key, payload, 1001, "trace-corrupt-stable");
+
+        assert!(matches!(result, DedupeResult::Conflict { .. }));
+        let entry = store.entries.get(&key_hex).expect("entry should remain");
+        assert_eq!(entry.status, EntryStatus::Complete);
+        assert!(entry.outcome.is_none());
+    }
+
+    #[test]
+    fn deserialized_corrupt_complete_entry_fails_closed_without_duplicate() {
+        let key = test_key(110);
+        let key_hex = key.to_hex();
+        let mut store = IdempotencyDedupeStore::new(3600);
+        store.entries.insert(
+            key_hex.clone(),
+            DedupeEntry {
+                key,
+                payload_hash: hash_payload(b"persisted-payload"),
+                status: EntryStatus::Complete,
+                outcome: None,
+                created_at_secs: 1000,
+                ttl_secs: 3600,
+            },
+        );
+        let encoded = serde_json::to_string(&store).expect("store should serialize");
+        let mut decoded: IdempotencyDedupeStore =
+            serde_json::from_str(&encoded).expect("store should deserialize");
+
+        let result = decoded.check_or_insert(key, b"persisted-payload", 1001, "trace-corrupt-json");
+
+        assert!(matches!(result, DedupeResult::Conflict { .. }));
+        let (_new, duplicates, conflicts, _expired) = decoded.stats();
+        assert_eq!(duplicates, 0);
+        assert_eq!(conflicts, 1);
+        assert_eq!(
+            decoded.entries.get(&key_hex).unwrap().status,
+            EntryStatus::Complete
+        );
+    }
+
+    #[test]
+    fn abandoned_retry_same_payload_resets_status_and_clears_prior_outcome() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(111);
+        let key_hex = key.to_hex();
+        assert_eq!(
+            store.check_or_insert(key, b"retry-reset", 1000, "trace-retry-reset"),
+            DedupeResult::New
+        );
+        assert_eq!(store.recover_inflight("trace-retry-reset"), 1);
+
+        let result = store.check_or_insert(key, b"retry-reset", 1001, "trace-retry-reset");
+
+        assert_eq!(result, DedupeResult::New);
+        let entry = store.entries.get(&key_hex).expect("entry should remain");
+        assert_eq!(entry.status, EntryStatus::Processing);
+        assert!(entry.outcome.is_none());
+        assert_eq!(entry.created_at_secs, 1001);
+    }
+
+    #[test]
+    fn recover_inflight_second_pass_recovers_zero_and_preserves_abandoned_entry() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(112);
+        let key_hex = key.to_hex();
+        assert_eq!(
+            store.check_or_insert(key, b"recover-once", 1000, "trace-recover-once"),
+            DedupeResult::New
+        );
+        assert_eq!(store.recover_inflight("trace-recover-once"), 1);
+
+        let recovered_again = store.recover_inflight("trace-recover-again");
+
+        assert_eq!(recovered_again, 0);
+        assert_eq!(
+            store.entries.get(&key_hex).unwrap().status,
+            EntryStatus::Abandoned
+        );
+    }
+
+    #[test]
+    fn sweep_expired_removes_abandoned_entry_at_exact_boundary() {
+        let mut store = IdempotencyDedupeStore::new(10);
+        let key = test_key(113);
+        assert_eq!(
+            store.check_or_insert(key, b"abandoned-expiry", 1000, "trace-abandoned-expiry"),
+            DedupeResult::New
+        );
+        assert_eq!(store.recover_inflight("trace-abandoned-expiry"), 1);
+
+        let swept = store.sweep_expired(1010, "trace-abandoned-expiry");
+
+        assert_eq!(swept, 1);
+        assert_eq!(store.entry_count(), 0);
+        let (_new, _duplicates, _conflicts, expired) = store.stats();
+        assert_eq!(expired, 1);
+    }
+
+    #[test]
+    fn conflict_after_recovery_does_not_consume_abandoned_retry_slot() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(114);
+        let key_hex = key.to_hex();
+        assert_eq!(
+            store.check_or_insert(key, b"stable-retry", 1000, "trace-conflict-retry-slot"),
+            DedupeResult::New
+        );
+        assert_eq!(store.recover_inflight("trace-conflict-retry-slot"), 1);
+        assert!(matches!(
+            store.check_or_insert(key, b"bad-retry", 1001, "trace-conflict-retry-slot"),
+            DedupeResult::Conflict { .. }
+        ));
+
+        let retry = store.check_or_insert(key, b"stable-retry", 1002, "trace-conflict-retry-slot");
+
+        assert_eq!(retry, DedupeResult::New);
+        let entry = store.entries.get(&key_hex).expect("entry should remain");
+        assert_eq!(entry.status, EntryStatus::Processing);
+        assert_eq!(entry.created_at_secs, 1002);
+    }
+
+    #[test]
+    fn conflict_result_reports_original_and_actual_payload_digests() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(115);
+        let original = b"original-conflict-payload";
+        let changed = b"changed-conflict-payload";
+
+        assert_eq!(
+            store.check_or_insert(key, original, 1000, "trace-conflict-digests"),
+            DedupeResult::New
+        );
+        let result = store.check_or_insert(key, changed, 1001, "trace-conflict-digests");
+
+        match result {
+            DedupeResult::Conflict {
+                key_hex,
+                expected_hash: expected_digest,
+                actual_hash: actual_digest,
+            } => {
+                assert_eq!(key_hex, key.to_hex());
+                assert_eq!(expected_digest, hash_payload(original));
+                assert_eq!(actual_digest, hash_payload(changed));
+            }
+            other => unreachable!("expected conflict with digests, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_against_abandoned_entry_reports_original_payload_digest() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(116);
+        assert_eq!(
+            store.check_or_insert(key, b"recover-original", 1000, "trace-abandoned-digest"),
+            DedupeResult::New
+        );
+        assert_eq!(store.recover_inflight("trace-abandoned-digest"), 1);
+
+        let result =
+            store.check_or_insert(key, b"recover-changed", 1001, "trace-abandoned-digest");
+
+        match result {
+            DedupeResult::Conflict {
+                expected_hash: expected_digest,
+                actual_hash: actual_digest,
+                ..
+            } => {
+                assert_eq!(expected_digest, hash_payload(b"recover-original"));
+                assert_eq!(actual_digest, hash_payload(b"recover-changed"));
+            }
+            other => unreachable!("expected abandoned conflict, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn conflict_after_completion_does_not_increment_duplicate_counter() {
+        let mut store = IdempotencyDedupeStore::new(3600);
+        let key = test_key(117);
+        assert_eq!(
+            store.check_or_insert(key, b"complete-original", 1000, "trace-complete-stats"),
+            DedupeResult::New
+        );
+        store
+            .complete(key, b"complete-outcome".to_vec(), 1001, "trace-complete-stats")
+            .expect("completion should succeed");
+
+        let result = store.check_or_insert(key, b"complete-changed", 1002, "trace-complete-stats");
+
+        assert!(matches!(result, DedupeResult::Conflict { .. }));
+        let (_new, duplicates, conflicts, _expired) = store.stats();
+        assert_eq!(duplicates, 0);
+        assert_eq!(conflicts, 1);
+    }
+
+    #[test]
+    fn audit_capacity_one_keeps_conflict_event_after_eviction() {
+        let mut store = IdempotencyDedupeStore::with_audit_log_capacity(3600, 1);
+        let key = test_key(118);
+        assert_eq!(
+            store.check_or_insert(key, b"audit-original", 1000, "trace-audit-one"),
+            DedupeResult::New
+        );
+
+        let result = store.check_or_insert(key, b"audit-changed", 1001, "trace-audit-one");
+
+        assert!(matches!(result, DedupeResult::Conflict { .. }));
+        assert_eq!(store.audit_log_len(), 1);
+        assert_eq!(store.audit_log()[0].event_code, event_codes::ID_ENTRY_CONFLICT);
+    }
+
+    #[test]
+    fn recover_with_capacity_one_evicts_prior_new_audit_event() {
+        let mut store = IdempotencyDedupeStore::with_audit_log_capacity(3600, 1);
+        let key = test_key(119);
+        assert_eq!(
+            store.check_or_insert(key, b"recover-capacity-one", 1000, "trace-recover-one"),
+            DedupeResult::New
+        );
+
+        let recovered = store.recover_inflight("trace-recover-one");
+
+        assert_eq!(recovered, 1);
+        assert_eq!(store.audit_log_len(), 1);
+        assert_eq!(
+            store.audit_log()[0].event_code,
+            event_codes::ID_STORE_RECOVERY
+        );
+    }
+
+    #[test]
+    fn sweep_before_exact_ttl_boundary_removes_nothing() {
+        let mut store = IdempotencyDedupeStore::new(10);
+        let key = test_key(120);
+        assert_eq!(
+            store.check_or_insert(key, b"not-yet-expired", 1000, "trace-before-ttl"),
+            DedupeResult::New
+        );
+
+        let swept = store.sweep_expired(1009, "trace-before-ttl");
+
+        assert_eq!(swept, 0);
+        assert_eq!(store.entry_count(), 1);
+        let (_new, _duplicates, _conflicts, expired) = store.stats();
+        assert_eq!(expired, 0);
+    }
+
+    #[test]
+    fn saturating_expiry_deadline_does_not_expire_before_u64_max() {
+        let entry = DedupeEntry {
+            key: test_key(121),
+            payload_hash: hash_payload(b"saturating-deadline"),
+            status: EntryStatus::Processing,
+            outcome: None,
+            created_at_secs: u64::MAX - 5,
+            ttl_secs: 10,
+        };
+
+        assert!(!entry.is_expired(u64::MAX - 1));
+        assert!(entry.is_expired(u64::MAX));
     }
 }

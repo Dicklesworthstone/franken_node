@@ -19,8 +19,12 @@ const MAX_ACTIVE_HALTS: usize = 4096;
 const MAX_BUNDLES: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -153,7 +157,10 @@ impl ProofContext {
 
     /// Total number of proofs examined.
     pub fn total(&self) -> usize {
-        self.failed_proofs.len() + self.missing_proofs.len() + self.passed_proofs.len()
+        self.failed_proofs
+            .len()
+            .saturating_add(self.missing_proofs.len())
+            .saturating_add(self.passed_proofs.len())
     }
 
     /// Whether all proofs are in a failure/missing state.
@@ -443,39 +450,124 @@ impl std::error::Error for DurabilityHaltedError {}
 
 // ── Bundle generation (deterministic) ──────────────────────────────
 
+fn hash_len(len: usize) -> [u8; 8] {
+    u64::try_from(len).unwrap_or(u64::MAX).to_le_bytes()
+}
+
+fn update_hash_u64(hasher: &mut Sha256, domain: &'static [u8], value: u64) {
+    hasher.update(domain);
+    hasher.update(value.to_le_bytes());
+}
+
+fn update_hash_bytes(hasher: &mut Sha256, domain: &'static [u8], value: &[u8]) {
+    hasher.update(domain);
+    hasher.update(hash_len(value.len()));
+    hasher.update(value);
+}
+
+fn update_hash_string_list(hasher: &mut Sha256, domain: &'static [u8], values: &[String]) {
+    hasher.update(domain);
+    hasher.update(hash_len(values.len()));
+    for value in values {
+        update_hash_bytes(
+            hasher,
+            b"durability_violation_bundle_v1:string_list_item",
+            value.as_bytes(),
+        );
+    }
+}
+
 /// Generate a violation bundle deterministically from context.
 pub fn generate_bundle(context: &ViolationContext) -> ViolationBundle {
     // Derive bundle_id deterministically from content.
-    // Length-prefix all variable-length string fields to prevent
-    // delimiter-collision attacks (e.g. key="a|b" vs key="a" + delim + "b").
+    // Length-prefix variable-length strings and domain-separate fields to
+    // prevent delimiter, section, and optional-field collisions.
     let mut hasher = Sha256::new();
-    hasher.update(b"durability_violation_bundle_v1:");
-    hasher.update(context.epoch_id.to_le_bytes());
-    hasher.update(context.timestamp_ms.to_le_bytes());
-    hasher.update(u64::try_from(context.hardening_level.len()).unwrap_or(u64::MAX).to_le_bytes());
-    hasher.update(context.hardening_level.as_bytes());
+    hasher.update(b"franken_node:observability:durability_violation_bundle:v1");
+    update_hash_u64(
+        &mut hasher,
+        b"durability_violation_bundle_v1:epoch_id",
+        context.epoch_id,
+    );
+    update_hash_u64(
+        &mut hasher,
+        b"durability_violation_bundle_v1:timestamp_ms",
+        context.timestamp_ms,
+    );
+    update_hash_bytes(
+        &mut hasher,
+        b"durability_violation_bundle_v1:hardening_level",
+        context.hardening_level.as_bytes(),
+    );
+    hasher.update(b"durability_violation_bundle_v1:events");
+    hasher.update(hash_len(context.events.len()));
     for event in &context.events {
         let label = event.event_type.label();
-        hasher.update(u64::try_from(label.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(label.as_bytes());
-        hasher.update(event.timestamp_ms.to_le_bytes());
-        let desc = event.description.as_bytes();
-        hasher.update(u64::try_from(desc.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(desc);
-        let eref = event.evidence_ref.as_deref().unwrap_or("");
-        hasher.update(u64::try_from(eref.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(eref.as_bytes());
+        hasher.update(b"durability_violation_bundle_v1:event");
+        update_hash_bytes(
+            &mut hasher,
+            b"durability_violation_bundle_v1:event_type",
+            label.as_bytes(),
+        );
+        update_hash_u64(
+            &mut hasher,
+            b"durability_violation_bundle_v1:event_timestamp_ms",
+            event.timestamp_ms,
+        );
+        update_hash_bytes(
+            &mut hasher,
+            b"durability_violation_bundle_v1:event_description",
+            event.description.as_bytes(),
+        );
+        match &event.evidence_ref {
+            Some(eref) => update_hash_bytes(
+                &mut hasher,
+                b"durability_violation_bundle_v1:event_evidence_ref_some",
+                eref.as_bytes(),
+            ),
+            None => hasher.update(b"durability_violation_bundle_v1:event_evidence_ref_none"),
+        }
     }
+    hasher.update(b"durability_violation_bundle_v1:artifacts");
+    hasher.update(hash_len(context.artifacts.len()));
     for artifact in &context.artifacts {
-        hasher.update(u64::try_from(artifact.artifact_path.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(artifact.artifact_path.as_bytes());
-        hasher.update(u64::try_from(artifact.expected_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(artifact.expected_hash.as_bytes());
-        hasher.update(u64::try_from(artifact.actual_hash.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(artifact.actual_hash.as_bytes());
-        hasher.update(u64::try_from(artifact.failure_reason.len()).unwrap_or(u64::MAX).to_le_bytes());
-        hasher.update(artifact.failure_reason.as_bytes());
+        hasher.update(b"durability_violation_bundle_v1:artifact");
+        update_hash_bytes(
+            &mut hasher,
+            b"durability_violation_bundle_v1:artifact_path",
+            artifact.artifact_path.as_bytes(),
+        );
+        update_hash_bytes(
+            &mut hasher,
+            b"durability_violation_bundle_v1:artifact_expected_hash",
+            artifact.expected_hash.as_bytes(),
+        );
+        update_hash_bytes(
+            &mut hasher,
+            b"durability_violation_bundle_v1:artifact_actual_hash",
+            artifact.actual_hash.as_bytes(),
+        );
+        update_hash_bytes(
+            &mut hasher,
+            b"durability_violation_bundle_v1:artifact_failure_reason",
+            artifact.failure_reason.as_bytes(),
+        );
     }
+    update_hash_string_list(
+        &mut hasher,
+        b"durability_violation_bundle_v1:proofs_failed",
+        &context.proofs.failed_proofs,
+    );
+    update_hash_string_list(
+        &mut hasher,
+        b"durability_violation_bundle_v1:proofs_missing",
+        &context.proofs.missing_proofs,
+    );
+    update_hash_string_list(
+        &mut hasher,
+        b"durability_violation_bundle_v1:proofs_passed",
+        &context.proofs.passed_proofs,
+    );
     let digest = hasher.finalize();
     let hash = u64::from_le_bytes(digest[..8].try_into().unwrap_or([0u8; 8]));
     let bundle_id = BundleId::new(format!("VB-{hash:016x}"));
@@ -534,6 +626,10 @@ mod tests {
             epoch_id: 42,
             timestamp_ms: 2000,
         }
+    }
+
+    fn bundle_id_for(context: &ViolationContext) -> BundleId {
+        generate_bundle(context).bundle_id
     }
 
     // ── BundleId tests ──
@@ -702,6 +798,28 @@ mod tests {
     }
 
     #[test]
+    fn artifact_failure_reason_change_changes_bundle_id() {
+        let ctx1 = make_context();
+        let mut ctx2 = make_context();
+        ctx2.artifacts[0].failure_reason = "signature was missing".into();
+
+        let b1 = generate_bundle(&ctx1);
+        let b2 = generate_bundle(&ctx2);
+        assert_ne!(b1.bundle_id, b2.bundle_id);
+    }
+
+    #[test]
+    fn artifact_expected_hash_change_changes_bundle_id() {
+        let ctx1 = make_context();
+        let mut ctx2 = make_context();
+        ctx2.artifacts[0].expected_hash = "cafebabe".into();
+
+        let b1 = generate_bundle(&ctx1);
+        let b2 = generate_bundle(&ctx2);
+        assert_ne!(b1.bundle_id, b2.bundle_id);
+    }
+
+    #[test]
     fn causal_events_ordering_preserved() {
         let ctx = make_context();
         let bundle = generate_bundle(&ctx);
@@ -824,6 +942,16 @@ mod tests {
     }
 
     #[test]
+    fn detector_halt_scope_empty_string_does_not_block_other_scopes() {
+        let mut detector = DurabilityViolationDetector::new(HaltPolicy::HaltScope(String::new()));
+        let ctx = make_context();
+        detector.generate_bundle(&ctx);
+
+        assert!(detector.check_durable_op("").is_err());
+        assert!(detector.check_durable_op("db").is_ok());
+    }
+
+    #[test]
     fn detector_warn_only_never_blocks() {
         let mut detector = DurabilityViolationDetector::new(HaltPolicy::WarnOnly);
         let ctx = make_context();
@@ -860,6 +988,115 @@ mod tests {
         let err = detector.check_durable_op("test").unwrap_err();
         assert_eq!(err.bundle_id, bid);
         assert!(err.to_string().contains("EVD-VIOLATION-004"));
+    }
+
+    #[test]
+    fn halt_all_empty_context_still_rejects_durable_ops() {
+        let mut detector = DurabilityViolationDetector::new(HaltPolicy::HaltAll);
+        let ctx = ViolationContext {
+            events: vec![],
+            artifacts: vec![],
+            proofs: ProofContext::new(),
+            hardening_level: "exhausted".into(),
+            epoch_id: 7,
+            timestamp_ms: 0,
+        };
+        let bundle_id = detector.generate_bundle(&ctx).bundle_id.clone();
+
+        let err = detector.check_durable_op("ledger").unwrap_err();
+
+        assert_eq!(err.bundle_id, bundle_id);
+        assert_eq!(err.scope, "ledger");
+        assert!(detector.is_scope_halted("unrelated"));
+    }
+
+    #[test]
+    fn scoped_halt_rejects_exact_scope_and_reports_requested_scope() {
+        let mut detector = DurabilityViolationDetector::new(HaltPolicy::HaltScope("ledger".into()));
+        let ctx = make_context();
+        detector.generate_bundle(&ctx);
+
+        let err = detector.check_durable_op("ledger").unwrap_err();
+
+        assert_eq!(err.scope, "ledger");
+        assert!(detector.check_durable_op("ledger/child").is_ok());
+        assert!(detector.check_durable_op("storage").is_ok());
+    }
+
+    #[test]
+    fn multiple_halts_rejection_uses_latest_bundle_id() {
+        let mut detector = DurabilityViolationDetector::with_defaults();
+        let first = make_context();
+        let mut second = make_context();
+        second.epoch_id = first.epoch_id.saturating_add(1);
+        second.timestamp_ms = first.timestamp_ms.saturating_add(1);
+
+        let first_id = detector.generate_bundle(&first).bundle_id.clone();
+        let second_id = detector.generate_bundle(&second).bundle_id.clone();
+        let err = detector.check_durable_op("any").unwrap_err();
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(err.bundle_id, second_id);
+        assert_eq!(detector.active_halts().len(), 2);
+    }
+
+    #[test]
+    fn clearing_scoped_halt_removes_rejection_without_erasing_bundles() {
+        let mut detector =
+            DurabilityViolationDetector::new(HaltPolicy::HaltScope("tenant-a".into()));
+        let ctx = make_context();
+        detector.generate_bundle(&ctx);
+
+        assert!(detector.check_durable_op("tenant-a").is_err());
+        detector.clear_halt();
+
+        assert!(detector.check_durable_op("tenant-a").is_ok());
+        assert_eq!(detector.bundle_count(), 1);
+        assert!(detector.active_halts().is_empty());
+    }
+
+    #[test]
+    fn proof_context_with_only_passed_proofs_is_not_all_failed() {
+        let ctx = ProofContext {
+            failed_proofs: vec![],
+            missing_proofs: vec![],
+            passed_proofs: vec!["integrity-proof".into()],
+        };
+
+        assert_eq!(ctx.total(), 1);
+        assert!(!ctx.all_failed());
+    }
+
+    #[test]
+    fn proof_context_with_only_missing_proofs_is_all_failed() {
+        let ctx = ProofContext {
+            failed_proofs: vec![],
+            missing_proofs: vec!["retrievability-proof".into()],
+            passed_proofs: vec![],
+        };
+
+        assert_eq!(ctx.total(), 1);
+        assert!(ctx.all_failed());
+    }
+
+    #[test]
+    fn json_keeps_empty_actual_hash_for_unavailable_artifact() {
+        let mut ctx = make_context();
+        ctx.artifacts[0].actual_hash = String::new();
+        ctx.artifacts[0].failure_reason = "artifact unavailable during replay".into();
+
+        let bundle = generate_bundle(&ctx);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&bundle.to_json()).expect("bundle JSON should parse");
+
+        assert_eq!(
+            parsed["failed_artifacts"][0]["actual_hash"].as_str(),
+            Some("")
+        );
+        assert_eq!(
+            parsed["failed_artifacts"][0]["reason"].as_str(),
+            Some("artifact unavailable during replay")
+        );
     }
 
     // ── Failed artifact verification ──
@@ -999,5 +1236,241 @@ mod tests {
         let b1 = generate_bundle(&ctx1);
         let b2 = generate_bundle(&ctx2);
         assert_ne!(b1.bundle_id, b2.bundle_id);
+    }
+
+    // ── Metamorphic hardening regressions ──
+
+    #[test]
+    fn mr_failed_proof_content_rebinds_bundle_id() {
+        let ctx1 = make_context();
+        let mut ctx2 = make_context();
+        ctx2.proofs.failed_proofs[0] = "proof-mutated".into();
+
+        assert_ne!(bundle_id_for(&ctx1), bundle_id_for(&ctx2));
+    }
+
+    #[test]
+    fn mr_missing_proof_content_rebinds_bundle_id() {
+        let ctx1 = make_context();
+        let mut ctx2 = make_context();
+        ctx2.proofs.missing_proofs[0] = "missing-proof-mutated".into();
+
+        assert_ne!(bundle_id_for(&ctx1), bundle_id_for(&ctx2));
+    }
+
+    #[test]
+    fn mr_passed_proof_content_rebinds_bundle_id() {
+        let ctx1 = make_context();
+        let mut ctx2 = make_context();
+        ctx2.proofs.passed_proofs[0] = "passed-proof-mutated".into();
+
+        assert_ne!(bundle_id_for(&ctx1), bundle_id_for(&ctx2));
+    }
+
+    #[test]
+    fn mr_proof_reclassification_rebinds_bundle_id() {
+        let mut ctx1 = make_context();
+        ctx1.proofs = ProofContext {
+            failed_proofs: vec!["proof-x".into()],
+            missing_proofs: vec![],
+            passed_proofs: vec![],
+        };
+        let mut ctx2 = make_context();
+        ctx2.proofs = ProofContext {
+            failed_proofs: vec![],
+            missing_proofs: vec![],
+            passed_proofs: vec!["proof-x".into()],
+        };
+
+        assert_ne!(bundle_id_for(&ctx1), bundle_id_for(&ctx2));
+    }
+
+    #[test]
+    fn mr_proof_list_delimiter_collision_is_domain_separated() {
+        let mut ctx1 = make_context();
+        ctx1.proofs = ProofContext {
+            failed_proofs: vec!["alpha|".into()],
+            missing_proofs: vec!["beta".into()],
+            passed_proofs: vec![],
+        };
+        let mut ctx2 = make_context();
+        ctx2.proofs = ProofContext {
+            failed_proofs: vec!["alpha".into()],
+            missing_proofs: vec!["|beta".into()],
+            passed_proofs: vec![],
+        };
+
+        assert_ne!(bundle_id_for(&ctx1), bundle_id_for(&ctx2));
+    }
+
+    #[test]
+    fn mr_causal_event_order_rebinds_bundle_id_without_losing_events() {
+        let ctx1 = make_context();
+        let mut ctx2 = make_context();
+        ctx2.events.swap(0, 1);
+
+        let bundle1 = generate_bundle(&ctx1);
+        let bundle2 = generate_bundle(&ctx2);
+
+        assert_ne!(bundle1.bundle_id, bundle2.bundle_id);
+        assert_eq!(bundle1.event_count(), bundle2.event_count());
+        assert_eq!(ctx1.events.len(), ctx2.events.len());
+    }
+
+    #[test]
+    fn mr_absent_and_empty_evidence_ref_are_domain_separated() {
+        let mut ctx1 = make_context();
+        ctx1.events = vec![CausalEvent {
+            event_type: CausalEventType::IntegrityCheckFailed,
+            timestamp_ms: 1700,
+            description: "integrity checker had no evidence ref".into(),
+            evidence_ref: None,
+        }];
+        let mut ctx2 = make_context();
+        ctx2.events = vec![CausalEvent {
+            event_type: CausalEventType::IntegrityCheckFailed,
+            timestamp_ms: 1700,
+            description: "integrity checker had no evidence ref".into(),
+            evidence_ref: Some(String::new()),
+        }];
+
+        let bundle1 = generate_bundle(&ctx1);
+        let bundle2 = generate_bundle(&ctx2);
+        let json1: serde_json::Value =
+            serde_json::from_str(&bundle1.to_json()).expect("bundle JSON should parse");
+        let json2: serde_json::Value =
+            serde_json::from_str(&bundle2.to_json()).expect("bundle JSON should parse");
+
+        assert_ne!(bundle1.bundle_id, bundle2.bundle_id);
+        assert_eq!(bundle1.event_count(), bundle2.event_count());
+        assert!(json1["causal_events"][0]["evidence_ref"].is_null());
+        assert_eq!(json2["causal_events"][0]["evidence_ref"].as_str(), Some(""));
+    }
+
+    #[test]
+    fn mr_failed_artifact_order_rebinds_bundle_id_without_losing_artifacts() {
+        let mut ctx1 = make_context();
+        ctx1.artifacts.push(FailedArtifact {
+            artifact_path: "objects/def456".into(),
+            expected_hash: "abcd".into(),
+            actual_hash: "1234".into(),
+            failure_reason: "missing detached signature".into(),
+        });
+        let mut ctx2 = ctx1.clone();
+        ctx2.artifacts.swap(0, 1);
+
+        let bundle1 = generate_bundle(&ctx1);
+        let bundle2 = generate_bundle(&ctx2);
+
+        assert_ne!(bundle1.bundle_id, bundle2.bundle_id);
+        assert_eq!(bundle1.artifact_count(), bundle2.artifact_count());
+    }
+
+    #[test]
+    fn mr_extra_causal_event_increments_json_count_and_rebinds_id() {
+        let ctx1 = make_context();
+        let mut ctx2 = make_context();
+        ctx2.events.push(CausalEvent {
+            event_type: CausalEventType::ArtifactUnverifiable,
+            timestamp_ms: 1600,
+            description: "artifact could not be reconstructed".into(),
+            evidence_ref: Some("EVD-003".into()),
+        });
+
+        let bundle1 = generate_bundle(&ctx1);
+        let bundle2 = generate_bundle(&ctx2);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&bundle2.to_json()).expect("bundle JSON should parse");
+
+        assert_ne!(bundle1.bundle_id, bundle2.bundle_id);
+        assert_eq!(bundle2.event_count(), bundle1.event_count() + 1);
+        assert_eq!(
+            parsed["event_count"].as_u64(),
+            Some(u64::try_from(bundle2.event_count()).unwrap_or(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn mr_extra_failed_artifact_increments_json_count_and_rebinds_id() {
+        let ctx1 = make_context();
+        let mut ctx2 = make_context();
+        ctx2.artifacts.push(FailedArtifact {
+            artifact_path: "objects/ghi789".into(),
+            expected_hash: "eeee".into(),
+            actual_hash: "".into(),
+            failure_reason: "artifact missing from replay bundle".into(),
+        });
+
+        let bundle1 = generate_bundle(&ctx1);
+        let bundle2 = generate_bundle(&ctx2);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&bundle2.to_json()).expect("bundle JSON should parse");
+
+        assert_ne!(bundle1.bundle_id, bundle2.bundle_id);
+        assert_eq!(bundle2.artifact_count(), bundle1.artifact_count() + 1);
+        assert_eq!(
+            parsed["artifact_count"].as_u64(),
+            Some(u64::try_from(bundle2.artifact_count()).unwrap_or(u64::MAX))
+        );
+    }
+
+    #[test]
+    fn mr_halt_policy_does_not_rewrite_bundle_identity() {
+        let ctx = make_context();
+        let expected = bundle_id_for(&ctx);
+        let mut halt_all = DurabilityViolationDetector::new(HaltPolicy::HaltAll);
+        let mut halt_scope = DurabilityViolationDetector::new(HaltPolicy::HaltScope("db".into()));
+        let mut warn_only = DurabilityViolationDetector::new(HaltPolicy::WarnOnly);
+
+        assert_eq!(halt_all.generate_bundle(&ctx).bundle_id, expected);
+        assert_eq!(halt_scope.generate_bundle(&ctx).bundle_id, expected);
+        assert_eq!(warn_only.generate_bundle(&ctx).bundle_id, expected);
+    }
+
+    #[test]
+    fn mr_warn_only_records_bundle_without_active_halt() {
+        let mut detector = DurabilityViolationDetector::new(HaltPolicy::WarnOnly);
+        let ctx = make_context();
+
+        detector.generate_bundle(&ctx);
+
+        assert_eq!(detector.bundle_count(), 1);
+        assert!(detector.active_halts().is_empty());
+        assert!(!detector.is_halted());
+        assert!(detector.check_durable_op("db").is_ok());
+    }
+
+    #[test]
+    fn mr_clear_halt_is_idempotent_and_preserves_bundles() {
+        let mut detector = DurabilityViolationDetector::with_defaults();
+        let ctx = make_context();
+        detector.generate_bundle(&ctx);
+
+        detector.clear_halt();
+        detector.clear_halt();
+
+        assert_eq!(detector.bundle_count(), 1);
+        assert!(detector.active_halts().is_empty());
+        assert!(detector.check_durable_op("db").is_ok());
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_retains_latest_window_after_over_capacity() {
+        let mut items = Vec::new();
+
+        for item in 0..6 {
+            push_bounded(&mut items, item, 3);
+        }
+
+        assert_eq!(items, vec![3, 4, 5]);
     }
 }

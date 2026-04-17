@@ -1275,6 +1275,450 @@ mod tests {
     }
 
     #[test]
+    fn fencing_lease_record_rejects_missing_required_holder_id() {
+        let value = serde_json::json!({
+            "lease_seq": 42,
+            "object_id": "obj-1",
+            "epoch": 7,
+            "acquired_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2026-01-01T01:00:00Z",
+            "fence_version": 1
+        });
+
+        let err = serde_json::from_value::<FencingLeaseRecord>(value)
+            .expect_err("missing holder_id must fail deserialization");
+
+        assert!(err.to_string().contains("holder_id"));
+    }
+
+    #[test]
+    fn lease_service_record_rejects_null_non_optional_state() {
+        let value = serde_json::json!({
+            "lease_id": "lease-1",
+            "holder_id": "holder-a",
+            "resource_key": "resource-a",
+            "state": null,
+            "epoch": 7,
+            "granted_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2026-01-01T01:00:00Z",
+            "renewed_count": 0
+        });
+
+        let err = serde_json::from_value::<LeaseServiceRecord>(value)
+            .expect_err("null state must fail deserialization");
+
+        assert!(err.to_string().contains("state"));
+    }
+
+    #[test]
+    fn lease_quorum_record_rejects_string_ack_count() {
+        let value = serde_json::json!({
+            "quorum_id": "quorum-1",
+            "resource_key": "resource-a",
+            "participants": ["a", "b"],
+            "ack_count": "2",
+            "required_acks": 2,
+            "epoch": 7,
+            "decided_at": null,
+            "outcome": "pending"
+        });
+
+        let err = serde_json::from_value::<LeaseQuorumRecord>(value)
+            .expect_err("string ack_count must fail deserialization");
+
+        assert!(err.to_string().contains("ack_count"));
+    }
+
+    #[test]
+    fn rollout_state_record_rejects_string_health_gate_flag() {
+        let value = serde_json::json!({
+            "connector_id": "conn-1",
+            "rollout_epoch": 5,
+            "lifecycle_state": "active",
+            "health_gate_passed": "true",
+            "rollout_phase": "canary",
+            "activated_at": null,
+            "persisted_at": "2026-01-01T00:01:00Z",
+            "version": 3
+        });
+
+        let err = serde_json::from_value::<RolloutStateRecord>(value)
+            .expect_err("string health gate flag must fail deserialization");
+
+        assert!(err.to_string().contains("health_gate_passed"));
+    }
+
+    #[test]
+    fn schema_migration_record_rejects_boolean_checksum() {
+        let value = serde_json::json!({
+            "migration_id": "mig-001",
+            "version_from": "0.9.0",
+            "version_to": "1.0.0",
+            "applied_at": "2026-01-15T12:00:00Z",
+            "checksum": true,
+            "reversible": true
+        });
+
+        let err = serde_json::from_value::<SchemaMigrationRecord>(value)
+            .expect_err("boolean checksum must fail deserialization");
+
+        assert!(err.to_string().contains("checksum"));
+    }
+
+    #[test]
+    fn offline_coverage_metric_rejects_string_coverage_pct() {
+        let value = serde_json::json!({
+            "metric_id": "metric-1",
+            "domain_name": "connector",
+            "coverage_pct": "0.99",
+            "sampled_at": "2026-01-01T00:00:00Z",
+            "sample_size": 100
+        });
+
+        let err = serde_json::from_value::<OfflineCoverageMetricRecord>(value)
+            .expect_err("string coverage_pct must fail deserialization");
+
+        assert!(err.to_string().contains("coverage_pct"));
+    }
+
+    #[test]
+    fn lifecycle_transition_cache_rejects_null_required_state() {
+        let value = serde_json::json!({
+            "transition_id": "lt-1",
+            "connector_id": "conn-2",
+            "from_state": "initializing",
+            "to_state": null,
+            "triggered_by": "health_gate_pass",
+            "transitioned_at": "2026-02-10T08:00:00Z"
+        });
+
+        let err = serde_json::from_value::<LifecycleTransitionCacheRecord>(value)
+            .expect_err("null to_state must fail deserialization");
+
+        assert!(err.to_string().contains("to_state"));
+    }
+
+    #[test]
+    fn malformed_json_rejects_model_deserialization() {
+        let err = serde_json::from_str::<FencingLeaseRecord>("{not-json")
+            .expect_err("malformed JSON must fail deserialization");
+
+        assert!(err.is_syntax());
+    }
+
+    #[test]
+    fn health_gate_policy_rejects_null_required_flag() {
+        let value = serde_json::json!({
+            "gate_id": "gate-1",
+            "connector_id": "conn-1",
+            "check_name": "startup",
+            "required": null,
+            "passed": true,
+            "message": null,
+            "evaluated_at": "2026-01-01T00:00:00Z",
+            "epoch": 7
+        });
+
+        let err = serde_json::from_value::<HealthGatePolicyRecord>(value)
+            .expect_err("null required flag must fail deserialization");
+
+        assert!(err.to_string().contains("required"));
+    }
+
+    #[test]
+    fn control_channel_state_rejects_negative_window_low() {
+        let value = serde_json::json!({
+            "channel_id": "chan-1",
+            "last_seq": 10,
+            "window_low": -1,
+            "window_high": 32,
+            "epoch": 7,
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<ControlChannelStateRecord>(value)
+            .expect_err("negative window_low must fail deserialization");
+
+        assert!(err.to_string().contains("window_low"));
+    }
+
+    #[test]
+    fn artifact_journal_rejects_object_metadata_json() {
+        let value = serde_json::json!({
+            "entry_id": "entry-1",
+            "artifact_hash": "sha256:abc",
+            "operation": "write",
+            "actor_id": "actor-1",
+            "epoch": 7,
+            "timestamp": "2026-01-01T00:00:00Z",
+            "metadata_json": {"unexpected": true}
+        });
+
+        let err = serde_json::from_value::<ArtifactJournalRecord>(value)
+            .expect_err("object metadata_json must fail deserialization");
+
+        assert!(err.to_string().contains("metadata_json"));
+    }
+
+    #[test]
+    fn tiered_trust_artifact_rejects_string_assurance_level() {
+        let value = serde_json::json!({
+            "artifact_id": "artifact-1",
+            "trust_tier": "high",
+            "publisher_id": "publisher-1",
+            "signature": "sig-1",
+            "assurance_level": "3",
+            "created_at": "2026-01-01T00:00:00Z",
+            "expires_at": null,
+            "revoked": false
+        });
+
+        let err = serde_json::from_value::<TieredTrustArtifactRecord>(value)
+            .expect_err("string assurance_level must fail deserialization");
+
+        assert!(err.to_string().contains("assurance_level"));
+    }
+
+    #[test]
+    fn canonical_state_root_rejects_array_root_hash() {
+        let value = serde_json::json!({
+            "root_hash": ["sha256:abc"],
+            "epoch": 7,
+            "computed_at": "2026-01-01T00:00:00Z",
+            "input_count": 3,
+            "algorithm": "sha256"
+        });
+
+        let err = serde_json::from_value::<CanonicalStateRootRecord>(value)
+            .expect_err("array root_hash must fail deserialization");
+
+        assert!(err.to_string().contains("root_hash"));
+    }
+
+    #[test]
+    fn durability_mode_rejects_string_wal_enabled() {
+        let value = serde_json::json!({
+            "domain_name": "connector",
+            "mode": "strict",
+            "wal_enabled": "true",
+            "sync_interval_ms": 1000,
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<DurabilityModeRecord>(value)
+            .expect_err("string wal_enabled must fail deserialization");
+
+        assert!(err.to_string().contains("wal_enabled"));
+    }
+
+    #[test]
+    fn durable_claim_audit_rejects_missing_decided_at() {
+        let value = serde_json::json!({
+            "claim_id": "claim-1",
+            "actor_id": "actor-1",
+            "claim_type": "durability",
+            "decision": "deny",
+            "reason": "insufficient evidence",
+            "epoch": 7
+        });
+
+        let err = serde_json::from_value::<DurableClaimAuditRecord>(value)
+            .expect_err("missing decided_at must fail deserialization");
+
+        assert!(err.to_string().contains("decided_at"));
+    }
+
+    #[test]
+    fn snapshot_policy_rejects_string_retention_count() {
+        let value = serde_json::json!({
+            "policy_id": "snapshot-1",
+            "domain_name": "connector",
+            "interval_seconds": 60,
+            "last_snapshot_at": null,
+            "next_snapshot_at": "2026-01-01T00:01:00Z",
+            "retention_count": "10"
+        });
+
+        let err = serde_json::from_value::<SnapshotPolicyRecord>(value)
+            .expect_err("string retention_count must fail deserialization");
+
+        assert!(err.to_string().contains("retention_count"));
+    }
+
+    #[test]
+    fn crdt_merge_state_rejects_object_vector_clock_json() {
+        let value = serde_json::json!({
+            "crdt_id": "crdt-1",
+            "crdt_type": "lww",
+            "vector_clock_json": {"node-a": 1},
+            "merge_count": 3,
+            "last_merged_at": "2026-01-01T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<CrdtMergeStateRecord>(value)
+            .expect_err("object vector_clock_json must fail deserialization");
+
+        assert!(err.to_string().contains("vector_clock_json"));
+    }
+
+    #[test]
+    fn retention_policy_rejects_negative_max_entries() {
+        let value = serde_json::json!({
+            "policy_id": "retention-1",
+            "domain_name": "connector",
+            "max_age_seconds": 3600,
+            "max_entries": -1,
+            "last_purge_at": null,
+            "next_purge_at": "2026-01-01T01:00:00Z"
+        });
+
+        let err = serde_json::from_value::<RetentionPolicyRecord>(value)
+            .expect_err("negative max_entries must fail deserialization");
+
+        assert!(err.to_string().contains("max_entries"));
+    }
+
+    #[test]
+    fn lease_service_record_rejects_negative_renewed_count() {
+        let value = serde_json::json!({
+            "lease_id": "lease-1",
+            "holder_id": "holder-a",
+            "resource_key": "resource-a",
+            "state": "granted",
+            "epoch": 7,
+            "granted_at": "2026-01-01T00:00:00Z",
+            "expires_at": "2026-01-01T01:00:00Z",
+            "renewed_count": -1
+        });
+
+        let err = serde_json::from_value::<LeaseServiceRecord>(value)
+            .expect_err("negative renewed_count must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn lease_quorum_record_rejects_non_array_participants() {
+        let value = serde_json::json!({
+            "quorum_id": "quorum-1",
+            "resource_key": "resource-a",
+            "participants": "node-a,node-b",
+            "ack_count": 2,
+            "required_acks": 2,
+            "epoch": 7,
+            "decided_at": null,
+            "outcome": "pending"
+        });
+
+        let err = serde_json::from_value::<LeaseQuorumRecord>(value)
+            .expect_err("non-array participants must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn quarantine_entry_record_rejects_string_released_flag() {
+        let value = serde_json::json!({
+            "entry_id": "qe-1",
+            "artifact_hash": "sha256:def456",
+            "reason": "suspicious behavior",
+            "severity": "high",
+            "quarantined_at": "2026-02-01T00:00:00Z",
+            "quarantined_by": "system",
+            "released": "false"
+        });
+
+        let err = serde_json::from_value::<QuarantineEntryRecord>(value)
+            .expect_err("string released flag must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn quarantine_promotion_record_rejects_missing_justification() {
+        let value = serde_json::json!({
+            "promotion_id": "promotion-1",
+            "entry_id": "qe-1",
+            "promoted_by": "operator-1",
+            "promoted_at": "2026-02-01T01:00:00Z"
+        });
+
+        let err = serde_json::from_value::<QuarantinePromotionRecord>(value)
+            .expect_err("missing justification must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn repair_cycle_audit_rejects_float_items_repaired() {
+        let value = serde_json::json!({
+            "cycle_id": "repair-1",
+            "domain_name": "connector",
+            "trigger": "integrity_sweep",
+            "items_repaired": 1.5,
+            "items_failed": 0,
+            "started_at": "2026-01-01T00:00:00Z",
+            "completed_at": "2026-01-01T00:01:00Z"
+        });
+
+        let err = serde_json::from_value::<RepairCycleAuditRecord>(value)
+            .expect_err("float items_repaired must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn lease_conflict_audit_rejects_null_holder_b() {
+        let value = serde_json::json!({
+            "conflict_id": "conflict-1",
+            "resource_key": "resource-a",
+            "holder_a": "holder-a",
+            "holder_b": null,
+            "resolution": "deny-second-holder",
+            "resolved_at": "2026-01-01T00:00:00Z",
+            "epoch": 7
+        });
+
+        let err = serde_json::from_value::<LeaseConflictAuditRecord>(value)
+            .expect_err("null holder_b must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn offline_coverage_metric_rejects_negative_sample_size() {
+        let value = serde_json::json!({
+            "metric_id": "metric-1",
+            "domain_name": "connector",
+            "coverage_pct": 0.99,
+            "sampled_at": "2026-01-01T00:00:00Z",
+            "sample_size": -1
+        });
+
+        let err = serde_json::from_value::<OfflineCoverageMetricRecord>(value)
+            .expect_err("negative sample_size must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
+    fn lifecycle_transition_cache_rejects_numeric_triggered_by() {
+        let value = serde_json::json!({
+            "transition_id": "lt-1",
+            "connector_id": "conn-2",
+            "from_state": "initializing",
+            "to_state": "active",
+            "triggered_by": 42,
+            "transitioned_at": "2026-02-10T08:00:00Z"
+        });
+
+        let err = serde_json::from_value::<LifecycleTransitionCacheRecord>(value)
+            .expect_err("numeric triggered_by must fail deserialization");
+
+        assert!(err.is_data());
+    }
+
+    #[test]
     fn owner_module_uniqueness_per_model() {
         let meta = all_model_metadata();
         for m in &meta {

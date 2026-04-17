@@ -7,10 +7,12 @@
 //! - Concurrency simulation
 //! - Hardening pattern verification
 
+use crate::capacity_defaults::aliases::{
+    MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS, MAX_RECEIPTS, MAX_SCHEMA_VERSIONS,
+};
 use crate::storage::frankensqlite_adapter::*;
-use crate::storage::retrievability_gate::*;
 use crate::storage::models::*;
-use crate::capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_EVENTS, MAX_RECEIPTS, MAX_SCHEMA_VERSIONS};
+use crate::storage::retrievability_gate::*;
 
 /// Test edge cases around push_bounded function
 #[cfg(test)]
@@ -23,12 +25,14 @@ mod push_bounded_edge_tests {
 
         // Fill exactly to capacity
         for i in 0..MAX_AUDIT_LOG_ENTRIES {
-            adapter.write(PersistenceClass::AuditLog, &format!("key_{}", i), b"data")
+            adapter
+                .write(PersistenceClass::AuditLog, &format!("key_{}", i), b"data")
                 .expect("should succeed");
         }
 
         // One more should trigger overflow handling
-        adapter.write(PersistenceClass::AuditLog, "overflow_key", b"overflow_data")
+        adapter
+            .write(PersistenceClass::AuditLog, "overflow_key", b"overflow_data")
             .expect("should succeed");
 
         assert_eq!(adapter.summary().total_writes, MAX_AUDIT_LOG_ENTRIES + 1);
@@ -109,10 +113,13 @@ mod saturating_arithmetic_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // Manually set a tier counter near MAX
-        adapter.writes_by_tier.insert(DurabilityTier::Tier1, u64::MAX - 1);
+        adapter
+            .writes_by_tier
+            .insert(DurabilityTier::Tier1, u64::MAX - 1);
 
         // Write to that tier
-        adapter.write(PersistenceClass::ControlState, "test", b"data")
+        adapter
+            .write(PersistenceClass::ControlState, "test", b"data")
             .expect("should succeed");
 
         assert_eq!(adapter.writes_by_tier[&DurabilityTier::Tier1], u64::MAX);
@@ -131,7 +138,7 @@ mod saturating_arithmetic_tests {
             &SegmentId("test".to_string()),
             StorageTier::L2Warm,
             StorageTier::L3Archive,
-            "hash"
+            "hash",
         );
 
         assert_eq!(gate.timestamp_counter, u64::MAX);
@@ -151,7 +158,8 @@ mod latency_measurement_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // Write operation should handle any latency measurement
-        adapter.write(PersistenceClass::ControlState, "test", b"data")
+        adapter
+            .write(PersistenceClass::ControlState, "test", b"data")
             .expect("should succeed");
 
         // The latency should be reasonable (implementation caps at u64::MAX)
@@ -169,15 +177,18 @@ mod input_validation_edge_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // Empty key should work
-        adapter.write(PersistenceClass::ControlState, "", b"data")
+        adapter
+            .write(PersistenceClass::ControlState, "", b"data")
             .expect("empty key should be allowed");
 
         // Empty value should work
-        adapter.write(PersistenceClass::ControlState, "key", b"")
+        adapter
+            .write(PersistenceClass::ControlState, "key", b"")
             .expect("empty value should be allowed");
 
         // Both empty should work
-        adapter.write(PersistenceClass::ControlState, "", b"")
+        adapter
+            .write(PersistenceClass::ControlState, "", b"")
             .expect("both empty should be allowed");
     }
 
@@ -187,7 +198,8 @@ mod input_validation_edge_tests {
 
         // Very long key
         let long_key = "a".repeat(10_000);
-        adapter.write(PersistenceClass::ControlState, &long_key, b"data")
+        adapter
+            .write(PersistenceClass::ControlState, &long_key, b"data")
             .expect("long key should be handled");
 
         let result = adapter.read(PersistenceClass::ControlState, &long_key);
@@ -201,7 +213,8 @@ mod input_validation_edge_tests {
 
         // Very large value (1MB)
         let large_value = vec![0u8; 1_000_000];
-        adapter.write(PersistenceClass::ControlState, "large", &large_value)
+        adapter
+            .write(PersistenceClass::ControlState, "large", &large_value)
             .expect("large value should be handled");
 
         let result = adapter.read(PersistenceClass::ControlState, "large");
@@ -215,7 +228,8 @@ mod input_validation_edge_tests {
 
         // Unicode key with various characters
         let unicode_key = "🔥测试🚀نمونه🎉";
-        adapter.write(PersistenceClass::ControlState, unicode_key, b"unicode_data")
+        adapter
+            .write(PersistenceClass::ControlState, unicode_key, b"unicode_data")
             .expect("unicode key should be handled");
 
         let result = adapter.read(PersistenceClass::ControlState, unicode_key);
@@ -228,18 +242,19 @@ mod input_validation_edge_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         let special_keys = vec![
-            "\n\r\t",          // Whitespace
-            "\0\x01\x02",      // Control chars
-            "\"'\\",           // Quotes and backslash
-            "/../..",          // Path-like
-            "<script>",        // HTML-like
-            "' OR 1=1 --",     // SQL injection-like
+            "\n\r\t",           // Whitespace
+            "\0\x01\x02",       // Control chars
+            "\"'\\",            // Quotes and backslash
+            "/../..",           // Path-like
+            "<script>",         // HTML-like
+            "' OR 1=1 --",      // SQL injection-like
             "\u{200B}\u{FEFF}", // Zero-width chars
         ];
 
         for (i, key) in special_keys.iter().enumerate() {
             let value = format!("value_{}", i).into_bytes();
-            adapter.write(PersistenceClass::ControlState, key, &value)
+            adapter
+                .write(PersistenceClass::ControlState, key, &value)
                 .expect("special character key should be handled");
 
             let result = adapter.read(PersistenceClass::ControlState, key);
@@ -261,18 +276,23 @@ mod retrievability_gate_edge_tests {
         let edge_cases = vec![
             ("", "empty artifact id should be rejected"),
             ("   ", "whitespace-only artifact id should be rejected"),
-            (" valid_id ", "artifact id with leading/trailing whitespace should be rejected"),
+            (
+                " valid_id ",
+                "artifact id with leading/trailing whitespace should be rejected",
+            ),
             ("<unknown>", "reserved artifact id should be rejected"),
         ];
 
         for (artifact_id, description) in edge_cases {
-            let err = gate.check_retrievability(
-                &ArtifactId(artifact_id.to_string()),
-                &SegmentId("valid_segment".to_string()),
-                StorageTier::L2Warm,
-                StorageTier::L3Archive,
-                "valid_hash"
-            ).unwrap_err();
+            let err = gate
+                .check_retrievability(
+                    &ArtifactId(artifact_id.to_string()),
+                    &SegmentId("valid_segment".to_string()),
+                    StorageTier::L2Warm,
+                    StorageTier::L3Archive,
+                    "valid_hash",
+                )
+                .unwrap_err();
 
             assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID, "{}", description);
         }
@@ -285,17 +305,22 @@ mod retrievability_gate_edge_tests {
         let edge_cases = vec![
             ("", "empty segment id should be rejected"),
             ("   ", "whitespace-only segment id should be rejected"),
-            (" valid_id ", "segment id with leading/trailing whitespace should be rejected"),
+            (
+                " valid_id ",
+                "segment id with leading/trailing whitespace should be rejected",
+            ),
         ];
 
         for (segment_id, description) in edge_cases {
-            let err = gate.check_retrievability(
-                &ArtifactId("valid_artifact".to_string()),
-                &SegmentId(segment_id.to_string()),
-                StorageTier::L2Warm,
-                StorageTier::L3Archive,
-                "valid_hash"
-            ).unwrap_err();
+            let err = gate
+                .check_retrievability(
+                    &ArtifactId("valid_artifact".to_string()),
+                    &SegmentId(segment_id.to_string()),
+                    StorageTier::L2Warm,
+                    StorageTier::L3Archive,
+                    "valid_hash",
+                )
+                .unwrap_err();
 
             assert_eq!(err.code, ERR_INVALID_SEGMENT_ID, "{}", description);
         }
@@ -332,7 +357,7 @@ mod retrievability_gate_edge_tests {
                 &SegmentId("test_segment".to_string()),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "test_hash"
+                "test_hash",
             );
 
             assert_eq!(result.is_ok(), should_pass, "{}", description);
@@ -364,13 +389,15 @@ mod retrievability_gate_edge_tests {
             },
         );
 
-        let err = gate.check_retrievability(
-            &ArtifactId("test".to_string()),
-            &SegmentId("test".to_string()),
-            StorageTier::L2Warm,
-            StorageTier::L3Archive,
-            "hash"
-        ).unwrap_err();
+        let err = gate
+            .check_retrievability(
+                &ArtifactId("test".to_string()),
+                &SegmentId("test".to_string()),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "hash",
+            )
+            .unwrap_err();
 
         assert_eq!(err.code, ERR_LATENCY_EXCEEDED);
     }
@@ -388,12 +415,12 @@ mod constant_time_comparison_tests {
         let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
 
         let test_cases = vec![
-            ("identical", "identical"),                    // Identical
-            ("different", "DIFFERENT"),                    // Different case
-            ("short", "very_long_string_different"),       // Different length
-            ("", "non_empty"),                             // Empty vs non-empty
-            ("similar_prefix_1", "similar_prefix_2"),      // Similar prefix
-            ("abc123", "abc124"),                          // One char difference
+            ("identical", "identical"),               // Identical
+            ("different", "DIFFERENT"),               // Different case
+            ("short", "very_long_string_different"),  // Different length
+            ("", "non_empty"),                        // Empty vs non-empty
+            ("similar_prefix_1", "similar_prefix_2"), // Similar prefix
+            ("abc123", "abc124"),                     // One char difference
         ];
 
         for (expected, actual) in test_cases {
@@ -413,7 +440,7 @@ mod constant_time_comparison_tests {
                 &SegmentId("test".to_string()),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                expected
+                expected,
             );
 
             if expected == actual {
@@ -445,13 +472,15 @@ mod constant_time_comparison_tests {
         );
 
         // Should pass even with hash mismatch in relaxed mode
-        let proof = gate.check_retrievability(
-            &ArtifactId("test".to_string()),
-            &SegmentId("test".to_string()),
-            StorageTier::L2Warm,
-            StorageTier::L3Archive,
-            "different_hash"
-        ).unwrap();
+        let proof = gate
+            .check_retrievability(
+                &ArtifactId("test".to_string()),
+                &SegmentId("test".to_string()),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "different_hash",
+            )
+            .unwrap();
 
         // Proof should bind to actual hash from target
         assert_eq!(proof.content_hash, "actual_hash");
@@ -469,7 +498,11 @@ mod resource_exhaustion_tests {
 
         // Generate more events than MAX_EVENTS by doing many writes
         for i in 0..(MAX_EVENTS + 100) {
-            let _ = adapter.write(PersistenceClass::ControlState, &format!("key_{}", i), b"data");
+            let _ = adapter.write(
+                PersistenceClass::ControlState,
+                &format!("key_{}", i),
+                b"data",
+            );
         }
 
         // Events should be bounded to MAX_EVENTS
@@ -477,7 +510,11 @@ mod resource_exhaustion_tests {
 
         // Latest events should be preserved
         let latest_events = adapter.events();
-        assert!(latest_events.iter().any(|e| e.detail.contains("FRANKENSQLITE_WRITE_SUCCESS")));
+        assert!(
+            latest_events
+                .iter()
+                .any(|e| e.detail.contains("FRANKENSQLITE_WRITE_SUCCESS"))
+        );
     }
 
     #[test]
@@ -506,7 +543,7 @@ mod resource_exhaustion_tests {
                 &SegmentId(segment_id),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                &hash
+                &hash,
             );
         }
 
@@ -553,8 +590,10 @@ mod concurrent_access_simulation_tests {
         for (op_type, class, key, value) in operations {
             match op_type {
                 "write" => {
-                    adapter.write(class, key, value).expect("write should succeed");
-                },
+                    adapter
+                        .write(class, key, value)
+                        .expect("write should succeed");
+                }
                 "read" => {
                     let result = adapter.read(class, key);
                     if class != PersistenceClass::Cache || key == "cache1" {
@@ -564,7 +603,7 @@ mod concurrent_access_simulation_tests {
                         }
                         assert!(result.found, "Should find data for {}", key);
                     }
-                },
+                }
                 _ => unreachable!(),
             }
         }
@@ -580,11 +619,13 @@ mod concurrent_access_simulation_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // First write should succeed
-        adapter.write(PersistenceClass::AuditLog, "audit_1", b"first_entry")
+        adapter
+            .write(PersistenceClass::AuditLog, "audit_1", b"first_entry")
             .expect("first audit entry should succeed");
 
         // Duplicate key should fail (simulates concurrent write attempt)
-        let err = adapter.write(PersistenceClass::AuditLog, "audit_1", b"duplicate_entry")
+        let err = adapter
+            .write(PersistenceClass::AuditLog, "audit_1", b"duplicate_entry")
             .expect_err("duplicate audit key should fail");
 
         assert!(matches!(err, AdapterError::WriteFailure { .. }));
@@ -603,7 +644,8 @@ mod concurrent_access_simulation_tests {
         // Write to all tiers with overlapping keys
         let classes = PersistenceClass::all();
         for (i, class) in classes.iter().enumerate() {
-            adapter.write(*class, "shared_key", format!("data_for_{}", i).as_bytes())
+            adapter
+                .write(*class, "shared_key", format!("data_for_{}", i).as_bytes())
                 .expect("write should succeed");
         }
 
@@ -669,7 +711,10 @@ mod hash_collision_prevention_tests {
             if input1 == input2 {
                 assert_eq!(hash1, hash2, "Same input should produce same hash");
             } else {
-                assert_ne!(hash1, hash2, "Different inputs should produce different hashes");
+                assert_ne!(
+                    hash1, hash2,
+                    "Different inputs should produce different hashes"
+                );
             }
         }
     }
@@ -685,19 +730,19 @@ mod error_handling_tests {
         let errors = vec![
             AdapterError::WriteFailure {
                 key: "test_key".to_string(),
-                reason: "disk full".to_string()
+                reason: "disk full".to_string(),
             },
             AdapterError::ReadFailure {
                 key: "missing_key".to_string(),
-                reason: "not found".to_string()
+                reason: "not found".to_string(),
             },
             AdapterError::ReplayMismatch {
                 entry_id: "entry_123".to_string(),
-                detail: "hash mismatch".to_string()
+                detail: "hash mismatch".to_string(),
             },
             AdapterError::SchemaMigrationFailed {
                 version: 42,
-                reason: "constraint violation".to_string()
+                reason: "constraint violation".to_string(),
             },
             AdapterError::PoolExhausted,
         ];
@@ -722,11 +767,17 @@ mod error_handling_tests {
 
         // Can't downgrade
         let err = adapter.migrate(0, "downgrade").unwrap_err();
-        assert!(matches!(err, AdapterError::SchemaMigrationFailed { version: 0, .. }));
+        assert!(matches!(
+            err,
+            AdapterError::SchemaMigrationFailed { version: 0, .. }
+        ));
 
         // Can't apply same version
         let err = adapter.migrate(1, "duplicate").unwrap_err();
-        assert!(matches!(err, AdapterError::SchemaMigrationFailed { version: 1, .. }));
+        assert!(matches!(
+            err,
+            AdapterError::SchemaMigrationFailed { version: 1, .. }
+        ));
 
         // Can upgrade
         adapter.migrate(2, "upgrade").expect("should succeed");
@@ -742,10 +793,18 @@ mod error_handling_tests {
         let mut adapter = FrankensqliteAdapter::default();
 
         // Write to different tiers
-        adapter.write(PersistenceClass::ControlState, "fence1", b"token1").expect("should succeed");
-        adapter.write(PersistenceClass::AuditLog, "audit1", b"log1").expect("should succeed");
-        adapter.write(PersistenceClass::Snapshot, "snap1", b"snapshot1").expect("should succeed");
-        adapter.write(PersistenceClass::Cache, "cache1", b"temp1").expect("should succeed");
+        adapter
+            .write(PersistenceClass::ControlState, "fence1", b"token1")
+            .expect("should succeed");
+        adapter
+            .write(PersistenceClass::AuditLog, "audit1", b"log1")
+            .expect("should succeed");
+        adapter
+            .write(PersistenceClass::Snapshot, "snap1", b"snapshot1")
+            .expect("should succeed");
+        adapter
+            .write(PersistenceClass::Cache, "cache1", b"temp1")
+            .expect("should succeed");
 
         // Simulate crash recovery
         let recovered_count = adapter.crash_recovery();
@@ -759,6 +818,203 @@ mod error_handling_tests {
 
         let audit_result = adapter.read(PersistenceClass::AuditLog, "audit1");
         assert!(audit_result.found);
+    }
+}
+
+/// Negative-path regression coverage for fail-closed storage behavior.
+#[cfg(test)]
+mod storage_negative_path_regression_tests {
+    use super::*;
+
+    #[test]
+    fn duplicate_audit_log_write_fails_and_marks_gate_failed() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .write(PersistenceClass::AuditLog, "audit-dup", b"first")
+            .expect("initial audit write should succeed");
+
+        let err = adapter
+            .write(PersistenceClass::AuditLog, "audit-dup", b"second")
+            .unwrap_err();
+
+        assert!(matches!(err, AdapterError::WriteFailure { .. }));
+        assert_eq!(adapter.summary().write_failures, 1);
+        assert!(!adapter.gate_pass());
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::FRANKENSQLITE_WRITE_FAIL)
+        );
+    }
+
+    #[test]
+    fn duplicate_audit_log_write_preserves_original_value() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .write(PersistenceClass::AuditLog, "audit-preserve", b"original")
+            .expect("initial audit write should succeed");
+
+        assert!(
+            adapter
+                .write(PersistenceClass::AuditLog, "audit-preserve", b"tampered")
+                .is_err()
+        );
+
+        let result = adapter.read(PersistenceClass::AuditLog, "audit-preserve");
+        assert!(result.found);
+        assert_eq!(result.value.as_deref(), Some(b"original".as_slice()));
+    }
+
+    #[test]
+    fn missing_control_state_read_does_not_create_value() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        let result = adapter.read(PersistenceClass::ControlState, "missing-control");
+
+        assert!(!result.found);
+        assert!(result.value.is_none());
+        assert_eq!(adapter.summary().total_reads, 1);
+        assert!(!result.cache_hit);
+    }
+
+    #[test]
+    fn same_version_migration_fails_without_changing_schema() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        let err = adapter.migrate(1, "duplicate initial schema").unwrap_err();
+
+        assert!(matches!(
+            err,
+            AdapterError::SchemaMigrationFailed { version: 1, .. }
+        ));
+        assert_eq!(adapter.schema_version(), 1);
+    }
+
+    #[test]
+    fn downgrade_migration_fails_after_upgrade() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .migrate(2, "valid upgrade")
+            .expect("upgrade should succeed");
+
+        let err = adapter.migrate(1, "downgrade").unwrap_err();
+
+        assert!(matches!(
+            err,
+            AdapterError::SchemaMigrationFailed { version: 1, .. }
+        ));
+        assert_eq!(adapter.schema_version(), 2);
+    }
+
+    #[test]
+    fn missing_target_blocks_eviction_and_records_failure() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
+
+        let err = gate
+            .attempt_eviction(
+                &ArtifactId("artifact-missing".to_string()),
+                &SegmentId("segment-missing".to_string()),
+                "hash",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_TARGET_UNREACHABLE);
+        assert_eq!(gate.failed_count(), 1);
+        assert!(
+            gate.events()
+                .iter()
+                .any(|event| event.code == RG_EVICTION_BLOCKED)
+        );
+    }
+
+    #[test]
+    fn unreachable_target_blocks_retrievability() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
+        let artifact = ArtifactId("artifact-unreachable".to_string());
+        let segment = SegmentId("segment-unreachable".to_string());
+        gate.register_target(
+            &artifact,
+            &segment,
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "hash".to_string(),
+                reachable: false,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .check_retrievability(
+                &artifact,
+                &segment,
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "hash",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_TARGET_UNREACHABLE);
+        assert_eq!(gate.passed_count(), 0);
+        assert_eq!(gate.failed_count(), 1);
+    }
+
+    #[test]
+    fn strict_hash_mismatch_blocks_eviction() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
+        let artifact = ArtifactId("artifact-hash".to_string());
+        let segment = SegmentId("segment-hash".to_string());
+        gate.register_target(
+            &artifact,
+            &segment,
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "actual-hash".to_string(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&artifact, &segment, "expected-hash")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        assert_eq!(gate.passed_count(), 0);
+        assert_eq!(gate.failed_count(), 1);
+    }
+
+    #[test]
+    fn zero_latency_limit_rejects_zero_latency_target() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig {
+            max_latency_ms: 0,
+            require_hash_match: true,
+        });
+        let artifact = ArtifactId("artifact-zero-latency".to_string());
+        let segment = SegmentId("segment-zero-latency".to_string());
+        gate.register_target(
+            &artifact,
+            &segment,
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "hash".to_string(),
+                reachable: true,
+                fetch_latency_ms: 0,
+            },
+        );
+
+        let err = gate
+            .check_retrievability(
+                &artifact,
+                &segment,
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "hash",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_LATENCY_EXCEEDED);
+        assert_eq!(gate.failed_count(), 1);
     }
 }
 
@@ -789,8 +1045,8 @@ mod model_serialization_tests {
         // LeaseQuorumRecord with empty participants
         let quorum_record = LeaseQuorumRecord {
             quorum_id: "quorum_".repeat(100), // Long ID
-            resource_key: "".to_string(), // Empty key
-            participants: Vec::new(), // Empty participants
+            resource_key: "".to_string(),     // Empty key
+            participants: Vec::new(),         // Empty participants
             ack_count: 0,
             required_acks: u32::MAX,
             epoch: u64::MAX,
@@ -807,15 +1063,16 @@ mod model_serialization_tests {
     fn test_optional_model_edge_cases() {
         // OfflineCoverageMetricRecord with edge values
         let coverage_record = OfflineCoverageMetricRecord {
-            metric_id: "m".repeat(1000), // Very long ID
-            domain_name: "".to_string(), // Empty domain
-            coverage_pct: f64::NAN, // NaN value
+            metric_id: "m".repeat(1000),            // Very long ID
+            domain_name: "".to_string(),            // Empty domain
+            coverage_pct: f64::NAN,                 // NaN value
             sampled_at: "invalid_date".to_string(), // Invalid date format
-            sample_size: 0, // Zero samples
+            sample_size: 0,                         // Zero samples
         };
 
         let json = serde_json::to_string(&coverage_record).expect("should serialize");
-        let parsed: OfflineCoverageMetricRecord = serde_json::from_str(&json).expect("should deserialize");
+        let parsed: OfflineCoverageMetricRecord =
+            serde_json::from_str(&json).expect("should deserialize");
         assert_eq!(parsed.metric_id, coverage_record.metric_id);
         assert_eq!(parsed.domain_name, coverage_record.domain_name);
         assert!(parsed.coverage_pct.is_nan()); // NaN comparison
@@ -829,20 +1086,39 @@ mod model_serialization_tests {
 
         for model in metadata {
             // All models should have non-empty names
-            assert!(!model.name.is_empty(), "Model {} has empty name", model.name);
+            assert!(
+                !model.name.is_empty(),
+                "Model {} has empty name",
+                model.name
+            );
 
             // All models should have version 1.0.0
-            assert_eq!(model.version, "1.0.0", "Model {} has wrong version", model.name);
+            assert_eq!(
+                model.version, "1.0.0",
+                "Model {} has wrong version",
+                model.name
+            );
 
             // All models should have non-empty table names
-            assert!(!model.table.is_empty(), "Model {} has empty table", model.name);
+            assert!(
+                !model.table.is_empty(),
+                "Model {} has empty table",
+                model.name
+            );
 
             // All models should have at least one column
-            assert!(!model.columns.is_empty(), "Model {} has no columns", model.name);
+            assert!(
+                !model.columns.is_empty(),
+                "Model {} has no columns",
+                model.name
+            );
 
             // Classification should be valid
             assert!(
-                matches!(model.classification, "mandatory" | "should_use" | "optional"),
+                matches!(
+                    model.classification,
+                    "mandatory" | "should_use" | "optional"
+                ),
                 "Model {} has invalid classification: {}",
                 model.name,
                 model.classification

@@ -12,7 +12,9 @@
 mod tests {
     use super::super::time_travel_engine::*;
     use crate::{
-        capacity_defaults::aliases::{MAX_AUDIT_LOG_ENTRIES, MAX_REGISTERED_TRACES, MAX_TRACE_STEPS},
+        capacity_defaults::aliases::{
+            MAX_AUDIT_LOG_ENTRIES, MAX_REGISTERED_TRACES, MAX_TRACE_STEPS,
+        },
         security::constant_time::ct_eq,
     };
     use std::collections::BTreeMap;
@@ -144,7 +146,8 @@ mod tests {
         assert_eq!(effects_digest.len(), 64);
 
         // Different from non-empty data
-        let non_empty_step = TraceStep::new(0, vec![1], vec![2], vec![SideEffect::new("a", vec![3])], 0);
+        let non_empty_step =
+            TraceStep::new(0, vec![1], vec![2], vec![SideEffect::new("a", vec![3])], 0);
         assert_ne!(output_digest, non_empty_step.output_digest());
         assert_ne!(effects_digest, non_empty_step.side_effects_digest());
     }
@@ -153,20 +156,24 @@ mod tests {
     fn trace_step_side_effects_digest_collision_resistance() {
         // Test that different side effects produce different digests
         let step1 = TraceStep::new(
-            0, vec![], vec![],
+            0,
+            vec![],
+            vec![],
             vec![
                 SideEffect::new("a", vec![1, 2]),
                 SideEffect::new("b", vec![3]),
             ],
-            0
+            0,
         );
 
         let step2 = TraceStep::new(
-            0, vec![], vec![],
+            0,
+            vec![],
+            vec![],
             vec![
                 SideEffect::new("ab", vec![1, 2, 3]), // Potential collision
             ],
-            0
+            0,
         );
 
         // Length-prefixed encoding should prevent collision
@@ -241,10 +248,10 @@ mod tests {
     fn workflow_trace_sequence_gap_detection() {
         // Test various sequence gaps
         let test_cases = [
-            (vec![0, 2], 1, 2),           // Missing 1
-            (vec![0, 1, 3], 2, 3),       // Missing 2
-            (vec![1, 2, 3], 0, 1),       // Missing 0
-            (vec![0, 1, 2, 5], 3, 5),    // Missing 3,4
+            (vec![0, 2], 1, 2),       // Missing 1
+            (vec![0, 1, 3], 2, 3),    // Missing 2
+            (vec![1, 2, 3], 0, 1),    // Missing 0
+            (vec![0, 1, 2, 5], 3, 5), // Missing 3,4
         ];
 
         for (sequences, expected_seq, found_seq) in test_cases {
@@ -270,7 +277,9 @@ mod tests {
 
             let err = trace.validate().unwrap_err();
             match err {
-                TimeTravelError::SequenceGap { expected, found, .. } => {
+                TimeTravelError::SequenceGap {
+                    expected, found, ..
+                } => {
                     assert_eq!(expected, expected_seq);
                     assert_eq!(found, found_seq);
                 }
@@ -290,7 +299,9 @@ mod tests {
 
         let err = trace.validate().unwrap_err();
         match err {
-            TimeTravelError::DigestMismatch { expected, found, .. } => {
+            TimeTravelError::DigestMismatch {
+                expected, found, ..
+            } => {
                 assert_eq!(expected, wrong_digest);
                 assert_eq!(found, correct_digest);
 
@@ -341,7 +352,11 @@ mod tests {
         assert!(audit_log.len() <= MAX_AUDIT_LOG_ENTRIES);
 
         // Should contain recent events
-        assert!(audit_log.iter().any(|e| e.event_code == event_codes::TTR_002));
+        assert!(
+            audit_log
+                .iter()
+                .any(|e| e.event_code == event_codes::TTR_002)
+        );
     }
 
     #[test]
@@ -352,12 +367,7 @@ mod tests {
         let edge_timestamps = [0, 1, u64::MAX - 1, u64::MAX];
 
         for (i, &timestamp) in edge_timestamps.iter().enumerate() {
-            builder.record_step(
-                vec![i as u8],
-                vec![i as u8],
-                vec![],
-                timestamp,
-            );
+            builder.record_step(vec![i as u8], vec![i as u8], vec![], timestamp);
         }
 
         let (trace, _) = builder.build().unwrap();
@@ -398,7 +408,9 @@ mod tests {
         // Register traces in specific order
         let trace_ids = ["charlie", "alpha", "bravo"];
         for &id in &trace_ids {
-            engine.register_trace(build_demo_trace(id, "test", 1)).unwrap();
+            engine
+                .register_trace(build_demo_trace(id, "test", 1))
+                .unwrap();
         }
 
         // trace_ids() should return sorted order
@@ -406,11 +418,15 @@ mod tests {
 
         // But eviction should be based on registration order (charlie first)
         for i in 0..MAX_REGISTERED_TRACES - 3 {
-            engine.register_trace(build_demo_trace(&format!("filler-{}", i), "test", 1)).unwrap();
+            engine
+                .register_trace(build_demo_trace(&format!("filler-{}", i), "test", 1))
+                .unwrap();
         }
 
         // Add one more to trigger eviction
-        engine.register_trace(build_demo_trace("newest", "test", 1)).unwrap();
+        engine
+            .register_trace(build_demo_trace("newest", "test", 1))
+            .unwrap();
 
         // Charlie should be evicted (oldest registration)
         assert!(engine.get_trace("charlie").is_none());
@@ -426,7 +442,10 @@ mod tests {
         engine.register_trace(trace).unwrap();
 
         // Replay function that subtly modifies every 10th step
-        fn subtle_divergence(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+        fn subtle_divergence(
+            step: &TraceStep,
+            _env: &EnvironmentSnapshot,
+        ) -> (Vec<u8>, Vec<SideEffect>) {
             if step.seq % 10 == 0 {
                 let mut output = step.output.clone();
                 if !output.is_empty() {
@@ -473,7 +492,10 @@ mod tests {
         engine.register_trace(trace).unwrap();
 
         // Replay function that keeps output identical but changes side effects
-        fn effects_divergence(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+        fn effects_divergence(
+            step: &TraceStep,
+            _env: &EnvironmentSnapshot,
+        ) -> (Vec<u8>, Vec<SideEffect>) {
             let modified_effects = vec![
                 SideEffect::new("log", b"modified message".to_vec()),
                 SideEffect::new("metric", vec![43]),
@@ -485,7 +507,10 @@ mod tests {
 
         assert_eq!(result.verdict, ReplayVerdict::Diverged(1));
         assert_eq!(result.divergences.len(), 1);
-        assert_eq!(result.divergences[0].kind, DivergenceKind::SideEffectMismatch);
+        assert_eq!(
+            result.divergences[0].kind,
+            DivergenceKind::SideEffectMismatch
+        );
         assert_eq!(result.divergences[0].step_seq, 0);
     }
 
@@ -496,14 +521,19 @@ mod tests {
         engine.register_trace(trace).unwrap();
 
         // Replay function that changes both output and side effects
-        fn full_divergence(_step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+        fn full_divergence(
+            _step: &TraceStep,
+            _env: &EnvironmentSnapshot,
+        ) -> (Vec<u8>, Vec<SideEffect>) {
             (
                 b"completely different output".to_vec(),
                 vec![SideEffect::new("completely_different", vec![99])],
             )
         }
 
-        let result = engine.replay("full-mismatch-test", full_divergence).unwrap();
+        let result = engine
+            .replay("full-mismatch-test", full_divergence)
+            .unwrap();
 
         assert_eq!(result.verdict, ReplayVerdict::Diverged(1));
         assert_eq!(result.divergences[0].kind, DivergenceKind::FullMismatch);
@@ -525,8 +555,16 @@ mod tests {
         assert!(audit_log.len() <= MAX_AUDIT_LOG_ENTRIES);
 
         // Should still contain recent events
-        assert!(audit_log.iter().any(|e| e.event_code == event_codes::TTR_004)); // Replay started
-        assert!(audit_log.iter().any(|e| e.event_code == event_codes::TTR_007)); // Replay completed
+        assert!(
+            audit_log
+                .iter()
+                .any(|e| e.event_code == event_codes::TTR_004)
+        ); // Replay started
+        assert!(
+            audit_log
+                .iter()
+                .any(|e| e.event_code == event_codes::TTR_007)
+        ); // Replay completed
     }
 
     #[test]
@@ -536,7 +574,9 @@ mod tests {
         // Register and remove traces to test cleanup
         let trace_ids = ["remove-1", "remove-2", "remove-3"];
         for &id in &trace_ids {
-            engine.register_trace(build_demo_trace(id, "test", 1)).unwrap();
+            engine
+                .register_trace(build_demo_trace(id, "test", 1))
+                .unwrap();
         }
 
         assert_eq!(engine.trace_count(), 3);
@@ -550,7 +590,9 @@ mod tests {
         // Registration order should be preserved for remaining traces
         // Add many traces to trigger eviction
         for i in 0..MAX_REGISTERED_TRACES {
-            engine.register_trace(build_demo_trace(&format!("fill-{}", i), "test", 1)).unwrap();
+            engine
+                .register_trace(build_demo_trace(&format!("fill-{}", i), "test", 1))
+                .unwrap();
         }
 
         // remove-1 should be evicted before remove-3 (older registration)
@@ -586,7 +628,10 @@ mod tests {
         assert_eq!(trace_small.steps.len(), trace_large.steps.len());
         for (step_small, step_large) in trace_small.steps.iter().zip(trace_large.steps.iter()) {
             assert_eq!(step_small.output_digest(), step_large.output_digest());
-            assert_eq!(step_small.side_effects_digest(), step_large.side_effects_digest());
+            assert_eq!(
+                step_small.side_effects_digest(),
+                step_large.side_effects_digest()
+            );
         }
 
         // But trace digests should be different (environment affects trace content)
@@ -604,7 +649,12 @@ mod tests {
             let large_output = vec![(i + 50) as u8; 100_000]; // 100KB per step
             let large_effects = vec![create_large_side_effect(50_000)]; // 50KB side effect
 
-            builder.record_step(large_input, large_output, large_effects, (i as u64 + 1) * 1000);
+            builder.record_step(
+                large_input,
+                large_output,
+                large_effects,
+                (i as u64 + 1) * 1000,
+            );
         }
 
         let (trace, _) = builder.build().unwrap();
@@ -616,7 +666,10 @@ mod tests {
         assert_eq!(result.steps_replayed, 100);
 
         // Divergent replay should also work
-        fn large_data_divergence(step: &TraceStep, _env: &EnvironmentSnapshot) -> (Vec<u8>, Vec<SideEffect>) {
+        fn large_data_divergence(
+            step: &TraceStep,
+            _env: &EnvironmentSnapshot,
+        ) -> (Vec<u8>, Vec<SideEffect>) {
             let mut output = step.output.clone();
             if !output.is_empty() {
                 output[0] ^= 1; // Flip one bit in large output
@@ -624,7 +677,9 @@ mod tests {
             (output, step.side_effects.clone())
         }
 
-        let divergent_result = engine.replay("memory-stress", large_data_divergence).unwrap();
+        let divergent_result = engine
+            .replay("memory-stress", large_data_divergence)
+            .unwrap();
         assert_eq!(divergent_result.verdict, ReplayVerdict::Diverged(100));
     }
 
@@ -654,17 +709,38 @@ mod tests {
             (vec![], vec![1, 2], vec![], vec![]),
             (vec![1], vec![2], vec![], vec![]),
             (vec![1, 2], vec![], vec![], vec![]),
-
             // Side effects that could collide
-            (vec![], vec![], vec![SideEffect::new("ab", vec![1])], vec![SideEffect::new("a", vec![]), SideEffect::new("b", vec![1])]),
-            (vec![], vec![], vec![SideEffect::new("", vec![97, 98, 1])], vec![SideEffect::new("ab", vec![1])]),
+            (
+                vec![],
+                vec![],
+                vec![SideEffect::new("ab", vec![1])],
+                vec![SideEffect::new("a", vec![]), SideEffect::new("b", vec![1])],
+            ),
+            (
+                vec![],
+                vec![],
+                vec![SideEffect::new("", vec![97, 98, 1])],
+                vec![SideEffect::new("ab", vec![1])],
+            ),
         ];
 
         let mut digests = std::collections::HashSet::new();
 
         for (i, (input, output, effects1, effects2)) in test_cases.iter().enumerate() {
-            let step1 = TraceStep::new(i as u64, input.clone(), output.clone(), effects1.clone(), 1000);
-            let step2 = TraceStep::new(i as u64, input.clone(), output.clone(), effects2.clone(), 1000);
+            let step1 = TraceStep::new(
+                i as u64,
+                input.clone(),
+                output.clone(),
+                effects1.clone(),
+                1000,
+            );
+            let step2 = TraceStep::new(
+                i as u64,
+                input.clone(),
+                output.clone(),
+                effects2.clone(),
+                1000,
+            );
 
             let digest1 = step1.side_effects_digest();
             let digest2 = step2.side_effects_digest();
@@ -674,9 +750,17 @@ mod tests {
             }
 
             // All digests should be unique
-            assert!(digests.insert(digest1.clone()), "Duplicate digest: {}", digest1);
+            assert!(
+                digests.insert(digest1.clone()),
+                "Duplicate digest: {}",
+                digest1
+            );
             if effects1 != effects2 {
-                assert!(digests.insert(digest2.clone()), "Duplicate digest: {}", digest2);
+                assert!(
+                    digests.insert(digest2.clone()),
+                    "Duplicate digest: {}",
+                    digest2
+                );
             }
         }
     }
@@ -690,12 +774,7 @@ mod tests {
         let timestamps = [0, 500, u64::MAX - 1, u64::MAX, 100]; // Non-monotonic
 
         for (i, &ts) in timestamps.iter().enumerate() {
-            builder.record_step(
-                vec![i as u8],
-                vec![i as u8],
-                vec![],
-                ts,
-            );
+            builder.record_step(vec![i as u8], vec![i as u8], vec![], ts);
         }
 
         let (trace, _) = builder.build().unwrap();
@@ -705,5 +784,209 @@ mod tests {
 
         // Duration should be max timestamp
         assert_eq!(result.replay_duration_ns, u64::MAX);
+    }
+
+    #[test]
+    fn negative_empty_workflow_trace_rejected() {
+        let trace = WorkflowTrace {
+            trace_id: "empty-negative".to_string(),
+            workflow_name: "negative".to_string(),
+            steps: Vec::new(),
+            environment: minimal_env(),
+            trace_digest: WorkflowTrace::compute_digest(&[]),
+            schema_version: SCHEMA_VERSION.to_string(),
+        };
+
+        let err = trace.validate().unwrap_err();
+        match err {
+            TimeTravelError::EmptyTrace { trace_id } => {
+                assert_eq!(trace_id, "empty-negative");
+            }
+            other => panic!("Expected EmptyTrace, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn negative_sequence_starting_at_one_rejected() {
+        let steps = vec![TraceStep::new(
+            1,
+            b"in".to_vec(),
+            b"out".to_vec(),
+            vec![],
+            10,
+        )];
+        let trace_digest = WorkflowTrace::compute_digest(&steps);
+        let trace = WorkflowTrace {
+            trace_id: "seq-start-negative".to_string(),
+            workflow_name: "negative".to_string(),
+            steps,
+            environment: minimal_env(),
+            trace_digest,
+            schema_version: SCHEMA_VERSION.to_string(),
+        };
+
+        let err = trace.validate().unwrap_err();
+        match err {
+            TimeTravelError::SequenceGap {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, 0);
+                assert_eq!(found, 1);
+            }
+            other => panic!("Expected SequenceGap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn negative_duplicate_sequence_rejected() {
+        let steps = vec![
+            TraceStep::new(0, b"in-0".to_vec(), b"out-0".to_vec(), vec![], 10),
+            TraceStep::new(0, b"in-1".to_vec(), b"out-1".to_vec(), vec![], 20),
+        ];
+        let trace_digest = WorkflowTrace::compute_digest(&steps);
+        let trace = WorkflowTrace {
+            trace_id: "duplicate-seq-negative".to_string(),
+            workflow_name: "negative".to_string(),
+            steps,
+            environment: minimal_env(),
+            trace_digest,
+            schema_version: SCHEMA_VERSION.to_string(),
+        };
+
+        let err = trace.validate().unwrap_err();
+        match err {
+            TimeTravelError::SequenceGap {
+                expected, found, ..
+            } => {
+                assert_eq!(expected, 1);
+                assert_eq!(found, 0);
+            }
+            other => panic!("Expected SequenceGap, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn negative_tampered_trace_rejected_on_registration() {
+        let mut trace = build_demo_trace("tampered-register-negative", "negative", 2);
+        trace.steps[0].output.push(0xFF);
+
+        let mut engine = ReplayEngine::new();
+        let err = engine.register_trace(trace).unwrap_err();
+
+        assert!(matches!(err, TimeTravelError::DigestMismatch { .. }));
+        assert_eq!(engine.trace_count(), 0);
+    }
+
+    #[test]
+    fn negative_missing_platform_rejected_on_registration() {
+        let steps = vec![TraceStep::new(
+            0,
+            b"in".to_vec(),
+            b"out".to_vec(),
+            vec![],
+            10,
+        )];
+        let trace_digest = WorkflowTrace::compute_digest(&steps);
+        let mut environment = minimal_env();
+        environment.platform.clear();
+        let trace = WorkflowTrace {
+            trace_id: "missing-platform-negative".to_string(),
+            workflow_name: "negative".to_string(),
+            steps,
+            environment,
+            trace_digest,
+            schema_version: SCHEMA_VERSION.to_string(),
+        };
+
+        let mut engine = ReplayEngine::new();
+        let err = engine.register_trace(trace).unwrap_err();
+        match err {
+            TimeTravelError::EnvironmentMissing { field, .. } => {
+                assert_eq!(field, "platform");
+            }
+            other => panic!("Expected EnvironmentMissing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn negative_missing_runtime_version_rejected_on_registration() {
+        let steps = vec![TraceStep::new(
+            0,
+            b"in".to_vec(),
+            b"out".to_vec(),
+            vec![],
+            10,
+        )];
+        let trace_digest = WorkflowTrace::compute_digest(&steps);
+        let mut environment = minimal_env();
+        environment.runtime_version.clear();
+        let trace = WorkflowTrace {
+            trace_id: "missing-runtime-negative".to_string(),
+            workflow_name: "negative".to_string(),
+            steps,
+            environment,
+            trace_digest,
+            schema_version: SCHEMA_VERSION.to_string(),
+        };
+
+        let mut engine = ReplayEngine::new();
+        let err = engine.register_trace(trace).unwrap_err();
+        match err {
+            TimeTravelError::EnvironmentMissing { field, .. } => {
+                assert_eq!(field, "runtime_version");
+            }
+            other => panic!("Expected EnvironmentMissing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn negative_duplicate_trace_registration_rejected() {
+        let mut engine = ReplayEngine::new();
+        engine
+            .register_trace(build_demo_trace("dupe-negative", "negative", 1))
+            .unwrap();
+
+        let err = engine
+            .register_trace(build_demo_trace("dupe-negative", "negative", 1))
+            .unwrap_err();
+
+        match err {
+            TimeTravelError::DuplicateTrace { trace_id } => {
+                assert_eq!(trace_id, "dupe-negative");
+            }
+            other => panic!("Expected DuplicateTrace, got {:?}", other),
+        }
+        assert_eq!(engine.trace_count(), 1);
+    }
+
+    #[test]
+    fn negative_replay_missing_trace_rejected_without_audit_event() {
+        let mut engine = ReplayEngine::new();
+
+        let err = engine
+            .replay_identity("missing-trace-negative")
+            .unwrap_err();
+
+        match err {
+            TimeTravelError::TraceNotFound { trace_id } => {
+                assert_eq!(trace_id, "missing-trace-negative");
+            }
+            other => panic!("Expected TraceNotFound, got {:?}", other),
+        }
+        assert!(engine.audit_log().is_empty());
+    }
+
+    #[test]
+    fn negative_empty_trace_builder_build_rejected() {
+        let builder = TraceBuilder::new("empty-builder-negative", "negative", minimal_env());
+
+        let err = builder.build().unwrap_err();
+
+        match err {
+            TimeTravelError::EmptyTrace { trace_id } => {
+                assert_eq!(trace_id, "empty-builder-negative");
+            }
+            other => panic!("Expected EmptyTrace, got {:?}", other),
+        }
     }
 }

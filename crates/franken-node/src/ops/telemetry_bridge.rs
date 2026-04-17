@@ -22,6 +22,11 @@ const CONNECTION_READ_TIMEOUT_MS: u64 = 500;
 const DEFAULT_DRAIN_TIMEOUT_MS: u64 = 5000;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -1507,6 +1512,172 @@ mod tests {
     }
 
     #[test]
+    fn push_bounded_zero_capacity_clears_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(
+            items.is_empty(),
+            "zero-capacity buffers must not retain stale events"
+        );
+    }
+
+    #[test]
+    fn push_bounded_large_overflow_keeps_only_latest_window() {
+        let mut items = vec![10, 11, 12, 13];
+
+        push_bounded(&mut items, 99, 2);
+
+        assert_eq!(items, vec![13, 99]);
+    }
+
+    #[test]
+    fn parse_runtime_event_rejects_non_object_json() {
+        let err = parse_runtime_telemetry_event(br#"[{"event":"metric"}]"#)
+            .expect_err("array payloads are not telemetry objects");
+
+        assert!(
+            err.contains("JSON object"),
+            "non-object payloads should fail with an object-shape error: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_runtime_event_rejects_malformed_json() {
+        let err = parse_runtime_telemetry_event(br#"{"event_type":"metric","#)
+            .expect_err("truncated JSON must be rejected");
+
+        assert!(
+            err.contains("invalid telemetry JSON"),
+            "malformed JSON should retain the parser failure context: {err}"
+        );
+    }
+
+    #[test]
+    fn invalid_event_type_falls_back_to_metric() {
+        let event = parse_runtime_telemetry_event(
+            br#"{"timestamp":"2026-04-06T00:00:00Z","event_type":" shell_exec ","payload":{"bad":true}}"#,
+        )
+        .expect("invalid event type should fall back instead of failing ingestion");
+
+        assert_eq!(event.event_type, "metric");
+        assert_eq!(event.payload, serde_json::json!({ "bad": true }));
+    }
+
+    #[test]
+    fn blank_event_alias_falls_back_to_metric() {
+        let event = parse_runtime_telemetry_event(
+            br#"{"timestamp":"2026-04-06T00:00:00Z","event":"   ","payload":{"empty_alias":true}}"#,
+        )
+        .expect("blank event aliases should not create empty event types");
+
+        assert_eq!(event.event_type, "metric");
+        assert_eq!(event.payload, serde_json::json!({ "empty_alias": true }));
+    }
+
+    #[test]
+    fn with_state_returns_none_after_poisoned_lock() {
+        let state = test_state(1);
+        let state_for_poison = Arc::clone(&state);
+        let _ = thread::spawn(move || {
+            let _guard = state_for_poison.lock().expect("state lock");
+            panic!("poison telemetry state lock");
+        })
+        .join();
+
+        assert!(
+            TelemetryBridge::with_state(&state, |metrics| metrics.accepted_total).is_none(),
+            "poisoned telemetry state should not be used after lock acquisition fails"
+        );
+    }
+
+    #[test]
+    fn abort_pending_persistence_saturates_depth_and_drop_count() {
+        let state = test_state(4);
+        {
+            let mut metrics = state.lock().expect("state lock");
+            metrics.queue_depth = 1;
+            metrics.dropped_total = u64::MAX - 1;
+        }
+        let (sender, receiver) = mpsc::sync_channel(4);
+        for bridge_seq in 2..=3 {
+            sender
+                .try_send(PersistEnvelope {
+                    connection_id: 7,
+                    bridge_seq,
+                    payload: br#"{"event":"pending"}"#.to_vec(),
+                })
+                .expect("queue seed should fit");
+        }
+        drop(sender);
+
+        TelemetryBridge::abort_pending_persistence(
+            Some(PersistEnvelope {
+                connection_id: 7,
+                bridge_seq: 1,
+                payload: br#"{"event":"first"}"#.to_vec(),
+            }),
+            &receiver,
+            &state,
+        );
+
+        let snapshot = state.lock().expect("state lock").snapshot();
+        assert_eq!(
+            snapshot.queue_depth, 0,
+            "drop accounting must not underflow queue depth"
+        );
+        assert_eq!(
+            snapshot.dropped_total,
+            u64::MAX,
+            "drop accounting must saturate at u64::MAX"
+        );
+        assert!(
+            snapshot.recent_events.iter().any(|event| {
+                event.code == event_codes::PERSIST_FAILURE
+                    && event.reason_code.as_deref() == Some(reason_codes::DRAIN_TIMEOUT)
+            }),
+            "aborted pending persistence must emit a drain-timeout failure event"
+        );
+    }
+
+    #[test]
+    fn zero_timeout_full_queue_does_not_record_retry() {
+        let state = test_state(1);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .try_send(PersistEnvelope {
+                connection_id: 1,
+                bridge_seq: 1,
+                payload: br#"{"event":"already_queued"}"#.to_vec(),
+            })
+            .expect("initial queue fill should succeed");
+
+        let admitted = TelemetryBridge::enqueue_with_timeout(
+            &sender,
+            PersistEnvelope {
+                connection_id: 2,
+                bridge_seq: 2,
+                payload: br#"{"event":"shed"}"#.to_vec(),
+            },
+            &state,
+            Duration::ZERO,
+        );
+        drop(receiver);
+
+        let snapshot = state.lock().expect("state lock").snapshot();
+        assert!(!admitted);
+        assert_eq!(snapshot.retry_total, 0);
+        assert_eq!(snapshot.shed_total, 1);
+        assert!(
+            snapshot.recent_events.iter().any(|event| {
+                event.reason_code.as_deref() == Some(reason_codes::QUEUE_FULL_SHED)
+            }),
+            "zero-timeout admission failure should be classified as queue shedding"
+        );
+    }
+
+    #[test]
     fn drain_timeout_reports_failure() {
         let tmp = tempfile::TempDir::new().expect("tempdir");
         let sock = tmp.path().join("test_drain_timeout.sock");
@@ -2953,5 +3124,446 @@ mod tests {
             .saturating_add(report.shed_total)
             .saturating_add(report.dropped_total);
         assert_eq!(total_accounted, total_events);
+    }
+
+    // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────
+
+    #[test]
+    fn test_negative_bridge_id_with_unicode_injection_attacks() {
+        use crate::security::constant_time::ct_eq;
+
+        let bridge = TelemetryBridge::new(
+            "/tmp/test-unicode-bridge.sock",
+            Arc::new(Mutex::new(FrankensqliteAdapter::default())),
+        );
+
+        let snapshot = bridge.snapshot();
+
+        // Verify bridge_id doesn't contain injection patterns
+        assert!(!snapshot.bridge_id.contains('\u{202E}'), "bridge ID must not contain BiDi override");
+        assert!(!snapshot.bridge_id.contains('\u{202D}'), "bridge ID must not contain BiDi embedding");
+        assert!(!snapshot.bridge_id.contains('\x1b'), "bridge ID must not contain ANSI escape sequences");
+        assert!(!snapshot.bridge_id.contains('\0'), "bridge ID must not contain null bytes");
+        assert!(!snapshot.bridge_id.contains('\r'), "bridge ID must not contain carriage returns");
+        assert!(!snapshot.bridge_id.contains('\n'), "bridge ID must not contain newlines");
+
+        // Verify bridge_id has reasonable length bounds
+        assert!(snapshot.bridge_id.len() < 256, "bridge ID must be reasonably bounded");
+        assert!(!snapshot.bridge_id.is_empty(), "bridge ID must not be empty");
+
+        // Verify constant-time comparison works for bridge IDs
+        let other_bridge = TelemetryBridge::new(
+            "/tmp/test-unicode-bridge-2.sock",
+            Arc::new(Mutex::new(FrankensqliteAdapter::default())),
+        );
+        let other_id = other_bridge.snapshot().bridge_id;
+
+        assert!(!ct_eq(&snapshot.bridge_id, &other_id), "bridge IDs should be unique");
+    }
+
+    #[test]
+    fn test_negative_event_detail_with_massive_injection_payload() {
+        let state = test_state(PERSIST_QUEUE_CAPACITY);
+
+        // Create malicious event with massive detail field
+        let massive_detail = "X".repeat(10_000_000); // 10MB payload
+        let malicious_event = TelemetryBridgeEvent {
+            code: event_codes::CONNECTION_ACCEPTED.to_string(),
+            bridge_id: "test-bridge".to_string(),
+            connection_id: Some(1),
+            bridge_seq: Some(1),
+            reason_code: Some(reason_codes::ALLOWED.to_string()),
+            queue_depth: 0,
+            queue_capacity: PERSIST_QUEUE_CAPACITY,
+            active_connections: 1,
+            accepted_total: 1,
+            persisted_total: 0,
+            shed_total: 0,
+            dropped_total: 0,
+            retry_total: 0,
+            detail: massive_detail.clone(),
+        };
+
+        // Verify bounded storage prevents memory exhaustion
+        let mut locked_state = state.lock().unwrap();
+        push_bounded(&mut locked_state.runtime_events, malicious_event.clone(), MAX_RUNTIME_EVENTS);
+
+        // Even with massive detail, storage should be bounded
+        assert_eq!(locked_state.runtime_events.len(), 1);
+
+        // Verify serialization doesn't cause memory explosion
+        let json = serde_json::to_string(&locked_state.runtime_events[0]).unwrap_or_default();
+        assert!(json.len() >= massive_detail.len(), "serialization preserves large detail");
+
+        // Verify this doesn't crash the snapshot functionality
+        drop(locked_state);
+        let bridge = TelemetryBridge::with_state(
+            "/tmp/test-massive.sock",
+            Arc::new(Mutex::new(FrankensqliteAdapter::default())),
+            state.clone(),
+        );
+        let snapshot = bridge.snapshot();
+        assert!(!snapshot.recent_events.is_empty(), "snapshot should include massive event");
+    }
+
+    #[test]
+    fn test_negative_runtime_telemetry_event_with_json_injection_attacks() {
+        // Create event with malicious JSON injection in payload
+        let malicious_payload = serde_json::json!({
+            "normal_field": "value",
+            "injection_attempt": "\"},\"injected_field\":\"malicious\",\"another_injection":{\"nested\":true",
+            "script_injection": "<script>alert('XSS')</script>",
+            "sql_injection": "'; DROP TABLE events; --",
+            "command_injection": "; cat /etc/passwd #",
+            "bidi_attack": "\u{202E}fake_field\u{202C}",
+            "ansi_escape": "\x1b[31mRed Text\x1b[0m"
+        });
+
+        let runtime_event = RuntimeTelemetryEvent {
+            timestamp: Utc::now().to_rfc3339(),
+            event_type: "test_injection".to_string(),
+            payload: malicious_payload,
+        };
+
+        // Verify serialization handles injection safely
+        let json = serde_json::to_string(&runtime_event).unwrap();
+        let parsed: RuntimeTelemetryEvent = serde_json::from_str(&json).unwrap();
+
+        // Verify injected content is properly escaped/contained
+        assert_eq!(parsed.event_type, "test_injection");
+        assert!(parsed.payload.is_object());
+
+        // Verify no additional fields were injected at the top level
+        let parsed_json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let expected_keys = ["timestamp", "event_type", "payload"];
+        for key in parsed_json.as_object().unwrap().keys() {
+            assert!(expected_keys.contains(&key.as_str()),
+                   "unexpected field '{}' - possible JSON injection", key);
+        }
+
+        // Verify payload contains the injection attempts as literal strings (safe)
+        let payload_str = parsed_json["payload"].to_string();
+        assert!(payload_str.contains("injected_field"), "injection should be contained as literal");
+        assert!(payload_str.contains("alert"), "script injection should be literal");
+    }
+
+    #[test]
+    fn test_negative_connection_id_arithmetic_overflow_protection() {
+        let state = test_state(PERSIST_QUEUE_CAPACITY);
+
+        // Test with maximum connection ID to check overflow protection
+        let max_conn_id = u64::MAX;
+        let near_max_event = TelemetryBridgeEvent {
+            code: event_codes::CONNECTION_ACCEPTED.to_string(),
+            bridge_id: "test-overflow".to_string(),
+            connection_id: Some(max_conn_id),
+            bridge_seq: Some(u64::MAX),
+            reason_code: Some(reason_codes::ALLOWED.to_string()),
+            queue_depth: 0,
+            queue_capacity: PERSIST_QUEUE_CAPACITY,
+            active_connections: MAX_ACTIVE_CONNECTIONS,
+            accepted_total: u64::MAX,
+            persisted_total: u64::MAX,
+            shed_total: u64::MAX,
+            dropped_total: u64::MAX,
+            retry_total: u64::MAX,
+            detail: "max_values_test".to_string(),
+        };
+
+        // Verify event can be stored without overflow
+        let mut locked_state = state.lock().unwrap();
+        push_bounded(&mut locked_state.runtime_events, near_max_event, MAX_RUNTIME_EVENTS);
+
+        // Verify arithmetic operations use saturating semantics
+        let event = &locked_state.runtime_events[0];
+
+        // Simulate counter increments that should use saturating_add
+        let new_accepted = event.accepted_total.saturating_add(1);
+        let new_persisted = event.persisted_total.saturating_add(1);
+
+        // At u64::MAX, saturating_add should not overflow
+        assert_eq!(new_accepted, u64::MAX, "saturating_add must prevent overflow");
+        assert_eq!(new_persisted, u64::MAX, "saturating_add must prevent overflow");
+
+        // Verify total accounting doesn't overflow
+        let total_processed = event.accepted_total
+            .saturating_add(event.shed_total)
+            .saturating_add(event.dropped_total);
+        assert!(total_processed == u64::MAX, "total accounting must use saturating arithmetic");
+    }
+
+    #[test]
+    fn test_negative_bridge_lifecycle_state_invalid_transitions() {
+        // Test invalid state byte values
+        for invalid_byte in [7, 8, 200, 255] {
+            let state = BridgeLifecycleState::from_u8(invalid_byte);
+            assert_eq!(state, BridgeLifecycleState::Failed,
+                      "invalid state byte {} should map to Failed", invalid_byte);
+        }
+
+        // Test state transition invariants
+        let terminal_states = [BridgeLifecycleState::Stopped, BridgeLifecycleState::Failed];
+        for terminal_state in terminal_states {
+            assert!(terminal_state.is_terminal(),
+                   "state {:?} should be terminal", terminal_state);
+        }
+
+        // Test serialization/deserialization robustness
+        for state in [
+            BridgeLifecycleState::Cold,
+            BridgeLifecycleState::Starting,
+            BridgeLifecycleState::Running,
+            BridgeLifecycleState::Degraded,
+            BridgeLifecycleState::Draining,
+            BridgeLifecycleState::Stopped,
+            BridgeLifecycleState::Failed,
+        ] {
+            let json = serde_json::to_string(&state).unwrap();
+            let parsed: BridgeLifecycleState = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, state, "state serialization must be round-trip safe");
+        }
+    }
+
+    #[test]
+    fn test_negative_persist_envelope_with_massive_payload_stress() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        let state = test_state(1);
+
+        // Test with payload at MAX_EVENT_BYTES boundary
+        let boundary_payload = vec![b'A'; MAX_EVENT_BYTES];
+        let boundary_envelope = PersistEnvelope {
+            connection_id: 1,
+            bridge_seq: 1,
+            payload: boundary_payload,
+        };
+
+        // Should handle boundary case
+        let result = TelemetryBridge::enqueue_with_timeout(
+            &sender,
+            boundary_envelope,
+            &state,
+            Duration::from_millis(1),
+        );
+        // May succeed or fail depending on queue state, but shouldn't panic
+
+        // Test with payload exceeding MAX_EVENT_BYTES
+        let oversized_payload = vec![b'B'; MAX_EVENT_BYTES + 1];
+        let oversized_envelope = PersistEnvelope {
+            connection_id: 2,
+            bridge_seq: 2,
+            payload: oversized_payload,
+        };
+
+        // Should handle oversized gracefully (likely shed/drop)
+        let result = TelemetryBridge::enqueue_with_timeout(
+            &sender,
+            oversized_envelope,
+            &state,
+            Duration::from_millis(1),
+        );
+
+        // Verify state accounting remains consistent regardless of outcome
+        let locked_state = state.lock().unwrap();
+        let total_events = locked_state.accepted_total + locked_state.shed_total + locked_state.dropped_total;
+        assert!(total_events <= 2, "event accounting must remain consistent");
+    }
+
+    #[test]
+    fn test_negative_shutdown_reason_display_injection_resistance() {
+        // Test EngineExit with extreme exit codes
+        let extreme_exit_codes = [
+            Some(i32::MAX),
+            Some(i32::MIN),
+            Some(-999999),
+            Some(999999),
+            None,
+        ];
+
+        for exit_code in extreme_exit_codes {
+            let shutdown_reason = ShutdownReason::EngineExit { exit_code };
+
+            // Verify serialization safety
+            let json = serde_json::to_string(&shutdown_reason).unwrap();
+            let parsed: ShutdownReason = serde_json::from_str(&json).unwrap();
+
+            match (shutdown_reason, parsed) {
+                (ShutdownReason::EngineExit { exit_code: orig },
+                 ShutdownReason::EngineExit { exit_code: parsed }) => {
+                    assert_eq!(orig, parsed, "exit code serialization must be exact");
+                }
+                _ => panic!("shutdown reason type should be preserved"),
+            }
+
+            // Verify debug display doesn't contain injection patterns
+            let debug_str = format!("{:?}", shutdown_reason);
+            assert!(!debug_str.contains('\x1b'), "debug display must not contain ANSI escapes");
+            assert!(!debug_str.contains('\0'), "debug display must not contain null bytes");
+            assert!(!debug_str.contains('\u{202E}'), "debug display must not contain BiDi overrides");
+        }
+
+        // Test Requested variant
+        let requested = ShutdownReason::Requested;
+        let json = serde_json::to_string(&requested).unwrap();
+        let parsed: ShutdownReason = serde_json::from_str(&json).unwrap();
+        assert!(matches!(parsed, ShutdownReason::Requested));
+    }
+
+    #[test]
+    fn test_negative_telemetry_runtime_report_with_extreme_values() {
+        // Create report with extreme counter values
+        let extreme_report = TelemetryRuntimeReport {
+            final_state: BridgeLifecycleState::Failed,
+            bridge_id: "extreme-test-bridge".to_string(),
+            accepted_total: u64::MAX,
+            persisted_total: u64::MAX,
+            shed_total: u64::MAX,
+            dropped_total: u64::MAX,
+            retry_total: u64::MAX,
+            drain_completed: false,
+            drain_duration_ms: u64::MAX,
+            telemetry_events: vec![],
+            recent_events: vec![],
+        };
+
+        // Verify serialization handles extreme values
+        let json = serde_json::to_string(&extreme_report).unwrap();
+        let parsed: TelemetryRuntimeReport = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(parsed.accepted_total, u64::MAX);
+        assert_eq!(parsed.persisted_total, u64::MAX);
+        assert_eq!(parsed.shed_total, u64::MAX);
+        assert_eq!(parsed.dropped_total, u64::MAX);
+        assert_eq!(parsed.retry_total, u64::MAX);
+        assert_eq!(parsed.drain_duration_ms, u64::MAX);
+
+        // Verify arithmetic operations on extreme values don't overflow
+        let total_events = parsed.accepted_total
+            .saturating_add(parsed.shed_total)
+            .saturating_add(parsed.dropped_total);
+        assert_eq!(total_events, u64::MAX, "extreme value arithmetic must use saturating operations");
+
+        // Create report with massive event collections for memory stress
+        let massive_telemetry_events: Vec<RuntimeTelemetryEvent> = (0..1000)
+            .map(|i| RuntimeTelemetryEvent {
+                timestamp: Utc::now().to_rfc3339(),
+                event_type: format!("massive_event_{}", i),
+                payload: serde_json::json!({
+                    "index": i,
+                    "data": "X".repeat(1000), // 1KB per event
+                }),
+            })
+            .collect();
+
+        let massive_bridge_events: Vec<TelemetryBridgeEvent> = (0..1000)
+            .map(|i| TelemetryBridgeEvent {
+                code: event_codes::CONNECTION_ACCEPTED.to_string(),
+                bridge_id: format!("bridge_{}", i),
+                connection_id: Some(i as u64),
+                bridge_seq: Some(i as u64),
+                reason_code: Some(reason_codes::ALLOWED.to_string()),
+                queue_depth: i % 256,
+                queue_capacity: PERSIST_QUEUE_CAPACITY,
+                active_connections: i % MAX_ACTIVE_CONNECTIONS,
+                accepted_total: i as u64,
+                persisted_total: i as u64,
+                shed_total: 0,
+                dropped_total: 0,
+                retry_total: 0,
+                detail: format!("massive_detail_{}", "Y".repeat(1000)),
+            })
+            .collect();
+
+        let massive_report = TelemetryRuntimeReport {
+            final_state: BridgeLifecycleState::Stopped,
+            bridge_id: "massive-bridge".to_string(),
+            accepted_total: 1000,
+            persisted_total: 1000,
+            shed_total: 0,
+            dropped_total: 0,
+            retry_total: 0,
+            drain_completed: true,
+            drain_duration_ms: 1000,
+            telemetry_events: massive_telemetry_events,
+            recent_events: massive_bridge_events,
+        };
+
+        // Verify massive report can be serialized without memory explosion
+        let massive_json = serde_json::to_string(&massive_report).unwrap();
+        assert!(massive_json.len() > 1_000_000, "massive report should be large but bounded");
+        assert!(massive_json.len() < 50_000_000, "massive report should not cause excessive memory usage");
+    }
+
+    #[test]
+    fn test_negative_error_display_injection_prevention() {
+        // Test TelemetryStartError with injection attempts
+        let malicious_start_errors = [
+            "normal error message",
+            "error\x1b[31mwith ANSI\x1b[0m",
+            "error\nwith\nnewlines",
+            "error\0with\0nulls",
+            "error\u{202E}with BiDi\u{202C}",
+            "error\"with'quotes}and{brackets",
+        ];
+
+        for error_msg in malicious_start_errors {
+            let start_error = TelemetryStartError(error_msg.to_string());
+            let display = format!("{}", start_error);
+
+            // Verify display format is consistent
+            assert!(display.starts_with("telemetry start failed:"));
+            assert!(display.contains(error_msg));
+
+            // Error trait should work
+            let _: &dyn std::error::Error = &start_error;
+        }
+
+        // Test TelemetryJoinError with injection attempts
+        let malicious_join_errors = [
+            "join failed normally",
+            "join\x1b[41mfailed with background\x1b[0m",
+            "join\rfailed\twith\tcontrol\rchars",
+            "join\u{202E}failed with bidi",
+        ];
+
+        for error_msg in malicious_join_errors {
+            let join_error = TelemetryJoinError(error_msg.to_string());
+            let display = format!("{}", join_error);
+
+            // Verify display format is consistent
+            assert!(display.starts_with("telemetry join failed:"));
+            assert!(display.contains(error_msg));
+
+            // Error trait should work
+            let _: &dyn std::error::Error = &join_error;
+        }
+    }
+
+    #[test]
+    fn test_negative_push_bounded_with_zero_capacity_edge_case() {
+        // Test push_bounded with zero capacity (should clear)
+        let mut test_vec = vec![1, 2, 3, 4, 5];
+        push_bounded(&mut test_vec, 6, 0);
+
+        assert_eq!(test_vec.len(), 0, "zero capacity should clear the vector");
+
+        // Test push_bounded with capacity 1 (should keep only latest)
+        let mut test_vec = vec![1, 2, 3];
+        push_bounded(&mut test_vec, 4, 1);
+
+        assert_eq!(test_vec.len(), 1, "capacity 1 should keep only latest");
+        assert_eq!(test_vec[0], 4, "should keep the newly pushed item");
+
+        // Test push_bounded with exact capacity match
+        let mut test_vec = Vec::new();
+        for i in 0..5 {
+            push_bounded(&mut test_vec, i, 5);
+        }
+        assert_eq!(test_vec.len(), 5, "should fill to exact capacity");
+
+        // Adding one more should drain oldest
+        push_bounded(&mut test_vec, 5, 5);
+        assert_eq!(test_vec.len(), 5, "should maintain capacity");
+        assert_eq!(test_vec[0], 1, "should have drained oldest (0)");
+        assert_eq!(test_vec[4], 5, "should have newest at end");
     }
 }

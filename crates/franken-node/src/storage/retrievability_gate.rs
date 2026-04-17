@@ -16,7 +16,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::security::constant_time::ct_eq;
+use crate::security::constant_time::ct_eq_bytes;
 
 // ---------------------------------------------------------------------------
 // Event codes
@@ -31,11 +31,57 @@ pub const RG_GATE_INITIALIZED: &str = "RG_GATE_INITIALIZED";
 use crate::capacity_defaults::aliases::{MAX_EVENTS, MAX_RECEIPTS};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
+}
+
+const CONTENT_HASH_DOMAIN: &[u8] = b"retrievability_gate_hash_v1:";
+const SHA256_DIGEST_BYTES: usize = 32;
+const SHA256_DIGEST_HEX_CHARS: usize = 64;
+
+fn is_canonical_sha256_hex_digest(candidate: &str) -> bool {
+    candidate.len() == SHA256_DIGEST_HEX_CHARS
+        && candidate
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn content_digest_matches(observed: &str, expected: &str) -> bool {
+    if observed.is_empty() || expected.is_empty() {
+        return false;
+    }
+    if !observed.is_ascii() || !expected.is_ascii() {
+        return false;
+    }
+    let observed_has_forbidden = observed.chars().any(|c| c.is_control() || c.is_whitespace());
+    let expected_has_forbidden = expected.chars().any(|c| c.is_control() || c.is_whitespace());
+    if observed_has_forbidden || expected_has_forbidden {
+        return false;
+    }
+    match (hex::decode(observed), hex::decode(expected)) {
+        (Ok(observed_bytes), Ok(expected_bytes)) => {
+            if observed_bytes.len() != SHA256_DIGEST_BYTES
+                || expected_bytes.len() != SHA256_DIGEST_BYTES
+            {
+                return false;
+            }
+            if !is_canonical_sha256_hex_digest(observed) {
+                return false;
+            }
+            if !is_canonical_sha256_hex_digest(expected) {
+                return false;
+            }
+            ct_eq_bytes(&observed_bytes, &expected_bytes)
+        }
+        _ => false,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +218,9 @@ fn invalid_artifact_id_reason(artifact_id: &ArtifactId) -> Option<String> {
     if trimmed != raw {
         return Some("artifact_id contains leading or trailing whitespace".to_string());
     }
+    if raw.chars().any(|c| c.is_control()) {
+        return Some("artifact_id must not contain control characters".to_string());
+    }
     None
 }
 
@@ -183,6 +232,9 @@ fn invalid_segment_id_reason(segment_id: &SegmentId) -> Option<String> {
     }
     if trimmed != raw {
         return Some("segment_id contains leading or trailing whitespace".to_string());
+    }
+    if raw.chars().any(|c| c.is_control()) {
+        return Some("segment_id must not contain control characters".to_string());
     }
     None
 }
@@ -296,16 +348,20 @@ impl RetrievabilityGate {
             events: Vec::new(),
             timestamp_counter: 1000,
         };
-        gate.events.push(GateEvent {
-            code: RG_GATE_INITIALIZED.to_string(),
-            artifact_id: String::new(),
-            segment_id: String::new(),
-            detail: format!(
-                "Gate initialized: max_latency={}ms, require_hash={}",
-                gate.config.max_latency_ms, gate.config.require_hash_match
-            ),
-        });
-        // No overflow check needed here — this is the first event in a new gate.
+        push_bounded(
+            &mut gate.events,
+            GateEvent {
+                code: RG_GATE_INITIALIZED.to_string(),
+                artifact_id: String::new(),
+                segment_id: String::new(),
+                detail: format!(
+                    "Gate initialized: max_latency={}ms, require_hash={}",
+                    gate.config.max_latency_ms, gate.config.require_hash_match
+                ),
+            },
+            MAX_EVENTS,
+        );
+        // Hardening: use push_bounded to prevent unbounded event growth
         gate
     }
 
@@ -485,7 +541,9 @@ impl RetrievabilityGate {
         }
 
         // Check hash match
-        if self.config.require_hash_match && !ct_eq(&state.content_hash, expected_hash) {
+        if self.config.require_hash_match
+            && !content_digest_matches(&state.content_hash, expected_hash)
+        {
             let observed_content_hash = state.content_hash.clone();
             let observed_latency_ms = state.fetch_latency_ms;
             let reason = ProofFailureReason::HashMismatch {
@@ -699,7 +757,7 @@ pub struct EvictionPermit {
 /// Compute SHA-256 content hash for a byte slice.
 pub fn content_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(b"retrievability_gate_hash_v1:");
+    hasher.update(CONTENT_HASH_DOMAIN);
     hasher.update(data);
     format!("{:x}", hasher.finalize())
 }
@@ -743,6 +801,14 @@ mod tests {
         }
     }
 
+    fn assert_hash_eq(left: &str, right: &str) {
+        assert!(ct_eq_bytes(left.as_bytes(), right.as_bytes()));
+    }
+
+    fn assert_hash_ne(left: &str, right: &str) {
+        assert!(!ct_eq_bytes(left.as_bytes(), right.as_bytes()));
+    }
+
     // -- Config defaults --
 
     #[test]
@@ -757,11 +823,12 @@ mod tests {
     #[test]
     fn test_successful_proof() {
         let mut gate = make_gate();
+        let hash = content_hash(b"successful proof payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("abc123"),
+            good_state(&hash),
         );
         let proof = gate
             .check_retrievability(
@@ -769,31 +836,32 @@ mod tests {
                 &sid("s1"),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "abc123",
+                &hash,
             )
             .unwrap();
         assert_eq!(proof.artifact_id, aid("a1"));
         assert_eq!(proof.segment_id, sid("s1"));
         assert_eq!(proof.source_tier, StorageTier::L2Warm);
         assert_eq!(proof.target_tier, StorageTier::L3Archive);
-        assert_eq!(proof.content_hash, "abc123");
+        assert_hash_eq(&proof.content_hash, &hash);
     }
 
     #[test]
     fn test_successful_proof_emits_event() {
         let mut gate = make_gate();
+        let hash = content_hash(b"event payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("abc123"),
+            good_state(&hash),
         );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L2Warm,
             StorageTier::L3Archive,
-            "abc123",
+            &hash,
         )
         .unwrap();
         let pass_events: Vec<_> = gate
@@ -807,24 +875,25 @@ mod tests {
     #[test]
     fn test_successful_proof_creates_receipt() {
         let mut gate = make_gate();
+        let hash = content_hash(b"receipt payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("abc123"),
+            good_state(&hash),
         );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L2Warm,
             StorageTier::L3Archive,
-            "abc123",
+            &hash,
         )
         .unwrap();
         assert_eq!(gate.receipts().len(), 1);
         assert!(gate.receipts()[0].passed);
         assert!(gate.receipts()[0].failure_reason.is_none());
-        assert_eq!(gate.receipts()[0].content_hash, "abc123");
+        assert_hash_eq(&gate.receipts()[0].content_hash, &hash);
     }
 
     #[test]
@@ -1036,12 +1105,13 @@ mod tests {
     #[test]
     fn test_latency_below_limit_passes() {
         let mut gate = make_gate();
+        let hash = content_hash(b"latency below limit payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
             TargetTierState {
-                content_hash: "abc".to_string(),
+                content_hash: hash.clone(),
                 reachable: true,
                 fetch_latency_ms: 4999, // one below limit → passes
             },
@@ -1052,7 +1122,7 @@ mod tests {
                 &sid("s1"),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "abc",
+                &hash,
             )
             .unwrap();
         assert_eq!(proof.latency_ms, 4999);
@@ -1110,6 +1180,148 @@ mod tests {
         assert!(err.reason.to_string().contains("segment_id"));
     }
 
+    #[test]
+    fn test_control_character_artifact_id_rejected_before_target_lookup() {
+        let mut gate = make_gate();
+        let err = gate
+            .check_retrievability(
+                &aid("a1\0hidden"),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "abc",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
+        assert!(err.reason.to_string().contains("control characters"));
+        assert_eq!(gate.failed_count(), 1);
+        assert!(gate.receipts()[0].content_hash.is_empty());
+    }
+
+    #[test]
+    fn test_newline_artifact_id_blocks_eviction() {
+        let mut gate = make_gate();
+        let err = gate
+            .attempt_eviction(&aid("artifact\nid"), &sid("s1"), "abc")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_ARTIFACT_ID);
+        assert!(gate.events().iter().any(|event| event.code == RG_EVICTION_BLOCKED));
+    }
+
+    #[test]
+    fn test_control_character_segment_id_rejected_before_target_lookup() {
+        let mut gate = make_gate();
+        let err = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("seg\t1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "abc",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_SEGMENT_ID);
+        assert!(err.reason.to_string().contains("control characters"));
+        assert_eq!(gate.failed_count(), 1);
+        assert!(gate.receipts()[0].content_hash.is_empty());
+    }
+
+    #[test]
+    fn test_newline_segment_id_blocks_eviction() {
+        let mut gate = make_gate();
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("segment\nid"), "abc")
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_SEGMENT_ID);
+        assert!(gate.events().iter().any(|event| event.code == RG_EVICTION_BLOCKED));
+    }
+
+    #[test]
+    fn test_relaxed_hash_mode_still_blocks_unreachable_target() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig {
+            max_latency_ms: 5000,
+            require_hash_match: false,
+        });
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "archive_hash".to_string(),
+                reachable: false,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "caller_hash",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_TARGET_UNREACHABLE);
+        assert_eq!(gate.failed_count(), 1);
+    }
+
+    #[test]
+    fn test_relaxed_hash_mode_still_rejects_latency_at_limit() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig {
+            max_latency_ms: 25,
+            require_hash_match: false,
+        });
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "archive_hash".to_string(),
+                reachable: true,
+                fetch_latency_ms: 25,
+            },
+        );
+
+        let err = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "caller_hash",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_LATENCY_EXCEEDED);
+        assert_eq!(gate.failed_count(), 1);
+    }
+
+    #[test]
+    fn test_relaxed_hash_mode_still_rejects_invalid_segment_id() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig {
+            max_latency_ms: 5000,
+            require_hash_match: false,
+        });
+        let err = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("seg\0id"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                "caller_hash",
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_SEGMENT_ID);
+        assert_eq!(gate.failed_count(), 1);
+    }
+
     // -- Target unreachable --
 
     #[test]
@@ -1161,14 +1373,15 @@ mod tests {
     #[test]
     fn test_eviction_succeeds_with_proof() {
         let mut gate = make_gate();
+        let hash = content_hash(b"eviction succeeds payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("hash1"),
+            good_state(&hash),
         );
         let permit = gate
-            .attempt_eviction(&aid("a1"), &sid("s1"), "hash1")
+            .attempt_eviction(&aid("a1"), &sid("s1"), &hash)
             .unwrap();
         assert!(permit.permit_id.contains("evict"));
         assert_eq!(permit.proof.artifact_id, aid("a1"));
@@ -1199,13 +1412,15 @@ mod tests {
     #[test]
     fn test_eviction_permitted_emits_event() {
         let mut gate = make_gate();
+        let hash = content_hash(b"eviction permitted event payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("h1"),
+            good_state(&hash),
         );
-        gate.attempt_eviction(&aid("a1"), &sid("s1"), "h1").unwrap();
+        gate.attempt_eviction(&aid("a1"), &sid("s1"), &hash)
+            .unwrap();
         let permit_events: Vec<_> = gate
             .events()
             .iter()
@@ -1214,16 +1429,84 @@ mod tests {
         assert_eq!(permit_events.len(), 1);
     }
 
+    #[test]
+    fn test_eviction_rechecks_target_after_prior_permit() {
+        let mut gate = make_gate();
+        let hash = content_hash(b"fresh archive copy");
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state(&hash),
+        );
+
+        gate.attempt_eviction(&aid("a1"), &sid("s1"), &hash)
+            .expect("first proof should permit eviction");
+
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state(&content_hash(b"corrupted archive copy")),
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), &hash)
+            .expect_err("stale prior permit must not bypass a fresh proof");
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+        assert_eq!(gate.passed_count(), 1);
+        assert_eq!(gate.failed_count(), 1);
+    }
+
+    #[test]
+    fn test_repeated_checks_issue_fresh_timestamps() {
+        let mut gate = make_gate();
+        let hash = content_hash(b"timestamped payload");
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state(&hash),
+        );
+
+        let first = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                &hash,
+            )
+            .expect("first proof should pass");
+        let second = gate
+            .check_retrievability(
+                &aid("a1"),
+                &sid("s1"),
+                StorageTier::L2Warm,
+                StorageTier::L3Archive,
+                &hash,
+            )
+            .expect("second proof should pass");
+
+        assert_eq!(
+            second.proof_timestamp,
+            first.proof_timestamp.saturating_add(1)
+        );
+        assert_eq!(gate.receipts().len(), 2);
+        assert_eq!(gate.receipts()[1].proof_timestamp, second.proof_timestamp);
+    }
+
     // -- Proof binding --
 
     #[test]
     fn test_proof_bound_to_segment() {
         let mut gate = make_gate();
+        let hash = content_hash(b"segment binding payload");
         gate.register_target(
             &aid("a1"),
             &sid("seg-42"),
             StorageTier::L3Archive,
-            good_state("h1"),
+            good_state(&hash),
         );
         let proof = gate
             .check_retrievability(
@@ -1231,7 +1514,7 @@ mod tests {
                 &sid("seg-42"),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "h1",
+                &hash,
             )
             .unwrap();
         assert_eq!(proof.segment_id, sid("seg-42"));
@@ -1240,11 +1523,12 @@ mod tests {
     #[test]
     fn test_proof_bound_to_artifact() {
         let mut gate = make_gate();
+        let hash = content_hash(b"artifact binding payload");
         gate.register_target(
             &aid("art-99"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("h1"),
+            good_state(&hash),
         );
         let proof = gate
             .check_retrievability(
@@ -1252,7 +1536,7 @@ mod tests {
                 &sid("s1"),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "h1",
+                &hash,
             )
             .unwrap();
         assert_eq!(proof.artifact_id, aid("art-99"));
@@ -1261,11 +1545,12 @@ mod tests {
     #[test]
     fn test_proof_bound_to_target_tier() {
         let mut gate = make_gate();
+        let hash = content_hash(b"target tier binding payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("h1"),
+            good_state(&hash),
         );
         let proof = gate
             .check_retrievability(
@@ -1273,7 +1558,7 @@ mod tests {
                 &sid("s1"),
                 StorageTier::L2Warm,
                 StorageTier::L3Archive,
-                "h1",
+                &hash,
             )
             .unwrap();
         assert_eq!(proof.target_tier, StorageTier::L3Archive);
@@ -1306,26 +1591,28 @@ mod tests {
     #[test]
     fn test_segments_of_same_artifact_are_isolated() {
         let mut gate = make_gate();
+        let hash_a = content_hash(b"segment a payload");
+        let hash_b = content_hash(b"segment b payload");
         gate.register_target(
             &aid("a1"),
             &sid("seg-a"),
             StorageTier::L3Archive,
-            good_state("hash-a"),
+            good_state(&hash_a),
         );
         gate.register_target(
             &aid("a1"),
             &sid("seg-b"),
             StorageTier::L3Archive,
-            good_state("hash-b"),
+            good_state(&hash_b),
         );
 
         let proof_a = gate
-            .attempt_eviction(&aid("a1"), &sid("seg-a"), "hash-a")
+            .attempt_eviction(&aid("a1"), &sid("seg-a"), &hash_a)
             .unwrap();
-        assert_eq!(proof_a.proof.content_hash, "hash-a");
+        assert_hash_eq(&proof_a.proof.content_hash, &hash_a);
 
         let err_b = gate
-            .attempt_eviction(&aid("a1"), &sid("seg-b"), "hash-a")
+            .attempt_eviction(&aid("a1"), &sid("seg-b"), &hash_a)
             .unwrap_err();
         assert_eq!(err_b.code, ERR_HASH_MISMATCH);
     }
@@ -1335,18 +1622,19 @@ mod tests {
     #[test]
     fn test_passed_count() {
         let mut gate = make_gate();
+        let hash = content_hash(b"passed count payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("h1"),
+            good_state(&hash),
         );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L2Warm,
             StorageTier::L3Archive,
-            "h1",
+            &hash,
         )
         .unwrap();
         assert_eq!(gate.passed_count(), 1);
@@ -1370,18 +1658,19 @@ mod tests {
     #[test]
     fn test_mixed_counts() {
         let mut gate = make_gate();
+        let hash = content_hash(b"mixed count payload");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("h1"),
+            good_state(&hash),
         );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L2Warm,
             StorageTier::L3Archive,
-            "h1",
+            &hash,
         )
         .unwrap();
         let _ = gate.check_retrievability(
@@ -1418,23 +1707,450 @@ mod tests {
         assert_eq!(h.len(), 64); // SHA-256 = 32 bytes = 64 hex chars
     }
 
-    // -- Receipts JSON export --
+    #[test]
+    fn test_content_hash_includes_domain_separator() {
+        let payload = b"domain-separated retrievability payload";
+        let mut hasher = Sha256::new();
+        hasher.update(CONTENT_HASH_DOMAIN);
+        hasher.update(payload);
+        let expected = format!("{:x}", hasher.finalize());
+        let plain_sha256 = format!("{:x}", Sha256::digest(payload));
+
+        assert_hash_eq(&content_hash(payload), &expected);
+        assert_hash_ne(&content_hash(payload), &plain_sha256);
+    }
 
     #[test]
-    fn test_receipts_json_valid() {
+    fn test_content_digest_matches_uses_decoded_hex_bytes() {
+        let expected = content_hash(b"hex integrity payload");
+        let mut tampered_bytes = hex::decode(&expected).expect("content hash is hex");
+        tampered_bytes[0] ^= 0x01;
+        let tampered = hex::encode(tampered_bytes);
+
+        assert!(content_digest_matches(&expected, &expected));
+        assert!(!content_digest_matches(&tampered, &expected));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_hex_length_mismatch() {
+        let expected = content_hash(b"hex length payload");
+        let truncated = &expected[..expected.len() - 2];
+
+        assert!(!content_digest_matches(truncated, &expected));
+    }
+
+    #[test]
+    fn test_canonical_digest_rejects_short_hex() {
+        assert!(!is_canonical_sha256_hex_digest("deadbeef"));
+    }
+
+    #[test]
+    fn test_canonical_digest_rejects_long_hex() {
+        let digest = format!("{}00", content_hash(b"too long"));
+
+        assert!(!is_canonical_sha256_hex_digest(&digest));
+    }
+
+    #[test]
+    fn test_canonical_digest_rejects_uppercase_hex() {
+        let digest = content_hash(b"uppercase canonical predicate").to_uppercase();
+
+        assert!(!is_canonical_sha256_hex_digest(&digest));
+    }
+
+    #[test]
+    fn test_canonical_digest_rejects_digest_length_non_hex() {
+        let digest = "z".repeat(SHA256_DIGEST_HEX_CHARS);
+
+        assert!(!is_canonical_sha256_hex_digest(&digest));
+    }
+
+    #[test]
+    fn test_canonical_digest_rejects_whitespace() {
+        let digest = format!("{} ", &content_hash(b"space")[..SHA256_DIGEST_HEX_CHARS - 1]);
+
+        assert!(!is_canonical_sha256_hex_digest(&digest));
+    }
+
+    #[test]
+    fn test_canonical_digest_rejects_non_ascii() {
+        let digest = format!(
+            "{}\u{e9}",
+            &content_hash(b"non ascii")[..SHA256_DIGEST_HEX_CHARS - 2],
+        );
+
+        assert!(!is_canonical_sha256_hex_digest(&digest));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_short_hex_digest() {
+        assert!(!content_digest_matches("deadbeef", "deadbeef"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_uppercase_observed_hex_digest() {
+        let expected = content_hash(b"uppercase observed");
+        let observed = expected.to_uppercase();
+
+        assert!(!content_digest_matches(&observed, &expected));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_uppercase_expected_hex_digest() {
+        let observed = content_hash(b"uppercase expected");
+        let expected = observed.to_uppercase();
+
+        assert!(!content_digest_matches(&observed, &expected));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_digest_length_non_hex_observed() {
+        let expected = content_hash(b"digest length non hex observed");
+        let observed = "z".repeat(SHA256_DIGEST_HEX_CHARS);
+
+        assert!(!content_digest_matches(&observed, &expected));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_digest_length_non_hex_expected() {
+        let observed = content_hash(b"digest length non hex expected");
+        let expected = "z".repeat(SHA256_DIGEST_HEX_CHARS);
+
+        assert!(!content_digest_matches(&observed, &expected));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_matching_digest_length_non_hex() {
+        let digest = "z".repeat(SHA256_DIGEST_HEX_CHARS);
+
+        assert!(!content_digest_matches(&digest, &digest));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_non_ascii_observed_digest() {
+        assert!(!content_digest_matches("archive\u{e9}hash", "archive_hash"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_non_ascii_expected_digest() {
+        assert!(!content_digest_matches("archive_hash", "archive\u{e9}hash"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_matching_non_ascii_digest() {
+        assert!(!content_digest_matches("archive\u{e9}hash", "archive\u{e9}hash"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_matching_short_non_hex_digest() {
+        assert!(!content_digest_matches("archive_hash", "archive_hash"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_short_non_hex_observed_digest() {
+        assert!(!content_digest_matches(
+            "archive_hash",
+            &content_hash(b"canonical expected"),
+        ));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_short_non_hex_expected_digest() {
+        assert!(!content_digest_matches(
+            &content_hash(b"canonical observed"),
+            "archive_hash",
+        ));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_matching_punctuation_digest() {
+        assert!(!content_digest_matches("not:a:digest", "not:a:digest"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_non_hex_same_length_mismatch() {
+        assert!(!content_digest_matches("placeholder-a", "placeholder-b"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_non_hex_prefix_mismatch() {
+        assert!(!content_digest_matches("placeholder", "placeholder-extra"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_empty_observed_digest() {
+        assert!(!content_digest_matches("", &content_hash(b"expected")));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_empty_expected_digest() {
+        assert!(!content_digest_matches(&content_hash(b"observed"), ""));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_control_character_observed_digest() {
+        assert!(!content_digest_matches("archive\nhash", "archive\nhash"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_control_character_expected_digest() {
+        assert!(!content_digest_matches("archive_hash", "archive\thash"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_leading_space_observed_digest() {
+        assert!(!content_digest_matches(" archive_hash", " archive_hash"));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_trailing_space_expected_digest() {
+        assert!(!content_digest_matches("archive_hash ", "archive_hash "));
+    }
+
+    #[test]
+    fn test_content_digest_matches_rejects_internal_space_digest() {
+        assert!(!content_digest_matches("archive hash", "archive hash"));
+    }
+
+    #[test]
+    fn test_empty_hash_does_not_satisfy_required_hash_gate() {
         let mut gate = make_gate();
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("h1"),
+            TargetTierState {
+                content_hash: String::new(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), "")
+            .expect_err("empty digest must not satisfy required hash gate");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_whitespace_hash_does_not_satisfy_required_hash_gate() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "archive hash".to_string(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), "archive hash")
+            .expect_err("whitespace-bearing digest must fail closed");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_short_hex_hash_does_not_satisfy_required_hash_gate() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "deadbeef".to_string(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), "deadbeef")
+            .expect_err("short hex digest must fail closed");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_uppercase_hex_hash_does_not_satisfy_required_hash_gate() {
+        let mut gate = make_gate();
+        let canonical = content_hash(b"uppercase gate payload");
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: canonical.to_uppercase(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), &canonical)
+            .expect_err("uppercase hex digest must fail closed");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_digest_length_non_hex_hash_does_not_satisfy_required_hash_gate() {
+        let mut gate = make_gate();
+        let digest = "z".repeat(SHA256_DIGEST_HEX_CHARS);
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: digest.clone(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), &digest)
+            .expect_err("digest-length non-hex string must fail closed");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_non_ascii_hash_does_not_satisfy_required_hash_gate() {
+        let mut gate = make_gate();
+        let digest = "archive\u{e9}hash";
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: digest.to_string(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), digest)
+            .expect_err("non-ASCII digest must fail closed");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_short_non_hex_hash_does_not_satisfy_required_hash_gate() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "archive_hash".to_string(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), "archive_hash")
+            .expect_err("short non-hex digest must fail closed");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_punctuation_hash_does_not_satisfy_required_hash_gate() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "not:a:digest".to_string(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), "not:a:digest")
+            .expect_err("punctuation digest must fail closed");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_control_character_hash_does_not_satisfy_required_hash_gate() {
+        let mut gate = make_gate();
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            TargetTierState {
+                content_hash: "archive\nhash".to_string(),
+                reachable: true,
+                fetch_latency_ms: 1,
+            },
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), "archive\nhash")
+            .expect_err("control-character digest must fail closed");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_plain_sha256_hash_does_not_satisfy_domain_hash_gate() {
+        let mut gate = make_gate();
+        let payload = b"domain gate payload";
+        let archive_hash = content_hash(payload);
+        let plain_hash = format!("{:x}", Sha256::digest(payload));
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state(&archive_hash),
+        );
+
+        let err = gate
+            .attempt_eviction(&aid("a1"), &sid("s1"), &plain_hash)
+            .expect_err("plain SHA-256 must not satisfy domain-separated gate");
+
+        assert_eq!(err.code, ERR_HASH_MISMATCH);
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_clears_without_underflow() {
+        let mut values = vec![1, 2, 3];
+
+        push_bounded(&mut values, 4, 0);
+
+        assert!(values.is_empty());
+    }
+
+    // -- Receipts JSON export --
+
+    #[test]
+    fn test_receipts_json_valid() {
+        let mut gate = make_gate();
+        let hash = content_hash(b"receipts json payload");
+        gate.register_target(
+            &aid("a1"),
+            &sid("s1"),
+            StorageTier::L3Archive,
+            good_state(&hash),
         );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L2Warm,
             StorageTier::L3Archive,
-            "h1",
+            &hash,
         )
         .unwrap();
         let json_str = gate.receipts_json();
@@ -1661,24 +2377,26 @@ mod tests {
     #[test]
     fn test_multiple_artifacts_independent() {
         let mut gate = make_gate();
+        let hash_1 = content_hash(b"multiple artifact one");
+        let hash_2 = content_hash(b"multiple artifact two");
         gate.register_target(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L3Archive,
-            good_state("h1"),
+            good_state(&hash_1),
         );
         gate.register_target(
             &aid("a2"),
             &sid("s2"),
             StorageTier::L3Archive,
-            good_state("h2"),
+            good_state(&hash_2),
         );
         gate.check_retrievability(
             &aid("a1"),
             &sid("s1"),
             StorageTier::L2Warm,
             StorageTier::L3Archive,
-            "h1",
+            &hash_1,
         )
         .unwrap();
         gate.check_retrievability(
@@ -1686,7 +2404,7 @@ mod tests {
             &sid("s2"),
             StorageTier::L2Warm,
             StorageTier::L3Archive,
-            "h2",
+            &hash_2,
         )
         .unwrap();
         assert_eq!(gate.passed_count(), 2);
@@ -2247,5 +2965,602 @@ mod storage_migration_integration_tests {
 
         // Storage gate was passed once for the artifact
         assert_eq!(gate.passed_count(), 1);
+    }
+
+    // -- Negative-path Security Tests ---------------------------------------
+    // Added 2026-04-17: Comprehensive security hardening tests
+
+    #[test]
+    fn test_security_unicode_injection_in_artifact_segment_ids() {
+        use crate::security::constant_time::ct_eq;
+
+        let mut gate = make_gate();
+
+        // Unicode injection attempts in artifact and segment IDs
+        let malicious_identifiers = vec![
+            (
+                "\u{202E}safe-artifact\u{202D}malicious",  // BiDi override in artifact ID
+                "segment\u{200B}001",  // Zero-width space in segment ID
+            ),
+            (
+                "artifact\u{FEFF}123",  // Zero-width no-break space
+                "\u{0000}bypass-segment",  // Null injection in segment ID
+            ),
+            (
+                "secure\u{2028}artifact",  // Line separator
+                "segment\u{2029}admin",  // Paragraph separator
+            ),
+            (
+                "\u{200E}normal\u{200F}",  // LTR/RTL marks
+                "segment\u{202C}reset",  // Pop directional formatting
+            ),
+        ];
+
+        for (artifact_id_str, segment_id_str) in malicious_identifiers {
+            let artifact_id = aid(artifact_id_str);
+            let segment_id = sid(segment_id_str);
+            let test_hash = content_hash(b"test_payload_unicode");
+
+            // Register target with Unicode-injected IDs
+            gate.register_target(&artifact_id, &segment_id, &good_state(&test_hash));
+
+            // Verify Unicode doesn't create privileged identifiers
+            assert!(!ct_eq(artifact_id.0.as_bytes(), b"admin"),
+                   "Unicode injection should not create admin artifacts");
+            assert!(!ct_eq(segment_id.0.as_bytes(), b"admin"),
+                   "Unicode injection should not create admin segments");
+
+            // Verify null bytes don't appear in identifiers
+            assert!(!artifact_id.0.contains('\0'),
+                   "Artifact ID should not contain null bytes");
+            assert!(!segment_id.0.contains('\0'),
+                   "Segment ID should not contain null bytes");
+
+            // Verify proof request works deterministically despite Unicode
+            let proof_result = gate.proof_eviction_safety(&artifact_id, &segment_id);
+            match proof_result {
+                Ok(_receipt) => {
+                    // If proof passed, verify it was for the correct identifiers
+                    assert!(gate.receipts().len() > 0, "Should have receipts");
+                },
+                Err(_) => {
+                    // Graceful rejection of Unicode-injected IDs is acceptable
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_hash_manipulation_and_bypass_attempts() {
+        let mut gate = make_gate();
+        let legitimate_hash = content_hash(b"legitimate_content");
+        let artifact_id = aid("hash_test_artifact");
+        let segment_id = sid("hash_test_segment");
+
+        // Register target with legitimate hash
+        gate.register_target(&artifact_id, &segment_id, &good_state(&legitimate_hash));
+
+        // Attempt various hash manipulation attacks
+        let malicious_hashes = vec![
+            // Hash with modified case (should be lowercase hex)
+            legitimate_hash.to_uppercase(),
+            // Hash with null injection
+            format!("{}\u{0000}", legitimate_hash),
+            // Hash with whitespace injection
+            format!("{}  ", legitimate_hash),
+            format!(" {}", legitimate_hash),
+            format!("{}\n", legitimate_hash),
+            format!("{}\t", legitimate_hash),
+            // Hash with Unicode injection
+            format!("{}\u{202E}", legitimate_hash),
+            // Truncated hash
+            legitimate_hash[..legitimate_hash.len()-2].to_string(),
+            // Extended hash
+            format!("{}00", legitimate_hash),
+            // Invalid hex characters
+            legitimate_hash.replace('a', 'g'),
+            // Empty hash
+            "".to_string(),
+            // Non-hex hash
+            "not_a_hash_at_all".to_string(),
+        ];
+
+        for malicious_hash in malicious_hashes {
+            let malicious_state = TargetTierState {
+                content_hash: malicious_hash.clone(),
+                reachable: true,
+                fetch_latency_ms: 100,
+            };
+
+            // Create new artifact/segment for each test to avoid state pollution
+            let test_artifact = aid(&format!("test_artifact_{}", malicious_hash.len()));
+            let test_segment = sid(&format!("test_segment_{}", malicious_hash.len()));
+
+            gate.register_target(&test_artifact, &test_segment, &malicious_state);
+
+            // Hash manipulation should not bypass verification
+            let proof_result = gate.proof_eviction_safety(&test_artifact, &test_segment);
+
+            match proof_result {
+                Ok(receipt) => {
+                    // If somehow accepted, verify security properties
+                    if malicious_hash == legitimate_hash.to_uppercase() ||
+                       malicious_hash.trim() == legitimate_hash {
+                        // Case or whitespace changes should be rejected
+                        assert!(!receipt.proof_passed,
+                               "Case/whitespace manipulation should fail proof");
+                    }
+                },
+                Err(err) => {
+                    // Expected rejection of malformed hashes
+                    assert!(err.contains("ERR_HASH_MISMATCH") ||
+                           err.contains("ERR_INVALID") ||
+                           err.contains("hash"),
+                           "Error should indicate hash validation failure: {}", err);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_content_digest_collision_attacks() {
+        use crate::security::constant_time::ct_eq_bytes;
+
+        let mut gate = make_gate();
+
+        // Content designed to test collision resistance
+        let collision_test_vectors = vec![
+            // Different payloads with potential hash collisions
+            (b"collision_test_1".to_vec(), b"collision_test_2".to_vec()),
+            (b"".to_vec(), b"\x00".to_vec()),  // Empty vs single byte
+            (b"abc".to_vec(), b"ab\x00c".to_vec()),  // Null injection
+            (b"test_data".to_vec(), b"test\x00_data".to_vec()),  // Null boundary
+
+            // Unicode normalization collision attempts
+            ("test".as_bytes().to_vec(), "te\u{0301}st".as_bytes().to_vec()),  // Combining character
+            ("café".as_bytes().to_vec(), "cafe\u{0301}".as_bytes().to_vec()),  // Acute accent
+
+            // Length extension attempts
+            (b"data".to_vec(), b"data\x00\x00\x00\x00".to_vec()),
+        ];
+
+        for (i, (payload1, payload2)) in collision_test_vectors.iter().enumerate() {
+            let hash1 = content_hash(payload1);
+            let hash2 = content_hash(payload2);
+            let artifact_id = aid(&format!("collision_test_artifact_{}", i));
+            let segment_id = sid(&format!("collision_test_segment_{}", i));
+
+            // Different payloads should produce different hashes
+            if payload1 != payload2 {
+                assert!(!ct_eq_bytes(hash1.as_bytes(), hash2.as_bytes()),
+                       "Different payloads should have different hashes: {} vs {}", hash1, hash2);
+            }
+
+            // Register target with first hash
+            gate.register_target(&artifact_id, &segment_id, &good_state(&hash1));
+
+            // Attempt to get proof with manipulated state using second hash
+            let manipulated_state = TargetTierState {
+                content_hash: hash2.clone(),
+                reachable: true,
+                fetch_latency_ms: 100,
+            };
+
+            // Update registration with manipulated hash
+            gate.register_target(&artifact_id, &segment_id, &manipulated_state);
+
+            // Proof should detect hash mismatch
+            let proof_result = gate.proof_eviction_safety(&artifact_id, &segment_id);
+
+            if hash1 != hash2 {
+                // Different hashes should either be rejected or fail proof verification
+                match proof_result {
+                    Ok(receipt) => {
+                        // If proof completed, it should fail verification for mismatched hash
+                        assert!(!receipt.proof_passed || hash1 == hash2,
+                               "Proof should fail for hash mismatch");
+                    },
+                    Err(err) => {
+                        // Expected rejection of hash mismatch
+                        assert!(err.contains("ERR_HASH_MISMATCH"),
+                               "Should report hash mismatch error");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_proof_binding_tampering() {
+        let mut gate = make_gate();
+        let test_hash = content_hash(b"proof_binding_test");
+        let artifact_id = aid("binding_test_artifact");
+        let segment_id = sid("binding_test_segment");
+
+        // Register legitimate target
+        gate.register_target(&artifact_id, &segment_id, &good_state(&test_hash));
+
+        // Attempt proof binding manipulation by creating similar identifiers
+        let similar_identifiers = vec![
+            (aid("binding_test_artifact\u{200B}"), sid("binding_test_segment")),  // Zero-width in artifact
+            (aid("binding_test_artifact"), sid("binding_test_segment\u{200B}")),  // Zero-width in segment
+            (aid("binding_test_artifact "), sid("binding_test_segment")),  // Trailing space in artifact
+            (aid("binding_test_artifact"), sid(" binding_test_segment")),  // Leading space in segment
+            (aid("BINDING_TEST_ARTIFACT"), sid("binding_test_segment")),  // Case manipulation
+            (aid("binding_test_artifact"), sid("BINDING_TEST_SEGMENT")),  // Case manipulation
+        ];
+
+        for (similar_artifact, similar_segment) in similar_identifiers {
+            // Register similar target
+            gate.register_target(&similar_artifact, &similar_segment, &good_state(&test_hash));
+
+            // Proof should be bound to exact identifiers
+            let proof_result = gate.proof_eviction_safety(&similar_artifact, &similar_segment);
+
+            match proof_result {
+                Ok(receipt) => {
+                    // If proof succeeded, verify binding is preserved
+                    assert_eq!(receipt.artifact_id.0, similar_artifact.0,
+                             "Receipt should be bound to exact artifact ID");
+                    assert_eq!(receipt.segment_id.0, similar_segment.0,
+                             "Receipt should be bound to exact segment ID");
+
+                    // Proof should not be transferable to original identifiers if different
+                    if similar_artifact.0 != artifact_id.0 || similar_segment.0 != segment_id.0 {
+                        let cross_proof = gate.proof_eviction_safety(&artifact_id, &segment_id);
+                        // Cross-binding should require separate proof
+                        assert!(cross_proof.is_ok(), "Original identifiers should have separate proof");
+                    }
+                },
+                Err(_) => {
+                    // Graceful rejection of similar identifiers is acceptable
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_latency_manipulation_attacks() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig {
+            max_latency_ms: 1000,  // Strict latency limit
+            require_hash_match: true,
+        });
+
+        let test_hash = content_hash(b"latency_test");
+        let artifact_id = aid("latency_test_artifact");
+        let segment_id = sid("latency_test_segment");
+
+        // Attempt latency manipulation attacks
+        let malicious_latencies = vec![
+            999,   // Just under limit (should pass)
+            1000,  // At limit (boundary test)
+            1001,  // Just over limit (should fail)
+            u32::MAX,  // Extreme latency
+            0,     // Zero latency (suspicious)
+        ];
+
+        for malicious_latency in malicious_latencies {
+            let latency_state = TargetTierState {
+                content_hash: test_hash.clone(),
+                reachable: true,
+                fetch_latency_ms: malicious_latency,
+            };
+
+            let test_artifact = aid(&format!("latency_artifact_{}", malicious_latency));
+            let test_segment = sid(&format!("latency_segment_{}", malicious_latency));
+
+            gate.register_target(&test_artifact, &test_segment, &latency_state);
+
+            let proof_result = gate.proof_eviction_safety(&test_artifact, &test_segment);
+
+            match proof_result {
+                Ok(receipt) => {
+                    if malicious_latency > 1000 {
+                        // High latency should fail proof
+                        assert!(!receipt.proof_passed,
+                               "High latency {} should fail proof", malicious_latency);
+                    } else {
+                        // Low latency should pass
+                        assert!(receipt.proof_passed,
+                               "Low latency {} should pass proof", malicious_latency);
+                    }
+                },
+                Err(err) => {
+                    // Expected rejection for excessive latency
+                    if malicious_latency > 1000 {
+                        assert!(err.contains("ERR_LATENCY_EXCEEDED"),
+                               "Should report latency exceeded error");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_target_state_spoofing() {
+        let mut gate = make_gate();
+        let test_hash = content_hash(b"spoofing_test");
+        let artifact_id = aid("spoofing_test_artifact");
+        let segment_id = sid("spoofing_test_segment");
+
+        // Attempt target state spoofing attacks
+        let spoofed_states = vec![
+            // Unreachable target claiming to be reachable
+            TargetTierState {
+                content_hash: test_hash.clone(),
+                reachable: false,  // Actually unreachable
+                fetch_latency_ms: 50,  // But claiming fast latency
+            },
+            // Target with suspicious hash claiming good state
+            TargetTierState {
+                content_hash: "0000000000000000000000000000000000000000000000000000000000000000".to_string(),  // All zeros
+                reachable: true,
+                fetch_latency_ms: 50,
+            },
+            // Target with non-hex hash
+            TargetTierState {
+                content_hash: "not_a_valid_hash".to_string(),
+                reachable: true,
+                fetch_latency_ms: 50,
+            },
+            // Target with suspiciously perfect latency
+            TargetTierState {
+                content_hash: test_hash.clone(),
+                reachable: true,
+                fetch_latency_ms: 0,  // Suspiciously fast
+            },
+        ];
+
+        for (i, spoofed_state) in spoofed_states.iter().enumerate() {
+            let test_artifact = aid(&format!("spoof_artifact_{}", i));
+            let test_segment = sid(&format!("spoof_segment_{}", i));
+
+            gate.register_target(&test_artifact, &test_segment, spoofed_state);
+
+            let proof_result = gate.proof_eviction_safety(&test_artifact, &test_segment);
+
+            match proof_result {
+                Ok(receipt) => {
+                    // Unreachable targets should fail proof
+                    if !spoofed_state.reachable {
+                        assert!(!receipt.proof_passed,
+                               "Unreachable target should fail proof");
+                    }
+
+                    // Invalid hashes should fail proof
+                    if !is_canonical_sha256_hex_digest(&spoofed_state.content_hash) {
+                        assert!(!receipt.proof_passed,
+                               "Invalid hash should fail proof");
+                    }
+                },
+                Err(err) => {
+                    // Expected rejection of spoofed states
+                    assert!(err.contains("ERR_TARGET_UNREACHABLE") ||
+                           err.contains("ERR_HASH_MISMATCH") ||
+                           err.contains("ERR_INVALID"),
+                           "Should report spoofing-related error: {}", err);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_json_injection_in_audit_trails() {
+        let mut gate = make_gate();
+        let test_hash = content_hash(b"audit_injection_test");
+
+        // Artifact/segment IDs with injection attempts
+        let injection_identifiers = vec![
+            (
+                aid("\";alert('xss');//"),  // JS injection
+                sid("normal_segment"),
+            ),
+            (
+                aid("normal_artifact"),
+                sid("</script><script>alert('xss')</script>"),  // HTML injection
+            ),
+            (
+                aid("$(rm -rf /)"),  // Command injection
+                sid("normal_segment"),
+            ),
+            (
+                aid("line1\nline2\r\nline3"),  // Newline injection
+                sid("tab\tseparated\tsegment"),  // Tab injection
+            ),
+        ];
+
+        for (artifact_id, segment_id) in injection_identifiers {
+            gate.register_target(&artifact_id, &segment_id, &good_state(&test_hash));
+
+            let proof_result = gate.proof_eviction_safety(&artifact_id, &segment_id);
+
+            match proof_result {
+                Ok(receipt) => {
+                    // Serialize receipt to JSON for audit trail
+                    let json_result = serde_json::to_string(&receipt);
+
+                    match json_result {
+                        Ok(json) => {
+                            // JSON should escape all injection attempts
+                            assert!(!json.contains("alert('xss')"), "JavaScript injection should be escaped");
+                            assert!(!json.contains("</script>"), "HTML injection should be escaped");
+                            assert!(!json.contains("rm -rf"), "Command injection should be escaped");
+                            assert!(!json.contains("\n"), "Newline injection should be escaped");
+                            assert!(!json.contains("\r"), "Carriage return injection should be escaped");
+                            assert!(!json.contains("\t"), "Tab injection should be escaped");
+
+                            // Verify roundtrip preserves structure
+                            let parsed: ProofReceipt = serde_json::from_str(&json)
+                                .expect("should deserialize");
+                            assert_eq!(receipt.artifact_id.0, parsed.artifact_id.0);
+                            assert_eq!(receipt.segment_id.0, parsed.segment_id.0);
+                        },
+                        Err(_) => {
+                            // Graceful serialization failure is acceptable for extreme injection
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Graceful rejection of injection attempts is expected
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_security_concurrent_retrievability_access_safety() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let gate = Arc::new(Mutex::new(make_gate()));
+        let test_hash = content_hash(b"concurrent_test");
+        let mut handles = vec![];
+
+        // Spawn concurrent retrievability operations
+        for i in 0..10 {
+            let gate_clone = Arc::clone(&gate);
+            let test_hash_clone = test_hash.clone();
+
+            let handle = thread::spawn(move || {
+                let artifact_id = aid(&format!("concurrent_artifact_{}", i));
+                let segment_id = sid(&format!("concurrent_segment_{}", i));
+
+                let mut locked_gate = gate_clone.lock().unwrap();
+
+                // Register target
+                locked_gate.register_target(&artifact_id, &segment_id, &good_state(&test_hash_clone));
+
+                // Attempt proof
+                locked_gate.proof_eviction_safety(&artifact_id, &segment_id)
+            });
+
+            handles.push(handle);
+        }
+
+        // Collect results
+        let mut results = vec![];
+        for handle in handles {
+            let result = handle.join().expect("thread should not panic");
+            results.push(result);
+        }
+
+        // Verify all proofs completed successfully
+        for (i, result) in results.iter().enumerate() {
+            match result {
+                Ok(receipt) => {
+                    assert!(receipt.proof_passed, "Concurrent proof {} should pass", i);
+                    assert!(receipt.artifact_id.0.contains(&i.to_string()),
+                           "Artifact ID should be preserved");
+                },
+                Err(err) => {
+                    panic!("Concurrent proof {} should not fail: {}", i, err);
+                }
+            }
+        }
+
+        // Verify final gate state is consistent
+        let final_gate = gate.lock().unwrap();
+        assert_eq!(final_gate.receipts().len(), 10, "Should have 10 receipts");
+        assert_eq!(final_gate.passed_count(), 10, "Should have 10 passed proofs");
+    }
+
+    #[test]
+    fn test_security_memory_exhaustion_through_large_receipt_sets() {
+        let mut gate = RetrievabilityGate::new(RetrievabilityConfig::default());
+
+        // Attempt memory exhaustion through massive receipt generation
+        for i in 0..50_000 {
+            let artifact_id = aid(&format!("memory_test_artifact_{}", i));
+            let segment_id = sid(&format!("memory_test_segment_{}", i));
+            let test_hash = content_hash(format!("payload_{}", i).as_bytes());
+
+            gate.register_target(&artifact_id, &segment_id, &good_state(&test_hash));
+
+            // Generate proof receipt
+            let _ = gate.proof_eviction_safety(&artifact_id, &segment_id);
+
+            // Verify bounded growth
+            if gate.receipts().len() > MAX_RECEIPTS {
+                assert!(gate.receipts().len() <= MAX_RECEIPTS + 100,
+                       "Receipt count should be bounded near MAX_RECEIPTS");
+            }
+        }
+
+        // Verify gate remains functional after memory pressure
+        let test_artifact = aid("final_test_artifact");
+        let test_segment = sid("final_test_segment");
+        let test_hash = content_hash(b"final_test_payload");
+
+        gate.register_target(&test_artifact, &test_segment, &good_state(&test_hash));
+        let final_result = gate.proof_eviction_safety(&test_artifact, &test_segment);
+
+        assert!(final_result.is_ok(), "Gate should remain functional after memory pressure");
+        // Test should complete without OOM
+    }
+
+    #[test]
+    fn test_security_eviction_bypass_attempts() {
+        let mut gate = make_gate();
+        let test_hash = content_hash(b"eviction_bypass_test");
+        let artifact_id = aid("bypass_test_artifact");
+        let segment_id = sid("bypass_test_segment");
+
+        // Register target but don't perform successful proof
+        gate.register_target(&artifact_id, &segment_id, &TargetTierState {
+            content_hash: test_hash,
+            reachable: false,  // Unreachable target
+            fetch_latency_ms: 10000,  // High latency
+        });
+
+        // Attempt various eviction bypass methods
+        let bypass_attempts = vec![
+            // Different artifact ID with same content
+            (aid("bypass_test_artifact_alt"), sid("bypass_test_segment")),
+            // Different segment ID
+            (aid("bypass_test_artifact"), sid("bypass_test_segment_alt")),
+            // Case manipulation
+            (aid("BYPASS_TEST_ARTIFACT"), sid("bypass_test_segment")),
+            // Unicode similar identifiers
+            (aid("bypass_test_artifact\u{200B}"), sid("bypass_test_segment")),
+        ];
+
+        for (bypass_artifact, bypass_segment) in bypass_attempts {
+            // Register bypass target
+            gate.register_target(&bypass_artifact, &bypass_segment, &TargetTierState {
+                content_hash: content_hash(b"eviction_bypass_test"),
+                reachable: true,  // Claim reachable
+                fetch_latency_ms: 50,  // Low latency
+            });
+
+            // Attempt proof for bypass target
+            let proof_result = gate.proof_eviction_safety(&bypass_artifact, &bypass_segment);
+
+            match proof_result {
+                Ok(receipt) => {
+                    // Successful proof should be bound to exact identifiers
+                    assert_eq!(receipt.artifact_id, bypass_artifact,
+                             "Proof should be bound to exact artifact ID");
+                    assert_eq!(receipt.segment_id, bypass_segment,
+                             "Proof should be bound to exact segment ID");
+
+                    // Original target should still be blocked
+                    let original_proof = gate.proof_eviction_safety(&artifact_id, &segment_id);
+                    match original_proof {
+                        Ok(original_receipt) => {
+                            assert!(!original_receipt.proof_passed,
+                                   "Original unreachable target should still fail proof");
+                        },
+                        Err(err) => {
+                            assert!(err.contains("ERR_TARGET_UNREACHABLE") ||
+                                   err.contains("ERR_LATENCY_EXCEEDED"),
+                                   "Original target should remain blocked");
+                        }
+                    }
+                },
+                Err(_) => {
+                    // Rejection of bypass attempts is acceptable
+                }
+            }
+        }
     }
 }

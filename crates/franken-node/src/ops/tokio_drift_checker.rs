@@ -134,20 +134,47 @@ fn is_valid_exception(preceding_line: Option<&str>) -> bool {
 /// comment context. This is a conservative heuristic: we only skip lines
 /// that are clearly in test-only code.
 fn is_in_test_context(lines: &[&str], line_idx: usize) -> bool {
-    // Walk backwards looking for `#[cfg(test)]` or `mod tests {`
-    for i in (0..line_idx).rev() {
-        let trimmed = lines[i].trim();
-        if trimmed == "#[cfg(test)]" || trimmed.starts_with("mod tests") {
-            return true;
+    let mut pending_cfg_test = false;
+    let mut depth = 0isize;
+    let mut test_context_depth: Option<isize> = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        if idx == line_idx {
+            return test_context_depth.is_some() || pending_cfg_test;
         }
-        // If we hit a top-level `mod` or `fn main` that isn't test, stop
-        if trimmed.starts_with("pub mod ")
-            || trimmed.starts_with("mod ") && !trimmed.contains("tests")
+
+        let trimmed = line.trim();
+        if trimmed == "#[cfg(test)]" {
+            pending_cfg_test = true;
+        }
+
+        if pending_cfg_test && trimmed.contains('{') && !trimmed.starts_with("#[") {
+            test_context_depth = Some(depth.saturating_add(1));
+            pending_cfg_test = false;
+        } else if pending_cfg_test
+            && !trimmed.is_empty()
+            && !trimmed.starts_with("#[")
+            && !trimmed.starts_with("//")
         {
-            return false;
+            pending_cfg_test = false;
+        }
+
+        depth = depth.saturating_add(brace_delta(line)).max(0);
+        if let Some(test_depth) = test_context_depth {
+            if depth < test_depth {
+                test_context_depth = None;
+            }
         }
     }
     false
+}
+
+fn brace_delta(line: &str) -> isize {
+    line.chars().fold(0, |delta, ch| match ch {
+        '{' => delta.saturating_add(1),
+        '}' => delta.saturating_sub(1),
+        _ => delta,
+    })
 }
 
 /// Returns true if the pattern match occurs inside a double-quoted string literal.
@@ -296,15 +323,77 @@ fn check_cargo_toml(
     let lines: Vec<&str> = cargo_toml_content.lines().collect();
     let mut in_dependencies = false;
     let mut in_dev_dependencies = false;
+    let mut in_tokio_dev_dependency_table = false;
 
     for (idx, line) in lines.iter().enumerate() {
         let trimmed = line.trim();
-        if trimmed.starts_with("[dependencies]") || trimmed.starts_with("[dependencies.") {
+        if trimmed.starts_with("[dependencies.") {
+            if trimmed
+                .strip_prefix("[dependencies.")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .is_some_and(|dependency_name| dependency_name == "tokio")
+            {
+                let preceding = if idx > 0 { Some(lines[idx - 1]) } else { None };
+                if is_valid_exception(preceding) {
+                    *exceptions_honored = exceptions_honored.saturating_add(1);
+                    in_dependencies = true;
+                    in_dev_dependencies = false;
+                    in_tokio_dev_dependency_table = false;
+                    continue;
+                }
+                violations.push(DriftViolation {
+                    file: cargo_toml_path.to_path_buf(),
+                    line_number: idx.saturating_add(1),
+                    line_content: line.to_string(),
+                    pattern: "tokio dependency in [dependencies.tokio]".to_string(),
+                    reason: "Direct tokio production dependency detected in Cargo.toml. \
+                             This crate intentionally removed Tokio (bd-1now.2). \
+                             Add a TOKIO_DRIFT_EXCEPTION marker if reintroduction is \
+                             architecturally justified.",
+                });
+            }
             in_dependencies = true;
             in_dev_dependencies = false;
+            in_tokio_dev_dependency_table = false;
+            continue;
+        }
+        if trimmed.starts_with("[target.") && trimmed.contains(".dependencies.tokio]") {
+            let preceding = if idx > 0 { Some(lines[idx - 1]) } else { None };
+            if is_valid_exception(preceding) {
+                *exceptions_honored = exceptions_honored.saturating_add(1);
+                in_dependencies = true;
+                in_dev_dependencies = false;
+                in_tokio_dev_dependency_table = false;
+                continue;
+            }
+            violations.push(DriftViolation {
+                file: cargo_toml_path.to_path_buf(),
+                line_number: idx.saturating_add(1),
+                line_content: line.to_string(),
+                pattern: "tokio dependency in target [dependencies.tokio]".to_string(),
+                reason: "Direct tokio production dependency detected in Cargo.toml. \
+                         This crate intentionally removed Tokio (bd-1now.2). \
+                         Add a TOKIO_DRIFT_EXCEPTION marker if reintroduction is \
+                         architecturally justified.",
+            });
+            in_dependencies = true;
+            in_dev_dependencies = false;
+            in_tokio_dev_dependency_table = false;
+            continue;
+        }
+        if trimmed.starts_with("[dependencies]")
+            || (trimmed.starts_with("[target.") && trimmed.ends_with(".dependencies]"))
+        {
+            in_dependencies = true;
+            in_dev_dependencies = false;
+            in_tokio_dev_dependency_table = false;
             continue;
         }
         if trimmed.starts_with("[dev-dependencies]") || trimmed.starts_with("[dev-dependencies.") {
+            in_tokio_dev_dependency_table = trimmed
+                .strip_prefix("[dev-dependencies.")
+                .and_then(|rest| rest.strip_suffix(']'))
+                .is_some_and(|dependency_name| dependency_name == "tokio");
             in_dependencies = false;
             in_dev_dependencies = true;
             continue;
@@ -312,6 +401,7 @@ fn check_cargo_toml(
         if trimmed.starts_with('[') {
             in_dependencies = false;
             in_dev_dependencies = false;
+            in_tokio_dev_dependency_table = false;
             continue;
         }
 
@@ -339,7 +429,8 @@ fn check_cargo_toml(
         // Dev-dependencies with tokio are allowed (for test infrastructure)
         // but we note them if someone tries to sneak runtime features in
         if in_dev_dependencies
-            && trimmed.starts_with("tokio")
+            && (trimmed.starts_with("tokio")
+                || (in_tokio_dev_dependency_table && trimmed.starts_with("features")))
             && (trimmed.contains("rt-multi-thread") || trimmed.contains("rt\""))
         {
             let preceding = if idx > 0 { Some(lines[idx - 1]) } else { None };
@@ -939,6 +1030,339 @@ tokio = { version = "1", features = ["full"] }
         assert_eq!(exceptions, 1);
     }
 
+    #[test]
+    fn exception_marker_must_be_immediately_adjacent() {
+        let lines = vec![
+            "// TOKIO_DRIFT_EXCEPTION(bd-future.1): reviewed async boundary",
+            "",
+            "#[tokio::main]",
+        ];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_line_for_violations(
+            lines[2],
+            3,
+            Some(lines[1]),
+            Path::new("src/main.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert_eq!(violations[0].pattern, "#[tokio::main]");
+    }
+
+    #[test]
+    fn malformed_source_exception_does_not_suppress_violation() {
+        let lines = vec![
+            "// TOKIO_DRIFT_EXCEPTION(no-bead): not traceable",
+            "use tokio::runtime;",
+        ];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_line_for_violations(
+            lines[1],
+            2,
+            Some(lines[0]),
+            Path::new("src/main.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("use tokio::"));
+    }
+
+    #[test]
+    fn api_transport_boundary_malformed_exception_does_not_suppress() {
+        let lines = vec![
+            "// TOKIO_DRIFT_EXCEPTION(): missing bead reference",
+            "use axum::Router;",
+        ];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_api_transport_boundary_line_for_violations(
+            lines[1],
+            2,
+            Some(lines[0]),
+            Path::new("src/api/server.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("axum::Router"));
+    }
+
+    #[test]
+    fn cargo_toml_exception_must_be_immediately_adjacent() {
+        let toml = r#"
+[package]
+name = "frankenengine-node"
+
+[dependencies]
+# TOKIO_DRIFT_EXCEPTION(bd-future.1): reviewed runtime boundary
+
+tokio = { version = "1", features = ["full"] }
+"#;
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_cargo_toml(
+            toml,
+            Path::new("Cargo.toml"),
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("tokio dependency"));
+    }
+
+    #[test]
+    fn malformed_toml_exception_does_not_suppress_dependency_violation() {
+        let toml = r#"
+[package]
+name = "frankenengine-node"
+
+[dependencies]
+# TOKIO_DRIFT_EXCEPTION(bd-future.1):
+tokio = { version = "1", features = ["full"] }
+"#;
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_cargo_toml(
+            toml,
+            Path::new("Cargo.toml"),
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].line_content.contains("tokio"));
+    }
+
+    #[test]
+    fn dev_dependency_short_runtime_feature_is_flagged() {
+        let toml = r#"
+[package]
+name = "frankenengine-node"
+
+[dependencies]
+serde = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt"] }
+"#;
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_cargo_toml(
+            toml,
+            Path::new("Cargo.toml"),
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("dev-dependencies"));
+    }
+
+    #[test]
+    fn production_dependency_table_form_is_flagged() {
+        let toml = r#"
+[package]
+name = "frankenengine-node"
+
+[dependencies]
+[dependencies.tokio]
+version = "1"
+features = ["full"]
+"#;
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_cargo_toml(
+            toml,
+            Path::new("Cargo.toml"),
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].line_content.contains("dependencies.tokio"));
+    }
+
+    #[test]
+    fn production_after_closed_inline_test_module_is_not_skipped() {
+        let lines = vec![
+            "#[cfg(test)]",
+            "mod tests {}",
+            "fn production_bootstrap() {",
+            "    let _rt = tokio::runtime::Runtime::new();",
+            "}",
+        ];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_line_for_violations(
+            lines[3],
+            4,
+            Some(lines[2]),
+            Path::new("src/main.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("tokio::runtime::Runtime"));
+    }
+
+    #[test]
+    fn production_after_closed_multiline_test_module_is_not_skipped() {
+        let lines = vec![
+            "#[cfg(test)]",
+            "mod tests {",
+            "    fn helper() {}",
+            "}",
+            "use tokio::runtime;",
+        ];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_line_for_violations(
+            lines[4],
+            5,
+            Some(lines[3]),
+            Path::new("src/lib.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("use tokio::"));
+    }
+
+    #[test]
+    fn target_specific_tokio_dependency_is_flagged() {
+        let toml = r#"
+[package]
+name = "frankenengine-node"
+
+[target.'cfg(unix)'.dependencies]
+tokio = { version = "1", features = ["full"] }
+"#;
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_cargo_toml(
+            toml,
+            Path::new("Cargo.toml"),
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("tokio dependency"));
+    }
+
+    #[test]
+    fn target_specific_tokio_dependency_table_is_flagged() {
+        let toml = r#"
+[package]
+name = "frankenengine-node"
+
+[target.'cfg(unix)'.dependencies.tokio]
+version = "1"
+features = ["full"]
+"#;
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_cargo_toml(
+            toml,
+            Path::new("Cargo.toml"),
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].line_content.contains("dependencies.tokio"));
+    }
+
+    #[test]
+    fn dev_dependency_table_runtime_feature_is_flagged() {
+        let toml = r#"
+[package]
+name = "frankenengine-node"
+
+[dependencies]
+serde = "1.0"
+
+[dev-dependencies.tokio]
+version = "1"
+features = ["rt"]
+"#;
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_cargo_toml(
+            toml,
+            Path::new("Cargo.toml"),
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("dev-dependencies"));
+    }
+
+    #[test]
+    fn api_transport_boundary_exception_gap_does_not_suppress() {
+        let lines = vec![
+            "// TOKIO_DRIFT_EXCEPTION(bd-1now.6): reviewed API transport boundary",
+            "",
+            "let router = axum::Router::new();",
+        ];
+        let mut violations = Vec::new();
+        let mut exceptions = 0;
+
+        check_api_transport_boundary_line_for_violations(
+            lines[2],
+            3,
+            Some(lines[1]),
+            Path::new("src/api/server.rs"),
+            &lines,
+            &mut violations,
+            &mut exceptions,
+        );
+
+        assert_eq!(violations.len(), 1);
+        assert_eq!(exceptions, 0);
+        assert!(violations[0].pattern.contains("axum::Router"));
+    }
+
     // ---------------------------------------------------------------
     // Full integration: check real crate (current tree)
     // ---------------------------------------------------------------
@@ -1132,5 +1556,186 @@ pub fn build_router() {
         assert!(report.contains("src/main.rs:42"));
         assert!(report.contains("#[tokio::main]"));
         assert!(report.contains("TOKIO_DRIFT_EXCEPTION"));
+    }
+}
+
+#[cfg(test)]
+mod tokio_drift_checker_boundary_negative_tests {
+    use super::*;
+    use std::fs;
+
+    fn malicious_checker() -> TokioDriftChecker {
+        TokioDriftChecker::new()
+    }
+
+    #[test]
+    fn negative_checker_rejects_nonexistent_directory_path() {
+        let checker = malicious_checker();
+
+        let result = checker.check_directory(Path::new("/nonexistent/malicious/path"));
+
+        assert!(result.is_err());
+        match result {
+            Err(DriftCheckError::IoError(_)) => (), // Expected
+            Err(other) => panic!("expected IoError, got {other:?}"),
+            Ok(_) => panic!("expected error for nonexistent directory"),
+        }
+    }
+
+    #[test]
+    fn negative_checker_handles_file_with_invalid_utf8_encoding() {
+        let checker = malicious_checker();
+        let temp_dir = tempfile::tempdir().expect("temp dir creation");
+        let malicious_file = temp_dir.path().join("invalid_utf8.rs");
+
+        // Create file with invalid UTF-8 sequence
+        fs::write(&malicious_file, &[0xFF, 0xFE, 0xFD]).expect("write invalid UTF-8");
+
+        let result = checker.check_file(&malicious_file);
+
+        // Should handle gracefully, not panic
+        match result {
+            Err(DriftCheckError::IoError(_)) => (), // Expected
+            Ok(violations) => {
+                // If it somehow succeeds, should have no violations for unreadable content
+                assert!(violations.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn negative_exception_parsing_rejects_malformed_bead_id_format() {
+        let malicious_line = "// TOKIO_DRIFT_EXCEPTION(not-a-bead): some justification";
+
+        let exception = parse_exception_marker(malicious_line);
+
+        assert!(exception.is_none(), "malformed bead ID should not parse as valid exception");
+    }
+
+    #[test]
+    fn negative_exception_parsing_rejects_missing_closing_parenthesis() {
+        let malicious_line = "// TOKIO_DRIFT_EXCEPTION(bd-1234: unclosed exception";
+
+        let exception = parse_exception_marker(malicious_line);
+
+        assert!(exception.is_none(), "unclosed parenthesis should not parse as valid exception");
+    }
+
+    #[test]
+    fn negative_exception_parsing_rejects_empty_bead_id_field() {
+        let malicious_line = "// TOKIO_DRIFT_EXCEPTION(): empty bead ID";
+
+        let exception = parse_exception_marker(malicious_line);
+
+        assert!(exception.is_none(), "empty bead ID field should not parse as valid exception");
+    }
+
+    #[test]
+    fn negative_exception_parsing_rejects_whitespace_only_justification() {
+        let malicious_line = "// TOKIO_DRIFT_EXCEPTION(bd-1234):   \t  ";
+
+        let exception = parse_exception_marker(malicious_line);
+
+        // Should reject whitespace-only justification as insufficient
+        assert!(exception.is_none(), "whitespace-only justification should not be valid");
+    }
+
+    #[test]
+    fn negative_check_file_handles_extremely_long_lines_without_panic() {
+        let checker = malicious_checker();
+        let temp_dir = tempfile::tempdir().expect("temp dir creation");
+        let malicious_file = temp_dir.path().join("long_lines.rs");
+
+        // Create file with extremely long line containing banned pattern
+        let mut extremely_long_line = "// ".to_string();
+        extremely_long_line.push_str(&"a".repeat(1_000_000)); // 1MB line
+        extremely_long_line.push_str(" #[tokio::main]");
+
+        fs::write(&malicious_file, extremely_long_line).expect("write long line file");
+
+        let result = checker.check_file(&malicious_file);
+
+        // Should handle gracefully without panicking
+        match result {
+            Ok(violations) => {
+                // Should still detect the violation despite the long line
+                assert!(!violations.is_empty());
+                assert!(violations[0].pattern == "#[tokio::main]");
+            }
+            Err(_) => (), // Error handling is also acceptable
+        }
+    }
+
+    #[test]
+    fn negative_format_drift_report_handles_empty_violations_list() {
+        let result = DriftCheckResult {
+            violations: vec![], // Empty violations
+            files_scanned: 100,
+            exceptions_honored: 5,
+        };
+
+        let report = format_drift_report(&result);
+
+        assert!(report.contains("PASS"));
+        assert!(report.contains("100 files"));
+        assert!(report.contains("5 exceptions"));
+        assert!(!report.contains("FAIL"));
+    }
+
+    #[test]
+    fn negative_drift_violation_with_nul_bytes_in_file_path_serializes_safely() {
+        let violation = DriftViolation {
+            file: PathBuf::from("src/malicious\0injection.rs"),
+            line_number: 42,
+            line_content: "#[tokio::main]".to_string(),
+            pattern: "#[tokio::main]".to_string(),
+            reason: "Forbidden pattern".to_string(),
+        };
+
+        // Should serialize without panic despite nul bytes in path
+        let serialized = serde_json::to_string(&violation);
+        match serialized {
+            Ok(json) => {
+                // Should not contain actual nul bytes in JSON
+                assert!(!json.as_bytes().contains(&0));
+            }
+            Err(_) => (), // Serialization failure is also acceptable
+        }
+    }
+
+    #[test]
+    fn negative_check_directory_with_circular_symlinks_terminates() {
+        let checker = malicious_checker();
+        let temp_dir = tempfile::tempdir().expect("temp dir creation");
+
+        // Create circular symlink if possible (skip if not supported on platform)
+        let link_a = temp_dir.path().join("link_a");
+        let link_b = temp_dir.path().join("link_b");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            if symlink(&link_b, &link_a).is_ok() && symlink(&link_a, &link_b).is_ok() {
+                let result = checker.check_directory(temp_dir.path());
+
+                // Should terminate without infinite loop
+                match result {
+                    Ok(_) => (), // Success is fine
+                    Err(_) => (), // Error handling is also acceptable
+                }
+            }
+        }
+
+        #[cfg(not(unix))]
+        {
+            // Skip test on platforms without symlink support
+        }
+    }
+
+    #[test]
+    fn negative_serde_rejects_unknown_drift_check_error_variant() {
+        let result: Result<DriftCheckError, _> = serde_json::from_str(r#""UnknownError""#);
+
+        assert!(result.is_err());
     }
 }

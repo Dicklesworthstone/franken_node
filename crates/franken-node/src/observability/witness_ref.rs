@@ -19,9 +19,13 @@ use crate::security::constant_time::ct_eq_bytes;
 const MAX_REFS: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
-        items.drain(0..overflow);
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
+        items.drain(0..overflow.min(items.len()));
     }
     items.push(item);
 }
@@ -391,7 +395,7 @@ impl WitnessValidator {
             for w in witnesses.refs() {
                 let needs_rejection = match &w.replay_bundle_locator {
                     None => true,
-                    Some(s) if s.is_empty() => true,
+                    Some(s) if s.trim().is_empty() => true,
                     _ => false,
                 };
                 if needs_rejection {
@@ -976,5 +980,867 @@ mod tests {
 
         assert_eq!(validator.validated_count(), 1);
         assert_eq!(validator.rejected_count(), 1);
+    }
+
+    mod metamorphic_witness_tests {
+        use super::*;
+
+        fn set_with(witnesses: &[(&str, WitnessKind)]) -> WitnessSet {
+            let mut set = WitnessSet::new();
+            for (id, kind) in witnesses {
+                set.add(make_witness(id, *kind));
+            }
+            set
+        }
+
+        fn locator_set(witnesses: &[(&str, WitnessKind, &str)]) -> WitnessSet {
+            let mut set = WitnessSet::new();
+            for (id, kind, locator) in witnesses {
+                set.add(make_witness(id, *kind).with_locator(*locator));
+            }
+            set
+        }
+
+        fn assert_audit_counts_eq(left: &WitnessAudit, right: &WitnessAudit) {
+            assert_eq!(left.total_entries, right.total_entries);
+            assert_eq!(left.high_impact_entries, right.high_impact_entries);
+            assert_eq!(
+                left.high_impact_with_witnesses,
+                right.high_impact_with_witnesses
+            );
+            assert_eq!(left.total_witnesses, right.total_witnesses);
+            assert!((left.coverage_pct - right.coverage_pct).abs() < f64::EPSILON);
+            assert_eq!(left.witness_kind_counts, right.witness_kind_counts);
+        }
+
+        #[test]
+        fn coverage_audit_is_invariant_under_entry_permutation() {
+            let entries = vec![
+                (
+                    make_entry(DecisionKind::Quarantine),
+                    set_with(&[("WIT-A", WitnessKind::Telemetry)]),
+                ),
+                (make_entry(DecisionKind::Release), WitnessSet::new()),
+                (
+                    make_entry(DecisionKind::Admit),
+                    set_with(&[("WIT-B", WitnessKind::ProofArtifact)]),
+                ),
+                (
+                    make_entry(DecisionKind::Escalate),
+                    set_with(&[("WIT-C", WitnessKind::StateSnapshot)]),
+                ),
+            ];
+            let mut reversed = entries.clone();
+            reversed.reverse();
+
+            let baseline = WitnessValidator::coverage_audit(&entries);
+            let permuted = WitnessValidator::coverage_audit(&reversed);
+
+            assert_audit_counts_eq(&baseline, &permuted);
+        }
+
+        #[test]
+        fn adding_low_impact_entry_preserves_high_impact_coverage_ratio() {
+            let baseline_entries = vec![
+                (
+                    make_entry(DecisionKind::Quarantine),
+                    set_with(&[("WIT-A", WitnessKind::Telemetry)]),
+                ),
+                (make_entry(DecisionKind::Release), WitnessSet::new()),
+            ];
+            let mut expanded_entries = baseline_entries.clone();
+            expanded_entries.push((make_entry(DecisionKind::Deny), WitnessSet::new()));
+
+            let baseline = WitnessValidator::coverage_audit(&baseline_entries);
+            let expanded = WitnessValidator::coverage_audit(&expanded_entries);
+
+            assert_eq!(expanded.total_entries, baseline.total_entries + 1);
+            assert_eq!(expanded.high_impact_entries, baseline.high_impact_entries);
+            assert_eq!(
+                expanded.high_impact_with_witnesses,
+                baseline.high_impact_with_witnesses
+            );
+            assert!((expanded.coverage_pct - baseline.coverage_pct).abs() < f64::EPSILON);
+        }
+
+        #[test]
+        fn adding_witness_to_missing_high_impact_entry_increases_coverage() {
+            let incomplete_entries = vec![
+                (
+                    make_entry(DecisionKind::Quarantine),
+                    set_with(&[("WIT-A", WitnessKind::Telemetry)]),
+                ),
+                (make_entry(DecisionKind::Release), WitnessSet::new()),
+            ];
+            let complete_entries = vec![
+                (
+                    make_entry(DecisionKind::Quarantine),
+                    set_with(&[("WIT-A", WitnessKind::Telemetry)]),
+                ),
+                (
+                    make_entry(DecisionKind::Release),
+                    set_with(&[("WIT-B", WitnessKind::ExternalSignal)]),
+                ),
+            ];
+
+            let incomplete = WitnessValidator::coverage_audit(&incomplete_entries);
+            let complete = WitnessValidator::coverage_audit(&complete_entries);
+
+            assert_eq!(complete.high_impact_entries, incomplete.high_impact_entries);
+            assert_eq!(
+                complete.high_impact_with_witnesses,
+                incomplete.high_impact_with_witnesses + 1
+            );
+            assert!(complete.coverage_pct > incomplete.coverage_pct);
+            assert!(complete.is_complete());
+        }
+
+        #[test]
+        fn adding_witness_changes_only_matching_kind_count_and_total() {
+            let baseline_entries = vec![(
+                make_entry(DecisionKind::Escalate),
+                set_with(&[
+                    ("WIT-A", WitnessKind::Telemetry),
+                    ("WIT-B", WitnessKind::ProofArtifact),
+                ]),
+            )];
+            let expanded_entries = vec![(
+                make_entry(DecisionKind::Escalate),
+                set_with(&[
+                    ("WIT-A", WitnessKind::Telemetry),
+                    ("WIT-B", WitnessKind::ProofArtifact),
+                    ("WIT-C", WitnessKind::Telemetry),
+                ]),
+            )];
+
+            let baseline = WitnessValidator::coverage_audit(&baseline_entries);
+            let expanded = WitnessValidator::coverage_audit(&expanded_entries);
+
+            assert_eq!(expanded.total_witnesses, baseline.total_witnesses + 1);
+            assert_eq!(
+                expanded.witness_kind_counts.get("telemetry"),
+                Some(&(baseline.witness_kind_counts["telemetry"] + 1))
+            );
+            assert_eq!(
+                expanded.witness_kind_counts.get("proof_artifact"),
+                baseline.witness_kind_counts.get("proof_artifact")
+            );
+            assert_eq!(
+                expanded.witness_kind_counts.get("state_snapshot"),
+                baseline.witness_kind_counts.get("state_snapshot")
+            );
+            assert_eq!(
+                expanded.witness_kind_counts.get("external_signal"),
+                baseline.witness_kind_counts.get("external_signal")
+            );
+        }
+
+        #[test]
+        fn strict_mode_is_monotonic_over_lenient_locator_policy() {
+            let entry = make_entry(DecisionKind::Quarantine);
+            let witnesses_without_locator = set_with(&[("WIT-A", WitnessKind::Telemetry)]);
+            let witnesses_with_locator = locator_set(&[(
+                "WIT-A",
+                WitnessKind::Telemetry,
+                "file:///bundles/replay-001.jsonl",
+            )]);
+
+            assert!(
+                WitnessValidator::new()
+                    .validate(&entry, &witnesses_without_locator)
+                    .is_ok()
+            );
+            assert!(
+                WitnessValidator::strict()
+                    .validate(&entry, &witnesses_without_locator)
+                    .is_err()
+            );
+            assert!(
+                WitnessValidator::strict()
+                    .validate(&entry, &witnesses_with_locator)
+                    .is_ok()
+            );
+        }
+
+        #[test]
+        fn strict_mode_rejects_whitespace_only_locator() {
+            let entry = make_entry(DecisionKind::Quarantine);
+            let witnesses = locator_set(&[("WIT-A", WitnessKind::Telemetry, " \t\n ")]);
+            let mut validator = WitnessValidator::strict();
+
+            let err = validator
+                .validate(&entry, &witnesses)
+                .expect_err("whitespace locator should be unresolvable");
+
+            assert_eq!(err.code(), "ERR_UNRESOLVABLE_LOCATOR");
+            assert_eq!(validator.validated_count(), 0);
+            assert_eq!(validator.rejected_count(), 1);
+        }
+
+        #[test]
+        fn duplicate_rejection_is_invariant_to_duplicate_position() {
+            let entry = make_entry(DecisionKind::Release);
+            let adjacent = set_with(&[
+                ("WIT-A", WitnessKind::Telemetry),
+                ("WIT-A", WitnessKind::ProofArtifact),
+                ("WIT-B", WitnessKind::StateSnapshot),
+            ]);
+            let separated = set_with(&[
+                ("WIT-A", WitnessKind::Telemetry),
+                ("WIT-B", WitnessKind::StateSnapshot),
+                ("WIT-A", WitnessKind::ProofArtifact),
+            ]);
+
+            let adjacent_err = WitnessValidator::new()
+                .validate(&entry, &adjacent)
+                .expect_err("adjacent duplicate should fail");
+            let separated_err = WitnessValidator::new()
+                .validate(&entry, &separated)
+                .expect_err("separated duplicate should fail");
+
+            assert_eq!(adjacent_err.code(), "ERR_DUPLICATE_WITNESS_ID");
+            assert_eq!(separated_err.code(), "ERR_DUPLICATE_WITNESS_ID");
+            assert_eq!(adjacent_err, separated_err);
+        }
+
+        #[test]
+        fn duplicate_rejection_does_not_increment_validated_count() {
+            let entry = make_entry(DecisionKind::Escalate);
+            let witnesses = set_with(&[
+                ("WIT-A", WitnessKind::Telemetry),
+                ("WIT-A", WitnessKind::ProofArtifact),
+            ]);
+            let mut validator = WitnessValidator::new();
+
+            let err = validator
+                .validate(&entry, &witnesses)
+                .expect_err("duplicate witness id should fail");
+
+            assert_eq!(err.code(), "ERR_DUPLICATE_WITNESS_ID");
+            assert_eq!(validator.validated_count(), 0);
+            assert_eq!(validator.rejected_count(), 1);
+        }
+
+        #[test]
+        fn integrity_verification_fails_on_single_bit_mutation_then_recovers() {
+            let witness = make_witness("WIT-A", WitnessKind::Telemetry);
+            let mut mutated_hash = witness.integrity_hash;
+            mutated_hash[7] ^= 0b0000_0001;
+
+            assert!(
+                WitnessValidator::new()
+                    .verify_integrity("DEC-001", &witness, &mutated_hash)
+                    .is_err()
+            );
+
+            mutated_hash[7] ^= 0b0000_0001;
+            assert!(
+                WitnessValidator::new()
+                    .verify_integrity("DEC-001", &witness, &mutated_hash)
+                    .is_ok()
+            );
+        }
+
+        #[test]
+        fn non_high_impact_kinds_accept_empty_witness_sets() {
+            for kind in [
+                DecisionKind::Admit,
+                DecisionKind::Deny,
+                DecisionKind::Rollback,
+                DecisionKind::Throttle,
+            ] {
+                assert!(
+                    WitnessValidator::new()
+                        .validate(&make_entry(kind), &WitnessSet::new())
+                        .is_ok(),
+                    "{} should not require a witness set",
+                    kind.label()
+                );
+            }
+        }
+
+        #[test]
+        fn push_bounded_zero_capacity_discards_without_panic() {
+            let mut values = vec![1, 2, 3];
+
+            push_bounded(&mut values, 4, 0);
+
+            assert!(values.is_empty());
+        }
+
+        #[test]
+        fn push_bounded_keeps_most_recent_items_when_over_capacity() {
+            let mut values = Vec::new();
+
+            for value in 0..5 {
+                push_bounded(&mut values, value, 3);
+            }
+
+            assert_eq!(values, vec![2, 3, 4]);
+        }
+
+        #[test]
+        fn push_bounded_massive_overflow_maintains_capacity_bound() {
+            let mut values = vec![1, 2];
+
+            // Try to add items far exceeding capacity
+            for value in 3..=100_000 {
+                push_bounded(&mut values, value, 5); // Capacity of 5
+            }
+
+            assert_eq!(values.len(), 5);
+            assert_eq!(values, vec![99996, 99997, 99998, 99999, 100000]);
+        }
+
+        #[test]
+        fn push_bounded_capacity_exactly_at_current_length_maintains_bound() {
+            let mut values = vec![1, 2, 3];
+
+            push_bounded(&mut values, 4, 3); // Capacity equals current length
+
+            assert_eq!(values.len(), 3);
+            assert_eq!(values, vec![2, 3, 4]); // Oldest item (1) evicted
+        }
+    }
+
+    // ── Comprehensive negative-path edge case tests ──────────────────────
+
+    mod witness_negative_path_edge_tests {
+        use super::*;
+
+        #[test]
+        fn negative_witness_id_with_extreme_unicode_and_control_patterns() {
+            // Test witness IDs with problematic Unicode and control character patterns
+            let malicious_witness_patterns = [
+                "WIT\u{202E}spoofed", // Right-to-left override
+                "WIT\u{200B}\u{FEFF}\u{034F}", // Zero-width/invisible chars
+                "WIT\x00null\r\n\t\x1b[31mred\x1b[0m", // Null + control + ANSI
+                "WIT\u{1F4A9}\u{1F525}\u{1F4AF}", // Emoji sequence
+                "WIT\u{FFFF}\u{10FFFF}", // Max Unicode codepoints
+                "\u{0301}\u{0300}WIT\u{0302}", // Combining diacritical marks
+                "WIT\u{1D11E}\u{1D122}", // Musical symbols (outside BMP)
+                "WIT".repeat(10000), // Extremely long identifier
+                "", // Empty witness ID
+                "WIT\"/><script>alert('xss')</script>", // XSS injection attempt
+                "WIT\":{\"injected\":true,\"evil\":\"", // JSON injection attempt
+                "WIT../../../etc/passwd", // Path traversal attempt
+                "WIT\r\n\r\n{\"http_header\":\"injection\"}", // HTTP header injection
+            ];
+
+            for pattern in &malicious_witness_patterns {
+                let witness_id = WitnessId::new(pattern);
+                let witness = WitnessRef::new(pattern, WitnessKind::ExternalSignal, make_hash(42))
+                    .with_locator("file:///test/replay.jsonl");
+
+                // Basic operations should work
+                assert_eq!(witness_id.as_str(), *pattern);
+                assert_eq!(witness_id.to_string(), *pattern);
+
+                // Witness creation should work
+                assert_eq!(witness.witness_id.as_str(), *pattern);
+
+                // Should work in witness sets
+                let mut set = WitnessSet::new();
+                set.add(witness);
+                assert_eq!(set.len(), 1);
+                assert!(!set.has_duplicates());
+                assert_eq!(set.refs()[0].witness_id.as_str(), *pattern);
+
+                // Should work with validation (depending on entry type)
+                let high_impact_entry = make_entry(DecisionKind::Quarantine);
+                let mut validator = WitnessValidator::new();
+                let validation_result = validator.validate(&high_impact_entry, &set);
+                assert!(validation_result.is_ok(), "witness ID pattern should be accepted: {}", pattern.escape_unicode());
+
+                // Should work with strict validation too
+                let mut strict_validator = WitnessValidator::strict();
+                let strict_result = strict_validator.validate(&high_impact_entry, &set);
+                assert!(strict_result.is_ok(), "witness ID pattern should work with strict validator: {}", pattern.escape_unicode());
+            }
+        }
+
+        #[test]
+        fn negative_replay_bundle_locator_injection_and_traversal_attacks() {
+            // Test replay bundle locators with various injection and traversal attacks
+            let malicious_locators = [
+                "file:///../../../etc/passwd", // Path traversal
+                "file:///C:\\Windows\\System32\\config\\sam", // Windows system files
+                "file:///dev/null", // Device files
+                "file:///proc/self/mem", // Process memory
+                "http://evil.com/steal.php?data=", // HTTP exfiltration attempt
+                "javascript:alert('xss')", // JavaScript injection
+                "data:text/html,<script>alert('xss')</script>", // Data URL injection
+                "ftp://attacker.com/upload/", // FTP upload attempt
+                "file:///var/log/auth.log", // Log files
+                "smb://evil.com/share/malware.exe", // SMB injection
+                "\x00/etc/passwd", // Null byte injection
+                "file:///replay.jsonl\r\nHost: evil.com", // HTTP header injection
+                "file:///replay.jsonl#fragment<script>", // Fragment injection
+                "file:///replay.jsonl?param=<script>alert(1)</script>", // Query injection
+                "file://" + &"A".repeat(100000), // Extremely long path
+                "file://\u{202E}normal.jsonl\u{202D}evil.exe", // Bidirectional text attack
+            ];
+
+            for malicious_locator in &malicious_locators {
+                let witness = WitnessRef::new("WIT-001", WitnessKind::ProofArtifact, make_hash(1))
+                    .with_locator(malicious_locator);
+
+                // Basic locator access should work
+                assert_eq!(witness.replay_bundle_locator.as_deref(), Some(*malicious_locator));
+
+                // Should work in witness sets
+                let mut set = WitnessSet::new();
+                set.add(witness);
+                assert_eq!(set.len(), 1);
+
+                // Validation should handle malicious locators gracefully
+                let entry = make_entry(DecisionKind::Escalate);
+                let mut validator = WitnessValidator::new();
+                let result = validator.validate(&entry, &set);
+                assert!(result.is_ok(), "non-strict validation should accept any locator: {}", malicious_locator);
+
+                // Strict validation should accept non-empty locators (even malicious ones)
+                let mut strict_validator = WitnessValidator::strict();
+                let strict_result = strict_validator.validate(&entry, &set);
+                assert!(strict_result.is_ok(), "strict validation should accept non-empty locator: {}", malicious_locator);
+
+                // Coverage audit should handle malicious locators without crashing
+                let entries_with_witnesses = vec![(entry, set)];
+                let audit = WitnessValidator::coverage_audit(&entries_with_witnesses);
+                assert_eq!(audit.total_entries, 1);
+                assert_eq!(audit.high_impact_entries, 1);
+                assert_eq!(audit.high_impact_with_witnesses, 1);
+                assert!(audit.is_complete());
+            }
+        }
+
+        #[test]
+        fn negative_integrity_hash_manipulation_and_collision_simulation() {
+            // Test integrity hash handling with various attack patterns
+            let collision_simulation_hashes = [
+                [0u8; 32], // All zeros
+                [0xFF; 32], // All ones
+                // Alternating pattern
+                {
+                    let mut hash = [0u8; 32];
+                    for i in 0..32 { hash[i] = if i % 2 == 0 { 0x55 } else { 0xAA }; }
+                    hash
+                },
+                // Sequential pattern
+                {
+                    let mut hash = [0u8; 32];
+                    for i in 0..32 { hash[i] = i as u8; }
+                    hash
+                },
+                // Pathological bit patterns that might confuse hex encoding
+                {
+                    let mut hash = [0u8; 32];
+                    hash[0] = 0xDE; hash[1] = 0xAD; hash[2] = 0xBE; hash[3] = 0xEF;
+                    hash[28] = 0xCA; hash[29] = 0xFE; hash[30] = 0xBA; hash[31] = 0xBE;
+                    hash
+                },
+            ];
+
+            for (i, test_hash) in collision_simulation_hashes.iter().enumerate() {
+                let witness = WitnessRef::new(format!("WIT-HASH-{}", i), WitnessKind::StateSnapshot, *test_hash);
+
+                // Hash hex encoding should work correctly
+                let hex = witness.hash_hex();
+                assert_eq!(hex.len(), 64); // 32 bytes * 2 hex chars
+                assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
+
+                // Should be able to verify integrity with correct hash
+                let mut validator = WitnessValidator::new();
+                let verify_result = validator.verify_integrity("DEC-HASH-TEST", &witness, test_hash);
+                assert!(verify_result.is_ok(), "integrity verification should pass with matching hash");
+
+                // Should fail with different hash
+                let mut different_hash = *test_hash;
+                different_hash[15] ^= 0x01; // Flip one bit
+                let verify_mismatch = validator.verify_integrity("DEC-HASH-TEST", &witness, &different_hash);
+                assert!(verify_mismatch.is_err(), "integrity verification should fail with mismatched hash");
+
+                if let Err(err) = verify_mismatch {
+                    assert_eq!(err.code(), "ERR_INTEGRITY_HASH_MISMATCH");
+                    let display = err.to_string();
+                    assert!(display.contains("EVD-WITNESS-004"));
+                    assert!(display.contains(&hex));
+                }
+
+                // Should work in witness sets and validation
+                let mut set = WitnessSet::new();
+                set.add(witness);
+                let entry = make_entry(DecisionKind::Release);
+                let validation_result = WitnessValidator::new().validate(&entry, &set);
+                assert!(validation_result.is_ok(), "validation should work with any hash pattern");
+            }
+        }
+
+        #[test]
+        fn negative_witness_set_capacity_overflow_with_massive_insertions() {
+            // Test witness set behavior under extreme capacity pressure
+            let mut set = WitnessSet::new();
+
+            // Test adding witnesses beyond MAX_REFS capacity
+            for i in 0..MAX_REFS + 1000 {
+                let witness = WitnessRef::new(
+                    format!("WIT-OVERFLOW-{:08}", i),
+                    match i % 4 {
+                        0 => WitnessKind::Telemetry,
+                        1 => WitnessKind::StateSnapshot,
+                        2 => WitnessKind::ProofArtifact,
+                        _ => WitnessKind::ExternalSignal,
+                    },
+                    {
+                        let mut hash = [0u8; 32];
+                        // Create unique hash for each witness
+                        hash[0] = (i & 0xFF) as u8;
+                        hash[1] = ((i >> 8) & 0xFF) as u8;
+                        hash[2] = ((i >> 16) & 0xFF) as u8;
+                        hash[3] = ((i >> 24) & 0xFF) as u8;
+                        hash
+                    },
+                );
+                set.add(witness);
+            }
+
+            // Should be bounded at MAX_REFS capacity
+            assert_eq!(set.len(), MAX_REFS);
+            assert!(!set.is_empty());
+
+            // Should contain the most recent witnesses (due to push_bounded behavior)
+            let refs = set.refs();
+            assert_eq!(refs.len(), MAX_REFS);
+
+            // Verify no duplicates even at capacity
+            assert!(!set.has_duplicates());
+
+            // Should work with validation
+            let entry = make_entry(DecisionKind::Quarantine);
+            let mut validator = WitnessValidator::new();
+            let validation_result = validator.validate(&entry, &set);
+            assert!(validation_result.is_ok(), "validation should work with max capacity witness set");
+
+            // Coverage audit should handle large witness sets
+            let entries_with_witnesses = vec![(entry, set)];
+            let audit = WitnessValidator::coverage_audit(&entries_with_witnesses);
+            assert_eq!(audit.total_entries, 1);
+            assert_eq!(audit.total_witnesses, MAX_REFS as u64);
+            assert!(audit.is_complete());
+
+            // Verify witness kind counts sum to total
+            let total_kinds: u64 = audit.witness_kind_counts.values().sum();
+            assert_eq!(total_kinds, MAX_REFS as u64);
+        }
+
+        #[test]
+        fn negative_validator_arithmetic_overflow_boundary_testing() {
+            // Test validator counter handling at arithmetic boundaries
+            let mut validator = WitnessValidator::new();
+
+            // Manually set counters to near overflow values (simulating long-running validator)
+            validator.validated_count = u64::MAX - 5;
+            validator.rejected_count = u64::MAX - 3;
+
+            let high_impact_entry = make_entry(DecisionKind::Escalate);
+            let mut good_witnesses = WitnessSet::new();
+            good_witnesses.add(make_witness("WIT-GOOD", WitnessKind::Telemetry));
+
+            let bad_witnesses = WitnessSet::new(); // Empty for high-impact = rejection
+
+            // Test successful validation with counter near overflow
+            for _ in 0..5 {
+                let result = validator.validate(&high_impact_entry, &good_witnesses);
+                assert!(result.is_ok(), "validation should succeed even near counter overflow");
+            }
+
+            // Should saturate at u64::MAX, not wrap around
+            assert_eq!(validator.validated_count(), u64::MAX);
+
+            // Test rejection with counter near overflow
+            for _ in 0..3 {
+                let result = validator.validate(&high_impact_entry, &bad_witnesses);
+                assert!(result.is_err(), "validation should fail for missing witnesses");
+            }
+
+            // Should saturate at u64::MAX, not wrap around
+            assert_eq!(validator.rejected_count(), u64::MAX);
+
+            // Test integrity verification with saturated counters
+            let witness = make_witness("WIT-INTEGRITY", WitnessKind::ProofArtifact);
+            let wrong_hash = make_hash(99);
+            let integrity_result = validator.verify_integrity("DEC-INTEGRITY", &witness, &wrong_hash);
+            assert!(integrity_result.is_err(), "integrity verification should still work with saturated counters");
+            assert_eq!(validator.rejected_count(), u64::MAX); // Should remain saturated
+        }
+
+        #[test]
+        fn negative_coverage_audit_with_pathological_witness_kind_distributions() {
+            // Test coverage audit with extreme witness kind distributions
+            let mut entries_with_witnesses = Vec::new();
+
+            // Pattern 1: Single entry with massive number of same-kind witnesses
+            let mut massive_telemetry_set = WitnessSet::new();
+            for i in 0..1000 {
+                massive_telemetry_set.add(WitnessRef::new(
+                    format!("TELEMETRY-{:04}", i),
+                    WitnessKind::Telemetry,
+                    make_hash((i % 256) as u8),
+                ));
+            }
+            entries_with_witnesses.push((make_entry(DecisionKind::Quarantine), massive_telemetry_set));
+
+            // Pattern 2: Many entries with single witnesses of different kinds
+            for (i, &kind) in WitnessKind::all().iter().enumerate() {
+                for j in 0..100 {
+                    let mut single_witness_set = WitnessSet::new();
+                    single_witness_set.add(WitnessRef::new(
+                        format!("{}-SINGLE-{:03}-{:03}", kind.label().to_uppercase(), i, j),
+                        kind,
+                        make_hash(((i * 100 + j) % 256) as u8),
+                    ));
+                    entries_with_witnesses.push((make_entry(DecisionKind::Release), single_witness_set));
+                }
+            }
+
+            // Pattern 3: Mixed high-impact and non-high-impact entries
+            for i in 0..50 {
+                entries_with_witnesses.push((make_entry(DecisionKind::Admit), WitnessSet::new())); // Non-high-impact, no witnesses
+                let mut mixed_set = WitnessSet::new();
+                for kind in WitnessKind::all() {
+                    mixed_set.add(WitnessRef::new(
+                        format!("MIXED-{:02}-{}", i, kind.label()),
+                        *kind,
+                        make_hash(((i as u8) ^ (kind.label().as_bytes()[0])) % 256),
+                    ));
+                }
+                entries_with_witnesses.push((make_entry(DecisionKind::Escalate), mixed_set));
+            }
+
+            // Generate audit
+            let audit = WitnessValidator::coverage_audit(&entries_with_witnesses);
+
+            // Verify arithmetic correctness
+            assert_eq!(audit.total_entries, entries_with_witnesses.len() as u64);
+
+            let expected_high_impact = entries_with_witnesses.iter().filter(|(entry, _)| is_high_impact(entry)).count() as u64;
+            assert_eq!(audit.high_impact_entries, expected_high_impact);
+
+            let expected_high_impact_with_witnesses = entries_with_witnesses.iter()
+                .filter(|(entry, witnesses)| is_high_impact(entry) && !witnesses.is_empty())
+                .count() as u64;
+            assert_eq!(audit.high_impact_with_witnesses, expected_high_impact_with_witnesses);
+
+            let expected_total_witnesses: u64 = entries_with_witnesses.iter()
+                .map(|(_, witnesses)| witnesses.len() as u64)
+                .sum();
+            assert_eq!(audit.total_witnesses, expected_total_witnesses);
+
+            // Verify coverage percentage calculation
+            let expected_coverage = if audit.high_impact_entries > 0 {
+                (audit.high_impact_with_witnesses as f64 / audit.high_impact_entries as f64) * 100.0
+            } else {
+                100.0
+            };
+            assert!((audit.coverage_pct - expected_coverage).abs() < f64::EPSILON);
+
+            // Verify witness kind counts
+            let total_kind_count: u64 = audit.witness_kind_counts.values().sum();
+            assert_eq!(total_kind_count, audit.total_witnesses);
+
+            // Should have counts for all witness kinds that were used
+            for kind in WitnessKind::all() {
+                let expected_count = entries_with_witnesses.iter()
+                    .flat_map(|(_, witnesses)| witnesses.refs())
+                    .filter(|w| w.witness_kind == *kind)
+                    .count() as u64;
+
+                if expected_count > 0 {
+                    assert_eq!(audit.witness_kind_counts.get(kind.label()), Some(&expected_count));
+                }
+            }
+        }
+
+        #[test]
+        fn negative_witness_validation_error_display_injection_resistance() {
+            // Test validation error display with injection attempts in error fields
+            let injection_patterns = [
+                "DEC\x00null\r\ninjection", // Null + CRLF injection
+                "DEC\u{202E}spoofed", // Right-to-left override
+                "DEC<script>alert('xss')</script>", // XSS attempt
+                "DEC\r\n\r\nHTTP/1.1 200 OK\r\nContent-Type: text/html\r\n\r\n<html>", // HTTP response injection
+                "DEC\t\x08\x7F\x1b[31mred\x1b[0m", // Control chars + ANSI escape
+                "DEC\"},{\"injected\":true,\"evil\":\"", // JSON injection attempt
+            ];
+
+            for pattern in &injection_patterns {
+                // Test MissingWitnesses error with injected entry_id and decision_kind
+                let missing_error = WitnessValidationError::MissingWitnesses {
+                    entry_id: pattern.to_string(),
+                    decision_kind: pattern.to_string(),
+                };
+                let display = missing_error.to_string();
+                assert!(display.contains("EVD-WITNESS-003"));
+                // Display should contain the injection pattern (not sanitized, but contained)
+                assert!(display.contains(pattern));
+
+                // Test IntegrityHashMismatch error with injected fields
+                let mismatch_error = WitnessValidationError::IntegrityHashMismatch {
+                    entry_id: pattern.to_string(),
+                    witness_id: format!("WIT-{}", pattern),
+                    expected_hex: format!("EXPECTED-{}", pattern),
+                    actual_hex: format!("ACTUAL-{}", pattern),
+                };
+                let mismatch_display = mismatch_error.to_string();
+                assert!(mismatch_display.contains("EVD-WITNESS-004"));
+                assert!(mismatch_display.contains(pattern));
+
+                // Test UnresolvableLocator error
+                let unresolvable_error = WitnessValidationError::UnresolvableLocator {
+                    entry_id: pattern.to_string(),
+                    witness_id: format!("WIT-{}", pattern),
+                };
+                let unresolvable_display = unresolvable_error.to_string();
+                assert!(unresolvable_display.contains("EVD-WITNESS-003"));
+                assert!(unresolvable_display.contains(pattern));
+
+                // Test DuplicateWitnessId error
+                let duplicate_error = WitnessValidationError::DuplicateWitnessId {
+                    entry_id: pattern.to_string(),
+                    witness_id: format!("WIT-{}", pattern),
+                };
+                let duplicate_display = duplicate_error.to_string();
+                assert!(duplicate_display.contains("EVD-WITNESS-003"));
+                assert!(duplicate_display.contains(pattern));
+
+                // Verify error code stability despite injection
+                assert_eq!(missing_error.code(), "ERR_MISSING_WITNESSES");
+                assert_eq!(mismatch_error.code(), "ERR_INTEGRITY_HASH_MISMATCH");
+                assert_eq!(unresolvable_error.code(), "ERR_UNRESOLVABLE_LOCATOR");
+                assert_eq!(duplicate_error.code(), "ERR_DUPLICATE_WITNESS_ID");
+            }
+        }
+
+        #[test]
+        fn negative_concurrent_validator_state_consistency_under_rapid_operations() {
+            // Test validator state consistency under rapid validation operations
+            let mut validator = WitnessValidator::new();
+
+            // Create test data
+            let high_impact_entry = make_entry(DecisionKind::Quarantine);
+            let low_impact_entry = make_entry(DecisionKind::Admit);
+            let good_witnesses = {
+                let mut set = WitnessSet::new();
+                set.add(make_witness("WIT-GOOD", WitnessKind::Telemetry));
+                set
+            };
+            let bad_witnesses = WitnessSet::new(); // Empty = missing witnesses for high-impact
+            let duplicate_witnesses = {
+                let mut set = WitnessSet::new();
+                set.add(make_witness("WIT-DUP", WitnessKind::Telemetry));
+                set.add(make_witness("WIT-DUP", WitnessKind::StateSnapshot)); // Duplicate ID
+                set
+            };
+
+            // Simulate rapid operations that mix successes and failures
+            let operations = [
+                (&high_impact_entry, &good_witnesses, true),   // Should succeed
+                (&low_impact_entry, &bad_witnesses, true),     // Should succeed (low impact can have no witnesses)
+                (&high_impact_entry, &bad_witnesses, false),   // Should fail (missing witnesses)
+                (&high_impact_entry, &duplicate_witnesses, false), // Should fail (duplicate IDs)
+                (&low_impact_entry, &good_witnesses, true),    // Should succeed
+            ];
+
+            let mut expected_validated = 0u64;
+            let mut expected_rejected = 0u64;
+
+            for (i, &(entry, witnesses, should_succeed)) in operations.iter().enumerate() {
+                let result = validator.validate(entry, witnesses);
+
+                if should_succeed {
+                    assert!(result.is_ok(), "operation {} should succeed", i);
+                    expected_validated = expected_validated.saturating_add(1);
+                } else {
+                    assert!(result.is_err(), "operation {} should fail", i);
+                    expected_rejected = expected_rejected.saturating_add(1);
+                }
+
+                // Verify counters are consistent after each operation
+                assert_eq!(validator.validated_count(), expected_validated);
+                assert_eq!(validator.rejected_count(), expected_rejected);
+            }
+
+            // Test integrity verification operations mixed in
+            let witness_with_hash = make_witness("WIT-INTEGRITY", WitnessKind::ProofArtifact);
+            let correct_hash = witness_with_hash.integrity_hash;
+            let wrong_hash = make_hash(255);
+
+            for i in 0..10 {
+                if i % 2 == 0 {
+                    let result = validator.verify_integrity("DEC-INTEGRITY-GOOD", &witness_with_hash, &correct_hash);
+                    assert!(result.is_ok(), "integrity verification {} should succeed", i);
+                } else {
+                    let result = validator.verify_integrity("DEC-INTEGRITY-BAD", &witness_with_hash, &wrong_hash);
+                    assert!(result.is_err(), "integrity verification {} should fail", i);
+                    expected_rejected = expected_rejected.saturating_add(1);
+                }
+
+                // Verify counters remain consistent
+                assert_eq!(validator.rejected_count(), expected_rejected);
+            }
+
+            // Final consistency check
+            assert_eq!(validator.validated_count(), expected_validated);
+            assert_eq!(validator.rejected_count(), expected_rejected);
+        }
+
+        #[test]
+        fn negative_witness_kind_exhaustive_boundary_testing() {
+            // Test all witness kinds with various edge cases
+            for &kind in WitnessKind::all() {
+                // Test basic properties
+                let label = kind.label();
+                assert!(!label.is_empty());
+                assert!(label.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'));
+
+                // Test display consistency
+                assert_eq!(kind.to_string(), label);
+
+                // Test with extreme witness IDs
+                let extreme_ids = [
+                    "".to_string(), // Empty
+                    "X".repeat(100000), // Very long
+                    "\x00\x01\x02".to_string(), // Binary data
+                    "\u{1F4A9}".repeat(1000), // Unicode spam
+                ];
+
+                for extreme_id in &extreme_ids {
+                    let witness = WitnessRef::new(extreme_id, kind, make_hash(42));
+                    assert_eq!(witness.witness_kind, kind);
+                    assert_eq!(witness.witness_id.as_str(), extreme_id);
+
+                    // Should work in witness sets
+                    let mut set = WitnessSet::new();
+                    set.add(witness);
+                    assert_eq!(set.len(), 1);
+                    assert!(!set.has_duplicates());
+
+                    // Should work in coverage audit
+                    let entries = vec![(make_entry(DecisionKind::Escalate), set)];
+                    let audit = WitnessValidator::coverage_audit(&entries);
+                    assert_eq!(audit.witness_kind_counts.get(label), Some(&1));
+                }
+            }
+
+            // Verify all witness kinds are distinct
+            let labels: Vec<&str> = WitnessKind::all().iter().map(|k| k.label()).collect();
+            let mut unique_labels = labels.clone();
+            unique_labels.sort();
+            unique_labels.dedup();
+            assert_eq!(labels.len(), unique_labels.len(), "all witness kind labels should be unique");
+
+            // Verify total count is stable
+            assert_eq!(WitnessKind::all().len(), 4, "total witness kind count should remain stable");
+        }
     }
 }

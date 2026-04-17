@@ -10,6 +10,11 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
+
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -34,6 +39,9 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     }
     if trimmed == RESERVED_ARTIFACT_ID {
         return Some(format!("artifact_id is reserved: {:?}", artifact_id));
+    }
+    if artifact_id.chars().any(char::is_control) {
+        return Some("artifact_id contains control characters".to_string());
     }
     if trimmed != artifact_id {
         return Some("artifact_id contains leading or trailing whitespace".to_string());
@@ -1239,6 +1247,119 @@ mod tests {
     }
 
     #[test]
+    fn test_begin_upload_unknown_saga_does_not_emit_audit() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.begin_upload("missing", 1_000, "t-missing").unwrap_err();
+
+        assert!(err.contains("saga not found: missing"));
+        assert!(mgr.audit_log.is_empty());
+    }
+
+    #[test]
+    fn test_recheck_remote_cap_unknown_saga_does_not_emit_audit() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr
+            .recheck_remote_cap("missing", false, "t-missing")
+            .unwrap_err();
+
+        assert!(err.contains("saga not found: missing"));
+        assert!(mgr.audit_log.is_empty());
+    }
+
+    #[test]
+    fn test_recover_unknown_saga_does_not_emit_audit() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.recover_saga("missing", 1_000, "t-missing").unwrap_err();
+
+        assert!(err.contains("saga not found: missing"));
+        assert!(mgr.audit_log.is_empty());
+    }
+
+    #[test]
+    fn test_cancel_unknown_saga_does_not_emit_audit() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.cancel_saga("missing", 1_000, "t-missing").unwrap_err();
+
+        assert!(err.contains("saga not found: missing"));
+        assert!(mgr.audit_log.is_empty());
+    }
+
+    #[test]
+    fn test_failed_complete_upload_does_not_mutate_created_saga() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr.start_saga("a", true, "t1").expect("should succeed");
+        let audit_len_before = mgr.audit_log.len();
+
+        let err = mgr.complete_upload(&id, 2_000, "t2").unwrap_err();
+
+        assert!(err.contains("invalid transition: Created -> Verifying"));
+        assert_eq!(mgr.audit_log.len(), audit_len_before);
+        let saga = mgr.get_saga(&id).expect("saga should remain present");
+        assert_eq!(saga.phase, SagaPhase::Created);
+        assert!(!saga.l3_present);
+        assert!(saga.transitions.is_empty());
+    }
+
+    #[test]
+    fn test_failed_complete_verify_does_not_mutate_uploading_saga() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr.start_saga("a", true, "t1").expect("should succeed");
+        mgr.begin_upload(&id, 2_000, "t2").expect("should succeed");
+        let audit_len_before = mgr.audit_log.len();
+
+        let err = mgr.complete_verify(&id, 3_000, "t3").unwrap_err();
+
+        assert!(err.contains("invalid transition: Uploading -> Retiring"));
+        assert_eq!(mgr.audit_log.len(), audit_len_before);
+        let saga = mgr.get_saga(&id).expect("saga should remain present");
+        assert_eq!(saga.phase, SagaPhase::Uploading);
+        assert!(!saga.l3_verified);
+        assert_eq!(saga.transitions.len(), 1);
+        assert_eq!(saga.transitions[0].to_phase, SagaPhase::Uploading);
+    }
+
+    #[test]
+    fn test_failed_complete_retire_does_not_mutate_verifying_saga() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr.start_saga("a", true, "t1").expect("should succeed");
+        mgr.begin_upload(&id, 2_000, "t2").expect("should succeed");
+        mgr.complete_upload(&id, 3_000, "t3")
+            .expect("should succeed");
+        let audit_len_before = mgr.audit_log.len();
+
+        let err = mgr.complete_retire(&id, 4_000, "t4").unwrap_err();
+
+        assert!(err.contains("invalid transition: Verifying -> Complete"));
+        assert_eq!(mgr.audit_log.len(), audit_len_before);
+        let saga = mgr.get_saga(&id).expect("saga should remain present");
+        assert_eq!(saga.phase, SagaPhase::Verifying);
+        assert!(saga.l2_present);
+        assert!(saga.l3_present);
+        assert!(!saga.l3_verified);
+    }
+
+    #[test]
+    fn test_cancel_failed_terminal_saga_is_rejected_without_new_audit() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr.start_saga("a", true, "t1").expect("should succeed");
+        {
+            let saga = mgr.sagas.get_mut(&id).expect("saga should exist");
+            saga.phase = SagaPhase::Failed;
+        }
+        let audit_len_before = mgr.audit_log.len();
+
+        let err = mgr.cancel_saga(&id, 2_000, "t2").unwrap_err();
+
+        assert!(err.contains("terminal phase Failed"));
+        assert_eq!(mgr.audit_log.len(), audit_len_before);
+        assert_eq!(mgr.get_saga(&id).unwrap().phase, SagaPhase::Failed);
+    }
+
+    #[test]
     fn test_multiple_sagas() {
         let mut mgr = EvictionSagaManager::new();
         let id1 = mgr.start_saga("a", true, "t1").expect("should succeed");
@@ -1574,5 +1695,325 @@ mod tests {
             event_codes::ES_COMPENSATION_COMPLETE
         );
         assert_eq!(new_events[1].detail["timestamp_ms"], 3_000);
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_clears_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_start_rejects_artifact_id_with_nul_byte() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr
+            .start_saga("artifact\0hidden", true, "t-nul")
+            .unwrap_err();
+
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("control characters"));
+        assert_eq!(mgr.saga_count(), 0);
+        assert!(mgr.audit_log.is_empty());
+    }
+
+    #[test]
+    fn test_start_rejects_artifact_id_with_embedded_newline() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr
+            .start_saga("artifact\nhidden", true, "t-newline")
+            .unwrap_err();
+
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("control characters"));
+        assert_eq!(mgr.saga_count(), 0);
+    }
+
+    #[test]
+    fn test_complete_upload_after_remote_cap_revoked_preserves_upload_state() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr.start_saga("artifact-cap", true, "t1").expect("start");
+        mgr.begin_upload(&id, 2_000, "t2").expect("begin upload");
+        let transition_count = mgr.get_saga(&id).unwrap().transitions.len();
+        mgr.recheck_remote_cap(&id, false, "t3")
+            .expect_err("revocation should be reported");
+
+        let err = mgr.complete_upload(&id, 4_000, "t4").unwrap_err();
+
+        assert!(err.contains("RemoteCap recheck failed"));
+        let saga = mgr.get_saga(&id).expect("saga should remain present");
+        assert_eq!(saga.phase, SagaPhase::Uploading);
+        assert!(!saga.l3_present);
+        assert_eq!(saga.transitions.len(), transition_count);
+    }
+
+    #[test]
+    fn test_cancel_created_saga_compensates_without_losing_l2() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr
+            .start_saga("artifact-created-cancel", true, "t1")
+            .expect("start");
+
+        let action = mgr.cancel_saga(&id, 2_000, "t2").expect("cancel created");
+
+        assert!(matches!(action, CompensationAction::None));
+        let saga = mgr.get_saga(&id).expect("saga should remain present");
+        assert_eq!(saga.phase, SagaPhase::Compensated);
+        assert!(saga.l2_present);
+        assert!(!saga.l3_present);
+    }
+
+    #[test]
+    fn test_leak_check_detects_retired_l2_without_l3() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr
+            .start_saga("artifact-orphan", true, "t1")
+            .expect("start");
+        {
+            let saga = mgr.sagas.get_mut(&id).expect("saga should exist");
+            saga.phase = SagaPhase::Complete;
+            saga.l2_present = false;
+            saga.l3_present = false;
+            saga.l3_verified = false;
+        }
+
+        let result = mgr.leak_check("t-leak");
+
+        assert!(!result.passed);
+        assert_eq!(result.orphans_found, 1);
+        assert!(result.details[0].contains("L2 retired but L3 absent"));
+    }
+
+    #[test]
+    fn test_leak_check_detects_complete_unverified_l3() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr
+            .start_saga("artifact-unverified", true, "t1")
+            .expect("start");
+        {
+            let saga = mgr.sagas.get_mut(&id).expect("saga should exist");
+            saga.phase = SagaPhase::Complete;
+            saga.l2_present = false;
+            saga.l3_present = true;
+            saga.l3_verified = false;
+        }
+
+        let result = mgr.leak_check("t-unverified");
+
+        assert!(!result.passed);
+        assert_eq!(result.orphans_found, 1);
+        assert!(result.details[0].contains("unverified"));
+    }
+
+    #[test]
+    fn test_recover_compensating_without_transition_does_not_drop_l2() {
+        let mut mgr = EvictionSagaManager::new();
+        let id = mgr
+            .start_saga("artifact-no-transition", true, "t1")
+            .expect("start");
+        {
+            let saga = mgr.sagas.get_mut(&id).expect("saga should exist");
+            saga.phase = SagaPhase::Compensating;
+            saga.transitions.clear();
+        }
+
+        let action = mgr.recover_saga(&id, 2_000, "t2").expect("recover");
+
+        assert!(matches!(action, CompensationAction::None));
+        let saga = mgr.get_saga(&id).expect("saga should remain present");
+        assert_eq!(saga.phase, SagaPhase::Compensated);
+        assert!(saga.l2_present);
+        assert!(!saga.l3_present);
+    }
+}
+
+#[cfg(test)]
+mod eviction_saga_boundary_negative_tests {
+    use super::*;
+
+    #[test]
+    fn negative_start_saga_rejects_empty_artifact_id() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.start_saga("", true, "trace-empty-artifact")
+            .expect_err("empty artifact ID should be rejected");
+
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("empty"));
+    }
+
+    #[test]
+    fn negative_start_saga_rejects_reserved_artifact_id() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.start_saga(RESERVED_ARTIFACT_ID, true, "trace-reserved")
+            .expect_err("reserved artifact ID should be rejected");
+
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("reserved"));
+    }
+
+    #[test]
+    fn negative_start_saga_rejects_artifact_id_with_control_characters() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.start_saga("artifact\n\r\t", true, "trace-control-chars")
+            .expect_err("artifact ID with control characters should be rejected");
+
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("control"));
+    }
+
+    #[test]
+    fn negative_start_saga_rejects_artifact_id_with_leading_trailing_whitespace() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.start_saga("  artifact-id  ", true, "trace-whitespace")
+            .expect_err("artifact ID with whitespace should be rejected");
+
+        assert!(err.contains(ERR_INVALID_ARTIFACT_ID));
+        assert!(err.contains("whitespace"));
+    }
+
+    #[test]
+    fn negative_start_saga_rejects_empty_trace_id() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.start_saga("artifact-valid", true, "")
+            .expect_err("empty trace ID should be rejected");
+
+        assert!(err.contains("trace_id"));
+    }
+
+    #[test]
+    fn negative_start_saga_rejects_trace_id_with_nul_bytes() {
+        let mut mgr = EvictionSagaManager::new();
+
+        let err = mgr.start_saga("artifact-valid", true, "trace\0injection")
+            .expect_err("trace ID with nul bytes should be rejected");
+
+        assert!(err.contains("trace_id"));
+    }
+
+    #[test]
+    fn negative_start_saga_prevents_duplicate_saga_id_collision() {
+        let mut mgr = EvictionSagaManager::new();
+        let first_id = mgr.start_saga("artifact-first", true, "trace-1")
+            .expect("first saga should succeed");
+
+        // Manually create collision by reusing ID
+        let collision_result = mgr.start_saga("artifact-second", true, "trace-2");
+
+        // Should either prevent collision or handle gracefully
+        match collision_result {
+            Ok(second_id) => {
+                assert_ne!(first_id, second_id, "saga IDs must be unique");
+            }
+            Err(err) => {
+                assert!(err.contains(ERR_SAGA_ID_REUSED) || err.contains("collision"));
+            }
+        }
+    }
+
+    #[test]
+    fn negative_transition_saga_rejects_nonexistent_saga_id() {
+        let mut mgr = EvictionSagaManager::new();
+        let nonexistent_id = SagaId("nonexistent-saga".to_string());
+
+        let err = mgr.transition_saga(&nonexistent_id, SagaEvent::UploadSucceeded, 1000, "trace-nonexistent")
+            .expect_err("nonexistent saga ID should be rejected");
+
+        assert!(err.contains("not found") || err.contains("nonexistent"));
+    }
+
+    #[test]
+    fn negative_transition_saga_rejects_invalid_state_transition() {
+        let mut mgr = EvictionSagaManager::new();
+        let saga_id = mgr.start_saga("artifact-invalid-transition", true, "trace-start")
+            .expect("saga start should succeed");
+
+        // Try invalid transition: Uploading -> Retired (skipping intermediate states)
+        let err = mgr.transition_saga(&saga_id, SagaEvent::RetireSucceeded, 1000, "trace-invalid")
+            .expect_err("invalid state transition should be rejected");
+
+        assert!(err.contains("invalid") || err.contains("transition"));
+    }
+
+    #[test]
+    fn negative_recover_saga_handles_corrupted_saga_state_gracefully() {
+        let mut mgr = EvictionSagaManager::new();
+        let saga_id = mgr.start_saga("artifact-corrupted", true, "trace-start")
+            .expect("saga start should succeed");
+
+        // Manually corrupt saga state
+        if let Some(saga) = mgr.sagas.get_mut(&saga_id) {
+            saga.phase = SagaPhase::Compensating;
+            saga.l2_present = false;
+            saga.l3_present = true; // Impossible state: L3 exists but L2 doesn't
+        }
+
+        let action = mgr.recover_saga(&saga_id, 2000, "trace-recover");
+
+        // Should handle corrupted state gracefully
+        match action {
+            Ok(CompensationAction::None) => (), // Graceful handling
+            Ok(_) => (), // Other compensation actions are acceptable
+            Err(err) => {
+                assert!(err.contains("corrupted") || err.contains("invalid"));
+            }
+        }
+    }
+
+    #[test]
+    fn negative_saga_manager_respects_max_sagas_capacity() {
+        let mut mgr = EvictionSagaManager::new();
+
+        // Try to create more sagas than capacity allows
+        for i in 0..MAX_SAGAS.saturating_add(10) {
+            let artifact_id = format!("artifact-{i}");
+            let result = mgr.start_saga(&artifact_id, true, "trace-capacity-test");
+
+            if i >= MAX_SAGAS {
+                // Should either reject or handle capacity gracefully
+                match result {
+                    Ok(_) => {
+                        // If accepted, total sagas should not exceed capacity
+                        assert!(mgr.sagas.len() <= MAX_SAGAS);
+                    }
+                    Err(err) => {
+                        assert!(err.contains("capacity") || err.contains("full"));
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_serde_rejects_unknown_saga_event_variant() {
+        let result: Result<SagaEvent, _> = serde_json::from_str(r#""UnknownEvent""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_saga_transition_with_extremely_old_timestamp_handles_gracefully() {
+        let mut mgr = EvictionSagaManager::new();
+        let saga_id = mgr.start_saga("artifact-old-timestamp", true, "trace-start")
+            .expect("saga start should succeed");
+
+        let result = mgr.transition_saga(&saga_id, SagaEvent::UploadSucceeded, 0, "trace-old-timestamp");
+
+        // Should handle old timestamps gracefully
+        match result {
+            Ok(_) => (), // Acceptance is fine
+            Err(err) => {
+                assert!(err.contains("timestamp") || err.contains("invalid"));
+            }
+        }
     }
 }

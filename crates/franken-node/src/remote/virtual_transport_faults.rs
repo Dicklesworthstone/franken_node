@@ -10,6 +10,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -226,15 +230,16 @@ impl FaultSchedule {
                     message_index: msg_idx,
                     fault: FaultClass::Drop,
                 });
-                fault_count += 1;
+                fault_count = fault_count.saturating_add(1);
             } else if roll < config.drop_probability + config.reorder_probability {
-                let depth = usize::try_from((rng_state % config.reorder_max_depth.max(1) as u64).saturating_add(1))
+                let max_depth = u64::try_from(config.reorder_max_depth.max(1)).unwrap_or(u64::MAX);
+                let depth = usize::try_from((rng_state % max_depth).saturating_add(1))
                     .unwrap_or(usize::MAX);
                 faults.push(ScheduledFault {
                     message_index: msg_idx,
                     fault: FaultClass::Reorder { depth },
                 });
-                fault_count += 1;
+                fault_count = fault_count.saturating_add(1);
             } else if roll
                 < config.drop_probability + config.reorder_probability + config.corrupt_probability
             {
@@ -243,7 +248,11 @@ impl FaultSchedule {
                     rng_state ^= rng_state << 13;
                     rng_state ^= rng_state >> 7;
                     rng_state ^= rng_state << 17;
-                    bits.push(usize::try_from(rng_state % 256).unwrap_or(usize::MAX).saturating_add(i));
+                    bits.push(
+                        usize::try_from(rng_state % 256)
+                            .unwrap_or(usize::MAX)
+                            .saturating_add(i),
+                    );
                 }
                 faults.push(ScheduledFault {
                     message_index: msg_idx,
@@ -251,7 +260,7 @@ impl FaultSchedule {
                         bit_positions: bits,
                     },
                 });
-                fault_count += 1;
+                fault_count = fault_count.saturating_add(1);
             }
         }
 
@@ -561,9 +570,17 @@ impl VirtualTransportFaultHarness {
             .unwrap_or_else(|e| format!("__serde_err:{e}"));
         let mut hasher = Sha256::new();
         hasher.update(b"virtual_transport_faults_content_v1:");
-        hasher.update(u64::try_from(schedule_json.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(schedule_json.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(schedule_json.as_bytes());
-        hasher.update(u64::try_from(delivered_json.len()).unwrap_or(u64::MAX).to_le_bytes());
+        hasher.update(
+            u64::try_from(delivered_json.len())
+                .unwrap_or(u64::MAX)
+                .to_le_bytes(),
+        );
         hasher.update(delivered_json.as_bytes());
         let content_hash = format!("{:x}", hasher.finalize());
 
@@ -842,6 +859,55 @@ mod tests {
     }
 
     #[test]
+    fn test_fault_config_rejects_drop_probability_above_one() {
+        let bad = FaultConfig {
+            drop_probability: 1.01,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: 0.0,
+            corrupt_bit_count: 0,
+            max_faults: 1,
+        };
+
+        let err = bad.validate().expect_err("drop probability > 1 must fail");
+        assert!(err.contains("drop_probability"));
+    }
+
+    #[test]
+    fn test_fault_config_rejects_reorder_probability_below_zero() {
+        let bad = FaultConfig {
+            drop_probability: 0.0,
+            reorder_probability: -0.01,
+            reorder_max_depth: 1,
+            corrupt_probability: 0.0,
+            corrupt_bit_count: 0,
+            max_faults: 1,
+        };
+
+        let err = bad
+            .validate()
+            .expect_err("negative reorder probability must fail");
+        assert!(err.contains("reorder_probability"));
+    }
+
+    #[test]
+    fn test_fault_config_rejects_corrupt_probability_infinity() {
+        let bad = FaultConfig {
+            drop_probability: 0.0,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: f64::INFINITY,
+            corrupt_bit_count: 1,
+            max_faults: 1,
+        };
+
+        let err = bad
+            .validate()
+            .expect_err("infinite corruption probability must fail");
+        assert!(err.contains("corrupt_probability"));
+    }
+
+    #[test]
     fn test_fault_config_zero_budget() {
         let bad = FaultConfig {
             drop_probability: 0.5,
@@ -891,6 +957,200 @@ mod tests {
             max_faults: 1,
         };
         assert!(bad.validate().is_err());
+    }
+
+    #[test]
+    fn test_schedule_with_zero_fault_budget_injects_no_faults() {
+        let config = FaultConfig {
+            drop_probability: 1.0,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: 0.0,
+            corrupt_bit_count: 0,
+            max_faults: 0,
+        };
+
+        let schedule = FaultSchedule::from_seed(42, &config, 10);
+
+        assert!(schedule.faults.is_empty());
+    }
+
+    #[test]
+    fn test_corrupt_ignores_out_of_range_bit_positions() {
+        let mut harness = VirtualTransportFaultHarness::new(1);
+        let payload = vec![0b1010_1010];
+
+        let corrupted = harness.apply_corrupt(1, &payload, &[8, 31, 1024], "t1");
+
+        assert_eq!(corrupted, payload);
+        assert_eq!(harness.fault_count(), 1);
+        assert_eq!(
+            harness.audit_log()[0].event_code,
+            event_codes::FAULT_CORRUPT_APPLIED
+        );
+    }
+
+    #[test]
+    fn test_process_message_ignores_fault_for_different_message_index() {
+        let mut harness = VirtualTransportFaultHarness::new(1);
+        let schedule = FaultSchedule {
+            seed: 1,
+            faults: vec![ScheduledFault {
+                message_index: 3,
+                fault: FaultClass::Drop,
+            }],
+            total_messages: 4,
+        };
+
+        let result = harness.process_message(&schedule, 0, 1, b"data", "t1");
+
+        assert_eq!(result, Some(b"data".to_vec()));
+        assert_eq!(harness.fault_count(), 0);
+        assert_eq!(harness.audit_log()[0].event_code, event_codes::FAULT_NONE);
+    }
+
+    #[test]
+    fn test_process_message_with_empty_corrupt_bits_keeps_payload_but_logs_fault() {
+        let mut harness = VirtualTransportFaultHarness::new(1);
+        let schedule = FaultSchedule {
+            seed: 1,
+            faults: vec![ScheduledFault {
+                message_index: 0,
+                fault: FaultClass::Corrupt {
+                    bit_positions: Vec::new(),
+                },
+            }],
+            total_messages: 1,
+        };
+
+        let result = harness.process_message(&schedule, 0, 1, b"data", "t1");
+
+        assert_eq!(result, Some(b"data".to_vec()));
+        assert_eq!(harness.fault_count(), 1);
+        assert_eq!(harness.fault_log()[0].fault_class, "Corrupt");
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_clears_without_panic() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+        push_bounded(&mut items, 5, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_fault_config_rejects_drop_probability_negative_infinity() {
+        let bad = FaultConfig {
+            drop_probability: f64::NEG_INFINITY,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: 0.0,
+            corrupt_bit_count: 0,
+            max_faults: 1,
+        };
+
+        let err = bad
+            .validate()
+            .expect_err("negative infinite drop probability must fail");
+        assert!(err.contains("drop_probability"));
+    }
+
+    #[test]
+    fn test_fault_config_rejects_reorder_probability_nan() {
+        let bad = FaultConfig {
+            drop_probability: 0.0,
+            reorder_probability: f64::NAN,
+            reorder_max_depth: 1,
+            corrupt_probability: 0.0,
+            corrupt_bit_count: 0,
+            max_faults: 1,
+        };
+
+        let err = bad
+            .validate()
+            .expect_err("NaN reorder probability must fail");
+        assert!(err.contains("reorder_probability"));
+    }
+
+    #[test]
+    fn test_fault_config_rejects_corrupt_probability_below_zero() {
+        let bad = FaultConfig {
+            drop_probability: 0.0,
+            reorder_probability: 0.0,
+            reorder_max_depth: 0,
+            corrupt_probability: -0.01,
+            corrupt_bit_count: 1,
+            max_faults: 1,
+        };
+
+        let err = bad
+            .validate()
+            .expect_err("negative corruption probability must fail");
+        assert!(err.contains("corrupt_probability"));
+    }
+
+    #[test]
+    fn test_reorder_depth_zero_returns_current_payload_and_drains_buffer() {
+        let mut harness = VirtualTransportFaultHarness::new(1);
+
+        let result = harness.apply_reorder(1, b"now", 0, "t1");
+
+        assert_eq!(result, Some(b"now".to_vec()));
+        assert!(harness.reorder_buffer.is_empty());
+        assert_eq!(harness.fault_count(), 1);
+        assert_eq!(
+            harness.audit_log()[0].event_code,
+            event_codes::FAULT_REORDER_APPLIED
+        );
+    }
+
+    #[test]
+    fn test_corrupt_empty_payload_with_bit_positions_logs_noop_fault() {
+        let mut harness = VirtualTransportFaultHarness::new(1);
+
+        let corrupted = harness.apply_corrupt(1, &[], &[0, 7], "t1");
+
+        assert!(corrupted.is_empty());
+        assert_eq!(harness.fault_count(), 1);
+        assert_eq!(harness.fault_log()[0].fault_class, "Corrupt");
+        assert_eq!(
+            harness.audit_log()[0].event_code,
+            event_codes::FAULT_CORRUPT_APPLIED
+        );
+    }
+
+    #[test]
+    fn test_flush_empty_reorder_buffer_returns_empty_vec() {
+        let mut harness = VirtualTransportFaultHarness::new(1);
+
+        let flushed = harness.flush_reorder_buffer();
+
+        assert!(flushed.is_empty());
+        assert_eq!(harness.fault_count(), 0);
+        assert!(harness.audit_log().is_empty());
+    }
+
+    #[test]
+    fn test_zero_message_campaign_records_no_faults() {
+        let mut harness = VirtualTransportFaultHarness::new(42);
+
+        let result = harness.run_campaign("empty", &chaos(), 0, "t1");
+
+        assert_eq!(result.total_messages, 0);
+        assert_eq!(result.total_faults, 0);
+        assert_eq!(result.drops, 0);
+        assert_eq!(result.reorders, 0);
+        assert_eq!(result.corruptions, 0);
+        assert_eq!(harness.fault_count(), 0);
+        assert!(!result.content_hash.is_empty());
+        assert!(
+            harness
+                .audit_log()
+                .iter()
+                .any(|record| record.event_code == event_codes::FAULT_SCENARIO_END)
+        );
     }
 
     #[test]

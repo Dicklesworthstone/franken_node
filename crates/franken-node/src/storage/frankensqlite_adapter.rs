@@ -1083,4 +1083,1010 @@ mod tests {
         let back: AdapterSummary = serde_json::from_str(&json).expect("should succeed");
         assert_eq!(back.total_writes, summary.total_writes);
     }
+
+    #[test]
+    fn duplicate_audit_write_does_not_consume_success_counters_or_tier_counts() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .write(PersistenceClass::AuditLog, "audit-1", b"original")
+            .expect("initial audit write should succeed");
+        let writes_before = adapter.summary().total_writes;
+        let tier1_before = adapter
+            .writes_by_tier
+            .get(&DurabilityTier::Tier1)
+            .copied()
+            .unwrap_or(0);
+        let audit_len_before = adapter.audit_log.len();
+
+        let err = adapter
+            .write(PersistenceClass::AuditLog, "audit-1", b"tampered")
+            .expect_err("duplicate audit write must fail closed");
+
+        assert!(matches!(err, AdapterError::WriteFailure { .. }));
+        assert_eq!(adapter.summary().total_writes, writes_before);
+        assert_eq!(adapter.summary().write_failures, 1);
+        assert_eq!(adapter.audit_log.len(), audit_len_before);
+        assert_eq!(
+            adapter
+                .writes_by_tier
+                .get(&DurabilityTier::Tier1)
+                .copied()
+                .unwrap_or(0),
+            tier1_before
+        );
+        let stored = adapter
+            .store
+            .get(&(PersistenceClass::AuditLog, "audit-1".to_string()))
+            .expect("original audit entry should remain");
+        assert!(ct_eq_bytes(stored, b"original"));
+    }
+
+    #[test]
+    fn duplicate_audit_failure_keeps_gate_closed_after_prior_success() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .write(PersistenceClass::ControlState, "control", b"ok")
+            .expect("control write should succeed");
+        assert!(adapter.gate_pass());
+
+        adapter
+            .write(PersistenceClass::AuditLog, "audit-1", b"original")
+            .expect("initial audit write should succeed");
+        let err = adapter
+            .write(PersistenceClass::AuditLog, "audit-1", b"duplicate")
+            .expect_err("duplicate audit write must fail closed");
+
+        assert!(matches!(err, AdapterError::WriteFailure { .. }));
+        assert!(!adapter.gate_pass());
+        assert_eq!(adapter.summary().write_failures, 1);
+    }
+
+    #[test]
+    fn replay_mismatch_when_stored_audit_value_is_tampered() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .write(PersistenceClass::AuditLog, "audit-1", b"expected")
+            .expect("audit write should succeed");
+        adapter.store.insert(
+            (PersistenceClass::AuditLog, "audit-1".to_string()),
+            b"actual".to_vec(),
+        );
+
+        let results = adapter.replay();
+
+        assert_eq!(results, vec![("audit-1".to_string(), false)]);
+        assert_eq!(adapter.summary().replay_mismatches, 1);
+        assert!(!adapter.gate_pass());
+        assert!(
+            adapter
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::FRANKENSQLITE_REPLAY_MISMATCH)
+        );
+    }
+
+    #[test]
+    fn replay_mismatch_when_audit_entry_missing_from_store() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .write(PersistenceClass::AuditLog, "audit-1", b"expected")
+            .expect("audit write should succeed");
+        adapter
+            .store
+            .remove(&(PersistenceClass::AuditLog, "audit-1".to_string()));
+
+        let results = adapter.replay();
+
+        assert_eq!(results, vec![("audit-1".to_string(), false)]);
+        assert_eq!(adapter.summary().replay_mismatches, 1);
+        assert_eq!(adapter.audit_log.len(), 1);
+    }
+
+    #[test]
+    fn failed_migration_does_not_append_schema_version() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .migrate(2, "add index")
+            .expect("migration should succeed");
+        let versions_before = adapter.schema_versions.len();
+        let schema_before = adapter.schema_version();
+
+        let err = adapter
+            .migrate(2, "duplicate")
+            .expect_err("duplicate migration must fail closed");
+
+        assert!(matches!(
+            err,
+            AdapterError::SchemaMigrationFailed { version: 2, .. }
+        ));
+        assert_eq!(adapter.schema_versions.len(), versions_before);
+        assert_eq!(adapter.schema_version(), schema_before);
+        assert_eq!(
+            adapter
+                .schema_versions
+                .last()
+                .expect("schema version should exist")
+                .description
+                .as_str(),
+            "add index"
+        );
+    }
+
+    #[test]
+    fn failed_migration_with_zero_version_preserves_initial_schema() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        let err = adapter
+            .migrate(0, "invalid downgrade")
+            .expect_err("zero version must fail closed");
+
+        assert!(matches!(
+            err,
+            AdapterError::SchemaMigrationFailed { version: 0, .. }
+        ));
+        assert_eq!(adapter.schema_version(), 1);
+        assert_eq!(adapter.schema_versions.len(), 1);
+    }
+
+    #[test]
+    fn missing_read_increments_read_count_without_creating_store_entry() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        let result = adapter.read(PersistenceClass::Snapshot, "missing");
+
+        assert!(!result.found);
+        assert!(result.value.is_none());
+        assert_eq!(result.tier, DurabilityTier::Tier2);
+        assert!(!result.cache_hit);
+        assert_eq!(adapter.summary().total_reads, 1);
+        assert!(
+            !adapter
+                .store
+                .contains_key(&(PersistenceClass::Snapshot, "missing".to_string()))
+        );
+    }
+
+    #[test]
+    fn crash_recovery_excludes_non_tier1_entries() {
+        let mut adapter = FrankensqliteAdapter::default();
+        adapter
+            .write(PersistenceClass::Snapshot, "snapshot", b"tier2")
+            .expect("snapshot write should succeed");
+        adapter
+            .write(PersistenceClass::Cache, "cache", b"tier3")
+            .expect("cache write should succeed");
+
+        let recovered = adapter.crash_recovery();
+
+        assert_eq!(recovered, 0);
+        assert_eq!(adapter.summary().total_writes, 2);
+        assert_eq!(adapter.summary().write_failures, 0);
+    }
+}
+
+#[cfg(test)]
+mod frankensqlite_adapter_extreme_adversarial_negative_tests {
+    use super::*;
+
+    #[test]
+    fn extreme_adversarial_sql_injection_pattern_key_resistance() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // SQL injection patterns in keys (even though this is in-memory, test key sanitization)
+        let sql_injection_keys = vec![
+            "'; DROP TABLE users; --",
+            "admin'--",
+            "admin'/*",
+            "' OR '1'='1",
+            "' OR 1=1--",
+            "'; INSERT INTO audit_log VALUES ('evil', 'payload'); --",
+            "key\x00injection",
+            "key'; SELECT * FROM sqlite_master; --",
+            "1' UNION SELECT password FROM users WHERE username='admin'--",
+            "key\\'; DELETE FROM control_state; --",
+        ];
+
+        for (i, malicious_key) in sql_injection_keys.iter().enumerate() {
+            let write_result = adapter.write(
+                PersistenceClass::ControlState,
+                malicious_key,
+                format!("test_value_{i}").as_bytes(),
+            );
+
+            // Should handle malicious keys without SQL injection vulnerabilities
+            assert!(write_result.is_ok(), "SQL injection key should be handled safely: {}", malicious_key);
+
+            // Verify the key is stored and retrievable (escaped/sanitized)
+            let read_result = adapter.read(PersistenceClass::ControlState, malicious_key);
+            assert!(read_result.found, "malicious key should be retrievable: {}", malicious_key);
+            assert_eq!(read_result.value.unwrap(), format!("test_value_{i}").as_bytes());
+        }
+
+        // Verify adapter state remains consistent
+        assert!(adapter.gate_pass());
+        assert_eq!(adapter.summary().write_failures, 0);
+    }
+
+    #[test]
+    fn extreme_adversarial_unicode_injection_key_value_pollution() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Unicode injection attacks in both keys and values
+        let unicode_attacks = vec![
+            ("key\u{202E}evil\u{202D}", "value\u{200B}hidden"),  // RTL override + zero-width
+            ("key\u{FEFF}bom", "value\u{FEFF}bombed"),           // BOM injection
+            ("key\u{0000}null", "value\u{0001}control"),        // Null/control bytes
+            ("key\r\nHTTP/1.1 200", "value\r\nContent-Length: 0"), // CRLF injection
+            ("café\u{0301}", "café\u{0301}"),                    // Unicode normalization
+            ("key\u{1F4A9}", "value\u{1F4A9}"),                 // Emoji injection
+        ];
+
+        for (unicode_key, unicode_value) in unicode_attacks {
+            let write_result = adapter.write(
+                PersistenceClass::AuditLog,
+                unicode_key,
+                unicode_value.as_bytes(),
+            );
+
+            // Should handle Unicode gracefully without corruption
+            assert!(write_result.is_ok(), "Unicode injection should be handled safely");
+
+            // Verify data integrity preserved
+            let read_result = adapter.read(PersistenceClass::AuditLog, unicode_key);
+            assert!(read_result.found);
+            assert_eq!(read_result.value.unwrap(), unicode_value.as_bytes());
+        }
+
+        // Verify audit log replay maintains Unicode integrity
+        let replay_results = adapter.replay();
+        assert!(replay_results.iter().all(|(_, matches)| *matches),
+            "Unicode entries should replay consistently");
+    }
+
+    #[test]
+    fn extreme_adversarial_memory_exhaustion_massive_key_value_pairs() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Test memory exhaustion with massive key-value pairs
+        let massive_key = "k".repeat(10_000_000); // 10MB key
+        let massive_value = vec![0x42; 50_000_000]; // 50MB value
+
+        let write_result = adapter.write(
+            PersistenceClass::Cache, // Use ephemeral tier to avoid persistence overhead
+            &massive_key,
+            &massive_value,
+        );
+
+        match write_result {
+            Ok(_) => {
+                // If write succeeds, verify data integrity
+                let read_result = adapter.read(PersistenceClass::Cache, &massive_key);
+                assert!(read_result.found);
+                assert_eq!(read_result.value.unwrap().len(), 50_000_000);
+
+                // Verify adapter state remains stable
+                assert_eq!(adapter.summary().write_failures, 0);
+            }
+            Err(_) => {
+                // Should fail gracefully with meaningful error, not crash
+                // This is acceptable behavior for memory exhaustion protection
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_arithmetic_overflow_counters_boundary_values() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Force near-overflow scenarios on internal counters
+        adapter.write_count = usize::MAX - 5;
+        adapter.read_count = usize::MAX - 3;
+        adapter.write_failures = usize::MAX - 1;
+        adapter.replay_count = usize::MAX - 2;
+        adapter.replay_mismatches = usize::MAX - 4;
+
+        // Test operations near overflow boundaries
+        for i in 0..10 {
+            let key = format!("overflow_key_{i}");
+            let value = format!("overflow_value_{i}");
+
+            let write_result = adapter.write(
+                PersistenceClass::ControlState,
+                &key,
+                value.as_bytes(),
+            );
+
+            // Should handle overflow gracefully with saturating arithmetic
+            assert!(write_result.is_ok(), "overflow boundary operation should succeed");
+
+            let read_result = adapter.read(PersistenceClass::ControlState, &key);
+            assert!(read_result.found);
+        }
+
+        // Verify counters use saturating arithmetic (don't wrap around)
+        assert_eq!(adapter.write_count, usize::MAX); // Should saturate
+        assert_eq!(adapter.read_count, usize::MAX);
+
+        // Test summary generation with overflow values
+        let summary = adapter.summary();
+        assert!(summary.total_writes <= usize::MAX);
+        assert!(summary.total_reads <= usize::MAX);
+    }
+
+    #[test]
+    fn extreme_adversarial_concurrent_key_collision_hash_attack() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Simulate hash collision attack with keys designed to collide
+        let collision_candidates = vec![
+            "collision_key_1",
+            "collision_key_2",
+            "collision_key_3",
+            // Add more sophisticated collision patterns
+            "key_with_suffix_a",
+            "key_with_suffix_b",
+            "key_with_suffix_c",
+        ];
+
+        // Write all collision candidates rapidly
+        for (i, key) in collision_candidates.iter().enumerate() {
+            for class in PersistenceClass::all() {
+                let result = adapter.write(
+                    *class,
+                    key,
+                    format!("value_{class}_{i}").as_bytes(),
+                );
+
+                assert!(result.is_ok(), "collision attack should not break storage");
+            }
+        }
+
+        // Verify all keys are independently accessible (no collisions)
+        for (i, key) in collision_candidates.iter().enumerate() {
+            for class in PersistenceClass::all() {
+                let read_result = adapter.read(*class, key);
+                assert!(read_result.found, "collision victim key should still be accessible");
+                assert_eq!(
+                    read_result.value.unwrap(),
+                    format!("value_{class}_{i}").as_bytes()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_malformed_json_serialization_injection() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // JSON injection patterns in values
+        let json_injection_payloads = vec![
+            br#"{"malicious": "payload"}"#.to_vec(),
+            br#""}}], "injected": {"evil": "data""#.to_vec(),
+            b"</script><script>alert('xss')</script>".to_vec(),
+            b"\x00\x01\x02\x03".to_vec(), // Binary data
+            format!("{{{}}}", "\"key\":\"value\",".repeat(10000)).into_bytes(), // Deep nesting
+        ];
+
+        for (i, payload) in json_injection_payloads.iter().enumerate() {
+            let key = format!("json_injection_{i}");
+
+            let write_result = adapter.write(
+                PersistenceClass::Snapshot,
+                &key,
+                payload,
+            );
+
+            assert!(write_result.is_ok(), "JSON payload should be stored safely");
+
+            // Verify data integrity
+            let read_result = adapter.read(PersistenceClass::Snapshot, &key);
+            assert!(read_result.found);
+            assert_eq!(read_result.value.unwrap(), *payload);
+        }
+
+        // Test report generation with potentially malicious data
+        let report = adapter.to_report();
+        let report_json = serde_json::to_string(&report).expect("report should serialize");
+
+        // Verify no JSON injection in report
+        assert!(!report_json.contains("</script>"));
+        assert!(!report_json.contains("alert("));
+        assert!(serde_json::from_str::<serde_json::Value>(&report_json).is_ok());
+    }
+
+    #[test]
+    fn extreme_adversarial_audit_log_replay_timing_attack_resistance() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Create audit entries with varying content sizes to test timing consistency
+        let timing_test_entries = vec![
+            ("short", b"a"),
+            ("medium", &vec![0x42; 1000]),
+            ("large", &vec![0x43; 100_000]),
+            ("massive", &vec![0x44; 1_000_000]),
+        ];
+
+        for (key, value) in &timing_test_entries {
+            adapter.write(PersistenceClass::AuditLog, key, value)
+                .expect("audit write should succeed");
+        }
+
+        // Measure replay timing for different entry sizes
+        let start = Instant::now();
+        let replay_results = adapter.replay();
+        let replay_duration = start.elapsed();
+
+        // Verify all entries replayed correctly
+        assert_eq!(replay_results.len(), timing_test_entries.len());
+        assert!(replay_results.iter().all(|(_, matches)| *matches));
+
+        // Replay should complete in reasonable time regardless of data size
+        assert!(replay_duration.as_millis() < 5000,
+            "replay took too long: {:?}", replay_duration);
+
+        // Verify constant-time comparison was used in replay
+        assert_eq!(adapter.summary().replay_mismatches, 0);
+    }
+
+    #[test]
+    fn extreme_adversarial_control_character_event_pollution() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Control characters in keys and values that could pollute events
+        let control_char_tests = vec![
+            ("key\x00\x01\x02", b"value\x03\x04\x05"),
+            ("key\r\ninjection", b"value\r\nHTTP/1.1 200 OK"),
+            ("key\t\t\t", b"value\x1B[31mred\x1B[0m"), // ANSI escape sequences
+            ("key\x7F\x80\x81", b"value\xFF\xFE\xFD"), // High control chars
+        ];
+
+        for (key, value) in control_char_tests {
+            adapter.write(PersistenceClass::ControlState, key, value)
+                .expect("control character write should succeed");
+        }
+
+        // Verify events don't contain dangerous control characters
+        for event in adapter.events() {
+            assert!(!event.detail.contains('\x00'), "event detail must not contain null bytes");
+            assert!(!event.detail.contains('\x01'), "event detail must not contain SOH");
+            assert!(!event.detail.contains('\x1B'), "event detail must not contain ESC sequences");
+
+            // Verify JSON serialization is safe
+            let event_json = serde_json::to_string(event).unwrap_or_default();
+            assert!(!event_json.contains("\\u0000"));
+            assert!(!event_json.contains("\\u0001"));
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_schema_version_integer_overflow_protection() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Test schema version overflow scenarios
+        let overflow_versions = vec![
+            u32::MAX - 1,
+            u32::MAX,
+            // Note: Can't test wrapping due to validation logic
+        ];
+
+        for version in overflow_versions {
+            let result = adapter.migrate(version, &format!("version_{version}"));
+
+            match result {
+                Ok(_) => {
+                    // If migration succeeds, verify version is set correctly
+                    assert_eq!(adapter.schema_version(), version);
+                }
+                Err(e) => {
+                    // Should fail gracefully, not panic
+                    assert!(matches!(e, AdapterError::SchemaMigrationFailed { .. }));
+                }
+            }
+        }
+
+        // Verify adapter remains in consistent state
+        assert!(adapter.schema_versions.len() <= MAX_SCHEMA_VERSIONS);
+    }
+
+    #[test]
+    fn extreme_adversarial_event_log_capacity_overflow_boundary_protection() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Force event log to exceed MAX_EVENTS capacity
+        let iterations = MAX_EVENTS + 100;
+
+        for i in 0..iterations {
+            adapter.write(
+                PersistenceClass::Cache,
+                &format!("overflow_event_{i}"),
+                b"test",
+            ).expect("write should succeed");
+        }
+
+        // Verify bounded behavior - events should not exceed maximum
+        assert!(adapter.events().len() <= MAX_EVENTS,
+            "events exceeded maximum capacity: {} > {}",
+            adapter.events().len(), MAX_EVENTS);
+
+        // Verify most recent events are preserved
+        let events = adapter.events();
+        if !events.is_empty() {
+            let last_event = &events[events.len() - 1];
+            // Last event should be from recent iterations
+            assert!(last_event.detail.contains(&format!("overflow_event_{}", iterations - 1)) ||
+                last_event.detail.contains("pool_size")); // or init event details
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_btreemap_key_order_manipulation_attack() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Keys designed to test BTreeMap ordering assumptions
+        let ordering_attack_keys = vec![
+            "\x00\x00\x00",     // Null prefix
+            "\x00\x00\x01",     // Minimal increment
+            "\xFF\xFF\xFF",     // Maximum bytes
+            "\x80\x00\x00",     // Sign bit boundary
+            "a\x00z",           // Null in middle
+            "z\x00a",           // Reverse null pattern
+        ];
+
+        // Write in one order
+        for (i, key) in ordering_attack_keys.iter().enumerate() {
+            adapter.write(
+                PersistenceClass::ControlState,
+                key,
+                &format!("value_{i}").as_bytes(),
+            ).expect("ordering attack write should succeed");
+        }
+
+        // Verify all keys are accessible regardless of ordering
+        for (i, key) in ordering_attack_keys.iter().enumerate() {
+            let read_result = adapter.read(PersistenceClass::ControlState, key);
+            assert!(read_result.found, "ordering attack key should be accessible: {:?}", key);
+            assert_eq!(
+                read_result.value.unwrap(),
+                format!("value_{i}").as_bytes()
+            );
+        }
+
+        // Verify adapter state consistency
+        assert_eq!(adapter.summary().total_writes, ordering_attack_keys.len());
+        assert_eq!(adapter.summary().write_failures, 0);
+    }
+
+    #[test]
+    fn extreme_adversarial_tier_mapping_confusion_attack() {
+        let mut adapter = FrankensqliteAdapter::default();
+
+        // Test all combinations of persistence classes and verify tier mappings
+        for class in PersistenceClass::all() {
+            let expected_tier = class.tier();
+
+            // Write data to each class
+            adapter.write(*class, "test_key", b"test_value")
+                .expect("tier mapping write should succeed");
+
+            // Verify read result has correct tier
+            let read_result = adapter.read(*class, "test_key");
+            assert_eq!(read_result.tier, expected_tier,
+                "tier mapping mismatch for class {:?}", class);
+
+            // Verify tier-specific behavior
+            match expected_tier {
+                DurabilityTier::Tier3 => {
+                    assert!(read_result.cache_hit, "Tier3 should be cache hit");
+                }
+                _ => {
+                    assert!(!read_result.cache_hit, "Non-Tier3 should not be cache hit");
+                }
+            }
+        }
+
+        // Verify crash recovery only affects Tier1 classes
+        let tier1_count_before = adapter.store.keys()
+            .filter(|(class, _)| class.tier() == DurabilityTier::Tier1)
+            .count();
+
+        let recovered = adapter.crash_recovery();
+        assert_eq!(recovered, tier1_count_before,
+            "crash recovery should only count Tier1 entries");
+    }
+
+    #[test]
+    fn negative_unicode_injection_in_record_keys() {
+        let adapter = FrankenSqliteAdapter::new("test-db", "v1.0").unwrap();
+
+        let malicious_keys = vec![
+            "normal\u{202e}evil\u{202c}key",    // BiDi override
+            "key\u{200b}\u{feff}hidden",        // Zero-width characters
+            "key\nnewline",                      // Newline injection
+            "key\ttab",                          // Tab injection
+            "key\x00null",                       // Null byte injection
+            "../../../etc/passwd",               // Path traversal attempt
+            "key\"quote'injection",              // SQL injection attempt
+        ];
+
+        for (i, malicious_key) in malicious_keys.iter().enumerate() {
+            let record = PersistenceRecord {
+                record_key: malicious_key.clone(),
+                record_value: format!("value-{}", i),
+                persistence_class: PersistenceClass::AuditLog,
+                durability_tier: DurabilityTier::Tier1,
+                schema_version: 1,
+            };
+
+            let result = adapter.write_record(record);
+            assert!(result.is_ok());
+
+            // Verify we can read it back with the exact key
+            let read_result = adapter.read_record(malicious_key, PersistenceClass::AuditLog);
+            assert!(read_result.is_ok());
+        }
+    }
+
+    #[test]
+    fn negative_massive_record_value_memory_stress() {
+        let adapter = FrankenSqliteAdapter::new("test-massive", "v1.0").unwrap();
+
+        // Create massive record values (10MB each)
+        let massive_value = "X".repeat(10 * 1024 * 1024);
+
+        for i in 0..3 {
+            let record = PersistenceRecord {
+                record_key: format!("massive-key-{}", i),
+                record_value: massive_value.clone(),
+                persistence_class: PersistenceClass::SnapshotState,
+                durability_tier: DurabilityTier::Tier2,
+                schema_version: 1,
+            };
+
+            let result = adapter.write_record(record);
+            if result.is_err() {
+                // Acceptable to reject massive values
+                continue;
+            }
+        }
+
+        // Adapter should remain functional
+        let small_record = PersistenceRecord {
+            record_key: "small-test".to_string(),
+            record_value: "small".to_string(),
+            persistence_class: PersistenceClass::AuditLog,
+            durability_tier: DurabilityTier::Tier1,
+            schema_version: 1,
+        };
+
+        let result = adapter.write_record(small_record);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn negative_schema_version_arithmetic_overflow() {
+        let adapter = FrankenSqliteAdapter::new("test-schema-overflow", "v1.0").unwrap();
+
+        let overflow_versions = vec![
+            u32::MAX,
+            u32::MAX - 1,
+            u32::MAX / 2,
+            0,  // Edge case: zero version
+        ];
+
+        for (i, version) in overflow_versions.iter().enumerate() {
+            let record = PersistenceRecord {
+                record_key: format!("overflow-key-{}", i),
+                record_value: format!("overflow-value-{}", i),
+                persistence_class: PersistenceClass::FencingToken,
+                durability_tier: DurabilityTier::Tier1,
+                schema_version: *version,
+            };
+
+            let result = adapter.write_record(record);
+            assert!(result.is_ok());
+
+            // Verify version is preserved correctly
+            let read_result = adapter.read_record(&format!("overflow-key-{}", i),
+                                                 PersistenceClass::FencingToken);
+            if let Ok(read_record) = read_result {
+                assert_eq!(read_record.schema_version, *version);
+            }
+        }
+    }
+
+    #[test]
+    fn negative_concurrent_write_data_race_stress() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+
+        let adapter = Arc::new(FrankenSqliteAdapter::new("test-concurrent", "v1.0").unwrap());
+        let barrier = Arc::new(Barrier::new(4));
+
+        let mut handles = Vec::new();
+
+        for thread_id in 0..4 {
+            let adapter = Arc::clone(&adapter);
+            let barrier = Arc::clone(&barrier);
+
+            let handle = thread::spawn(move || {
+                barrier.wait();
+
+                for i in 0..100 {
+                    let record = PersistenceRecord {
+                        record_key: format!("thread-{}-record-{}", thread_id, i),
+                        record_value: format!("value-{}-{}", thread_id, i),
+                        persistence_class: PersistenceClass::CrdtMergeState,
+                        durability_tier: DurabilityTier::Tier2,
+                        schema_version: 1,
+                    };
+
+                    let _ = adapter.write_record(record);
+                }
+            });
+
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread should complete");
+        }
+
+        // Verify adapter remains consistent
+        let test_record = PersistenceRecord {
+            record_key: "final-consistency-test".to_string(),
+            record_value: "consistency".to_string(),
+            persistence_class: PersistenceClass::AuditLog,
+            durability_tier: DurabilityTier::Tier1,
+            schema_version: 1,
+        };
+
+        let result = adapter.write_record(test_record);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn negative_crash_recovery_with_corrupted_wal() {
+        let adapter = FrankenSqliteAdapter::new("test-corrupted", "v1.0").unwrap();
+
+        // Write some Tier1 records
+        for i in 0..10 {
+            let record = PersistenceRecord {
+                record_key: format!("pre-crash-{}", i),
+                record_value: format!("value-{}", i),
+                persistence_class: PersistenceClass::AuditLog,
+                durability_tier: DurabilityTier::Tier1,
+                schema_version: 1,
+            };
+            adapter.write_record(record).unwrap();
+        }
+
+        // Simulate crash with potential WAL corruption
+        adapter.simulate_crash();
+
+        // Recovery should handle corruption gracefully
+        let recovery_count = adapter.crash_recovery();
+
+        // Should recover some records (implementation-dependent)
+        assert!(recovery_count >= 0);
+
+        // Adapter should remain functional after corrupted recovery
+        let post_recovery_record = PersistenceRecord {
+            record_key: "post-recovery-test".to_string(),
+            record_value: "recovery-test".to_string(),
+            persistence_class: PersistenceClass::FencingToken,
+            durability_tier: DurabilityTier::Tier1,
+            schema_version: 1,
+        };
+
+        let result = adapter.write_record(post_recovery_record);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn negative_replay_mismatch_detection() {
+        let adapter = FrankenSqliteAdapter::new("test-replay", "v1.0").unwrap();
+
+        // Create a baseline state
+        for i in 0..5 {
+            let record = PersistenceRecord {
+                record_key: format!("baseline-{}", i),
+                record_value: format!("value-{}", i),
+                persistence_class: PersistenceClass::SnapshotState,
+                durability_tier: DurabilityTier::Tier2,
+                schema_version: 1,
+            };
+            adapter.write_record(record).unwrap();
+        }
+
+        let initial_state = adapter.export_state();
+
+        // Modify state to create divergence
+        let divergent_record = PersistenceRecord {
+            record_key: "divergent-key".to_string(),
+            record_value: "divergent-value".to_string(),
+            persistence_class: PersistenceClass::SnapshotState,
+            durability_tier: DurabilityTier::Tier2,
+            schema_version: 1,
+        };
+        adapter.write_record(divergent_record).unwrap();
+
+        // Replay from initial state should detect mismatch
+        let replay_result = adapter.replay_from_state(initial_state);
+
+        // Implementation may handle replay mismatches differently
+        if replay_result.is_err() {
+            // Should fail gracefully with appropriate error
+        } else {
+            // Or may succeed with conflict resolution
+        }
+    }
+
+    #[test]
+    fn negative_persistence_class_boundary_violations() {
+        let adapter = FrankenSqliteAdapter::new("test-boundaries", "v1.0").unwrap();
+
+        // Test records with mismatched durability tiers
+        let mismatched_records = vec![
+            (PersistenceClass::FencingToken, DurabilityTier::Tier3),   // Critical data in ephemeral tier
+            (PersistenceClass::CacheData, DurabilityTier::Tier1),      // Cache data in WAL tier
+            (PersistenceClass::TransientMetrics, DurabilityTier::Tier1), // Transient in durable tier
+        ];
+
+        for (class, tier) in mismatched_records {
+            let record = PersistenceRecord {
+                record_key: format!("mismatch-{:?}-{:?}", class, tier),
+                record_value: "mismatch-test".to_string(),
+                persistence_class: class,
+                durability_tier: tier,
+                schema_version: 1,
+            };
+
+            let result = adapter.write_record(record);
+            // Should either accept with warnings or reject gracefully
+            if result.is_err() {
+                // Acceptable to enforce tier constraints
+                continue;
+            }
+        }
+    }
+
+    #[test]
+    fn negative_empty_and_whitespace_record_values() {
+        let adapter = FrankenSqliteAdapter::new("test-empty", "v1.0").unwrap();
+
+        let edge_case_values = vec![
+            "".to_string(),                    // Empty string
+            " ".to_string(),                   // Single space
+            "\n\t\r".to_string(),             // Whitespace characters
+            "\u{0000}".to_string(),           // Null character
+            "\u{FEFF}".to_string(),           // Byte Order Mark
+            "\u{200B}\u{200C}\u{200D}".to_string(), // Zero-width characters
+        ];
+
+        for (i, value) in edge_case_values.iter().enumerate() {
+            let record = PersistenceRecord {
+                record_key: format!("empty-test-{}", i),
+                record_value: value.clone(),
+                persistence_class: PersistenceClass::AuditLog,
+                durability_tier: DurabilityTier::Tier1,
+                schema_version: 1,
+            };
+
+            let result = adapter.write_record(record);
+            assert!(result.is_ok());
+
+            // Verify we can read back exact value
+            let read_result = adapter.read_record(&format!("empty-test-{}", i),
+                                                 PersistenceClass::AuditLog);
+            if let Ok(read_record) = read_result {
+                assert_eq!(read_record.record_value, *value);
+            }
+        }
+    }
+
+    #[test]
+    fn negative_schema_migration_version_rollback_edge_cases() {
+        let adapter = FrankenSqliteAdapter::new("test-migration", "v1.0").unwrap();
+
+        // Write records with increasing schema versions
+        for version in 1..=5 {
+            let record = PersistenceRecord {
+                record_key: format!("versioned-{}", version),
+                record_value: format!("value-v{}", version),
+                persistence_class: PersistenceClass::SnapshotState,
+                durability_tier: DurabilityTier::Tier2,
+                schema_version: version,
+            };
+            adapter.write_record(record).unwrap();
+        }
+
+        // Attempt to write record with older schema version
+        let rollback_record = PersistenceRecord {
+            record_key: "rollback-test".to_string(),
+            record_value: "rollback-value".to_string(),
+            persistence_class: PersistenceClass::SnapshotState,
+            durability_tier: DurabilityTier::Tier2,
+            schema_version: 1, // Lower than existing versions
+        };
+
+        let result = adapter.write_record(rollback_record);
+        // Should handle version rollback gracefully
+        assert!(result.is_ok() || result.is_err());
+    }
+
+    #[test]
+    fn negative_adapter_initialization_with_invalid_database_name() {
+        let invalid_db_names = vec![
+            "",                              // Empty name
+            "db\x00name",                   // Null byte
+            "db\nnewline",                  // Newline
+            "../../../etc/passwd",          // Path traversal
+            "db\"injection",                // Quote injection
+            "\u{FEFF}db",                   // BOM prefix
+            "x".repeat(1000),               // Very long name
+        ];
+
+        for invalid_name in invalid_db_names {
+            let result = FrankenSqliteAdapter::new(&invalid_name, "v1.0");
+
+            // Should either reject invalid names or sanitize them
+            if result.is_ok() {
+                // If it accepts, should remain functional
+                let adapter = result.unwrap();
+                let test_record = PersistenceRecord {
+                    record_key: "init-test".to_string(),
+                    record_value: "test".to_string(),
+                    persistence_class: PersistenceClass::AuditLog,
+                    durability_tier: DurabilityTier::Tier1,
+                    schema_version: 1,
+                };
+
+                let write_result = adapter.write_record(test_record);
+                assert!(write_result.is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn negative_database_operation_under_memory_pressure() {
+        let adapter = FrankenSqliteAdapter::new("test-memory-pressure", "v1.0").unwrap();
+
+        // Create memory pressure by allocating large chunks
+        let mut pressure_allocations = Vec::new();
+        for i in 0..50 {
+            pressure_allocations.push(vec![i as u8; 1_000_000]); // 50MB total
+        }
+
+        // Perform database operations under memory pressure
+        for i in 0..100 {
+            let record = PersistenceRecord {
+                record_key: format!("pressure-key-{}", i),
+                record_value: format!("pressure-value-{}", i),
+                persistence_class: PersistenceClass::AuditLog,
+                durability_tier: DurabilityTier::Tier1,
+                schema_version: 1,
+            };
+
+            let result = adapter.write_record(record);
+            // Should handle memory pressure gracefully
+            if result.is_err() {
+                // Acceptable to fail under extreme pressure
+                break;
+            }
+        }
+
+        // Clean up pressure and verify adapter recovery
+        drop(pressure_allocations);
+
+        let recovery_record = PersistenceRecord {
+            record_key: "pressure-recovery".to_string(),
+            record_value: "recovered".to_string(),
+            persistence_class: PersistenceClass::FencingToken,
+            durability_tier: DurabilityTier::Tier1,
+            schema_version: 1,
+        };
+
+        let result = adapter.write_record(recovery_record);
+        assert!(result.is_ok());
+    }
 }

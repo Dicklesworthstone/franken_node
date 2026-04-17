@@ -332,10 +332,11 @@ impl RemoteBulkhead {
 
     fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         if cap == 0 {
+            items.clear();
             return;
         }
         if items.len() >= cap {
-            let overflow = items.len() - cap + 1;
+            let overflow = items.len().saturating_sub(cap).saturating_add(1);
             items.drain(0..overflow);
         }
         items.push(item);
@@ -370,6 +371,16 @@ impl RemoteBulkhead {
         if request_id.trim().is_empty() {
             return Err(BulkheadError::InvalidRequestId {
                 detail: "request_id must not be empty".to_string(),
+            });
+        }
+        if request_id.trim() != request_id {
+            return Err(BulkheadError::InvalidRequestId {
+                detail: "request_id must not contain leading or trailing whitespace".to_string(),
+            });
+        }
+        if request_id.chars().any(char::is_control) {
+            return Err(BulkheadError::InvalidRequestId {
+                detail: "request_id must not contain control characters".to_string(),
             });
         }
         Ok(())
@@ -747,7 +758,10 @@ impl RemoteBulkhead {
             .collect::<Vec<_>>();
         values.sort_unstable();
         let len = values.len();
-        let rank = (99usize.saturating_mul(len)).div_ceil(100).max(1).saturating_sub(1);
+        let rank = (99usize.saturating_mul(len))
+            .div_ceil(100)
+            .max(1)
+            .saturating_sub(1);
         Some(values[rank])
     }
 
@@ -1201,5 +1215,493 @@ mod tests {
             last.latency_ms,
             u64::try_from(total - 1).expect("usize->u64 conversion should not overflow")
         );
+    }
+
+    #[test]
+    fn zero_max_in_flight_config_is_rejected() {
+        let err = RemoteBulkhead::new(0, BackpressurePolicy::Reject, 50)
+            .expect_err("zero max_in_flight must fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidConfig { ref reason } if reason.contains("max_in_flight")
+        ));
+        assert_eq!(err.code(), "RB_ERR_INVALID_CONFIG");
+    }
+
+    #[test]
+    fn zero_p99_target_config_is_rejected() {
+        let err = RemoteBulkhead::new(1, BackpressurePolicy::Reject, 0)
+            .expect_err("zero p99 target must fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidConfig { ref reason } if reason.contains("p99_target_ms")
+        ));
+        assert_eq!(err.code(), "RB_ERR_INVALID_CONFIG");
+    }
+
+    #[test]
+    fn queue_policy_zero_depth_config_is_rejected() {
+        let err = RemoteBulkhead::new(
+            1,
+            BackpressurePolicy::Queue {
+                max_depth: 0,
+                timeout_ms: 10,
+            },
+            50,
+        )
+        .expect_err("zero queue depth must fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidConfig { ref reason } if reason.contains("max_depth")
+        ));
+        assert_eq!(err.code(), "RB_ERR_INVALID_CONFIG");
+    }
+
+    #[test]
+    fn queue_policy_zero_timeout_config_is_rejected() {
+        let err = RemoteBulkhead::new(
+            1,
+            BackpressurePolicy::Queue {
+                max_depth: 1,
+                timeout_ms: 0,
+            },
+            50,
+        )
+        .expect_err("zero queue timeout must fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidConfig { ref reason } if reason.contains("timeout_ms")
+        ));
+        assert_eq!(err.code(), "RB_ERR_INVALID_CONFIG");
+    }
+
+    #[test]
+    fn invalid_acquire_request_id_does_not_log_or_change_capacity() {
+        let mut b = bulkhead_reject(2);
+
+        let err = b
+            .acquire(true, "\t\n", 10)
+            .expect_err("blank request id must fail before admission");
+
+        assert!(matches!(err, BulkheadError::InvalidRequestId { .. }));
+        assert_eq!(b.current_in_flight(), 0);
+        assert_eq!(b.max_in_flight(), 2);
+        assert!(b.events().is_empty());
+    }
+
+    #[test]
+    fn invalid_poll_request_id_does_not_evict_existing_waiter() {
+        let mut b = bulkhead_queue(1, 2, 5);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        let queued = b
+            .acquire(true, "queued", 2)
+            .expect_err("request should queue");
+        assert!(matches!(queued, BulkheadError::Queued { .. }));
+
+        let err = b
+            .poll_queued("   ", 100)
+            .expect_err("blank poll request id must fail before queue eviction");
+
+        assert!(matches!(err, BulkheadError::InvalidRequestId { .. }));
+        assert_eq!(b.queue_depth(), 1);
+        b.release(active, 101).expect("release active permit");
+    }
+
+    #[test]
+    fn unknown_poll_evicts_expired_front_waiter_without_promoting_anything() {
+        let mut b = bulkhead_queue(1, 2, 5);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        let queued = b
+            .acquire(true, "queued", 2)
+            .expect_err("request should queue");
+        assert!(matches!(queued, BulkheadError::Queued { .. }));
+
+        let err = b
+            .poll_queued("missing", 10)
+            .expect_err("unknown request should not promote expired waiter");
+
+        assert!(matches!(
+            err,
+            BulkheadError::UnknownRequest { ref request_id } if request_id == "missing"
+        ));
+        assert_eq!(b.queue_depth(), 0);
+        assert_eq!(b.current_in_flight(), 1);
+        b.release(active, 11).expect("release active permit");
+    }
+
+    #[test]
+    fn release_same_permit_twice_fails_without_underflow_or_event() {
+        let mut b = bulkhead_reject(1);
+        let permit = b.acquire(true, "req", 1).expect("permit");
+        b.release(permit.clone(), 2).expect("first release");
+        let events_after_release = b.events().len();
+
+        let err = b
+            .release(permit, 3)
+            .expect_err("second release must fail closed");
+
+        assert!(matches!(err, BulkheadError::UnknownPermit { .. }));
+        assert_eq!(b.current_in_flight(), 0);
+        assert_eq!(b.events().len(), events_after_release);
+    }
+
+    #[test]
+    fn invalid_runtime_cap_change_preserves_existing_cap_and_drain_state() {
+        let mut b = bulkhead_reject(2);
+        let permit = b.acquire(true, "req", 1).expect("permit");
+
+        let err = b
+            .set_max_in_flight(0, 2)
+            .expect_err("zero runtime cap must fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidConfig { ref reason } if reason.contains("new cap")
+        ));
+        assert_eq!(b.max_in_flight(), 2);
+        assert_eq!(b.draining_target(), None);
+        assert_eq!(b.current_in_flight(), 1);
+        b.release(permit, 3).expect("release permit");
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_existing_items() {
+        let mut items = vec![1, 2, 3];
+
+        RemoteBulkhead::push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn request_id_with_outer_whitespace_is_rejected_without_event() {
+        let mut b = bulkhead_reject(1);
+
+        let err = b
+            .acquire(true, " req ", 1)
+            .expect_err("outer whitespace should fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidRequestId { ref detail }
+                if detail.contains("leading or trailing whitespace")
+        ));
+        assert_eq!(b.current_in_flight(), 0);
+        assert!(b.events().is_empty());
+    }
+
+    #[test]
+    fn request_id_with_nul_byte_is_rejected_without_event() {
+        let mut b = bulkhead_reject(1);
+
+        let err = b
+            .acquire(true, "req\0hidden", 1)
+            .expect_err("control byte should fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidRequestId { ref detail } if detail.contains("control")
+        ));
+        assert_eq!(b.current_in_flight(), 0);
+        assert!(b.events().is_empty());
+    }
+
+    #[test]
+    fn remote_cap_missing_under_queue_policy_does_not_enqueue() {
+        let mut b = bulkhead_queue(1, 2, 100);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+
+        let err = b
+            .acquire(false, "no-cap-waiter", 2)
+            .expect_err("missing RemoteCap should reject before queue admission");
+
+        assert!(matches!(err, BulkheadError::RemoteCapRequired));
+        assert_eq!(b.queue_depth(), 0);
+        assert_eq!(b.current_in_flight(), 1);
+        b.release(active, 3).expect("release active permit");
+    }
+
+    #[test]
+    fn exact_queue_timeout_boundary_rejects_and_removes_waiter() {
+        let mut b = bulkhead_queue(1, 2, 10);
+        let active = b.acquire(true, "active", 10).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "waiter", 12),
+            Err(BulkheadError::Queued { .. })
+        ));
+
+        let err = b
+            .poll_queued("waiter", 22)
+            .expect_err("exact expiry boundary must time out");
+
+        assert!(matches!(
+            err,
+            BulkheadError::QueueTimeout { ref request_id } if request_id == "waiter"
+        ));
+        assert_eq!(b.queue_depth(), 0);
+        assert!(!b.request_id_in_use("waiter"));
+        b.release(active, 23).expect("release active permit");
+    }
+
+    #[test]
+    fn acquire_evicts_expired_waiter_before_granting_new_request() {
+        let mut b = bulkhead_queue(1, 2, 5);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "expired-waiter", 2),
+            Err(BulkheadError::Queued { .. })
+        ));
+        b.release(active, 3).expect("release active permit");
+
+        let fresh = b
+            .acquire(true, "fresh", 7)
+            .expect("expired waiter should be evicted before fresh acquire");
+
+        assert_eq!(b.queue_depth(), 0);
+        assert_eq!(b.current_in_flight(), 1);
+        assert!(!b.request_id_in_use("expired-waiter"));
+        b.release(fresh, 8).expect("release fresh permit");
+    }
+
+    #[test]
+    fn active_queued_request_id_fails_poll_without_removing_waiter() {
+        let mut b = bulkhead_queue(1, 2, 100);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "waiter", 2),
+            Err(BulkheadError::Queued { .. })
+        ));
+        b.active_request_ids.insert("waiter".to_string());
+        b.release(active, 3).expect("release active permit");
+
+        let err = b
+            .poll_queued("waiter", 4)
+            .expect_err("queued id already active should fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::DuplicateRequest { ref request_id } if request_id == "waiter"
+        ));
+        assert_eq!(b.queue_depth(), 1);
+    }
+
+    #[test]
+    fn permit_exhaustion_during_poll_removes_waiter_without_marking_active() {
+        let mut b = bulkhead_queue(1, 2, 100);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "waiter", 2),
+            Err(BulkheadError::Queued { .. })
+        ));
+        b.release(active, 3).expect("release active permit");
+        b.permit_ids_exhausted = true;
+
+        let err = b
+            .poll_queued("waiter", 4)
+            .expect_err("exhausted permit ids should reject queued waiter");
+
+        assert!(matches!(
+            err,
+            BulkheadError::PermitIdExhausted { ref request_id } if request_id == "waiter"
+        ));
+        assert_eq!(b.queue_depth(), 0);
+        assert!(!b.active_request_ids.contains("waiter"));
+        assert_eq!(b.current_in_flight(), 0);
+    }
+
+    #[test]
+    fn drain_rejection_does_not_enqueue_request_under_queue_policy() {
+        let mut b = bulkhead_queue(2, 2, 100);
+        let first = b.acquire(true, "first", 1).expect("first permit");
+        let second = b.acquire(true, "second", 2).expect("second permit");
+        b.set_max_in_flight(1, 3).expect("reduce cap");
+
+        let err = b
+            .acquire(true, "drained-waiter", 4)
+            .expect_err("draining should reject before queue admission");
+
+        assert!(matches!(err, BulkheadError::Draining { .. }));
+        assert_eq!(b.queue_depth(), 0);
+        assert!(!b.request_id_in_use("drained-waiter"));
+        b.release(first, 5).expect("release first");
+        b.release(second, 6).expect("release second");
+    }
+
+    #[test]
+    fn unknown_poll_before_expiry_keeps_waiter_and_logs_no_rejection() {
+        let mut b = bulkhead_queue(1, 2, 100);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "waiter", 2),
+            Err(BulkheadError::Queued { .. })
+        ));
+        let events_before = b.events().len();
+
+        let err = b
+            .poll_queued("missing", 50)
+            .expect_err("unknown request should not mutate live waiter");
+
+        assert!(matches!(
+            err,
+            BulkheadError::UnknownRequest { ref request_id } if request_id == "missing"
+        ));
+        assert_eq!(b.queue_depth(), 1);
+        assert_eq!(b.events().len(), events_before);
+        b.release(active, 51).expect("release active permit");
+    }
+
+    #[test]
+    fn non_front_waiter_poll_cannot_leapfrog_after_capacity_frees() {
+        let mut b = bulkhead_queue(1, 3, 100);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "front", 2),
+            Err(BulkheadError::Queued { .. })
+        ));
+        assert!(matches!(
+            b.acquire(true, "second", 3),
+            Err(BulkheadError::Queued { .. })
+        ));
+        b.release(active, 4).expect("release active permit");
+
+        let err = b
+            .poll_queued("second", 5)
+            .expect_err("second waiter must not leapfrog front waiter");
+
+        assert!(matches!(
+            err,
+            BulkheadError::Queued {
+                ref request_id,
+                position,
+                ..
+            } if request_id == "second" && position == 2
+        ));
+        assert_eq!(b.queue_depth(), 2);
+        assert_eq!(b.current_in_flight(), 0);
+    }
+
+    #[test]
+    fn queue_saturated_does_not_mark_rejected_request_in_use() {
+        let mut b = bulkhead_queue(1, 1, 100);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "waiter", 2),
+            Err(BulkheadError::Queued { .. })
+        ));
+
+        let err = b
+            .acquire(true, "overflow", 3)
+            .expect_err("full queue must reject overflow");
+
+        assert!(matches!(err, BulkheadError::QueueSaturated { max_depth: 1 }));
+        assert_eq!(b.queue_depth(), 1);
+        assert!(!b.request_id_in_use("overflow"));
+        b.release(active, 4).expect("release active permit");
+    }
+
+    #[test]
+    fn poll_request_id_with_trailing_space_does_not_evict_expired_waiter() {
+        let mut b = bulkhead_queue(1, 2, 5);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "waiter", 2),
+            Err(BulkheadError::Queued { .. })
+        ));
+
+        let err = b
+            .poll_queued("waiter ", 99)
+            .expect_err("invalid poll id must fail before eviction");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidRequestId { ref detail }
+                if detail.contains("leading or trailing whitespace")
+        ));
+        assert_eq!(b.queue_depth(), 1);
+        assert!(b.request_id_in_use("waiter"));
+        b.release(active, 100).expect("release active permit");
+    }
+
+    #[test]
+    fn request_id_with_delete_control_byte_is_rejected_without_event() {
+        let mut b = bulkhead_reject(1);
+
+        let err = b
+            .acquire(true, "req\u{7f}", 1)
+            .expect_err("delete control byte must fail closed");
+
+        assert!(matches!(
+            err,
+            BulkheadError::InvalidRequestId { ref detail } if detail.contains("control")
+        ));
+        assert_eq!(b.current_in_flight(), 0);
+        assert!(b.events().is_empty());
+    }
+
+    #[test]
+    fn saturating_queue_deadline_does_not_timeout_before_u64_max() {
+        let mut b = bulkhead_queue(1, 2, 10);
+        let active = b
+            .acquire(true, "active", u64::MAX - 5)
+            .expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "waiter", u64::MAX - 5),
+            Err(BulkheadError::Queued { .. })
+        ));
+
+        let still_waiting = b
+            .poll_queued("waiter", u64::MAX - 1)
+            .expect_err("saturating deadline should not expire early");
+
+        assert!(matches!(
+            still_waiting,
+            BulkheadError::Queued {
+                ref request_id, ..
+            } if request_id == "waiter"
+        ));
+        assert_eq!(b.queue_depth(), 1);
+
+        let timed_out = b
+            .poll_queued("waiter", u64::MAX)
+            .expect_err("exact saturating deadline should timeout");
+
+        assert!(matches!(
+            timed_out,
+            BulkheadError::QueueTimeout { ref request_id } if request_id == "waiter"
+        ));
+        assert_eq!(b.queue_depth(), 0);
+        b.release(active, u64::MAX).expect("release active permit");
+    }
+
+    #[test]
+    fn unknown_permit_release_does_not_change_queue_or_event_log() {
+        let mut b = bulkhead_queue(1, 2, 100);
+        let active = b.acquire(true, "active", 1).expect("active permit");
+        assert!(matches!(
+            b.acquire(true, "waiter", 2),
+            Err(BulkheadError::Queued { .. })
+        ));
+        let events_before = b.events().len();
+
+        let err = b
+            .release(
+                BulkheadPermit {
+                    permit_id: 999,
+                    issued_at_ms: 0,
+                    cap_snapshot: 1,
+                },
+                3,
+            )
+            .expect_err("unknown permit must fail closed");
+
+        assert!(matches!(err, BulkheadError::UnknownPermit { permit_id: 999 }));
+        assert_eq!(b.current_in_flight(), 1);
+        assert_eq!(b.queue_depth(), 1);
+        assert_eq!(b.events().len(), events_before);
+        b.release(active, 4).expect("release active permit");
     }
 }

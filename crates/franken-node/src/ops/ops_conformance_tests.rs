@@ -7,34 +7,20 @@
 //! - Drift checker arithmetic operations
 //! - Process timeout handling and fail-closed semantics
 
-use super::engine_dispatcher::{EngineDispatcher, CapturedProcessOutput, RunDispatchReport};
-use super::tokio_drift_checker::{
-    check_tokio_drift, check_api_transport_boundary_trigger,
-    DriftCheckResult, DriftViolation,
-};
-use crate::config::{Config, PreferredRuntime};
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output, ExitStatus};
-use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::{Duration, Instant};
-use tempfile::TempDir;
+use super::engine_dispatcher::{CapturedProcessOutput, EngineDispatcher, RunDispatchReport};
+use super::tokio_drift_checker::{check_api_transport_boundary_trigger, check_tokio_drift};
+use crate::config::PreferredRuntime;
 use std::io::Write;
+use std::os::unix::process::ExitStatusExt;
+use std::path::PathBuf;
+use std::process::{ExitStatus, Output};
+use std::thread;
+use std::time::Duration;
 
 // ---- Engine Dispatcher Hardening Tests ----
 
 #[test]
 fn engine_dispatcher_duration_overflow_protection() {
-    // Test that duration conversion handles extreme values safely
-    let start = Instant::now();
-
-    // Create a mock output representing an extremely long-running process
-    let mock_output = Output {
-        status: ExitStatus::from_raw(0),
-        stdout: b"test output".to_vec(),
-        stderr: b"".to_vec(),
-    };
-
     // Test duration conversion with max value
     let max_duration = Duration::from_millis(u64::MAX);
     let duration_ms = u64::try_from(max_duration.as_millis()).unwrap_or(u64::MAX);
@@ -47,9 +33,120 @@ fn engine_dispatcher_duration_overflow_protection() {
 }
 
 #[test]
-fn engine_dispatcher_path_traversal_protection() {
-    let dispatcher = EngineDispatcher::default();
+fn ops_drift_check_is_idempotent_for_same_tree() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(
+        temp_dir.path().join("Cargo.toml"),
+        "[package]\nname = \"ops-idem\"\n",
+    )
+    .unwrap();
+    std::fs::write(src_dir.join("main.rs"), "fn main() {}\n").unwrap();
 
+    let first = check_tokio_drift(temp_dir.path());
+    let second = check_tokio_drift(temp_dir.path());
+
+    assert_eq!(first.is_clean(), second.is_clean());
+    assert_eq!(first.files_scanned, second.files_scanned);
+    assert_eq!(first.exceptions_honored, second.exceptions_honored);
+    assert_eq!(first.violations, second.violations);
+}
+
+#[test]
+fn ops_transport_boundary_check_is_idempotent_for_same_tree() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let api_dir = temp_dir.path().join("src/api");
+    std::fs::create_dir_all(&api_dir).unwrap();
+    std::fs::write(api_dir.join("server.rs"), "pub fn route_table() {}\n").unwrap();
+
+    let first = check_api_transport_boundary_trigger(temp_dir.path());
+    let second = check_api_transport_boundary_trigger(temp_dir.path());
+
+    assert_eq!(first.is_clean(), second.is_clean());
+    assert_eq!(first.files_scanned, second.files_scanned);
+    assert_eq!(first.exceptions_honored, second.exceptions_honored);
+    assert_eq!(first.violations, second.violations);
+}
+
+#[test]
+fn run_dispatch_report_json_keeps_receipt_fields_stable() {
+    let report = RunDispatchReport {
+        runtime: "node".to_string(),
+        runtime_path: "/usr/bin/node".to_string(),
+        target: "/workspace/app/index.js".to_string(),
+        working_dir: "/workspace/app".to_string(),
+        used_fallback_runtime: true,
+        started_at_utc: "2026-04-17T00:00:00Z".to_string(),
+        finished_at_utc: "2026-04-17T00:00:01Z".to_string(),
+        duration_ms: 1000,
+        exit_code: Some(0),
+        terminated_by_signal: false,
+        telemetry: None,
+        captured_output: CapturedProcessOutput {
+            stdout: "ok\n".to_string(),
+            stderr: String::new(),
+        },
+    };
+
+    let encoded = serde_json::to_value(&report).unwrap();
+
+    assert_eq!(encoded["runtime"], "node");
+    assert_eq!(encoded["runtime_path"], "/usr/bin/node");
+    assert_eq!(encoded["target"], "/workspace/app/index.js");
+    assert_eq!(encoded["working_dir"], "/workspace/app");
+    assert_eq!(encoded["used_fallback_runtime"], true);
+    assert_eq!(encoded["exit_code"], 0);
+    assert_eq!(encoded["terminated_by_signal"], false);
+    assert_eq!(encoded["captured_output"]["stdout"], "ok\n");
+    assert!(encoded["telemetry"].is_null());
+}
+
+#[test]
+fn run_dispatch_report_json_round_trips_without_format_drift() {
+    let report = RunDispatchReport {
+        runtime: "franken_engine".to_string(),
+        runtime_path: "/opt/bin/franken-engine".to_string(),
+        target: "app.js".to_string(),
+        working_dir: ".".to_string(),
+        used_fallback_runtime: false,
+        started_at_utc: "2026-04-17T00:00:00Z".to_string(),
+        finished_at_utc: "2026-04-17T00:00:00Z".to_string(),
+        duration_ms: 0,
+        exit_code: None,
+        terminated_by_signal: true,
+        telemetry: None,
+        captured_output: CapturedProcessOutput {
+            stdout: String::new(),
+            stderr: "terminated".to_string(),
+        },
+    };
+
+    let encoded = serde_json::to_string(&report).unwrap();
+    let decoded: RunDispatchReport = serde_json::from_str(&encoded).unwrap();
+
+    assert_eq!(decoded.runtime, report.runtime);
+    assert_eq!(decoded.runtime_path, report.runtime_path);
+    assert_eq!(decoded.target, report.target);
+    assert_eq!(decoded.working_dir, report.working_dir);
+    assert_eq!(decoded.used_fallback_runtime, report.used_fallback_runtime);
+    assert_eq!(decoded.started_at_utc, report.started_at_utc);
+    assert_eq!(decoded.finished_at_utc, report.finished_at_utc);
+    assert_eq!(decoded.duration_ms, report.duration_ms);
+    assert_eq!(decoded.exit_code, report.exit_code);
+    assert_eq!(decoded.terminated_by_signal, report.terminated_by_signal);
+    assert_eq!(
+        decoded.captured_output.stdout,
+        report.captured_output.stdout
+    );
+    assert_eq!(
+        decoded.captured_output.stderr,
+        report.captured_output.stderr
+    );
+}
+
+#[test]
+fn engine_dispatcher_path_traversal_protection() {
     // Test various potentially dangerous paths
     let dangerous_paths = [
         "../../../etc/passwd",
@@ -63,7 +160,7 @@ fn engine_dispatcher_path_traversal_protection() {
     // These should not cause the dispatcher to panic or access unexpected files
     for dangerous_path in &dangerous_paths {
         let path = PathBuf::from(dangerous_path);
-        let dispatcher = EngineDispatcher::new(Some(path.clone()), PreferredRuntime::Auto);
+        let _dispatcher = EngineDispatcher::new(Some(path.clone()), PreferredRuntime::Auto);
 
         // The dispatcher should handle these gracefully without panicking
         // (actual execution will fail safely when the files don't exist)
@@ -179,7 +276,12 @@ fn drift_checker_exception_count_overflow_protection() {
     let mut file = std::fs::File::create(&main_rs_path).unwrap();
 
     for i in 0..1000 {
-        writeln!(file, "// TOKIO_DRIFT_EXCEPTION(bd-test-{}): justified exception", i).unwrap();
+        writeln!(
+            file,
+            "// TOKIO_DRIFT_EXCEPTION(bd-test-{}): justified exception",
+            i
+        )
+        .unwrap();
         writeln!(file, "#[tokio::main]").unwrap();
     }
 
@@ -235,19 +337,19 @@ fn drift_checker_string_boundary_conditions() {
     // Test various string edge cases that could cause issues
     let test_cases = vec![
         // Empty strings
-        ("", false),
+        ("".to_string(), false),
         // Very long strings
         ("a".repeat(10000), false),
         // Strings with embedded nulls (should not cause issues)
-        ("test\0content", false),
+        ("test\0content".to_string(), false),
         // Strings with control characters
-        ("test\n\r\tpattern", false),
+        ("test\n\r\tpattern".to_string(), false),
         // Unicode content
-        ("使用 tokio 的代码", false),
+        ("使用 tokio 的代码".to_string(), false),
         // String with actual violation
-        ("#[tokio::main]", true),
+        ("#[tokio::main]".to_string(), true),
         // String with violation in quotes (should be ignored)
-        ("\"#[tokio::main]\"", false),
+        ("\"#[tokio::main]\"".to_string(), false),
     ];
 
     for (i, (content, should_violate)) in test_cases.iter().enumerate() {
@@ -266,7 +368,10 @@ fn drift_checker_string_boundary_conditions() {
     let result = check_tokio_drift(temp_dir.path());
 
     // Should find exactly one violation (from the actual #[tokio::main])
-    let violation_count = test_cases.iter().filter(|(_, should_violate)| *should_violate).count();
+    let violation_count = test_cases
+        .iter()
+        .filter(|(_, should_violate)| *should_violate)
+        .count();
     assert_eq!(result.violations.len(), violation_count);
 }
 
@@ -297,7 +402,12 @@ fn drift_checker_api_transport_boundary_path_validation() {
 
     // Should only detect violation in API directory
     assert_eq!(result.violations.len(), 1);
-    assert!(result.violations[0].file.to_string_lossy().contains("src/api/"));
+    assert!(
+        result.violations[0]
+            .file
+            .to_string_lossy()
+            .contains("src/api/")
+    );
 }
 
 // ---- Thread Safety Tests ----
@@ -442,15 +552,21 @@ fn ops_full_integration_pipeline() {
 
     // Phase 1: Drift checking should pass
     let drift_result = check_tokio_drift(temp_dir.path());
-    assert!(drift_result.is_clean(), "Clean crate should pass drift check");
+    assert!(
+        drift_result.is_clean(),
+        "Clean crate should pass drift check"
+    );
     assert!(drift_result.files_scanned >= 2); // At least Cargo.toml and main.rs
 
     // Phase 2: API transport boundary check should pass
     let api_result = check_api_transport_boundary_trigger(temp_dir.path());
-    assert!(api_result.is_clean(), "No API transport boundary should be detected");
+    assert!(
+        api_result.is_clean(),
+        "No API transport boundary should be detected"
+    );
 
     // Phase 3: Engine dispatcher should handle the application path
-    let dispatcher = EngineDispatcher::new(None, PreferredRuntime::Auto);
+    let _dispatcher = EngineDispatcher::new(None, PreferredRuntime::Auto);
 
     // The dispatcher should be able to handle the path without panicking
     // (Actual execution would require the engine binary to be present)
@@ -479,8 +595,229 @@ fn ops_error_propagation_and_recovery() {
 
     // Test 3: Engine dispatcher with non-existent paths
     let nonexistent_path = PathBuf::from("/this/path/does/not/exist/engine");
-    let dispatcher = EngineDispatcher::new(Some(nonexistent_path), PreferredRuntime::Auto);
+    let _dispatcher = EngineDispatcher::new(Some(nonexistent_path), PreferredRuntime::Auto);
 
     // Should create successfully (errors occur during dispatch, not construction)
     assert!(true);
+}
+
+#[test]
+fn ops_drift_check_detects_production_tokio_main_without_exception() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(
+        temp_dir.path().join("Cargo.toml"),
+        "[package]\nname = \"ops-negative\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("main.rs"),
+        "#[tokio::main]\nasync fn main() {}\n",
+    )
+    .unwrap();
+
+    let result = check_tokio_drift(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert!(
+        result
+            .violations
+            .iter()
+            .any(|violation| violation.pattern == "#[tokio::main]")
+    );
+}
+
+#[test]
+fn ops_drift_check_rejects_bare_exception_marker() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let src_dir = temp_dir.path().join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+    std::fs::write(
+        temp_dir.path().join("Cargo.toml"),
+        "[package]\nname = \"ops-bare-exception\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src_dir.join("main.rs"),
+        "// TOKIO_DRIFT_EXCEPTION: no bead id\nuse tokio::runtime::Runtime;\n",
+    )
+    .unwrap();
+
+    let result = check_tokio_drift(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert_eq!(result.exceptions_honored, 0);
+    assert!(
+        result
+            .violations
+            .iter()
+            .any(|violation| violation.pattern == "tokio::runtime::Runtime")
+    );
+}
+
+#[test]
+fn ops_transport_boundary_check_detects_api_tcp_listener() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let api_dir = temp_dir.path().join("src/api");
+    std::fs::create_dir_all(&api_dir).unwrap();
+    std::fs::write(
+        api_dir.join("server.rs"),
+        "pub fn bind() { let _ = std::net::TcpListener::bind(\"127.0.0.1:0\"); }\n",
+    )
+    .unwrap();
+
+    let result = check_api_transport_boundary_trigger(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert!(result.violations.iter().any(|violation| {
+        violation.pattern == "std::net::TcpListener::bind("
+            || violation.pattern == "TcpListener::bind("
+    }));
+}
+
+fn negative_fixture(cargo_toml: &str) -> tempfile::TempDir {
+    let temp_dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(temp_dir.path().join("src")).unwrap();
+    std::fs::write(temp_dir.path().join("Cargo.toml"), cargo_toml).unwrap();
+    temp_dir
+}
+
+fn write_negative_source(root: &std::path::Path, rel_path: &str, source: &str) {
+    let path = root.join(rel_path);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).unwrap();
+    }
+    std::fs::write(path, source).unwrap();
+}
+
+#[test]
+fn ops_drift_check_detects_production_tokio_test_attribute() {
+    let temp_dir = negative_fixture("[package]\nname = \"ops-tokio-test\"\n");
+    write_negative_source(
+        temp_dir.path(),
+        "src/lib.rs",
+        "#[tokio::test]\nasync fn exercises_runtime() {}\n",
+    );
+
+    let result = check_tokio_drift(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert!(
+        result
+            .violations
+            .iter()
+            .any(|violation| violation.pattern == "#[tokio::test]")
+    );
+}
+
+#[test]
+fn ops_drift_check_detects_direct_tokio_import() {
+    let temp_dir = negative_fixture("[package]\nname = \"ops-tokio-import\"\n");
+    write_negative_source(
+        temp_dir.path(),
+        "src/lib.rs",
+        "use tokio::time::sleep;\npub fn imported_runtime() {}\n",
+    );
+
+    let result = check_tokio_drift(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert!(
+        result
+            .violations
+            .iter()
+            .any(|violation| violation.pattern == "use tokio::")
+    );
+}
+
+#[test]
+fn ops_drift_check_detects_current_thread_builder() {
+    let temp_dir = negative_fixture("[package]\nname = \"ops-builder\"\n");
+    write_negative_source(
+        temp_dir.path(),
+        "src/lib.rs",
+        "pub fn boot() { let _ = tokio::runtime::Builder::new_current_thread(); }\n",
+    );
+
+    let result = check_tokio_drift(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert!(result.violations.iter().any(|violation| {
+        violation.pattern == "tokio::runtime::Builder"
+            || violation.pattern == "Builder::new_current_thread()"
+    }));
+}
+
+#[test]
+fn ops_drift_check_detects_production_tokio_dependency_table() {
+    let temp_dir = negative_fixture(
+        "[package]\nname = \"ops-tokio-table\"\n\n[dependencies.tokio]\nversion = \"1\"\n",
+    );
+    write_negative_source(temp_dir.path(), "src/lib.rs", "pub fn clean() {}\n");
+
+    let result = check_tokio_drift(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert!(result.violations.iter().any(|violation| {
+        violation.pattern == "tokio dependency in [dependencies.tokio]"
+    }));
+}
+
+#[test]
+fn ops_drift_check_detects_dev_dependency_runtime_features() {
+    let temp_dir = negative_fixture(
+        "[package]\nname = \"ops-dev-runtime\"\n\n[dev-dependencies]\n\
+         tokio = { version = \"1\", features = [\"rt\"] }\n",
+    );
+    write_negative_source(temp_dir.path(), "src/lib.rs", "pub fn clean() {}\n");
+
+    let result = check_tokio_drift(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert!(result.violations.iter().any(|violation| {
+        violation.pattern == "tokio runtime features in [dev-dependencies]"
+    }));
+}
+
+#[test]
+fn ops_transport_boundary_check_detects_axum_router_in_api_source() {
+    let temp_dir = negative_fixture("[package]\nname = \"ops-api-axum\"\n");
+    write_negative_source(
+        temp_dir.path(),
+        "src/api/routes.rs",
+        "pub fn router() { let _ = axum::Router::new(); }\n",
+    );
+
+    let result = check_api_transport_boundary_trigger(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert!(
+        result
+            .violations
+            .iter()
+            .any(|violation| violation.pattern == "axum::Router")
+    );
+}
+
+#[test]
+fn ops_transport_boundary_check_rejects_invalid_exception_marker() {
+    let temp_dir = negative_fixture("[package]\nname = \"ops-api-invalid-exception\"\n");
+    write_negative_source(
+        temp_dir.path(),
+        "src/api/server.rs",
+        "// TOKIO_DRIFT_EXCEPTION(bd-): missing bead suffix\n\
+         pub fn serve() { let _ = hyper::Server::builder; }\n",
+    );
+
+    let result = check_api_transport_boundary_trigger(temp_dir.path());
+
+    assert!(!result.is_clean());
+    assert_eq!(result.exceptions_honored, 0);
+    assert!(
+        result
+            .violations
+            .iter()
+            .any(|violation| violation.pattern == "hyper::Server")
+    );
 }
