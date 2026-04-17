@@ -1404,4 +1404,120 @@ mod tests {
         assert_eq!(err.code(), ERR_DSG_SCENARIO_NOT_FOUND);
         assert!(gate.registered_scenarios().is_empty());
     }
+
+    #[test]
+    fn trailing_newline_scenario_name_is_rejected_without_registration_event() {
+        let mut gate = DporScheduleGate::with_defaults().unwrap();
+        let before_events = gate.events().len();
+        let name = format!("{}\n", SCENARIO_EPOCH_LEASE_INTERLEAVE);
+
+        let err = gate.register_scenario(&name).unwrap_err();
+
+        assert_eq!(err.code(), ERR_DSG_SCENARIO_NOT_FOUND);
+        assert!(gate.registered_scenarios().is_empty());
+        assert_eq!(gate.events().len(), before_events);
+        assert!(
+            !gate
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::DSG_002)
+        );
+    }
+
+    #[test]
+    fn nul_suffixed_scenario_name_is_rejected_verbatim() {
+        let mut gate = DporScheduleGate::with_defaults().unwrap();
+        let name = format!("{}\0", SCENARIO_REMOTE_EVIDENCE_RACE);
+
+        let err = gate.register_scenario(&name).unwrap_err();
+
+        assert!(matches!(
+            err,
+            DporScheduleGateError::ScenarioNotFound(ref rejected) if rejected == &name
+        ));
+        assert!(gate.registered_scenarios().is_empty());
+    }
+
+    #[test]
+    fn failed_register_after_success_preserves_registered_scenarios() {
+        let mut gate = DporScheduleGate::with_defaults().unwrap();
+        gate.register_scenario(SCENARIO_LEASE_EVIDENCE_SYNC)
+            .unwrap();
+        let before = gate.registered_scenarios().to_vec();
+        let before_events = gate.events().len();
+
+        let err = gate.register_scenario("lease_evidence_sync ").unwrap_err();
+
+        assert_eq!(err.code(), ERR_DSG_SCENARIO_NOT_FOUND);
+        assert_eq!(gate.registered_scenarios(), before.as_slice());
+        assert_eq!(gate.events().len(), before_events);
+    }
+
+    #[test]
+    fn run_full_gate_with_corrupt_registered_scenario_fails_before_final_event() {
+        let mut gate = DporScheduleGate::with_defaults().unwrap();
+        gate.registered_scenarios = vec!["missing-model".to_string()];
+
+        let err = gate.run_full_gate().unwrap_err();
+
+        assert_eq!(err.code(), ERR_DSG_EXPLORATION_FAILED);
+        assert!(
+            gate.events()
+                .iter()
+                .any(|event| event.code == event_codes::DSG_006)
+        );
+        assert!(
+            !gate
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::DSG_007)
+        );
+    }
+
+    #[test]
+    fn custom_checker_with_corrupt_registered_scenario_fails_before_final_event() {
+        let mut gate = DporScheduleGate::with_defaults().unwrap();
+        gate.registered_scenarios = vec!["missing-custom-model".to_string()];
+
+        let err = gate
+            .run_full_gate_with_checker(&no_violations)
+            .unwrap_err();
+
+        assert_eq!(err.code(), ERR_DSG_EXPLORATION_FAILED);
+        assert!(
+            gate.events()
+                .iter()
+                .any(|event| event.code == event_codes::DSG_006)
+        );
+        assert!(
+            !gate
+                .events()
+                .iter()
+                .any(|event| event.code == event_codes::DSG_007)
+        );
+    }
+
+    #[test]
+    fn gate_result_is_pass_rejects_whitespace_wrapped_pass() {
+        for verdict in ["PASS ", " PASS", "PASS\n", "\tPASS", "Pass"] {
+            let result = GateResult {
+                schema_version: SCHEMA_VERSION.to_string(),
+                scenarios_explored: ALL_SCENARIOS.len(),
+                scenarios_total: ALL_SCENARIOS.len(),
+                total_schedules_explored: 1,
+                total_violations: 0,
+                per_scenario: Vec::new(),
+                verdict: verdict.to_string(),
+            };
+
+            assert!(!result.is_pass());
+        }
+    }
+
+    #[test]
+    fn event_description_rejects_punctuation_and_nul_near_misses() {
+        for code in ["DSG--001", "DSG_001", "DSG-01", "DSG-001\0"] {
+            assert_eq!(event_description(code), "unknown event code");
+        }
+    }
 }

@@ -904,4 +904,120 @@ mod tests {
 
         assert!(err.is_err());
     }
+
+    #[test]
+    fn serde_snapshot_record_missing_policy_fails() {
+        let json = serde_json::json!({
+            "connector_id": "conn-1",
+            "snapshot_version": 7,
+            "root_hash": "root-v7",
+            "taken_at": "t",
+            "ops_since_last": 2,
+            "bytes_since_last": 128
+        });
+
+        let err = serde_json::from_value::<SnapshotRecord>(json).unwrap_err();
+
+        assert!(err.to_string().contains("policy"));
+    }
+
+    #[test]
+    fn serde_policy_audit_missing_reason_fails() {
+        let json = serde_json::json!({
+            "connector_id": "conn-1",
+            "old_policy": SnapshotPolicy::new(100, 65536),
+            "new_policy": SnapshotPolicy::new(50, 4096),
+            "changed_at": "t"
+        });
+
+        let err = serde_json::from_value::<PolicyAuditRecord>(json).unwrap_err();
+
+        assert!(err.to_string().contains("reason"));
+    }
+
+    #[test]
+    fn serde_snapshot_error_stale_missing_current_version_fails() {
+        let json = serde_json::json!({
+            "SNAPSHOT_STALE": {
+                "snapshot_version": 4
+            }
+        });
+
+        let err = serde_json::from_value::<SnapshotError>(json).unwrap_err();
+
+        assert!(err.to_string().contains("current_version"));
+    }
+
+    #[test]
+    fn serde_snapshot_error_mismatch_missing_actual_fails() {
+        let json = serde_json::json!({
+            "SNAPSHOT_HASH_MISMATCH": {
+                "expected": "chain-head"
+            }
+        });
+
+        let err = serde_json::from_value::<SnapshotError>(json).unwrap_err();
+
+        assert!(err.to_string().contains("actual"));
+    }
+
+    #[test]
+    fn serde_policy_string_threshold_fails() {
+        let json = serde_json::json!({
+            "every_updates": "10",
+            "every_bytes": 1024
+        });
+
+        let err = serde_json::from_value::<SnapshotPolicy>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn serde_replay_target_missing_replay_bytes_fails() {
+        let json = serde_json::json!({
+            "max_replay_ops": 10,
+            "max_replay_bytes": 1024,
+            "snapshot_version": 1,
+            "current_version": 2
+        });
+
+        let err = serde_json::from_value::<ReplayTarget>(json).unwrap_err();
+
+        assert!(err.to_string().contains("replay_bytes"));
+    }
+
+    #[test]
+    fn hash_validation_rejects_empty_expected_for_nonempty_record() {
+        let record = SnapshotRecord {
+            connector_id: "conn-1".into(),
+            snapshot_version: 5,
+            root_hash: "root-v5".into(),
+            taken_at: "t".into(),
+            policy: SnapshotPolicy::default_policy(),
+            ops_since_last: 1,
+            bytes_since_last: 1,
+        };
+
+        let err = SnapshotTracker::validate_snapshot_hash(&record, "").unwrap_err();
+
+        assert!(matches!(err, SnapshotError::SnapshotHashMismatch { .. }));
+    }
+
+    #[test]
+    fn hash_validation_rejects_empty_record_for_nonempty_expected() {
+        let record = SnapshotRecord {
+            connector_id: "conn-1".into(),
+            snapshot_version: 5,
+            root_hash: String::new(),
+            taken_at: "t".into(),
+            policy: SnapshotPolicy::default_policy(),
+            ops_since_last: 1,
+            bytes_since_last: 1,
+        };
+
+        let err = SnapshotTracker::validate_snapshot_hash(&record, "root-v5").unwrap_err();
+
+        assert!(matches!(err, SnapshotError::SnapshotHashMismatch { .. }));
+    }
 }

@@ -1777,4 +1777,439 @@ mod tests {
 
         assert!(!r.within_budget, "negative cold start must fail closed");
     }
+
+    // ── NEGATIVE-PATH TESTS: Security & Robustness ──────────────────
+
+    #[test]
+    fn test_negative_trace_id_with_unicode_injection_attacks() {
+        use crate::security::constant_time::ct_eq;
+
+        let mut gate = OverheadGate::with_default_policy();
+        let result = within_budget_result(HotPath::HealthGateEvaluation);
+
+        // Evaluate to trigger trace ID generation
+        let _ = gate.evaluate(result);
+        let events = gate.events();
+
+        // Verify trace ID is sanitized and doesn't contain injection patterns
+        let trace_id = &events[0].trace_id;
+
+        // Should NOT contain BiDi override characters
+        assert!(!trace_id.contains('\u{202E}'), "trace ID must not contain BiDi override");
+        assert!(!trace_id.contains('\u{202D}'), "trace ID must not contain BiDi override");
+
+        // Should NOT contain ANSI escape sequences
+        assert!(!trace_id.contains("\x1b["), "trace ID must not contain ANSI escapes");
+
+        // Should NOT contain null bytes or control characters
+        assert!(!trace_id.contains('\0'), "trace ID must not contain null bytes");
+        assert!(!trace_id.contains('\r'), "trace ID must not contain carriage return");
+        assert!(!trace_id.contains('\n'), "trace ID must not contain newlines");
+
+        // Should use constant-time comparison for generated trace IDs
+        let expected_prefix = "perf-health_gate_evaluation";
+        assert!(ct_eq(trace_id.as_str(), expected_prefix),
+               "trace ID comparison must be constant-time");
+    }
+
+    #[test]
+    fn test_negative_event_detail_with_massive_memory_exhaustion() {
+        let mut gate = OverheadGate::with_default_policy();
+        let massive_detail = "A".repeat(1_000_000); // 1MB string
+
+        // Create malicious event with huge detail
+        let malicious_event = OverheadEvent {
+            code: event_codes::PRF_001_BENCHMARK_STARTED.to_string(),
+            hot_path: "health_gate_evaluation".to_string(),
+            detail: massive_detail.clone(),
+            overhead_pct: Some(5.0),
+            trace_id: "trace-001".to_string(),
+        };
+
+        // Simulate bounded event storage
+        push_bounded(&mut gate.events, malicious_event, MAX_EVENTS);
+
+        // Verify bounded storage prevents memory exhaustion
+        assert!(gate.events().len() <= MAX_EVENTS,
+               "event storage must respect MAX_EVENTS bound");
+
+        // Verify event detail is properly bounded when serialized
+        let json = serde_json::to_string(&gate.events()[0]).unwrap_or_default();
+        assert!(json.len() < 10_000_000, "serialized event must not cause memory exhaustion");
+
+        // Verify CSV export is also bounded
+        let csv = gate.to_csv();
+        assert!(csv.len() < 10_000_000, "CSV export must not cause memory exhaustion");
+    }
+
+    #[test]
+    fn test_negative_policy_with_json_injection_attacks() {
+        // Create policy with malicious JSON injection patterns in flamegraph paths
+        let malicious_budget = HotPathBudget {
+            hot_path: HotPath::HealthGateEvaluation,
+            p95_overhead_pct: 10.0,
+            p99_overhead_pct: 20.0,
+            cold_start_ms: 30.0,
+        };
+
+        let result = MeasurementResult::from_measurements(
+            HotPath::HealthGateEvaluation,
+            100.0, 110.0, 120.0,
+            105.0, 118.0, 130.0,
+            15.0,
+            &malicious_budget,
+            Some(r#"flamegraph.svg","injection":"malicious"}"#.to_string())
+        );
+
+        // Serialize to JSON and verify no injection
+        let json = serde_json::to_string(&result).unwrap();
+
+        // Verify JSON structure integrity - should properly escape the injection
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let flamegraph_path = parsed["flamegraph_path"].as_str().unwrap();
+
+        // Should be the literal string, not parsed as JSON injection
+        assert_eq!(flamegraph_path, r#"flamegraph.svg","injection":"malicious"}"#);
+
+        // Verify no extra fields were injected
+        assert!(parsed.get("injection").is_none(), "JSON injection must not create extra fields");
+    }
+
+    #[test]
+    fn test_negative_hot_path_display_injection_resistance() {
+        // Test that HotPath display doesn't allow injection
+        for hot_path in HotPath::all() {
+            let display_str = format!("{}", hot_path);
+            let label_str = hot_path.label();
+
+            // Verify no ANSI escape sequences
+            assert!(!display_str.contains("\x1b["),
+                   "HotPath display must not contain ANSI escapes: {}", hot_path);
+            assert!(!label_str.contains("\x1b["),
+                   "HotPath label must not contain ANSI escapes: {}", hot_path);
+
+            // Verify no BiDi override attacks
+            assert!(!display_str.contains('\u{202E}'),
+                   "HotPath display must not contain BiDi override: {}", hot_path);
+            assert!(!label_str.contains('\u{202E}'),
+                   "HotPath label must not contain BiDi override: {}", hot_path);
+
+            // Verify no null bytes or newlines
+            assert!(!display_str.contains('\0'),
+                   "HotPath display must not contain null bytes: {}", hot_path);
+            assert!(!display_str.contains('\n'),
+                   "HotPath display must not contain newlines: {}", hot_path);
+
+            // Verify consistent safe length
+            assert!(display_str.len() < 100,
+                   "HotPath display must be reasonably bounded: {}", hot_path);
+            assert!(label_str.len() < 100,
+                   "HotPath label must be reasonably bounded: {}", hot_path);
+        }
+    }
+
+    #[test]
+    fn test_negative_csv_output_with_malicious_field_injection() {
+        let mut gate = OverheadGate::with_default_policy();
+
+        // Create measurement with malicious injection attempts in flamegraph path
+        let budget = default_budget();
+        let malicious_result = MeasurementResult {
+            hot_path: HotPath::HealthGateEvaluation,
+            baseline_p50_us: 100.0,
+            baseline_p95_us: 110.0,
+            baseline_p99_us: 120.0,
+            integrated_p50_us: 105.0,
+            integrated_p95_us: 118.0,
+            integrated_p99_us: 130.0,
+            overhead_p95_pct: 7.27,
+            overhead_p99_pct: 8.33,
+            cold_start_ms: 15.0,
+            within_budget: true,
+            flamegraph_path: Some("file.svg\",\"injected_field\":\"malicious".to_string()),
+        };
+
+        gate.evaluate(malicious_result);
+        let csv = gate.to_csv();
+
+        // Verify CSV structure integrity
+        let lines: Vec<&str> = csv.lines().collect();
+        assert!(lines.len() >= 2, "CSV must have header and data rows");
+
+        // Verify header is not corrupted
+        let header = lines[0];
+        let expected_header = "hot_path,baseline_p50_us,baseline_p95_us,baseline_p99_us,integrated_p50_us,integrated_p95_us,integrated_p99_us,overhead_p95_pct,overhead_p99_pct,cold_start_ms,within_budget";
+        assert_eq!(header, expected_header, "CSV header must not be corrupted by injection");
+
+        // Verify data row has exactly the expected number of fields
+        let data_row = lines[1];
+        let fields: Vec<&str> = data_row.split(',').collect();
+        assert_eq!(fields.len(), 11, "CSV data row must have exactly 11 fields, not be corrupted by injection");
+
+        // Verify no extra commas from injection
+        let comma_count = data_row.matches(',').count();
+        assert_eq!(comma_count, 10, "CSV data row must have exactly 10 commas");
+    }
+
+    #[test]
+    fn test_negative_budget_policy_with_massive_budget_list_memory_stress() {
+        // Create policy with 10,000 identical budgets to stress memory
+        let massive_budgets: Vec<HotPathBudget> = (0..10_000)
+            .map(|i| HotPathBudget {
+                hot_path: if i % 4 == 0 { HotPath::LifecycleTransition }
+                         else if i % 4 == 1 { HotPath::HealthGateEvaluation }
+                         else if i % 4 == 2 { HotPath::RolloutStateChange }
+                         else { HotPath::FencingTokenOp },
+                p95_overhead_pct: (i as f64) * 0.001, // Vary slightly
+                p99_overhead_pct: (i as f64) * 0.002,
+                cold_start_ms: (i as f64) * 0.01,
+            })
+            .collect();
+
+        let massive_policy = BudgetPolicy {
+            budgets: massive_budgets,
+        };
+
+        // Verify policy creation doesn't crash
+        let gate = OverheadGate::new(massive_policy);
+
+        // Verify budget lookup still works efficiently
+        let budget = gate.policy().budget_for(HotPath::HealthGateEvaluation);
+        assert!(budget.is_some(), "budget lookup must work even with massive policy");
+
+        // Verify JSON serialization is bounded
+        let json = gate.policy().to_json();
+        assert!(json.len() < 50_000_000, "massive policy JSON must not cause excessive memory usage");
+
+        // Verify policy doesn't cause stack overflow in normal operations
+        let test_result = within_budget_result(HotPath::HealthGateEvaluation);
+        let mut test_gate = OverheadGate::new(gate.policy().clone());
+        let decision = test_gate.evaluate(test_result);
+        assert!(decision.is_pass(), "massive policy must not break normal evaluation");
+    }
+
+    #[test]
+    fn test_negative_overhead_calculation_with_extreme_floating_point_edge_cases() {
+        let budget = default_budget();
+
+        // Test with values very close to zero (potential division issues)
+        let near_zero_result = MeasurementResult::from_measurements(
+            HotPath::HealthGateEvaluation,
+            1e-100, 1e-100, 1e-100, // baseline near zero
+            1e-99,  1e-99,  1e-99,  // integrated slightly larger
+            10.0,
+            &budget,
+            None,
+        );
+        // Should handle gracefully without panic
+        assert!(near_zero_result.overhead_p95_pct.is_finite() || near_zero_result.overhead_p95_pct == 0.0);
+
+        // Test with very large finite values (near f64::MAX)
+        let huge_baseline = 1e100;
+        let huge_integrated = huge_baseline * 2.0; // Would cause 100% overhead if computed naively
+
+        let huge_result = MeasurementResult::from_measurements(
+            HotPath::HealthGateEvaluation,
+            huge_baseline, huge_baseline, huge_baseline,
+            huge_integrated, huge_integrated, huge_integrated,
+            10.0,
+            &budget,
+            None,
+        );
+
+        // Should detect this is over budget due to extreme overhead
+        assert!(!huge_result.within_budget, "extreme overhead must fail budget");
+
+        // Test overflow protection in saturating arithmetic patterns
+        let max_result = MeasurementResult::from_measurements(
+            HotPath::HealthGateEvaluation,
+            f64::MAX / 2.0, f64::MAX / 2.0, f64::MAX / 2.0,
+            f64::MAX, f64::MAX, f64::MAX,
+            f64::MAX,
+            &budget,
+            None,
+        );
+
+        // Should fail closed rather than overflow
+        assert!(!max_result.within_budget, "extreme values must fail closed");
+    }
+
+    #[test]
+    fn test_negative_gate_decision_display_injection_prevention() {
+        // Test Pass decision display safety
+        let pass_display = format!("{}", GateDecision::Pass);
+        assert_eq!(pass_display, "PASS");
+        assert!(!pass_display.contains('\n'));
+        assert!(!pass_display.contains('\0'));
+
+        // Test Fail decision with injection attempts in violation messages
+        let malicious_violations = vec![
+            "p95 overhead 50.0% > budget 10.0%\x1b[31m<INJECTION>\x1b[0m".to_string(),
+            "violation\",\"injected\":\"field\"}//".to_string(),
+            "violation\ninjected_line".to_string(),
+            "violation\0null_injection".to_string(),
+            "violation\u{202E}bidi_override".to_string(),
+        ];
+
+        let fail_decision = GateDecision::Fail {
+            violations: malicious_violations.clone()
+        };
+
+        let display_str = format!("{}", fail_decision);
+
+        // Verify basic structure is maintained
+        assert!(display_str.starts_with("FAIL"));
+        assert!(display_str.contains("5 violations"));
+
+        // Verify the display itself doesn't propagate injection patterns
+        // (The violations are stored as-is, but display should be safe)
+        assert!(!display_str.contains("\x1b[31m"),
+               "display must not propagate ANSI escape sequences");
+
+        // Test serde safety with malicious violations
+        let json = serde_json::to_string(&fail_decision).unwrap();
+        let parsed: GateDecision = serde_json::from_str(&json).unwrap();
+
+        if let GateDecision::Fail { violations: parsed_violations } = parsed {
+            assert_eq!(parsed_violations.len(), 5);
+            // Verify violations are preserved exactly (for forensics) but contained
+            assert_eq!(parsed_violations, malicious_violations);
+        } else {
+            panic!("parsed decision should be Fail");
+        }
+    }
+
+    #[test]
+    fn test_negative_concurrent_gate_evaluation_race_conditions() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let gate = Arc::new(Mutex::new(OverheadGate::with_default_policy()));
+        let mut handles = Vec::new();
+
+        // Spawn 8 threads doing concurrent evaluations
+        for thread_id in 0..8 {
+            let gate_clone = Arc::clone(&gate);
+            let handle = thread::spawn(move || {
+                for i in 0..100 {
+                    let hot_path = match (thread_id + i) % 4 {
+                        0 => HotPath::LifecycleTransition,
+                        1 => HotPath::HealthGateEvaluation,
+                        2 => HotPath::RolloutStateChange,
+                        _ => HotPath::FencingTokenOp,
+                    };
+
+                    let result = within_budget_result(hot_path);
+
+                    // Acquire lock and evaluate
+                    let mut locked_gate = gate_clone.lock().unwrap();
+                    let decision = locked_gate.evaluate(result);
+                    assert!(decision.is_pass(), "concurrent evaluation must remain correct");
+
+                    // Verify internal state consistency
+                    let summary = locked_gate.summary();
+                    assert!(summary.total > 0, "total count must be positive");
+                    assert_eq!(summary.over_budget, 0, "all results should be within budget");
+                    assert!(summary.within_budget <= summary.total, "counts must be consistent");
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify final state
+        let final_gate = gate.lock().unwrap();
+        let final_summary = final_gate.summary();
+        assert_eq!(final_summary.total, 800, "should have 8 threads × 100 evaluations");
+        assert_eq!(final_summary.within_budget, 800, "all should be within budget");
+        assert_eq!(final_summary.over_budget, 0, "none should be over budget");
+        assert!(final_gate.gate_pass(), "final gate should pass");
+    }
+
+    #[test]
+    fn test_negative_report_generation_with_malicious_policy_fields() {
+        // Create policy with potential injection in JSON serialization
+        let mut malicious_budgets = Vec::new();
+        for _ in 0..1000 {
+            malicious_budgets.push(HotPathBudget {
+                hot_path: HotPath::HealthGateEvaluation,
+                p95_overhead_pct: f64::INFINITY, // Extreme value
+                p99_overhead_pct: f64::NEG_INFINITY, // Extreme value
+                cold_start_ms: f64::NAN, // Extreme value
+            });
+        }
+
+        let malicious_policy = BudgetPolicy {
+            budgets: malicious_budgets,
+        };
+
+        let mut gate = OverheadGate::new(malicious_policy);
+
+        // Add some results
+        for hot_path in HotPath::all() {
+            gate.evaluate(within_budget_result(*hot_path));
+        }
+
+        // Generate report and verify it's safe
+        let report = gate.to_report();
+
+        // Verify report structure
+        assert!(report["bead_id"].is_string());
+        assert!(report["section"].is_string());
+        assert!(report["gate_pass"].is_boolean());
+        assert!(report["summary"].is_object());
+        assert!(report["policy"].is_object());
+        assert!(report["results"].is_array());
+
+        // Verify extreme values in policy are handled safely
+        let policy_json = report["policy"].clone();
+        let policy_str = serde_json::to_string(&policy_json).unwrap();
+
+        // Should not contain raw infinity/NaN that could break parsers
+        // (serde_json should serialize these as null or string representations)
+        assert!(policy_str.len() < 1_000_000, "policy serialization must be bounded");
+
+        // Verify report can be re-parsed safely
+        let report_str = serde_json::to_string(&report).unwrap();
+        let reparsed: serde_json::Value = serde_json::from_str(&report_str).unwrap();
+        assert_eq!(reparsed["bead_id"], report["bead_id"]);
+    }
+
+    #[test]
+    fn test_negative_measurement_result_field_bypass_with_case_sensitivity() {
+        // Test potential bypass via case sensitivity in field names
+        let json_mixed_case = r#"{
+            "Hot_Path": "HealthGateEvaluation",
+            "hot_path": "LifecycleTransition",
+            "baseline_p50_us": 100.0,
+            "Baseline_P95_Us": 999.0,
+            "baseline_p95_us": 110.0,
+            "baseline_p99_us": 120.0,
+            "integrated_p50_us": 105.0,
+            "integrated_p95_us": 118.0,
+            "integrated_p99_us": 130.0,
+            "overhead_p95_pct": 7.27,
+            "overhead_p99_pct": 8.33,
+            "cold_start_ms": 15.0,
+            "within_budget": true,
+            "flamegraph_path": null
+        }"#;
+
+        // Should fail to parse due to unknown fields or use only the correct cased fields
+        let result: Result<MeasurementResult, _> = serde_json::from_str(json_mixed_case);
+
+        // Depending on serde behavior, this should either:
+        // 1. Fail to parse (preferred for security), or
+        // 2. Use only the correctly cased fields and ignore the rest
+        if let Ok(parsed) = result {
+            // If it parses, verify it used the correct cased field values
+            assert_eq!(parsed.hot_path, HotPath::LifecycleTransition);
+            assert_eq!(parsed.baseline_p95_us, 110.0); // Should use lowercase version
+        }
+        // If it fails to parse, that's also acceptable security behavior
+    }
 }

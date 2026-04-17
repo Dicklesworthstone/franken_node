@@ -23,6 +23,9 @@ fn invalid_artifact_id_reason(artifact_id: &str) -> Option<String> {
     if trimmed != artifact_id {
         return Some("artifact_id contains leading or trailing whitespace".to_string());
     }
+    if artifact_id.contains('\0') {
+        return Some("artifact_id must not contain null bytes".to_string());
+    }
     None
 }
 
@@ -1114,13 +1117,34 @@ mod tests {
     fn replay_hooks_preserve_order_gaps_when_middle_artifact_is_missing() {
         let mut store = ArtifactStore::new();
         store
-            .persist("audit-1", ArtifactType::Audit, current_epoch(), "h1", "tr", 1000)
+            .persist(
+                "audit-1",
+                ArtifactType::Audit,
+                current_epoch(),
+                "h1",
+                "tr",
+                1000,
+            )
             .unwrap();
         store
-            .persist("audit-2", ArtifactType::Audit, current_epoch(), "h2", "tr", 1001)
+            .persist(
+                "audit-2",
+                ArtifactType::Audit,
+                current_epoch(),
+                "h2",
+                "tr",
+                1001,
+            )
             .unwrap();
         store
-            .persist("audit-3", ArtifactType::Audit, current_epoch(), "h3", "tr", 1002)
+            .persist(
+                "audit-3",
+                ArtifactType::Audit,
+                current_epoch(),
+                "h3",
+                "tr",
+                1002,
+            )
             .unwrap();
 
         store.artifacts.remove("audit-2");
@@ -1196,5 +1220,203 @@ mod tests {
         assert!(store.get("kept-response").is_some());
         assert!(store.get("old-response").is_none());
         assert_eq!(store.count_by_type(ArtifactType::Response), 1);
+    }
+
+    #[test]
+    fn null_byte_artifact_id_is_rejected_without_consuming_sequence() {
+        let mut store = ArtifactStore::new();
+
+        let err = store
+            .persist(
+                "artifact\0id",
+                ArtifactType::Invoke,
+                current_epoch(),
+                "h-null",
+                "tr-null",
+                1000,
+            )
+            .unwrap_err();
+        let accepted = store
+            .persist(
+                "artifact-ok",
+                ArtifactType::Invoke,
+                current_epoch(),
+                "h-ok",
+                "tr-ok",
+                1001,
+            )
+            .unwrap();
+
+        assert_eq!(err.code(), "PRA_INVALID_ARTIFACT");
+        assert!(err.to_string().contains("null bytes"));
+        assert_eq!(accepted.sequence_number, 0);
+        assert!(store.get("artifact\0id").is_none());
+    }
+
+    #[test]
+    fn duplicate_id_with_different_type_preserves_original_type_and_hooks() {
+        let mut store = ArtifactStore::new();
+        store
+            .persist(
+                "same-id",
+                ArtifactType::Invoke,
+                current_epoch(),
+                "h-invoke",
+                "tr-invoke",
+                1000,
+            )
+            .unwrap();
+
+        let err = store
+            .persist(
+                "same-id",
+                ArtifactType::Response,
+                current_epoch(),
+                "h-response",
+                "tr-response",
+                1001,
+            )
+            .unwrap_err();
+
+        assert_eq!(err.code(), "PRA_DUPLICATE");
+        assert_eq!(store.total_count(), 1);
+        assert_eq!(store.count_by_type(ArtifactType::Invoke), 1);
+        assert_eq!(store.count_by_type(ArtifactType::Response), 0);
+        assert_eq!(
+            store.get("same-id").unwrap().artifact_type,
+            ArtifactType::Invoke
+        );
+    }
+
+    #[test]
+    fn epoch_rejection_precedes_duplicate_check_and_preserves_original() {
+        let mut store = ArtifactStore::new();
+        store
+            .persist(
+                "epoch-dup",
+                ArtifactType::Receipt,
+                current_epoch(),
+                "h-original",
+                "tr-original",
+                1000,
+            )
+            .unwrap();
+        store.set_validity_policy(ValidityWindowPolicy::new(ControlEpoch::new(5), 0));
+
+        let err = store
+            .persist(
+                "epoch-dup",
+                ArtifactType::Receipt,
+                ControlEpoch::new(4),
+                "h-replacement",
+                "tr-old",
+                1001,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, PersistenceError::EpochRejected { .. }));
+        let stored = store.get("epoch-dup").unwrap();
+        assert!(ct_eq(&stored.payload_hash, "h-original"));
+        assert_eq!(stored.trace_id, "tr-original");
+        assert_eq!(store.count_by_type(ArtifactType::Receipt), 1);
+    }
+
+    #[test]
+    fn verify_replay_empty_hash_is_mismatch_and_preserves_artifact() {
+        let mut store = ArtifactStore::new();
+        store
+            .persist(
+                "empty-replay-hash",
+                ArtifactType::Audit,
+                current_epoch(),
+                "h-audit",
+                "tr-audit",
+                1000,
+            )
+            .unwrap();
+
+        let err = store.verify_replay("empty-replay-hash", "").unwrap_err();
+
+        assert_eq!(err.code(), "PRA_REPLAY_MISMATCH");
+        assert_eq!(store.total_count(), 1);
+        assert_eq!(store.replay_hooks(ArtifactType::Audit).len(), 1);
+        assert!(store.get("empty-replay-hash").is_some());
+    }
+
+    #[test]
+    fn verify_replay_case_changed_hash_is_rejected() {
+        let mut store = ArtifactStore::new();
+        store
+            .persist(
+                "case-hash",
+                ArtifactType::Approval,
+                current_epoch(),
+                "deadbeef",
+                "tr-case",
+                1000,
+            )
+            .unwrap();
+
+        let err = store.verify_replay("case-hash", "DEADBEEF").unwrap_err();
+
+        assert_eq!(err.code(), "PRA_REPLAY_MISMATCH");
+        assert!(matches!(
+            err,
+            PersistenceError::ReplayMismatch {
+                ref expected_hash,
+                ref got_hash,
+                ..
+            } if ct_eq(expected_hash, "deadbeef") && ct_eq(got_hash, "DEADBEEF")
+        ));
+    }
+
+    #[test]
+    fn artifact_type_from_label_rejects_null_and_zero_width_variants() {
+        assert_eq!(ArtifactType::from_label("invoke\0"), None);
+        assert_eq!(ArtifactType::from_label("invoke\u{200b}"), None);
+        assert_eq!(ArtifactType::from_label("response\0audit"), None);
+        assert_eq!(ArtifactType::from_label("\u{200b}receipt"), None);
+    }
+
+    #[test]
+    fn future_epoch_rejection_after_valid_prefix_does_not_advance_sequence() {
+        let mut store = ArtifactStore::new();
+        store.set_validity_policy(ValidityWindowPolicy::new(ControlEpoch::new(5), 0));
+        store
+            .persist(
+                "current-audit",
+                ArtifactType::Audit,
+                ControlEpoch::new(5),
+                "h-current",
+                "tr-current",
+                1000,
+            )
+            .unwrap();
+
+        let err = store
+            .persist(
+                "future-audit",
+                ArtifactType::Audit,
+                ControlEpoch::new(6),
+                "h-future",
+                "tr-future",
+                1001,
+            )
+            .unwrap_err();
+        let accepted = store
+            .persist(
+                "current-audit-2",
+                ArtifactType::Audit,
+                ControlEpoch::new(5),
+                "h-current-2",
+                "tr-current-2",
+                1002,
+            )
+            .unwrap();
+
+        assert!(matches!(err, PersistenceError::EpochRejected { .. }));
+        assert_eq!(accepted.sequence_number, 1);
+        assert_eq!(store.count_by_type(ArtifactType::Audit), 2);
+        assert!(store.get("future-audit").is_none());
     }
 }

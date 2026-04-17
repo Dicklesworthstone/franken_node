@@ -2638,6 +2638,148 @@ mod tests {
     }
 
     #[test]
+    fn parse_rejects_extra_version_component() {
+        let err = SchemaVersion::parse("1.2.3.4").unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::SchemaVersionInvalid { reason, .. }
+                if reason.contains("expected major.minor.patch")
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_negative_major_version() {
+        let err = SchemaVersion::parse("-1.2.3").unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::SchemaVersionInvalid { reason, .. }
+                if reason.contains("invalid major version")
+        ));
+    }
+
+    #[test]
+    fn connector_state_rejects_blank_connector_id() {
+        let state = ConnectorState::new(
+            " \n\t",
+            v(1, 0, 0),
+            BTreeMap::from([("name".to_string(), json!("Ada"))]),
+        );
+
+        assert!(matches!(
+            state.unwrap_err(),
+            MigrationError::StateConflict { reason } if reason.contains("connector_id")
+        ));
+    }
+
+    #[test]
+    fn normalize_plan_rejects_empty_non_identity_range() {
+        let plan = MigrationPlan {
+            connector_id: "conn-1".into(),
+            from_version: v(1, 0, 0),
+            to_version: v(1, 1, 0),
+            steps: Vec::new(),
+        };
+
+        let err = normalize_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::PlanNormalizationFailed { reason }
+                if reason.contains("requires at least one step")
+        ));
+    }
+
+    #[test]
+    fn normalize_plan_rejects_empty_step_description() {
+        let plan = MigrationPlan {
+            connector_id: "conn-1".into(),
+            from_version: v(1, 0, 0),
+            to_version: v(1, 1, 0),
+            steps: vec![MigrationHint {
+                from_version: v(1, 0, 0),
+                to_version: v(1, 1, 0),
+                hint_type: HintType::AddField,
+                description: " \t".into(),
+                idempotent: true,
+                rollback_safe: true,
+                mutation: MutationSpec::AddField {
+                    field: "email".into(),
+                    value: json!("unknown@example.invalid"),
+                },
+            }],
+        };
+
+        let err = normalize_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::PlanNormalizationFailed { reason }
+                if reason.contains("must have a description")
+        ));
+    }
+
+    #[test]
+    fn normalize_plan_rejects_self_loop_step() {
+        let plan = MigrationPlan {
+            connector_id: "conn-1".into(),
+            from_version: v(1, 0, 0),
+            to_version: v(1, 0, 0),
+            steps: vec![MigrationHint {
+                from_version: v(1, 0, 0),
+                to_version: v(1, 0, 0),
+                hint_type: HintType::Transform,
+                description: "self loop should be rejected".into(),
+                idempotent: true,
+                rollback_safe: true,
+                mutation: MutationSpec::Transform {
+                    field: "profile_version".into(),
+                    from: json!(1),
+                    to: json!(1),
+                },
+            }],
+        };
+
+        let err = normalize_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::PlanNormalizationFailed { reason }
+                if reason.contains("cannot be a self-loop")
+        ));
+    }
+
+    #[test]
+    fn normalize_plan_rejects_rename_to_same_field() {
+        let plan = MigrationPlan {
+            connector_id: "conn-1".into(),
+            from_version: v(1, 0, 0),
+            to_version: v(1, 1, 0),
+            steps: vec![MigrationHint {
+                from_version: v(1, 0, 0),
+                to_version: v(1, 1, 0),
+                hint_type: HintType::RenameField,
+                description: "invalid no-op rename".into(),
+                idempotent: true,
+                rollback_safe: true,
+                mutation: MutationSpec::RenameField {
+                    from: "name".into(),
+                    to: "name".into(),
+                },
+            }],
+        };
+
+        let err = normalize_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::PlanNormalizationFailed { reason }
+                if reason.contains("must change the destination field")
+        ));
+    }
+
+    #[test]
     fn error_display_messages() {
         let e1 = MigrationError::MigrationPathMissing {
             from: "1.0.0".into(),
@@ -2656,5 +2798,134 @@ mod tests {
             reason: "io error".into(),
         };
         assert!(e3.to_string().contains("MIGRATION_ROLLBACK_FAILED"));
+    }
+
+    #[test]
+    fn negative_parse_rejects_empty_minor_component() {
+        let err = SchemaVersion::parse("1..0").unwrap_err();
+
+        assert!(matches!(err, MigrationError::SchemaVersionInvalid { .. }));
+        assert!(err.to_string().contains("invalid minor version"));
+    }
+
+    #[test]
+    fn negative_parse_rejects_overflowing_patch_component() {
+        let err = SchemaVersion::parse("1.0.4294967296").unwrap_err();
+
+        assert!(matches!(err, MigrationError::SchemaVersionInvalid { .. }));
+        assert!(err.to_string().contains("invalid patch version"));
+    }
+
+    #[test]
+    fn negative_serde_schema_version_rejects_string_major() {
+        let err = serde_json::from_str::<SchemaVersion>(
+            r#"{"major":"1","minor":0,"patch":0}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_hint_type_rejects_unknown_variant() {
+        let err = serde_json::from_str::<HintType>(r#""drop_everything""#);
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_mutation_spec_rejects_missing_kind_tag() {
+        let err = serde_json::from_str::<MutationSpec>(r#"{"field":"email","value":null}"#);
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_mutation_spec_rejects_unknown_kind_tag() {
+        let err = serde_json::from_str::<MutationSpec>(
+            r#"{"kind":"delete_table","field":"email"}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_migration_outcome_failed_requires_reason() {
+        let err = serde_json::from_str::<MigrationOutcome>(r#"{"failed":{}}"#);
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_connector_state_rejects_nested_float_payload() {
+        let err = ConnectorState::new(
+            "conn-1",
+            v(1, 0, 0),
+            BTreeMap::from([("risk".to_string(), json!({"scores": [1, 2.5]}))]),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::NonDeterministicState { .. }
+        ));
+        assert!(err.to_string().contains("MIGRATION_STATE_NON_DETERMINISTIC"));
+    }
+
+    #[test]
+    fn negative_normalize_plan_rejects_blank_mutation_field() {
+        let plan = MigrationPlan {
+            connector_id: "conn-1".into(),
+            from_version: v(1, 0, 0),
+            to_version: v(1, 1, 0),
+            steps: vec![MigrationHint {
+                from_version: v(1, 0, 0),
+                to_version: v(1, 1, 0),
+                hint_type: HintType::AddField,
+                description: "blank field".into(),
+                idempotent: true,
+                rollback_safe: true,
+                mutation: MutationSpec::AddField {
+                    field: " \t ".into(),
+                    value: json!("bad"),
+                },
+            }],
+        };
+
+        let err = normalize_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::PlanNormalizationFailed { .. }
+        ));
+        assert!(err.to_string().contains("mutation field names cannot be empty"));
+    }
+
+    #[test]
+    fn negative_normalize_plan_rejects_rename_to_same_field_after_trim() {
+        let plan = MigrationPlan {
+            connector_id: "conn-1".into(),
+            from_version: v(1, 0, 0),
+            to_version: v(1, 1, 0),
+            steps: vec![MigrationHint {
+                from_version: v(1, 0, 0),
+                to_version: v(1, 1, 0),
+                hint_type: HintType::RenameField,
+                description: "same field".into(),
+                idempotent: true,
+                rollback_safe: true,
+                mutation: MutationSpec::RenameField {
+                    from: "email".into(),
+                    to: " email ".into(),
+                },
+            }],
+        };
+
+        let err = normalize_plan(&plan).unwrap_err();
+
+        assert!(matches!(
+            err,
+            MigrationError::PlanNormalizationFailed { .. }
+        ));
+        assert!(err.to_string().contains("must change the destination field"));
     }
 }

@@ -1008,4 +1008,184 @@ mod tests {
         assert_eq!(err.code(), "AAR_INVALID_POLICY");
         assert!(err.to_string().contains("unauth_max_bytes"));
     }
+
+    #[test]
+    fn negative_declared_byte_bound_one_below_actual_blocks_without_ratio_noise() {
+        let r = req("r-declared-byte-edge", "p1", true, 10_000, 999, 1_000, 1);
+
+        let (v, audit) = check_response_bound(&r, &policy(), "tr", "ts").expect("valid policy");
+
+        assert!(!v.allowed);
+        assert_eq!(v.enforced_limit, 999);
+        assert_eq!(audit.enforced_limit, 999);
+        assert_eq!(v.violations.len(), 1);
+        assert!(v.violations.iter().any(|v| matches!(
+            v,
+            BoundViolation::ResponseTooLarge {
+                actual: 1_000,
+                limit: 999
+            }
+        )));
+    }
+
+    #[test]
+    fn negative_declared_item_bound_one_below_actual_blocks_without_byte_noise() {
+        let mut r = req("r-declared-item-edge", "p1", true, 10_000, 5_000, 100, 11);
+        r.declared_bound.max_items = 10;
+
+        let (v, audit) = check_response_bound(&r, &policy(), "tr", "ts").expect("valid policy");
+
+        assert!(!v.allowed);
+        assert_eq!(audit.verdict, "BLOCK");
+        assert_eq!(v.violations.len(), 1);
+        assert!(v.violations.iter().any(|v| matches!(
+            v,
+            BoundViolation::ItemsExceeded {
+                actual: 11,
+                limit: 10
+            }
+        )));
+    }
+
+    #[test]
+    fn negative_tiny_positive_ratio_policy_rejects_nonzero_response_ratio() {
+        let mut p = policy();
+        p.max_response_ratio = f64::MIN_POSITIVE;
+        let r = req("r-min-positive-ratio", "p1", true, 1_000, 5_000, 1, 0);
+
+        let (v, audit) = check_response_bound(&r, &p, "tr", "ts").expect("valid policy");
+
+        assert!(!v.allowed);
+        assert_eq!(v.violations.len(), 1);
+        assert_eq!(audit.verdict, "BLOCK");
+        assert!(v.violations.iter().any(|v| matches!(
+            v,
+            BoundViolation::RatioExceeded {
+                ratio,
+                max_ratio
+            } if *ratio > 0.0 && *max_ratio == f64::MIN_POSITIVE
+        )));
+    }
+
+    #[test]
+    fn negative_default_policy_unauth_cap_plus_one_reports_size_and_unauth_limits() {
+        let p = AmplificationPolicy::default_policy();
+        let r = BoundCheckRequest {
+            request_id: "r-default-unauth-cap".into(),
+            peer_id: "p1".into(),
+            authenticated: false,
+            request_bytes: 10_000,
+            declared_bound: ResponseBound {
+                max_bytes: p.unauth_max_bytes.saturating_add(1),
+                max_items: 1,
+            },
+            actual_response_bytes: p.unauth_max_bytes.saturating_add(1),
+            actual_items: 1,
+        };
+
+        let (v, audit) = check_response_bound(&r, &p, "tr", "ts").expect("valid policy");
+
+        assert!(!v.allowed);
+        assert_eq!(v.enforced_limit, p.unauth_max_bytes);
+        assert_eq!(audit.verdict, "BLOCK");
+        assert!(v.violations.iter().any(|v| matches!(
+            v,
+            BoundViolation::ResponseTooLarge { actual, limit }
+                if *actual == p.unauth_max_bytes.saturating_add(1)
+                    && *limit == p.unauth_max_bytes
+        )));
+        assert!(v.violations.iter().any(|v| matches!(
+            v,
+            BoundViolation::UnauthLimit { actual, limit }
+                if *actual == p.unauth_max_bytes.saturating_add(1)
+                    && *limit == p.unauth_max_bytes
+        )));
+    }
+
+    #[test]
+    fn negative_zero_request_zero_declared_nonzero_response_reports_size_and_ratio() {
+        let r = req("r-zero-request-zero-bound", "p1", true, 0, 0, 1, 0);
+
+        let (v, audit) = check_response_bound(&r, &policy(), "tr", "ts").expect("valid policy");
+
+        assert!(!v.allowed);
+        assert_eq!(v.enforced_limit, 0);
+        assert!(audit.ratio.is_infinite());
+        assert_eq!(v.violations.len(), 2);
+        assert!(v.violations.iter().any(|v| matches!(
+            v,
+            BoundViolation::ResponseTooLarge {
+                actual: 1,
+                limit: 0
+            }
+        )));
+        assert!(v.violations.iter().any(|v| {
+            matches!(
+                v,
+                BoundViolation::RatioExceeded {
+                    ratio,
+                    max_ratio: 10.0
+                } if ratio.is_infinite()
+            )
+        }));
+    }
+
+    #[test]
+    fn negative_harness_preserves_multiple_block_reasons_per_request() {
+        let mut item_and_ratio = req("r-harness-multi", "p1", true, 10, 10_000, 101, 51);
+        item_and_ratio.declared_bound.max_items = 50;
+        let requests = vec![item_and_ratio];
+
+        let results =
+            run_adversarial_harness(&requests, &policy(), "tr", "ts").expect("valid policy");
+
+        assert_eq!(results.len(), 1);
+        let verdict = &results[0].0;
+        assert!(!verdict.allowed);
+        assert_eq!(verdict.violations.len(), 2);
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|v| matches!(v, BoundViolation::RatioExceeded { .. }))
+        );
+        assert!(
+            verdict
+                .violations
+                .iter()
+                .any(|v| matches!(v, BoundViolation::ItemsExceeded { .. }))
+        );
+    }
+
+    #[test]
+    fn negative_error_display_variants_include_request_id_and_limits() {
+        let errors = [
+            AmplificationError::ResponseTooLarge {
+                request_id: "r-display".into(),
+                actual: 11,
+                limit: 10,
+            },
+            AmplificationError::RatioExceeded {
+                request_id: "r-display".into(),
+                ratio: 11.0,
+                max_ratio: 10.0,
+            },
+            AmplificationError::UnauthLimit {
+                request_id: "r-display".into(),
+                actual: 1_001,
+                limit: 1_000,
+            },
+            AmplificationError::ItemsExceeded {
+                request_id: "r-display".into(),
+                actual: 51,
+                limit: 50,
+            },
+        ];
+
+        for err in errors {
+            let rendered = err.to_string();
+            assert!(rendered.contains("r-display"));
+            assert!(rendered.contains(err.code()));
+        }
+    }
 }

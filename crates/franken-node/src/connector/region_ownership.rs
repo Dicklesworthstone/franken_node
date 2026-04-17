@@ -249,6 +249,12 @@ pub struct CloseResult {
 pub enum RegionError {
     #[serde(rename = "RGN_ALREADY_CLOSED")]
     AlreadyClosed { region_id: RegionId },
+    #[serde(rename = "RGN_INVALID_TASK_ID")]
+    InvalidTaskId {
+        region_id: RegionId,
+        task_id: String,
+        reason: String,
+    },
     #[serde(rename = "RGN_CHILD_STILL_OPEN")]
     ChildStillOpen {
         region_id: RegionId,
@@ -270,6 +276,14 @@ impl fmt::Display for RegionError {
                     "RGN_ALREADY_CLOSED: region {region_id} is already closed"
                 )
             }
+            Self::InvalidTaskId {
+                region_id,
+                task_id,
+                reason,
+            } => write!(
+                f,
+                "RGN_INVALID_TASK_ID: task {task_id:?} is invalid in region {region_id}: {reason}"
+            ),
             Self::ChildStillOpen {
                 region_id,
                 child_region_id,
@@ -286,6 +300,19 @@ impl fmt::Display for RegionError {
 }
 
 impl std::error::Error for RegionError {}
+
+fn invalid_task_id_reason(task_id: &str) -> Option<&'static str> {
+    if task_id.trim().is_empty() {
+        return Some("task_id must be non-empty");
+    }
+    if task_id.trim() != task_id {
+        return Some("task_id must not contain leading or trailing whitespace");
+    }
+    if task_id.contains('\0') {
+        return Some("task_id must not contain NUL bytes");
+    }
+    None
+}
 
 /// An execution region that owns child tasks and enforces quiescence on close.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -351,6 +378,13 @@ impl Region {
         if self.closed {
             return Err(RegionError::AlreadyClosed { region_id: self.id });
         }
+        if let Some(reason) = invalid_task_id_reason(task_id) {
+            return Err(RegionError::InvalidTaskId {
+                region_id: self.id,
+                task_id: task_id.to_string(),
+                reason: reason.to_string(),
+            });
+        }
         push_bounded(
             &mut self.tasks,
             RegionTask {
@@ -365,6 +399,13 @@ impl Region {
 
     /// Mark a task as completed. Only valid from Running or Draining state.
     pub fn complete_task(&mut self, task_id: &str) -> Result<(), RegionError> {
+        if let Some(reason) = invalid_task_id_reason(task_id) {
+            return Err(RegionError::InvalidTaskId {
+                region_id: self.id,
+                task_id: task_id.to_string(),
+                reason: reason.to_string(),
+            });
+        }
         let task = self
             .tasks
             .iter_mut()
@@ -1037,5 +1078,188 @@ mod tests {
             .events
             .iter()
             .all(|event| event.cx_id == expected_cx_id));
+    }
+
+    #[test]
+    fn complete_empty_task_id_is_rejected_without_touching_tasks() {
+        let mut region = Region::new_root(test_cx(), 5000);
+        region.register_task("task-1").unwrap();
+
+        let err = region.complete_task("").unwrap_err();
+
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert!(err.to_string().contains("must be non-empty"));
+        assert_eq!(region.tasks[0].state, TaskState::Running);
+        assert_eq!(region.active_task_count(), 1);
+    }
+
+    #[test]
+    fn complete_task_is_case_sensitive_and_preserves_original() {
+        let mut region = Region::new_root(test_cx(), 5000);
+        region.register_task("Task-A").unwrap();
+
+        let err = region.complete_task("task-a").unwrap_err();
+
+        assert!(matches!(
+            err,
+            RegionError::TaskNotFound { ref task_id, .. } if task_id == "task-a"
+        ));
+        assert_eq!(region.tasks[0].task_id, "Task-A");
+        assert_eq!(region.tasks[0].state, TaskState::Running);
+    }
+
+    #[test]
+    fn register_task_after_close_preserves_existing_terminal_task() {
+        let mut region = Region::new_root(test_cx(), 5000);
+        region.register_task("done").unwrap();
+        region.complete_task("done").unwrap();
+        region.close().unwrap();
+
+        let err = region.register_task("late").unwrap_err();
+
+        assert!(matches!(err, RegionError::AlreadyClosed { .. }));
+        assert_eq!(region.tasks.len(), 1);
+        assert_eq!(region.tasks[0].task_id, "done");
+        assert_eq!(region.tasks[0].state, TaskState::Completed);
+    }
+
+    #[test]
+    fn serde_rejects_already_closed_error_missing_region_id() {
+        let json = serde_json::json!({
+            "code": "RGN_ALREADY_CLOSED"
+        });
+
+        let err = serde_json::from_value::<RegionError>(json).unwrap_err();
+
+        assert!(err.to_string().contains("region_id"));
+    }
+
+    #[test]
+    fn serde_rejects_child_still_open_error_missing_child_region_id() {
+        let json = serde_json::json!({
+            "code": "RGN_CHILD_STILL_OPEN",
+            "region_id": 1
+        });
+
+        let err = serde_json::from_value::<RegionError>(json).unwrap_err();
+
+        assert!(err.to_string().contains("child_region_id"));
+    }
+
+    #[test]
+    fn serde_rejects_region_event_missing_cx_id() {
+        let json = serde_json::json!({
+            "event_code": "RGN-001",
+            "region_id": 1,
+            "parent_region_id": null,
+            "region_kind": "connector_lifecycle",
+            "child_task_count": 0,
+            "trace_id": "trace-001",
+            "detail": "opened"
+        });
+
+        let err = serde_json::from_value::<RegionEvent>(json).unwrap_err();
+
+        assert!(err.to_string().contains("cx_id"));
+    }
+
+    #[test]
+    fn serde_rejects_close_result_missing_events() {
+        let json = serde_json::json!({
+            "region_id": 1,
+            "quiescence_achieved": true,
+            "tasks_drained": 0,
+            "tasks_force_terminated": 0,
+            "elapsed_ms": 0
+        });
+
+        let err = serde_json::from_value::<CloseResult>(json).unwrap_err();
+
+        assert!(err.to_string().contains("events"));
+    }
+
+    #[test]
+    fn serde_rejects_control_plane_cx_parent_with_wrong_type() {
+        let json = serde_json::json!({
+            "epoch": 42,
+            "seq": 7,
+            "parent_cx_id": 99,
+            "cx_id": compute_cx_id(42, 7),
+            "connector_id": "conn-1",
+            "trace_id": "trace-1"
+        });
+
+        let err = serde_json::from_value::<ControlPlaneCx>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn register_task_rejects_empty_task_id() {
+        let mut region = Region::new_root(test_cx(), 5000);
+
+        let err = region.register_task("").unwrap_err();
+
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert!(err.to_string().contains("must be non-empty"));
+        assert!(region.tasks.is_empty());
+    }
+
+    #[test]
+    fn register_task_rejects_blank_task_id() {
+        let mut region = Region::new_root(test_cx(), 5000);
+
+        let err = region.register_task("\t ").unwrap_err();
+
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert!(err.to_string().contains("must be non-empty"));
+        assert!(region.tasks.is_empty());
+    }
+
+    #[test]
+    fn register_task_rejects_task_id_with_edge_whitespace() {
+        let mut region = Region::new_root(test_cx(), 5000);
+
+        let err = region.register_task(" task-1").unwrap_err();
+
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert!(err.to_string().contains("leading or trailing whitespace"));
+        assert!(region.tasks.is_empty());
+    }
+
+    #[test]
+    fn register_task_rejects_task_id_with_nul() {
+        let mut region = Region::new_root(test_cx(), 5000);
+
+        let err = region.register_task("task\0shadow").unwrap_err();
+
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert!(err.to_string().contains("NUL"));
+        assert!(region.tasks.is_empty());
+    }
+
+    #[test]
+    fn complete_task_rejects_empty_task_id_without_lookup() {
+        let mut region = Region::new_root(test_cx(), 5000);
+        region.register_task("task-1").unwrap();
+
+        let err = region.complete_task("").unwrap_err();
+
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert_eq!(region.active_task_count(), 1);
+        assert_eq!(region.tasks[0].state, TaskState::Running);
+    }
+
+    #[test]
+    fn complete_task_rejects_nul_task_id_without_mutating_tasks() {
+        let mut region = Region::new_root(test_cx(), 5000);
+        region.register_task("task-1").unwrap();
+
+        let err = region.complete_task("task-1\0shadow").unwrap_err();
+
+        assert!(matches!(err, RegionError::InvalidTaskId { .. }));
+        assert!(err.to_string().contains("NUL"));
+        assert_eq!(region.active_task_count(), 1);
+        assert_eq!(region.tasks[0].state, TaskState::Running);
     }
 }

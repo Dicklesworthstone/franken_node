@@ -1027,7 +1027,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
         return;
     }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -3845,5 +3845,281 @@ mod tests {
                         "NaN hazard should be rejected: {}", description);
             }
         }
+    }
+
+    #[test]
+    fn negative_gaussian_observe_rejects_nan_without_side_effects() {
+        let mut detector = gaussian_detector("gaussian-negative-nan");
+
+        let result = detector.observe(f64::NAN, 1);
+
+        assert!(result.is_none());
+        assert_eq!(detector.observation_count(), 0);
+        assert!(detector.events().is_empty());
+        assert_eq!(detector.posterior_sum(), 1.0);
+    }
+
+    #[test]
+    fn negative_poisson_observe_rejects_negative_count_without_side_effects() {
+        let mut detector = poisson_detector("poisson-negative-count");
+
+        let result = detector.observe(-1.0, 1);
+
+        assert!(result.is_none());
+        assert_eq!(detector.observation_count(), 0);
+        assert!(detector.events().is_empty());
+        assert_eq!(detector.posterior_sum(), 1.0);
+    }
+
+    #[test]
+    fn negative_categorical_observe_rejects_out_of_range_without_side_effects() {
+        let mut detector = categorical_detector("categorical-out-of-range");
+
+        let result = detector.observe(4.0, 1);
+
+        assert!(result.is_none());
+        assert_eq!(detector.observation_count(), 0);
+        assert!(detector.events().is_empty());
+        assert_eq!(detector.posterior_sum(), 1.0);
+    }
+
+    #[test]
+    fn negative_correlator_ignores_invalid_current_shift_without_pruning_retained() {
+        let mut correlator = MultiStreamCorrelator::new(60);
+        let retained = valid_shift("retained-stream");
+        assert!(correlator.record_shift(retained).is_empty());
+        let mut invalid = valid_shift("invalid stream");
+        invalid.timestamp = 10_000;
+
+        let correlated = correlator.record_shift(invalid);
+
+        assert!(correlated.is_empty());
+        assert_eq!(correlator.recent_count(), 1);
+    }
+
+    #[test]
+    fn negative_correlator_prunes_invalid_retained_shift_on_valid_record() {
+        let mut correlator = MultiStreamCorrelator::new(60);
+        let mut invalid_retained = valid_shift("invalid-retained");
+        invalid_retained.confidence = f64::NAN;
+        correlator.recent_shifts.push(invalid_retained);
+
+        let correlated = correlator.record_shift(valid_shift("fresh-stream"));
+
+        assert!(correlated.is_empty());
+        assert_eq!(correlator.recent_count(), 1);
+        assert_eq!(correlator.recent_shifts[0].stream_name, "fresh-stream");
+    }
+
+    #[test]
+    fn negative_correlator_does_not_report_same_stream_as_correlated() {
+        let mut correlator = MultiStreamCorrelator::new(60);
+        let first = valid_shift("same-stream");
+        let mut second = valid_shift("same-stream");
+        second.timestamp = first.timestamp.saturating_add(1);
+        assert!(correlator.record_shift(first).is_empty());
+
+        let correlated = correlator.record_shift(second);
+
+        assert!(correlated.is_empty());
+        assert_eq!(correlator.recent_count(), 2);
+    }
+
+    #[test]
+    fn negative_collapsed_posterior_is_reset_to_safe_prior() {
+        let mut detector = gaussian_detector("collapsed-posterior");
+        detector.run_length_probs = vec![0.0, 0.0, 0.0];
+
+        let result = detector.observe(1.0, 1);
+
+        assert!(result.is_none());
+        assert!(detector.posterior_sum().is_finite());
+        assert!(detector.posterior_sum() > 0.0);
+    }
+
+    #[test]
+    fn negative_empty_posterior_vector_is_rebuilt_without_panic() {
+        let mut detector = gaussian_detector("empty-posterior");
+        detector.run_length_probs.clear();
+
+        let result = detector.observe(1.0, 1);
+
+        assert!(result.is_none());
+        assert_eq!(detector.observation_count(), 1);
+        assert!(detector.posterior_sum() > 0.0);
+    }
+
+    #[test]
+    fn negative_empty_posterior_accessors_fail_closed_to_zero() {
+        let mut detector = gaussian_detector("empty-posterior-accessors");
+        detector.run_length_probs.clear();
+
+        assert_eq!(detector.map_run_length(), 0);
+        assert_eq!(detector.changepoint_probability(), 0.0);
+        assert_eq!(detector.posterior_sum(), 0.0);
+    }
+
+    #[test]
+    fn negative_nan_posterior_observe_resets_without_recording_shift() {
+        let mut detector = gaussian_detector("nan-posterior");
+        detector.run_length_probs = vec![f64::NAN];
+
+        let result = detector.observe(1.0, 1);
+
+        assert!(result.is_none());
+        assert!(detector.posterior_sum().is_finite());
+        assert!(detector.changepoint_probability().is_finite());
+        assert!(detector.regime_history().is_empty());
+    }
+
+    #[test]
+    fn negative_invalid_constant_hazard_does_not_poison_posterior() {
+        let config = BocpdConfig {
+            min_run_length: 1,
+            ..default_config()
+        };
+        let mut detector = BocpdDetector::new(
+            "nan-hazard",
+            config,
+            HazardFunction::Constant { lambda: f64::NAN },
+            ObservationModel::Gaussian(GaussianModel::default()),
+        )
+        .expect("detector should be constructible before observations");
+
+        let result = detector.observe(1.0, 1);
+
+        assert!(result.is_none());
+        assert!(detector.posterior_sum().is_finite());
+        assert!((detector.posterior_sum() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn negative_zero_window_correlator_prunes_older_shift_before_matching() {
+        let mut correlator = MultiStreamCorrelator::new(0);
+        assert!(correlator.record_shift(valid_shift("stream-a")).is_empty());
+        let mut later = valid_shift("stream-b");
+        later.timestamp = 1_001;
+
+        let correlated = correlator.record_shift(later);
+
+        assert!(correlated.is_empty());
+        assert_eq!(correlator.recent_count(), 1);
+        assert_eq!(correlator.recent_shifts[0].stream_name, "stream-b");
+    }
+
+    #[test]
+    fn negative_correlator_prunes_expired_retained_shift_on_valid_record() {
+        let mut expired = valid_shift("expired-retained");
+        expired.timestamp = 900;
+        let mut correlator = MultiStreamCorrelator {
+            window_secs: 50,
+            recent_shifts: vec![expired],
+        };
+        let mut fresh = valid_shift("fresh-stream");
+        fresh.timestamp = 1_100;
+
+        let correlated = correlator.record_shift(fresh);
+
+        assert!(correlated.is_empty());
+        assert_eq!(correlator.recent_count(), 1);
+        assert_eq!(correlator.recent_shifts[0].stream_name, "fresh-stream");
+    }
+
+    #[test]
+    fn negative_invalid_current_shift_does_not_prune_existing_history() {
+        let mut correlator = MultiStreamCorrelator::new(0);
+        assert!(correlator.record_shift(valid_shift("retained-stream")).is_empty());
+        let mut invalid = valid_shift("invalid-current");
+        invalid.confidence = f64::INFINITY;
+        invalid.timestamp = 10_000;
+
+        let correlated = correlator.record_shift(invalid);
+
+        assert!(correlated.is_empty());
+        assert_eq!(correlator.recent_count(), 1);
+        assert_eq!(correlator.recent_shifts[0].stream_name, "retained-stream");
+    }
+
+    #[test]
+    fn negative_poisson_stats_saturates_overflowing_sum() {
+        let mut stats = PoissonSuffStats {
+            n: 1.0,
+            sum: f64::MAX,
+        };
+
+        stats.update(1.0);
+
+        assert_eq!(stats.n, 2.0);
+        assert_eq!(stats.sum, f64::MAX);
+    }
+
+    #[test]
+    fn negative_categorical_update_saturates_overflowing_count() {
+        let mut stats = CategoricalSuffStats {
+            counts: vec![f64::MAX],
+        };
+
+        stats.update(0);
+
+        assert_eq!(stats.counts, vec![f64::MAX]);
+    }
+
+    #[test]
+    fn negative_poisson_predictive_rejects_stats_with_infinite_sum() {
+        let model = PoissonModel::default();
+        let stats = PoissonSuffStats {
+            n: 1.0,
+            sum: f64::INFINITY,
+        };
+
+        assert_eq!(model.predictive_prob(&stats, 1.0), 1e-300);
+    }
+
+    #[test]
+    fn negative_categorical_predictive_rejects_total_overflow() {
+        let model = CategoricalModel { k: 2, alpha0: 1.0 };
+        let stats = CategoricalSuffStats {
+            counts: vec![f64::MAX, f64::MAX],
+        };
+
+        assert_eq!(model.predictive_prob(&stats, 0), 1e-300);
+    }
+
+    #[test]
+    fn negative_regime_sum_saturates_when_already_at_upper_bound() {
+        let mut detector = gaussian_detector("regime-sum-upper-bound");
+        detector.current_regime_sum = f64::MAX;
+
+        assert!(detector.observe(1.0, 1).is_none());
+
+        assert_eq!(detector.current_regime_sum, f64::MAX);
+        assert_eq!(detector.observation_count(), 1);
+    }
+
+    #[test]
+    fn negative_regime_count_saturates_when_already_at_upper_bound() {
+        let mut detector = gaussian_detector("regime-count-upper-bound");
+        detector.current_regime_count = f64::MAX;
+
+        assert!(detector.observe(1.0, 1).is_none());
+
+        assert_eq!(detector.current_regime_count, f64::MAX);
+        assert_eq!(detector.observation_count(), 1);
+    }
+
+    #[test]
+    fn negative_correlator_uses_saturating_cutoff_for_small_timestamp() {
+        let mut correlator = MultiStreamCorrelator::new(u64::MAX);
+        let mut first = valid_shift("first-underflow-window");
+        first.timestamp = 0;
+        let mut second = valid_shift("second-underflow-window");
+        second.timestamp = 1;
+        assert!(correlator.record_shift(first).is_empty());
+
+        let correlated = correlator.record_shift(second);
+
+        assert_eq!(correlated.len(), 1);
+        assert_eq!(correlated[0].stream_name, "first-underflow-window");
+        assert_eq!(correlator.recent_count(), 2);
     }
 }

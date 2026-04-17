@@ -591,6 +591,10 @@ impl EcosystemReputationApi {
 // -- Bounded push helper -------------------------------------------------------
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -1230,6 +1234,156 @@ mod tests {
         let weights = ScoringWeights::default();
         let score = deterministic_reputation_score(&inputs, &weights);
         assert!((score - 100.0).abs() < 1e-9); // Clamped at 100
+    }
+
+    #[test]
+    fn negative_score_clamps_below_zero_for_negative_inputs() {
+        let inputs = ReputationInputs {
+            compatibility_pass_rate: -1.0,
+            migration_success_rate: -0.5,
+            trust_artifact_validity: -2.0,
+            verifier_audit_frequency: -3.0,
+        };
+        let score = deterministic_reputation_score(&inputs, &ScoringWeights::default());
+
+        assert!(score.abs() < 1e-9);
+    }
+
+    #[test]
+    fn negative_scoring_weights_with_nan_component_are_invalid() {
+        let weights = ScoringWeights {
+            compatibility: f64::NAN,
+            migration: 0.25,
+            trust_artifact: 0.25,
+            verifier_audit: 0.20,
+        };
+
+        assert!(!weights.valid());
+        assert!(deterministic_reputation_score(&ReputationInputs::ones(), &weights).abs() < 1e-9);
+    }
+
+    #[test]
+    fn negative_anomaly_detection_non_finite_history_fails_closed() {
+        let config = AnomalyConfig::default();
+
+        assert!(is_anomalous_delta(0.1, &[0.0, f64::INFINITY, 0.2], &config));
+        assert!(is_anomalous_delta(0.1, &[0.0, f64::NAN, 0.2], &config));
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_without_retaining_new_item() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn negative_rate_limit_failures_do_not_increment_past_limit_or_emit_events() {
+        let mut api = EcosystemReputationApi::new();
+        api.register_publisher("pub-1", "key-1", &ts(1)).unwrap();
+        for i in 0..api.rate_limit_max {
+            let day = u32::try_from(i).unwrap() + 2;
+            api.compute_reputation("pub-1", ReputationInputs::zeros(), &ts(day))
+                .unwrap();
+        }
+        api.take_events();
+
+        let first = api.compute_reputation("pub-1", ReputationInputs::ones(), &ts(20));
+        let second = api.compute_reputation("pub-1", ReputationInputs::ones(), &ts(21));
+
+        assert!(matches!(
+            first,
+            Err(ReputationApiError::RateLimitExceeded(_))
+        ));
+        assert!(matches!(
+            second,
+            Err(ReputationApiError::RateLimitExceeded(_))
+        ));
+        assert_eq!(
+            api.rate_counters.get("pub-1").copied(),
+            Some(api.rate_limit_max)
+        );
+        assert!(api.take_events().is_empty());
+    }
+
+    #[test]
+    fn negative_rate_limit_exhausted_for_one_publisher_does_not_block_another() {
+        let mut api = EcosystemReputationApi::new();
+        api.register_publisher("pub-1", "key-1", &ts(1)).unwrap();
+        api.register_publisher("pub-2", "key-2", &ts(1)).unwrap();
+        for i in 0..api.rate_limit_max {
+            let day = u32::try_from(i).unwrap() + 2;
+            api.compute_reputation("pub-1", ReputationInputs::zeros(), &ts(day))
+                .unwrap();
+        }
+
+        let blocked = api.compute_reputation("pub-1", ReputationInputs::ones(), &ts(20));
+        let allowed = api.compute_reputation("pub-2", ReputationInputs::ones(), &ts(20));
+
+        assert!(matches!(
+            blocked,
+            Err(ReputationApiError::RateLimitExceeded(_))
+        ));
+        assert!(allowed.is_ok());
+        assert_eq!(api.rate_counters.get("pub-2").copied(), Some(1));
+    }
+
+    #[test]
+    fn negative_reset_rate_counters_does_not_unfreeze_publisher() {
+        let mut api = EcosystemReputationApi::new();
+        api.register_publisher("pub-1", "key-1", &ts(1)).unwrap();
+        api.publishers.get_mut("pub-1").unwrap().frozen = true;
+        api.reset_rate_counters();
+
+        let result = api.compute_reputation("pub-1", ReputationInputs::ones(), &ts(2));
+
+        assert!(matches!(
+            result,
+            Err(ReputationApiError::PublisherFrozen(_))
+        ));
+        assert!(api.rate_counters.is_empty());
+    }
+
+    #[test]
+    fn negative_get_score_history_missing_publisher_does_not_create_state() {
+        let api = EcosystemReputationApi::new();
+
+        let result = api.get_score_history("missing");
+
+        assert!(matches!(
+            result,
+            Err(ReputationApiError::PublisherNotFound(_))
+        ));
+        assert_eq!(api.publisher_count(), 0);
+    }
+
+    #[test]
+    fn negative_resolve_blank_dispute_id_does_not_resolve_existing_dispute() {
+        let mut api = EcosystemReputationApi::new();
+        api.register_publisher("pub-1", "key-1", &ts(1)).unwrap();
+        api.file_dispute("d-1", "pub-1", "reason", 10.0, 20.0, &ts(2))
+            .unwrap();
+
+        assert!(!api.resolve_dispute("", "upheld"));
+
+        let disputes = api.list_disputes("pub-1");
+        assert_eq!(disputes.len(), 1);
+        assert!(!disputes[0].resolved);
+        assert!(disputes[0].outcome.is_none());
+    }
+
+    #[test]
+    fn negative_file_dispute_rejects_new_score_above_range_without_record() {
+        assert_invalid_dispute_rejected(
+            "d-1",
+            "reason",
+            10.0,
+            100.000_001,
+            &ts(2),
+            "between 0 and 100",
+        );
     }
 
     #[test]

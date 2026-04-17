@@ -939,4 +939,132 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn negative_replay_errors_when_decision_type_changes_after_hash_capture() {
+        let mut gate = EvidenceReplayGate::new();
+        let mut ev = make_evidence("d-type-mutation", DecisionType::HealthGate, "admit");
+        ev.decision_type = DecisionType::Fencing;
+
+        let result = gate.replay_decision(&ev, "admit", "2026-01-15T04:00:00Z");
+
+        assert!(matches!(result.verdict, ReplayVerdict::Error { .. }));
+        assert_eq!(result.event_code, RPL_004_ERROR);
+        assert_eq!(gate.total_errors(), 1);
+        assert_eq!(gate.total_reproduced(), 0);
+    }
+
+    #[test]
+    fn negative_replay_errors_when_context_key_is_removed_after_hash_capture() {
+        let mut gate = EvidenceReplayGate::new();
+        let mut ev = make_evidence("d-context-removed", DecisionType::Rollout, "proceed");
+        ev.input_context.remove("key");
+
+        let result = gate.replay_decision(&ev, "proceed", "2026-01-15T04:01:00Z");
+
+        assert!(matches!(result.verdict, ReplayVerdict::Error { .. }));
+        assert_eq!(gate.total_errors(), 1);
+        assert_eq!(gate.total_diverged(), 0);
+    }
+
+    #[test]
+    fn negative_replay_errors_when_context_key_is_added_after_hash_capture() {
+        let mut gate = EvidenceReplayGate::new();
+        let mut ev = make_evidence("d-context-added", DecisionType::Quarantine, "quarantine");
+        ev.input_context
+            .insert("late-key".to_owned(), "late-value".to_owned());
+
+        let result = gate.replay_decision(&ev, "quarantine", "2026-01-15T04:02:00Z");
+
+        assert!(matches!(result.verdict, ReplayVerdict::Error { .. }));
+        assert_eq!(gate.total_errors(), 1);
+        assert_eq!(gate.replay_log()[1].event_code, RPL_004_ERROR);
+    }
+
+    #[test]
+    fn negative_replay_errors_when_context_key_is_renamed_after_hash_capture() {
+        let mut gate = EvidenceReplayGate::new();
+        let mut ev = make_evidence("d-context-renamed", DecisionType::Fencing, "fence");
+        let value = ev
+            .input_context
+            .remove("key")
+            .expect("fixture includes canonical context key");
+        ev.input_context.insert("renamed-key".to_owned(), value);
+
+        let result = gate.replay_decision(&ev, "fence", "2026-01-15T04:03:00Z");
+
+        assert!(matches!(result.verdict, ReplayVerdict::Error { .. }));
+        assert_eq!(gate.total_errors(), 1);
+    }
+
+    #[test]
+    fn negative_replay_errors_when_input_entries_are_reordered_after_hash_capture() {
+        let mut gate = EvidenceReplayGate::new();
+        let mut ev = make_evidence("d-entry-order", DecisionType::HealthGate, "admit");
+        ev.input_entries = vec!["entry-a".to_owned(), "entry-b".to_owned()];
+        ev.input_hash = ev.compute_input_hash();
+        ev.input_entries.swap(0, 1);
+
+        let result = gate.replay_decision(&ev, "admit", "2026-01-15T04:04:00Z");
+
+        assert!(matches!(result.verdict, ReplayVerdict::Error { .. }));
+        assert_eq!(gate.total_errors(), 1);
+    }
+
+    #[test]
+    fn negative_replay_errors_when_input_hash_is_empty() {
+        let mut gate = EvidenceReplayGate::new();
+        let mut ev = make_evidence("d-empty-hash", DecisionType::Rollout, "proceed");
+        ev.input_hash = String::new();
+
+        let result = gate.replay_decision(&ev, "proceed", "2026-01-15T04:05:00Z");
+
+        match result.verdict {
+            ReplayVerdict::Error { reason } => {
+                assert!(reason.contains("Input hash mismatch"));
+            }
+            other => panic!("expected input-hash error, got {other:?}"),
+        }
+        assert_eq!(gate.total_errors(), 1);
+        assert_eq!(gate.total_replays(), 1);
+    }
+
+    #[test]
+    fn negative_replay_diverges_when_replayed_action_has_trailing_space() {
+        let mut gate = EvidenceReplayGate::new();
+        let ev = make_evidence("d-action-space", DecisionType::Quarantine, "quarantine");
+
+        let result = gate.replay_decision(&ev, "quarantine ", "2026-01-15T04:06:00Z");
+
+        match result.verdict {
+            ReplayVerdict::Diverged {
+                original_action,
+                replayed_action,
+                diff_size_bytes,
+                ..
+            } => {
+                assert_eq!(original_action, "quarantine");
+                assert_eq!(replayed_action, "quarantine ");
+                assert_ne!(diff_size_bytes, 0);
+            }
+            other => panic!("expected divergence, got {other:?}"),
+        }
+        assert_eq!(gate.total_diverged(), 1);
+        assert_eq!(gate.total_errors(), 0);
+    }
+
+    #[test]
+    fn negative_evaluate_gate_fails_when_captured_input_hash_is_empty() {
+        let mut gate = EvidenceReplayGate::new();
+        let mut ev = make_evidence("d-gate-empty-hash", DecisionType::Fencing, "fence");
+        ev.input_hash = String::new();
+        gate.capture_evidence(ev);
+
+        let result = gate.evaluate_gate("2026-01-15T04:07:00Z");
+
+        assert_eq!(result.decision, GateDecision::Fail);
+        assert_eq!(result.reproduced_count, 0);
+        assert_eq!(result.error_count, 1);
+        assert_eq!(gate.total_errors(), 1);
+    }
 }

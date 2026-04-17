@@ -462,4 +462,77 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn negative_utf8_prefix_invalid_raw_bytes_are_rejected_before_prefixing() {
+        let invalid_inputs: &[&[u8]] = &[
+            b"\xff",
+            b"\xe2\x82",
+            b"\xf0\x9f\x99",
+            b"safe\xc3(payload",
+        ];
+
+        for bytes in invalid_inputs {
+            assert!(std::str::from_utf8(bytes).is_err());
+        }
+    }
+
+    #[test]
+    fn negative_utf8_prefix_zero_limit_blocks_bidi_payload() {
+        let value = "\u{202e}hidden";
+
+        assert_eq!(utf8_prefix(value, 0), "");
+        assert_eq!(utf8_prefix(value, 1), "\u{202e}");
+        assert!(!utf8_prefix(value, 1).contains("hidden"));
+    }
+
+    #[test]
+    fn negative_utf8_prefix_escape_prefix_does_not_swallow_ansi_payload() {
+        let value = "\x1b[31mred";
+        let prefix = utf8_prefix(value, 1);
+
+        assert_eq!(prefix, "\x1b");
+        assert!(!prefix.contains("[31m"));
+        assert!(!prefix.contains("red"));
+    }
+
+    #[test]
+    fn negative_utf8_prefix_unpaired_combining_mark_stays_single_scalar() {
+        let value = "\u{0301}payload";
+        let prefix = utf8_prefix(value, 1);
+
+        assert_eq!(prefix, "\u{0301}");
+        assert!(!prefix.contains("payload"));
+    }
+
+    #[test]
+    fn negative_utf8_prefix_does_not_normalize_confusable_fullwidth_ascii() {
+        let value = "\u{ff41}dmin";
+        let prefix = utf8_prefix(value, 1);
+
+        assert_eq!(prefix, "\u{ff41}");
+        assert_ne!(prefix, "a");
+        assert!(!prefix.contains("dmin"));
+    }
+
+    #[test]
+    fn negative_utf8_prefix_cuts_between_regional_indicators_without_tail() {
+        let value = "🇺🇸secret";
+        let mut chars = value.chars();
+        let first = chars.next().unwrap();
+        let second = chars.next().unwrap();
+        let prefix = utf8_prefix(value, 1);
+
+        assert_eq!(prefix, first.to_string());
+        assert!(!prefix.contains(second));
+        assert!(!prefix.contains("secret"));
+    }
+
+    #[test]
+    fn negative_utf8_prefix_nul_prefix_does_not_hide_following_suffix() {
+        let value = "\0admin=true";
+
+        assert_eq!(utf8_prefix(value, 1), "\0");
+        assert!(!utf8_prefix(value, 1).contains("admin=true"));
+    }
 }

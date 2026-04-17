@@ -828,8 +828,12 @@ impl RollbackResult {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1843,5 +1847,133 @@ mod tests {
         c.insert("key_alphb".to_string(), sha256_hex(b"val1"));
         c.insert("key_beta".to_string(), sha256_hex(b"val2"));
         assert!(!ct_eq_checksum_maps(&a, &c));
+    }
+
+    #[test]
+    fn negative_health_check_kind_rejects_camel_case_variant() {
+        let err = serde_json::from_str::<HealthCheckKind>(r#""BinaryVersion""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_bundle_component_rejects_string_order() {
+        let value = serde_json::json!({
+            "name": "binary_ref",
+            "checksum": sha256_hex(b"binary-ref"),
+            "order": "first",
+            "data": [1, 2, 3]
+        });
+
+        let err = serde_json::from_value::<BundleComponent>(value).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("invalid type") || message.contains("u32"));
+    }
+
+    #[test]
+    fn negative_restore_manifest_rejects_object_components() {
+        let value = serde_json::json!({
+            "manifest_version": "1.0.0",
+            "source_version": "1.4.2",
+            "target_version": "1.4.1",
+            "created_at": "2026-02-20T12:00:00Z",
+            "components": {"binary_ref": true},
+            "health_checks": ["binary_version"],
+            "compatibility": {
+                "rollback_from": "1.4.2",
+                "rollback_to": "1.4.1"
+            }
+        });
+
+        let err = serde_json::from_value::<RestoreManifest>(value).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("invalid type") || message.contains("sequence"));
+    }
+
+    #[test]
+    fn negative_state_snapshot_rejects_array_config_checksums() {
+        let value = serde_json::json!({
+            "config_checksums": ["not", "a", "map"],
+            "schema_version": "schema-v1",
+            "policy_set": "policy-a",
+            "binary_version": "1.4.1"
+        });
+
+        let err = serde_json::from_value::<StateSnapshot>(value).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("invalid type") || message.contains("map"));
+    }
+
+    #[test]
+    fn negative_rollback_audit_entry_rejects_missing_bundle_hash() {
+        let value = serde_json::json!({
+            "timestamp": "2026-02-20T12:00:00Z",
+            "event_code": event_codes::RRB_004_ROLLBACK_FAILED,
+            "source_version": "1.4.2",
+            "target_version": "1.4.1",
+            "outcome": "failed",
+            "detail": "missing field"
+        });
+
+        let err = serde_json::from_value::<RollbackAuditEntry>(value).unwrap_err();
+
+        assert!(err.to_string().contains("bundle_hash"));
+    }
+
+    #[test]
+    fn negative_rollback_result_rejects_unknown_nested_mode() {
+        let value = serde_json::json!({
+            "success": false,
+            "mode": "preview",
+            "actions": [],
+            "health_results": [],
+            "errors": [],
+            "pre_snapshot": null,
+            "post_snapshot": null
+        });
+
+        let err = serde_json::from_value::<RollbackResult>(value).unwrap_err();
+
+        assert!(err.to_string().contains("unknown rollback mode"));
+    }
+
+    #[test]
+    fn negative_rollback_error_checksum_mismatch_missing_actual() {
+        let value = serde_json::json!({
+            "ERR-RRB-CHECKSUM-MISMATCH": {
+                "component": "binary_ref",
+                "expected": sha256_hex(b"expected")
+            }
+        });
+
+        let err = serde_json::from_value::<RollbackBundleError>(value).unwrap_err();
+
+        assert!(err.to_string().contains("actual"));
+    }
+
+    #[test]
+    fn negative_rollback_bundle_rejects_missing_integrity_hash() {
+        let (_store, bundle) = make_store_and_bundle();
+        let value = serde_json::json!({
+            "manifest": bundle.manifest,
+            "timestamp": bundle.timestamp,
+            "components": bundle.components
+        });
+
+        let err = serde_json::from_value::<RollbackBundle>(value).unwrap_err();
+
+        assert!(err.to_string().contains("integrity_hash"));
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_without_inserting() {
+        let mut items = vec!["old-a".to_string(), "old-b".to_string()];
+
+        push_bounded(&mut items, "new".to_string(), 0);
+
+        assert!(items.is_empty());
     }
 }

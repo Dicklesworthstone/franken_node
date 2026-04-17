@@ -1147,5 +1147,91 @@ mod tests {
 
             assert_classification_ambiguous(&result, &divergence_id);
         }
+
+        #[test]
+        fn receipt_with_nul_in_issuer_is_rejected() {
+            let (cfg, sample, divergence_id) = observed_divergence();
+            let mut malformed_receipt = receipt(divergence_id.clone(), "https://l1/result/ok");
+            malformed_receipt.issuer = "policy\0team".to_string();
+
+            let result = run_harness(&cfg, &[sample], &[malformed_receipt]);
+
+            assert_classification_ambiguous(&result, &divergence_id);
+        }
+
+        #[test]
+        fn receipt_with_nul_in_justification_is_rejected() {
+            let (cfg, sample, divergence_id) = observed_divergence();
+            let mut malformed_receipt = receipt(divergence_id.clone(), "https://l1/result/ok");
+            malformed_receipt.justification = "reviewed\0delta".to_string();
+
+            let result = run_harness(&cfg, &[sample], &[malformed_receipt]);
+
+            assert_classification_ambiguous(&result, &divergence_id);
+        }
+
+        #[test]
+        fn receipt_with_nul_l1_link_is_rejected_when_link_required() {
+            let (cfg, sample, divergence_id) = observed_divergence();
+            let malformed_receipt = receipt(divergence_id.clone(), "https://l1/result\0bad");
+
+            let result = run_harness(&cfg, &[sample], &[malformed_receipt]);
+
+            assert_classification_ambiguous(&result, &divergence_id);
+        }
+
+        #[test]
+        fn duplicate_receipt_with_later_mismatched_risk_tier_is_rejected() {
+            let (cfg, sample, divergence_id) = observed_divergence();
+            let valid_receipt = receipt(divergence_id.clone(), "https://l1/result/ok");
+            let mut later_receipt = receipt(divergence_id.clone(), "https://l1/result/ok");
+            later_receipt.risk_tier = RiskTier::High;
+
+            let result = run_harness(&cfg, &[sample], &[valid_receipt, later_receipt]);
+
+            assert_classification_ambiguous(&result, &divergence_id);
+        }
+
+        #[test]
+        fn duplicate_receipt_with_later_empty_justification_is_rejected() {
+            let (cfg, sample, divergence_id) = observed_divergence();
+            let valid_receipt = receipt(divergence_id.clone(), "https://l1/result/ok");
+            let mut later_receipt = receipt(divergence_id.clone(), "https://l1/result/ok");
+            later_receipt.justification.clear();
+
+            let result = run_harness(&cfg, &[sample], &[valid_receipt, later_receipt]);
+
+            assert_classification_ambiguous(&result, &divergence_id);
+        }
+
+        #[test]
+        fn receipt_with_valid_fields_but_wrong_divergence_id_keeps_missing_receipt() {
+            let (cfg, sample, divergence_id) = observed_divergence();
+            let wrong_receipt = receipt("div-9999".to_string(), "https://l1/result/ok");
+
+            let result = run_harness(&cfg, &[sample], &[wrong_receipt]);
+
+            assert_eq!(result.stats.receipted_count, 0);
+            assert!(matches!(
+                result.verdict,
+                ReleaseVerdict::Blocked { reasons }
+                    if reasons.iter().any(|reason| matches!(
+                        reason,
+                        ReleaseBlockReason::MissingReceipt { divergence_ids }
+                            if divergence_ids == &vec![divergence_id.clone()]
+                    ))
+            ));
+        }
+
+        #[test]
+        fn receipt_with_high_risk_tier_for_medium_divergence_is_rejected() {
+            let (cfg, sample, divergence_id) = observed_divergence();
+            let mut malformed_receipt = receipt(divergence_id.clone(), "https://l1/result/ok");
+            malformed_receipt.risk_tier = RiskTier::High;
+
+            let result = run_harness(&cfg, &[sample], &[malformed_receipt]);
+
+            assert_classification_ambiguous(&result, &divergence_id);
+        }
     }
 }

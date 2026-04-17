@@ -983,6 +983,86 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn test_parse_rejects_nul_before_prefix() {
+        let digest = sha256_digest(b"nul-before-prefix");
+        let candidate = format!("\u{0}ext:sha256:{digest}");
+
+        let result = TrustObjectId::parse(&candidate);
+
+        assert!(matches!(result, Err(IdError::InvalidPrefix { .. })));
+    }
+
+    #[test]
+    fn test_parse_rejects_nul_after_prefix_before_algorithm() {
+        let digest = sha256_digest(b"nul-after-prefix");
+        let candidate = format!("ext:\u{0}sha256:{digest}");
+
+        let result = TrustObjectId::parse(&candidate);
+
+        assert!(matches!(result, Err(IdError::InvalidFormat { .. })));
+    }
+
+    #[test]
+    fn test_parse_rejects_nul_inside_algorithm_marker() {
+        let digest = sha256_digest(b"nul-inside-algorithm");
+        let candidate = format!("ext:sha\u{0}256:{digest}");
+
+        let result = TrustObjectId::parse(&candidate);
+
+        assert!(matches!(result, Err(IdError::InvalidFormat { .. })));
+    }
+
+    #[test]
+    fn test_parse_rejects_nul_inside_content_digest() {
+        let digest = sha256_digest(b"nul-content-digest");
+        let candidate = format!("ext:sha256:{}\u{0}{}", &digest[..32], &digest[33..]);
+
+        let result = TrustObjectId::parse(&candidate);
+
+        assert!(matches!(
+            result,
+            Err(IdError::MalformedDigest { ref reason, .. })
+                if reason == "contains non-hex characters"
+        ));
+    }
+
+    #[test]
+    fn test_parse_rejects_nul_inside_context_epoch() {
+        let digest = sha256_digest(b"nul-context-epoch");
+        let candidate = format!("ext:1\u{0}:2:{digest}");
+
+        let result = TrustObjectId::parse(&candidate);
+
+        assert!(matches!(
+            result,
+            Err(IdError::InvalidFormat { ref reason, .. })
+                if reason == "epoch is not a valid u64"
+        ));
+    }
+
+    #[test]
+    fn test_parse_rejects_nul_inside_context_sequence() {
+        let digest = sha256_digest(b"nul-context-sequence");
+        let candidate = format!("ext:1:2\u{0}:{digest}");
+
+        let result = TrustObjectId::parse(&candidate);
+
+        assert!(matches!(
+            result,
+            Err(IdError::InvalidFormat { ref reason, .. })
+                if reason == "sequence is not a valid u64"
+        ));
+    }
+
+    #[test]
+    fn test_validate_rejects_nul_inside_context_digest() {
+        let digest = sha256_digest(b"nul-context-digest");
+        let candidate = format!("ext:1:2:{}\u{0}{}", &digest[..16], &digest[17..]);
+
+        assert!(!TrustObjectId::validate(&candidate));
+    }
+
     // ── TrustObjectId: validate ─────────────────────────────────────
 
     #[test]

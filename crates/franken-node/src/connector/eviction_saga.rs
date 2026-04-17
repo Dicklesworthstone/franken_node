@@ -642,8 +642,12 @@ pub const SCHEMA_VERSION: &str = "es-v1.0";
 
 /// Push an item to a bounded Vec, evicting oldest entries if at capacity.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if max == 0 {
+        vec.clear();
+        return;
+    }
     if vec.len() >= max {
-        let overflow = vec.len() - max + 1;
+        let overflow = vec.len().saturating_sub(max).saturating_add(1);
         vec.drain(0..overflow);
     }
     vec.push(item);
@@ -1382,5 +1386,102 @@ mod tests {
         let json = serde_json::to_string(&t).unwrap();
         assert!(json.contains("pending"));
         assert!(json.contains("uploading"));
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_existing_transitions() {
+        let mut values = vec!["old".to_string()];
+
+        push_bounded(&mut values, "new".to_string(), 0);
+
+        assert!(values.is_empty());
+    }
+
+    #[test]
+    fn negative_push_bounded_overfull_cap_one_keeps_only_newest_transition() {
+        let mut values = vec!["oldest".to_string(), "middle".to_string()];
+
+        push_bounded(&mut values, "newest".to_string(), 1);
+
+        assert_eq!(values, vec!["newest".to_string()]);
+    }
+
+    #[test]
+    fn negative_serde_rejects_unknown_saga_phase_variant() {
+        let err = serde_json::from_str::<SagaPhase>(r#""retired""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_serde_rejects_unknown_compensation_action_variant() {
+        let err = serde_json::from_str::<CompensationAction>(r#""delete_l2""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_serde_rejects_tier_presence_missing_verification_flag() {
+        let err = serde_json::from_str::<TierPresence>(r#"{"l2_present":true,"l3_present":true}"#)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("l3_verified"));
+    }
+
+    #[test]
+    fn negative_serde_rejects_phase_transition_with_unknown_from_phase() {
+        let err = serde_json::from_str::<PhaseTransition>(
+            r#"{
+                "saga_id":"s1",
+                "artifact_id":"a1",
+                "from_phase":"deleted",
+                "to_phase":"uploading",
+                "event_code":"ES_PHASE_UPLOAD",
+                "timestamp_epoch_ms":1,
+                "outcome":"started"
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_serde_rejects_saga_missing_tier_presence() {
+        let err = serde_json::from_str::<EvictionSaga>(
+            r#"{
+                "saga_id":"s1",
+                "artifact_id":"a1",
+                "current_phase":"pending",
+                "remote_cap_validated":false,
+                "transitions":[],
+                "compensation_action":null
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("tier_presence"));
+    }
+
+    #[test]
+    fn negative_serde_rejects_saga_with_scalar_transitions() {
+        let err = serde_json::from_str::<EvictionSaga>(
+            r#"{
+                "saga_id":"s1",
+                "artifact_id":"a1",
+                "current_phase":"pending",
+                "remote_cap_validated":false,
+                "tier_presence":{
+                    "l2_present":true,
+                    "l3_present":false,
+                    "l3_verified":false
+                },
+                "transitions":"not-a-list",
+                "compensation_action":null
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
     }
 }

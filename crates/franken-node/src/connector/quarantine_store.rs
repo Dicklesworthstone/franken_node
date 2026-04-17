@@ -801,4 +801,121 @@ mod tests {
         assert_eq!(store.stats(900).object_count, 1);
         assert_eq!(store.stats(900).total_bytes, 100);
     }
+
+    #[test]
+    fn invalid_config_reports_zero_objects_before_zero_bytes_and_ttl() {
+        let err = validate_config(&QuarantineConfig {
+            max_objects: 0,
+            max_bytes: 0,
+            ttl_seconds: 0,
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            QuarantineError::InvalidConfig { ref reason } if reason == "max_objects must be > 0"
+        ));
+    }
+
+    #[test]
+    fn invalid_config_reports_zero_bytes_before_zero_ttl() {
+        let err = validate_config(&QuarantineConfig {
+            max_objects: 1,
+            max_bytes: 0,
+            ttl_seconds: 0,
+        })
+        .unwrap_err();
+
+        assert!(matches!(
+            err,
+            QuarantineError::InvalidConfig { ref reason } if reason == "max_bytes must be > 0"
+        ));
+    }
+
+    #[test]
+    fn duplicate_oversized_object_reports_duplicate_before_quota() {
+        let mut store = QuarantineStore::new(config()).unwrap();
+        store.ingest("obj1", 100, "peer1", 1000).unwrap();
+
+        let err = store.ingest("obj1", 501, "peer2", 1001).unwrap_err();
+        let entry = store.promote("obj1").unwrap();
+
+        assert!(matches!(
+            err,
+            QuarantineError::Duplicate { ref object_id } if object_id == "obj1"
+        ));
+        assert_eq!(entry.size_bytes, 100);
+        assert_eq!(entry.source_peer, "peer1");
+        assert_eq!(entry.ingested_at, 1000);
+    }
+
+    #[test]
+    fn duplicate_after_ttl_cleanup_can_still_be_rejected_by_oversize() {
+        let mut store = QuarantineStore::new(config()).unwrap();
+        store.ingest("expired-dup", 100, "peer1", 1000).unwrap();
+
+        let err = store.ingest("expired-dup", 501, "peer2", 1100).unwrap_err();
+
+        assert!(matches!(
+            err,
+            QuarantineError::QuotaExceeded {
+                current_bytes: 0,
+                max_bytes: 500
+            }
+        ));
+        assert!(!store.contains("expired-dup"));
+        let stats = store.stats(1100);
+        assert_eq!(stats.object_count, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.evictions_total, 1);
+    }
+
+    #[test]
+    fn promote_missing_does_not_increment_evictions_total() {
+        let mut store = QuarantineStore::new(config()).unwrap();
+        store.ingest("kept", 100, "peer1", 1000).unwrap();
+
+        let err = store.promote("missing").unwrap_err();
+
+        assert!(matches!(
+            err,
+            QuarantineError::NotFound { ref object_id } if object_id == "missing"
+        ));
+        assert_eq!(store.stats(1001).evictions_total, 0);
+        assert!(store.contains("kept"));
+    }
+
+    #[test]
+    fn evict_expired_is_idempotent_after_first_cleanup() {
+        let mut store = QuarantineStore::new(config()).unwrap();
+        store.ingest("expired-once", 100, "peer1", 1000).unwrap();
+
+        let first = store.evict_expired(1100);
+        let second = store.evict_expired(1200);
+
+        assert_eq!(first.len(), 1);
+        assert!(second.is_empty());
+        assert_eq!(store.stats(1200).evictions_total, 1);
+        assert_eq!(store.stats(1200).total_bytes, 0);
+    }
+
+    #[test]
+    fn quota_rejection_when_empty_does_not_create_entry_or_eviction() {
+        let mut store = QuarantineStore::new(config()).unwrap();
+
+        let err = store.ingest("too-big-empty", 501, "peer1", 1000).unwrap_err();
+
+        assert!(matches!(
+            err,
+            QuarantineError::QuotaExceeded {
+                current_bytes: 0,
+                max_bytes: 500
+            }
+        ));
+        assert!(!store.contains("too-big-empty"));
+        let stats = store.stats(1000);
+        assert_eq!(stats.object_count, 0);
+        assert_eq!(stats.total_bytes, 0);
+        assert_eq!(stats.evictions_total, 0);
+    }
 }

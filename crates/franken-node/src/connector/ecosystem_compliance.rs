@@ -200,9 +200,19 @@ impl ComplianceEvidenceStore {
                 "publisher id must not be empty".to_owned(),
             ));
         }
+        if publisher_id.trim() != publisher_id {
+            return Err(ComplianceError::InvalidEvidence(
+                "publisher id must be trimmed".to_owned(),
+            ));
+        }
         if title.trim().is_empty() {
             return Err(ComplianceError::InvalidEvidence(
                 "title must not be empty".to_owned(),
+            ));
+        }
+        if title.trim() != title {
+            return Err(ComplianceError::InvalidEvidence(
+                "title must be trimmed".to_owned(),
             ));
         }
         if content.trim().is_empty() {
@@ -215,9 +225,14 @@ impl ComplianceEvidenceStore {
                 "timestamp must not be empty".to_owned(),
             ));
         }
-        if attestation.is_some_and(|value| value.trim().is_empty()) {
+        if timestamp.trim() != timestamp {
             return Err(ComplianceError::InvalidEvidence(
-                "attestation must not be blank when provided".to_owned(),
+                "timestamp must be trimmed".to_owned(),
+            ));
+        }
+        if attestation.is_some_and(|value| value.trim().is_empty() || value.trim() != value) {
+            return Err(ComplianceError::InvalidEvidence(
+                "attestation must be non-empty and trimmed when provided".to_owned(),
             ));
         }
         if tags
@@ -419,8 +434,12 @@ impl ComplianceEvidenceStore {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1364,5 +1383,169 @@ mod tests {
             evidence.attestation.as_deref(),
             Some("attestation-signature-abc")
         );
+    }
+
+    #[test]
+    fn negative_evidence_source_rejects_unknown_variant() {
+        let err = serde_json::from_str::<EvidenceSource>(r#""verifier_market""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_compliance_evidence_rejects_missing_content_hash() {
+        let value = serde_json::json!({
+            "publisher_id": "publisher-1",
+            "source": "security_audit",
+            "title": "Audit",
+            "content": "{}",
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "attestation": null,
+            "tags": ["audit"]
+        });
+
+        let err = serde_json::from_value::<ComplianceEvidence>(value).unwrap_err();
+
+        assert!(err.to_string().contains("content_hash"));
+    }
+
+    #[test]
+    fn negative_compliance_evidence_rejects_object_tags() {
+        let value = serde_json::json!({
+            "content_hash": "sha256:abc",
+            "publisher_id": "publisher-1",
+            "source": "security_audit",
+            "title": "Audit",
+            "content": "{}",
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "attestation": null,
+            "tags": {"audit": true}
+        });
+
+        let err = serde_json::from_value::<ComplianceEvidence>(value).unwrap_err();
+
+        let message = err.to_string();
+        assert!(message.contains("invalid type") || message.contains("sequence"));
+    }
+
+    #[test]
+    fn negative_compliance_event_rejects_missing_trace_id() {
+        let value = serde_json::json!({
+            "event_code": ENE_005_COMPLIANCE_EVIDENCE_STORED,
+            "content_hash": "sha256:abc",
+            "detail": "stored",
+            "timestamp": "2026-01-01T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<ComplianceEvent>(value).unwrap_err();
+
+        assert!(err.to_string().contains("trace_id"));
+    }
+
+    #[test]
+    fn negative_index_entry_rejects_uppercase_source_variant() {
+        let value = serde_json::json!({
+            "content_hash": "sha256:abc",
+            "publisher_id": "publisher-1",
+            "source": "SecurityAudit",
+            "title": "Audit",
+            "submitted_at": "2026-01-01T00:00:00Z",
+            "tags": ["audit"]
+        });
+
+        let err = serde_json::from_value::<ComplianceIndexEntry>(value).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_store_rejects_untrimmed_attestation_without_event() {
+        let mut store = ComplianceEvidenceStore::new();
+
+        let result = store.store_evidence(
+            "publisher-1",
+            EvidenceSource::External,
+            "External report",
+            "{}",
+            Some(" signed "),
+            &["external".to_owned()],
+            &ts(1),
+            "trace-attestation",
+        );
+
+        assert!(matches!(
+            result,
+            Err(ComplianceError::InvalidEvidence(ref detail)) if detail.contains("attestation")
+        ));
+        assert_eq!(store.evidence_count(), 0);
+        assert!(store.take_events().is_empty());
+    }
+
+    #[test]
+    fn negative_store_rejects_untrimmed_publisher_without_event() {
+        let mut store = ComplianceEvidenceStore::new();
+
+        let result = store.store_evidence(
+            " publisher-1 ",
+            EvidenceSource::External,
+            "External report",
+            "{}",
+            None,
+            &["external".to_owned()],
+            &ts(1),
+            "trace-publisher",
+        );
+
+        assert!(matches!(
+            result,
+            Err(ComplianceError::InvalidEvidence(ref detail)) if detail.contains("publisher")
+        ));
+        assert_eq!(store.evidence_count(), 0);
+        assert!(store.take_events().is_empty());
+    }
+
+    #[test]
+    fn negative_store_rejects_untrimmed_title_without_event() {
+        let mut store = ComplianceEvidenceStore::new();
+
+        let result = store.store_evidence(
+            "publisher-1",
+            EvidenceSource::External,
+            " External report ",
+            "{}",
+            None,
+            &["external".to_owned()],
+            &ts(1),
+            "trace-title",
+        );
+
+        assert!(matches!(
+            result,
+            Err(ComplianceError::InvalidEvidence(ref detail)) if detail.contains("title")
+        ));
+        assert_eq!(store.evidence_count(), 0);
+        assert!(store.take_events().is_empty());
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_without_inserting() {
+        let mut events = vec![ComplianceEvent {
+            event_code: ENE_005_COMPLIANCE_EVIDENCE_STORED.to_owned(),
+            content_hash: "sha256:old".to_owned(),
+            detail: "old".to_owned(),
+            timestamp: ts(1),
+            trace_id: "trace-old".to_owned(),
+        }];
+        let new_event = ComplianceEvent {
+            event_code: ENE_006_COMPLIANCE_EVIDENCE_RETRIEVED.to_owned(),
+            content_hash: "sha256:new".to_owned(),
+            detail: "new".to_owned(),
+            timestamp: ts(2),
+            trace_id: "trace-new".to_owned(),
+        };
+
+        push_bounded(&mut events, new_event, 0);
+
+        assert!(events.is_empty());
     }
 }

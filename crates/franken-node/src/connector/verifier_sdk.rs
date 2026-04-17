@@ -32,8 +32,12 @@ use std::collections::BTreeMap;
 const MAX_TRANSPARENCY_LOG_ENTRIES: usize = 8192;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -2740,5 +2744,165 @@ mod tests {
             err.is_err(),
             "should reject when evidence_refs subset of evidence items"
         );
+    }
+
+    #[test]
+    fn negative_claim_rejects_numeric_timestamp() {
+        let json = r#"{
+            "claim_id": "claim-ref-001",
+            "claim_type": "migration_safety",
+            "subject": "plan-ref-001",
+            "assertion": "claim is safe",
+            "evidence_refs": ["ev-ref-001"],
+            "timestamp": 1708473600
+        }"#;
+
+        let result: Result<Claim, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_evidence_rejects_missing_verification_procedure() {
+        let json = r#"{
+            "evidence_id": "ev-ref-001",
+            "claim_ref": "claim-ref-001",
+            "artifacts": {"digest": "aa"}
+        }"#;
+
+        let result: Result<Evidence, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_evidence_rejects_non_string_artifact_value() {
+        let json = r#"{
+            "evidence_id": "ev-ref-001",
+            "claim_ref": "claim-ref-001",
+            "artifacts": {"digest": 7},
+            "verification_procedure": "verify digest"
+        }"#;
+
+        let result: Result<Evidence, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_evidence_bundle_rejects_numeric_self_contained_flag() {
+        let json = r#"{
+            "claim": {
+                "claim_id": "claim-ref-001",
+                "claim_type": "migration_safety",
+                "subject": "plan-ref-001",
+                "assertion": "claim is safe",
+                "evidence_refs": ["ev-ref-001"],
+                "timestamp": "2026-02-21T00:00:00Z"
+            },
+            "evidence_items": [],
+            "self_contained": 1
+        }"#;
+
+        let result: Result<EvidenceBundle, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_verification_result_rejects_object_checked_assertions() {
+        let json = r#"{
+            "verdict": "pass",
+            "confidence_score": 1.0,
+            "checked_assertions": {"assertion": "present"},
+            "execution_timestamp": "2026-02-21T00:00:00Z",
+            "verifier_identity": "v1",
+            "signature_algorithm": "ed25519",
+            "verifier_public_key": "00",
+            "artifact_binding_hash": "binding",
+            "verifier_signature": "00"
+        }"#;
+
+        let result: Result<VerificationResult, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_verification_result_rejects_string_confidence_score() {
+        let json = r#"{
+            "verdict": "pass",
+            "confidence_score": "1.0",
+            "checked_assertions": [],
+            "execution_timestamp": "2026-02-21T00:00:00Z",
+            "verifier_identity": "v1",
+            "signature_algorithm": "ed25519",
+            "verifier_public_key": "00",
+            "artifact_binding_hash": "binding",
+            "verifier_signature": "00"
+        }"#;
+
+        let result: Result<VerificationResult, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_replay_result_rejects_string_duration() {
+        let json = r#"{
+            "verdict": "fail",
+            "expected_output_hash": "aa",
+            "actual_output_hash": "bb",
+            "replay_duration_ms": "42"
+        }"#;
+
+        let result: Result<ReplayResult, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_transparency_log_entry_rejects_numeric_proof_member() {
+        let json = r#"{
+            "result_hash": "aabb",
+            "timestamp": "2026-02-21T00:00:00Z",
+            "verifier_id": "v1",
+            "merkle_proof": ["proof1", 7]
+        }"#;
+
+        let result: Result<TransparencyLogEntry, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_verifier_sdk_event_rejects_numeric_event_code() {
+        let json = r#"{
+            "event_code": 7,
+            "detail": "claim verified",
+            "timestamp": "2026-02-21T00:00:00Z"
+        }"#;
+
+        let result: Result<VerifierSdkEvent, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_without_insert() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn negative_push_bounded_eviction_handles_exact_capacity() {
+        let mut items = vec![1, 2];
+
+        push_bounded(&mut items, 3, 2);
+
+        assert_eq!(items, vec![2, 3]);
     }
 }

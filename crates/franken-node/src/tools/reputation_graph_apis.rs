@@ -1169,4 +1169,92 @@ mod tests {
         let g = ReputationGraphApis::default();
         assert_eq!(g.schema_version, SCHEMA_VERSION);
     }
+
+    #[test]
+    fn node_type_deserialize_rejects_unknown_variant() {
+        let result: Result<NodeType, _> = serde_json::from_str("\"unknown_node_type\"");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn node_type_deserialize_rejects_display_case_label() {
+        let result: Result<NodeType, _> = serde_json::from_str("\"DataSource\"");
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_node_deserialize_rejects_string_base_score() {
+        let raw = serde_json::json!({
+            "node_id": "n-string-score",
+            "node_type": "operator",
+            "display_name": "string score",
+            "base_score": "0.8",
+            "created_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ReputationNode, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_edge_deserialize_rejects_missing_evidence() {
+        let raw = serde_json::json!({
+            "edge_id": "e-missing-evidence",
+            "source": "n1",
+            "target": "n2",
+            "weight": 0.7,
+            "created_at": "2026-04-17T00:00:00Z"
+        });
+
+        let result: Result<ReputationEdge, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn reputation_score_deserialize_rejects_string_edge_count() {
+        let raw = serde_json::json!({
+            "node_id": "n1",
+            "composite_score": 0.8,
+            "meets_threshold": true,
+            "edge_count": "1",
+            "content_hash": "a".repeat(64)
+        });
+
+        let result: Result<ReputationScore, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn graph_snapshot_deserialize_rejects_missing_schema_version() {
+        let raw = serde_json::json!({
+            "snapshot_id": "snapshot-1",
+            "timestamp": "2026-04-17T00:00:00Z",
+            "node_count": 1_usize,
+            "edge_count": 0_usize,
+            "content_hash": "a".repeat(64)
+        });
+
+        let result: Result<GraphSnapshot, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audit_record_deserialize_rejects_missing_details() {
+        let raw = serde_json::json!({
+            "record_id": "rga-audit-1",
+            "event_code": event_codes::RGA_NODE_ADDED,
+            "timestamp": "2026-04-17T00:00:00Z",
+            "trace_id": "trace-1"
+        });
+
+        let result: Result<RgaAuditRecord, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err());
+    }
 }

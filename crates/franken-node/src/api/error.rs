@@ -894,6 +894,110 @@ mod problem_detail_schema_negative_tests {
         assert!(err.to_string().contains("invalid type"));
     }
 
+    fn valid_problem_detail_value() -> serde_json::Value {
+        serde_json::json!({
+            "type": "urn:franken-node:error:fastapi-bad-request",
+            "title": "Bad request",
+            "status": 400,
+            "detail": "required field baseline",
+            "instance": "/v1/operator/status",
+            "code": "FASTAPI_BAD_REQUEST",
+            "trace_id": "trace-required-baseline"
+        })
+    }
+
+    fn assert_missing_required_field_is_rejected(field: &str) {
+        let mut value = valid_problem_detail_value();
+        value
+            .as_object_mut()
+            .expect("problem detail test fixture must be a JSON object")
+            .remove(field);
+
+        let err = serde_json::from_value::<ProblemDetail>(value)
+            .expect_err("missing required ProblemDetail field must fail deserialization");
+
+        assert!(
+            err.to_string().contains(field),
+            "error {err} should identify missing field {field}"
+        );
+    }
+
+    #[test]
+    fn negative_problem_detail_missing_title_is_rejected() {
+        assert_missing_required_field_is_rejected("title");
+    }
+
+    #[test]
+    fn negative_problem_detail_missing_status_is_rejected() {
+        assert_missing_required_field_is_rejected("status");
+    }
+
+    #[test]
+    fn negative_problem_detail_missing_detail_is_rejected() {
+        assert_missing_required_field_is_rejected("detail");
+    }
+
+    #[test]
+    fn negative_problem_detail_missing_instance_is_rejected() {
+        assert_missing_required_field_is_rejected("instance");
+    }
+
+    #[test]
+    fn negative_problem_detail_missing_code_is_rejected() {
+        assert_missing_required_field_is_rejected("code");
+    }
+
+    #[test]
+    fn negative_problem_detail_null_type_is_rejected() {
+        let mut value = valid_problem_detail_value();
+        value["type"] = serde_json::Value::Null;
+
+        let err = serde_json::from_value::<ProblemDetail>(value)
+            .expect_err("null RFC 7807 type must fail deserialization");
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    fn assert_null_required_field_is_rejected(field: &str) {
+        let mut value = valid_problem_detail_value();
+        value[field] = serde_json::Value::Null;
+
+        let err = serde_json::from_value::<ProblemDetail>(value)
+            .expect_err("null required ProblemDetail field must fail deserialization");
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_problem_detail_null_title_is_rejected() {
+        assert_null_required_field_is_rejected("title");
+    }
+
+    #[test]
+    fn negative_problem_detail_null_status_is_rejected() {
+        assert_null_required_field_is_rejected("status");
+    }
+
+    #[test]
+    fn negative_problem_detail_null_detail_is_rejected() {
+        assert_null_required_field_is_rejected("detail");
+    }
+
+    #[test]
+    fn negative_problem_detail_null_instance_is_rejected() {
+        assert_null_required_field_is_rejected("instance");
+    }
+
+    #[test]
+    fn negative_problem_detail_null_code_is_rejected() {
+        assert_null_required_field_is_rejected("code");
+    }
+
+    #[test]
+    fn negative_problem_detail_null_trace_id_is_rejected() {
+        assert_null_required_field_is_rejected("trace_id");
+    }
+
     // =========================================================================
     // NEGATIVE-PATH TESTS FOR EDGE CASES AND MALICIOUS INPUT HANDLING
     // =========================================================================

@@ -413,6 +413,73 @@ mod connector_root_negative_tests {
         }
     }
 
+    fn assert_invalid_namespace_rejected(code: &str) {
+        let mut registry = ErrorCodeRegistry::new();
+        let reg = registration(
+            code,
+            Severity::Transient,
+            recovery(true, Some(100), "retry after fixing namespace"),
+            1,
+        );
+
+        let err = registry.register(&reg).unwrap_err();
+
+        assert!(matches!(
+            err,
+            RegistryError::InvalidNamespace(rejected) if rejected == code
+        ));
+        assert!(registry.is_empty());
+    }
+
+    #[test]
+    fn connector_root_rejects_lowercase_code_suffix() {
+        assert_invalid_namespace_rejected("FRANKEN_CONNECTOR_timeout");
+    }
+
+    #[test]
+    fn connector_root_rejects_trailing_underscore_code_suffix() {
+        assert_invalid_namespace_rejected("FRANKEN_CONNECTOR_TIMEOUT_");
+    }
+
+    #[test]
+    fn connector_root_rejects_double_separator_code_suffix() {
+        assert_invalid_namespace_rejected("FRANKEN_CONNECTOR__TIMEOUT");
+    }
+
+    #[test]
+    fn connector_root_rejects_hyphenated_code_suffix() {
+        assert_invalid_namespace_rejected("FRANKEN_CONNECTOR_TIME-OUT");
+    }
+
+    #[test]
+    fn connector_root_rejects_nul_byte_code_suffix() {
+        assert_invalid_namespace_rejected("FRANKEN_CONNECTOR_TIMEOUT\0NUL");
+    }
+
+    #[test]
+    fn connector_root_rejects_non_ascii_code_suffix() {
+        assert_invalid_namespace_rejected("FRANKEN_CONNECTOR_TIMEOUT_\u{03b2}");
+    }
+
+    #[test]
+    fn connector_root_rejects_whitespace_only_recovery_hint() {
+        let mut registry = ErrorCodeRegistry::new();
+        let reg = registration(
+            "FRANKEN_CONNECTOR_WHITESPACE_HINT",
+            Severity::Transient,
+            recovery(true, Some(100), " \n\t "),
+            1,
+        );
+
+        let err = registry.register(&reg).unwrap_err();
+
+        assert!(matches!(
+            err,
+            RegistryError::MissingRecovery(code) if code == "FRANKEN_CONNECTOR_WHITESPACE_HINT"
+        ));
+        assert!(registry.is_empty());
+    }
+
     #[test]
     fn connector_root_rejects_code_without_franken_namespace() {
         let mut registry = ErrorCodeRegistry::new();

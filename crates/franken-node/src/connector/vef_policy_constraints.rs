@@ -279,6 +279,9 @@ fn invalid_policy_id_reason(policy_id: &str) -> Option<String> {
     if trimmed == RESERVED_POLICY_ID {
         return Some(format!("policy_id is reserved: {:?}", policy_id));
     }
+    if contains_nul(policy_id) {
+        return Some("policy_id must not contain NUL bytes".to_string());
+    }
     if trimmed != policy_id {
         return Some("policy_id contains leading or trailing whitespace".to_string());
     }
@@ -330,6 +333,14 @@ fn normalize_policy(
                 None,
             ));
         }
+        if contains_nul(rule.rule_id.as_str()) {
+            return Err(ConstraintCompileError::new(
+                event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
+                "rule_id must not contain NUL bytes",
+                trace_id,
+                Some(rule_id),
+            ));
+        }
 
         if !seen_rule_ids.insert(rule_id.to_string()) {
             return Err(ConstraintCompileError::new(
@@ -340,6 +351,16 @@ fn normalize_policy(
             ));
         }
 
+        for capability in &rule.required_capabilities {
+            if contains_nul(capability) {
+                return Err(ConstraintCompileError::new(
+                    event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
+                    "required capability must not contain NUL bytes",
+                    trace_id,
+                    Some(rule_id),
+                ));
+            }
+        }
         let mut required_capabilities: Vec<String> = rule
             .required_capabilities
             .iter()
@@ -361,11 +382,27 @@ fn normalize_policy(
                     Some(rule_id),
                 ));
             }
+            if contains_nul(key) {
+                return Err(ConstraintCompileError::new(
+                    event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
+                    "constraint key must not contain NUL bytes",
+                    trace_id,
+                    Some(rule_id),
+                ));
+            }
             let trimmed_value = value.trim();
             if trimmed_value.is_empty() {
                 return Err(ConstraintCompileError::new(
                     event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
                     "constraint value must be non-empty",
+                    trace_id,
+                    Some(rule_id),
+                ));
+            }
+            if contains_nul(trimmed_value) {
+                return Err(ConstraintCompileError::new(
+                    event_codes::VEF_COMPILE_ERR_004_INVALID_RULE,
+                    "constraint value must not contain NUL bytes",
                     trace_id,
                     Some(rule_id),
                 ));
@@ -584,7 +621,7 @@ pub fn compile_policy(
         let counter = coverage
             .entry(rule.action_class.as_str().to_string())
             .or_insert(0);
-        *counter += 1;
+        *counter = (*counter).saturating_add(1);
     }
 
     if normalized.require_full_action_coverage {
@@ -678,14 +715,22 @@ pub fn proof_generator_accepts(envelope: &CompiledConstraintEnvelope) -> bool {
 
     envelope.predicates.iter().all(|predicate| {
         !predicate.predicate_id.is_empty()
+            && !contains_nul(&predicate.predicate_id)
             && !predicate.source_rule_id.is_empty()
+            && !contains_nul(&predicate.source_rule_id)
             && !predicate.expression.is_empty()
+            && !contains_nul(&predicate.expression)
+            && !contains_nul(&predicate.trace_link)
             && predicate.trace_link.starts_with("policy:")
             && predicate
                 .trace_link
                 .split('/')
                 .any(|seg| seg.starts_with("rule:"))
     })
+}
+
+fn contains_nul(value: &str) -> bool {
+    value.as_bytes().contains(&0)
 }
 
 #[cfg(test)]
@@ -831,11 +876,35 @@ mod tests {
     }
 
     #[test]
+    fn policy_id_with_nul_fails() {
+        let mut policy = full_policy();
+        policy.policy_id = "policy\0full".to_string();
+
+        let err = compile_policy(&policy, "trace-policy-nul").unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_001_INVALID_INPUT);
+        assert!(err.message.contains("policy_id must not contain NUL"));
+        assert!(err.rule_id.is_none());
+    }
+
+    #[test]
     fn empty_rule_id_fails() {
         let mut policy = full_policy();
         policy.rules[0].rule_id = "".to_string();
         let err = compile_policy(&policy, "trace-empty-rule").unwrap_err();
         assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
+    }
+
+    #[test]
+    fn rule_id_with_nul_fails() {
+        let mut policy = full_policy();
+        policy.rules[0].rule_id = "rule\0bad".to_string();
+
+        let err = compile_policy(&policy, "trace-rule-nul").unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
+        assert!(err.message.contains("rule_id must not contain NUL"));
+        assert_eq!(err.rule_id.as_deref(), Some("rule\0bad"));
     }
 
     #[test]
@@ -887,6 +956,20 @@ mod tests {
         let err = compile_policy(&policy, "trace-blank-cap").unwrap_err();
         assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
         assert!(err.message.contains("require rule"));
+    }
+
+    #[test]
+    fn required_capability_with_nul_fails() {
+        let mut policy = full_policy();
+        policy.rules[0]
+            .required_capabilities
+            .push("capability\0bad".to_string());
+
+        let err = compile_policy(&policy, "trace-capability-nul").unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
+        assert!(err.message.contains("capability must not contain NUL"));
+        assert_eq!(err.rule_id.as_deref(), Some("rule-00"));
     }
 
     #[test]
@@ -984,6 +1067,34 @@ mod tests {
     }
 
     #[test]
+    fn constraint_key_with_nul_fails() {
+        let mut policy = full_policy();
+        policy.rules[0]
+            .constraints
+            .insert("scope\0bad".to_string(), "network".to_string());
+
+        let err = compile_policy(&policy, "trace-key-nul").unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
+        assert!(err.message.contains("constraint key must not contain NUL"));
+        assert_eq!(err.rule_id.as_deref(), Some("rule-00"));
+    }
+
+    #[test]
+    fn constraint_value_with_nul_fails() {
+        let mut policy = full_policy();
+        policy.rules[0]
+            .constraints
+            .insert("scope".to_string(), "network\0bad".to_string());
+
+        let err = compile_policy(&policy, "trace-value-nul").unwrap_err();
+
+        assert_eq!(err.code, event_codes::VEF_COMPILE_ERR_004_INVALID_RULE);
+        assert!(err.message.contains("constraint value must not contain NUL"));
+        assert_eq!(err.rule_id.as_deref(), Some("rule-00"));
+    }
+
+    #[test]
     fn round_trip_semantics_propagates_invalid_rule() {
         let mut policy = full_policy();
         policy.rules[0].rule_id = "   ".to_string();
@@ -1078,6 +1189,20 @@ mod tests {
     fn proof_generator_rejects_non_policy_trace_prefix() {
         let mut envelope = compile_policy(&full_policy(), "trace-proofgen-trace-prefix").unwrap();
         envelope.predicates[0].trace_link = "claim:policy-full/rule:rule-00".to_string();
+        assert!(!proof_generator_accepts(&envelope));
+    }
+
+    #[test]
+    fn proof_generator_rejects_nul_in_predicate_id() {
+        let mut envelope = compile_policy(&full_policy(), "trace-proofgen-nul-predicate").unwrap();
+        envelope.predicates[0].predicate_id = "pred\0bad".to_string();
+        assert!(!proof_generator_accepts(&envelope));
+    }
+
+    #[test]
+    fn proof_generator_rejects_nul_in_expression() {
+        let mut envelope = compile_policy(&full_policy(), "trace-proofgen-nul-expression").unwrap();
+        envelope.predicates[0].expression = "permit(network_access)\0".to_string();
         assert!(!proof_generator_accepts(&envelope));
     }
 

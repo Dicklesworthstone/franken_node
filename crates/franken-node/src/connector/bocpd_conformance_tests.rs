@@ -624,3 +624,136 @@ fn negative_correlator_prunes_old_shifts_before_matching() {
     assert!(correlated.is_empty());
     assert_eq!(correlator.recent_count(), 1);
 }
+
+#[test]
+fn negative_detector_rejects_zero_min_run_length_config() {
+    let config = BocpdConfig {
+        min_run_length: 0,
+        ..BocpdConfig::default()
+    };
+
+    let err = BocpdDetector::new(
+        "bad_zero_min_run",
+        config,
+        HazardFunction::Constant { lambda: 1.0 },
+        ObservationModel::Gaussian(GaussianModel::default()),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, BocpdError::InvalidConfig(_)));
+    assert!(err.to_string().contains("min_run_length"));
+}
+
+#[test]
+fn negative_detector_rejects_min_run_length_above_max() {
+    let config = BocpdConfig {
+        min_run_length: 10,
+        max_run_length: 9,
+        ..BocpdConfig::default()
+    };
+
+    let err = BocpdDetector::new(
+        "bad_min_above_max",
+        config,
+        HazardFunction::Constant { lambda: 1.0 },
+        ObservationModel::Gaussian(GaussianModel::default()),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, BocpdError::InvalidConfig(_)));
+    assert!(err.to_string().contains("min_run_length"));
+}
+
+#[test]
+fn negative_detector_rejects_zero_regime_history_config() {
+    let config = BocpdConfig {
+        max_regime_history: 0,
+        ..BocpdConfig::default()
+    };
+
+    let err = BocpdDetector::new(
+        "bad_zero_history",
+        config,
+        HazardFunction::Constant { lambda: 1.0 },
+        ObservationModel::Gaussian(GaussianModel::default()),
+    )
+    .unwrap_err();
+
+    assert!(matches!(err, BocpdError::InvalidConfig(_)));
+    assert!(err.to_string().contains("max_regime_history"));
+}
+
+#[test]
+fn negative_detector_rejects_noncanonical_stream_names() {
+    for stream_name in ["", " ", "bad stream", "\tbad", "bad\n"] {
+        let err = BocpdDetector::new(
+            stream_name,
+            BocpdConfig::default(),
+            HazardFunction::Constant { lambda: 1.0 },
+            ObservationModel::Gaussian(GaussianModel::default()),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, BocpdError::InvalidConfig(_)));
+        assert!(err.to_string().contains("stream_name"));
+    }
+}
+
+#[test]
+fn negative_poisson_stats_ignore_invalid_updates() {
+    let mut stats = PoissonSuffStats::new();
+
+    for value in [-1.0, 1.5, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        stats.update(value);
+    }
+
+    assert_eq!(stats.n, 0.0);
+    assert_eq!(stats.sum, 0.0);
+}
+
+#[test]
+fn negative_categorical_model_rejects_mismatched_stats_width() {
+    let model = CategoricalModel { k: 3, alpha0: 1.0 };
+    let stats = CategoricalSuffStats::new(2);
+
+    assert_eq!(model.predictive_prob(&stats, 0), 1e-300);
+}
+
+#[test]
+fn negative_correlator_rejects_zero_run_length_shift() {
+    let mut correlator = MultiStreamCorrelator::new(60);
+    let shift = RegimeShift {
+        stream_name: "zero-run".to_string(),
+        timestamp: 1_000,
+        confidence: 0.8,
+        run_length: 0,
+        old_regime_mean: 1.0,
+        new_regime_mean: 2.0,
+    };
+
+    assert!(correlator.record_shift(shift).is_empty());
+    assert_eq!(correlator.recent_count(), 0);
+}
+
+#[test]
+fn negative_correlator_rejects_nonfinite_means() {
+    for (old_regime_mean, new_regime_mean) in [
+        (f64::NAN, 2.0),
+        (1.0, f64::NAN),
+        (f64::INFINITY, 2.0),
+        (1.0, f64::NEG_INFINITY),
+    ] {
+        let mut correlator = MultiStreamCorrelator::new(60);
+        let shift = RegimeShift {
+            stream_name: "nonfinite-mean".to_string(),
+            timestamp: 1_000,
+            confidence: 0.8,
+            run_length: 5,
+            old_regime_mean,
+            new_regime_mean,
+        };
+
+        assert!(correlator.record_shift(shift).is_empty());
+        assert_eq!(correlator.recent_count(), 0);
+    }
+}

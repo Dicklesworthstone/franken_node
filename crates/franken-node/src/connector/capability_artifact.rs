@@ -1230,8 +1230,12 @@ pub fn build_test_artifact(artifact_id: &str, capabilities: &[(&str, &str)]) -> 
 
 /// Push an item to a bounded Vec, evicting oldest entries if at capacity.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if max == 0 {
+        vec.clear();
+        return;
+    }
     if vec.len() >= max {
-        let overflow = vec.len() - max + 1;
+        let overflow = vec.len().saturating_sub(max).saturating_add(1);
         vec.drain(0..overflow);
     }
     vec.push(item);
@@ -2772,5 +2776,142 @@ mod tests {
                 .iter()
                 .any(|entry| entry.event_code == event_codes::CART_006)
         );
+    }
+
+    #[test]
+    fn negative_artifact_identity_rejects_missing_author() {
+        let value = serde_json::json!({
+            "artifact_id": "ext-missing-author",
+            "created_at": "2026-02-21T00:00:00Z"
+        });
+
+        let err = serde_json::from_value::<ArtifactIdentity>(value).unwrap_err();
+
+        assert!(err.to_string().contains("author"));
+    }
+
+    #[test]
+    fn negative_capability_requirement_rejects_non_bool_mandatory() {
+        let value = serde_json::json!({
+            "capability": "cap:fs:read",
+            "justification": "read manifest",
+            "mandatory": "yes"
+        });
+
+        let err = serde_json::from_value::<CapabilityRequirement>(value).unwrap_err();
+
+        assert!(err.to_string().contains("mandatory"));
+    }
+
+    #[test]
+    fn negative_capability_envelope_rejects_array_requirements() {
+        let value = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "requirements": [{
+                "capability": "cap:fs:read",
+                "justification": "read manifest",
+                "mandatory": true
+            }],
+            "digest": "sha256:abc"
+        });
+
+        let err = serde_json::from_value::<CapabilityEnvelope>(value).unwrap_err();
+
+        assert!(err.to_string().contains("requirements"));
+    }
+
+    #[test]
+    fn negative_extension_artifact_rejects_numeric_envelope() {
+        let value = serde_json::json!({
+            "identity": {
+                "artifact_id": "ext-bad-envelope",
+                "author": "test-author",
+                "created_at": "2026-02-21T00:00:00Z"
+            },
+            "envelope": 7
+        });
+
+        let err = serde_json::from_value::<ExtensionArtifact>(value).unwrap_err();
+
+        assert!(err.to_string().contains("envelope"));
+    }
+
+    #[test]
+    fn negative_artifact_error_rejects_missing_variant_payload() {
+        let value = serde_json::json!({
+            "OverScoped": {
+                "artifact_id": "ext-over"
+            }
+        });
+
+        let err = serde_json::from_value::<ArtifactError>(value).unwrap_err();
+
+        assert!(err.to_string().contains("out_of_scope"));
+    }
+
+    #[test]
+    fn negative_audit_entry_rejects_missing_event_code() {
+        let value = serde_json::json!({
+            "artifact_id": "ext-audit",
+            "timestamp": "2026-02-21T00:00:00Z",
+            "outcome": "rejected",
+            "detail": "missing event code"
+        });
+
+        let err = serde_json::from_value::<AuditEntry>(value).unwrap_err();
+
+        assert!(err.to_string().contains("event_code"));
+    }
+
+    #[test]
+    fn negative_admission_gate_rejects_object_allowed_scope() {
+        let value = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "admitted": {},
+            "audit_log": [],
+            "allowed_scope": {"cap:fs:read": true}
+        });
+
+        let err = serde_json::from_value::<AdmissionGate>(value).unwrap_err();
+
+        assert!(err.to_string().contains("allowed_scope"));
+    }
+
+    #[test]
+    fn negative_envelope_enforcer_rejects_numeric_admitted_capability() {
+        let value = serde_json::json!({
+            "artifact_id": "ext-enforcer",
+            "admitted_capabilities": ["cap:fs:read", 7],
+            "used_capabilities": [],
+            "revoked_capabilities": [],
+            "enforcement_log": []
+        });
+
+        let err = serde_json::from_value::<EnvelopeEnforcer>(value).unwrap_err();
+
+        assert!(err.to_string().contains("admitted_capabilities"));
+    }
+
+    #[test]
+    fn negative_admission_report_rejects_negative_capability_count() {
+        let value = serde_json::json!({
+            "artifact_id": "ext-report",
+            "verdict": "FAIL",
+            "capabilities_declared": -1,
+            "detail": "invalid count"
+        });
+
+        let err = serde_json::from_value::<AdmissionReport>(value).unwrap_err();
+
+        assert!(err.to_string().contains("capabilities_declared"));
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_without_inserting() {
+        let mut values = vec!["old-a".to_string(), "old-b".to_string()];
+
+        push_bounded(&mut values, "new".to_string(), 0);
+
+        assert!(values.is_empty());
     }
 }

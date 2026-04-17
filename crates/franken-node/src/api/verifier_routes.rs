@@ -1394,4 +1394,166 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn reserve_trigger_ids_rejects_exhausted_check_counter_without_mutation() {
+        let mut state = VerifierRouteState::default();
+        state.check_ids_exhausted = true;
+        state.next_check_seq = 7;
+        state.next_audit_seq = 11;
+
+        let err = state
+            .reserve_trigger_ids("trace-exhausted-check")
+            .expect_err("exhausted check counter must fail closed");
+
+        assert!(matches!(err, ApiError::Internal { .. }));
+        assert_eq!(state.next_check_seq, 7);
+        assert_eq!(state.next_audit_seq, 11);
+        assert!(state.checks.is_empty());
+        assert!(state.audit_log.is_empty());
+    }
+
+    #[test]
+    fn reserve_trigger_ids_rejects_exhausted_audit_counter_without_mutation() {
+        let mut state = VerifierRouteState::default();
+        state.audit_ids_exhausted = true;
+        state.next_check_seq = 13;
+        state.next_audit_seq = 17;
+
+        let err = state
+            .reserve_trigger_ids("trace-exhausted-audit")
+            .expect_err("exhausted audit counter must fail closed");
+
+        assert!(matches!(err, ApiError::Internal { .. }));
+        assert_eq!(state.next_check_seq, 13);
+        assert_eq!(state.next_audit_seq, 17);
+        assert!(state.checks.is_empty());
+        assert!(state.audit_log.is_empty());
+    }
+
+    #[test]
+    fn next_audit_entry_id_rejects_exhausted_counter_without_incrementing() {
+        let mut state = VerifierRouteState::default();
+        state.audit_ids_exhausted = true;
+        state.next_audit_seq = 23;
+
+        let err = state
+            .next_audit_entry_id("trace-audit-exhausted")
+            .expect_err("exhausted audit counter must not allocate");
+
+        assert!(matches!(err, ApiError::Internal { .. }));
+        assert_eq!(state.next_audit_seq, 23);
+        assert!(state.audit_log.is_empty());
+    }
+
+    #[test]
+    fn append_audit_rejects_exhausted_counter_without_writing_entry() {
+        let mut state = VerifierRouteState::default();
+        state.audit_ids_exhausted = true;
+
+        let err = state
+            .append_audit(
+                "evidence.read",
+                "test-verifier",
+                "chk-exhausted",
+                "success",
+                "trace-audit-exhausted",
+            )
+            .expect_err("exhausted audit counter must fail append");
+
+        assert!(matches!(err, ApiError::Internal { .. }));
+        assert!(state.audit_log.is_empty());
+    }
+
+    #[test]
+    fn blank_evidence_request_does_not_write_audit_entry() {
+        let _guard = test_guard();
+        reset_verifier_state();
+        let identity = test_identity();
+        let trace = test_trace();
+
+        let err = get_evidence(&identity, &trace, " \n\t ").expect_err("blank id");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let audit = query_audit_log(
+            &identity,
+            &trace,
+            &AuditLogQuery {
+                action: None,
+                actor: None,
+                limit: Some(10),
+                since: None,
+            },
+        )
+        .expect("audit query");
+        assert!(audit.data.is_empty());
+    }
+
+    #[test]
+    fn query_audit_log_nonmatching_filters_return_empty_results() {
+        let _guard = test_guard();
+        reset_verifier_state();
+        let identity = test_identity();
+        let trace = test_trace();
+        let request = ConformanceTriggerRequest {
+            scope: None,
+            verbose: false,
+        };
+        trigger_conformance(&identity, &trace, &request).expect("seed audit");
+
+        let audit = query_audit_log(
+            &identity,
+            &trace,
+            &AuditLogQuery {
+                action: Some("evidence.read".to_string()),
+                actor: Some("different-verifier".to_string()),
+                limit: Some(10),
+                since: None,
+            },
+        )
+        .expect("audit query");
+
+        assert!(audit.data.is_empty());
+    }
+
+    #[test]
+    fn trigger_request_deserialize_rejects_missing_verbose_flag() {
+        let raw = serde_json::json!({
+            "scope": "security"
+        });
+
+        let result = serde_json::from_value::<ConformanceTriggerRequest>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn conformance_finding_deserialize_rejects_missing_detail() {
+        let raw = serde_json::json!({
+            "check_name": "trust_card_schema",
+            "status": "Pass",
+            "severity": "info"
+        });
+
+        let result = serde_json::from_value::<ConformanceFinding>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audit_log_entry_deserialize_rejects_numeric_resource() {
+        let raw = serde_json::json!({
+            "entry_id": "audit-schema-0002",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "action": "evidence.read",
+            "actor": "test-verifier",
+            "resource": 17,
+            "outcome": "success",
+            "trace_id": "trace-schema"
+        });
+
+        let result = serde_json::from_value::<AuditLogEntry>(raw);
+
+        assert!(result.is_err());
+    }
 }

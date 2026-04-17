@@ -204,9 +204,19 @@ impl EcosystemRegistry {
                 "publisher id must not be empty".to_owned(),
             ));
         }
+        if metadata.publisher_id.trim() != metadata.publisher_id.as_str() {
+            return Err(RegistryError::InvalidMetadata(
+                "publisher id must not include surrounding whitespace".to_owned(),
+            ));
+        }
         if metadata.publisher_key.trim().is_empty() {
             return Err(RegistryError::InvalidMetadata(
                 "publisher key must not be empty".to_owned(),
+            ));
+        }
+        if metadata.publisher_key.trim() != metadata.publisher_key.as_str() {
+            return Err(RegistryError::InvalidMetadata(
+                "publisher key must not include surrounding whitespace".to_owned(),
             ));
         }
         if metadata.name.trim().is_empty() {
@@ -214,9 +224,19 @@ impl EcosystemRegistry {
                 "extension name must not be empty".to_owned(),
             ));
         }
+        if metadata.name.trim() != metadata.name.as_str() {
+            return Err(RegistryError::InvalidMetadata(
+                "extension name must not include surrounding whitespace".to_owned(),
+            ));
+        }
         if metadata.description.trim().is_empty() {
             return Err(RegistryError::InvalidMetadata(
                 "extension description must not be empty".to_owned(),
+            ));
+        }
+        if metadata.description.trim() != metadata.description.as_str() {
+            return Err(RegistryError::InvalidMetadata(
+                "extension description must not include surrounding whitespace".to_owned(),
             ));
         }
         if metadata.version.trim().is_empty() {
@@ -224,14 +244,29 @@ impl EcosystemRegistry {
                 "extension version must not be empty".to_owned(),
             ));
         }
+        if metadata.version.trim() != metadata.version.as_str() {
+            return Err(RegistryError::InvalidMetadata(
+                "extension version must not include surrounding whitespace".to_owned(),
+            ));
+        }
         if metadata.signature.trim().is_empty() {
             return Err(RegistryError::InvalidMetadata(
                 "extension signature must not be empty".to_owned(),
             ));
         }
+        if metadata.signature.trim() != metadata.signature.as_str() {
+            return Err(RegistryError::InvalidMetadata(
+                "extension signature must not include surrounding whitespace".to_owned(),
+            ));
+        }
         if timestamp.trim().is_empty() {
             return Err(RegistryError::InvalidMetadata(
                 "registration timestamp must not be empty".to_owned(),
+            ));
+        }
+        if timestamp.trim() != timestamp {
+            return Err(RegistryError::InvalidMetadata(
+                "registration timestamp must not include surrounding whitespace".to_owned(),
             ));
         }
         if metadata
@@ -640,8 +675,12 @@ fn compute_audit_hash(entry: &RegistryAuditEntry) -> String {
 
 /// Push an item to a bounded Vec, evicting oldest entries if at capacity.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if max == 0 {
+        vec.clear();
+        return;
+    }
     if vec.len() >= max {
-        let overflow = vec.len() - max + 1;
+        let overflow = vec.len().saturating_sub(max).saturating_add(1);
         vec.drain(0..overflow);
     }
     vec.push(item);
@@ -748,11 +787,29 @@ mod tests {
     }
 
     #[test]
+    fn test_register_padded_publisher_id_rejected_without_mutation() {
+        assert_invalid_metadata_rejected(
+            make_metadata("ext-1", " pub-1", "key-1"),
+            &ts(1),
+            "publisher id must not include surrounding whitespace",
+        );
+    }
+
+    #[test]
     fn test_register_empty_publisher_key_rejected_without_mutation() {
         assert_invalid_metadata_rejected(
             make_metadata("ext-1", "pub-1", "\t "),
             &ts(1),
             "publisher key",
+        );
+    }
+
+    #[test]
+    fn test_register_padded_publisher_key_rejected_without_mutation() {
+        assert_invalid_metadata_rejected(
+            make_metadata("ext-1", "pub-1", "key-1 "),
+            &ts(1),
+            "publisher key must not include surrounding whitespace",
         );
     }
 
@@ -765,11 +822,59 @@ mod tests {
     }
 
     #[test]
+    fn test_register_padded_name_rejected_without_mutation() {
+        let mut metadata = make_metadata("ext-1", "pub-1", "key-1");
+        metadata.name = " Extension ext-1".to_owned();
+
+        assert_invalid_metadata_rejected(
+            metadata,
+            &ts(1),
+            "extension name must not include surrounding whitespace",
+        );
+    }
+
+    #[test]
+    fn test_register_padded_description_rejected_without_mutation() {
+        let mut metadata = make_metadata("ext-1", "pub-1", "key-1");
+        metadata.description = "Test extension ".to_owned();
+
+        assert_invalid_metadata_rejected(
+            metadata,
+            &ts(1),
+            "extension description must not include surrounding whitespace",
+        );
+    }
+
+    #[test]
+    fn test_register_padded_version_rejected_without_mutation() {
+        let mut metadata = make_metadata("ext-1", "pub-1", "key-1");
+        metadata.version = "\t1.0.0".to_owned();
+
+        assert_invalid_metadata_rejected(
+            metadata,
+            &ts(1),
+            "extension version must not include surrounding whitespace",
+        );
+    }
+
+    #[test]
     fn test_register_empty_signature_rejected_without_mutation() {
         let mut metadata = make_metadata("ext-1", "pub-1", "key-1");
         metadata.signature = "\n ".to_owned();
 
         assert_invalid_metadata_rejected(metadata, &ts(1), "signature");
+    }
+
+    #[test]
+    fn test_register_padded_signature_rejected_without_mutation() {
+        let mut metadata = make_metadata("ext-1", "pub-1", "key-1");
+        metadata.signature = " sig-placeholder".to_owned();
+
+        assert_invalid_metadata_rejected(
+            metadata,
+            &ts(1),
+            "extension signature must not include surrounding whitespace",
+        );
     }
 
     #[test]
@@ -782,11 +887,29 @@ mod tests {
     }
 
     #[test]
+    fn test_register_padded_timestamp_rejected_without_mutation() {
+        assert_invalid_metadata_rejected(
+            make_metadata("ext-1", "pub-1", "key-1"),
+            " 2026-01-01T00:00:00Z",
+            "registration timestamp must not include surrounding whitespace",
+        );
+    }
+
+    #[test]
     fn test_register_blank_tag_rejected_without_mutation() {
         let mut metadata = make_metadata("ext-1", "pub-1", "key-1");
         metadata.tags = vec!["test".to_owned(), " ".to_owned()];
 
         assert_invalid_metadata_rejected(metadata, &ts(1), "tags");
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_clears_without_inserting() {
+        let mut entries = vec![1, 2, 3];
+
+        push_bounded(&mut entries, 4, 0);
+
+        assert!(entries.is_empty());
     }
 
     #[test]

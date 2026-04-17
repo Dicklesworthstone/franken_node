@@ -714,6 +714,10 @@ impl TrustFabricFleet {
 // ---------------------------------------------------------------------------
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -1229,6 +1233,129 @@ mod tests {
         assert!(fleet.get_node("n1").is_some());
     }
 
+    #[test]
+    fn test_push_bounded_zero_capacity_drops_existing_items_without_panic() {
+        let mut items = vec!["kept", "overflow"];
+
+        push_bounded(&mut items, "new", 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn test_partition_heal_in_degraded_mode_does_not_import_authorizations() {
+        let mut remote = make_node("remote");
+        remote.add_trust_card("card-new").unwrap();
+        remote.add_extension("ext-new").unwrap();
+        remote.apply_revocation("card-revoked");
+        let remote_state = remote.state().clone();
+
+        let mut node = make_node("local");
+        node.check_convergence(100);
+        let delta = node.partition_heal(&remote_state, 101);
+
+        assert!(delta.new_cards.contains("card-new"));
+        assert!(delta.new_extensions.contains("ext-new"));
+        assert!(delta.new_revocations.contains("card-revoked"));
+        assert!(!node.is_degraded());
+        assert!(node.state().is_revoked("card-revoked"));
+        assert!(!node.state().trust_cards.contains("card-new"));
+        assert!(!node.state().extensions.contains("ext-new"));
+    }
+
+    #[test]
+    fn test_revoked_identifier_is_not_reintroduced_by_newer_gossip() {
+        let mut node = make_node("local");
+        node.apply_revocation("artifact-1");
+
+        let mut remote = make_node("remote");
+        remote.add_trust_card("artifact-1").unwrap();
+        remote.add_extension("artifact-1").unwrap();
+        remote.add_trust_card("padding").unwrap();
+        let remote_state = remote.state().clone();
+
+        let delta = node.receive_gossip(&remote_state).unwrap();
+
+        assert!(delta.new_cards.contains("artifact-1"));
+        assert!(delta.new_extensions.contains("artifact-1"));
+        assert!(node.state().is_revoked("artifact-1"));
+        assert!(!node.state().trust_cards.contains("artifact-1"));
+        assert!(!node.state().extensions.contains("artifact-1"));
+        assert!(node.state().trust_cards.contains("padding"));
+    }
+
+    #[test]
+    fn test_gossip_round_records_failure_when_peer_state_is_older() {
+        let mut fleet = TrustFabricFleet::new();
+        let mut ahead = make_node("ahead");
+        ahead.add_trust_card("card-1").unwrap();
+        ahead.add_extension("ext-1").unwrap();
+        fleet.add_node(ahead);
+        fleet.add_node(make_node("behind"));
+
+        fleet.gossip_round();
+
+        let ahead = fleet.get_node("ahead").unwrap();
+        assert!(
+            ahead.events().iter().any(|event| {
+                event.code == "EVT_GOSSIP_FAILED" && event.detail.contains("behind")
+            })
+        );
+    }
+
+    #[test]
+    fn test_convergence_boundary_enters_degraded_and_escalates_at_limit() {
+        let config = TrustFabricConfig {
+            convergence_lag_threshold: 10,
+            max_degraded_secs: 5,
+            ..default_config()
+        };
+        let mut node = TrustFabricNode::new("boundary", config, 1).unwrap();
+
+        node.check_convergence(10);
+        node.check_convergence(15);
+
+        assert!(node.is_degraded());
+        assert!(
+            node.events()
+                .iter()
+                .any(|event| event.code == EVT_DEGRADED_ENTERED)
+        );
+        assert!(node.events().iter().any(|event| {
+            event.code == EVT_CONVERGENCE_LAG && event.detail.contains("degraded for 5s")
+        }));
+    }
+
+    #[test]
+    fn test_anti_entropy_with_older_remote_state_does_not_remove_local_authorizations() {
+        let remote_state = make_node("empty").state().clone();
+        let mut node = make_node("local");
+        node.add_trust_card("card-local").unwrap();
+        node.add_extension("ext-local").unwrap();
+        let version = node.state().version;
+
+        let delta = node.anti_entropy_sweep(&remote_state);
+
+        assert!(delta.is_empty());
+        assert!(node.state().trust_cards.contains("card-local"));
+        assert!(node.state().extensions.contains("ext-local"));
+        assert_eq!(node.state().version, version);
+    }
+
+    #[test]
+    fn test_duplicate_fleet_node_id_replaces_existing_entry_without_shadow_peer() {
+        let mut fleet = TrustFabricFleet::new();
+        let mut original = make_node("duplicate");
+        original.add_trust_card("card-original").unwrap();
+        fleet.add_node(original);
+
+        fleet.add_node(make_node("duplicate"));
+
+        let replacement = fleet.get_node("duplicate").unwrap();
+        assert_eq!(fleet.node_count(), 1);
+        assert!(!replacement.state().trust_cards.contains("card-original"));
+    }
+
     /// Negative path: extremely large version numbers approaching u64::MAX
     #[test]
     fn test_trust_state_vector_handles_maximum_version_numbers() {
@@ -1268,12 +1395,14 @@ mod tests {
         ];
 
         for id in &unicode_ids {
-            node.add_trust_card(id).expect("unicode card should be accepted");
+            node.add_trust_card(id)
+                .expect("unicode card should be accepted");
             assert!(node.state().trust_cards.contains(*id));
         }
 
         // Extensions should also accept unicode
-        node.add_extension("ext-🌟unicode").expect("unicode extension accepted");
+        node.add_extension("ext-🌟unicode")
+            .expect("unicode extension accepted");
         assert!(node.state().extensions.contains("ext-🌟unicode"));
 
         // Revocations should work with unicode IDs
@@ -1282,7 +1411,11 @@ mod tests {
         assert!(!node.state().trust_cards.contains("card-🔐-security"));
 
         // Event details should preserve unicode
-        let unicode_event = node.events().iter().find(|e| e.detail.contains("🔐")).expect("unicode event");
+        let unicode_event = node
+            .events()
+            .iter()
+            .find(|e| e.detail.contains("🔐"))
+            .expect("unicode event");
         assert!(unicode_event.detail.contains("🔐"));
     }
 
@@ -1324,7 +1457,7 @@ mod tests {
         // Test that similar but different states produce different digests
         let cards1 = BTreeSet::from(["card-a".to_string(), "card-b".to_string()]);
         let cards2 = BTreeSet::from(["card-a".to_string(), "card-c".to_string()]);
-        let cards3 = BTreeSet::from(["card-ab".to_string()]);  // Concatenation attempt
+        let cards3 = BTreeSet::from(["card-ab".to_string()]); // Concatenation attempt
 
         let empty_set = BTreeSet::new();
 
@@ -1382,11 +1515,11 @@ mod tests {
     #[test]
     fn test_trust_fabric_handles_malformed_node_identifiers() {
         let problematic_ids = [
-            "",                    // Empty string
-            " ",                   // Whitespace only
-            "\x00",               // Null byte
-            "\t\n\r",             // Control characters
-            "a".repeat(100_000),  // Very long ID (100KB)
+            "",                  // Empty string
+            " ",                 // Whitespace only
+            "\x00",              // Null byte
+            "\t\n\r",            // Control characters
+            "a".repeat(100_000), // Very long ID (100KB)
         ];
 
         for node_id in &problematic_ids {
@@ -1398,7 +1531,8 @@ mod tests {
 
             // Operations should still work
             let mut node = node;
-            node.add_trust_card("test-card").expect("operations should work with malformed node ID");
+            node.add_trust_card("test-card")
+                .expect("operations should work with malformed node ID");
 
             // Events should contain the malformed node ID
             let event = node.events().last().expect("event should exist");
@@ -1437,7 +1571,8 @@ mod tests {
 
         // Generate more events than MAX_EVENTS capacity
         for i in 0..MAX_EVENTS + 100 {
-            node.add_trust_card(&format!("card-{}", i)).expect("add card");
+            node.add_trust_card(&format!("card-{}", i))
+                .expect("add card");
             node.apply_revocation(&format!("card-{}", i)); // Each generates 2 events
         }
 
@@ -1446,8 +1581,11 @@ mod tests {
 
         // Most recent events should be retained
         let last_event = node.events().last().expect("last event");
-        assert!(last_event.detail.contains("card-") &&
-               (last_event.code == EVT_STATE_UPDATED || last_event.code == EVT_REVOCATION_APPLIED));
+        assert!(
+            last_event.detail.contains("card-")
+                && (last_event.code == EVT_STATE_UPDATED
+                    || last_event.code == EVT_REVOCATION_APPLIED)
+        );
     }
 
     /// Negative path: convergence timeout edge cases with time overflow
@@ -1498,7 +1636,9 @@ mod tests {
 
         // Add 1000 items to heavy node
         for i in 0..1000 {
-            heavy_node.add_trust_card(&format!("heavy-card-{}", i)).unwrap();
+            heavy_node
+                .add_trust_card(&format!("heavy-card-{}", i))
+                .unwrap();
         }
 
         unbalanced_fleet.add_node(heavy_node);
@@ -1514,6 +1654,143 @@ mod tests {
         }
 
         // Should converge within reasonable number of rounds
-        assert!(unbalanced_fleet.is_converged(), "Unbalanced fleet should eventually converge");
+        assert!(
+            unbalanced_fleet.is_converged(),
+            "Unbalanced fleet should eventually converge"
+        );
+    }
+
+    #[test]
+    fn negative_stale_remote_with_matching_digest_is_still_rejected() {
+        let mut node = make_node("local");
+        node.add_trust_card("card-1").unwrap();
+        node.add_extension("ext-1").unwrap();
+        let mut stale = node.state().clone();
+        stale.version = node.state().version.saturating_sub(1);
+        let before_version = node.state().version;
+        let before_cards = node.state().trust_cards.clone();
+
+        let err = node.receive_gossip(&stale).unwrap_err();
+
+        assert_eq!(
+            err,
+            TrustFabricError::StaleState {
+                remote_ver: stale.version,
+                local_ver: before_version
+            }
+        );
+        assert_eq!(node.state().version, before_version);
+        assert_eq!(node.state().trust_cards, before_cards);
+    }
+
+    #[test]
+    fn negative_contradictory_remote_revocation_wins_over_card_authorization() {
+        let mut node = make_node("local");
+        let mut remote = node.state().clone();
+        remote.version = 10;
+        remote.trust_cards.insert("card-conflict".to_string());
+        remote.revocations.insert("card-conflict".to_string());
+        remote.revocation_ver = 1;
+        remote.recompute_digest();
+
+        let delta = node.receive_gossip(&remote).unwrap();
+
+        assert!(delta.new_cards.contains("card-conflict"));
+        assert!(delta.new_revocations.contains("card-conflict"));
+        assert!(node.state().is_revoked("card-conflict"));
+        assert!(!node.state().trust_cards.contains("card-conflict"));
+    }
+
+    #[test]
+    fn negative_contradictory_remote_revocation_wins_over_extension_authorization() {
+        let mut node = make_node("local");
+        let mut remote = node.state().clone();
+        remote.version = 10;
+        remote.extensions.insert("ext-conflict".to_string());
+        remote.revocations.insert("ext-conflict".to_string());
+        remote.revocation_ver = 1;
+        remote.recompute_digest();
+
+        let delta = node.receive_gossip(&remote).unwrap();
+
+        assert!(delta.new_extensions.contains("ext-conflict"));
+        assert!(delta.new_revocations.contains("ext-conflict"));
+        assert!(node.state().is_revoked("ext-conflict"));
+        assert!(!node.state().extensions.contains("ext-conflict"));
+    }
+
+    #[test]
+    fn negative_degraded_anti_entropy_keeps_new_cards_suppressed_after_revocation() {
+        let mut remote = make_node("remote");
+        remote.add_trust_card("card-new").unwrap();
+        remote.apply_revocation("card-old");
+        let remote_state = remote.state().clone();
+
+        let mut node = make_node("local");
+        node.add_trust_card("card-old").unwrap();
+        node.check_convergence(100);
+
+        let delta = node.anti_entropy_sweep(&remote_state);
+
+        assert!(delta.new_cards.contains("card-new"));
+        assert!(delta.new_revocations.contains("card-old"));
+        assert!(node.state().is_revoked("card-old"));
+        assert!(!node.state().trust_cards.contains("card-old"));
+        assert!(!node.state().trust_cards.contains("card-new"));
+    }
+
+    #[test]
+    fn negative_exact_convergence_threshold_enters_degraded_mode() {
+        let mut node = make_node("local");
+
+        node.check_convergence(default_config().convergence_lag_threshold);
+
+        assert!(node.is_degraded());
+        assert_eq!(
+            node.events().last().map(|event| event.code.as_str()),
+            Some(EVT_DEGRADED_ENTERED)
+        );
+    }
+
+    #[test]
+    fn negative_exact_degraded_timeout_emits_escalation_event() {
+        let mut node = make_node("local");
+        let config = default_config();
+        node.check_convergence(config.convergence_lag_threshold);
+        let entered_events = node.events().len();
+
+        node.check_convergence(config.convergence_lag_threshold + config.max_degraded_secs);
+
+        assert!(node.is_degraded());
+        assert!(node.events().len() > entered_events);
+        assert_eq!(
+            node.events().last().map(|event| event.code.as_str()),
+            Some(EVT_CONVERGENCE_LAG)
+        );
+    }
+
+    #[test]
+    fn negative_duplicate_fleet_node_id_replaces_previous_node() {
+        let mut fleet = TrustFabricFleet::new();
+        let mut first = make_node("node-dup");
+        first.add_trust_card("card-first").unwrap();
+        let second = make_node("node-dup");
+
+        fleet.add_node(first);
+        fleet.add_node(second);
+
+        assert_eq!(fleet.node_count(), 1);
+        let node = fleet
+            .get_node("node-dup")
+            .expect("replacement should remain");
+        assert!(!node.state().trust_cards.contains("card-first"));
+    }
+
+    #[test]
+    fn negative_confirm_convergence_with_past_timestamp_prevents_underflow_lag() {
+        let mut node = make_node("local");
+        node.confirm_convergence(100);
+
+        assert_eq!(node.convergence_lag(50), 0);
     }
 }

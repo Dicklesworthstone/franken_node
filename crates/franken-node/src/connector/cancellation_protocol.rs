@@ -1345,4 +1345,103 @@ mod tests {
             "workflow_id,phase,budget_ms,actual_ms,within_budget,resources_released\n"
         );
     }
+
+    #[test]
+    fn malformed_cancellation_phase_unknown_variant_is_rejected() {
+        let err = serde_json::from_str::<CancellationPhase>("\"Paused\"").unwrap_err();
+
+        assert!(err.to_string().contains("Paused"));
+    }
+
+    #[test]
+    fn malformed_workflow_custom_payload_type_is_rejected() {
+        let payload = serde_json::json!({
+            "Custom": 42
+        });
+
+        let err = serde_json::from_value::<WorkflowKind>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("string"));
+    }
+
+    #[test]
+    fn malformed_cancellation_budget_missing_timeout_is_rejected() {
+        let payload = serde_json::json!({
+            "workflow": "rollout"
+        });
+
+        let err = serde_json::from_value::<CancellationBudget>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("timeout_ms"));
+    }
+
+    #[test]
+    fn malformed_audit_event_missing_schema_version_is_rejected() {
+        let payload = serde_json::json!({
+            "event_code": event_codes::CAN_001,
+            "phase": CancellationPhase::Requested,
+            "workflow": "rollout",
+            "trace_id": "trace-missing-schema",
+            "detail": "cancellation requested"
+        });
+
+        let err = serde_json::from_value::<CancellationAuditEvent>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("schema_version"));
+    }
+
+    #[test]
+    fn malformed_phase_transition_string_force_flag_is_rejected() {
+        let payload = serde_json::json!({
+            "from": CancellationPhase::Requested,
+            "to": CancellationPhase::Completed,
+            "force_finalized": "true",
+            "event_code": event_codes::CAN_005,
+            "error": null
+        });
+
+        let err = serde_json::from_value::<PhaseTransitionResult>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("boolean"));
+    }
+
+    #[test]
+    fn malformed_timing_row_missing_resources_released_is_rejected() {
+        let payload = serde_json::json!({
+            "workflow_id": "rollout",
+            "phase": "drain",
+            "budget_ms": 3000,
+            "actual_ms": 3001,
+            "within_budget": false
+        });
+
+        let err = serde_json::from_value::<TimingRow>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("resources_released"));
+    }
+
+    #[test]
+    fn finalize_after_drain_timeout_is_rejected_without_extra_audit_events() {
+        let mut proto = make_protocol("timeout-finalize", 100);
+        proto.request().unwrap();
+        let timeout = proto.drain(100).unwrap();
+        let events_after_timeout = proto.audit_log().len();
+
+        let err = proto.finalize().unwrap_err();
+
+        assert!(timeout.force_finalized);
+        assert_eq!(err, error_codes::ERR_CANCEL_ALREADY_FINAL);
+        assert_eq!(proto.phase(), CancellationPhase::Completed);
+        assert_eq!(proto.audit_log().len(), events_after_timeout);
+    }
+
+    #[test]
+    fn register_child_at_saturated_count_does_not_wrap() {
+        let mut proto = make_protocol("saturated-children", 3000);
+        proto.inflight_children = usize::MAX;
+
+        proto.register_child();
+
+        assert_eq!(proto.inflight_children(), usize::MAX);
+    }
 }

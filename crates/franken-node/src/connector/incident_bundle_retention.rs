@@ -1647,4 +1647,167 @@ mod tests {
             "hash must be hex"
         );
     }
+
+    #[test]
+    fn negative_store_incomplete_bundle_does_not_record_decision_or_bytes() {
+        let mut store = default_store();
+        let mut bundle = sample_bundle(
+            "ibr-incomplete",
+            "INC-INCOMPLETE",
+            Severity::High,
+            RetentionTier::Hot,
+            1000,
+        );
+        bundle.incident_id.clear();
+        bundle.integrity_hash = compute_integrity_hash(&bundle);
+
+        let err = store.store(bundle, 1001).unwrap_err();
+
+        assert_eq!(err.code(), "IBR_INCOMPLETE");
+        assert_eq!(store.bundle_count(), 0);
+        assert_eq!(store.total_bytes(), 0);
+        assert!(store.decisions().is_empty());
+    }
+
+    #[test]
+    fn negative_bad_integrity_preempts_storage_capacity_rejection() {
+        let mut store = IncidentBundleStore::new(RetentionConfig::default(), 1).unwrap();
+        let mut bundle = sample_bundle(
+            "ibr-bad-hash",
+            "INC-BAD-HASH",
+            Severity::Critical,
+            RetentionTier::Hot,
+            1000,
+        );
+        bundle.integrity_hash = "bad-hash".to_string();
+
+        let err = store.store(bundle, 1001).unwrap_err();
+
+        assert_eq!(err.code(), "IBR_INTEGRITY_FAILURE");
+        assert_eq!(store.bundle_count(), 0);
+        assert_eq!(store.total_bytes(), 0);
+        assert!(store.decisions().is_empty());
+    }
+
+    #[test]
+    fn negative_export_missing_bundle_does_not_record_decision() {
+        let mut store = default_store();
+        let decision_count = store.decisions().len();
+
+        let err = store
+            .export("missing-bundle", ExportFormat::Json, "operator", 1000)
+            .unwrap_err();
+
+        assert_eq!(err.code(), "IBR_NOT_FOUND");
+        assert_eq!(store.decisions().len(), decision_count);
+    }
+
+    #[test]
+    fn negative_export_integrity_failure_does_not_record_export_decision() {
+        let mut store = default_store();
+        let bundle = sample_bundle(
+            "ibr-tamper",
+            "INC-TAMPER",
+            Severity::High,
+            RetentionTier::Hot,
+            1000,
+        );
+        store.store(bundle, 1000).unwrap();
+        let decision_count = store.decisions().len();
+        store
+            .bundles
+            .get_mut("ibr-tamper")
+            .unwrap()
+            .metadata
+            .tags
+            .push("tampered".to_string());
+
+        let err = store
+            .export("ibr-tamper", ExportFormat::Csv, "operator", 1001)
+            .unwrap_err();
+
+        assert_eq!(err.code(), "IBR_INTEGRITY_FAILURE");
+        assert_eq!(store.decisions().len(), decision_count);
+    }
+
+    #[test]
+    fn negative_delete_missing_bundle_does_not_record_decision() {
+        let mut store = default_store();
+        let decision_count = store.decisions().len();
+
+        let err = store.delete("missing-bundle", true, 1000).unwrap_err();
+
+        assert_eq!(err.code(), "IBR_NOT_FOUND");
+        assert_eq!(store.decisions().len(), decision_count);
+        assert_eq!(store.total_bytes(), 0);
+    }
+
+    #[test]
+    fn negative_archive_delete_without_force_preserves_bytes_and_bundle() {
+        let mut store = default_store();
+        let mut bundle = sample_bundle(
+            "ibr-archive",
+            "INC-ARCHIVE",
+            Severity::Critical,
+            RetentionTier::Archive,
+            1000,
+        );
+        bundle.integrity_hash = compute_integrity_hash(&bundle);
+        store.store(bundle, 1000).unwrap();
+        let total_bytes = store.total_bytes();
+        let decision_count = store.decisions().len();
+
+        let err = store.delete("ibr-archive", false, 1001).unwrap_err();
+
+        assert_eq!(err.code(), "IBR_ARCHIVE_PROTECTED");
+        assert!(store.contains("ibr-archive"));
+        assert_eq!(store.total_bytes(), total_bytes);
+        assert_eq!(store.decisions().len(), decision_count);
+    }
+
+    #[test]
+    fn negative_cleanup_before_threshold_does_not_record_cleanup_decision() {
+        let mut store = default_store();
+        let bundle = sample_bundle(
+            "ibr-too-new",
+            "INC-TOO-NEW",
+            Severity::Medium,
+            RetentionTier::Hot,
+            1000,
+        );
+        store.store(bundle, 1000).unwrap();
+        let decision_count = store.decisions().len();
+
+        let decisions = store.cleanup(1001);
+
+        assert!(decisions.is_empty());
+        assert_eq!(store.decisions().len(), decision_count);
+        assert_eq!(
+            store.get("ibr-too-new").unwrap().retention_tier,
+            RetentionTier::Hot
+        );
+    }
+
+    #[test]
+    fn negative_rotate_with_timestamp_before_creation_is_noop() {
+        let mut store = default_store();
+        let bundle = sample_bundle(
+            "ibr-time-travel",
+            "INC-TIME-TRAVEL",
+            Severity::Low,
+            RetentionTier::Hot,
+            10_000,
+        );
+        store.store(bundle, 10_000).unwrap();
+        let decision_count = store.decisions().len();
+
+        let transitions = store.rotate_tiers(999);
+
+        assert!(transitions.is_empty());
+        assert_eq!(store.decisions().len(), decision_count);
+        assert_eq!(
+            store.get("ibr-time-travel").unwrap().retention_tier,
+            RetentionTier::Hot
+        );
+    }
 }

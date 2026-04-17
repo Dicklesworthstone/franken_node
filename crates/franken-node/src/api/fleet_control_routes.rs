@@ -1320,4 +1320,173 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn acquire_lease_zero_ttl_does_not_allocate_sequence_or_lease() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = LeaseAcquireRequest {
+            resource: "control-plane-lock".to_string(),
+            ttl_seconds: 0,
+        };
+
+        let err = acquire_lease(&identity, &trace, &request).expect_err("zero ttl");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let state = fleet_lease_state().lock().expect("state lock");
+        assert!(state.leases.is_empty());
+        assert_eq!(state.next_lease_seq, 1);
+        assert_eq!(state.next_fencing_seq, 1);
+    }
+
+    #[test]
+    fn acquire_lease_blank_resource_does_not_allocate_sequence_or_lease() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = LeaseAcquireRequest {
+            resource: "\n\t ".to_string(),
+            ttl_seconds: 300,
+        };
+
+        let err = acquire_lease(&identity, &trace, &request).expect_err("blank resource");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let state = fleet_lease_state().lock().expect("state lock");
+        assert!(state.leases.is_empty());
+        assert_eq!(state.next_lease_seq, 1);
+        assert_eq!(state.next_fencing_seq, 1);
+    }
+
+    #[test]
+    fn acquire_lease_duplicate_resource_does_not_allocate_second_sequence() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = LeaseAcquireRequest {
+            resource: "control-plane-lock".to_string(),
+            ttl_seconds: 300,
+        };
+        acquire_lease(&identity, &trace, &request).expect("first lease");
+
+        let err = acquire_lease(&identity, &trace, &request).expect_err("duplicate resource");
+
+        assert!(matches!(err, ApiError::Conflict { .. }));
+        let state = fleet_lease_state().lock().expect("state lock");
+        assert_eq!(state.leases.len(), 1);
+        assert_eq!(state.next_lease_seq, 2);
+        assert_eq!(state.next_fencing_seq, 2);
+    }
+
+    #[test]
+    fn release_lease_blank_id_does_not_sweep_or_remove_existing_state() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let expired_at = chrono::Utc::now() - chrono::Duration::seconds(1);
+        {
+            let mut state = fleet_lease_state().lock().expect("state lock");
+            state.leases.insert(
+                "lease-expired-blank-release".to_string(),
+                StoredLease {
+                    lease: Lease {
+                        lease_id: "lease-expired-blank-release".to_string(),
+                        holder: "fleet-admin-1".to_string(),
+                        resource: "control-plane-lock".to_string(),
+                        acquired_at: expired_at.to_rfc3339(),
+                        expires_at: expired_at.to_rfc3339(),
+                        fencing_token: 1,
+                    },
+                    expires_at: expired_at,
+                },
+            );
+        }
+        let identity = admin_identity();
+        let trace = test_trace();
+
+        let err = release_lease(&identity, &trace, "  ").expect_err("blank lease id");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let state = fleet_lease_state().lock().expect("state lock");
+        assert!(state.leases.contains_key("lease-expired-blank-release"));
+    }
+
+    #[test]
+    fn execute_fence_blank_target_does_not_issue_fencing_token() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = FencingRequest {
+            target_node: " ".to_string(),
+            action: FencingAction::Drain,
+            reason: "maintenance".to_string(),
+        };
+
+        let err = execute_fence(&identity, &trace, &request).expect_err("blank target");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let state = fleet_lease_state().lock().expect("state lock");
+        assert_eq!(state.next_fencing_seq, 1);
+    }
+
+    #[test]
+    fn execute_fence_blank_reason_does_not_issue_fencing_token() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = FencingRequest {
+            target_node: "node-2".to_string(),
+            action: FencingAction::Isolate,
+            reason: "\t\n".to_string(),
+        };
+
+        let err = execute_fence(&identity, &trace, &request).expect_err("blank reason");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let state = fleet_lease_state().lock().expect("state lock");
+        assert_eq!(state.next_fencing_seq, 1);
+    }
+
+    #[test]
+    fn execute_coordination_empty_targets_does_not_allocate_command_id() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = CoordinationRequest {
+            command_type: "policy-update".to_string(),
+            target_nodes: Vec::new(),
+            timeout_seconds: 30,
+        };
+
+        let err = execute_coordination(&identity, &trace, &request).expect_err("empty targets");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let state = fleet_lease_state().lock().expect("state lock");
+        assert_eq!(state.next_coordination_seq, 1);
+    }
+
+    #[test]
+    fn execute_coordination_duplicate_targets_do_not_allocate_command_id() {
+        let _guard = test_guard();
+        reset_fleet_lease_state();
+        let identity = admin_identity();
+        let trace = test_trace();
+        let request = CoordinationRequest {
+            command_type: "policy-update".to_string(),
+            target_nodes: vec![" node-1 ".to_string(), "node-1".to_string()],
+            timeout_seconds: 30,
+        };
+
+        let err = execute_coordination(&identity, &trace, &request).expect_err("duplicate");
+
+        assert!(matches!(err, ApiError::BadRequest { .. }));
+        let state = fleet_lease_state().lock().expect("state lock");
+        assert_eq!(state.next_coordination_seq, 1);
+    }
 }

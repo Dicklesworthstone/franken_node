@@ -993,4 +993,153 @@ mod tests {
         );
         assert!(errors.iter().any(|err| err.code() == "OLC_DANGEROUS_HALT"));
     }
+
+    #[test]
+    fn resolve_conflict_missing_second_lease_returns_no_winner() {
+        let conflict = LeaseConflict {
+            lease_a: "present".into(),
+            lease_b: "missing-b".into(),
+            resource: "r".into(),
+            overlap_start: 100,
+            overlap_end: 160,
+            tier: ConflictTier::Standard,
+        };
+        let leases = vec![lease("present", "r", "Operation", 100, 60, "Standard")];
+
+        let err = resolve_conflict(&conflict, &policy(), &leases).unwrap_err();
+
+        assert_eq!(
+            err,
+            ConflictError::NoWinner {
+                lease_a: "present".into(),
+                lease_b: "missing-b".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn dangerous_halt_disabled_allows_missing_lease_lookup_to_fail() {
+        let conflict = LeaseConflict {
+            lease_a: "missing-a".into(),
+            lease_b: "missing-b".into(),
+            resource: "danger-zone".into(),
+            overlap_start: 100,
+            overlap_end: 160,
+            tier: ConflictTier::Dangerous,
+        };
+        let mut p = policy();
+        p.halt_on_dangerous = false;
+
+        let err = resolve_conflict(&conflict, &p, &[]).unwrap_err();
+
+        assert_eq!(err.code(), "OLC_NO_WINNER");
+    }
+
+    #[test]
+    fn lowercase_tier_is_treated_as_dangerous() {
+        let leases = vec![
+            lease("l1", "r", "Operation", 100, 60, "risky"),
+            lease("l2", "r", "Operation", 110, 60, "Standard"),
+        ];
+
+        let conflict = &detect_conflicts(&leases, "r", 120)[0];
+
+        assert_eq!(conflict.tier, ConflictTier::Dangerous);
+        assert_eq!(
+            resolve_conflict(conflict, &policy(), &leases)
+                .unwrap_err()
+                .code(),
+            "OLC_DANGEROUS_HALT"
+        );
+    }
+
+    #[test]
+    fn lowercase_migration_handoff_does_not_gain_priority() {
+        let leases = vec![
+            lease("l1", "r", "migrationhandoff", 100, 60, "Standard"),
+            lease("l2", "r", "StateWrite", 110, 60, "Standard"),
+        ];
+        let conflict = &detect_conflicts(&leases, "r", 120)[0];
+
+        let res = resolve_conflict(conflict, &policy(), &leases).unwrap();
+
+        assert_eq!(
+            LeasePurposePriority::parse("migrationhandoff"),
+            LeasePurposePriority::Operation
+        );
+        assert_eq!(res.winner, "l2");
+        assert_eq!(res.rule_applied, "purpose_priority");
+    }
+
+    #[test]
+    fn prefer_earliest_disabled_uses_hash_tiebreak_for_same_priority() {
+        let leases = vec![
+            lease("l1", "r", "Operation", 100, 60, "Standard"),
+            lease("l2", "r", "Operation", 110, 60, "Standard"),
+        ];
+        let mut p = policy();
+        p.prefer_earliest = false;
+        let conflict = &detect_conflicts(&leases, "r", 120)[0];
+
+        let res = resolve_conflict(conflict, &p, &leases).unwrap();
+
+        assert_eq!(res.rule_applied, "hash_tiebreak");
+        assert!([res.winner.as_str(), res.loser.as_str()].contains(&"l1"));
+        assert!([res.winner.as_str(), res.loser.as_str()].contains(&"l2"));
+    }
+
+    #[test]
+    fn process_conflicts_dangerous_with_missing_action_reports_log_and_halt_errors() {
+        let leases = vec![
+            lease("l1", "r", "Operation", 100, 60, "Dangerous"),
+            lease("l2", "r", "Operation", 110, 60, "Standard"),
+        ];
+
+        let (resolutions, logs, errors) =
+            process_conflicts(&leases, "r", 120, &policy(), "tr", " ", "ts");
+
+        assert!(resolutions.is_empty());
+        assert!(logs.is_empty());
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|err| {
+            matches!(
+                err,
+                ConflictError::ForkLogIncomplete { field } if field == "action_id"
+            )
+        }));
+        assert!(errors.iter().any(|err| err.code() == "OLC_DANGEROUS_HALT"));
+    }
+
+    #[test]
+    fn process_conflicts_dangerous_with_missing_timestamp_reports_log_and_halt_errors() {
+        let leases = vec![
+            lease("l1", "r", "Operation", 100, 60, "Dangerous"),
+            lease("l2", "r", "Operation", 110, 60, "Standard"),
+        ];
+
+        let (resolutions, logs, errors) =
+            process_conflicts(&leases, "r", 120, &policy(), "tr", "act", "\n");
+
+        assert!(resolutions.is_empty());
+        assert!(logs.is_empty());
+        assert_eq!(errors.len(), 2);
+        assert!(errors.iter().any(|err| {
+            matches!(
+                err,
+                ConflictError::ForkLogIncomplete { field } if field == "timestamp"
+            )
+        }));
+        assert!(errors.iter().any(|err| err.code() == "OLC_DANGEROUS_HALT"));
+    }
+
+    #[test]
+    fn non_monotonic_manual_lease_interval_does_not_create_conflict() {
+        let mut bad = lease("l1", "r", "Operation", 200, 60, "Standard");
+        bad.expires_at = 150;
+        let leases = vec![bad, lease("l2", "r", "Operation", 100, 200, "Standard")];
+
+        let conflicts = detect_conflicts(&leases, "r", 160);
+
+        assert!(conflicts.is_empty());
+    }
 }

@@ -24,8 +24,12 @@ use crate::security::constant_time::ct_eq;
 use crate::capacity_defaults::aliases::MAX_AUDIT_LOG_ENTRIES;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -273,6 +277,11 @@ impl TransportFaultGateConfig {
         if self.protocols.is_empty() {
             return Err(TransportFaultGateError::InvalidConfig(
                 "protocols must be non-empty".into(),
+            ));
+        }
+        if self.fault_modes.is_empty() {
+            return Err(TransportFaultGateError::InvalidConfig(
+                "fault_modes must be non-empty".into(),
             ));
         }
         if self.messages_per_run == 0 {
@@ -1218,6 +1227,90 @@ mod tests {
             err.to_string()
                 .starts_with(error_codes::ERR_TFG_INVALID_CONFIG)
         );
+    }
+
+    #[test]
+    fn with_config_rejects_empty_fault_modes() {
+        let config = TransportFaultGateConfig {
+            fault_modes: Vec::new(),
+            ..Default::default()
+        };
+
+        let err = TransportFaultGate::with_config(config).unwrap_err();
+
+        assert!(matches!(err, TransportFaultGateError::InvalidConfig(_)));
+        assert!(err.to_string().contains("fault_modes must be non-empty"));
+    }
+
+    #[test]
+    fn run_full_gate_rejects_mutated_empty_fault_modes() {
+        let mut gate = TransportFaultGate::new();
+        gate.config.fault_modes.clear();
+
+        let err = gate.run_full_gate().unwrap_err();
+
+        assert!(matches!(err, TransportFaultGateError::InvalidConfig(_)));
+        assert!(err.to_string().contains("fault_modes must be non-empty"));
+        assert!(gate.audit_log().is_empty());
+    }
+
+    #[test]
+    fn serde_rejects_unknown_control_protocol_variant() {
+        let err = serde_json::from_str::<ControlProtocol>(r#""unknown_protocol""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_unknown_fault_mode_variant() {
+        let err = serde_json::from_str::<FaultMode>(r#""Glitch""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_gate_verdict_missing_content_hash() {
+        let json = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "bead_id": BEAD_ID,
+            "section": SECTION,
+            "passed": true,
+            "total_tests": 0,
+            "passed_tests": 0,
+            "failed_tests": 0,
+            "results": [],
+            "protocols_tested": [],
+            "fault_modes_tested": [],
+            "seeds_used": []
+        });
+
+        let err = serde_json::from_value::<GateVerdict>(json).unwrap_err();
+
+        assert!(err.to_string().contains("content_hash"));
+    }
+
+    #[test]
+    fn serde_rejects_audit_record_with_string_seed() {
+        let json = serde_json::json!({
+            "event_code": event_codes::TFG_001,
+            "protocol": "health_check",
+            "fault_mode": "NONE",
+            "seed": "42",
+            "detail": {}
+        });
+
+        let err = serde_json::from_value::<TfgAuditRecord>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_panicking() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
     }
 
     #[test]

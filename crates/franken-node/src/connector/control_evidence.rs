@@ -174,14 +174,44 @@ impl ControlEvidenceEntry {
                 "decision_id must not be empty".to_string(),
             ));
         }
+        if self.decision_id.trim() != self.decision_id {
+            return Err(ConformanceError::SchemaInvalid(
+                "decision_id must not contain leading or trailing whitespace".to_string(),
+            ));
+        }
+        if self.decision_id.contains('\0') {
+            return Err(ConformanceError::SchemaInvalid(
+                "decision_id must not contain null bytes".to_string(),
+            ));
+        }
         if self.trace_id.is_empty() {
             return Err(ConformanceError::SchemaInvalid(
                 "trace_id must not be empty".to_string(),
             ));
         }
+        if self.trace_id.trim() != self.trace_id {
+            return Err(ConformanceError::SchemaInvalid(
+                "trace_id must not contain leading or trailing whitespace".to_string(),
+            ));
+        }
+        if self.trace_id.contains('\0') {
+            return Err(ConformanceError::SchemaInvalid(
+                "trace_id must not contain null bytes".to_string(),
+            ));
+        }
         if self.chosen_action.is_empty() {
             return Err(ConformanceError::SchemaInvalid(
                 "chosen_action must not be empty".to_string(),
+            ));
+        }
+        if self.chosen_action.trim() != self.chosen_action {
+            return Err(ConformanceError::SchemaInvalid(
+                "chosen_action must not contain leading or trailing whitespace".to_string(),
+            ));
+        }
+        if self.chosen_action.contains('\0') {
+            return Err(ConformanceError::SchemaInvalid(
+                "chosen_action must not contain null bytes".to_string(),
             ));
         }
         Ok(())
@@ -422,6 +452,10 @@ impl Default for ControlEvidenceEmitter {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -653,6 +687,119 @@ mod tests {
         assert!(matches!(err, ConformanceError::SchemaInvalid(_)));
     }
 
+    #[test]
+    fn test_entry_validate_rejects_padded_decision_id() {
+        let mut entry = make_entry(
+            DecisionType::HealthGateEval,
+            DecisionOutcome::Pass,
+            " d1 ",
+            100,
+        );
+
+        let err = entry.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConformanceError::SchemaInvalid(ref reason)
+                if reason == "decision_id must not contain leading or trailing whitespace"
+        ));
+    }
+
+    #[test]
+    fn test_entry_validate_rejects_null_byte_decision_id() {
+        let mut entry = make_entry(
+            DecisionType::HealthGateEval,
+            DecisionOutcome::Pass,
+            "d1",
+            100,
+        );
+        entry.decision_id = "d1\0shadow".to_string();
+
+        let err = entry.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConformanceError::SchemaInvalid(ref reason)
+                if reason == "decision_id must not contain null bytes"
+        ));
+    }
+
+    #[test]
+    fn test_entry_validate_rejects_padded_trace_id() {
+        let mut entry = make_entry(
+            DecisionType::FencingDecision,
+            DecisionOutcome::Grant,
+            "d1",
+            100,
+        );
+        entry.trace_id = "\ttrace-001".to_string();
+
+        let err = entry.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConformanceError::SchemaInvalid(ref reason)
+                if reason == "trace_id must not contain leading or trailing whitespace"
+        ));
+    }
+
+    #[test]
+    fn test_entry_validate_rejects_null_byte_trace_id() {
+        let mut entry = make_entry(
+            DecisionType::FencingDecision,
+            DecisionOutcome::Grant,
+            "d1",
+            100,
+        );
+        entry.trace_id = "trace\0id".to_string();
+
+        let err = entry.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConformanceError::SchemaInvalid(ref reason)
+                if reason == "trace_id must not contain null bytes"
+        ));
+    }
+
+    #[test]
+    fn test_entry_validate_rejects_padded_chosen_action() {
+        let mut entry = make_entry(
+            DecisionType::MigrationDecision,
+            DecisionOutcome::Proceed,
+            "d1",
+            100,
+        );
+        entry.chosen_action = " Proceed".to_string();
+
+        let err = entry.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConformanceError::SchemaInvalid(ref reason)
+                if reason == "chosen_action must not contain leading or trailing whitespace"
+        ));
+    }
+
+    #[test]
+    fn test_entry_validate_rejects_null_byte_chosen_action() {
+        let mut entry = make_entry(
+            DecisionType::MigrationDecision,
+            DecisionOutcome::Proceed,
+            "d1",
+            100,
+        );
+        entry.chosen_action = "Proceed\0Deny".to_string();
+
+        let err = entry.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            ConformanceError::SchemaInvalid(ref reason)
+                if reason == "chosen_action must not contain null bytes"
+        ));
+    }
+
     // -- ControlEvidenceEmitter: emit evidence --------------------------
 
     #[test]
@@ -800,6 +947,34 @@ mod tests {
                 .events()
                 .iter()
                 .all(|event| event.code != EVD_003_SCHEMA_VALID)
+        );
+    }
+
+    #[test]
+    fn test_emit_null_action_does_not_append_entry_or_mark_coverage() {
+        let mut emitter = ControlEvidenceEmitter::new();
+        let mut entry = make_entry(
+            DecisionType::RolloutTransition,
+            DecisionOutcome::Proceed,
+            "d1",
+            100,
+        );
+        entry.chosen_action = "Proceed\0Abort".to_string();
+
+        let result = emitter.emit_evidence(entry);
+
+        assert!(matches!(result, Err(ConformanceError::SchemaInvalid(_))));
+        assert!(emitter.entries().is_empty());
+        assert!(
+            emitter
+                .uncovered_types()
+                .contains(&DecisionType::RolloutTransition)
+        );
+        assert!(
+            emitter
+                .events()
+                .iter()
+                .any(|event| event.code == EVD_004_SCHEMA_INVALID)
         );
     }
 
@@ -1333,6 +1508,15 @@ mod tests {
         let emitter = ControlEvidenceEmitter::default();
         assert!(emitter.entries().is_empty());
         assert!(emitter.events().is_empty());
+    }
+
+    #[test]
+    fn test_push_bounded_zero_capacity_clears_without_panic() {
+        let mut items = vec!["old"];
+
+        push_bounded(&mut items, "new", 0);
+
+        assert!(items.is_empty());
     }
 
     // -- All decision types emit evidence successfully ------------------

@@ -1865,4 +1865,98 @@ mod tests {
         assert_eq!(sup.restart_timestamps.len(), retained_restart_timestamps);
         assert_eq!(sup.events().len(), event_len);
     }
+
+    #[test]
+    fn test_remove_child_is_case_sensitive_and_preserves_original() {
+        let mut sup = make_supervisor();
+        sup.add_child(make_spec("Worker-1")).unwrap();
+        let event_len = sup.events().len();
+
+        let err = sup.remove_child("worker-1").unwrap_err();
+
+        assert_eq!(
+            err,
+            SupervisionError::ChildNotFound {
+                name: "worker-1".to_string()
+            }
+        );
+        assert_eq!(sup.child_count(), 1);
+        assert_eq!(sup.child_state("Worker-1"), Some(ChildState::Running));
+        assert_eq!(sup.events().len(), event_len);
+    }
+
+    #[test]
+    fn test_handle_failure_is_case_sensitive_and_does_not_emit_failure() {
+        let mut sup = make_supervisor();
+        sup.add_child(make_spec("Worker-1")).unwrap();
+        let event_len = sup.events().len();
+
+        let err = sup.handle_failure("worker-1").unwrap_err();
+
+        assert_eq!(
+            err,
+            SupervisionError::ChildNotFound {
+                name: "worker-1".to_string()
+            }
+        );
+        assert_eq!(sup.child_state("Worker-1"), Some(ChildState::Running));
+        assert!(sup.restart_timestamps.is_empty());
+        assert_eq!(sup.events().len(), event_len);
+    }
+
+    #[test]
+    fn test_serde_rejects_unknown_supervision_strategy() {
+        let err = serde_json::from_str::<SupervisionStrategy>(r#""one_for_some""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn test_serde_rejects_unknown_restart_type() {
+        let err = serde_json::from_str::<RestartType>(r#""sometimes""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn test_serde_rejects_unknown_child_state() {
+        let err = serde_json::from_str::<ChildState>(r#""wedged""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn test_serde_rejects_child_spec_missing_name() {
+        let json = serde_json::json!({
+            "restart_type": "permanent",
+            "shutdown_timeout_ms": 1000
+        });
+
+        let err = serde_json::from_value::<ChildSpec>(json).unwrap_err();
+
+        assert!(err.to_string().contains("name"));
+    }
+
+    #[test]
+    fn test_serde_rejects_supervision_error_missing_child_name() {
+        let json = serde_json::json!({
+            "code": "ERR_SUP_CHILD_NOT_FOUND"
+        });
+
+        let err = serde_json::from_value::<SupervisionError>(json).unwrap_err();
+
+        assert!(err.to_string().contains("name"));
+    }
+
+    #[test]
+    fn test_serde_rejects_clock_regression_error_missing_attempted_time() {
+        let json = serde_json::json!({
+            "code": "ERR_SUP_CLOCK_REGRESSION",
+            "current_ms": 500
+        });
+
+        let err = serde_json::from_value::<SupervisionClockError>(json).unwrap_err();
+
+        assert!(err.to_string().contains("attempted_ms"));
+    }
 }

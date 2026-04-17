@@ -504,8 +504,12 @@ impl VefClaimIntegration {
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1199,5 +1203,83 @@ mod tests {
         assert!(!result.passed);
         assert!(result.reason.contains("invalid coverage metric"));
         assert_eq!(result.coverage, f64::INFINITY);
+    }
+
+    #[test]
+    fn claim_with_negative_validity_requirement_fails_closed() {
+        let mut engine = make_engine();
+        let mut claim = test_claim();
+        claim.min_validity = -0.01;
+
+        let result = engine.evaluate_claim(&claim, &good_metrics());
+
+        assert!(!result.passed);
+        assert!(result.reason.contains("invalid validity requirement"));
+        assert_eq!(engine.events().last().unwrap().code, EVT_CLAIM_BLOCKED);
+    }
+
+    #[test]
+    fn claim_with_coverage_requirement_above_one_fails_closed() {
+        let mut engine = make_engine();
+        let mut claim = test_claim();
+        claim.min_coverage = 1.01;
+
+        let result = engine.evaluate_claim(&claim, &good_metrics());
+
+        assert!(!result.passed);
+        assert!(result.reason.contains("invalid coverage requirement"));
+        assert_eq!(engine.gate_results().len(), 1);
+    }
+
+    #[test]
+    fn metrics_with_negative_coverage_fail_closed() {
+        let mut engine = make_engine();
+        let claim = test_claim();
+        let mut metrics = good_metrics();
+        metrics.coverage_pct = -0.01;
+
+        let result = engine.evaluate_claim(&claim, &metrics);
+
+        assert!(!result.passed);
+        assert!(result.reason.contains("invalid coverage metric"));
+        assert_eq!(result.coverage, -0.01);
+    }
+
+    #[test]
+    fn metrics_with_validity_above_one_fail_closed() {
+        let mut engine = make_engine();
+        let claim = test_claim();
+        let mut metrics = good_metrics();
+        metrics.validity_rate = 1.01;
+
+        let result = engine.evaluate_claim(&claim, &metrics);
+
+        assert!(!result.passed);
+        assert!(result.reason.contains("invalid validity metric"));
+        assert_eq!(result.validity, 1.01);
+    }
+
+    #[test]
+    fn proof_freshness_u64_max_is_stale() {
+        let engine = make_engine();
+
+        let err = engine.check_proof_freshness(u64::MAX).unwrap_err();
+
+        assert!(matches!(
+            err,
+            VefClaimError::ProofStale {
+                age_secs: u64::MAX,
+                max_secs: 3600,
+            }
+        ));
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_panicking() {
+        let mut items = vec![1, 2, 3];
+
+        push_bounded(&mut items, 4, 0);
+
+        assert!(items.is_empty());
     }
 }

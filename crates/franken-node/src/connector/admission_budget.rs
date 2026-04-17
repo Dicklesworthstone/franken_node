@@ -1278,4 +1278,187 @@ mod tests {
             AdmissionError::InvalidBudget { reason } if reason.contains("max_decode_cpu_ms")
         ));
     }
+
+    #[test]
+    fn update_budget_rejects_zero_bytes_without_replacing_current_config() {
+        let mut tracker = AdmissionBudgetTracker::new(budget()).unwrap();
+        let mut invalid = budget();
+        invalid.max_bytes = 0;
+
+        let err = tracker.update_budget(invalid).unwrap_err();
+
+        assert!(matches!(
+            err,
+            AdmissionError::InvalidBudget { reason } if reason.contains("max_bytes")
+        ));
+        assert_eq!(tracker.budget().max_bytes, 1000);
+        assert_eq!(tracker.budget().max_symbols, 500);
+    }
+
+    #[test]
+    fn update_budget_rejects_zero_decode_cpu_without_replacing_current_config() {
+        let mut tracker = AdmissionBudgetTracker::new(budget()).unwrap();
+        let mut invalid = budget();
+        invalid.max_decode_cpu_ms = 0;
+
+        let err = tracker.update_budget(invalid).unwrap_err();
+
+        assert!(matches!(
+            err,
+            AdmissionError::InvalidBudget { reason } if reason.contains("max_decode_cpu_ms")
+        ));
+        assert_eq!(tracker.budget().max_decode_cpu_ms, 2000);
+        assert_eq!(tracker.budget().max_bytes, 1000);
+    }
+
+    #[test]
+    fn stateless_check_rejects_zero_symbols_budget_with_specific_reason() {
+        let usage = PeerUsage::default();
+        let req = request("p-stateless", 1, 1, 1);
+        let mut invalid = budget();
+        invalid.max_symbols = 0;
+
+        let err = check_admission_stateless(&req, &usage, &invalid, "tr", "ts").unwrap_err();
+
+        assert!(matches!(
+            err,
+            AdmissionError::InvalidBudget { reason } if reason.contains("max_symbols")
+        ));
+    }
+
+    #[test]
+    fn stateless_check_rejects_zero_inflight_budget_with_specific_reason() {
+        let usage = PeerUsage::default();
+        let req = request("p-stateless", 1, 1, 1);
+        let mut invalid = budget();
+        invalid.max_inflight_decode = 0;
+
+        let err = check_admission_stateless(&req, &usage, &invalid, "tr", "ts").unwrap_err();
+
+        assert!(matches!(
+            err,
+            AdmissionError::InvalidBudget { reason } if reason.contains("max_inflight_decode")
+        ));
+    }
+
+    #[test]
+    fn overbudget_existing_usage_reports_zero_remaining_and_failed_records() {
+        let mut tracker = AdmissionBudgetTracker::new(budget()).unwrap();
+        tracker.peers.insert(
+            "p-over".to_string(),
+            PeerUsage {
+                bytes_used: 1001,
+                symbols_used: 501,
+                decode_cpu_ms: 2001,
+                ..Default::default()
+            },
+        );
+
+        let (verdict, records) =
+            tracker.check_admission(&request("p-over", 0, 0, 0), "tr-over", "ts-over");
+
+        assert!(!verdict.admitted);
+        assert_eq!(verdict.remaining.bytes_remaining, 0);
+        assert_eq!(verdict.remaining.symbols_remaining, 0);
+        assert_eq!(verdict.remaining.decode_cpu_remaining, 0);
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::Bytes)
+        );
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::Symbols)
+        );
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::DecodeCpu)
+        );
+        assert!(records.iter().any(|record| {
+            record.dimension.as_str() == "bytes"
+                && record.usage_before == 1001
+                && record.verdict.as_str() == "FAIL"
+        }));
+    }
+
+    #[test]
+    fn failed_auth_blocked_admit_does_not_mutate_resource_counters() {
+        let mut tracker = AdmissionBudgetTracker::new(budget()).unwrap();
+        for _ in 0..3 {
+            tracker.record_failed_auth("p-auth-block").unwrap();
+        }
+
+        let (verdict, _) = tracker.admit(
+            &request("p-auth-block", 100, 50, 25),
+            "tr-block",
+            "ts-block",
+        );
+
+        assert!(!verdict.admitted);
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::FailedAuth)
+        );
+        let usage = tracker.get_usage("p-auth-block");
+        assert_eq!(usage.bytes_used, 0);
+        assert_eq!(usage.symbols_used, 0);
+        assert_eq!(usage.decode_cpu_ms, 0);
+        assert_eq!(usage.failed_auth_count, 3);
+    }
+
+    #[test]
+    fn inflight_blocked_admit_does_not_mutate_resource_counters() {
+        let mut tracker = AdmissionBudgetTracker::new(budget()).unwrap();
+        for _ in 0..5 {
+            tracker.record_decode_start("p-inflight-block").unwrap();
+        }
+
+        let (verdict, _) = tracker.admit(
+            &request("p-inflight-block", 100, 50, 25),
+            "tr-block",
+            "ts-block",
+        );
+
+        assert!(!verdict.admitted);
+        assert!(
+            verdict
+                .violated_dimensions
+                .contains(&BudgetDimension::InflightDecode)
+        );
+        let usage = tracker.get_usage("p-inflight-block");
+        assert_eq!(usage.bytes_used, 0);
+        assert_eq!(usage.symbols_used, 0);
+        assert_eq!(usage.decode_cpu_ms, 0);
+        assert_eq!(usage.inflight_decode_count, 5);
+    }
+
+    #[test]
+    fn tighter_budget_rejects_existing_usage_on_next_admission() {
+        let mut tracker = AdmissionBudgetTracker::new(budget()).unwrap();
+        assert!(
+            tracker
+                .admit(&request("p-tight", 900, 100, 100), "tr", "ts")
+                .0
+                .admitted
+        );
+        let mut tighter = budget();
+        tighter.max_bytes = 800;
+        tracker.update_budget(tighter).unwrap();
+
+        let (verdict, records) =
+            tracker.admit(&request("p-tight", 1, 0, 0), "tr-tight", "ts-tight");
+
+        assert!(!verdict.admitted);
+        assert_eq!(verdict.remaining.bytes_remaining, 0);
+        assert_eq!(tracker.get_usage("p-tight").bytes_used, 900);
+        assert!(records.iter().any(|record| {
+            record.dimension.as_str() == "bytes"
+                && record.usage_before == 900
+                && record.limit == 800
+                && record.verdict.as_str() == "FAIL"
+        }));
+    }
 }

@@ -1714,6 +1714,218 @@ mod tests {
         assert!(src.contains("INV-CIG-REPORT-COMPLETE"));
     }
 
+    // ---- Malformed contract inputs ----
+
+    #[test]
+    fn serde_rejects_unknown_control_workflow_variant() {
+        let err = serde_json::from_str::<ControlWorkflow>(r#""unknown_workflow""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn serde_rejects_gate_report_missing_workflow_results() {
+        let json = serde_json::json!({
+            "gate_id": "bd-3tpg",
+            "schema_version": SCHEMA_VERSION,
+            "total_workflows": 6,
+            "total_injection_points": 21,
+            "total_passed": 21,
+            "total_failed": 0,
+            "verdict": "PASS"
+        });
+
+        let err = serde_json::from_value::<CancelInjectionGateReport>(json).unwrap_err();
+
+        assert!(err.to_string().contains("workflow_results"));
+    }
+
+    #[test]
+    fn serde_rejects_gate_report_with_string_failure_count() {
+        let json = serde_json::json!({
+            "gate_id": "bd-3tpg",
+            "schema_version": SCHEMA_VERSION,
+            "total_workflows": 6,
+            "total_injection_points": 21,
+            "total_passed": 20,
+            "total_failed": "1",
+            "verdict": "FAIL",
+            "workflow_results": []
+        });
+
+        let err = serde_json::from_value::<CancelInjectionGateReport>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn serde_rejects_workflow_result_missing_failures() {
+        let json = serde_json::json!({
+            "workflow": "fencing_acquire",
+            "total_points": 3,
+            "points_passed": 0,
+            "points_failed": 3
+        });
+
+        let err = serde_json::from_value::<WorkflowInjectionResult>(json).unwrap_err();
+
+        assert!(err.to_string().contains("failures"));
+    }
+
+    #[test]
+    fn serde_rejects_point_failure_negative_index() {
+        let json = serde_json::json!({
+            "await_point_index": -1,
+            "await_point_label": "token_request",
+            "failure_type": error_codes::ERR_CIG_MATRIX_INCOMPLETE,
+            "detail": "negative index should be rejected"
+        });
+
+        let err = serde_json::from_value::<PointFailure>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid value"));
+    }
+
+    #[test]
+    fn serde_rejects_audit_record_wrong_event_code_type() {
+        let json = serde_json::json!({
+            "event_code": 7,
+            "workflow": "fencing_acquire",
+            "detail": "registered",
+            "trace_id": "trace-001",
+            "schema_version": SCHEMA_VERSION
+        });
+
+        let err = serde_json::from_value::<GateAuditRecord>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn serde_rejects_gate_report_negative_workflow_count() {
+        let json = serde_json::json!({
+            "gate_id": "bd-3tpg",
+            "schema_version": SCHEMA_VERSION,
+            "total_workflows": -1,
+            "total_injection_points": 21,
+            "total_passed": 21,
+            "total_failed": 0,
+            "verdict": "PASS",
+            "workflow_results": []
+        });
+
+        let err = serde_json::from_value::<CancelInjectionGateReport>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid value"));
+    }
+
+    #[test]
+    fn serde_rejects_gate_report_scalar_workflow_results() {
+        let json = serde_json::json!({
+            "gate_id": "bd-3tpg",
+            "schema_version": SCHEMA_VERSION,
+            "total_workflows": 6,
+            "total_injection_points": 21,
+            "total_passed": 21,
+            "total_failed": 0,
+            "verdict": "PASS",
+            "workflow_results": "none"
+        });
+
+        let err = serde_json::from_value::<CancelInjectionGateReport>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn serde_rejects_gate_report_null_verdict() {
+        let json = serde_json::json!({
+            "gate_id": "bd-3tpg",
+            "schema_version": SCHEMA_VERSION,
+            "total_workflows": 6,
+            "total_injection_points": 21,
+            "total_passed": 21,
+            "total_failed": 0,
+            "verdict": null,
+            "workflow_results": []
+        });
+
+        let err = serde_json::from_value::<CancelInjectionGateReport>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn serde_rejects_workflow_result_string_total_points() {
+        let json = serde_json::json!({
+            "workflow": "fencing_acquire",
+            "total_points": "3",
+            "points_passed": 0,
+            "points_failed": 3,
+            "failures": []
+        });
+
+        let err = serde_json::from_value::<WorkflowInjectionResult>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn serde_rejects_workflow_result_null_failures() {
+        let json = serde_json::json!({
+            "workflow": "fencing_acquire",
+            "total_points": 3,
+            "points_passed": 0,
+            "points_failed": 3,
+            "failures": null
+        });
+
+        let err = serde_json::from_value::<WorkflowInjectionResult>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn serde_rejects_point_failure_missing_detail() {
+        let json = serde_json::json!({
+            "await_point_index": 0,
+            "await_point_label": "token_request",
+            "failure_type": error_codes::ERR_CIG_MATRIX_INCOMPLETE
+        });
+
+        let err = serde_json::from_value::<PointFailure>(json).unwrap_err();
+
+        assert!(err.to_string().contains("detail"));
+    }
+
+    #[test]
+    fn serde_rejects_point_failure_string_index() {
+        let json = serde_json::json!({
+            "await_point_index": "0",
+            "await_point_label": "token_request",
+            "failure_type": error_codes::ERR_CIG_MATRIX_INCOMPLETE,
+            "detail": "index must stay numeric"
+        });
+
+        let err = serde_json::from_value::<PointFailure>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn serde_rejects_audit_record_missing_trace_id() {
+        let json = serde_json::json!({
+            "event_code": event_codes::CIN_WORKFLOW_REGISTERED,
+            "workflow": "fencing_acquire",
+            "detail": "registered",
+            "schema_version": SCHEMA_VERSION
+        });
+
+        let err = serde_json::from_value::<GateAuditRecord>(json).unwrap_err();
+
+        assert!(err.to_string().contains("trace_id"));
+    }
+
     // ---- Event codes present ----
 
     #[test]

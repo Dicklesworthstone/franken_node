@@ -387,6 +387,51 @@ impl VefOverheadGate {
                 continue;
             }
 
+            let all_non_negative = measurement.p95_ms >= 0.0
+                && measurement.p99_ms >= 0.0
+                && measurement.cold_start_ms >= 0.0
+                && measurement.cv >= 0.0;
+
+            if !all_non_negative {
+                events.push(VefPerfEvent {
+                    code: event_codes::VEF_PERF_ERR_001.to_string(),
+                    hot_path: measurement.hot_path.label().to_string(),
+                    mode: measurement.mode.label().to_string(),
+                    detail: "negative measurement value".to_string(),
+                });
+                path_results.push(VefPathResult {
+                    hot_path: measurement.hot_path,
+                    mode: measurement.mode,
+                    p95_pass: false,
+                    p99_pass: false,
+                    cold_start_pass: false,
+                    noisy: true,
+                    overall_pass: false,
+                    detail: "negative measurement value — fail closed".to_string(),
+                });
+                continue;
+            }
+
+            if measurement.p99_ms < measurement.p95_ms {
+                events.push(VefPerfEvent {
+                    code: event_codes::VEF_PERF_ERR_001.to_string(),
+                    hot_path: measurement.hot_path.label().to_string(),
+                    mode: measurement.mode.label().to_string(),
+                    detail: "inverted percentile measurement".to_string(),
+                });
+                path_results.push(VefPathResult {
+                    hot_path: measurement.hot_path,
+                    mode: measurement.mode,
+                    p95_pass: false,
+                    p99_pass: false,
+                    cold_start_pass: false,
+                    noisy: true,
+                    overall_pass: false,
+                    detail: "inverted percentile measurement — fail closed".to_string(),
+                });
+                continue;
+            }
+
             let cv_threshold = self.policy.max_cv_pct / 100.0;
             let noisy = if cv_threshold.is_finite() {
                 measurement.cv > cv_threshold
@@ -1073,6 +1118,238 @@ mod tests {
         assert!(
             !result.overall_pass,
             "NaN cv must not bypass noise detection"
+        );
+    }
+
+    #[test]
+    fn finite_negative_p95_measurement_fails_closed() {
+        let gate = VefOverheadGate::with_default_policy();
+        let result = gate.evaluate(&[VefMeasurement {
+            hot_path: VefHotPath::ReceiptEmission,
+            mode: VefBudgetMode::Normal,
+            p95_ms: -0.1,
+            p99_ms: 1.0,
+            cold_start_ms: 5.0,
+            cv: 0.05,
+            iterations: 1000,
+        }]);
+
+        assert!(!result.overall_pass);
+        assert_eq!(result.failed, 1);
+        assert_eq!(
+            result.path_results[0].detail,
+            "negative measurement value — fail closed"
+        );
+        assert!(result.events.iter().any(|event| {
+            event.code == event_codes::VEF_PERF_ERR_001
+                && event.detail == "negative measurement value"
+        }));
+    }
+
+    #[test]
+    fn finite_negative_p99_measurement_fails_closed() {
+        let gate = VefOverheadGate::with_default_policy();
+        let result = gate.evaluate(&[VefMeasurement {
+            hot_path: VefHotPath::ChainAppend,
+            mode: VefBudgetMode::Normal,
+            p95_ms: 0.5,
+            p99_ms: -0.1,
+            cold_start_ms: 5.0,
+            cv: 0.05,
+            iterations: 1000,
+        }]);
+
+        assert!(!result.overall_pass);
+        assert!(result.path_results[0].noisy);
+        assert_eq!(
+            result.path_results[0].detail,
+            "negative measurement value — fail closed"
+        );
+    }
+
+    #[test]
+    fn finite_negative_cold_start_measurement_fails_closed() {
+        let gate = VefOverheadGate::with_default_policy();
+        let result = gate.evaluate(&[VefMeasurement {
+            hot_path: VefHotPath::CheckpointComputation,
+            mode: VefBudgetMode::Normal,
+            p95_ms: 0.5,
+            p99_ms: 1.0,
+            cold_start_ms: -0.1,
+            cv: 0.05,
+            iterations: 1000,
+        }]);
+
+        assert!(!result.overall_pass);
+        assert_eq!(result.noisy_warnings, 1);
+        assert!(!result.path_results[0].overall_pass);
+    }
+
+    #[test]
+    fn negative_cv_measurement_fails_closed() {
+        let gate = VefOverheadGate::with_default_policy();
+        let result = gate.evaluate(&[VefMeasurement {
+            hot_path: VefHotPath::VerificationGateCheck,
+            mode: VefBudgetMode::Normal,
+            p95_ms: 0.5,
+            p99_ms: 1.0,
+            cold_start_ms: 5.0,
+            cv: -0.01,
+            iterations: 1000,
+        }]);
+
+        assert!(!result.overall_pass);
+        assert!(result.path_results[0].noisy);
+        assert_eq!(
+            result.path_results[0].detail,
+            "negative measurement value — fail closed"
+        );
+    }
+
+    #[test]
+    fn p99_below_p95_measurement_fails_closed() {
+        let gate = VefOverheadGate::with_default_policy();
+        let result = gate.evaluate(&[VefMeasurement {
+            hot_path: VefHotPath::ModeTransition,
+            mode: VefBudgetMode::Normal,
+            p95_ms: 2.0,
+            p99_ms: 1.0,
+            cold_start_ms: 5.0,
+            cv: 0.05,
+            iterations: 1000,
+        }]);
+
+        assert!(!result.overall_pass);
+        assert_eq!(
+            result.path_results[0].detail,
+            "inverted percentile measurement — fail closed"
+        );
+        assert!(result.events.iter().any(|event| {
+            event.code == event_codes::VEF_PERF_ERR_001
+                && event.detail == "inverted percentile measurement"
+        }));
+    }
+
+    #[test]
+    fn nan_noise_multiplier_fails_closed_to_zero_budget() {
+        let mut policy = VefBudgetPolicy::default_policy();
+        policy.noise_multiplier = f64::NAN;
+        let gate = VefOverheadGate::new(policy);
+
+        let result = gate.evaluate(&[VefMeasurement {
+            hot_path: VefHotPath::ReceiptEmission,
+            mode: VefBudgetMode::Normal,
+            p95_ms: 0.1,
+            p99_ms: 0.2,
+            cold_start_ms: 0.3,
+            cv: 0.01,
+            iterations: 1000,
+        }]);
+
+        assert!(!result.overall_pass);
+        assert_eq!(result.failed, 1);
+        assert!(result.path_results[0].detail.contains("0.00ms"));
+    }
+
+    #[test]
+    fn overflowed_effective_budget_fails_closed_to_zero_budget() {
+        let mut policy = VefBudgetPolicy::default_policy();
+        policy.noise_multiplier = 2.0;
+        let budget = policy
+            .budgets
+            .iter_mut()
+            .find(|budget| {
+                budget.hot_path == VefHotPath::ReceiptEmission
+                    && budget.mode == VefBudgetMode::Normal
+            })
+            .unwrap();
+        budget.p95_overhead_ms = f64::MAX;
+        budget.p99_overhead_ms = f64::MAX;
+        budget.cold_start_ms = f64::MAX;
+        let gate = VefOverheadGate::new(policy);
+
+        let result = gate.evaluate(&[VefMeasurement {
+            hot_path: VefHotPath::ReceiptEmission,
+            mode: VefBudgetMode::Normal,
+            p95_ms: 0.1,
+            p99_ms: 0.2,
+            cold_start_ms: 0.3,
+            cv: 0.01,
+            iterations: 1000,
+        }]);
+
+        assert!(!result.overall_pass);
+        assert!(!result.path_results[0].p95_pass);
+        assert!(!result.path_results[0].p99_pass);
+        assert!(!result.path_results[0].cold_start_pass);
+    }
+
+    #[test]
+    fn negative_budget_threshold_rejects_zero_measurement() {
+        let mut policy = VefBudgetPolicy::default_policy();
+        let budget = policy
+            .budgets
+            .iter_mut()
+            .find(|budget| {
+                budget.hot_path == VefHotPath::ChainAppend
+                    && budget.mode == VefBudgetMode::Normal
+            })
+            .unwrap();
+        budget.p95_overhead_ms = -1.0;
+        budget.p99_overhead_ms = -1.0;
+        budget.cold_start_ms = -1.0;
+        let gate = VefOverheadGate::new(policy);
+
+        let result = gate.evaluate(&[VefMeasurement {
+            hot_path: VefHotPath::ChainAppend,
+            mode: VefBudgetMode::Normal,
+            p95_ms: 0.0,
+            p99_ms: 0.0,
+            cold_start_ms: 0.0,
+            cv: 0.0,
+            iterations: 1000,
+        }]);
+
+        assert!(!result.overall_pass);
+        assert_eq!(result.failed, 1);
+        assert!(result.path_results[0].detail.contains("EXCEEDED"));
+    }
+
+    #[test]
+    fn empty_budget_policy_fails_every_measurement_closed() {
+        let mut policy = VefBudgetPolicy::default_policy();
+        policy.budgets.clear();
+        let gate = VefOverheadGate::new(policy);
+
+        let result = gate.evaluate(&[
+            VefMeasurement {
+                hot_path: VefHotPath::ReceiptEmission,
+                mode: VefBudgetMode::Normal,
+                p95_ms: 0.1,
+                p99_ms: 0.2,
+                cold_start_ms: 0.3,
+                cv: 0.01,
+                iterations: 1000,
+            },
+            VefMeasurement {
+                hot_path: VefHotPath::ChainAppend,
+                mode: VefBudgetMode::Restricted,
+                p95_ms: 0.1,
+                p99_ms: 0.2,
+                cold_start_ms: 0.3,
+                cv: 0.01,
+                iterations: 1000,
+            },
+        ]);
+
+        assert!(!result.overall_pass);
+        assert_eq!(result.total_checks, 2);
+        assert_eq!(result.failed, 2);
+        assert!(
+            result
+                .path_results
+                .iter()
+                .all(|path_result| !path_result.overall_pass)
         );
     }
 }

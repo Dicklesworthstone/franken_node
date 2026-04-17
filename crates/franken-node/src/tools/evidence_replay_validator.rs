@@ -1387,4 +1387,229 @@ mod tests {
         assert_eq!(v.results().len(), MAX_RESULTS);
         assert_eq!(v.results()[0].0, "DEC-invalid-00007");
     }
+
+    // ── Negative-path edge case tests ──
+
+    #[test]
+    fn negative_candidate_score_skipped_in_selection() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-negative-score", DecisionKind::Admit, 1);
+        let c = ReplayContext::new(
+            vec![
+                Candidate {
+                    id: "DEC-negative-score".into(),
+                    decision_kind: DecisionKind::Admit,
+                    score: -5.0,  // Negative score
+                    metadata: serde_json::json!({}),
+                },
+                Candidate {
+                    id: "DEC-valid".into(),
+                    decision_kind: DecisionKind::Admit,
+                    score: 1.0,
+                    metadata: serde_json::json!({}),
+                },
+            ],
+            vec![Constraint {
+                id: "ok".into(),
+                description: "satisfied".into(),
+                satisfied: true,
+            }],
+            1,
+            "snap-negative",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_mismatch());
+        if let ReplayResult::Mismatch { got, .. } = result {
+            assert_eq!(got.decision_id, "DEC-valid");
+        }
+    }
+
+    #[test]
+    fn zero_score_candidate_selected_when_only_option() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-zero-score", DecisionKind::Quarantine, 1);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-zero-score".into(),
+                decision_kind: DecisionKind::Quarantine,
+                score: 0.0,  // Exactly zero score
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "ok".into(),
+                description: "satisfied".into(),
+                satisfied: true,
+            }],
+            1,
+            "snap-zero",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_match(), "Zero score should be valid but got: {:?}", result);
+    }
+
+    #[test]
+    fn empty_decision_id_handled_gracefully() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("", DecisionKind::Throttle, 1); // Empty decision_id
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "".into(),  // Empty candidate id
+                decision_kind: DecisionKind::Throttle,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "ok".into(),
+                description: "satisfied".into(),
+                satisfied: true,
+            }],
+            1,
+            "snap-empty",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_match(), "Empty decision_id should be handled: {:?}", result);
+    }
+
+    #[test]
+    fn validator_counter_overflow_protection() {
+        let mut v = EvidenceReplayValidator::new();
+
+        // Manually set counters to near overflow
+        v.total_validations = u64::MAX.saturating_sub(2);
+        v.match_count = u64::MAX.saturating_sub(2);
+
+        let e = test_replay_entry("DEC-overflow", DecisionKind::Admit, 1);
+        let c = matching_context(&e);
+
+        // This should not panic due to saturating arithmetic
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_match());
+        assert_eq!(v.total_validations(), u64::MAX.saturating_sub(1));
+        assert_eq!(v.match_count(), u64::MAX.saturating_sub(1));
+    }
+
+    #[test]
+    fn extremely_large_epoch_id_handled() {
+        let mut v = EvidenceReplayValidator::new();
+        let large_epoch = u64::MAX.saturating_sub(1);
+        let e = test_replay_entry("DEC-large-epoch", DecisionKind::Escalate, large_epoch);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-large-epoch".into(),
+                decision_kind: DecisionKind::Escalate,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![],
+            large_epoch,
+            "snap-large-epoch",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_match(), "Large epoch should be handled: {:?}", result);
+    }
+
+    #[test]
+    fn candidate_with_negative_infinity_score_skipped() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-neg-inf", DecisionKind::Release, 1);
+        let c = ReplayContext::new(
+            vec![
+                Candidate {
+                    id: "DEC-neg-inf".into(),
+                    decision_kind: DecisionKind::Release,
+                    score: f64::NEG_INFINITY,  // Negative infinity
+                    metadata: serde_json::json!({}),
+                },
+                Candidate {
+                    id: "DEC-backup".into(),
+                    decision_kind: DecisionKind::Release,
+                    score: 0.1,
+                    metadata: serde_json::json!({}),
+                },
+            ],
+            vec![Constraint {
+                id: "ok".into(),
+                description: "satisfied".into(),
+                satisfied: true,
+            }],
+            1,
+            "snap-neg-inf",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_mismatch());
+        if let ReplayResult::Mismatch { got, .. } = result {
+            assert_eq!(got.decision_id, "DEC-backup");
+        }
+    }
+
+    #[test]
+    fn replay_context_with_whitespace_only_policy_snapshot_invalid() {
+        let ctx = ReplayContext::new(
+            vec![Candidate {
+                id: "c1".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![],
+            1,
+            "   ",  // Whitespace-only policy snapshot
+        );
+
+        // Note: current implementation only checks for empty string, not whitespace
+        // This test documents the behavior - whitespace-only is considered valid
+        assert!(ctx.is_valid(), "Whitespace-only policy snapshot is currently considered valid");
+    }
+
+    #[test]
+    fn multiple_constraints_with_mixed_satisfaction_blocks_all() {
+        let mut v = EvidenceReplayValidator::new();
+        let e = test_replay_entry("DEC-mixed-constraints", DecisionKind::Admit, 1);
+        let c = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-mixed-constraints".into(),
+                decision_kind: DecisionKind::Admit,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![
+                Constraint {
+                    id: "c1".into(),
+                    description: "satisfied constraint".into(),
+                    satisfied: true,
+                },
+                Constraint {
+                    id: "c2".into(),
+                    description: "unsatisfied constraint".into(),
+                    satisfied: false,  // One unsatisfied constraint blocks all
+                },
+                Constraint {
+                    id: "c3".into(),
+                    description: "another satisfied".into(),
+                    satisfied: true,
+                },
+            ],
+            1,
+            "snap-mixed",
+        );
+
+        let result = v.validate(&e, &c);
+
+        assert!(result.is_mismatch());
+        if let ReplayResult::Mismatch { got, .. } = result {
+            assert_eq!(got.decision_kind, "none");
+            assert_eq!(got.decision_id, "none");
+        }
+    }
 }

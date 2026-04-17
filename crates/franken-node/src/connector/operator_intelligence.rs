@@ -938,6 +938,10 @@ impl RecommendationEngine {
 // ---------------------------------------------------------------------------
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -1991,5 +1995,112 @@ mod tests {
         let ctx = test_context(); // compat_pass = 0.85 < 0.9
         let actions = generate_actions(&ctx);
         assert!(actions.iter().any(|(id, _, _, _)| id == "run_compat_suite"));
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_drops_existing_items_without_panic() {
+        let mut items = vec!["old", "older"];
+
+        push_bounded(&mut items, "new", 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn negative_config_rejects_nan_risk_budget() {
+        let mut cfg = default_config();
+        cfg.risk_budget = f64::NAN;
+
+        let err = cfg.validate().unwrap_err();
+
+        assert!(matches!(err, OIError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn negative_config_rejects_negative_infinite_confidence_threshold() {
+        let mut cfg = default_config();
+        cfg.confidence_threshold = f64::NEG_INFINITY;
+
+        let err = cfg.validate().unwrap_err();
+
+        assert!(matches!(err, OIError::InvalidConfig(_)));
+    }
+
+    #[test]
+    fn negative_context_rejects_infinite_compatibility_rate_without_fingerprint_side_effects() {
+        let mut engine = make_engine();
+        let mut ctx = test_context();
+        ctx.compatibility_pass = f64::INFINITY;
+
+        let err = engine.recommend(&ctx, 1000).unwrap_err();
+
+        assert!(matches!(err, OIError::NoContext(_)));
+        assert!(engine.audit_trail().is_empty());
+        assert!(engine.events().is_empty());
+    }
+
+    #[test]
+    fn negative_duplicate_missing_source_does_not_duplicate_degraded_state() {
+        let mut engine = make_engine();
+
+        engine.mark_source_unavailable("metrics");
+        engine.mark_source_unavailable("metrics");
+
+        assert!(engine.is_degraded());
+        assert_eq!(engine.missing_sources, vec!["metrics".to_string()]);
+        assert_eq!(
+            engine
+                .events()
+                .iter()
+                .filter(|event| event.code == EVT_DEGRADED_MODE_ENTERED)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn negative_clear_degraded_removes_all_missing_sources_without_clearing_audit() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let _ = engine.recommend(&ctx, 1000).unwrap();
+        let audit_len = engine.audit_trail().len();
+
+        engine.mark_source_unavailable("metrics");
+        engine.mark_source_unavailable("history");
+        engine.clear_degraded();
+
+        assert!(!engine.is_degraded());
+        assert!(engine.missing_sources.is_empty());
+        assert_eq!(engine.audit_trail().len(), audit_len);
+    }
+
+    #[test]
+    fn negative_reject_after_forged_acceptance_uses_authoritative_closed_decision() {
+        let mut engine = make_engine();
+        let ctx = test_context();
+        let recs = engine.recommend(&ctx, 1000).unwrap();
+        let mut forged = recs[0].clone();
+        engine.accept_recommendation(&forged, 1001).unwrap();
+        forged.expected_loss = 0.0;
+        forged.action = "forged-action".to_string();
+
+        let err = engine.reject_recommendation(&forged, 1002).unwrap_err();
+
+        assert!(matches!(err, OIError::NoContext(_)));
+    }
+
+    #[test]
+    fn negative_rollback_proof_content_changes_when_rollback_spec_is_tampered() {
+        let proof = RollbackProof {
+            pre_state_hash: [1u8; 32],
+            action_spec: "migrate".to_string(),
+            post_state_hash: [2u8; 32],
+            rollback_spec: "rollback:migrate".to_string(),
+        };
+        let mut tampered = proof.clone();
+        tampered.rollback_spec = "rollback:other".to_string();
+
+        assert_ne!(proof.content_hash(), tampered.content_hash());
+        assert!(tampered.verify().is_err());
     }
 }

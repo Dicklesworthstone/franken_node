@@ -1765,6 +1765,312 @@ mod tests {
     }
 
     #[test]
+    fn read_latest_valid_detects_progress_state_hash_tamper() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-progress-hash-tamper",
+                "orch-progress-hash-tamper",
+                1,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "1".to_string())]),
+            )
+            .expect("save checkpoint");
+        writer
+            .backend_mut()
+            .records
+            .get_mut("orch-progress-hash-tamper")
+            .expect("stream")
+            .get_mut(0)
+            .expect("record")
+            .progress_state_hash = "tampered-progress-hash".to_string();
+
+        let read = writer
+            .read_latest_valid("trace-progress-hash-tamper", "orch-progress-hash-tamper")
+            .expect("read latest valid");
+
+        assert!(read.latest.is_none());
+        let violation = read
+            .events
+            .iter()
+            .find(|event| event.event_code == FN_CK_003_HASH_CHAIN_FAILURE)
+            .expect("progress hash mismatch event");
+        assert!(
+            violation
+                .contract_status
+                .contains("progress_state_hash_mismatch")
+        );
+    }
+
+    #[test]
+    fn restore_checkpoint_returns_none_when_progress_hash_is_tampered() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-restore-progress-hash-tamper",
+                "orch-restore-progress-hash-tamper",
+                1,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "1".to_string())]),
+            )
+            .expect("save checkpoint");
+        writer
+            .backend_mut()
+            .records
+            .get_mut("orch-restore-progress-hash-tamper")
+            .expect("stream")
+            .get_mut(0)
+            .expect("record")
+            .progress_state_hash = "tampered-progress-hash".to_string();
+
+        let restored = writer
+            .restore_checkpoint::<BTreeMap<String, String>>(
+                "trace-restore-progress-hash-tamper",
+                "orch-restore-progress-hash-tamper",
+            )
+            .expect("tampered checkpoint should not deserialize");
+
+        assert!(restored.is_none());
+    }
+
+    #[test]
+    fn save_checkpoint_rejects_append_after_progress_hash_tamper() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-append-progress-hash-tamper",
+                "orch-append-progress-hash-tamper",
+                1,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "1".to_string())]),
+            )
+            .expect("first checkpoint");
+        writer
+            .backend_mut()
+            .records
+            .get_mut("orch-append-progress-hash-tamper")
+            .expect("stream")
+            .get_mut(0)
+            .expect("record")
+            .progress_state_hash = "tampered-progress-hash".to_string();
+
+        let err = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-append-progress-hash-tamper",
+                "orch-append-progress-hash-tamper",
+                2,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "2".to_string())]),
+            )
+            .expect_err("progress hash tamper must block append");
+
+        assert!(matches!(
+            err,
+            CheckpointError::HashChainViolation {
+                ref reason,
+                ..
+            } if reason.as_str().eq("cannot_append_after_hash_chain_failure")
+        ));
+    }
+
+    #[test]
+    fn read_latest_valid_reports_combined_state_and_id_tamper() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-combined-tamper",
+                "orch-combined-tamper",
+                1,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "1".to_string())]),
+            )
+            .expect("save checkpoint");
+        writer
+            .backend_mut()
+            .tamper_progress_state("orch-combined-tamper", 0, "{\"cursor\":\"2\"}");
+
+        let read = writer
+            .read_latest_valid("trace-combined-tamper", "orch-combined-tamper")
+            .expect("read latest valid");
+
+        assert!(read.latest.is_none());
+        let violation = read
+            .events
+            .iter()
+            .find(|event| event.event_code == FN_CK_003_HASH_CHAIN_FAILURE)
+            .expect("combined tamper event");
+        assert!(
+            violation
+                .contract_status
+                .contains("progress_state_hash_mismatch")
+        );
+        assert!(
+            violation
+                .contract_status
+                .contains("checkpoint_id_mismatch")
+        );
+    }
+
+    #[test]
+    fn read_latest_valid_detects_padded_previous_checkpoint_hash() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+        let first = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-padded-prev",
+                "orch-padded-prev",
+                1,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "1".to_string())]),
+            )
+            .expect("first checkpoint");
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-padded-prev",
+                "orch-padded-prev",
+                2,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "2".to_string())]),
+            )
+            .expect("second checkpoint");
+        let padded = format!(" {first} ");
+        writer
+            .backend_mut()
+            .tamper_previous_checkpoint_hash("orch-padded-prev", 1, Some(&padded));
+
+        let read = writer
+            .read_latest_valid("trace-padded-prev", "orch-padded-prev")
+            .expect("read latest valid");
+
+        assert_eq!(read.latest.expect("latest").iteration_count, 1);
+        let violation = read
+            .events
+            .iter()
+            .find(|event| event.event_code == FN_CK_003_HASH_CHAIN_FAILURE)
+            .expect("previous hash mismatch event");
+        assert!(
+            violation
+                .contract_status
+                .contains("previous_checkpoint_hash_mismatch")
+        );
+    }
+
+    #[test]
+    fn save_checkpoint_rejects_append_after_padded_previous_hash_tamper() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+        let first = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-append-padded-prev",
+                "orch-append-padded-prev",
+                1,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "1".to_string())]),
+            )
+            .expect("first checkpoint");
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-append-padded-prev",
+                "orch-append-padded-prev",
+                2,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "2".to_string())]),
+            )
+            .expect("second checkpoint");
+        let padded = format!(" {first} ");
+        writer
+            .backend_mut()
+            .tamper_previous_checkpoint_hash("orch-append-padded-prev", 1, Some(&padded));
+
+        let err = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-append-padded-prev",
+                "orch-append-padded-prev",
+                3,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "3".to_string())]),
+            )
+            .expect_err("padded previous hash tamper must block append");
+
+        assert!(matches!(
+            err,
+            CheckpointError::HashChainViolation {
+                ref reason,
+                ..
+            } if reason.as_str().eq("cannot_append_after_hash_chain_failure")
+        ));
+    }
+
+    #[test]
+    fn restore_checkpoint_ignores_second_record_with_padded_previous_hash() {
+        let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
+        let mut cancel = CancellationState::new();
+        let first = writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-restore-padded-prev",
+                "orch-restore-padded-prev",
+                1,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "1".to_string())]),
+            )
+            .expect("first checkpoint");
+        writer
+            .save_checkpoint(
+                &cx(),
+                &mut cancel,
+                "trace-restore-padded-prev",
+                "orch-restore-padded-prev",
+                2,
+                1,
+                &BTreeMap::from([("cursor".to_string(), "2".to_string())]),
+            )
+            .expect("second checkpoint");
+        let padded = format!(" {first} ");
+        writer.backend_mut().tamper_previous_checkpoint_hash(
+            "orch-restore-padded-prev",
+            1,
+            Some(&padded),
+        );
+
+        let restored = writer
+            .restore_checkpoint::<BTreeMap<String, String>>(
+                "trace-restore-padded-prev",
+                "orch-restore-padded-prev",
+            )
+            .expect("restore should select latest valid prefix")
+            .expect("first checkpoint remains valid");
+
+        assert_eq!(restored.meta.iteration_count, 1);
+        assert_eq!(restored.state.get("cursor"), Some(&"1".to_string()));
+    }
+
+    #[test]
     fn read_latest_valid_detects_checkpoint_id_tamper() {
         let mut writer = CheckpointWriter::new(InMemoryCheckpointBackend::default());
         let mut cancel = CancellationState::new();

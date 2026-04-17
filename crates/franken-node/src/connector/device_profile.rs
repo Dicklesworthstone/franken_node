@@ -3,7 +3,7 @@
 //! Profiles are schema-validated on registration. Stale profiles are excluded
 //! from placement. Placement evaluation is deterministic.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// A registered device profile.
 #[derive(Debug, Clone)]
@@ -101,12 +101,19 @@ fn tier_rank(tier: &str) -> u8 {
     }
 }
 
+fn contains_nul(value: &str) -> bool {
+    value.as_bytes().contains(&0)
+}
+
 /// Validate a device profile schema.
 ///
 /// INV-DPR-SCHEMA: profiles must have non-empty device_id, region, tier,
 /// at least one capability, and a valid schema_version.
 pub fn validate_profile(profile: &DeviceProfile) -> Result<(), RegistryError> {
-    if profile.device_id.trim().is_empty() || profile.device_id.trim() != profile.device_id {
+    if profile.device_id.trim().is_empty()
+        || profile.device_id.trim() != profile.device_id
+        || contains_nul(&profile.device_id)
+    {
         return Err(RegistryError::SchemaInvalid {
             device_id: "(empty)".into(),
             field: "device_id".into(),
@@ -116,20 +123,39 @@ pub fn validate_profile(profile: &DeviceProfile) -> Result<(), RegistryError> {
         || profile
             .capabilities
             .iter()
-            .any(|capability| capability.trim().is_empty() || capability.trim() != capability)
+            .any(|capability| {
+                capability.trim().is_empty()
+                    || capability.trim() != capability
+                    || contains_nul(capability)
+            })
     {
         return Err(RegistryError::SchemaInvalid {
             device_id: profile.device_id.clone(),
             field: "capabilities".into(),
         });
     }
-    if profile.region.trim().is_empty() || profile.region.trim() != profile.region {
+    let mut seen_capabilities = BTreeSet::new();
+    for capability in &profile.capabilities {
+        if !seen_capabilities.insert(capability.as_str()) {
+            return Err(RegistryError::SchemaInvalid {
+                device_id: profile.device_id.clone(),
+                field: "capabilities".into(),
+            });
+        }
+    }
+    if profile.region.trim().is_empty()
+        || profile.region.trim() != profile.region
+        || contains_nul(&profile.region)
+    {
         return Err(RegistryError::SchemaInvalid {
             device_id: profile.device_id.clone(),
             field: "region".into(),
         });
     }
-    if profile.tier.trim().is_empty() || profile.tier.trim() != profile.tier {
+    if profile.tier.trim().is_empty()
+        || profile.tier.trim() != profile.tier
+        || contains_nul(&profile.tier)
+    {
         return Err(RegistryError::SchemaInvalid {
             device_id: profile.device_id.clone(),
             field: "tier".into(),
@@ -161,6 +187,30 @@ pub fn validate_constraints(constraints: &[PlacementConstraint]) -> Result<(), R
         {
             return Err(RegistryError::InvalidConstraint {
                 reason: "required_capabilities contains empty or non-canonical capability".into(),
+            });
+        }
+        if c.required_capabilities
+            .iter()
+            .any(|capability| contains_nul(capability))
+        {
+            return Err(RegistryError::InvalidConstraint {
+                reason: "required_capabilities must not contain NUL bytes".into(),
+            });
+        }
+        let mut seen_required = BTreeSet::new();
+        for capability in &c.required_capabilities {
+            if !seen_required.insert(capability.as_str()) {
+                return Err(RegistryError::InvalidConstraint {
+                    reason: "required_capabilities must not contain duplicates".into(),
+                });
+            }
+        }
+        if !c.preferred_region.is_empty()
+            && (c.preferred_region.trim() != c.preferred_region
+                || contains_nul(&c.preferred_region))
+        {
+            return Err(RegistryError::InvalidConstraint {
+                reason: "preferred_region is not canonical".into(),
             });
         }
         if !c.min_tier.is_empty()
@@ -868,5 +918,115 @@ mod tests {
 
         assert_eq!(err.code(), "DPR_INVALID_CONSTRAINT");
         assert!(err.to_string().contains("min_tier"));
+    }
+
+    #[test]
+    fn register_device_id_with_nul_fails_without_mutating_registry() {
+        let mut reg = DeviceProfileRegistry::new();
+        let p = prof("dev\0ice", &["gpu"], "us", "Standard", 100);
+
+        let err = reg.register(p).unwrap_err();
+
+        assert_eq!(err.code(), "DPR_SCHEMA_INVALID");
+        assert_eq!(reg.count(), 0);
+        assert!(reg.get("dev\0ice").is_none());
+    }
+
+    #[test]
+    fn register_capability_with_nul_fails_without_mutating_registry() {
+        let mut reg = DeviceProfileRegistry::new();
+        let p = prof("d-nul-cap", &["gpu\0bad"], "us", "Standard", 100);
+
+        let err = reg.register(p).unwrap_err();
+
+        assert_eq!(err.code(), "DPR_SCHEMA_INVALID");
+        assert_eq!(reg.count(), 0);
+        assert!(reg.get("d-nul-cap").is_none());
+    }
+
+    #[test]
+    fn register_region_with_nul_fails_without_mutating_registry() {
+        let mut reg = DeviceProfileRegistry::new();
+        let p = prof("d-nul-region", &["gpu"], "us\0east", "Standard", 100);
+
+        let err = reg.register(p).unwrap_err();
+
+        assert_eq!(err.code(), "DPR_SCHEMA_INVALID");
+        assert_eq!(reg.count(), 0);
+        assert!(reg.get("d-nul-region").is_none());
+    }
+
+    #[test]
+    fn register_tier_with_nul_fails_without_mutating_registry() {
+        let mut reg = DeviceProfileRegistry::new();
+        let p = prof("d-nul-tier", &["gpu"], "us", "Standard\0", 100);
+
+        let err = reg.register(p).unwrap_err();
+
+        assert_eq!(err.code(), "DPR_SCHEMA_INVALID");
+        assert_eq!(reg.count(), 0);
+        assert!(reg.get("d-nul-tier").is_none());
+    }
+
+    #[test]
+    fn register_duplicate_capability_fails_without_mutating_registry() {
+        let mut reg = DeviceProfileRegistry::new();
+        let p = prof("d-dup-cap", &["gpu", "gpu"], "us", "Standard", 100);
+
+        let err = reg.register(p).unwrap_err();
+
+        assert_eq!(err.code(), "DPR_SCHEMA_INVALID");
+        assert_eq!(reg.count(), 0);
+        assert!(reg.get("d-dup-cap").is_none());
+    }
+
+    #[test]
+    fn required_capability_with_nul_is_rejected() {
+        let reg = DeviceProfileRegistry::new();
+        let p = policy(vec![constraint(&["gpu\0bad"], "us", "", 100)], 3600);
+
+        let err = reg.evaluate_placement(&p, 200, "ts").unwrap_err();
+
+        assert_eq!(err.code(), "DPR_INVALID_CONSTRAINT");
+        assert!(err.to_string().contains("NUL"));
+    }
+
+    #[test]
+    fn duplicate_required_capability_is_rejected() {
+        let reg = DeviceProfileRegistry::new();
+        let p = policy(vec![constraint(&["gpu", "gpu"], "us", "", 100)], 3600);
+
+        let err = reg.evaluate_placement(&p, 200, "ts").unwrap_err();
+
+        assert_eq!(err.code(), "DPR_INVALID_CONSTRAINT");
+        assert!(err.to_string().contains("duplicates"));
+    }
+
+    #[test]
+    fn padded_preferred_region_is_rejected_before_matching_profiles() {
+        let mut reg = DeviceProfileRegistry::new();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
+        let p = policy(vec![constraint(&["gpu"], " us ", "", 100)], 3600);
+
+        let err = reg.evaluate_placement(&p, 200, "ts").unwrap_err();
+
+        assert_eq!(err.code(), "DPR_INVALID_CONSTRAINT");
+        assert!(err.to_string().contains("preferred_region"));
+        assert_eq!(reg.count(), 1);
+    }
+
+    #[test]
+    fn preferred_region_with_nul_is_rejected_before_matching_profiles() {
+        let mut reg = DeviceProfileRegistry::new();
+        reg.register(prof("d1", &["gpu"], "us", "Standard", 100))
+            .unwrap();
+        let p = policy(vec![constraint(&["gpu"], "us\0east", "", 100)], 3600);
+
+        let err = reg.evaluate_placement(&p, 200, "ts").unwrap_err();
+
+        assert_eq!(err.code(), "DPR_INVALID_CONSTRAINT");
+        assert!(err.to_string().contains("preferred_region"));
+        assert_eq!(reg.count(), 1);
     }
 }

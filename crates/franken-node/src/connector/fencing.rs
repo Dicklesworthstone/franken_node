@@ -47,6 +47,12 @@ pub enum FencingError {
     WriteUnfenced,
     #[serde(rename = "WRITE_STALE_FENCE")]
     WriteStaleFence { write_seq: u64, current_seq: u64 },
+    #[serde(rename = "WRITE_FENCE_MISMATCH")]
+    WriteFenceMismatch {
+        write_seq: u64,
+        lease_seq: u64,
+        current_seq: u64,
+    },
     #[serde(rename = "LEASE_EXPIRED")]
     LeaseExpired {
         expires_at: String,
@@ -87,6 +93,14 @@ impl fmt::Display for FencingError {
             } => write!(
                 f,
                 "WRITE_STALE_FENCE: write seq {write_seq} < current fence {current_seq}"
+            ),
+            Self::WriteFenceMismatch {
+                write_seq,
+                lease_seq,
+                current_seq,
+            } => write!(
+                f,
+                "WRITE_FENCE_MISMATCH: write seq {write_seq}, lease seq {lease_seq}, current fence {current_seq}"
             ),
             Self::LeaseExpired {
                 expires_at,
@@ -215,6 +229,14 @@ impl FenceState {
         if fence_seq < self.current_seq {
             return Err(FencingError::WriteStaleFence {
                 write_seq: fence_seq,
+                current_seq: self.current_seq,
+            });
+        }
+
+        if fence_seq != lease.lease_seq || fence_seq != self.current_seq {
+            return Err(FencingError::WriteFenceMismatch {
+                write_seq: fence_seq,
+                lease_seq: lease.lease_seq,
                 current_seq: self.current_seq,
             });
         }
@@ -742,6 +764,11 @@ mod tests {
                 write_seq: 1,
                 current_seq: 2,
             },
+            FencingError::WriteFenceMismatch {
+                write_seq: 3,
+                lease_seq: 2,
+                current_seq: 3,
+            },
             FencingError::LeaseExpired {
                 expires_at: "2026-01-01T00:00:00Z".into(),
                 current_time: "2026-01-01T00:00:00Z".into(),
@@ -974,6 +1001,209 @@ mod tests {
             FencingError::LeaseObjectMismatch {
                 lease_object: "obj-epoch-mismatch".into(),
                 target_object: "obj-other".into()
+            }
+        );
+    }
+
+    #[test]
+    fn future_fence_sequence_rejected_without_waiting_for_expiry() {
+        let mut fs = FenceState::new("obj-future-fence".into());
+        let lease = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2026-02-01T00:00:00Z".into(),
+        );
+        let write = FencedWrite {
+            fence_seq: Some(2),
+            target_object_id: "obj-future-fence".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &lease, "2026-03-01T00:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::WriteFenceMismatch {
+                write_seq: 2,
+                lease_seq: 1,
+                current_seq: 1
+            }
+        );
+    }
+
+    #[test]
+    fn stale_lease_with_current_write_sequence_is_rejected() {
+        let mut fs = FenceState::new("obj-stale-lease".into());
+        let stale_lease = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let _current_lease = fs.acquire_lease(
+            "writer-b".into(),
+            "2026-01-02T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let write = FencedWrite {
+            fence_seq: Some(2),
+            target_object_id: "obj-stale-lease".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &stale_lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::WriteFenceMismatch {
+                write_seq: 2,
+                lease_seq: 1,
+                current_seq: 2
+            }
+        );
+    }
+
+    #[test]
+    fn fence_mismatch_error_display_includes_all_sequences() {
+        let err = FencingError::WriteFenceMismatch {
+            write_seq: 9,
+            lease_seq: 4,
+            current_seq: 7,
+        };
+
+        let rendered = err.to_string();
+
+        assert!(rendered.contains("WRITE_FENCE_MISMATCH"));
+        assert!(rendered.contains("write seq 9"));
+        assert!(rendered.contains("lease seq 4"));
+        assert!(rendered.contains("current fence 7"));
+        assert_eq!(err.epoch_event_code(), None);
+    }
+
+    #[test]
+    fn epoch_scoped_validation_rejects_lease_sequence_mismatch_after_epoch_acceptance() {
+        let mut fs = FenceState::new("obj-epoch-stale-lease".into());
+        let stale_lease = fs.acquire_lease_with_epoch(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+            ControlEpoch::new(5),
+        );
+        let _current_lease = fs.acquire_lease_with_epoch(
+            "writer-b".into(),
+            "2026-01-02T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+            ControlEpoch::new(5),
+        );
+        let write = FencedWrite {
+            fence_seq: Some(2),
+            target_object_id: "obj-epoch-stale-lease".into(),
+            payload: json!({}),
+        };
+        let policy = ValidityWindowPolicy::new(ControlEpoch::new(5), 0);
+
+        let err = fs
+            .validate_write_epoch_scoped(
+                &write,
+                &stale_lease,
+                "2026-06-01T00:00:00Z",
+                &policy,
+                "trace-stale-lease",
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::WriteFenceMismatch {
+                write_seq: 2,
+                lease_seq: 1,
+                current_seq: 2
+            }
+        );
+    }
+
+    #[test]
+    fn fence_mismatch_precedes_object_mismatch_for_forged_current_sequence() {
+        let mut fs = FenceState::new("obj-mismatch-first".into());
+        let stale_lease = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let _current_lease = fs.acquire_lease(
+            "writer-b".into(),
+            "2026-01-02T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let write = FencedWrite {
+            fence_seq: Some(2),
+            target_object_id: "different-object".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &stale_lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
+
+        assert!(matches!(err, FencingError::WriteFenceMismatch { .. }));
+    }
+
+    #[test]
+    fn fence_mismatch_precedes_expired_lease_for_forged_current_sequence() {
+        let mut fs = FenceState::new("obj-expired-mismatch-first".into());
+        let stale_lease = fs.acquire_lease(
+            "writer-a".into(),
+            "2026-01-01T00:00:00Z".into(),
+            "2026-02-01T00:00:00Z".into(),
+        );
+        let _current_lease = fs.acquire_lease(
+            "writer-b".into(),
+            "2026-01-02T00:00:00Z".into(),
+            "2030-01-01T00:00:00Z".into(),
+        );
+        let write = FencedWrite {
+            fence_seq: Some(2),
+            target_object_id: "obj-expired-mismatch-first".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &stale_lease, "2026-03-01T00:00:00Z")
+            .unwrap_err();
+
+        assert!(matches!(err, FencingError::WriteFenceMismatch { .. }));
+    }
+
+    #[test]
+    fn foreign_lease_rejected_even_when_write_sequence_matches_foreign_lease() {
+        let fs = FenceState::new("obj-local".into());
+        let foreign_lease = Lease {
+            lease_seq: 1,
+            object_id: "obj-local".into(),
+            epoch: ControlEpoch::GENESIS,
+            holder_id: "writer-foreign".into(),
+            acquired_at: "2026-01-01T00:00:00Z".into(),
+            expires_at: "2030-01-01T00:00:00Z".into(),
+        };
+        let write = FencedWrite {
+            fence_seq: Some(1),
+            target_object_id: "obj-local".into(),
+            payload: json!({}),
+        };
+
+        let err = fs
+            .validate_write(&write, &foreign_lease, "2026-06-01T00:00:00Z")
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            FencingError::WriteFenceMismatch {
+                write_seq: 1,
+                lease_seq: 1,
+                current_seq: 0
             }
         );
     }

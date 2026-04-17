@@ -874,4 +874,147 @@ mod tests {
 
         assert!(decisions.is_empty());
     }
+
+    #[test]
+    fn duplicate_id_is_rejected_before_empty_message_type_validation() {
+        let mut store = RetentionStore::new(registry(), 10_000).unwrap();
+        store.store("m1", "invoke", 100, 1_000).unwrap();
+
+        let err = store.store("m1", " \t ", 25, 1_001).unwrap_err();
+
+        assert_eq!(err.code(), "CPR_DUPLICATE_MESSAGE_ID");
+        assert_eq!(store.total_bytes(), 100);
+        assert_eq!(store.message_count(), 1);
+        assert_eq!(store.decisions().len(), 1);
+    }
+
+    #[test]
+    fn duplicate_id_is_rejected_before_nul_message_type_validation() {
+        let mut store = RetentionStore::new(registry(), 10_000).unwrap();
+        store.store("m1", "invoke", 100, 1_000).unwrap();
+
+        let err = store.store("m1", "bad\0type", 25, 1_001).unwrap_err();
+
+        assert_eq!(err.code(), "CPR_DUPLICATE_MESSAGE_ID");
+        assert_eq!(store.total_bytes(), 100);
+        assert_eq!(store.message_count(), 1);
+        assert_eq!(store.decisions().len(), 1);
+    }
+
+    #[test]
+    fn oversized_message_rejects_without_decision_or_storage_mutation() {
+        let mut store = RetentionStore::new(registry(), 10_000).unwrap();
+
+        let err = store.store("huge", "invoke", u64::MAX, 1_000).unwrap_err();
+
+        assert_eq!(
+            err,
+            RetentionError::StorageFull {
+                current_bytes: 0,
+                max_bytes: 10_000,
+            }
+        );
+        assert_eq!(store.total_bytes(), 0);
+        assert_eq!(store.message_count(), 0);
+        assert!(!store.contains("huge"));
+        assert!(store.decisions().is_empty());
+    }
+
+    #[test]
+    fn storage_pressure_can_drop_expired_ephemeral_and_still_reject_large_required() {
+        let mut store = RetentionStore::new(registry(), 200).unwrap();
+        store
+            .store("expired-heartbeat", "heartbeat", 150, 1_000)
+            .unwrap();
+
+        let err = store
+            .store("too-large-required", "invoke", 201, 1_100)
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            RetentionError::StorageFull {
+                current_bytes: 0,
+                max_bytes: 200,
+            }
+        );
+        assert!(!store.contains("expired-heartbeat"));
+        assert!(!store.contains("too-large-required"));
+        assert_eq!(store.total_bytes(), 0);
+        assert_eq!(store.message_count(), 0);
+        assert!(
+            store
+                .decisions()
+                .iter()
+                .any(|decision| decision.message_id == "expired-heartbeat"
+                    && decision.action == "drop"
+                    && decision.reason == "ttl_expired")
+        );
+    }
+
+    #[test]
+    fn cleanup_with_missing_ephemeral_policy_does_not_drop_message() {
+        let mut store = RetentionStore::new(registry(), 10_000).unwrap();
+        store.store("m-heartbeat", "heartbeat", 50, 1_000).unwrap();
+        store.registry.policies.remove("heartbeat");
+
+        let dropped = store.cleanup_ephemeral(2_000);
+
+        assert!(dropped.is_empty());
+        assert!(store.contains("m-heartbeat"));
+        assert_eq!(store.total_bytes(), 50);
+        assert_eq!(store.decisions().len(), 1);
+    }
+
+    #[test]
+    fn cleanup_with_time_before_store_timestamp_does_not_drop_ephemeral_message() {
+        let mut store = RetentionStore::new(registry(), 10_000).unwrap();
+        store
+            .store("future-heartbeat", "heartbeat", 50, 2_000)
+            .unwrap();
+
+        let dropped = store.cleanup_ephemeral(1_000);
+
+        assert!(dropped.is_empty());
+        assert!(store.contains("future-heartbeat"));
+        assert_eq!(store.total_bytes(), 50);
+        assert_eq!(store.decisions().len(), 1);
+    }
+
+    #[test]
+    fn drop_missing_empty_message_id_returns_not_found_without_decision() {
+        let mut store = RetentionStore::new(registry(), 10_000).unwrap();
+
+        let err = store.drop_message("", 1_000).unwrap_err();
+
+        assert_eq!(
+            err,
+            RetentionError::NotFound {
+                message_id: String::new(),
+            }
+        );
+        assert!(store.decisions().is_empty());
+        assert_eq!(store.total_bytes(), 0);
+    }
+
+    #[test]
+    fn padded_policy_type_does_not_classify_trimmed_message_type() {
+        let mut reg = RetentionRegistry::new();
+        reg.register(RetentionPolicy {
+            message_type: " heartbeat ".into(),
+            retention_class: RetentionClass::Ephemeral,
+            ephemeral_ttl_seconds: 60,
+        })
+        .unwrap();
+
+        let err = reg.classify("heartbeat").unwrap_err();
+
+        assert_eq!(
+            err,
+            RetentionError::Unclassified {
+                message_type: "heartbeat".into(),
+            }
+        );
+        assert_eq!(reg.policy_count(), 1);
+    }
 }

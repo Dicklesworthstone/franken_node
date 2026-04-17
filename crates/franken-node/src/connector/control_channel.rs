@@ -219,9 +219,29 @@ pub fn validate_config(config: &ChannelConfig) -> Result<(), ChannelError> {
             reason: "channel_id must not be empty".into(),
         });
     }
+    if config.channel_id.trim() != config.channel_id {
+        return Err(ChannelError::InvalidConfig {
+            reason: "channel_id must not contain leading or trailing whitespace".into(),
+        });
+    }
+    if config.channel_id.contains('\0') {
+        return Err(ChannelError::InvalidConfig {
+            reason: "channel_id must not contain null bytes".into(),
+        });
+    }
     if config.audience.trim().is_empty() {
         return Err(ChannelError::InvalidConfig {
             reason: "audience must not be empty".into(),
+        });
+    }
+    if config.audience.trim() != config.audience {
+        return Err(ChannelError::InvalidConfig {
+            reason: "audience must not contain leading or trailing whitespace".into(),
+        });
+    }
+    if config.audience.contains('\0') {
+        return Err(ChannelError::InvalidConfig {
+            reason: "audience must not contain null bytes".into(),
         });
     }
     Ok(())
@@ -2050,5 +2070,113 @@ mod tests {
         assert_eq!(err.code(), "ACC_CHANNEL_CLOSED");
         assert_eq!(ch.audit_log().len(), audit_len_before);
         assert!(!ch.is_open());
+    }
+
+    #[test]
+    fn invalid_config_rejects_channel_id_with_leading_whitespace() {
+        let cfg = ChannelConfig {
+            channel_id: " test-channel".into(),
+            ..config()
+        };
+
+        let err = validate_config(&cfg).unwrap_err();
+
+        assert_eq!(err.code(), "ACC_INVALID_CONFIG");
+        assert!(matches!(
+            err,
+            ChannelError::InvalidConfig { reason }
+                if reason == "channel_id must not contain leading or trailing whitespace"
+        ));
+    }
+
+    #[test]
+    fn invalid_config_rejects_channel_id_with_trailing_whitespace() {
+        let cfg = ChannelConfig {
+            channel_id: "test-channel\n".into(),
+            ..config()
+        };
+
+        let err = ControlChannel::new(cfg, test_secret()).unwrap_err();
+
+        assert_eq!(err.code(), "ACC_INVALID_CONFIG");
+        assert!(err.to_string().contains("leading or trailing whitespace"));
+    }
+
+    #[test]
+    fn invalid_config_rejects_audience_with_leading_whitespace() {
+        let cfg = ChannelConfig {
+            audience: "\ttest-audience".into(),
+            ..config()
+        };
+
+        let err = validate_config(&cfg).unwrap_err();
+
+        assert_eq!(err.code(), "ACC_INVALID_CONFIG");
+        assert!(matches!(
+            err,
+            ChannelError::InvalidConfig { reason }
+                if reason == "audience must not contain leading or trailing whitespace"
+        ));
+    }
+
+    #[test]
+    fn invalid_config_rejects_audience_with_trailing_whitespace() {
+        let cfg = ChannelConfig {
+            audience: "test-audience ".into(),
+            ..config()
+        };
+
+        let err = ControlChannel::new(cfg, test_secret()).unwrap_err();
+
+        assert_eq!(err.code(), "ACC_INVALID_CONFIG");
+        assert!(err.to_string().contains("leading or trailing whitespace"));
+    }
+
+    #[test]
+    fn invalid_config_rejects_channel_id_with_null_byte() {
+        let cfg = ChannelConfig {
+            channel_id: "test\0channel".into(),
+            ..config()
+        };
+
+        let err = validate_config(&cfg).unwrap_err();
+
+        assert_eq!(err.code(), "ACC_INVALID_CONFIG");
+        assert!(matches!(
+            err,
+            ChannelError::InvalidConfig { reason }
+                if reason == "channel_id must not contain null bytes"
+        ));
+    }
+
+    #[test]
+    fn invalid_config_rejects_audience_with_null_byte() {
+        let cfg = ChannelConfig {
+            audience: "test\0audience".into(),
+            ..config()
+        };
+
+        let err = ControlChannel::new(cfg, test_secret()).unwrap_err();
+
+        assert_eq!(err.code(), "ACC_INVALID_CONFIG");
+        assert!(err.to_string().contains("null bytes"));
+    }
+
+    #[test]
+    fn invalid_config_reports_window_before_padded_identifiers() {
+        let cfg = ChannelConfig {
+            replay_window_size: 0,
+            channel_id: " test-channel ".into(),
+            audience: " test-audience ".into(),
+            require_auth: true,
+        };
+
+        let err = validate_config(&cfg).unwrap_err();
+
+        assert!(matches!(
+            err,
+            ChannelError::InvalidConfig { reason }
+                if reason == "replay_window_size must be > 0"
+        ));
     }
 }

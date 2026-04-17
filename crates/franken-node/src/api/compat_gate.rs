@@ -1927,3 +1927,172 @@ mod compat_gate_additional_negative_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod compat_gate_fresh_negative_tests {
+    use super::*;
+
+    fn base_shim(shim_id: &str, scope: &str) -> ShimMetadata {
+        ShimMetadata {
+            shim_id: shim_id.to_string(),
+            description: format!("shim {shim_id}"),
+            risk_category: "low".to_string(),
+            activation_policy: "balanced".to_string(),
+            divergence_rationale: "negative test fixture".to_string(),
+            scope: scope.to_string(),
+        }
+    }
+
+    #[test]
+    fn legacy_risky_scope_gate_check_is_audit_not_silent_allow() {
+        let mut svc = CompatGateService::new();
+        svc.set_scope_mode("legacy-scope", CompatMode::LegacyRisky);
+
+        let response = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-legacy".to_string(),
+                requested_mode: CompatMode::LegacyRisky,
+                scope: "legacy-scope".to_string(),
+                policy_context: None,
+            })
+            .expect("legacy-risky gate check should complete");
+
+        assert_eq!(response.decision, GateDecision::Audit);
+        assert_ne!(response.decision, GateDecision::Allow);
+        assert!(
+            !svc.events()
+                .iter()
+                .any(|event| event.code == event_codes::PCG_002_GATE_FAILED)
+        );
+    }
+
+    #[test]
+    fn denied_gate_check_does_not_mutate_existing_scope_mode() {
+        let mut svc = CompatGateService::new();
+        svc.set_scope_mode("strict-scope", CompatMode::Strict);
+
+        let response = svc
+            .gate_check(&GateCheckRequest {
+                package_id: "pkg-risky".to_string(),
+                requested_mode: CompatMode::LegacyRisky,
+                scope: "strict-scope".to_string(),
+                policy_context: None,
+            })
+            .expect("denied gate check should still return a response");
+
+        assert_eq!(response.decision, GateDecision::Deny);
+        assert_eq!(
+            svc.query_mode("strict-scope").expect("scope exists").mode,
+            CompatMode::Strict
+        );
+    }
+
+    #[test]
+    fn denied_gate_check_records_failed_event_but_no_transition_event() {
+        let mut svc = CompatGateService::new();
+        svc.set_scope_mode("strict-scope", CompatMode::Strict);
+
+        svc.gate_check(&GateCheckRequest {
+            package_id: "pkg-risky".to_string(),
+            requested_mode: CompatMode::LegacyRisky,
+            scope: "strict-scope".to_string(),
+            policy_context: None,
+        })
+        .expect("denied gate check should still emit audit data");
+
+        assert!(
+            svc.events()
+                .iter()
+                .any(|event| event.code == event_codes::PCG_002_GATE_FAILED)
+        );
+        assert!(
+            !svc.events()
+                .iter()
+                .any(|event| event.code == event_codes::PCG_003_TRANSITION_APPROVED)
+        );
+    }
+
+    #[test]
+    fn scope_specific_shim_does_not_leak_to_unrelated_scope() {
+        let mut svc = CompatGateService::new();
+        svc.register_shim(base_shim("scoped-shim", "scope-a"))
+            .expect("scope-specific shim should register");
+
+        assert!(svc.query_shims(Some("scope-b")).is_empty());
+    }
+
+    #[test]
+    fn wildcard_shim_does_not_make_scoped_shim_match_unrelated_scope() {
+        let mut svc = CompatGateService::new();
+        svc.register_shim(base_shim("scoped-shim", "scope-a"))
+            .expect("scope-specific shim should register");
+        svc.register_shim(base_shim("wildcard-shim", "*"))
+            .expect("wildcard shim should register");
+
+        let shims = svc.query_shims(Some("scope-b"));
+
+        assert_eq!(shims.len(), 1);
+        assert_eq!(shims[0].shim_id, "wildcard-shim");
+    }
+
+    #[test]
+    fn receipt_filter_requires_scope_and_severity_to_match_together() {
+        let mut svc = CompatGateService::new();
+        svc.issue_divergence_receipt("scope-a", "medium")
+            .expect("first receipt should issue");
+        svc.issue_divergence_receipt("scope-b", "high")
+            .expect("second receipt should issue");
+
+        assert!(svc.query_receipts(Some("scope-a"), Some("high")).is_empty());
+        assert!(svc.query_receipts(Some("scope-b"), Some("medium")).is_empty());
+    }
+
+    #[test]
+    fn denied_wrong_from_mode_transition_does_not_drain_existing_events() {
+        let mut svc = CompatGateService::new();
+        svc.set_scope_mode("project-denied", CompatMode::Balanced);
+        svc.gate_check(&GateCheckRequest {
+            package_id: "seed".to_string(),
+            requested_mode: CompatMode::Strict,
+            scope: "project-denied".to_string(),
+            policy_context: None,
+        })
+        .expect("seed gate check should complete");
+        let events_before = svc.events().len();
+
+        let response = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "project-denied".to_string(),
+                from_mode: CompatMode::Strict,
+                to_mode: CompatMode::LegacyRisky,
+                justification: "stale caller state".to_string(),
+                requestor: "operator".to_string(),
+            })
+            .expect("wrong from-mode transition should return denial");
+
+        assert!(!response.approved);
+        assert_eq!(svc.events().len(), events_before);
+    }
+
+    #[test]
+    fn terminal_trace_exhaustion_on_transition_leaves_no_receipt() {
+        let mut svc = CompatGateService::new();
+        svc.set_scope_mode("terminal-trace", CompatMode::Balanced);
+        svc.trace_counter = u64::MAX;
+        svc.trace_epoch = u64::MAX;
+
+        let err = svc
+            .request_transition(&ModeTransitionRequest {
+                scope_id: "terminal-trace".to_string(),
+                from_mode: CompatMode::Balanced,
+                to_mode: CompatMode::Strict,
+                justification: String::new(),
+                requestor: "operator".to_string(),
+            })
+            .expect_err("terminal trace exhaustion must fail closed");
+
+        assert_eq!(err, CompatGateOperationError::TraceIdSpaceExhausted);
+        assert!(svc.receipts().is_empty());
+        assert!(svc.events().is_empty());
+    }
+}

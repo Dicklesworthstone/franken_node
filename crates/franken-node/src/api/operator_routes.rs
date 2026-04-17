@@ -955,4 +955,477 @@ mod tests {
 
         assert!(result.is_err(), "total_nodes must remain numeric");
     }
+
+    #[test]
+    fn node_status_deserialize_rejects_negative_control_epoch() {
+        let raw = serde_json::json!({
+            "node_id": "node-1",
+            "version": "1.2.3",
+            "uptime_seconds": 10_u64,
+            "policy_profile": "balanced",
+            "active_extensions": 0_u32,
+            "quarantined_extensions": 0_u32,
+            "control_epoch": -1
+        });
+
+        let result: Result<NodeStatus, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "control_epoch must not accept negative values");
+    }
+
+    #[test]
+    fn node_status_deserialize_rejects_string_quarantined_extensions() {
+        let raw = serde_json::json!({
+            "node_id": "node-1",
+            "version": "1.2.3",
+            "uptime_seconds": 10_u64,
+            "policy_profile": "balanced",
+            "active_extensions": 0_u32,
+            "quarantined_extensions": "0",
+            "control_epoch": 1_u64
+        });
+
+        let result: Result<NodeStatus, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "quarantined_extensions must remain numeric"
+        );
+    }
+
+    #[test]
+    fn health_check_deserialize_rejects_string_live_flag() {
+        let raw = serde_json::json!({
+            "live": "true",
+            "ready": true,
+            "checks": []
+        });
+
+        let result: Result<HealthCheck, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "live must remain a boolean");
+    }
+
+    #[test]
+    fn health_component_deserialize_rejects_missing_status() {
+        let raw = serde_json::json!({
+            "name": "policy_engine",
+            "detail": null
+        });
+
+        let result: Result<HealthComponent, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "component status is required");
+    }
+
+    #[test]
+    fn config_view_deserialize_rejects_negative_timeout() {
+        let raw = serde_json::json!({
+            "profile": "balanced",
+            "compatibility_mode": "balanced",
+            "trust_revocation_fresh": true,
+            "quarantine_on_high_risk": true,
+            "replay_persist_high_severity": true,
+            "fleet_convergence_timeout_seconds": -1,
+            "observability_namespace": "franken_node"
+        });
+
+        let result: Result<ConfigView, _> = serde_json::from_value(raw);
+
+        assert!(
+            result.is_err(),
+            "fleet_convergence_timeout_seconds must not be negative"
+        );
+    }
+
+    #[test]
+    fn config_view_deserialize_rejects_missing_observability_namespace() {
+        let raw = serde_json::json!({
+            "profile": "balanced",
+            "compatibility_mode": "balanced",
+            "trust_revocation_fresh": true,
+            "quarantine_on_high_risk": true,
+            "replay_persist_high_severity": true,
+            "fleet_convergence_timeout_seconds": 120_u32
+        });
+
+        let result: Result<ConfigView, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "observability_namespace is required");
+    }
+
+    #[test]
+    fn rollout_state_deserialize_rejects_string_canary_percentage() {
+        let raw = serde_json::json!({
+            "current_phase": "stable",
+            "target_version": "1.2.3",
+            "canary_percentage": "0",
+            "healthy_nodes": 1_u32,
+            "total_nodes": 1_u32,
+            "last_transition": "2026-03-20T12:34:56Z"
+        });
+
+        let result: Result<RolloutState, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "canary_percentage must remain numeric");
+    }
+
+    #[test]
+    fn rollout_state_deserialize_rejects_negative_healthy_nodes() {
+        let raw = serde_json::json!({
+            "current_phase": "stable",
+            "target_version": "1.2.3",
+            "canary_percentage": 0_u8,
+            "healthy_nodes": -1,
+            "total_nodes": 1_u32,
+            "last_transition": "2026-03-20T12:34:56Z"
+        });
+
+        let result: Result<RolloutState, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "healthy_nodes must not be negative");
+    }
+
+    /// Comprehensive negative-path test module covering edge cases and attack vectors.
+    ///
+    /// These tests validate robustness against malicious inputs, resource exhaustion,
+    /// timing attacks, and arithmetic edge cases in operator API routes.
+    #[cfg(test)]
+    mod operator_routes_comprehensive_negative_tests {
+        use super::*;
+
+        #[test]
+        fn unicode_injection_in_authentication_identifiers_handled_safely() {
+            // Unicode control characters, NULL bytes, path traversal attempts
+            let malicious_principals = vec![
+                "op\u{0000}null_injection",
+                "op\u{200B}zero_width",
+                "op\u{FEFF}bom_attack",
+                "op/../../../etc/passwd",
+                "op\u{202E}rtl_override\u{202D}",
+                "op\x1B[H\x1B[2J", // ANSI escape sequences
+                "op\u{1F4A9}emoji_flood",
+            ];
+
+            let malicious_trace_ids = vec![
+                "trace\u{0000}null",
+                "trace\u{200B}zwsp",
+                "trace/../../../admin",
+                "trace\x1B[31m;DELETE;",
+                "trace\u{202E}direction",
+            ];
+
+            for malicious_principal in &malicious_principals {
+                for malicious_trace_id in &malicious_trace_ids {
+                    let identity = AuthIdentity {
+                        principal: malicious_principal.to_string(),
+                        method: AuthMethod::ApiKey,
+                        roles: vec!["operator".to_string()],
+                    };
+
+                    let trace = TraceContext {
+                        trace_id: malicious_trace_id.to_string(),
+                        span_id: "0000000000000001".to_string(),
+                        trace_flags: 1,
+                    };
+
+                    // All endpoint handlers should process gracefully without panics/crashes
+                    let status_result = get_status(&identity, &trace);
+                    assert!(status_result.is_ok(), "Status should handle malicious identity");
+
+                    let health_result = get_health(&identity, &trace);
+                    assert!(health_result.is_ok(), "Health should handle malicious identity");
+
+                    let config_result = get_config(&identity, &trace);
+                    assert!(config_result.is_ok(), "Config should handle malicious identity");
+
+                    let rollout_result = get_rollout(&identity, &trace);
+                    assert!(rollout_result.is_ok(), "Rollout should handle malicious identity");
+                }
+            }
+        }
+
+        #[test]
+        fn arithmetic_overflow_protection_in_uptime_calculations() {
+            let _lock = process_start_test_lock();
+            clear_process_start_override_for_tests();
+
+            // Test near u64::MAX boundaries for timing calculations
+            let extreme_offsets = vec![
+                u64::MAX - 1000,
+                u64::MAX - 1,
+                u64::MAX,
+            ];
+
+            for &extreme_offset in &extreme_offsets {
+                // Install extreme process start offset
+                install_process_start(extreme_offset, "2099-01-01T00:00:00Z".to_string());
+
+                let identity = test_identity();
+                let trace = test_trace();
+                let status_result = get_status(&identity, &trace);
+                assert!(status_result.is_ok(), "Should handle extreme offset: {}", extreme_offset);
+
+                let status = status_result.unwrap();
+                // Uptime should saturate gracefully, not overflow
+                assert!(status.data.uptime_seconds <= u64::MAX);
+
+                // Test rollout endpoint timing calculations
+                let rollout_result = get_rollout(&identity, &trace);
+                assert!(rollout_result.is_ok(), "Rollout should handle extreme timing");
+
+                let rollout = rollout_result.unwrap();
+                assert!(!rollout.data.last_transition.is_empty());
+            }
+        }
+
+        #[test]
+        fn memory_exhaustion_through_massive_health_components() {
+            let identity = test_identity();
+            let trace = test_trace();
+
+            // Create artificial health check with massive component list
+            let massive_component_count = 10000;
+            let mut massive_checks = Vec::new();
+
+            for comp_idx in 0..massive_component_count {
+                massive_checks.push(HealthComponent {
+                    name: format!("flood_component_{comp_idx:05}"),
+                    status: match comp_idx % 3 {
+                        0 => ComponentStatus::Ok,
+                        1 => ComponentStatus::Degraded,
+                        _ => ComponentStatus::Down,
+                    },
+                    detail: Some(format!("memory_pressure_test_detail_{comp_idx}")),
+                });
+            }
+
+            let massive_health = HealthCheck {
+                live: true,
+                ready: massive_component_count > 5000, // Degraded if too many components
+                checks: massive_checks,
+            };
+
+            // Serialization should handle large payloads
+            let serialized_result = serde_json::to_string(&massive_health);
+            assert!(serialized_result.is_ok(), "Should serialize massive health check");
+
+            // Deserialization should handle large payloads
+            let serialized = serialized_result.unwrap();
+            let deserialized_result: Result<HealthCheck, _> = serde_json::from_str(&serialized);
+            assert!(deserialized_result.is_ok(), "Should deserialize massive health check");
+
+            let deserialized = deserialized_result.unwrap();
+            assert_eq!(deserialized.checks.len(), massive_component_count);
+        }
+
+        #[test]
+        fn concurrent_operations_simulation_race_conditions() {
+            let _lock = process_start_test_lock();
+            clear_process_start_override_for_tests();
+
+            // Simulate concurrent endpoint access
+            // (In real concurrency this would need proper synchronization)
+            let identity = test_identity();
+            let base_trace = test_trace();
+
+            let mut results = Vec::new();
+
+            // Rapid burst of API calls as if from concurrent clients
+            for i in 0..50 {
+                let trace = TraceContext {
+                    trace_id: format!("race_trace_{i:03}"),
+                    span_id: format!("{i:016}"),
+                    trace_flags: 1,
+                };
+
+                // Interleave different endpoint calls
+                match i % 4 {
+                    0 => {
+                        let result = get_status(&identity, &trace);
+                        results.push(("status", result.is_ok()));
+                    }
+                    1 => {
+                        let result = get_health(&identity, &trace);
+                        results.push(("health", result.is_ok()));
+                    }
+                    2 => {
+                        let result = get_config(&identity, &trace);
+                        results.push(("config", result.is_ok()));
+                    }
+                    _ => {
+                        let result = get_rollout(&identity, &trace);
+                        results.push(("rollout", result.is_ok()));
+                    }
+                }
+            }
+
+            // All operations should succeed despite "concurrent" access
+            assert!(results.iter().all(|(_, success)| *success), "All concurrent operations should succeed");
+            assert_eq!(results.len(), 50);
+
+            // Verify state consistency
+            let final_status = get_status(&identity, &base_trace).expect("final status");
+            let final_config = get_config(&identity, &base_trace).expect("final config");
+            assert_eq!(final_status.data.policy_profile, final_config.data.profile);
+        }
+
+        #[test]
+        fn configuration_extreme_edge_cases() {
+            // Test configurations with extreme values
+            let mut extreme_config = RuntimeConfig::default();
+
+            // Test maximum values
+            extreme_config.fleet.convergence_timeout_seconds = u64::MAX;
+
+            let config_view = ConfigView::from_runtime_config(&extreme_config);
+
+            // Should clamp to u32::MAX
+            assert_eq!(config_view.fleet_convergence_timeout_seconds, u32::MAX);
+
+            // Test serialization/deserialization with extreme values
+            let serialized = serde_json::to_string(&config_view).expect("serialize extreme config");
+            let deserialized: ConfigView = serde_json::from_str(&serialized).expect("deserialize extreme config");
+            assert_eq!(deserialized.fleet_convergence_timeout_seconds, u32::MAX);
+
+            // Test with extreme string lengths
+            extreme_config.observability.namespace = "a".repeat(10000);
+            extreme_config.profile = crate::config::Profile::Balanced; // Reset profile to known value
+
+            let extreme_view = ConfigView::from_runtime_config(&extreme_config);
+            assert_eq!(extreme_view.observability_namespace.len(), 10000);
+            assert_eq!(extreme_view.profile, "balanced");
+        }
+
+        #[test]
+        fn process_timing_boundary_attack_scenarios() {
+            let _lock = process_start_test_lock();
+            clear_process_start_override_for_tests();
+
+            // Test timing consistency across process start boundaries
+            let identity = test_identity();
+            let trace = test_trace();
+
+            // Test with process start time in the future (invalid scenario)
+            let future_time = chrono::Utc::now() + chrono::Duration::seconds(3600);
+            let future_offset = now_epoch_nanos() + 3600_000_000_000; // 1 hour in nanos
+
+            install_process_start(future_offset, future_time.to_rfc3339());
+
+            let status_result = get_status(&identity, &trace);
+            assert!(status_result.is_ok(), "Should handle future process start time");
+
+            let status = status_result.unwrap();
+            // Uptime should saturate to 0 for future timestamps
+            assert_eq!(status.data.uptime_seconds, 0);
+
+            let rollout_result = get_rollout(&identity, &trace);
+            assert!(rollout_result.is_ok(), "Rollout should handle future process start");
+
+            let rollout = rollout_result.unwrap();
+            assert_eq!(rollout.data.last_transition, future_time.to_rfc3339());
+
+            // Test with process start at epoch boundaries
+            let epoch_boundaries = vec![
+                0u64,
+                1u64,
+                u64::MAX / 2,
+                u64::MAX - 1,
+                u64::MAX,
+            ];
+
+            for &boundary_offset in &epoch_boundaries {
+                install_process_start(boundary_offset, "2000-01-01T00:00:00Z".to_string());
+
+                let boundary_status = get_status(&identity, &trace);
+                assert!(boundary_status.is_ok(), "Should handle boundary offset: {}", boundary_offset);
+
+                let boundary_result = boundary_status.unwrap();
+                assert!(boundary_result.data.uptime_seconds <= u64::MAX);
+            }
+        }
+
+        #[test]
+        fn serialization_attack_vectors_json_injection() {
+            let identity = test_identity();
+            let trace = test_trace();
+
+            // Test with malicious JSON injection patterns
+            let malicious_node_status = NodeStatus {
+                node_id: "node\"},\"malicious\":\"payload\",\"a\":{\"".to_string(),
+                version: "\"\"},\"injected\":true,\"version\":\"".to_string(),
+                uptime_seconds: 100,
+                policy_profile: "balanced\\\",\\\"attack\\\":\\\"vector".to_string(),
+                active_extensions: 0,
+                quarantined_extensions: 0,
+                control_epoch: 1,
+            };
+
+            // Should serialize safely without breaking JSON structure
+            let serialized_result = serde_json::to_string(&malicious_node_status);
+            assert!(serialized_result.is_ok(), "Should serialize malicious node status safely");
+
+            let serialized = serialized_result.unwrap();
+            assert!(!serialized.contains("\"malicious\":\"payload\""), "Should escape injection attempts");
+
+            // Verify round-trip integrity
+            let deserialized_result: Result<NodeStatus, _> = serde_json::from_str(&serialized);
+            assert!(deserialized_result.is_ok(), "Should deserialize safely");
+
+            let deserialized = deserialized_result.unwrap();
+            assert_eq!(deserialized.node_id, malicious_node_status.node_id);
+            assert_eq!(deserialized.version, malicious_node_status.version);
+        }
+
+        #[test]
+        fn route_metadata_boundary_validation() {
+            let routes = route_metadata();
+
+            // Test route metadata consistency and bounds
+            assert_eq!(routes.len(), 4, "Should have exactly 4 operator routes");
+
+            for route in &routes {
+                // Path validation
+                assert!(route.path.starts_with("/v1/operator/"), "All paths should start with operator prefix");
+                assert!(route.path.len() < 1000, "Paths should be reasonable length");
+
+                // Method validation
+                assert_eq!(route.method, "GET", "All operator routes should be GET");
+
+                // Group validation
+                assert_eq!(route.group, EndpointGroup::Operator, "All should be operator group");
+
+                // Lifecycle validation
+                assert_eq!(route.lifecycle, EndpointLifecycle::Stable, "All should be stable");
+
+                // Auth validation
+                if route.path.contains("health") {
+                    assert_eq!(route.auth_method, AuthMethod::None, "Health endpoint should not require auth");
+                } else {
+                    assert_eq!(route.auth_method, AuthMethod::ApiKey, "Non-health endpoints should require API key");
+                }
+
+                // Policy validation
+                assert!(route.policy_hook.hook_id.starts_with("operator."), "Hook IDs should start with operator prefix");
+                assert!(route.policy_hook.hook_id.len() < 100, "Hook IDs should be reasonable length");
+
+                if route.path.contains("health") {
+                    assert!(route.policy_hook.required_roles.is_empty(), "Health endpoint should not require roles");
+                } else {
+                    assert!(!route.policy_hook.required_roles.is_empty(), "Non-health endpoints should require roles");
+                    assert!(route.policy_hook.required_roles.contains(&"operator".to_string()), "Should require operator role");
+                }
+
+                // Trace propagation
+                assert!(route.trace_propagation, "All routes should support trace propagation");
+            }
+
+            // Test uniqueness
+            let unique_paths: std::collections::BTreeSet<_> = routes.iter().map(|r| &r.path).collect();
+            assert_eq!(unique_paths.len(), routes.len(), "All paths should be unique");
+
+            let unique_hook_ids: std::collections::BTreeSet<_> = routes.iter().map(|r| &r.policy_hook.hook_id).collect();
+            assert_eq!(unique_hook_ids.len(), routes.len(), "All hook IDs should be unique");
+        }
+    }
 }

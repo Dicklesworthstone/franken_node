@@ -702,10 +702,13 @@ pub fn advance(mut state: PipelineState) -> Result<PipelineState, PipelineError>
             state.verification_report = Some(report);
         }
         PipelineStage::ReceiptIssuance => {
-            let report = state.verification_report.as_ref().ok_or_else(|| PipelineError {
-                code: error_codes::ERR_PIPE_INVALID_TRANSITION.to_string(),
-                message: "Cannot issue receipt without verification report".to_string(),
-            })?;
+            let report = state
+                .verification_report
+                .as_ref()
+                .ok_or_else(|| PipelineError {
+                    code: error_codes::ERR_PIPE_INVALID_TRANSITION.to_string(),
+                    message: "Cannot issue receipt without verification report".to_string(),
+                })?;
             if !report.meets_threshold {
                 return Err(PipelineError {
                     code: error_codes::ERR_PIPE_THRESHOLD_NOT_MET.to_string(),
@@ -3199,5 +3202,106 @@ mod tests {
         assert!(ci.lower_bound.is_finite());
         assert!(ci.upper_bound.is_finite());
         assert!(ci.lower_bound >= 0.0);
+    }
+
+    #[test]
+    fn negative_pipeline_stage_serde_rejects_unknown_variant() {
+        let err = serde_json::from_str::<PipelineStage>(r#""deploy""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_compatibility_band_serde_rejects_unknown_variant() {
+        let err = serde_json::from_str::<CompatibilityBand>(r#""guarded_mode""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_transform_action_serde_rejects_unknown_variant() {
+        let err = serde_json::from_str::<TransformAction>(r#""native_rewrite""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_pipeline_state_serde_rejects_missing_current_stage() {
+        let mut value = serde_json::to_value(new(&sample_cohort()).unwrap()).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("current_stage")
+            .unwrap();
+
+        let err = serde_json::from_value::<PipelineState>(value).unwrap_err();
+
+        assert!(err.to_string().contains("current_stage"));
+    }
+
+    #[test]
+    fn negative_cohort_definition_serde_rejects_scalar_extensions() {
+        let err = serde_json::from_str::<CohortDefinition>(
+            r#"{
+                "cohort_id":"cohort-bad",
+                "extensions":"not-a-list",
+                "selection_criteria":"pilot"
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_extension_spec_serde_rejects_missing_name() {
+        let err = serde_json::from_str::<ExtensionSpec>(
+            r#"{
+                "source_version":"1.0.0",
+                "target_version":"2.0.0",
+                "dependency_complexity":1,
+                "risk_tier":1
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("name"));
+    }
+
+    #[test]
+    fn negative_verification_report_serde_rejects_string_pass_rate() {
+        let err = serde_json::from_str::<VerificationReport>(
+            r#"{
+                "pass_rate":"0.95",
+                "per_extension_results":{},
+                "meets_threshold":true,
+                "extension_details":{},
+                "degraded_mode":null,
+                "counterexample_witnesses":[],
+                "evidence_artifacts":[]
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_migration_receipt_serde_rejects_missing_signature() {
+        let err = serde_json::from_str::<MigrationReceipt>(
+            r#"{
+                "pre_migration_hash":"pre",
+                "plan_fingerprint":"plan",
+                "post_migration_hash":"post",
+                "verification_summary":"ok",
+                "rollback_proof":"rollback",
+                "timestamp":"2026-02-21T00:00:00Z",
+                "evidence_artifact_ids":[],
+                "degraded_mode_summary":null
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("signature"));
     }
 }

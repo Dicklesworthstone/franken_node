@@ -1031,4 +1031,544 @@ mod tests {
         let gate = HighAssuranceGate::high_assurance();
         assert_eq!(gate.mode(), AssuranceMode::HighAssurance);
     }
+
+    // ---------------------------------------------------------------------------
+    // NEGATIVE-PATH TESTS: Security hardening for high-assurance promotion
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn negative_unicode_injection_in_artifact_ids_and_policy_references() {
+        let mut gate = HighAssuranceGate::high_assurance();
+
+        // BiDi override attack in artifact ID
+        let malicious_artifact_id = "\u{202E}trojan\u{202D}legitimate_artifact";
+        let bundle = ProofBundle::full();
+
+        let result = gate.evaluate(malicious_artifact_id, ObjectClass::CriticalMarker, Some(&bundle));
+        assert!(result.is_ok()); // Should process but preserve the malicious ID
+
+        // Zero-width character injection
+        let zero_width_id = "normal\u{200B}\u{200C}\u{200D}\u{FEFF}hidden_payload";
+        let result2 = gate.evaluate(zero_width_id, ObjectClass::StateObject, Some(&bundle));
+        assert!(result2.is_ok());
+
+        // Test Unicode injection in policy authorization
+        let unicode_policy_auth = PolicyAuthorization {
+            policy_ref: "\u{202E}ycilop_ekal\u{202D}real_policy_POL-001".to_string(),
+            authorizer_id: "admin\u{0000}\ninjection\u{FEFF}".to_string(),
+            timestamp_ms: 1000,
+        };
+
+        // Should still validate as "valid" since we preserve input for analysis
+        assert!(unicode_policy_auth.is_valid());
+
+        // Test mode downgrade with Unicode injection in authorization
+        let result3 = gate.switch_mode(AssuranceMode::Standard, Some(&unicode_policy_auth));
+        assert!(result3.is_ok()); // Should succeed since auth is technically valid
+
+        // Path traversal injection in artifact ID
+        let path_traversal_id = "../../../etc/passwd\0\nmalicious_path";
+        let result4 = gate.evaluate(path_traversal_id, ObjectClass::ConfigObject, Some(&bundle));
+        assert!(result4.is_ok());
+
+        // Verify counters updated correctly despite Unicode attacks
+        assert_eq!(gate.approvals(), 4);
+    }
+
+    #[test]
+    fn negative_proof_bundle_forgery_and_manipulation_attacks() {
+        let mut gate = HighAssuranceGate::high_assurance();
+
+        // Test proof bundle with contradictory states (logical impossibility)
+        let contradictory_bundle = ProofBundle {
+            has_proof_chain: true,
+            has_integrity_proof: false, // Contradiction: chain implies integrity
+            has_integrity_hash: false,  // Another contradiction
+            has_schema_proof: true,
+        };
+
+        // Should still check against requirements regardless of internal contradictions
+        let result = gate.evaluate("contradictory", ObjectClass::CriticalMarker, Some(&contradictory_bundle));
+        assert!(result.is_ok()); // has_proof_chain=true satisfies FullProofChain
+
+        // Test edge case: all proofs false but claim to be "full"
+        let fake_full_bundle = ProofBundle {
+            has_proof_chain: false,
+            has_integrity_proof: false,
+            has_integrity_hash: false,
+            has_schema_proof: false,
+        };
+
+        let result2 = gate.evaluate("fake_full", ObjectClass::CriticalMarker, Some(&fake_full_bundle));
+        assert!(result2.is_err()); // Should fail - no actual proof
+
+        // Test proof requirement bypassing attempts for each class
+        let hash_only_bundle = ProofBundle {
+            has_proof_chain: false,
+            has_integrity_proof: false,
+            has_integrity_hash: true,
+            has_schema_proof: false,
+        };
+
+        // Try to use hash-only for classes that require more
+        let bypass_attempts = vec![
+            (ObjectClass::CriticalMarker, ProofRequirement::FullProofChain),
+            (ObjectClass::StateObject, ProofRequirement::IntegrityProof),
+            (ObjectClass::ConfigObject, ProofRequirement::SchemaProof),
+        ];
+
+        for (class, expected_req) in bypass_attempts {
+            let result = gate.evaluate(
+                &format!("bypass_{}", class.label()),
+                class,
+                Some(&hash_only_bundle)
+            );
+
+            if class == ObjectClass::TelemetryArtifact {
+                assert!(result.is_ok()); // This class only needs IntegrityHash
+            } else {
+                assert!(result.is_err()); // Others should fail
+                if let Err(PromotionDenialReason::ProofBundleInsufficient { required, .. }) = result {
+                    assert_eq!(required, expected_req);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn negative_counter_overflow_and_arithmetic_boundary_attacks() {
+        let mut gate = HighAssuranceGate::high_assurance();
+        let bundle = ProofBundle::full();
+
+        // Test approval counter near overflow boundary
+        gate.approvals = u64::MAX - 5;
+        for i in 0..10 {
+            let result = gate.evaluate(&format!("overflow_test_{}", i), ObjectClass::CriticalMarker, Some(&bundle));
+            assert!(result.is_ok());
+        }
+
+        // Verify saturating arithmetic prevented overflow
+        assert_eq!(gate.approvals(), u64::MAX);
+
+        // Reset and test denial counter overflow
+        let mut denial_gate = HighAssuranceGate::high_assurance();
+        denial_gate.denials = u64::MAX - 3;
+
+        for i in 0..8 {
+            let result = denial_gate.evaluate(&format!("denial_overflow_{}", i), ObjectClass::CriticalMarker, None);
+            assert!(result.is_err());
+        }
+
+        // Verify denials saturated correctly
+        assert_eq!(denial_gate.denials(), u64::MAX);
+
+        // Test mode_changes counter overflow
+        let mut mode_gate = HighAssuranceGate::standard();
+        mode_gate.mode_changes = u64::MAX - 2;
+
+        let auth = PolicyAuthorization {
+            policy_ref: "POL-001".to_string(),
+            authorizer_id: "admin".to_string(),
+            timestamp_ms: 1000,
+        };
+
+        // Multiple mode switches to test overflow protection
+        for _ in 0..5 {
+            let _ = mode_gate.switch_mode(AssuranceMode::HighAssurance, None);
+            let _ = mode_gate.switch_mode(AssuranceMode::Standard, Some(&auth));
+        }
+
+        assert_eq!(mode_gate.mode_changes(), u64::MAX);
+
+        // Test arithmetic edge cases with zero values
+        let mut zero_gate = HighAssuranceGate::high_assurance();
+        assert_eq!(zero_gate.approvals(), 0);
+        assert_eq!(zero_gate.denials(), 0);
+        assert_eq!(zero_gate.mode_changes(), 0);
+
+        // Verify operations work correctly from zero state
+        let _ = zero_gate.evaluate("zero_test", ObjectClass::CriticalMarker, None);
+        assert_eq!(zero_gate.denials(), 1);
+    }
+
+    #[test]
+    fn negative_policy_authorization_bypass_and_forgery_attacks() {
+        let mut gate = HighAssuranceGate::high_assurance();
+
+        // Test authorization with malicious field injections
+        let malicious_auth = PolicyAuthorization {
+            policy_ref: "POL-001\0DROP TABLE policies;\nGRANT ALL".to_string(),
+            authorizer_id: "admin'; DELETE FROM users; --".to_string(),
+            timestamp_ms: u64::MAX, // Extreme timestamp
+        };
+
+        // Should be considered "valid" since fields are non-empty
+        assert!(malicious_auth.is_valid());
+
+        let result = gate.switch_mode(AssuranceMode::Standard, Some(&malicious_auth));
+        assert!(result.is_ok()); // Dangerous but technically valid auth
+
+        // Test authorization bypass with whitespace manipulation
+        let whitespace_auth = PolicyAuthorization {
+            policy_ref: "\n\t\r POL-001 \t\n".to_string(),
+            authorizer_id: "\u{00A0}\u{2000}\u{2001}admin\u{2028}".to_string(), // Unicode whitespace
+            timestamp_ms: 1,
+        };
+
+        assert!(whitespace_auth.is_valid()); // Non-empty after trim
+
+        // Test timestamp manipulation attacks
+        let timestamp_attacks = vec![
+            PolicyAuthorization {
+                policy_ref: "POL-001".to_string(),
+                authorizer_id: "admin".to_string(),
+                timestamp_ms: 0, // Should be invalid
+            },
+            PolicyAuthorization {
+                policy_ref: "POL-001".to_string(),
+                authorizer_id: "admin".to_string(),
+                timestamp_ms: u64::MAX - 1, // Near overflow
+            },
+            PolicyAuthorization {
+                policy_ref: "POL-001".to_string(),
+                authorizer_id: "admin".to_string(),
+                timestamp_ms: 1, // Minimal valid timestamp
+            },
+        ];
+
+        for (i, auth) in timestamp_attacks.iter().enumerate() {
+            let is_zero = auth.timestamp_ms == 0;
+            assert_eq!(!auth.is_valid(), is_zero); // Only zero timestamp should be invalid
+
+            let mut test_gate = HighAssuranceGate::high_assurance();
+            let result = test_gate.switch_mode(AssuranceMode::Standard, Some(auth));
+
+            if is_zero {
+                assert!(result.is_err());
+                assert!(matches!(result, Err(PromotionDenialReason::UnauthorizedModeDowngrade { .. })));
+            } else {
+                assert!(result.is_ok());
+            }
+        }
+
+        // Test authorization field length attacks
+        let long_field_auth = PolicyAuthorization {
+            policy_ref: "A".repeat(100_000), // Very long policy reference
+            authorizer_id: "B".repeat(100_000), // Very long authorizer ID
+            timestamp_ms: 1000,
+        };
+
+        assert!(long_field_auth.is_valid());
+
+        let mut long_gate = HighAssuranceGate::high_assurance();
+        let result = long_gate.switch_mode(AssuranceMode::Standard, Some(&long_field_auth));
+        assert!(result.is_ok()); // Should handle long strings gracefully
+    }
+
+    #[test]
+    fn negative_concurrent_access_safety_and_race_conditions() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let gate = Arc::new(Mutex::new(HighAssuranceGate::high_assurance()));
+        let mut handles = vec![];
+
+        // Spawn threads performing concurrent evaluations and mode switches
+        for thread_id in 0..8 {
+            let gate_clone = Arc::clone(&gate);
+            let handle = thread::spawn(move || {
+                let bundle = ProofBundle::full();
+                let auth = PolicyAuthorization {
+                    policy_ref: format!("POL-{:03}", thread_id),
+                    authorizer_id: format!("admin_{}", thread_id),
+                    timestamp_ms: 1000 + thread_id as u64,
+                };
+
+                for op_id in 0..100 {
+                    let mut gate = gate_clone.lock().unwrap();
+
+                    // Concurrent evaluations
+                    let artifact_id = format!("thread_{}_artifact_{}", thread_id, op_id);
+                    let _ = gate.evaluate(&artifact_id, ObjectClass::CriticalMarker, Some(&bundle));
+
+                    // Some denials mixed in
+                    if op_id % 10 == 0 {
+                        let _ = gate.evaluate(&artifact_id, ObjectClass::CriticalMarker, None);
+                    }
+
+                    // Concurrent mode switches (should be safe due to lock)
+                    if op_id % 20 == 0 {
+                        let _ = gate.switch_mode(AssuranceMode::Standard, Some(&auth));
+                        let _ = gate.switch_mode(AssuranceMode::HighAssurance, None);
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify final state consistency
+        let final_gate = gate.lock().unwrap();
+        let total_approvals = final_gate.approvals();
+        let total_denials = final_gate.denials();
+        let total_mode_changes = final_gate.mode_changes();
+
+        // Should have reasonable totals from 8 threads * 100 ops each
+        assert!(total_approvals > 0);
+        assert!(total_denials > 0); // Some should have failed
+        assert!(total_mode_changes > 0); // Some mode switches should have occurred
+
+        // Verify no counter overflow occurred
+        assert!(total_approvals <= 8 * 100);
+        assert!(total_denials <= 8 * 10); // Max 10 denials per thread
+    }
+
+    #[test]
+    fn negative_json_serialization_injection_and_corruption_attacks() {
+        let gate = HighAssuranceGate::high_assurance();
+        let matrix = gate.promotion_matrix();
+
+        // Test JSON output for injection vulnerabilities
+        for entry in &matrix {
+            let json = entry.to_json();
+
+            // Verify JSON is well-formed (no injection)
+            assert!(json.starts_with('{'));
+            assert!(json.ends_with('}'));
+            assert!(json.contains("object_class"));
+            assert!(json.contains("assurance_mode"));
+            assert!(json.contains("proof_required"));
+            assert!(json.contains("proof_requirement"));
+
+            // Verify no unescaped control characters
+            assert!(!json.contains('\0'));
+            assert!(!json.contains('\n'));
+            assert!(!json.contains('\r'));
+            assert!(!json.contains('\t'));
+        }
+
+        // Test with crafted object class names (simulate if they could be injected)
+        let malicious_entry = PromotionMatrixEntry {
+            object_class: ObjectClass::CriticalMarker, // Would be "critical_marker" in JSON
+            assurance_mode: AssuranceMode::HighAssurance,
+            proof_required: true,
+            proof_requirement: Some(ProofRequirement::FullProofChain),
+        };
+
+        let json = malicious_entry.to_json();
+
+        // Verify proper JSON escaping and structure
+        assert!(json.contains("\"critical_marker\""));
+        assert!(json.contains("\"high_assurance\""));
+        assert!(json.contains("\"full_proof_chain\""));
+        assert!(json.contains("true"));
+
+        // Test edge cases in JSON generation
+        let edge_cases = vec![
+            PromotionMatrixEntry {
+                object_class: ObjectClass::TelemetryArtifact,
+                assurance_mode: AssuranceMode::Standard,
+                proof_required: false,
+                proof_requirement: None, // null in JSON
+            },
+            PromotionMatrixEntry {
+                object_class: ObjectClass::ConfigObject,
+                assurance_mode: AssuranceMode::HighAssurance,
+                proof_required: true,
+                proof_requirement: Some(ProofRequirement::SchemaProof),
+            },
+        ];
+
+        for entry in edge_cases {
+            let json = entry.to_json();
+
+            if entry.proof_requirement.is_none() {
+                assert!(json.contains("null"));
+            } else {
+                assert!(!json.contains("null"));
+                assert!(json.contains("\"schema_proof\""));
+            }
+
+            // Verify boolean serialization
+            if entry.proof_required {
+                assert!(json.contains("true"));
+            } else {
+                assert!(json.contains("false"));
+            }
+        }
+    }
+
+    #[test]
+    fn negative_mode_switching_state_corruption_and_bypass_attempts() {
+        let mut gate = HighAssuranceGate::high_assurance();
+
+        // Verify initial state
+        assert_eq!(gate.mode(), AssuranceMode::HighAssurance);
+        assert_eq!(gate.mode_changes(), 0);
+
+        // Test rapid mode switching to detect state corruption
+        let auth = PolicyAuthorization {
+            policy_ref: "POL-RAPID".to_string(),
+            authorizer_id: "admin".to_string(),
+            timestamp_ms: 1000,
+        };
+
+        for i in 0..1000 {
+            let target_mode = if i % 2 == 0 {
+                AssuranceMode::Standard
+            } else {
+                AssuranceMode::HighAssurance
+            };
+
+            let auth_opt = if target_mode == AssuranceMode::Standard {
+                Some(&auth)
+            } else {
+                None
+            };
+
+            let result = gate.switch_mode(target_mode, auth_opt);
+            assert!(result.is_ok());
+            assert_eq!(gate.mode(), target_mode);
+        }
+
+        // Verify mode changes counter tracked correctly
+        assert_eq!(gate.mode_changes(), 999); // 1000 switches, but first was HighAssurance->Standard
+
+        // Test concurrent evaluation during mode switching vulnerability window
+        let bundle = ProofBundle::empty();
+
+        // Switch to standard mode
+        let _ = gate.switch_mode(AssuranceMode::Standard, Some(&auth));
+
+        // Evaluation should use current mode (Standard = no proof required)
+        let result = gate.evaluate("during_switch", ObjectClass::CriticalMarker, Some(&bundle));
+        assert!(result.is_ok()); // Standard mode allows empty bundle
+
+        // Switch back to high assurance
+        let _ = gate.switch_mode(AssuranceMode::HighAssurance, None);
+
+        // Same bundle should now be rejected
+        let result2 = gate.evaluate("after_switch", ObjectClass::CriticalMarker, Some(&bundle));
+        assert!(result2.is_err()); // HighAssurance mode rejects empty bundle
+
+        // Test invalid authorization replay attacks
+        let used_auth = PolicyAuthorization {
+            policy_ref: "POL-USED".to_string(),
+            authorizer_id: "admin".to_string(),
+            timestamp_ms: 500, // Earlier timestamp
+        };
+
+        // Should still work (no timestamp ordering enforced)
+        let result3 = gate.switch_mode(AssuranceMode::Standard, Some(&used_auth));
+        assert!(result3.is_ok());
+
+        // Test authorization with extreme edge values
+        let edge_auth = PolicyAuthorization {
+            policy_ref: "A".to_string(), // Single character
+            authorizer_id: "B".to_string(), // Single character
+            timestamp_ms: 1, // Minimum valid timestamp
+        };
+
+        let result4 = gate.switch_mode(AssuranceMode::HighAssurance, None);
+        assert!(result4.is_ok());
+
+        let result5 = gate.switch_mode(AssuranceMode::Standard, Some(&edge_auth));
+        assert!(result5.is_ok()); // Should accept minimal valid auth
+    }
+
+    #[test]
+    fn negative_proof_requirement_logic_bypass_and_class_confusion_attacks() {
+        let mut gate = HighAssuranceGate::high_assurance();
+
+        // Test class confusion attacks - using wrong proof for different classes
+        let proofs_by_type = vec![
+            ("full_chain", ProofBundle {
+                has_proof_chain: true,
+                has_integrity_proof: false,
+                has_integrity_hash: false,
+                has_schema_proof: false,
+            }),
+            ("integrity_proof", ProofBundle {
+                has_proof_chain: false,
+                has_integrity_proof: true,
+                has_integrity_hash: false,
+                has_schema_proof: false,
+            }),
+            ("integrity_hash", ProofBundle {
+                has_proof_chain: false,
+                has_integrity_proof: false,
+                has_integrity_hash: true,
+                has_schema_proof: false,
+            }),
+            ("schema_proof", ProofBundle {
+                has_proof_chain: false,
+                has_integrity_proof: false,
+                has_integrity_hash: false,
+                has_schema_proof: true,
+            }),
+        ];
+
+        // Test each proof type against each object class
+        for (proof_name, bundle) in &proofs_by_type {
+            for &class in ObjectClass::all() {
+                let artifact_id = format!("{}_{}", proof_name, class.label());
+                let result = gate.evaluate(&artifact_id, class, Some(bundle));
+
+                let expected_requirement = proof_requirement_for(class);
+                let should_succeed = bundle.satisfies(expected_requirement);
+
+                if should_succeed {
+                    assert!(result.is_ok(), "Expected success for {} with {} proof", class.label(), proof_name);
+                } else {
+                    assert!(result.is_err(), "Expected failure for {} with {} proof", class.label(), proof_name);
+
+                    if let Err(PromotionDenialReason::ProofBundleInsufficient { required, .. }) = result {
+                        assert_eq!(required, expected_requirement);
+                    }
+                }
+            }
+        }
+
+        // Test proof requirement enumeration completeness
+        let all_requirements = vec![
+            ProofRequirement::FullProofChain,
+            ProofRequirement::IntegrityProof,
+            ProofRequirement::IntegrityHash,
+            ProofRequirement::SchemaProof,
+        ];
+
+        for requirement in &all_requirements {
+            // Each requirement should have a non-empty label
+            assert!(!requirement.label().is_empty());
+
+            // Each requirement should have a valid Display implementation
+            let display_str = requirement.to_string();
+            assert!(!display_str.is_empty());
+            assert_eq!(display_str, requirement.label());
+        }
+
+        // Test mapping coverage - every object class should map to a requirement
+        for &class in ObjectClass::all() {
+            let requirement = proof_requirement_for(class);
+            assert!(all_requirements.contains(&requirement));
+        }
+
+        // Test proof bundle satisfies logic edge cases
+        let contradictory_bundle = ProofBundle {
+            has_proof_chain: true,    // Should imply others are also true
+            has_integrity_proof: false, // But they're false - logical inconsistency
+            has_integrity_hash: false,
+            has_schema_proof: false,
+        };
+
+        // Each requirement should be checked independently
+        assert!(contradictory_bundle.satisfies(ProofRequirement::FullProofChain));
+        assert!(!contradictory_bundle.satisfies(ProofRequirement::IntegrityProof));
+        assert!(!contradictory_bundle.satisfies(ProofRequirement::IntegrityHash));
+        assert!(!contradictory_bundle.satisfies(ProofRequirement::SchemaProof));
+    }
 }

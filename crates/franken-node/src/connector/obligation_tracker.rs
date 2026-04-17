@@ -957,8 +957,12 @@ impl Drop for ObligationGuard {
 
 /// Push an item to a bounded Vec, evicting oldest entries if at capacity.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
+    if max == 0 {
+        vec.clear();
+        return;
+    }
     if vec.len() >= max {
-        let overflow = vec.len() - max + 1;
+        let overflow = vec.len().saturating_sub(max).saturating_add(1);
         vec.drain(0..overflow);
     }
     vec.push(item);
@@ -1722,6 +1726,183 @@ mod tests {
         // Check audit log shows drop was skipped
         let audit_json = t.export_audit_log_jsonl();
         assert!(audit_json.contains("OBL-006")); // OBL_DROP_SKIPPED
+    }
+
+    #[test]
+    fn push_bounded_zero_capacity_clears_without_appending_audit_record() {
+        let mut audit = vec![ObligationAuditRecord {
+            event_code: event_codes::OBL_RESERVED.to_string(),
+            obligation_id: "obl-old".into(),
+            flow: "publish".into(),
+            state: "Reserved".into(),
+            trace_id: "trace-old".into(),
+            schema_version: SCHEMA_VERSION.to_string(),
+            detail: "old".into(),
+        }];
+        let replacement = ObligationAuditRecord {
+            event_code: event_codes::OBL_COMMITTED.to_string(),
+            obligation_id: "obl-new".into(),
+            flow: "publish".into(),
+            state: "Committed".into(),
+            trace_id: "trace-new".into(),
+            schema_version: SCHEMA_VERSION.to_string(),
+            detail: "new".into(),
+        };
+
+        push_bounded(&mut audit, replacement, 0);
+
+        assert!(audit.is_empty());
+    }
+
+    #[test]
+    fn push_bounded_overfull_scan_results_keeps_newest_entries() {
+        let mut scans = vec![
+            LeakScanResult {
+                scanned: 1,
+                leaked: 0,
+                leaked_ids: Vec::new(),
+                scan_at_ms: 1,
+                schema_version: SCHEMA_VERSION.to_string(),
+            },
+            LeakScanResult {
+                scanned: 2,
+                leaked: 0,
+                leaked_ids: Vec::new(),
+                scan_at_ms: 2,
+                schema_version: SCHEMA_VERSION.to_string(),
+            },
+            LeakScanResult {
+                scanned: 3,
+                leaked: 0,
+                leaked_ids: Vec::new(),
+                scan_at_ms: 3,
+                schema_version: SCHEMA_VERSION.to_string(),
+            },
+        ];
+        let newest = LeakScanResult {
+            scanned: 4,
+            leaked: 0,
+            leaked_ids: Vec::new(),
+            scan_at_ms: 4,
+            schema_version: SCHEMA_VERSION.to_string(),
+        };
+
+        push_bounded(&mut scans, newest, 2);
+
+        assert_eq!(scans.len(), 2);
+        assert_eq!(scans[0].scan_at_ms, 3);
+        assert_eq!(scans[1].scan_at_ms, 4);
+    }
+
+    #[test]
+    fn try_reserve_zero_flow_budget_rejects_without_audit_or_obligation() {
+        let mut t = ObligationTracker::with_flow_budget(0);
+
+        let err = t
+            .try_reserve(ObligationFlow::Publish, vec![], 1_000, "trace-budget-zero")
+            .unwrap_err();
+
+        assert_eq!(err, error_codes::ERR_OBL_BUDGET_EXCEEDED);
+        assert_eq!(t.total_obligations(), 0);
+        assert_eq!(t.audit_log_count(), 0);
+    }
+
+    #[test]
+    fn commit_after_leak_scan_is_rejected_without_changing_leaked_state() {
+        let mut t = ObligationTracker::with_leak_timeout(1);
+        let id = reserve_ok(&mut t, ObligationFlow::Publish, vec![], 1_000, "trace-leak");
+        t.run_leak_scan(2_000, "trace-scan");
+        let audit_before = t.audit_log_count();
+
+        let err = t.commit(&id, 2_100, "trace-commit").unwrap_err();
+
+        assert_eq!(err, error_codes::ERR_OBL_ALREADY_ROLLED_BACK);
+        let obligation = t.get_obligation(&id).unwrap();
+        assert_eq!(obligation.state, ObligationState::Leaked);
+        assert_eq!(obligation.resolved_at_ms, Some(2_000));
+        assert_eq!(t.audit_log_count(), audit_before);
+    }
+
+    #[test]
+    fn rollback_after_leak_scan_is_idempotent_without_new_audit() {
+        let mut t = ObligationTracker::with_leak_timeout(1);
+        let id = reserve_ok(
+            &mut t,
+            ObligationFlow::Migration,
+            vec![],
+            1_000,
+            "trace-leak",
+        );
+        t.run_leak_scan(2_000, "trace-scan");
+        let audit_before = t.audit_log_count();
+
+        t.rollback(&id, 2_100, "trace-rollback").unwrap();
+
+        let obligation = t.get_obligation(&id).unwrap();
+        assert_eq!(obligation.state, ObligationState::Leaked);
+        assert_eq!(obligation.resolved_at_ms, Some(2_000));
+        assert_eq!(t.audit_log_count(), audit_before);
+    }
+
+    #[test]
+    fn guard_commit_after_external_rollback_returns_error_without_reverting_state() {
+        let mut t = make_tracker();
+        let guard = t
+            .reserve_guard(ObligationFlow::Revoke, vec![], 1_000, "trace-guard")
+            .unwrap();
+        let id = guard.obligation_id.clone();
+        t.rollback(&id, 1_050, "trace-external-rollback").unwrap();
+        let audit_before = t.audit_log_count();
+
+        let err = guard.commit(1_100).unwrap_err();
+
+        assert_eq!(err, error_codes::ERR_OBL_ALREADY_ROLLED_BACK);
+        assert_eq!(
+            t.get_obligation(&id).unwrap().state,
+            ObligationState::RolledBack
+        );
+        assert_eq!(t.audit_log_count(), audit_before);
+    }
+
+    #[test]
+    fn guard_rollback_after_external_commit_returns_error_without_reverting_state() {
+        let mut t = make_tracker();
+        let guard = t
+            .reserve_guard(ObligationFlow::Fencing, vec![], 1_000, "trace-guard")
+            .unwrap();
+        let id = guard.obligation_id.clone();
+        t.commit(&id, 1_050, "trace-external-commit").unwrap();
+        let audit_before = t.audit_log_count();
+
+        let err = guard.rollback(1_100).unwrap_err();
+
+        assert_eq!(err, error_codes::ERR_OBL_ALREADY_COMMITTED);
+        assert_eq!(
+            t.get_obligation(&id).unwrap().state,
+            ObligationState::Committed
+        );
+        assert_eq!(t.audit_log_count(), audit_before);
+    }
+
+    #[test]
+    fn leak_scan_before_reservation_time_does_not_mark_reserved_as_leaked() {
+        let mut t = ObligationTracker::with_leak_timeout(1);
+        let id = reserve_ok(
+            &mut t,
+            ObligationFlow::Quarantine,
+            vec![],
+            5_000,
+            "trace-future",
+        );
+
+        let result = t.run_leak_scan(1_000, "trace-backwards-scan");
+
+        assert_eq!(result.leaked, 0);
+        assert_eq!(
+            t.get_obligation(&id).unwrap().state,
+            ObligationState::Reserved
+        );
+        assert_eq!(t.count_in_state(ObligationState::Leaked), 0);
     }
 }
 

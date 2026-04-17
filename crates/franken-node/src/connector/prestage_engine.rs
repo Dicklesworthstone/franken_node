@@ -195,7 +195,7 @@ pub fn evaluate_candidates(
 
         // Stage this artifact
         budget_used = budget_used.saturating_add(candidate.size_bytes);
-        staged_count += 1;
+        staged_count = staged_count.saturating_add(1);
         decisions.push(PrestageDecision {
             artifact_id: candidate.artifact_id.clone(),
             staged: true,
@@ -832,6 +832,94 @@ mod tests {
         let actual = vec!["missing-artifact".to_string()];
 
         let quality = measure_quality(&[], &actual);
+
+        assert!((quality.precision - 0.0).abs() < 1e-10);
+        assert!((quality.recall - 0.0).abs() < 1e-10);
+        assert!((quality.f1_score - 0.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn invalid_zero_budget_takes_precedence_over_empty_candidates() {
+        let cfg = PrestageConfig {
+            max_bytes: 0,
+            ..config()
+        };
+
+        let err = evaluate_candidates(&[], &cfg, "tr", "ts").unwrap_err();
+
+        assert_eq!(err.code(), "PSE_INVALID_CONFIG");
+    }
+
+    #[test]
+    fn invalid_threshold_takes_precedence_over_empty_candidates() {
+        let cfg = PrestageConfig {
+            probability_threshold: f64::NAN,
+            ..config()
+        };
+
+        let err = evaluate_candidates(&[], &cfg, "tr", "ts").unwrap_err();
+
+        assert_eq!(err.code(), "PSE_THRESHOLD_INVALID");
+    }
+
+    #[test]
+    fn threshold_one_rejects_near_miss_candidate() {
+        let cfg = PrestageConfig {
+            probability_threshold: 1.0,
+            ..config()
+        };
+        let candidates = vec![cand("almost-certain", 10, 1.0 - f64::EPSILON)];
+
+        let (decisions, report) = evaluate_candidates(&candidates, &cfg, "tr", "ts").unwrap();
+
+        assert!(!decisions[0].staged);
+        assert!(decisions[0].reason.contains("< threshold"));
+        assert_eq!(report.staged_count, 0);
+        assert_eq!(report.budget_used, 0);
+    }
+
+    #[test]
+    fn max_artifacts_skip_preserves_remaining_budget() {
+        let cfg = PrestageConfig {
+            max_artifacts_per_cycle: 1,
+            ..config()
+        };
+        let candidates = vec![cand("first", 250, 0.9), cand("limited", 250, 0.8)];
+
+        let (decisions, report) = evaluate_candidates(&candidates, &cfg, "tr", "ts").unwrap();
+
+        assert!(decisions[0].staged);
+        assert!(!decisions[1].staged);
+        assert_eq!(decisions[1].reason, "max_artifacts_per_cycle reached");
+        assert_eq!(decisions[1].budget_remaining, 750);
+        assert_eq!(report.budget_used, 250);
+    }
+
+    #[test]
+    fn exact_budget_exhaustion_rejects_next_candidate() {
+        let candidates = vec![cand("fills-budget", 1000, 0.9), cand("overflow", 1, 0.8)];
+
+        let (decisions, report) = evaluate_candidates(&candidates, &config(), "tr", "ts").unwrap();
+
+        assert!(decisions[0].staged);
+        assert!(!decisions[1].staged);
+        assert_eq!(decisions[0].budget_remaining, 0);
+        assert_eq!(decisions[1].budget_remaining, 0);
+        assert!(decisions[1].reason.contains("budget exceeded"));
+        assert_eq!(report.budget_used, 1000);
+    }
+
+    #[test]
+    fn unstaged_matching_actual_does_not_count_as_true_positive() {
+        let decisions = vec![PrestageDecision {
+            artifact_id: "needed".into(),
+            staged: false,
+            reason: "below threshold".into(),
+            budget_remaining: 1000,
+        }];
+        let actual = vec!["needed".to_string()];
+
+        let quality = measure_quality(&decisions, &actual);
 
         assert!((quality.precision - 0.0).abs() < 1e-10);
         assert!((quality.recall - 0.0).abs() < 1e-10);

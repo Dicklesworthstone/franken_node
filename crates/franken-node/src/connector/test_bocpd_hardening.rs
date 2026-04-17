@@ -339,4 +339,206 @@ mod bocpd_hardening_regression_tests {
             assert_eq!(correlator.recent_count(), 0);
         }
     }
+
+    #[test]
+    fn negative_config_rejects_nonpositive_or_nonfinite_hazard_lambda() {
+        for lambda in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut config = BocpdConfig::default();
+            config.hazard_lambda = lambda;
+
+            let err = config.validate().unwrap_err();
+
+            assert!(matches!(
+                err,
+                BocpdError::InvalidConfig(msg) if msg.contains("hazard_lambda")
+            ));
+        }
+    }
+
+    #[test]
+    fn negative_config_rejects_zero_max_run_length() {
+        let mut config = BocpdConfig::default();
+        config.max_run_length = 0;
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            BocpdError::InvalidConfig(msg) if msg.contains("max_run_length")
+        ));
+    }
+
+    #[test]
+    fn negative_config_rejects_zero_min_run_length() {
+        let mut config = BocpdConfig::default();
+        config.min_run_length = 0;
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            BocpdError::InvalidConfig(msg) if msg.contains("min_run_length")
+        ));
+    }
+
+    #[test]
+    fn negative_config_rejects_min_run_length_above_max() {
+        let mut config = BocpdConfig::default();
+        config.min_run_length = 8;
+        config.max_run_length = 7;
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            BocpdError::InvalidConfig(msg) if msg.contains("min_run_length")
+        ));
+    }
+
+    #[test]
+    fn negative_config_rejects_zero_regime_history_capacity() {
+        let mut config = BocpdConfig::default();
+        config.max_regime_history = 0;
+
+        let err = config.validate().unwrap_err();
+
+        assert!(matches!(
+            err,
+            BocpdError::InvalidConfig(msg) if msg.contains("max_regime_history")
+        ));
+    }
+
+    #[test]
+    fn negative_gaussian_detector_rejects_invalid_model_observations() {
+        let invalid_models = [
+            GaussianModel {
+                kappa0: 0.0,
+                ..GaussianModel::default()
+            },
+            GaussianModel {
+                alpha0: f64::NAN,
+                ..GaussianModel::default()
+            },
+            GaussianModel {
+                beta0: f64::NEG_INFINITY,
+                ..GaussianModel::default()
+            },
+        ];
+
+        for model in invalid_models {
+            let mut detector = BocpdDetector::new(
+                "gaussian-invalid-model",
+                BocpdConfig::default(),
+                HazardFunction::Constant { lambda: 200.0 },
+                ObservationModel::Gaussian(model),
+            )
+            .unwrap();
+
+            assert!(detector.observe(1.0, 1).is_none());
+            assert_eq!(detector.observation_count(), 0);
+            assert!(detector.events().is_empty());
+        }
+    }
+
+    #[test]
+    fn negative_poisson_detector_rejects_invalid_model_observations() {
+        let invalid_models = [
+            PoissonModel {
+                alpha0: 0.0,
+                ..PoissonModel::default()
+            },
+            PoissonModel {
+                beta0: f64::NAN,
+                ..PoissonModel::default()
+            },
+        ];
+
+        for model in invalid_models {
+            let mut detector = BocpdDetector::new(
+                "poisson-invalid-model",
+                BocpdConfig::default(),
+                HazardFunction::Constant { lambda: 200.0 },
+                ObservationModel::Poisson(model),
+            )
+            .unwrap();
+
+            assert!(detector.observe(1.0, 1).is_none());
+            assert_eq!(detector.observation_count(), 0);
+            assert!(detector.events().is_empty());
+        }
+    }
+
+    #[test]
+    fn negative_categorical_detector_rejects_invalid_model_observations() {
+        let invalid_models = [
+            CategoricalModel { k: 0, alpha0: 1.0 },
+            CategoricalModel { k: 3, alpha0: 0.0 },
+            CategoricalModel {
+                k: 3,
+                alpha0: f64::INFINITY,
+            },
+        ];
+
+        for model in invalid_models {
+            let mut detector = BocpdDetector::new(
+                "categorical-invalid-model",
+                BocpdConfig::default(),
+                HazardFunction::Constant { lambda: 200.0 },
+                ObservationModel::Categorical(model),
+            )
+            .unwrap();
+
+            assert!(detector.observe(1.0, 1).is_none());
+            assert_eq!(detector.observation_count(), 0);
+            assert!(detector.events().is_empty());
+        }
+    }
+
+    fn valid_shift(stream_name: &str, timestamp: u64) -> RegimeShift {
+        RegimeShift {
+            stream_name: stream_name.to_string(),
+            timestamp,
+            confidence: 0.8,
+            run_length: 5,
+            old_regime_mean: 1.0,
+            new_regime_mean: 2.0,
+        }
+    }
+
+    #[test]
+    fn negative_correlator_rejects_whitespace_stream_names() {
+        for stream_name in ["bad stream", "bad\tstream", "\nstream", "stream\n"] {
+            let mut correlator = MultiStreamCorrelator::new(60);
+
+            assert!(
+                correlator
+                    .record_shift(valid_shift(stream_name, 10))
+                    .is_empty()
+            );
+            assert_eq!(correlator.recent_count(), 0);
+        }
+    }
+
+    #[test]
+    fn negative_correlator_rejects_confidence_outside_unit_interval() {
+        for confidence in [-0.01, 1.01, f64::INFINITY] {
+            let mut shift = valid_shift("bad-confidence-range", 10);
+            shift.confidence = confidence;
+            let mut correlator = MultiStreamCorrelator::new(60);
+
+            assert!(correlator.record_shift(shift).is_empty());
+            assert_eq!(correlator.recent_count(), 0);
+        }
+    }
+
+    #[test]
+    fn negative_correlator_drops_prior_shift_outside_window() {
+        let mut correlator = MultiStreamCorrelator::new(60);
+
+        assert!(correlator.record_shift(valid_shift("stream-a", 100)).is_empty());
+        let correlated = correlator.record_shift(valid_shift("stream-b", 161));
+
+        assert!(correlated.is_empty());
+        assert_eq!(correlator.recent_count(), 1);
+    }
 }

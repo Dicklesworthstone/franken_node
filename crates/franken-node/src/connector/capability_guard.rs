@@ -1743,12 +1743,13 @@ mod tests {
     #[test]
     fn negative_capability_profile_with_massive_field_lengths() {
         // Test capability profile with extremely large field values
-        let huge_subsystem = "s".repeat(1_000_000);    // 1MB subsystem name
-        let huge_version = "v".repeat(500_000);        // 500KB version string
-        let huge_capability = "c".repeat(250_000);     // 250KB capability name
+        let huge_subsystem = "s".repeat(1_000_000); // 1MB subsystem name
+        let huge_version = "v".repeat(500_000); // 500KB version string
+        let huge_capability = "c".repeat(250_000); // 250KB capability name
         let huge_justification = "j".repeat(2_000_000); // 2MB justification
 
-        let mut profile = CapabilityProfile::new(&huge_subsystem, &huge_version, RiskLevel::Critical);
+        let mut profile =
+            CapabilityProfile::new(&huge_subsystem, &huge_version, RiskLevel::Critical);
 
         let start = std::time::Instant::now();
         profile.add_capability(&huge_capability, &huge_justification);
@@ -1773,18 +1774,18 @@ mod tests {
     fn negative_capability_name_with_unicode_and_injection_attacks() {
         // Test various Unicode and injection attacks in capability names
         let malicious_capabilities = vec![
-            "cap\u{202E}fake:fs:read\u{202D}",          // Unicode BiDi override
-            "cap:fs\u{00A0}nonbreaking:read",           // Non-breaking space
-            "cap:fs\u{200B}zerowidth:read",             // Zero-width space
-            "cap:fs\u{FEFF}bom:read",                    // BOM character
-            "cap:fs\u{0000}null:read",                   // Null byte
-            "cap:fs\x1F\x1E\x1D:read",                  // Control characters
-            "cap/../../../etc/passwd",                   // Path traversal
-            "cap:fs'; DROP TABLE caps; --:read",        // SQL injection attempt
-            "cap:<script>alert('xss')</script>:read",   // XSS attempt
-            "cap:fs|nc attacker.com:read",              // Command injection
-            "\u{1F4A9}cap:fs:read",                     // Emoji prefix
-            "cap:café\u{0301}:read",                    // NFD normalization
+            "cap\u{202E}fake:fs:read\u{202D}",        // Unicode BiDi override
+            "cap:fs\u{00A0}nonbreaking:read",         // Non-breaking space
+            "cap:fs\u{200B}zerowidth:read",           // Zero-width space
+            "cap:fs\u{FEFF}bom:read",                 // BOM character
+            "cap:fs\u{0000}null:read",                // Null byte
+            "cap:fs\x1F\x1E\x1D:read",                // Control characters
+            "cap/../../../etc/passwd",                // Path traversal
+            "cap:fs'; DROP TABLE caps; --:read",      // SQL injection attempt
+            "cap:<script>alert('xss')</script>:read", // XSS attempt
+            "cap:fs|nc attacker.com:read",            // Command injection
+            "\u{1F4A9}cap:fs:read",                   // Emoji prefix
+            "cap:café\u{0301}:read",                  // NFD normalization
         ];
 
         for malicious_cap in malicious_capabilities {
@@ -1803,7 +1804,11 @@ mod tests {
             assert!(profile.has_capability(&malicious_cap));
             let errors = profile.validate();
             assert!(!errors.is_empty());
-            assert!(errors.iter().all(|e| matches!(e, CapabilityGuardError::UndeclaredCapability { .. })));
+            assert!(
+                errors
+                    .iter()
+                    .all(|e| matches!(e, CapabilityGuardError::UndeclaredCapability { .. }))
+            );
         }
     }
 
@@ -1811,32 +1816,36 @@ mod tests {
     fn negative_risk_level_exhaustive_boundary_and_injection_testing() {
         // Test RiskLevel::from_label with comprehensive invalid inputs
         let invalid_risk_levels = vec![
-            "",                                    // Empty
-            " ",                                   // Whitespace only
-            "Low",                                 // Wrong case
-            "HIGH",                                // Wrong case
-            " low",                                // Leading space
-            "low ",                                // Trailing space
-            "\tlow",                               // Tab prefix
-            "low\n",                               // Newline suffix
-            "medium\x00",                          // Null byte
-            "high\u{202E}override\u{202D}",       // BiDi override
-            "critical\u{200B}invisible",          // Zero-width space
-            "lowmedium",                           // Concatenated
-            "low-medium",                          // Hyphenated
-            "undefined",                           // Different word
-            "0",                                   // Numeric
-            "true",                                // Boolean string
-            "null",                                // Null string
-            "{'level':'low'}",                     // JSON-like
-            "<level>low</level>",                  // XML-like
-            "../../../etc/passwd",                // Path traversal
-            "'; DROP TABLE risks; --",            // SQL injection
+            "",                             // Empty
+            " ",                            // Whitespace only
+            "Low",                          // Wrong case
+            "HIGH",                         // Wrong case
+            " low",                         // Leading space
+            "low ",                         // Trailing space
+            "\tlow",                        // Tab prefix
+            "low\n",                        // Newline suffix
+            "medium\x00",                   // Null byte
+            "high\u{202E}override\u{202D}", // BiDi override
+            "critical\u{200B}invisible",    // Zero-width space
+            "lowmedium",                    // Concatenated
+            "low-medium",                   // Hyphenated
+            "undefined",                    // Different word
+            "0",                            // Numeric
+            "true",                         // Boolean string
+            "null",                         // Null string
+            "{'level':'low'}",              // JSON-like
+            "<level>low</level>",           // XML-like
+            "../../../etc/passwd",          // Path traversal
+            "'; DROP TABLE risks; --",      // SQL injection
         ];
 
         for invalid_level in invalid_risk_levels {
             let result = RiskLevel::from_label(invalid_level);
-            assert!(result.is_none(), "Invalid risk level '{}' should return None", invalid_level);
+            assert!(
+                result.is_none(),
+                "Invalid risk level '{}' should return None",
+                invalid_level
+            );
         }
 
         // Test that valid levels still work exactly
@@ -1849,7 +1858,12 @@ mod tests {
         assert!(RiskLevel::Low < RiskLevel::Critical);
         assert!(RiskLevel::Critical > RiskLevel::Low);
 
-        let all_levels = vec![RiskLevel::Low, RiskLevel::Medium, RiskLevel::High, RiskLevel::Critical];
+        let all_levels = vec![
+            RiskLevel::Low,
+            RiskLevel::Medium,
+            RiskLevel::High,
+            RiskLevel::Critical,
+        ];
         for i in 0..all_levels.len() {
             for j in 0..all_levels.len() {
                 if i < j {
@@ -2020,7 +2034,12 @@ mod tests {
                     p.add_capability("cap:crypto:sign", "sign data");
                 },
                 vec!["cap:process:spawn", "cap:crypto:sign"],
-                vec!["cap:fs:read", "cap:fs:write", "cap:crypto:verify", "cap:network:connect"],
+                vec![
+                    "cap:fs:read",
+                    "cap:fs:write",
+                    "cap:crypto:verify",
+                    "cap:network:connect",
+                ],
             ),
         ];
 
@@ -2030,27 +2049,51 @@ mod tests {
             modifier(&mut new_profile);
 
             let change = ProfileChange::detect(&old_profile, &new_profile);
-            assert!(change.is_some(), "Change should be detected for: {}", description);
+            assert!(
+                change.is_some(),
+                "Change should be detected for: {}",
+                description
+            );
 
             let change = change.unwrap();
             assert_eq!(change.old_version, "1.0.0");
             assert_eq!(change.new_version, "2.0.0");
-            assert!(change.requires_review, "Change should require review: {}", description);
+            assert!(
+                change.requires_review,
+                "Change should require review: {}",
+                description
+            );
 
             // Verify added capabilities
-            assert_eq!(change.added.len(), expected_added.len(),
-                      "Added count mismatch for: {}", description);
+            assert_eq!(
+                change.added.len(),
+                expected_added.len(),
+                "Added count mismatch for: {}",
+                description
+            );
             for expected in &expected_added {
-                assert!(change.added.contains(&expected.to_string()),
-                       "Missing added capability '{}' for: {}", expected, description);
+                assert!(
+                    change.added.contains(&expected.to_string()),
+                    "Missing added capability '{}' for: {}",
+                    expected,
+                    description
+                );
             }
 
             // Verify removed capabilities
-            assert_eq!(change.removed.len(), expected_removed.len(),
-                      "Removed count mismatch for: {}", description);
+            assert_eq!(
+                change.removed.len(),
+                expected_removed.len(),
+                "Removed count mismatch for: {}",
+                description
+            );
             for expected in &expected_removed {
-                assert!(change.removed.contains(&expected.to_string()),
-                       "Missing removed capability '{}' for: {}", expected, description);
+                assert!(
+                    change.removed.contains(&expected.to_string()),
+                    "Missing removed capability '{}' for: {}",
+                    expected,
+                    description
+                );
             }
         }
     }
@@ -2064,20 +2107,23 @@ mod tests {
 
         // Test various malformed timestamp formats
         let malformed_timestamps = vec![
-            "",                                    // Empty
-            "not-a-timestamp",                     // Invalid format
-            "2026-02-31T25:61:61Z",               // Invalid date/time
-            "2026\x0002\x0021T00:00:00Z",        // Null bytes
-            "2026-02-21T00:00:00Z\n<script>",     // Injection attempt
+            "",                                     // Empty
+            "not-a-timestamp",                      // Invalid format
+            "2026-02-31T25:61:61Z",                 // Invalid date/time
+            "2026\x0002\x0021T00:00:00Z",           // Null bytes
+            "2026-02-21T00:00:00Z\n<script>",       // Injection attempt
             "\u{202E}Z00:00:00T12-20-6202\u{202D}", // BiDi override
-            "9".repeat(1000),                      // Extremely long
-            "\u{1F4A9}2026-02-21T00:00:00Z",     // Emoji prefix
+            "9".repeat(1000),                       // Extremely long
+            "\u{1F4A9}2026-02-21T00:00:00Z",        // Emoji prefix
         ];
 
         for timestamp in malformed_timestamps {
             // Should handle malformed timestamps gracefully - store literally in audit
             let result = guard.check_capability("time_test_sub", "cap:fs:read", timestamp);
-            assert!(result.is_ok(), "Capability check should succeed regardless of timestamp format");
+            assert!(
+                result.is_ok(),
+                "Capability check should succeed regardless of timestamp format"
+            );
 
             // Timestamp should be stored literally in audit trail
             let audit_entry = guard.audit_trail().last().unwrap();
@@ -2140,13 +2186,19 @@ mod tests {
         }
 
         // Verify specific profile characteristics that shouldn't change
-        let trust_fabric = profiles1.iter().find(|p| p.subsystem == "trust_fabric").unwrap();
+        let trust_fabric = profiles1
+            .iter()
+            .find(|p| p.subsystem == "trust_fabric")
+            .unwrap();
         assert!(trust_fabric.has_capability("cap:trust:read"));
         assert!(trust_fabric.has_capability("cap:trust:write"));
         assert!(trust_fabric.has_capability("cap:network:connect"));
         assert_eq!(trust_fabric.risk_level, RiskLevel::High);
 
-        let artifact_signing = profiles1.iter().find(|p| p.subsystem == "artifact_signing").unwrap();
+        let artifact_signing = profiles1
+            .iter()
+            .find(|p| p.subsystem == "artifact_signing")
+            .unwrap();
         assert!(artifact_signing.has_capability("cap:crypto:sign"));
         assert!(artifact_signing.has_capability("cap:crypto:derive"));
         assert_eq!(artifact_signing.risk_level, RiskLevel::Critical);
@@ -2164,18 +2216,21 @@ mod tests {
     fn negative_push_bounded_edge_cases_with_various_capacities() {
         // Test push_bounded with various edge case capacity values
         let test_cases = vec![
-            (0, vec!["existing"], "new", vec![]),                    // Zero capacity
-            (1, vec![], "new", vec!["new"]),                        // Minimal capacity, empty
-            (1, vec!["old"], "new", vec!["new"]),                   // Minimal capacity, replacement
-            (2, vec!["a", "b"], "c", vec!["b", "c"]),               // Exact capacity, eviction
-            (10, vec![], "new", vec!["new"]),                       // Large capacity, single item
+            (0, vec!["existing"], "new", vec![]),     // Zero capacity
+            (1, vec![], "new", vec!["new"]),          // Minimal capacity, empty
+            (1, vec!["old"], "new", vec!["new"]),     // Minimal capacity, replacement
+            (2, vec!["a", "b"], "c", vec!["b", "c"]), // Exact capacity, eviction
+            (10, vec![], "new", vec!["new"]),         // Large capacity, single item
             (3, vec!["1", "2", "3", "4", "5"], "6", vec!["4", "5", "6"]), // Multiple evictions
         ];
 
         for (capacity, mut initial, new_item, expected) in test_cases {
             push_bounded(&mut initial, new_item, capacity);
-            assert_eq!(initial, expected,
-                      "Failed for capacity={}, new_item={}", capacity, new_item);
+            assert_eq!(
+                initial, expected,
+                "Failed for capacity={}, new_item={}",
+                capacity, new_item
+            );
         }
 
         // Test with large capacity and many items
@@ -2212,7 +2267,9 @@ mod tests {
         let mut profile = CapabilityProfile::new("test_sub", "1.0.0", RiskLevel::Low);
         profile.add_capability("cap:fs:read", "read");
         mutable_guard.register_profile(profile).unwrap();
-        mutable_guard.check_capability("test_sub", "cap:fs:read", "ts").unwrap();
+        mutable_guard
+            .check_capability("test_sub", "cap:fs:read", "ts")
+            .unwrap();
 
         assert_eq!(mutable_guard.schema_version, SCHEMA_VERSION);
 
@@ -2222,5 +2279,125 @@ mod tests {
         assert!(!mutable_guard.schema_version.contains('<'));
         assert!(!mutable_guard.schema_version.contains('>'));
         assert!(mutable_guard.schema_version.is_ascii());
+    }
+
+    #[test]
+    fn negative_profile_validate_rejects_null_byte_capability_name() {
+        let mut profile = CapabilityProfile::new("null_cap_sub", "1.0.0", RiskLevel::Low);
+        profile.add_capability("cap:fs:read\0", "null-byte capability suffix");
+
+        let errors = profile.validate();
+
+        assert_eq!(errors.len(), 1);
+        assert!(matches!(
+            &errors[0],
+            CapabilityGuardError::UndeclaredCapability {
+                subsystem,
+                capability
+            } if subsystem == "null_cap_sub" && capability == "cap:fs:read\0"
+        ));
+    }
+
+    #[test]
+    fn negative_profile_validate_rejects_newline_capability_name() {
+        let mut profile = CapabilityProfile::new("newline_cap_sub", "1.0.0", RiskLevel::Low);
+        profile.add_capability("cap:fs:read\ncap:trust:write", "newline injection");
+
+        let errors = profile.validate();
+
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code(), error_codes::ERR_CAP_UNDECLARED);
+        assert!(format!("{}", errors[0]).contains("cap:fs:read\ncap:trust:write"));
+    }
+
+    #[test]
+    fn negative_register_profile_reports_first_invalid_capability_in_sorted_order() {
+        let mut guard = CapabilityGuard::new();
+        let mut profile = CapabilityProfile::new("sorted_invalid_sub", "1.0.0", RiskLevel::Low);
+        profile.add_capability("cap:zz:invalid", "later invalid name");
+        profile.add_capability("cap:aa:invalid", "earlier invalid name");
+
+        let err = guard.register_profile(profile).unwrap_err();
+
+        assert!(matches!(
+            err,
+            CapabilityGuardError::UndeclaredCapability {
+                ref subsystem,
+                ref capability
+            } if subsystem == "sorted_invalid_sub" && capability == "cap:aa:invalid"
+        ));
+        assert_eq!(guard.profile_count(), 0);
+    }
+
+    #[test]
+    fn negative_check_capability_rejects_null_byte_requested_name_and_audits_literal() {
+        let mut guard = CapabilityGuard::new();
+        let mut profile = CapabilityProfile::new("sub", "1.0.0", RiskLevel::Low);
+        profile.add_capability("cap:fs:read", "read");
+        guard.register_profile(profile).unwrap();
+
+        let err = guard
+            .check_capability("sub", "cap:fs:read\0", "ts-null-cap")
+            .unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CAP_DENIED);
+        let audit = guard.audit_trail().last().unwrap();
+        assert_eq!(audit.capability, "cap:fs:read\0");
+        assert_eq!(audit.outcome, "denied");
+        assert_eq!(audit.timestamp, "ts-null-cap");
+    }
+
+    #[test]
+    fn negative_check_capability_rejects_newline_requested_name_and_emits_deny_event() {
+        let mut guard = CapabilityGuard::new();
+        let mut profile = CapabilityProfile::new("sub", "1.0.0", RiskLevel::Low);
+        profile.add_capability("cap:fs:read", "read");
+        guard.register_profile(profile).unwrap();
+
+        let err = guard
+            .check_capability("sub", "cap:fs:read\n", "ts-newline-cap")
+            .unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CAP_DENIED);
+        assert!(guard.events().iter().any(|event| {
+            event.event_code == event_codes::CAP_002
+                && event.subsystem == "sub"
+                && event.detail.contains("not in profile")
+        }));
+    }
+
+    #[test]
+    fn negative_check_all_with_duplicate_denials_preserves_each_attempt() {
+        let mut guard = CapabilityGuard::new();
+        let mut profile = CapabilityProfile::new("sub", "1.0.0", RiskLevel::Low);
+        profile.add_capability("cap:fs:read", "read");
+        guard.register_profile(profile).unwrap();
+
+        let report = guard.check_all(
+            "sub",
+            &["cap:fs:write", "cap:fs:write", "cap:fs:read"],
+            "ts-duplicate-deny",
+        );
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.granted, vec!["cap:fs:read".to_string()]);
+        assert_eq!(report.denied.len(), 2);
+        assert_eq!(report.denied[0].0, "cap:fs:write");
+        assert_eq!(report.denied[1].0, "cap:fs:write");
+        assert_eq!(guard.audit_trail().len(), 3);
+    }
+
+    #[test]
+    fn negative_profile_change_treats_zero_width_lookalike_as_distinct_capability() {
+        let mut old_profile = CapabilityProfile::new("sub", "1.0.0", RiskLevel::Low);
+        old_profile.add_capability("cap:fs:read", "read");
+        let mut new_profile = CapabilityProfile::new("sub", "1.1.0", RiskLevel::Low);
+        new_profile.add_capability("cap:fs:read\u{200b}", "lookalike read");
+
+        let change = ProfileChange::detect(&old_profile, &new_profile).unwrap();
+
+        assert_eq!(change.added, vec!["cap:fs:read\u{200b}".to_string()]);
+        assert_eq!(change.removed, vec!["cap:fs:read".to_string()]);
+        assert!(change.requires_review);
     }
 }

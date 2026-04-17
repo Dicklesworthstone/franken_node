@@ -729,6 +729,187 @@ mod tests {
         assert!(r.list_by_subsystem("SUPPLY_CHAIN").is_empty());
     }
 
+    fn assert_malformed_suffix_is_rejected(code: &str) {
+        let mut r = ErrorCodeRegistry::new();
+        let err = r
+            .register(&reg(
+                code,
+                Severity::Transient,
+                recovery(true, Some(100), "retry after namespace fix"),
+                1,
+            ))
+            .unwrap_err();
+
+        assert_eq!(err.code(), "ECR_INVALID_NAMESPACE");
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn reject_code_suffix_with_dot() {
+        assert_malformed_suffix_is_rejected("FRANKEN_PROTOCOL_BAD.NAME");
+    }
+
+    #[test]
+    fn reject_code_suffix_with_slash() {
+        assert_malformed_suffix_is_rejected("FRANKEN_PROTOCOL_BAD/NAME");
+    }
+
+    #[test]
+    fn reject_code_suffix_with_colon() {
+        assert_malformed_suffix_is_rejected("FRANKEN_PROTOCOL_BAD:NAME");
+    }
+
+    #[test]
+    fn reject_code_suffix_with_nul_byte() {
+        assert_malformed_suffix_is_rejected("FRANKEN_PROTOCOL_BAD\0NAME");
+    }
+
+    #[test]
+    fn reject_code_suffix_with_non_ascii_letter() {
+        assert_malformed_suffix_is_rejected("FRANKEN_PROTOCOL_BAD_é");
+    }
+
+    #[test]
+    fn reject_code_suffix_with_embedded_space() {
+        assert_malformed_suffix_is_rejected("FRANKEN_PROTOCOL_BAD NAME");
+    }
+
+    #[test]
+    fn failed_invalid_namespace_preserves_existing_catalog() {
+        let mut r = ErrorCodeRegistry::new();
+        r.register(&reg(
+            "FRANKEN_PROTOCOL_SEEDED",
+            Severity::Transient,
+            recovery(true, Some(25), "retry seeded protocol"),
+            1,
+        ))
+        .unwrap();
+
+        let err = r
+            .register(&reg(
+                " FRANKEN_PROTOCOL_BAD",
+                Severity::Transient,
+                recovery(true, Some(25), "retry after namespace fix"),
+                1,
+            ))
+            .unwrap_err();
+
+        assert_eq!(err.code(), "ECR_INVALID_NAMESPACE");
+        assert_eq!(r.len(), 1);
+        assert!(r.get("FRANKEN_PROTOCOL_SEEDED").is_some());
+        assert!(r.get(" FRANKEN_PROTOCOL_BAD").is_none());
+    }
+
+    #[test]
+    fn failed_unknown_subsystem_preserves_existing_entry() {
+        let mut r = ErrorCodeRegistry::new();
+        r.register(&reg(
+            "FRANKEN_RUNTIME_SEEDED",
+            Severity::Degraded,
+            recovery(false, None, "inspect runtime"),
+            1,
+        ))
+        .unwrap();
+
+        let err = r
+            .register(&reg(
+                "FRANKEN_RUNTIME_CONTROL_BAD",
+                Severity::Transient,
+                recovery(true, Some(10), "retry valid namespace"),
+                1,
+            ))
+            .unwrap_err();
+
+        assert_eq!(err.code(), "ECR_INVALID_NAMESPACE");
+        assert_eq!(r.len(), 1);
+        assert_eq!(
+            r.list_by_subsystem("RUNTIME")
+                .first()
+                .map(|entry| entry.code.as_str()),
+            Some("FRANKEN_RUNTIME_SEEDED")
+        );
+        assert!(r.list_by_subsystem("RUNTIME_CONTROL").is_empty());
+    }
+
+    #[test]
+    fn get_rejects_case_mismatch_without_normalization() {
+        let mut r = ErrorCodeRegistry::new();
+        r.register(&reg(
+            "FRANKEN_CONNECTOR_CANONICAL",
+            Severity::Transient,
+            recovery(true, None, "retry connector"),
+            1,
+        ))
+        .unwrap();
+
+        assert!(r.get("franken_CONNECTOR_CANONICAL").is_none());
+        assert!(r.get("FRANKEN_connector_CANONICAL").is_none());
+        assert!(r.get("FRANKEN_CONNECTOR_canonical").is_none());
+        assert!(r.get("FRANKEN_CONNECTOR_CANONICAL").is_some());
+    }
+
+    #[test]
+    fn freeze_rejects_padded_code_without_matching_canonical_entry() {
+        let mut r = ErrorCodeRegistry::new();
+        r.register(&reg(
+            "FRANKEN_SECURITY_CANONICAL",
+            Severity::Fatal,
+            recovery(false, None, ""),
+            1,
+        ))
+        .unwrap();
+
+        let err = r.freeze("FRANKEN_SECURITY_CANONICAL ").unwrap_err();
+
+        assert_eq!(err.code(), "ECR_NOT_FOUND");
+        assert!(r.get("FRANKEN_SECURITY_CANONICAL").is_some());
+        assert!(!r.get("FRANKEN_SECURITY_CANONICAL").unwrap().frozen);
+    }
+
+    #[test]
+    fn list_by_subsystem_rejects_noncanonical_subsystem_names() {
+        let mut r = ErrorCodeRegistry::new();
+        r.register(&reg(
+            "FRANKEN_SUPPLY_CHAIN_CANONICAL",
+            Severity::Transient,
+            recovery(true, Some(100), "retry supply chain"),
+            1,
+        ))
+        .unwrap();
+
+        assert!(r.list_by_subsystem("supply_chain").is_empty());
+        assert!(r.list_by_subsystem(" SUPPLY_CHAIN").is_empty());
+        assert!(r.list_by_subsystem("SUPPLY_CHAIN ").is_empty());
+        assert_eq!(r.list_by_subsystem("SUPPLY_CHAIN").len(), 1);
+    }
+
+    #[test]
+    fn duplicate_with_higher_version_does_not_mutate_unfrozen_entry() {
+        let mut r = ErrorCodeRegistry::new();
+        r.register(&reg(
+            "FRANKEN_EGRESS_DUP_VERSION",
+            Severity::Transient,
+            recovery(true, Some(100), "retry egress"),
+            1,
+        ))
+        .unwrap();
+
+        let err = r
+            .register(&reg(
+                "FRANKEN_EGRESS_DUP_VERSION",
+                Severity::Transient,
+                recovery(true, Some(500), "retry egress later"),
+                2,
+            ))
+            .unwrap_err();
+
+        let entry = r.get("FRANKEN_EGRESS_DUP_VERSION").unwrap();
+        assert_eq!(err.code(), "ECR_DUPLICATE_CODE");
+        assert_eq!(entry.version, 1);
+        assert_eq!(entry.recovery.retry_after_ms, Some(100));
+        assert_eq!(entry.recovery.recovery_hint, "retry egress");
+    }
+
     #[test]
     fn reject_non_fatal_whitespace_only_recovery_hint() {
         let mut r = ErrorCodeRegistry::new();

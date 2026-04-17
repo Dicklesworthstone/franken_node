@@ -656,6 +656,153 @@ mod tests {
     }
 
     #[test]
+    fn negative_zero_version_rejected_for_each_category_without_insert() {
+        let mut r = SchemaRegistry::new();
+
+        for cat in [
+            SchemaCategory::Serialization,
+            SchemaCategory::Signature,
+            SchemaCategory::ControlFrame,
+        ] {
+            let err = r.register_schema(make_spec(cat, 0)).unwrap_err();
+
+            assert_eq!(err, SchemaError::InvalidVersion(cat.to_string()));
+            assert_eq!(r.schema_count(), 0);
+            assert_eq!(r.vector_count(cat), 0);
+        }
+    }
+
+    #[test]
+    fn negative_empty_changelog_rejected_for_each_category_without_insert() {
+        let mut r = SchemaRegistry::new();
+
+        for cat in [
+            SchemaCategory::Serialization,
+            SchemaCategory::Signature,
+            SchemaCategory::ControlFrame,
+        ] {
+            let spec = SchemaSpec {
+                category: cat,
+                version: 1,
+                content_hash: format!("sha256:{cat}:empty-changelog"),
+                changelog: Vec::new(),
+            };
+            let err = r.register_schema(spec).unwrap_err();
+
+            assert_eq!(err, SchemaError::NoChangelog(cat.to_string()));
+            assert!(!r.schemas.contains_key(&cat));
+            assert_eq!(r.schema_count(), 0);
+        }
+    }
+
+    #[test]
+    fn negative_invalid_schema_update_preserves_existing_schema_and_vectors() {
+        let mut r = SchemaRegistry::new();
+        r.register_schema(make_spec(SchemaCategory::ControlFrame, 1))
+            .expect("initial schema");
+        r.add_vector(make_vector(SchemaCategory::ControlFrame, "ctrl-v1"))
+            .expect("initial vector");
+
+        let err = r
+            .register_schema(make_spec(SchemaCategory::ControlFrame, 0))
+            .unwrap_err();
+
+        assert_eq!(err.code(), "GSV_INVALID_VERSION");
+        assert_eq!(r.schema_count(), 1);
+        assert_eq!(r.vector_count(SchemaCategory::ControlFrame), 1);
+        assert_eq!(
+            r.schemas
+                .get(&SchemaCategory::ControlFrame)
+                .expect("original schema remains")
+                .version,
+            1
+        );
+    }
+
+    #[test]
+    fn negative_no_changelog_update_preserves_existing_content_hash() {
+        let mut r = SchemaRegistry::new();
+        r.register_schema(make_spec(SchemaCategory::Serialization, 1))
+            .expect("initial schema");
+        let original_hash = r
+            .schemas
+            .get(&SchemaCategory::Serialization)
+            .expect("schema exists")
+            .content_hash
+            .clone();
+        let invalid = SchemaSpec {
+            category: SchemaCategory::Serialization,
+            version: 2,
+            content_hash: "sha256:replacement-should-not-land".to_string(),
+            changelog: Vec::new(),
+        };
+
+        let err = r.register_schema(invalid).unwrap_err();
+
+        assert_eq!(err.code(), "GSV_NO_CHANGELOG");
+        assert_eq!(
+            r.schemas
+                .get(&SchemaCategory::Serialization)
+                .expect("original schema remains")
+                .content_hash,
+            original_hash
+        );
+    }
+
+    #[test]
+    fn negative_add_vector_missing_schema_preserves_other_category_vectors() {
+        let mut r = SchemaRegistry::new();
+        r.register_schema(make_spec(SchemaCategory::Signature, 1))
+            .expect("signature schema");
+        r.add_vector(make_vector(SchemaCategory::Signature, "sig-v1"))
+            .expect("signature vector");
+
+        let err = r
+            .add_vector(make_vector(SchemaCategory::ControlFrame, "ctrl-missing"))
+            .unwrap_err();
+
+        assert_eq!(err, SchemaError::MissingSchema("control_frame".to_string()));
+        assert_eq!(r.vector_count(SchemaCategory::Signature), 1);
+        assert_eq!(r.vector_count(SchemaCategory::ControlFrame), 0);
+    }
+
+    #[test]
+    fn negative_verify_vectors_empty_actual_fails_every_vector() {
+        let r = populated_registry();
+
+        let results = r.verify_vectors(|_vector| String::new());
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|result| !result.passed));
+        assert!(results.iter().all(|result| result.details.contains("expected=")));
+        assert!(results.iter().all(|result| result.details.contains("actual=")));
+    }
+
+    #[test]
+    fn negative_verify_vectors_category_only_output_does_not_match_golden() {
+        let r = populated_registry();
+
+        let results = r.verify_vectors(|vector| format!("output_{}", vector.category));
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|result| !result.passed));
+        assert!(
+            results
+                .iter()
+                .all(|result| result.details.contains("actual=output_"))
+        );
+    }
+
+    #[test]
+    fn negative_push_bounded_overfull_input_drops_oldest_entries() {
+        let mut values = vec![0, 1, 2, 3];
+
+        push_bounded(&mut values, 4, 2);
+
+        assert_eq!(values, vec![3, 4]);
+    }
+
+    #[test]
     fn all_error_codes_present() {
         let errors = [
             SchemaError::MissingSchema("x".into()),

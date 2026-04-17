@@ -1541,4 +1541,172 @@ mod tests {
         assert_eq!(compiler.sequence, sequence_before);
         assert_eq!(compiler.entries, entries_before);
     }
+
+    #[test]
+    fn schema_version_with_trailing_space_is_rejected() {
+        let mut compiler = make_compiler();
+        let mut raw = valid_raw_claim("schema-space");
+        raw.schema_version = format!("{SCHEMA_VERSION} ");
+
+        let err = compiler.compile_claim(&raw).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CLMC_SCHEMA_UNKNOWN);
+        assert_eq!(compiler.entry_count(), 0);
+        assert!(
+            !compiler
+                .events()
+                .iter()
+                .any(|event| event.event_code == event_codes::CLMC_002)
+        );
+    }
+
+    #[test]
+    fn zero_length_claim_budget_rejects_nonempty_text_without_compile() {
+        let mut compiler = ClaimCompiler::new(ClaimCompilerConfig {
+            max_claim_text_bytes: 0,
+            ..Default::default()
+        });
+        let raw = valid_raw_claim("zero-budget");
+
+        let err = compiler.compile_claim(&raw).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CLMC_CLAIM_TEXT_TOO_LONG);
+        assert_eq!(compiler.entry_count(), 0);
+        assert!(
+            !compiler
+                .events()
+                .iter()
+                .any(|event| event.event_code == event_codes::CLMC_002)
+        );
+    }
+
+    #[test]
+    fn missing_source_preempts_missing_evidence_validation() {
+        let mut compiler = make_compiler();
+        let mut raw = valid_raw_claim("missing-source-and-evidence");
+        raw.source = None;
+        raw.evidence_links.clear();
+
+        let err = compiler.compile_claim(&raw).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CLMC_MISSING_SOURCE);
+        assert!(
+            !compiler
+                .events()
+                .iter()
+                .any(|event| event.detail == "no evidence links")
+        );
+        assert_eq!(compiler.entry_count(), 0);
+    }
+
+    #[test]
+    fn whitespace_evidence_uri_rejects_claim_without_success_event() {
+        let mut compiler = make_compiler();
+        let mut raw = valid_raw_claim("whitespace-evidence-uri");
+        raw.evidence_links = vec![EvidenceLink {
+            label: "blank-uri".to_string(),
+            uri: " \n\t ".to_string(),
+            content_digest: "abc".to_string(),
+        }];
+
+        let err = compiler.compile_claim(&raw).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CLMC_INVALID_EVIDENCE_LINK);
+        assert!(
+            compiler
+                .events()
+                .iter()
+                .any(|event| event.event_code == event_codes::CLMC_008)
+        );
+        assert!(
+            !compiler
+                .events()
+                .iter()
+                .any(|event| event.event_code == event_codes::CLMC_002)
+        );
+    }
+
+    #[test]
+    fn oversized_batch_rejection_leaves_scoreboard_empty() {
+        let mut compiler = ClaimCompiler::new(ClaimCompilerConfig {
+            scoreboard_capacity: 1,
+            ..Default::default()
+        });
+        let first = compiler
+            .compile_claim(&valid_raw_claim("oversized-a"))
+            .unwrap();
+        let second = compiler
+            .compile_claim(&valid_raw_claim("oversized-b"))
+            .unwrap();
+
+        let err = compiler.publish_batch(&[first, second]).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CLMC_SCOREBOARD_FULL);
+        assert_eq!(compiler.sequence, 0);
+        assert_eq!(compiler.entry_count(), 0);
+        assert!(compiler.entries.is_empty());
+    }
+
+    #[test]
+    fn duplicate_existing_claim_preempts_tampered_digest_validation() {
+        let mut compiler = make_compiler();
+        let original = compiler
+            .compile_claim(&valid_raw_claim("dup-preempts-digest"))
+            .unwrap();
+        compiler.publish_batch(&[original]).unwrap();
+        let entries_before = compiler.entries.clone();
+        let mut duplicate = compiler
+            .compile_claim(&valid_raw_claim("dup-preempts-digest"))
+            .unwrap();
+        duplicate.compilation_digest = "not-the-real-digest".to_string();
+
+        let err = compiler.publish_batch(&[duplicate]).unwrap_err();
+
+        assert_eq!(err.code(), error_codes::ERR_CLMC_DUPLICATE_CLAIM_ID);
+        assert_eq!(compiler.entry_count(), 1);
+        assert_eq!(compiler.entries, entries_before);
+    }
+
+    #[test]
+    fn claim_source_deserialize_rejects_string_timestamp() {
+        let raw = serde_json::json!({
+            "submitter_id": "submitter-1",
+            "origin": "external_api",
+            "received_at_ms": "1700000000000"
+        });
+
+        let result = serde_json::from_value::<ClaimSource>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn raw_claim_deserialize_rejects_missing_trace_id() {
+        let raw = serde_json::json!({
+            "claim_id": "missing-trace",
+            "claim_text": "claim",
+            "source": default_source(),
+            "evidence_links": [default_evidence_link()],
+            "schema_version": SCHEMA_VERSION
+        });
+
+        let result = serde_json::from_value::<RawClaim>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn scoreboard_snapshot_deserialize_rejects_string_sequence() {
+        let raw = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "sequence": "1",
+            "entries": {},
+            "snapshot_digest": "digest",
+            "entry_count": 0
+        });
+
+        let result = serde_json::from_value::<ScoreboardSnapshot>(raw);
+
+        assert!(result.is_err());
+    }
 }

@@ -373,6 +373,18 @@ impl DurabilityController {
         operator_authorized: bool,
     ) -> Result<(), DurabilityError> {
         let current_mode = self.mode.clone();
+        if let Err(err) = new_mode.validate() {
+            self.emit(
+                DM_MODE_SWITCH_DENIED,
+                &current_mode,
+                format!(
+                    "Mode switch from {} to {} denied for class {}: {}",
+                    current_mode, new_mode, self.class_id, err.message
+                ),
+            );
+            return Err(err);
+        }
+
         if !self
             .policy
             .is_authorized(&current_mode, &new_mode, operator_authorized)
@@ -406,6 +418,8 @@ impl DurabilityController {
     /// Execute a local write. Returns a claim on success.
     pub fn write_local(&mut self) -> Result<DurabilityClaim, DurabilityError> {
         let mode = self.mode.clone();
+        mode.validate()?;
+
         match &mode {
             DurabilityMode::Local => {
                 let outcome = WriteOutcome::LocalFsyncConfirmed;
@@ -440,6 +454,8 @@ impl DurabilityController {
         responses: &[ReplicaResponse],
     ) -> Result<DurabilityClaim, DurabilityError> {
         let mode = self.mode.clone();
+        mode.validate()?;
+
         match &mode {
             DurabilityMode::Quorum { min_acks } => {
                 let acked =
@@ -574,10 +590,11 @@ impl DurabilityController {
 /// Push an item to a bounded Vec, evicting oldest entries if at capacity.
 fn push_bounded<T>(vec: &mut Vec<T>, item: T, max: usize) {
     if max == 0 {
+        vec.clear();
         return;
     }
     if vec.len() >= max {
-        let overflow = vec.len() - max + 1;
+        let overflow = vec.len().saturating_sub(max).saturating_add(1);
         vec.drain(0..overflow);
     }
     vec.push(item);
@@ -1193,8 +1210,7 @@ mod tests {
             0,
         );
 
-        assert_eq!(events.len(), 1);
-        assert_eq!(events[0].detail, "kept");
+        assert!(events.is_empty());
     }
 
     #[test]
@@ -1284,5 +1300,105 @@ mod tests {
         );
         assert!(second.is_empty());
         assert!(ctrl.events().is_empty());
+    }
+
+    #[test]
+    fn negative_zero_quorum_controller_rejects_empty_write_without_claim() {
+        let mut ctrl = DurabilityController::quorum("bad_quorum", 0);
+        ctrl.take_events();
+
+        let err = ctrl.write_quorum(&[]).unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_QUORUM_SIZE);
+        assert!(err.message.contains("min_acks"));
+        assert!(ctrl.events().is_empty());
+    }
+
+    #[test]
+    fn negative_zero_quorum_controller_rejects_acked_write_without_claim() {
+        let mut ctrl = DurabilityController::quorum("bad_quorum", 0);
+        ctrl.take_events();
+        let responses = make_responses(3, 0);
+
+        let err = ctrl.write_quorum(&responses).unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_QUORUM_SIZE);
+        assert!(
+            !ctrl
+                .events()
+                .iter()
+                .any(|event| event.code == DM_CLAIM_GENERATED)
+        );
+    }
+
+    #[test]
+    fn negative_zero_quorum_controller_rejects_local_write_as_invalid_mode() {
+        let mut ctrl = DurabilityController::quorum("bad_quorum", 0);
+        ctrl.take_events();
+
+        let err = ctrl.write_local().unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_QUORUM_SIZE);
+        assert!(ctrl.events().is_empty());
+    }
+
+    #[test]
+    fn negative_switch_to_zero_quorum_is_denied_and_preserves_local_mode() {
+        let mut ctrl = DurabilityController::local("receipt");
+        ctrl.take_events();
+
+        let err = ctrl
+            .switch_mode(DurabilityMode::Quorum { min_acks: 0 }, true)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_QUORUM_SIZE);
+        assert_eq!(ctrl.mode(), &DurabilityMode::Local);
+        assert!(ctrl.events().iter().any(|event| {
+            event.code == DM_MODE_SWITCH_DENIED && event.detail.contains("min_acks")
+        }));
+    }
+
+    #[test]
+    fn negative_switch_to_zero_quorum_preserves_existing_quorum_requirement() {
+        let mut ctrl = DurabilityController::quorum("receipt", 3);
+        ctrl.take_events();
+
+        let err = ctrl
+            .switch_mode(DurabilityMode::Quorum { min_acks: 0 }, true)
+            .unwrap_err();
+
+        assert_eq!(err.code, ERR_INVALID_QUORUM_SIZE);
+        assert_eq!(ctrl.mode(), &DurabilityMode::Quorum { min_acks: 3 });
+        assert!(
+            !ctrl
+                .events()
+                .iter()
+                .any(|event| event.code == DM_MODE_SWITCH)
+        );
+    }
+
+    #[test]
+    fn negative_replica_response_serde_rejects_missing_replica_id() {
+        let err = serde_json::from_str::<ReplicaResponse>(r#"{"acked":true}"#).unwrap_err();
+
+        assert!(err.to_string().contains("replica_id"));
+    }
+
+    #[test]
+    fn negative_replica_response_serde_rejects_non_boolean_ack() {
+        let err = serde_json::from_str::<ReplicaResponse>(r#"{"replica_id":"r1","acked":"yes"}"#)
+            .unwrap_err();
+
+        assert!(err.to_string().contains("boolean"));
+    }
+
+    #[test]
+    fn negative_durability_claim_serde_rejects_missing_claim_string() {
+        let err = serde_json::from_str::<DurabilityClaim>(
+            r#"{"mode":"Local","outcome":"LocalFsyncConfirmed","deterministic":true}"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("claim_string"));
     }
 }

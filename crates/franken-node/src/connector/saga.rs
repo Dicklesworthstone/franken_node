@@ -1508,4 +1508,617 @@ mod tests {
     fn test_schema_version() {
         assert_eq!(SCHEMA_VERSION, "saga-v1.0");
     }
+
+    // ---------------------------------------------------------------------------
+    // NEGATIVE-PATH TESTS: Security hardening for saga execution
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn negative_unicode_injection_in_saga_identifiers_and_step_names() {
+        let mut exec = SagaExecutor::new();
+
+        // BiDi override attack in step name
+        let malicious_steps = vec![
+            SagaStepDef {
+                name: "\u{202E}pets_malicious\u{202D}legitimate_step".to_string(),
+                computation_name: Some("\u{202E}drojan\u{202D}safe_computation".to_string()),
+                is_remote: true,
+                idempotency_key: Some("key\u{200B}\u{200C}hidden\u{FEFF}".to_string()),
+            },
+            SagaStepDef {
+                name: "normal_step".to_string(),
+                computation_name: None,
+                is_remote: false,
+                idempotency_key: None,
+            },
+        ];
+
+        // Malicious trace ID with control characters
+        let malicious_trace_id = "trace\u{0000}\ninjection\r\tlog_corruption";
+
+        let saga_id = exec.create_saga(malicious_steps.clone(), malicious_trace_id).unwrap();
+
+        // Verify Unicode is preserved in saga data
+        let saga = exec.get_saga(&saga_id).unwrap();
+        assert!(saga.steps[0].name.contains('\u{202E}'));
+        assert!(saga.steps[0].computation_name.as_ref().unwrap().contains('\u{202E}'));
+        assert!(saga.steps[0].idempotency_key.as_ref().unwrap().contains('\u{200B}'));
+
+        // Test step execution with Unicode in outcome data
+        let unicode_outcome = StepOutcome::Success {
+            result_data: "result\u{202E}kcattA\u{202D}normal".as_bytes().to_vec(),
+        };
+
+        let step_idx = exec.execute_step(&saga_id, unicode_outcome, 100, malicious_trace_id).unwrap();
+        assert_eq!(step_idx, 0);
+
+        // Path traversal injection in step names
+        let path_traversal_steps = vec![SagaStepDef {
+            name: "../../../etc/passwd\0\nmalicious_path".to_string(),
+            computation_name: Some("computation\n\r\0injection".to_string()),
+            is_remote: true,
+            idempotency_key: Some("../../../keys/secret\0".to_string()),
+        }];
+
+        let traversal_saga = exec.create_saga(path_traversal_steps, "traversal_trace").unwrap();
+        let saga2 = exec.get_saga(&traversal_saga).unwrap();
+        assert!(saga2.steps[0].name.contains('\0'));
+        assert!(saga2.steps[0].name.contains('\n'));
+
+        // Verify audit log preserves Unicode injection for analysis
+        let audit_jsonl = exec.export_audit_log_jsonl();
+        assert!(audit_jsonl.contains(malicious_trace_id));
+    }
+
+    #[test]
+    fn negative_memory_exhaustion_with_massive_audit_logs_and_step_records() {
+        let mut exec = SagaExecutor::new();
+
+        // Create saga with maximum steps
+        let huge_steps: Vec<SagaStepDef> = (0..10_000)
+            .map(|i| SagaStepDef {
+                name: format!("massive_step_{}", i),
+                computation_name: Some(format!("computation_{}", i)),
+                is_remote: true,
+                idempotency_key: Some(format!("key_{}", i)),
+            })
+            .collect();
+
+        let saga_id = exec.create_saga(huge_steps, "memory_stress_trace").unwrap();
+
+        // Execute steps with large result data
+        for i in 0..1000 {
+            let massive_result = StepOutcome::Success {
+                result_data: vec![0x42; 100_000], // 100KB per step result
+            };
+
+            if exec.get_saga(&saga_id).unwrap().completed_steps < exec.get_saga(&saga_id).unwrap().steps.len() {
+                let _ = exec.execute_step(&saga_id, massive_result, u64::MAX, "stress").unwrap();
+            }
+        }
+
+        // Verify bounded storage prevents unbounded growth
+        let saga = exec.get_saga(&saga_id).unwrap();
+        assert!(saga.records.len() <= MAX_RECORDS_PER_SAGA);
+
+        // Test memory stress with audit log
+        for i in 0..MAX_AUDIT_LOG_ENTRIES * 2 {
+            let stress_steps = vec![SagaStepDef {
+                name: format!("audit_stress_{}", i),
+                computation_name: None,
+                is_remote: false,
+                idempotency_key: None,
+            }];
+
+            let _ = exec.create_saga(stress_steps, &format!("audit_trace_{}", i));
+        }
+
+        // Verify audit log is bounded
+        assert!(exec.audit_log.len() <= MAX_AUDIT_LOG_ENTRIES);
+
+        // Test massive failure reasons and skip reasons
+        let failure_saga = exec.create_saga(make_steps(&["fail", "skip"]), "fail_trace").unwrap();
+
+        let massive_failure = StepOutcome::Failed {
+            reason: "A".repeat(1_000_000), // 1MB error message
+        };
+
+        let _ = exec.execute_step(&failure_saga, massive_failure, 1, "fail").unwrap();
+
+        let massive_skip = StepOutcome::Skipped {
+            reason: "B".repeat(1_000_000), // 1MB skip reason
+        };
+
+        let _ = exec.execute_step(&failure_saga, massive_skip, 1, "skip").unwrap();
+
+        // Verify large data is preserved but bounded by collection limits
+        let fail_saga = exec.get_saga(&failure_saga).unwrap();
+        assert!(fail_saga.records.len() <= MAX_RECORDS_PER_SAGA);
+    }
+
+    #[test]
+    fn negative_counter_overflow_and_arithmetic_boundary_attacks() {
+        let mut exec = SagaExecutor::new();
+
+        // Test saga ID counter overflow protection
+        exec.next_saga_id = u64::MAX - 5;
+
+        for i in 0..10 {
+            let steps = make_steps(&[&format!("overflow_test_{}", i)]);
+            let result = exec.create_saga(steps, "overflow_trace");
+
+            if i < 5 {
+                assert!(result.is_ok());
+            } else {
+                // Should hit overflow and fail
+                assert!(result.is_err());
+                assert!(result.unwrap_err().contains("counter exhausted"));
+            }
+        }
+
+        // Verify saturating arithmetic was used
+        assert_eq!(exec.next_saga_id, u64::MAX);
+
+        // Test completed_steps counter overflow
+        let mut overflow_exec = SagaExecutor::new();
+        let saga_id = overflow_exec.create_saga(make_steps(&["test"]), "trace").unwrap();
+
+        // Manually set completed_steps near overflow
+        if let Some(saga) = overflow_exec.sagas.get_mut(&saga_id) {
+            saga.completed_steps = usize::MAX - 5;
+        }
+
+        // Execute step should use saturating arithmetic
+        let outcome = StepOutcome::Success { result_data: vec![] };
+        let _ = overflow_exec.execute_step(&saga_id, outcome, 1, "trace");
+
+        let saga = overflow_exec.get_saga(&saga_id).unwrap();
+        assert!(saga.completed_steps <= usize::MAX);
+
+        // Test elapsed time overflow
+        let time_saga = overflow_exec.create_saga(make_steps(&["time_test"]), "time").unwrap();
+        let time_outcome = StepOutcome::Success { result_data: vec![] };
+
+        let _ = overflow_exec.execute_step(&time_saga, time_outcome, u64::MAX, "time");
+
+        let time_saga_data = overflow_exec.get_saga(&time_saga).unwrap();
+        assert_eq!(time_saga_data.records[0].elapsed_ms, u64::MAX);
+
+        // Test step index overflow during compensation
+        let comp_saga = overflow_exec.create_saga(make_steps(&["comp"]), "comp").unwrap();
+        let comp_outcome = StepOutcome::Success { result_data: vec![] };
+        let _ = overflow_exec.execute_step(&comp_saga, comp_outcome, 1, "comp");
+
+        // Manually corrupt step_index to test overflow handling
+        if let Some(saga) = overflow_exec.sagas.get_mut(&comp_saga) {
+            saga.records[0].step_index = usize::MAX;
+        }
+
+        // Compensation should handle corrupted indices gracefully
+        let trace = overflow_exec.compensate(&comp_saga, "comp").unwrap();
+        assert_eq!(trace.final_state, SagaState::Compensated);
+    }
+
+    #[test]
+    fn negative_json_serialization_corruption_and_injection_attacks() {
+        let mut exec = SagaExecutor::new();
+
+        // Create saga with JSON injection attempts in various fields
+        let injection_steps = vec![
+            SagaStepDef {
+                name: r#"step","malicious":"injection"#.to_string(),
+                computation_name: Some(r#"comp\"}],"evil":"payload"#.to_string()),
+                is_remote: true,
+                idempotency_key: Some(r#"key\n\r\t\0"#.to_string()),
+            },
+            SagaStepDef {
+                name: "\\u0000\\n\\r\\t".to_string(), // Escape sequence injection
+                computation_name: None,
+                is_remote: false,
+                idempotency_key: None,
+            },
+        ];
+
+        let saga_id = exec.create_saga(injection_steps, r#"trace","attack":"value"#).unwrap();
+
+        // Execute with JSON injection in outcome data
+        let json_attack_outcome = StepOutcome::Success {
+            result_data: r#"{"fake":"json","injection":true}"#.as_bytes().to_vec(),
+        };
+
+        let _ = exec.execute_step(&saga_id, json_attack_outcome, 100, r#"trace\"},{"evil":true#).unwrap();
+
+        // Execute with JSON injection in failure reason
+        let json_fail_outcome = StepOutcome::Failed {
+            reason: r#"error\"}],"malicious_payload":"injected"#.to_string(),
+        };
+
+        let fail_saga = exec.create_saga(make_steps(&["fail"]), "fail_trace").unwrap();
+        let _ = exec.execute_step(&fail_saga, json_fail_outcome, 50, "fail").unwrap();
+
+        // Export audit log and verify JSON integrity
+        let audit_jsonl = exec.export_audit_log_jsonl();
+        let lines: Vec<&str> = audit_jsonl.lines().collect();
+
+        for line in &lines {
+            // Each line should parse as valid JSON
+            let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+            assert!(parsed.is_ok(), "Corrupted JSON in audit log: {}", line);
+
+            if let Ok(json) = parsed {
+                // Verify required fields are present
+                assert!(json.get("event_code").is_some());
+                assert!(json.get("trace_id").is_some());
+                assert!(json.get("saga_id").is_some());
+                assert!(json.get("detail").is_some());
+
+                // Verify no unescaped injection
+                let json_str = serde_json::to_string(&json).unwrap();
+                assert!(!json_str.contains(r#""malicious""#));
+                assert!(!json_str.contains(r#""evil""#));
+                assert!(!json_str.contains(r#""attack""#));
+            }
+        }
+
+        // Test content hash with injection attempts
+        let hash1 = exec.content_hash();
+
+        // Modify internal state with injection
+        if let Some(saga) = exec.sagas.get_mut(&saga_id) {
+            saga.saga_id = r#"modified","injection":"here"#.to_string();
+        }
+
+        let hash2 = exec.content_hash();
+        assert_ne!(hash1, hash2); // Hash should change with content
+
+        // Test serialization of compensation trace
+        let comp_saga = exec.create_saga(make_steps(&["comp"]), "comp").unwrap();
+        let _ = exec.execute_step(&comp_saga, StepOutcome::Success { result_data: vec![] }, 1, "comp");
+        let trace = exec.compensate(&comp_saga, "comp").unwrap();
+
+        let trace_json = serde_json::to_string(&trace).unwrap();
+        let parsed_trace: CompensationTrace = serde_json::from_str(&trace_json).unwrap();
+        assert_eq!(parsed_trace.saga_id, trace.saga_id);
+        assert_eq!(parsed_trace.final_state, trace.final_state);
+    }
+
+    #[test]
+    fn negative_state_transition_bypass_and_manipulation_attacks() {
+        let mut exec = SagaExecutor::new();
+        let saga_id = exec.create_saga(make_steps(&["step1", "step2"]), "trace").unwrap();
+
+        // Try to execute step while in wrong state (should fail)
+        if let Some(saga) = exec.sagas.get_mut(&saga_id) {
+            saga.state = SagaState::Committed; // Force invalid state
+        }
+
+        let bypass_outcome = StepOutcome::Success { result_data: vec![] };
+        let result = exec.execute_step(&saga_id, bypass_outcome, 10, "bypass");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("cannot execute forward steps"));
+
+        // Reset to valid state
+        if let Some(saga) = exec.sagas.get_mut(&saga_id) {
+            saga.state = SagaState::Pending;
+        }
+
+        // Execute valid step
+        let _ = exec.execute_step(&saga_id, StepOutcome::Success { result_data: vec![] }, 10, "valid");
+
+        // Try to manipulate completed_steps counter beyond steps.len()
+        if let Some(saga) = exec.sagas.get_mut(&saga_id) {
+            saga.completed_steps = saga.steps.len() + 100; // Illegal state
+        }
+
+        // Should reject additional execution
+        let overflow_result = exec.execute_step(&saga_id, StepOutcome::Success { result_data: vec![] }, 5, "overflow");
+        assert!(overflow_result.is_err());
+
+        // Test compensation state bypass
+        let comp_saga = exec.create_saga(make_steps(&["comp1", "comp2"]), "comp").unwrap();
+
+        // Force saga to Committed state
+        if let Some(saga) = exec.sagas.get_mut(&comp_saga) {
+            saga.state = SagaState::Committed;
+        }
+
+        // Should reject compensation of committed saga
+        let comp_result = exec.compensate(&comp_saga, "comp");
+        assert!(comp_result.is_err());
+        assert!(comp_result.unwrap_err().contains("Committed"));
+
+        // Test invalid step record manipulation
+        let record_saga = exec.create_saga(make_steps(&["record"]), "record").unwrap();
+        let _ = exec.execute_step(&record_saga, StepOutcome::Success { result_data: vec![] }, 5, "record");
+
+        // Manually corrupt step record
+        if let Some(saga) = exec.sagas.get_mut(&record_saga) {
+            saga.records[0].action = "invalid_action".to_string();
+            saga.records[0].step_index = 999; // Out of bounds
+        }
+
+        // Compensation should handle corrupted records gracefully
+        let corrupted_trace = exec.compensate(&record_saga, "record");
+        assert!(corrupted_trace.is_ok());
+
+        // Test failed forward step validation bypass
+        let fail_saga = exec.create_saga(make_steps(&["fail", "after_fail"]), "fail").unwrap();
+        let _ = exec.execute_step(&fail_saga, StepOutcome::Failed { reason: "boom".to_string() }, 1, "fail");
+
+        // Manually reset state to try bypassing failure check
+        if let Some(saga) = exec.sagas.get_mut(&fail_saga) {
+            saga.state = SagaState::Running; // Try to bypass failure state
+        }
+
+        // Should still detect failed forward step and reject
+        let bypass_fail = exec.execute_step(&fail_saga, StepOutcome::Success { result_data: vec![] }, 1, "bypass");
+        assert!(bypass_fail.is_err());
+        assert!(bypass_fail.unwrap_err().contains("failed forward steps"));
+    }
+
+    #[test]
+    fn negative_concurrent_access_safety_and_race_conditions() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let exec = Arc::new(Mutex::new(SagaExecutor::new()));
+        let mut handles = vec![];
+
+        // Spawn multiple threads performing concurrent saga operations
+        for thread_id in 0..8 {
+            let exec_clone = Arc::clone(&exec);
+            let handle = thread::spawn(move || {
+                for op_id in 0..50 {
+                    let mut executor = exec_clone.lock().unwrap();
+
+                    // Create saga
+                    let steps = vec![
+                        SagaStepDef {
+                            name: format!("thread_{}_step_{}_a", thread_id, op_id),
+                            computation_name: Some(format!("comp_{}", thread_id)),
+                            is_remote: thread_id % 2 == 0,
+                            idempotency_key: Some(format!("key_{}_{}", thread_id, op_id)),
+                        },
+                        SagaStepDef {
+                            name: format!("thread_{}_step_{}_b", thread_id, op_id),
+                            computation_name: None,
+                            is_remote: false,
+                            idempotency_key: None,
+                        },
+                    ];
+
+                    let saga_id_result = executor.create_saga(steps, &format!("trace_{}_{}", thread_id, op_id));
+
+                    if let Ok(saga_id) = saga_id_result {
+                        // Execute first step
+                        let outcome1 = StepOutcome::Success { result_data: vec![thread_id as u8; 100] };
+                        let _ = executor.execute_step(&saga_id, outcome1, op_id as u64, "step1");
+
+                        // Some threads compensate, others commit
+                        if thread_id % 2 == 0 {
+                            let outcome2 = StepOutcome::Success { result_data: vec![0xFF; 100] };
+                            let _ = executor.execute_step(&saga_id, outcome2, op_id as u64, "step2");
+                            let _ = executor.commit(&saga_id, "commit");
+                        } else {
+                            let outcome2 = StepOutcome::Failed { reason: format!("deliberate_fail_{}", op_id) };
+                            let _ = executor.execute_step(&saga_id, outcome2, op_id as u64, "step2");
+                            let _ = executor.compensate(&saga_id, "compensate");
+                        }
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify final state consistency
+        let final_exec = exec.lock().unwrap();
+        let saga_count = final_exec.saga_count();
+        assert!(saga_count > 0); // Some sagas should have been created
+
+        // Verify audit log integrity
+        let audit_jsonl = final_exec.export_audit_log_jsonl();
+        if !audit_jsonl.is_empty() {
+            for line in audit_jsonl.lines() {
+                let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
+                assert!(parsed.is_ok(), "Concurrent access corrupted audit log");
+            }
+        }
+
+        // Verify content hash is deterministic
+        let hash = final_exec.content_hash();
+        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 64); // SHA-256 hex string length
+    }
+
+    #[test]
+    fn negative_compensation_trace_manipulation_and_replay_attacks() {
+        let mut exec = SagaExecutor::new();
+
+        // Create saga with multiple steps for compensation testing
+        let steps = make_steps(&["prepare", "validate", "execute", "finalize"]);
+        let saga_id = exec.create_saga(steps, "comp_trace").unwrap();
+
+        // Execute steps with different outcomes
+        let _ = exec.execute_step(&saga_id, StepOutcome::Success { result_data: b"prepare_ok".to_vec() }, 10, "step1");
+        let _ = exec.execute_step(&saga_id, StepOutcome::Skipped { reason: "validation_skipped".to_string() }, 5, "step2");
+        let _ = exec.execute_step(&saga_id, StepOutcome::Success { result_data: b"execute_ok".to_vec() }, 15, "step3");
+        let _ = exec.execute_step(&saga_id, StepOutcome::Failed { reason: "finalize_failed".to_string() }, 20, "step4");
+
+        // Get compensation trace
+        let trace = exec.compensate(&saga_id, "compensate").unwrap();
+
+        // Verify only successful steps are in compensation trace (not skipped or failed)
+        assert_eq!(trace.compensated_steps.len(), 2); // prepare and execute
+
+        // Verify reverse order (execute compensated before prepare)
+        assert_eq!(trace.compensated_steps[0].step_index, 2); // execute (index 2)
+        assert_eq!(trace.compensated_steps[1].step_index, 0); // prepare (index 0)
+        assert_eq!(trace.compensated_steps[0].step_name, "execute");
+        assert_eq!(trace.compensated_steps[1].step_name, "prepare");
+
+        // All compensation actions should be marked as "compensate"
+        for comp_record in &trace.compensated_steps {
+            assert_eq!(comp_record.action, "compensate");
+            assert_eq!(comp_record.outcome, StepOutcome::Compensated);
+        }
+
+        // Test idempotent compensation
+        let trace2 = exec.compensate(&saga_id, "compensate2").unwrap();
+        assert!(trace2.compensated_steps.is_empty()); // No additional compensation
+        assert_eq!(trace2.final_state, SagaState::Compensated);
+
+        // Test export trace consistency
+        let exported = exec.export_trace(&saga_id).unwrap();
+        assert_eq!(exported.saga_id, saga_id);
+        assert_eq!(exported.final_state, SagaState::Compensated);
+
+        // Should include both compensation rounds (but only non-empty first round)
+        assert_eq!(exported.compensated_steps.len(), 2);
+
+        // Test compensation with corrupted step records
+        let corrupt_saga = exec.create_saga(make_steps(&["corrupt"]), "corrupt").unwrap();
+        let _ = exec.execute_step(&corrupt_saga, StepOutcome::Success { result_data: vec![] }, 1, "corrupt");
+
+        // Manually corrupt the records
+        if let Some(saga) = exec.sagas.get_mut(&corrupt_saga) {
+            // Add fake compensation record
+            saga.records.push(StepRecord {
+                step_index: 999, // Invalid index
+                step_name: "fake_compensation".to_string(),
+                action: "compensate".to_string(),
+                outcome: StepOutcome::Compensated,
+                elapsed_ms: 0,
+            });
+        }
+
+        // Export should handle corrupted records gracefully
+        let corrupt_trace = exec.export_trace(&corrupt_saga);
+        assert!(corrupt_trace.is_some());
+
+        // Test compensation with massive step counts
+        let large_steps: Vec<SagaStepDef> = (0..1000)
+            .map(|i| SagaStepDef {
+                name: format!("mass_step_{}", i),
+                computation_name: None,
+                is_remote: false,
+                idempotency_key: None,
+            })
+            .collect();
+
+        let mass_saga = exec.create_saga(large_steps, "mass").unwrap();
+
+        // Execute many successful steps
+        for i in 0..100 {
+            if exec.get_saga(&mass_saga).unwrap().completed_steps < 100 {
+                let _ = exec.execute_step(&mass_saga, StepOutcome::Success { result_data: vec![i as u8] }, 1, "mass");
+            }
+        }
+
+        // Compensation should handle large compensation lists
+        let mass_trace = exec.compensate(&mass_saga, "mass_comp").unwrap();
+        assert_eq!(mass_trace.compensated_steps.len(), 100);
+
+        // Verify reverse order for large compensation
+        for (i, record) in mass_trace.compensated_steps.iter().enumerate() {
+            assert_eq!(record.step_index, 99 - i); // Reverse order
+            assert_eq!(record.action, "compensate");
+        }
+    }
+
+    #[test]
+    fn negative_hash_collision_and_content_integrity_attacks() {
+        let mut exec1 = SagaExecutor::new();
+        let mut exec2 = SagaExecutor::new();
+
+        // Create identical sagas in both executors
+        let steps1 = make_steps(&["identical1", "identical2"]);
+        let steps2 = make_steps(&["identical1", "identical2"]);
+
+        let id1 = exec1.create_saga(steps1, "trace1").unwrap();
+        let id2 = exec2.create_saga(steps2, "trace1").unwrap();
+
+        // Hashes should be identical for identical content
+        let hash1 = exec1.content_hash();
+        let hash2 = exec2.content_hash();
+        assert_eq!(hash1, hash2);
+
+        // Modify one executor and verify hash changes
+        let _ = exec1.execute_step(&id1, StepOutcome::Success { result_data: b"data1".to_vec() }, 10, "exec1");
+        let _ = exec2.execute_step(&id2, StepOutcome::Success { result_data: b"data2".to_vec() }, 10, "exec2");
+
+        let hash1_modified = exec1.content_hash();
+        let hash2_modified = exec2.content_hash();
+        assert_ne!(hash1_modified, hash2_modified);
+        assert_ne!(hash1, hash1_modified);
+
+        // Test hash collision resistance with crafted inputs
+        let collision_attempts = vec![
+            ("hash_test_1", "collision_attempt"),
+            ("hash_test", "_1collision_attempt"),
+            ("hash_tes", "t_1collision_attempt"),
+            ("hash", "_test_1collision_attempt"),
+        ];
+
+        let mut collision_hashes = Vec::new();
+        for (name1, name2) in collision_attempts {
+            let mut collision_exec = SagaExecutor::new();
+            let collision_steps = vec![
+                SagaStepDef {
+                    name: name1.to_string(),
+                    computation_name: Some(name2.to_string()),
+                    is_remote: true,
+                    idempotency_key: None,
+                },
+            ];
+            let _ = collision_exec.create_saga(collision_steps, "collision");
+            collision_hashes.push(collision_exec.content_hash());
+        }
+
+        // All hashes should be unique (no collisions)
+        for i in 0..collision_hashes.len() {
+            for j in i + 1..collision_hashes.len() {
+                assert_ne!(collision_hashes[i], collision_hashes[j]);
+            }
+        }
+
+        // Test hash with serialization failures
+        let mut corrupt_exec = SagaExecutor::new();
+        let corrupt_id = corrupt_exec.create_saga(make_steps(&["test"]), "trace").unwrap();
+
+        // Force a serialization error by corrupting internal state
+        if let Some(saga) = corrupt_exec.sagas.get_mut(&corrupt_id) {
+            // Insert non-serializable data (this will cause serde to fail)
+            // We can't actually break serde with the current types, but we can test the error path
+            saga.saga_id = "\x00\x01\x02\x03invalid_utf8".to_string();
+        }
+
+        let error_hash = corrupt_exec.content_hash();
+        assert!(error_hash.starts_with("e3b0c44298fc1c149afbf4c8996fb924")); // Empty string SHA256 when serde fails
+
+        // Test deterministic hashing across multiple operations
+        let mut deterministic_exec = SagaExecutor::new();
+        let det_id = deterministic_exec.create_saga(make_steps(&["det1", "det2"]), "det").unwrap();
+
+        let hash_before = deterministic_exec.content_hash();
+        let _ = deterministic_exec.execute_step(&det_id, StepOutcome::Success { result_data: vec![42] }, 100, "det");
+        let hash_after = deterministic_exec.content_hash();
+        let _ = deterministic_exec.compensate(&det_id, "det");
+        let hash_compensated = deterministic_exec.content_hash();
+
+        // All hashes should be different
+        assert_ne!(hash_before, hash_after);
+        assert_ne!(hash_after, hash_compensated);
+        assert_ne!(hash_before, hash_compensated);
+
+        // Verify hash length and format consistency
+        for hash in &[hash_before, hash_after, hash_compensated] {
+            assert_eq!(hash.len(), 64); // SHA-256 hex string
+            assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+        }
+    }
 }

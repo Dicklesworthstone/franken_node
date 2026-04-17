@@ -783,4 +783,136 @@ mod tests {
         assert_eq!(audit.total_units_used, config().fairness_minimum);
         assert_eq!(audit.cap, config().max_units_per_cycle);
     }
+
+    #[test]
+    fn negative_no_pending_precedes_blank_cycle_metadata() {
+        let err = run_cycle(&[], &config(), "", "", "").unwrap_err();
+
+        assert_eq!(err, RepairError::NoPending);
+    }
+
+    #[test]
+    fn negative_invalid_config_precedes_duplicate_item_ids() {
+        let cfg = RepairConfig {
+            max_units_per_cycle: 0,
+            ..config()
+        };
+        let items = vec![item("dup", "a", 10, 5), item("dup", "b", 1, 5)];
+
+        let err = run_cycle(&items, &cfg, "c1", "tr", "ts").unwrap_err();
+
+        assert_eq!(
+            err,
+            RepairError::InvalidConfig {
+                reason: "max_units_per_cycle must be > 0".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_duplicate_item_id_in_skipped_tenant_is_rejected() {
+        let cfg = RepairConfig {
+            max_tenants_per_cycle: 1,
+            ..config()
+        };
+        let items = vec![item("dup", "a-tenant", 10, 5), item("dup", "z-tenant", 1, 5)];
+
+        let err = run_cycle(&items, &cfg, "c1", "tr", "ts").unwrap_err();
+
+        assert_eq!(
+            err,
+            RepairError::InvalidConfig {
+                reason: "duplicate item_id: dup".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_blank_item_id_in_skipped_tenant_is_rejected() {
+        let cfg = RepairConfig {
+            max_tenants_per_cycle: 1,
+            ..config()
+        };
+        let items = vec![item("ok", "a-tenant", 10, 5), item("", "z-tenant", 1, 5)];
+
+        let err = run_cycle(&items, &cfg, "c1", "tr", "ts").unwrap_err();
+
+        assert_eq!(
+            err,
+            RepairError::InvalidConfig {
+                reason: "item_id must be non-empty and unpadded".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_padded_tenant_id_in_late_item_is_rejected_before_tenant_limit() {
+        let cfg = RepairConfig {
+            max_tenants_per_cycle: 1,
+            ..config()
+        };
+        let items = vec![item("ok", "a-tenant", 10, 5), item("late", " z-tenant", 1, 5)];
+
+        let err = run_cycle(&items, &cfg, "c1", "tr", "ts").unwrap_err();
+
+        assert_eq!(
+            err,
+            RepairError::InvalidConfig {
+                reason: "tenant_id must be non-empty and unpadded".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn negative_zero_sized_high_priority_item_does_not_block_billable_work() {
+        let items = vec![
+            item("zero-high", "tenant", u32::MAX, 0),
+            item("billable-low", "tenant", 1, 5),
+        ];
+
+        let (allocs, audit) =
+            run_cycle(&items, &config(), "c-zero-high", "tr-zero-high", "ts")
+                .expect("cycle succeeds");
+
+        assert_eq!(allocs.len(), 1);
+        assert_eq!(allocs[0].items_allocated, vec!["billable-low".to_string()]);
+        assert_eq!(allocs[0].units_used, 5);
+        assert_eq!(audit.tenants_served, 1);
+        assert_eq!(audit.total_units_used, 5);
+    }
+
+    #[test]
+    fn negative_zero_sized_tenant_does_not_inflate_served_count() {
+        let items = vec![item("zero", "a-zero", 10, 0), item("work", "b-work", 10, 5)];
+
+        let (allocs, audit) =
+            run_cycle(&items, &config(), "c-zero-tenant", "tr-zero-tenant", "ts")
+                .expect("cycle succeeds");
+
+        assert_eq!(allocs.len(), 2);
+        assert!(allocs[0].items_allocated.is_empty());
+        assert_eq!(allocs[0].units_used, 0);
+        assert_eq!(allocs[1].items_allocated, vec!["work".to_string()]);
+        assert_eq!(audit.tenants_served, 1);
+        assert_eq!(audit.total_units_used, 5);
+    }
+
+    #[test]
+    fn negative_extreme_fairness_minimum_still_respects_cycle_cap() {
+        let cfg = RepairConfig {
+            max_units_per_cycle: 3,
+            fairness_minimum: u64::MAX,
+            max_tenants_per_cycle: 10,
+        };
+        let items = vec![item("huge", "tenant", 10, u64::MAX)];
+
+        let (allocs, audit) =
+            run_cycle(&items, &cfg, "c-extreme-fair", "tr-extreme-fair", "ts")
+                .expect("cycle succeeds");
+
+        assert_eq!(allocs.len(), 1);
+        assert_eq!(allocs[0].units_used, 3);
+        assert_eq!(audit.total_units_used, cfg.max_units_per_cycle);
+        assert_eq!(audit.cap, cfg.max_units_per_cycle);
+    }
 }

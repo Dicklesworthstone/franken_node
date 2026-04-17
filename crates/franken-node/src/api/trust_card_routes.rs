@@ -1029,4 +1029,178 @@ mod tests {
 
         assert!(result.is_err());
     }
+
+    #[test]
+    fn pagination_deserialize_rejects_missing_per_page() {
+        let value = serde_json::json!({
+            "page": 1
+        });
+
+        let result = serde_json::from_value::<Pagination>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pagination_deserialize_rejects_string_page() {
+        let value = serde_json::json!({
+            "page": "1",
+            "per_page": 20
+        });
+
+        let result = serde_json::from_value::<Pagination>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pagination_deserialize_rejects_negative_per_page() {
+        let value = serde_json::json!({
+            "page": 1,
+            "per_page": -20
+        });
+
+        let result = serde_json::from_value::<Pagination>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn page_meta_deserialize_rejects_negative_page() {
+        let value = serde_json::json!({
+            "page": -1,
+            "per_page": 20,
+            "total_items": 0,
+            "total_pages": 0
+        });
+
+        let result = serde_json::from_value::<PageMeta>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn page_meta_deserialize_rejects_string_total_pages() {
+        let value = serde_json::json!({
+            "page": 1,
+            "per_page": 20,
+            "total_items": 0,
+            "total_pages": "0"
+        });
+
+        let result = serde_json::from_value::<PageMeta>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn api_response_deserialize_rejects_string_ok_flag() {
+        let value = serde_json::json!({
+            "ok": "true",
+            "data": [],
+            "page": null
+        });
+
+        let result = serde_json::from_value::<ApiResponse<Vec<String>>>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn api_response_deserialize_rejects_non_array_data() {
+        let value = serde_json::json!({
+            "ok": true,
+            "data": "not-a-list",
+            "page": null
+        });
+
+        let result = serde_json::from_value::<ApiResponse<Vec<String>>>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn api_response_deserialize_rejects_non_object_page() {
+        let value = serde_json::json!({
+            "ok": true,
+            "data": [],
+            "page": "page-one"
+        });
+
+        let result = serde_json::from_value::<ApiResponse<Vec<String>>>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pagination_deserialize_rejects_null_page() {
+        let value = serde_json::json!({
+            "page": null,
+            "per_page": 20
+        });
+
+        let result = serde_json::from_value::<Pagination>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pagination_deserialize_rejects_float_per_page() {
+        let value = serde_json::json!({
+            "page": 1,
+            "per_page": 20.5
+        });
+
+        let result = serde_json::from_value::<Pagination>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn pagination_deserialize_rejects_u64_overflow_page() {
+        let result = serde_json::from_str::<Pagination>(
+            r#"{"page":18446744073709551616,"per_page":20}"#,
+        );
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn page_meta_deserialize_rejects_null_total_items() {
+        let value = serde_json::json!({
+            "page": 1,
+            "per_page": 20,
+            "total_items": null,
+            "total_pages": 0
+        });
+
+        let result = serde_json::from_value::<PageMeta>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn api_response_deserialize_rejects_missing_data() {
+        let value = serde_json::json!({
+            "ok": true,
+            "page": null
+        });
+
+        let result = serde_json::from_value::<ApiResponse<Vec<String>>>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn api_response_deserialize_rejects_null_data_for_vec() {
+        let value = serde_json::json!({
+            "ok": true,
+            "data": null,
+            "page": null
+        });
+
+        let result = serde_json::from_value::<ApiResponse<Vec<String>>>(value);
+
+        assert!(result.is_err());
+    }
 }

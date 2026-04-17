@@ -1306,4 +1306,146 @@ mod tests {
 
         assert!(!verify_artifact_signatures(&artifact));
     }
+
+    #[test]
+    fn negative_validate_trailing_space_schema_version_fails_closed() {
+        let mut artifact = generate_reference_artifact();
+        artifact.schema_version = format!("{SCHEMA_VERSION} ");
+
+        let result = validate_artifact(&artifact);
+
+        assert!(!result.valid);
+        assert!(result.errors.iter().any(|error| {
+            error.contains(error_codes::ERR_MA_VERSION_UNSUPPORTED)
+                && error.contains("ma-v1.0 ")
+        }));
+    }
+
+    #[test]
+    fn negative_validate_empty_schema_version_fails_closed() {
+        let mut artifact = generate_reference_artifact();
+        artifact.schema_version.clear();
+
+        let result = validate_artifact(&artifact);
+
+        assert!(!result.valid);
+        assert_eq!(result.errors.len(), 1);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains(error_codes::ERR_MA_VERSION_UNSUPPORTED))
+        );
+    }
+
+    #[test]
+    fn negative_validate_infinite_probability_fails_closed() {
+        let mut artifact = generate_reference_artifact();
+        artifact.confidence_interval.probability = f64::INFINITY;
+
+        let result = validate_artifact(&artifact);
+
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains(error_codes::ERR_MA_CONFIDENCE_LOW))
+        );
+    }
+
+    #[test]
+    fn negative_validate_negative_infinite_probability_fails_closed() {
+        let mut artifact = generate_reference_artifact();
+        artifact.confidence_interval.probability = f64::NEG_INFINITY;
+
+        let result = validate_artifact(&artifact);
+
+        assert!(!result.valid);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains(error_codes::ERR_MA_CONFIDENCE_LOW))
+        );
+    }
+
+    #[test]
+    fn negative_rollback_original_state_tamper_rejects_signatures() {
+        let mut artifact = generate_reference_artifact();
+        assert!(verify_artifact_signatures(&artifact));
+
+        artifact.rollback_receipt.original_state_ref.push_str("#tampered");
+
+        assert!(!verify_artifact_signatures(&artifact));
+    }
+
+    #[test]
+    fn negative_empty_rollback_signature_rejects_signature_verification() {
+        let mut artifact = generate_reference_artifact();
+        artifact.rollback_receipt.signature.clear();
+
+        assert!(!verify_artifact_signatures(&artifact));
+    }
+
+    #[test]
+    fn negative_empty_artifact_signature_rejects_signature_verification() {
+        let mut artifact = generate_reference_artifact();
+        artifact.signature.clear();
+
+        assert!(!verify_artifact_signatures(&artifact));
+    }
+
+    #[test]
+    fn negative_deserialize_artifact_rejects_missing_plan_id() {
+        let mut value = serde_json::to_value(generate_reference_artifact()).unwrap();
+        value.as_object_mut().unwrap().remove("plan_id");
+
+        let result = serde_json::from_value::<MigrationArtifact>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_deserialize_artifact_rejects_string_plan_version() {
+        let mut value = serde_json::to_value(generate_reference_artifact()).unwrap();
+        value.as_object_mut().unwrap().insert(
+            "plan_version".to_string(),
+            serde_json::Value::String("1".to_string()),
+        );
+
+        let result = serde_json::from_value::<MigrationArtifact>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_deserialize_confidence_rejects_string_probability() {
+        let raw = serde_json::json!({
+            "probability": "0.95",
+            "dry_run_success_rate": 0.98,
+            "historical_similarity": 0.90,
+            "precondition_coverage": 1.0,
+            "rollback_validation": true
+        });
+
+        let result = serde_json::from_value::<ConfidenceInterval>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_deserialize_step_rejects_missing_rollback_action() {
+        let raw = serde_json::json!({
+            "action_type": "schema_upgrade",
+            "target_resource": "trust_store.db",
+            "pre_state_hash": "aaaa",
+            "post_state_hash": "bbbb",
+            "estimated_duration_ms": 5000
+        });
+
+        let result = serde_json::from_value::<MigrationStep>(raw);
+
+        assert!(result.is_err());
+    }
 }

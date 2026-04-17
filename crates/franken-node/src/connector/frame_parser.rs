@@ -830,4 +830,117 @@ mod frame_parser_additional_negative_tests {
                 if reason == "max_frame_bytes must be > 0"
         ));
     }
+
+    #[test]
+    fn unicode_whitespace_frame_id_is_malformed() {
+        let err = check_frame(&frame("\u{2003}\u{2009}", 1, 1, 1), &config(), "ts")
+            .expect_err("unicode-whitespace frame ID must fail closed");
+
+        assert!(matches!(
+            err,
+            ParserError::MalformedFrame { ref frame_id, ref reason }
+                if frame_id == "(empty)" && reason == "frame_id must not be empty"
+        ));
+    }
+
+    #[test]
+    fn size_and_depth_violations_do_not_include_cpu() {
+        let (verdict, audit) =
+            check_frame(&frame("size-depth", 1000, 10, 49), &config(), "ts")
+                .expect("guardrail verdict");
+
+        assert!(!verdict.allowed);
+        assert_eq!(verdict.violations.len(), 2);
+        assert!(matches!(
+            verdict.violations.as_slice(),
+            [
+                GuardrailViolation::SizeExceeded { .. },
+                GuardrailViolation::DepthExceeded { .. }
+            ]
+        ));
+        assert_eq!(audit.cpu_used, 49);
+        assert_eq!(audit.verdict, "BLOCK");
+    }
+
+    #[test]
+    fn size_and_cpu_violations_do_not_include_depth() {
+        let (verdict, audit) = check_frame(&frame("size-cpu", 1000, 9, 50), &config(), "ts")
+            .expect("guardrail verdict");
+
+        assert!(!verdict.allowed);
+        assert_eq!(verdict.violations.len(), 2);
+        assert!(matches!(
+            verdict.violations.as_slice(),
+            [
+                GuardrailViolation::SizeExceeded { .. },
+                GuardrailViolation::CpuExceeded { .. }
+            ]
+        ));
+        assert_eq!(audit.depth, 9);
+        assert_eq!(audit.verdict, "BLOCK");
+    }
+
+    #[test]
+    fn depth_and_cpu_violations_do_not_include_size() {
+        let (verdict, audit) = check_frame(&frame("depth-cpu", 999, 10, 50), &config(), "ts")
+            .expect("guardrail verdict");
+
+        assert!(!verdict.allowed);
+        assert_eq!(verdict.violations.len(), 2);
+        assert!(matches!(
+            verdict.violations.as_slice(),
+            [
+                GuardrailViolation::DepthExceeded { .. },
+                GuardrailViolation::CpuExceeded { .. }
+            ]
+        ));
+        assert_eq!(audit.size, 999);
+        assert_eq!(audit.verdict, "BLOCK");
+    }
+
+    #[test]
+    fn batch_aborts_on_first_malformed_frame_before_later_resource_blocks() {
+        let frames = vec![
+            frame(" \t", 1, 1, 1),
+            frame("later-size-block", 1000, 1, 1),
+        ];
+
+        let err = check_batch(&frames, &config(), "ts")
+            .expect_err("first malformed frame must abort batch");
+
+        assert!(matches!(
+            err,
+            ParserError::MalformedFrame { ref frame_id, .. } if frame_id == "(empty)"
+        ));
+    }
+
+    #[test]
+    fn batch_zero_depth_config_preempts_valid_frames() {
+        let cfg = ParserConfig {
+            max_frame_bytes: 1,
+            max_nesting_depth: 0,
+            max_decode_cpu_ms: 1,
+        };
+        let frames = vec![frame("valid-looking", 0, 0, 0)];
+
+        let err = check_batch(&frames, &cfg, "ts")
+            .expect_err("invalid config must fail before frame processing");
+
+        assert!(matches!(
+            err,
+            ParserError::InvalidConfig { ref reason }
+                if reason == "max_nesting_depth must be > 0"
+        ));
+    }
+
+    #[test]
+    fn malformed_frame_display_includes_placeholder_and_reason() {
+        let err = check_frame(&frame("", 1, 1, 1), &config(), "ts")
+            .expect_err("empty frame ID must fail");
+        let rendered = err.to_string();
+
+        assert!(rendered.contains("BPG_MALFORMED_FRAME"));
+        assert!(rendered.contains("(empty)"));
+        assert!(rendered.contains("frame_id must not be empty"));
+    }
 }

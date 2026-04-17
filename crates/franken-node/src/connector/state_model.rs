@@ -581,4 +581,100 @@ mod tests {
         assert_eq!(root.version, u64::MAX);
         assert!(root.verify_integrity());
     }
+
+    #[test]
+    fn serde_rejects_state_root_missing_connector_id() {
+        let root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"k": "v"}));
+        let mut value = serde_json::to_value(root).expect("state root should serialize");
+        value.as_object_mut().unwrap().remove("connector_id");
+
+        let err = serde_json::from_value::<StateRoot>(value).unwrap_err();
+
+        assert!(err.to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn serde_rejects_state_root_missing_root_hash() {
+        let root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"k": "v"}));
+        let mut value = serde_json::to_value(root).expect("state root should serialize");
+        value.as_object_mut().unwrap().remove("root_hash");
+
+        let err = serde_json::from_value::<StateRoot>(value).unwrap_err();
+
+        assert!(err.to_string().contains("missing field"));
+    }
+
+    #[test]
+    fn serde_rejects_negative_state_root_version() {
+        let root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"k": "v"}));
+        let mut value = serde_json::to_value(root).expect("state root should serialize");
+        value["version"] = json!(-1);
+
+        let err = serde_json::from_value::<StateRoot>(value).unwrap_err();
+
+        assert!(err.to_string().contains("invalid value"));
+    }
+
+    #[test]
+    fn serde_rejects_state_root_last_modified_type_confusion() {
+        let root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"k": "v"}));
+        let mut value = serde_json::to_value(root).expect("state root should serialize");
+        value["last_modified"] = json!(1700000000u64);
+
+        let err = serde_json::from_value::<StateRoot>(value).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn domainless_json_hash_cannot_spoof_integrity() {
+        let mut root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"k": "v"}));
+        let canonical = serde_json::to_string(&root.head).expect("head should serialize");
+        let digest = Sha256::digest(canonical.as_bytes());
+        root.root_hash = format!("{digest:064x}");
+
+        assert!(!root.verify_integrity());
+    }
+
+    #[test]
+    fn stale_connector_mismatch_still_requires_pull_canonical() {
+        let local = StateRoot::new(
+            "conn-local".into(),
+            StateModelType::Document,
+            json!({"k": "v"}),
+        );
+        let mut canonical = StateRoot::new(
+            "conn-canonical".into(),
+            StateModelType::Document,
+            json!({"k": "v"}),
+        );
+        canonical.update_head(json!({"k": "new"}));
+
+        let check = detect_divergence(&local, &canonical);
+
+        assert_eq!(check.divergence_type, DivergenceType::Stale);
+        assert_eq!(reconcile_action(&check), ReconcileAction::PullCanonical);
+    }
+
+    #[test]
+    fn split_brain_model_mismatch_still_requires_review() {
+        let canonical =
+            StateRoot::new("conn-1".into(), StateModelType::Document, json!({"k": "v"}));
+        let mut local =
+            StateRoot::new("conn-1".into(), StateModelType::KeyValue, json!({"k": "v"}));
+        local.update_head(json!({"k": "local"}));
+
+        let check = detect_divergence(&local, &canonical);
+
+        assert_eq!(check.divergence_type, DivergenceType::SplitBrain);
+        assert_eq!(reconcile_action(&check), ReconcileAction::FlagForReview);
+    }
+
+    #[test]
+    fn uppercase_root_hash_fails_constant_time_integrity_check() {
+        let mut root = StateRoot::new("conn-1".into(), StateModelType::Document, json!({"k": "v"}));
+        root.root_hash = root.root_hash.to_uppercase();
+
+        assert!(!root.verify_integrity());
+    }
 }

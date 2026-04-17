@@ -3647,6 +3647,214 @@ mod tests {
         ));
         assert!(mgr.events().is_empty());
     }
+
+    #[test]
+    fn deserialize_message_rejects_short_verified_mac_hex() {
+        let json = r#"{
+            "session_id": "s1",
+            "sequence": 0,
+            "direction": "Send",
+            "payload_hash": "payload",
+            "verified_mac": "abcd"
+        }"#;
+
+        let parsed: Result<AuthenticatedMessage, _> = serde_json::from_str(json);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn deserialize_session_rejects_non_hex_handshake_mac() {
+        let json = format!(
+            r#"{{
+                "session_id": "s1",
+                "state": "Active",
+                "client_identity": "client",
+                "server_identity": "server",
+                "encryption_key_id": "enc",
+                "signing_key_id": "sign",
+                "established_at": 1,
+                "last_activity_at": 1,
+                "send_seq": 0,
+                "send_seq_exhausted": false,
+                "recv_seq": 0,
+                "recv_seq_exhausted": false,
+                "replay_window": 0,
+                "epoch": 1,
+                "handshake_mac": "{}"
+            }}"#,
+            "zz".repeat(SIGNATURE_LEN)
+        );
+
+        let parsed: Result<AuthenticatedSession, _> = serde_json::from_str(&json);
+
+        assert!(parsed.is_err());
+    }
+
+    #[test]
+    fn handshake_mac_is_bound_to_session_identifier() {
+        let root = test_root_secret();
+        let epoch = test_epoch();
+        let first = sign_handshake("s1", "client", "server", "enc", "sign", epoch, 1, &root);
+        let second = sign_handshake("s2", "client", "server", "enc", "sign", epoch, 1, &root);
+
+        assert!(!ct_eq_bytes(&first, &second));
+    }
+
+    #[test]
+    fn message_mac_is_bound_to_payload_hash() {
+        let mut mgr = default_manager();
+        establish_test_session(&mut mgr, "s1");
+        let session = mgr.get_session("s1").expect("session");
+        let first = sign_session_message(
+            "s1",
+            MessageDirection::Send,
+            0,
+            "payload-a",
+            test_epoch(),
+            &session.handshake_mac,
+            &test_root_secret(),
+        );
+        let second = sign_session_message(
+            "s1",
+            MessageDirection::Send,
+            0,
+            "payload-b",
+            test_epoch(),
+            &session.handshake_mac,
+            &test_root_secret(),
+        );
+
+        assert!(!ct_eq_bytes(&first, &second));
+    }
+
+    #[test]
+    fn process_message_rejects_mac_for_opposite_direction_without_advancing() {
+        let mut mgr = default_manager();
+        establish_test_session(&mut mgr, "s1");
+        let wrong_direction_mac = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "payload");
+
+        let result = mgr.process_message(
+            "s1",
+            MessageDirection::Receive,
+            0,
+            "payload",
+            &wrong_direction_mac,
+            2_000,
+            "trace-wrong-direction",
+        );
+
+        assert!(matches!(result, Err(SessionError::AuthFailed { .. })));
+        let session = mgr.get_session("s1").expect("session");
+        assert_eq!(session.send_seq, 0);
+        assert_eq!(session.recv_seq, 0);
+    }
+
+    #[test]
+    fn process_message_rejects_future_sequence_even_with_valid_mac() {
+        let mut mgr = default_manager();
+        establish_test_session(&mut mgr, "s1");
+        let future_mac = sign_msg(&mgr, "s1", MessageDirection::Send, 2, "payload");
+
+        let result = mgr.process_message(
+            "s1",
+            MessageDirection::Send,
+            2,
+            "payload",
+            &future_mac,
+            2_000,
+            "trace-future-seq",
+        );
+
+        assert!(matches!(
+            result,
+            Err(SessionError::SequenceViolation {
+                expected_min: 0,
+                got: 2,
+                ..
+            })
+        ));
+        assert_eq!(mgr.get_session("s1").expect("session").send_seq, 0);
+    }
+
+    #[test]
+    fn process_message_rejects_windowed_sequence_below_floor() {
+        let mut mgr = SessionManager::new(
+            SessionConfig {
+                replay_window: 2,
+                max_sessions: 10,
+                session_timeout_ms: 60_000,
+            },
+            test_root_secret(),
+            test_epoch(),
+        );
+        establish_test_session(&mut mgr, "s1");
+        let high_mac = sign_msg(&mgr, "s1", MessageDirection::Send, 5, "payload-high");
+        mgr.process_message(
+            "s1",
+            MessageDirection::Send,
+            5,
+            "payload-high",
+            &high_mac,
+            2_000,
+            "trace-high",
+        )
+        .unwrap();
+        let stale_mac = sign_msg(&mgr, "s1", MessageDirection::Send, 2, "payload-stale");
+
+        let result = mgr.process_message(
+            "s1",
+            MessageDirection::Send,
+            2,
+            "payload-stale",
+            &stale_mac,
+            2_001,
+            "trace-below-floor",
+        );
+
+        assert!(matches!(
+            result,
+            Err(SessionError::SequenceViolation {
+                expected_min: 4,
+                got: 2,
+                ..
+            })
+        ));
+        assert_eq!(mgr.get_session("s1").expect("session").send_seq, 6);
+    }
+
+    #[test]
+    fn process_message_rejects_expired_session_before_sequence_advance() {
+        let mut mgr = SessionManager::new(
+            SessionConfig {
+                replay_window: 0,
+                max_sessions: 10,
+                session_timeout_ms: 10,
+            },
+            test_root_secret(),
+            test_epoch(),
+        );
+        establish_test_session(&mut mgr, "s1");
+        let message_mac = sign_msg(&mgr, "s1", MessageDirection::Send, 0, "payload");
+
+        let result = mgr.process_message(
+            "s1",
+            MessageDirection::Send,
+            0,
+            "payload",
+            &message_mac,
+            1_000_011,
+            "trace-expired",
+        );
+
+        assert!(matches!(
+            result,
+            Err(SessionError::SessionExpired { .. })
+        ));
+        let session = mgr.get_session("s1").expect("session");
+        assert_eq!(session.state, SessionState::Expired);
+        assert_eq!(session.send_seq, 0);
+    }
 }
 
 #[cfg(test)]
@@ -3881,6 +4089,134 @@ mod session_auth_boundary_negative_tests {
     #[test]
     fn negative_serde_rejects_unknown_session_error_variant() {
         let result: Result<SessionError, _> = serde_json::from_str(r#""UnknownError""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_session_state_deserialize_rejects_unknown_variant() {
+        let result: Result<SessionState, _> = serde_json::from_str(r#""Paused""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_session_config_deserialize_rejects_negative_timeout() {
+        let raw = serde_json::json!({
+            "replay_window": 0,
+            "max_sessions": 4,
+            "session_timeout_ms": -1
+        });
+
+        let result = serde_json::from_value::<SessionConfig>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_authenticated_session_deserialize_rejects_missing_handshake_mac() {
+        let raw = serde_json::json!({
+            "session_id": "s-missing-mac",
+            "state": "Active",
+            "client_identity": "client",
+            "server_identity": "server",
+            "encryption_key_id": "enc-key",
+            "signing_key_id": "sign-key",
+            "established_at": 1000,
+            "last_activity_at": 1000,
+            "send_seq": 0,
+            "send_seq_exhausted": false,
+            "recv_seq": 0,
+            "recv_seq_exhausted": false,
+            "replay_window": 0,
+            "epoch": 1
+        });
+
+        let result = serde_json::from_value::<AuthenticatedSession>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_authenticated_session_deserialize_rejects_numeric_handshake_mac() {
+        let raw = serde_json::json!({
+            "session_id": "s-numeric-mac",
+            "state": "Active",
+            "client_identity": "client",
+            "server_identity": "server",
+            "encryption_key_id": "enc-key",
+            "signing_key_id": "sign-key",
+            "established_at": 1000,
+            "last_activity_at": 1000,
+            "send_seq": 0,
+            "send_seq_exhausted": false,
+            "recv_seq": 0,
+            "recv_seq_exhausted": false,
+            "replay_window": 0,
+            "epoch": 1,
+            "handshake_mac": 7
+        });
+
+        let result = serde_json::from_value::<AuthenticatedSession>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_authenticated_message_deserialize_rejects_missing_verified_mac() {
+        let raw = serde_json::json!({
+            "session_id": "s-message",
+            "sequence": 0,
+            "direction": "Send",
+            "payload_hash": "payload"
+        });
+
+        let result = serde_json::from_value::<AuthenticatedMessage>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_authenticated_message_deserialize_rejects_string_sequence() {
+        let raw = serde_json::json!({
+            "session_id": "s-message",
+            "sequence": "0",
+            "direction": "Send",
+            "payload_hash": "payload",
+            "verified_mac": "00".repeat(SIGNATURE_LEN)
+        });
+
+        let result = serde_json::from_value::<AuthenticatedMessage>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_authenticated_message_deserialize_rejects_unknown_direction() {
+        let raw = serde_json::json!({
+            "session_id": "s-message",
+            "sequence": 0,
+            "direction": "Inbound",
+            "payload_hash": "payload",
+            "verified_mac": "00".repeat(SIGNATURE_LEN)
+        });
+
+        let result = serde_json::from_value::<AuthenticatedMessage>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_session_event_deserialize_rejects_string_timestamp() {
+        let raw = serde_json::json!({
+            "event_code": event_codes::SCC_MESSAGE_REJECTED,
+            "session_id": "s-event",
+            "trace_id": "trace-event",
+            "detail": "rejected",
+            "timestamp": "1000"
+        });
+
+        let result = serde_json::from_value::<SessionEvent>(raw);
 
         assert!(result.is_err());
     }

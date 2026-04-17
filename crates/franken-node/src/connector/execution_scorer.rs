@@ -1124,3 +1124,770 @@ mod tests {
         assert!(err.to_string().contains("inf"));
     }
 }
+
+#[cfg(test)]
+mod execution_scorer_comprehensive_negative_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    /// Negative test: Unicode injection and encoding attacks in device identifiers and trace data
+    #[test]
+    fn negative_unicode_injection_device_and_trace_attacks() {
+        // Test malicious Unicode in device IDs
+        let malicious_devices = vec![
+            "device\u{202e}evil\u{200b}", // Right-to-left override + zero-width space
+            "device\u{0000}injection", // Null byte injection
+            "device\u{feff}bom", // Byte order mark
+            "device\u{2028}newline", // Line separator
+            "device\u{2029}paragraph", // Paragraph separator
+            "device\u{200c}\u{200d}joiners", // Zero-width joiners
+            "device\u{034f}combining", // Combining grapheme joiner
+        ];
+
+        let mut candidates = Vec::new();
+        for (i, malicious_device) in malicious_devices.iter().enumerate() {
+            candidates.push(CandidateInput {
+                device_id: malicious_device.to_string(),
+                estimated_latency_ms: 100.0 + i as f64 * 10.0,
+                risk_score: 0.1 + i as f64 * 0.1,
+                capability_match_ratio: 0.9 - i as f64 * 0.1,
+            });
+        }
+
+        let weights = ScoringWeights::default_weights();
+        let unicode_trace = "trace\u{202e}malicious\u{0000}";
+        let unicode_timestamp = "2026-01-01T\u{feff}12:00:00Z";
+
+        let result = score_candidates(&candidates, &weights, &unicode_trace, &unicode_timestamp);
+        assert!(result.is_ok(), "Should handle Unicode in device IDs and trace data");
+
+        let decision = result.unwrap();
+        assert_eq!(decision.candidates.len(), malicious_devices.len());
+
+        // Verify Unicode content is preserved without corruption
+        assert_eq!(decision.trace_id, unicode_trace);
+        assert_eq!(decision.timestamp, unicode_timestamp);
+
+        // Verify ranking determinism despite Unicode content
+        let second_result = score_candidates(&candidates, &weights, &unicode_trace, &unicode_timestamp);
+        assert!(second_result.is_ok());
+
+        let second_decision = second_result.unwrap();
+        for (i, (first, second)) in decision.candidates.iter().zip(second_decision.candidates.iter()).enumerate() {
+            assert_eq!(first.device_id, second.device_id, "Unicode should not affect deterministic ranking at position {}", i);
+            assert_eq!(first.rank, second.rank, "Ranks should be identical despite Unicode");
+        }
+
+        // Test loss matrix with Unicode action/outcome names
+        let unicode_matrix = LossMatrix {
+            schema_version: "1.0\u{200b}".to_string(),
+            actions: vec![
+                "do_nothing\u{202e}".to_string(),
+                "action\u{0000}inject".to_string(),
+                "unicode\u{feff}action".to_string(),
+            ],
+            outcomes: vec![
+                "outcome\u{2028}a".to_string(),
+                "outcome\u{200c}b".to_string(),
+            ],
+            values: vec![
+                vec![1.0, 10.0],
+                vec![2.0, 5.0],
+                vec![3.0, 8.0],
+            ],
+        };
+
+        let validation_result = unicode_matrix.validate();
+        match validation_result {
+            Ok(_) => {
+                // Unicode was accepted, test scoring
+                let probs = [0.7, 0.3];
+                let score_result = score_action("do_nothing\u{202e}", &unicode_matrix, &probs);
+                match score_result {
+                    Ok(score) => {
+                        assert_eq!(score.action, "do_nothing\u{202e}");
+                        assert!(score.expected_loss.is_finite());
+                    },
+                    Err(e) => {
+                        // Unicode-specific rejection is acceptable
+                        assert!(matches!(e, LossScoringError::UnknownAction { .. }));
+                    }
+                }
+            },
+            Err(e) => {
+                // Unicode validation failure is also acceptable
+                assert_eq!(e.code(), "ELS_INVALID_SCHEMA");
+            }
+        }
+    }
+
+    /// Negative test: Arithmetic overflow and floating-point precision attacks
+    #[test]
+    fn negative_arithmetic_overflow_floating_point_precision() {
+        let weights = ScoringWeights::default_weights();
+
+        // Test near-maximum floating-point values
+        let extreme_candidates = vec![
+            CandidateInput {
+                device_id: "extreme-latency".to_string(),
+                estimated_latency_ms: f64::MAX / 2.0, // Very large latency
+                risk_score: 0.5,
+                capability_match_ratio: 0.5,
+            },
+            CandidateInput {
+                device_id: "tiny-latency".to_string(),
+                estimated_latency_ms: f64::MIN_POSITIVE, // Smallest positive value
+                risk_score: 0.5,
+                capability_match_ratio: 0.5,
+            },
+            CandidateInput {
+                device_id: "precision-boundary".to_string(),
+                estimated_latency_ms: 1000.0 + f64::EPSILON, // Just above 1000ms boundary
+                risk_score: 1.0 - f64::EPSILON, // Near maximum risk
+                capability_match_ratio: f64::EPSILON, // Near minimum capability
+            },
+        ];
+
+        let result = score_candidates(&extreme_candidates, &weights, "trace-extreme", "timestamp");
+        assert!(result.is_ok(), "Should handle extreme floating-point values");
+
+        let decision = result.unwrap();
+        for candidate in &decision.candidates {
+            assert!(candidate.total_score.is_finite(), "Total score should be finite for {}", candidate.device_id);
+            assert!(candidate.factors.latency_component.is_finite(), "Latency component should be finite");
+            assert!(candidate.factors.risk_component.is_finite(), "Risk component should be finite");
+            assert!(candidate.factors.capability_component.is_finite(), "Capability component should be finite");
+        }
+
+        // Test overflow protection in weight calculations
+        let overflow_weights = ScoringWeights {
+            latency_weight: f64::MAX / 4.0,
+            risk_weight: f64::MAX / 4.0,
+            capability_weight: f64::MAX / 4.0,
+        };
+
+        let overflow_candidate = vec![CandidateInput {
+            device_id: "overflow-test".to_string(),
+            estimated_latency_ms: 500.0,
+            risk_score: 0.8,
+            capability_match_ratio: 0.9,
+        }];
+
+        let overflow_result = score_candidates(&overflow_candidate, &overflow_weights, "trace-overflow", "timestamp");
+        match overflow_result {
+            Ok(decision) => {
+                // If scoring succeeded, verify no overflow occurred
+                assert!(decision.candidates[0].total_score.is_finite(), "Score should remain finite despite large weights");
+            },
+            Err(e) => {
+                // Overflow detection and rejection is acceptable
+                assert!(matches!(e, ScorerError::InvalidWeights { .. } | ScorerError::ScoreOverflow { .. }));
+            }
+        }
+
+        // Test loss matrix with extreme values
+        let extreme_matrix = LossMatrix {
+            schema_version: "extreme-test".to_string(),
+            actions: vec!["do_nothing".to_string(), "extreme_action".to_string()],
+            outcomes: vec!["normal".to_string(), "extreme".to_string()],
+            values: vec![
+                vec![1.0, f64::MAX / 1e6], // Large but finite loss
+                vec![f64::MIN_POSITIVE, 1000.0],
+            ],
+        };
+
+        let extreme_validation = extreme_matrix.validate();
+        assert!(extreme_validation.is_ok(), "Should handle extreme but finite loss values");
+
+        let extreme_probs = [1.0 - f64::EPSILON, f64::EPSILON];
+        let extreme_score_result = score_action("extreme_action", &extreme_matrix, &extreme_probs);
+        assert!(extreme_score_result.is_ok(), "Should handle extreme probability distributions");
+
+        if let Ok(score) = extreme_score_result {
+            assert!(score.expected_loss.is_finite(), "Expected loss should remain finite");
+        }
+
+        // Test precision loss in probability normalization
+        let precision_probs = [0.3333333333333333, 0.3333333333333333, 0.3333333333333334];
+        let precision_matrix = LossMatrix {
+            schema_version: "precision-test".to_string(),
+            actions: vec!["do_nothing".to_string()],
+            outcomes: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+            values: vec![vec![1.0, 2.0, 3.0]],
+        };
+
+        let precision_validation = validate_probabilities(&precision_probs, 3);
+        assert!(precision_validation.is_ok(), "Should handle precision-boundary probability sums");
+    }
+
+    /// Negative test: Memory exhaustion attacks with massive candidate sets and loss matrices
+    #[test]
+    fn negative_memory_exhaustion_massive_data_structures() {
+        let weights = ScoringWeights::default_weights();
+
+        // Test massive number of candidates
+        let huge_device_base = "device".repeat(100);
+        let mut massive_candidates = Vec::new();
+
+        for i in 0..1000 {
+            massive_candidates.push(CandidateInput {
+                device_id: format!("{}-{}", huge_device_base, i),
+                estimated_latency_ms: 100.0 + (i as f64 * 0.1) % 1000.0,
+                risk_score: (i as f64 * 0.001) % 1.0,
+                capability_match_ratio: 1.0 - (i as f64 * 0.0005) % 1.0,
+            });
+        }
+
+        let massive_trace = "trace".repeat(1000);
+        let massive_timestamp = "timestamp".repeat(500);
+
+        let result = score_candidates(&massive_candidates, &weights, &massive_trace, &massive_timestamp);
+        assert!(result.is_ok(), "Should handle large candidate sets without memory exhaustion");
+
+        if let Ok(decision) = result {
+            assert_eq!(decision.candidates.len(), 1000);
+
+            // Verify deterministic ranking with large dataset
+            for (i, candidate) in decision.candidates.iter().enumerate() {
+                assert_eq!(candidate.rank, i + 1, "Ranks should be sequential");
+                assert!(candidate.total_score.is_finite(), "All scores should be finite");
+            }
+        }
+
+        // Test massive loss matrix
+        let mut massive_actions = Vec::new();
+        let mut massive_outcomes = Vec::new();
+        let mut massive_values = Vec::new();
+
+        // Create large loss matrix
+        massive_actions.push("do_nothing".to_string()); // Required action
+        for i in 0..500 {
+            massive_actions.push(format!("action-{}-{}", i, "x".repeat(50)));
+        }
+
+        for i in 0..300 {
+            massive_outcomes.push(format!("outcome-{}-{}", i, "y".repeat(30)));
+        }
+
+        for action_idx in 0..massive_actions.len() {
+            let mut row = Vec::new();
+            for outcome_idx in 0..massive_outcomes.len() {
+                row.push(1.0 + (action_idx as f64 + outcome_idx as f64) * 0.1);
+            }
+            massive_values.push(row);
+        }
+
+        let massive_matrix = LossMatrix {
+            schema_version: "massive-test".to_string(),
+            actions: massive_actions.clone(),
+            outcomes: massive_outcomes.clone(),
+            values: massive_values,
+        };
+
+        let massive_validation = massive_matrix.validate();
+        assert!(massive_validation.is_ok(), "Should validate massive but well-formed loss matrix");
+
+        // Test scoring with massive matrix (use smaller probability array for efficiency)
+        let mut massive_probs = vec![0.0; massive_outcomes.len()];
+        massive_probs[0] = 1.0; // All probability on first outcome
+
+        let massive_score_result = score_action("do_nothing", &massive_matrix, &massive_probs);
+        assert!(massive_score_result.is_ok(), "Should handle massive loss matrix scoring");
+
+        // Test memory usage during sensitivity analysis with smaller subset
+        let subset_actions: Vec<&str> = massive_actions.iter().take(10).map(|s| s.as_str()).collect();
+        let mut subset_probs = vec![0.0; massive_outcomes.len().min(20)];
+        if !subset_probs.is_empty() {
+            subset_probs[0] = 1.0;
+        }
+
+        // Adjust matrix for subset test
+        let subset_matrix = LossMatrix {
+            schema_version: massive_matrix.schema_version.clone(),
+            actions: massive_matrix.actions.iter().take(10).cloned().collect(),
+            outcomes: massive_matrix.outcomes.iter().take(20).cloned().collect(),
+            values: massive_matrix.values.iter().take(10).map(|row| row.iter().take(20).cloned().collect()).collect(),
+        };
+
+        let sensitivity_result = sensitivity_analysis(&subset_actions, &subset_matrix, &subset_probs, 0.1);
+        match sensitivity_result {
+            Ok(records) => {
+                assert!(records.len() < 10000, "Sensitivity records should be bounded");
+            },
+            Err(_) => {
+                // Memory or computation limits are acceptable for massive datasets
+            }
+        }
+    }
+
+    /// Negative test: Floating-point precision edge cases and denormal number handling
+    #[test]
+    fn negative_floating_point_precision_edge_cases() {
+        let weights = ScoringWeights::default_weights();
+
+        // Test subnormal (denormal) numbers
+        let subnormal_candidates = vec![
+            CandidateInput {
+                device_id: "subnormal-latency".to_string(),
+                estimated_latency_ms: f64::from_bits(1), // Smallest subnormal positive
+                risk_score: 0.5,
+                capability_match_ratio: 0.5,
+            },
+            CandidateInput {
+                device_id: "subnormal-precision".to_string(),
+                estimated_latency_ms: 100.0,
+                risk_score: f64::from_bits(1), // Subnormal risk (invalid, should fail)
+                capability_match_ratio: 0.5,
+            },
+        ];
+
+        let result = score_candidates(&subnormal_candidates, &weights, "trace-subnormal", "timestamp");
+        match result {
+            Ok(decision) => {
+                // If accepted, verify all scores remain finite
+                for candidate in &decision.candidates {
+                    assert!(candidate.total_score.is_finite());
+                    assert!(candidate.total_score >= 0.0);
+                }
+            },
+            Err(e) => {
+                // Rejection of subnormal values is acceptable
+                assert_eq!(e.code(), "EPS_INVALID_INPUT");
+            }
+        }
+
+        // Test precision loss in tie-breaking scenarios
+        let epsilon_diff = f64::EPSILON;
+        let tie_candidates = vec![
+            CandidateInput {
+                device_id: "tie-a".to_string(),
+                estimated_latency_ms: 100.0,
+                risk_score: 0.5,
+                capability_match_ratio: 0.5,
+            },
+            CandidateInput {
+                device_id: "tie-b".to_string(),
+                estimated_latency_ms: 100.0 + epsilon_diff,
+                risk_score: 0.5,
+                capability_match_ratio: 0.5,
+            },
+            CandidateInput {
+                device_id: "tie-c".to_string(),
+                estimated_latency_ms: 100.0 - epsilon_diff,
+                risk_score: 0.5,
+                capability_match_ratio: 0.5,
+            },
+        ];
+
+        let tie_result = score_candidates(&tie_candidates, &weights, "trace-tie", "timestamp");
+        assert!(tie_result.is_ok(), "Should handle epsilon-level differences");
+
+        let tie_decision = tie_result.unwrap();
+        assert_eq!(tie_decision.candidates.len(), 3);
+
+        // Test multiple rounds to ensure deterministic tie-breaking
+        let tie_result2 = score_candidates(&tie_candidates, &weights, "trace-tie", "timestamp");
+        assert!(tie_result2.is_ok());
+
+        let tie_decision2 = tie_result2.unwrap();
+        for (first, second) in tie_decision.candidates.iter().zip(tie_decision2.candidates.iter()) {
+            assert_eq!(first.device_id, second.device_id, "Tie-breaking should be deterministic");
+            assert_eq!(first.rank, second.rank, "Ranks should be stable across runs");
+        }
+
+        // Test probability normalization edge cases
+        let edge_probs = vec![
+            [1.0, 0.0], // Perfect certainty
+            [0.5 + f64::EPSILON, 0.5 - f64::EPSILON], // Epsilon imbalance
+            [f64::MIN_POSITIVE, 1.0 - f64::MIN_POSITIVE], // Extreme imbalance
+        ];
+
+        let edge_matrix = LossMatrix {
+            schema_version: "edge-test".to_string(),
+            actions: vec!["do_nothing".to_string(), "act".to_string()],
+            outcomes: vec!["a".to_string(), "b".to_string()],
+            values: vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+        };
+
+        for probs in edge_probs {
+            let validation = validate_probabilities(&probs, 2);
+            assert!(validation.is_ok(), "Should handle edge-case probability distributions: {:?}", probs);
+
+            let score_result = score_action("act", &edge_matrix, &probs);
+            assert!(score_result.is_ok(), "Should score with edge-case probabilities: {:?}", probs);
+        }
+
+        // Test weight normalization edge cases
+        let edge_weights = vec![
+            ScoringWeights { latency_weight: f64::EPSILON, risk_weight: f64::EPSILON, capability_weight: 1.0 },
+            ScoringWeights { latency_weight: 1000000.0, risk_weight: 0.001, capability_weight: 0.001 },
+            ScoringWeights { latency_weight: f64::MIN_POSITIVE, risk_weight: f64::MIN_POSITIVE, capability_weight: f64::MIN_POSITIVE },
+        ];
+
+        let test_candidate = vec![CandidateInput {
+            device_id: "edge-weight-test".to_string(),
+            estimated_latency_ms: 100.0,
+            risk_score: 0.5,
+            capability_match_ratio: 0.5,
+        }];
+
+        for weight in edge_weights {
+            let weight_result = score_candidates(&test_candidate, &weight, "trace-weight-edge", "timestamp");
+            match weight_result {
+                Ok(decision) => {
+                    // If accepted, verify normalization worked correctly
+                    assert!(decision.candidates[0].total_score.is_finite());
+                },
+                Err(e) => {
+                    // Rejection of extreme weights is acceptable
+                    assert_eq!(e.code(), "EPS_INVALID_WEIGHTS");
+                }
+            }
+        }
+    }
+
+    /// Negative test: Timing attack resistance in scoring operations and comparisons
+    #[test]
+    fn negative_timing_attack_resistance() {
+        let weights = ScoringWeights::default_weights();
+
+        // Create candidates with similar vs. different device IDs
+        let similar_devices = vec![
+            "device-aaa",
+            "device-aab",
+            "device-aac",
+            "device-xyz",
+            "completely-different-device-name",
+        ];
+
+        let mut timing_candidates = Vec::new();
+        for device_id in &similar_devices {
+            timing_candidates.push(CandidateInput {
+                device_id: device_id.to_string(),
+                estimated_latency_ms: 100.0,
+                risk_score: 0.5,
+                capability_match_ratio: 0.5,
+            });
+        }
+
+        // Measure timing for multiple runs
+        let mut timing_results = Vec::new();
+        for _ in 0..10 {
+            let start_time = std::time::Instant::now();
+            let _result = score_candidates(&timing_candidates, &weights, "trace-timing", "timestamp");
+            let duration = start_time.elapsed();
+            timing_results.push(duration);
+        }
+
+        // Timing should be relatively consistent
+        let max_timing = timing_results.iter().max().unwrap();
+        let min_timing = timing_results.iter().min().unwrap();
+        let timing_ratio = max_timing.as_nanos() as f64 / min_timing.as_nanos() as f64;
+
+        assert!(timing_ratio < 3.0, "Scoring timing variance too high: {}", timing_ratio);
+
+        // Test timing consistency for validation operations
+        let validation_test_weights = vec![
+            ScoringWeights { latency_weight: 0.4, risk_weight: 0.3, capability_weight: 0.3 },
+            ScoringWeights { latency_weight: -0.1, risk_weight: 0.3, capability_weight: 0.3 }, // Invalid
+            ScoringWeights { latency_weight: 0.0, risk_weight: 0.0, capability_weight: 0.0 }, // Invalid
+        ];
+
+        let mut validation_timing_results = Vec::new();
+        for weight_config in &validation_test_weights {
+            let start_time = std::time::Instant::now();
+            let _result = validate_weights(weight_config);
+            let duration = start_time.elapsed();
+            validation_timing_results.push(duration);
+        }
+
+        // Validation timing should not leak information about validity
+        let max_val_timing = validation_timing_results.iter().max().unwrap();
+        let min_val_timing = validation_timing_results.iter().min().unwrap();
+        let val_timing_ratio = max_val_timing.as_nanos() as f64 / min_val_timing.as_nanos() as f64;
+
+        assert!(val_timing_ratio < 4.0, "Validation timing variance too high: {}", val_timing_ratio);
+
+        // Test loss matrix action lookup timing consistency
+        let timing_matrix = LossMatrix {
+            schema_version: "timing-test".to_string(),
+            actions: vec!["do_nothing".to_string(), "similar_action_a".to_string(), "similar_action_b".to_string(), "different".to_string()],
+            outcomes: vec!["outcome".to_string()],
+            values: vec![vec![1.0], vec![2.0], vec![3.0], vec![4.0]],
+        };
+
+        let test_probs = [1.0];
+        let test_actions = ["do_nothing", "similar_action_a", "similar_action_b", "different", "nonexistent"];
+
+        let mut action_timing_results = Vec::new();
+        for action in &test_actions {
+            let start_time = std::time::Instant::now();
+            let _result = score_action(action, &timing_matrix, &test_probs);
+            let duration = start_time.elapsed();
+            action_timing_results.push(duration);
+        }
+
+        // Action lookup timing should be consistent regardless of similarity or existence
+        let max_action_timing = action_timing_results.iter().max().unwrap();
+        let min_action_timing = action_timing_results.iter().min().unwrap();
+        let action_timing_ratio = max_action_timing.as_nanos() as f64 / min_action_timing.as_nanos() as f64;
+
+        assert!(action_timing_ratio < 5.0, "Action lookup timing variance too high: {}", action_timing_ratio);
+    }
+
+    /// Negative test: Probability perturbation edge cases and sensitivity analysis attacks
+    #[test]
+    fn negative_probability_perturbation_sensitivity_attacks() {
+        // Test perturb_probabilities with edge cases
+        let edge_cases = vec![
+            // Single probability (special case)
+            (vec![1.0], 0, 0.1, false), // Should fail - can't perturb single probability away from 1.0
+            (vec![1.0], 0, 0.0, true),  // Should succeed - no change
+
+            // Boundary perturbations
+            (vec![0.0, 1.0], 0, 1.0, true),  // Move all probability to first outcome
+            (vec![0.0, 1.0], 1, -1.0, true), // Move all probability from second outcome
+            (vec![0.5, 0.5], 0, 0.5, true),  // Boundary case
+            (vec![0.5, 0.5], 0, 0.6, false), // Exceeds boundary
+
+            // Precision edge cases
+            (vec![0.3333333333333333, 0.6666666666666667], 0, f64::EPSILON, true),
+            (vec![f64::EPSILON, 1.0 - f64::EPSILON], 0, -f64::EPSILON/2.0, true),
+        ];
+
+        for (base_probs, index, delta, should_succeed) in edge_cases {
+            let result = perturb_probabilities(&base_probs, index, delta);
+            if should_succeed {
+                assert!(result.is_some(), "Expected perturbation to succeed for base={:?}, index={}, delta={}", base_probs, index, delta);
+
+                if let Some(perturbed) = result {
+                    // Verify probability properties
+                    assert!(perturbed.iter().all(|p| *p >= 0.0 && *p <= 1.0), "All probabilities should be in [0,1]");
+                    let sum: f64 = perturbed.iter().sum();
+                    assert!((sum - 1.0).abs() <= PROBABILITY_SUM_EPSILON * 10.0, "Perturbed probabilities should sum to 1.0, got {}", sum);
+                }
+            } else {
+                assert!(result.is_none(), "Expected perturbation to fail for base={:?}, index={}, delta={}", base_probs, index, delta);
+            }
+        }
+
+        // Test sensitivity analysis with extreme scenarios
+        let extreme_matrix = LossMatrix {
+            schema_version: "extreme-sensitivity".to_string(),
+            actions: vec![
+                "do_nothing".to_string(),
+                "low_impact".to_string(),
+                "high_impact".to_string(),
+            ],
+            outcomes: vec![
+                "very_likely".to_string(),
+                "unlikely".to_string(),
+                "very_unlikely".to_string(),
+            ],
+            values: vec![
+                vec![1.0, 100.0, 1000.0],    // do_nothing: low cost for likely, high for unlikely
+                vec![10.0, 50.0, 100.0],     // low_impact: medium costs
+                vec![50.0, 20.0, 10.0],      // high_impact: front-loaded cost
+            ],
+        };
+
+        // Test with extreme probability distributions
+        let extreme_prob_cases = vec![
+            [0.99, 0.009, 0.001],           // Very skewed
+            [0.001, 0.001, 0.998],          // Reverse skewed
+            [0.333333, 0.333333, 0.333334], // Even split with precision boundary
+        ];
+
+        for probs in extreme_prob_cases {
+            let actions = ["do_nothing", "low_impact", "high_impact"];
+
+            // Test baseline comparison
+            let baseline_result = compare_actions(&actions, &extreme_matrix, &probs);
+            assert!(baseline_result.is_ok(), "Baseline comparison should succeed for probs: {:?}", probs);
+
+            // Test sensitivity analysis with various delta values
+            let delta_values = [0.001, 0.01, 0.1, 0.2];
+            for delta in delta_values {
+                let sensitivity_result = sensitivity_analysis(&actions, &extreme_matrix, &probs, delta);
+                match sensitivity_result {
+                    Ok(records) => {
+                        // Verify sensitivity records are well-formed
+                        for record in &records {
+                            assert!(actions.contains(&record.action.as_str()), "Action should be in original set");
+                            assert!(extreme_matrix.outcomes.contains(&record.parameter_name), "Parameter should be an outcome");
+                            assert!(record.delta.abs() <= delta + f64::EPSILON, "Delta should be within specified range");
+                            assert!(record.original_rank >= 1 && record.original_rank <= actions.len(), "Original rank should be valid");
+                            assert!(record.perturbed_rank >= 1 && record.perturbed_rank <= actions.len(), "Perturbed rank should be valid");
+                        }
+
+                        // Verify sorting order
+                        for window in records.windows(2) {
+                            let (a, b) = (&window[0], &window[1]);
+                            assert!(
+                                a.parameter_name <= b.parameter_name ||
+                                (a.parameter_name == b.parameter_name && a.delta >= b.delta) ||
+                                (a.parameter_name == b.parameter_name && a.delta == b.delta && a.action <= b.action),
+                                "Sensitivity records should be properly sorted"
+                            );
+                        }
+                    },
+                    Err(e) => {
+                        // Some extreme cases may legitimately fail
+                        assert!(matches!(e,
+                            LossScoringError::InvalidProbabilities { .. } |
+                            LossScoringError::InvalidSensitivityDelta { .. }
+                        ), "Failure should be due to invalid input parameters for delta={}, probs={:?}", delta, probs);
+                    }
+                }
+            }
+        }
+
+        // Test sensitivity analysis with massive delta (should fail gracefully)
+        let normal_probs = [0.6, 0.3, 0.1];
+        let actions = ["do_nothing", "low_impact"];
+
+        let massive_delta_result = sensitivity_analysis(&actions, &extreme_matrix, &normal_probs, 10.0);
+        assert!(massive_delta_result.is_err(), "Massive delta should be rejected");
+        assert_eq!(massive_delta_result.unwrap_err().code(), "ELS_INVALID_SENSITIVITY_DELTA");
+
+        let negative_delta_result = sensitivity_analysis(&actions, &extreme_matrix, &normal_probs, -0.1);
+        assert!(negative_delta_result.is_err(), "Negative delta should be rejected");
+        assert_eq!(negative_delta_result.unwrap_err().code(), "ELS_INVALID_SENSITIVITY_DELTA");
+    }
+
+    /// Negative test: Loss matrix schema validation edge cases and malformed data
+    #[test]
+    fn negative_loss_matrix_schema_validation_attacks() {
+        // Test various schema validation edge cases
+        let malformed_matrices = vec![
+            // Empty schema version
+            LossMatrix {
+                schema_version: String::new(),
+                actions: vec!["do_nothing".to_string()],
+                outcomes: vec!["outcome".to_string()],
+                values: vec![vec![1.0]],
+            },
+
+            // Whitespace-only schema version
+            LossMatrix {
+                schema_version: "   \t\n  ".to_string(),
+                actions: vec!["do_nothing".to_string()],
+                outcomes: vec!["outcome".to_string()],
+                values: vec![vec![1.0]],
+            },
+
+            // Missing required "do nothing" action (various spellings)
+            LossMatrix {
+                schema_version: "test".to_string(),
+                actions: vec!["act".to_string(), "react".to_string()],
+                outcomes: vec!["outcome".to_string()],
+                values: vec![vec![1.0], vec![2.0]],
+            },
+
+            // Inconsistent row lengths
+            LossMatrix {
+                schema_version: "test".to_string(),
+                actions: vec!["do_nothing".to_string(), "act".to_string()],
+                outcomes: vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                values: vec![
+                    vec![1.0, 2.0, 3.0],  // Correct length
+                    vec![4.0, 5.0],       // Wrong length
+                ],
+            },
+
+            // Infinite loss values
+            LossMatrix {
+                schema_version: "test".to_string(),
+                actions: vec!["do_nothing".to_string()],
+                outcomes: vec!["outcome".to_string()],
+                values: vec![vec![f64::INFINITY]],
+            },
+
+            // NaN loss values
+            LossMatrix {
+                schema_version: "test".to_string(),
+                actions: vec!["do_nothing".to_string()],
+                outcomes: vec!["outcome".to_string()],
+                values: vec![vec![f64::NAN]],
+            },
+        ];
+
+        for (i, matrix) in malformed_matrices.iter().enumerate() {
+            let validation_result = matrix.validate();
+            assert!(validation_result.is_err(), "Matrix {} should fail validation: {:?}", i, matrix);
+
+            let error = validation_result.unwrap_err();
+            match error {
+                LossScoringError::InvalidSchema { .. } => {},
+                LossScoringError::MissingDoNothingAction => {},
+                _ => panic!("Unexpected error type for matrix {}: {:?}", i, error),
+            }
+        }
+
+        // Test "do nothing" action recognition edge cases
+        let do_nothing_variants = vec![
+            "do_nothing",
+            "donothing",
+            "noop",
+            "NOOP",
+            "Do_Nothing",
+            "do-nothing", // Should NOT match (contains non-alphanumeric)
+            "do nothing", // Should NOT match (contains space)
+        ];
+
+        for variant in do_nothing_variants {
+            let matrix = LossMatrix {
+                schema_version: "test".to_string(),
+                actions: vec![variant.to_string()],
+                outcomes: vec!["outcome".to_string()],
+                values: vec![vec![1.0]],
+            };
+
+            let validation_result = matrix.validate();
+            let normalized = normalize_action_name(variant);
+
+            if normalized == "donothing" || normalized == "noop" {
+                assert!(validation_result.is_ok(), "Variant '{}' (normalized: '{}') should be accepted as do_nothing", variant, normalized);
+            } else {
+                assert!(validation_result.is_err(), "Variant '{}' (normalized: '{}') should be rejected", variant, normalized);
+                assert_eq!(validation_result.unwrap_err(), LossScoringError::MissingDoNothingAction);
+            }
+        }
+
+        // Test action name normalization edge cases
+        let normalization_cases = vec![
+            ("Action123", "action123"),
+            ("Action_With_Underscores", "actionwithunderscores"),
+            ("Action-With-Dashes", "actionwithdashes"),
+            ("Action With Spaces", "actionwithspaces"),
+            ("Action!@#$%^&*()With~Symbols", "actionwithsymbols"),
+            ("", ""),
+            ("123", "123"),
+            ("αβγ", "αβγ"), // Non-ASCII should be preserved
+        ];
+
+        for (input, expected) in normalization_cases {
+            let normalized = normalize_action_name(input);
+            assert_eq!(normalized, expected, "Normalization failed for input: '{}'", input);
+        }
+
+        // Test massive matrix dimensions
+        let massive_matrix = LossMatrix {
+            schema_version: "massive-test".to_string(),
+            actions: (0..1000).map(|i| if i == 0 { "do_nothing".to_string() } else { format!("action_{}", i) }).collect(),
+            outcomes: (0..500).map(|i| format!("outcome_{}", i)).collect(),
+            values: (0..1000).map(|i| (0..500).map(|j| (i + j) as f64).collect()).collect(),
+        };
+
+        let massive_validation = massive_matrix.validate();
+        assert!(massive_validation.is_ok(), "Massive but well-formed matrix should validate");
+
+        // Test action lookup performance with massive matrix
+        let lookup_start = std::time::Instant::now();
+        let lookup_result = massive_matrix.action_index("action_999");
+        let lookup_duration = lookup_start.elapsed();
+
+        assert_eq!(lookup_result, Some(999), "Action lookup should find correct index");
+        assert!(lookup_duration < std::time::Duration::from_millis(10), "Action lookup should be fast even for large matrices");
+    }
+}

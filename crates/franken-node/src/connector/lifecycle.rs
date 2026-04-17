@@ -542,6 +542,163 @@ mod tests {
             assert_eq!(state, parsed);
         }
     }
+
+    #[test]
+    fn negative_serde_state_rejects_uppercase_variant() {
+        let err = serde_json::from_str::<ConnectorState>(r#""ACTIVE""#);
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_state_rejects_null() {
+        let err = serde_json::from_str::<ConnectorState>("null");
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_lifecycle_error_rejects_missing_code_tag() {
+        let err = serde_json::from_str::<LifecycleError>(
+            r#"{"from":"discovered","to":"active","permitted":["verified"]}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_lifecycle_error_rejects_unknown_code_tag() {
+        let err = serde_json::from_str::<LifecycleError>(
+            r#"{"code":"FORCED_TRANSITION","from":"discovered","to":"active","permitted":[]}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_illegal_transition_requires_permitted_targets() {
+        let err = serde_json::from_str::<LifecycleError>(
+            r#"{"code":"ILLEGAL_TRANSITION","from":"discovered","to":"active"}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_self_transition_rejects_bad_state_variant() {
+        let err = serde_json::from_str::<LifecycleError>(
+            r#"{"code":"SELF_TRANSITION","state":"ACTIVE"}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_transition_entry_requires_legal_boolean() {
+        let err = serde_json::from_str::<TransitionEntry>(
+            r#"{"from":"discovered","to":"verified","legal":"true"}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_non_failed_states_cannot_reset_to_discovered() {
+        for state in [
+            ConnectorState::Verified,
+            ConnectorState::Installed,
+            ConnectorState::Configured,
+            ConnectorState::Active,
+            ConnectorState::Paused,
+            ConnectorState::Cancelling,
+            ConnectorState::Stopped,
+        ] {
+            let err = transition(state, ConnectorState::Discovered).unwrap_err();
+
+            assert!(matches!(err, LifecycleError::IllegalTransition { .. }));
+        }
+    }
+
+    #[test]
+    fn negative_serde_transition_entry_rejects_unknown_from_state() {
+        let err = serde_json::from_str::<TransitionEntry>(
+            r#"{"from":"bootstrapped","to":"verified","legal":true}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_transition_entry_rejects_missing_target_state() {
+        let err =
+            serde_json::from_str::<TransitionEntry>(r#"{"from":"discovered","legal":true}"#);
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_transition_entry_rejects_null_legal_flag() {
+        let err = serde_json::from_str::<TransitionEntry>(
+            r#"{"from":"discovered","to":"verified","legal":null}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_illegal_transition_rejects_scalar_permitted_targets() {
+        let err = serde_json::from_str::<LifecycleError>(concat!(
+            r#"{"code":"ILLEGAL_TRANSITION","from":"discovered","#,
+            r#""to":"active","permitted":"verified"}"#,
+        ));
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_illegal_transition_rejects_unknown_permitted_target() {
+        let err = serde_json::from_str::<LifecycleError>(concat!(
+            r#"{"code":"ILLEGAL_TRANSITION","from":"discovered","#,
+            r#""to":"active","permitted":["verified","bootstrapped"]}"#,
+        ));
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_cancelling_state_cannot_backtrack_to_pre_cancel_states() {
+        for target in [
+            ConnectorState::Discovered,
+            ConnectorState::Verified,
+            ConnectorState::Installed,
+            ConnectorState::Configured,
+            ConnectorState::Active,
+            ConnectorState::Paused,
+        ] {
+            assert_illegal_transition(
+                ConnectorState::Cancelling,
+                target,
+                &[ConnectorState::Stopped, ConnectorState::Failed],
+            );
+        }
+    }
+
+    #[test]
+    fn negative_stopped_state_cannot_jump_to_runtime_states() {
+        for target in [
+            ConnectorState::Verified,
+            ConnectorState::Installed,
+            ConnectorState::Active,
+            ConnectorState::Paused,
+            ConnectorState::Cancelling,
+        ] {
+            assert_illegal_transition(
+                ConnectorState::Stopped,
+                target,
+                &[ConnectorState::Configured, ConnectorState::Failed],
+            );
+        }
+    }
 }
 
 /// Integration tests: Connector lifecycle × Runtime lane scheduling × Obligation channels.

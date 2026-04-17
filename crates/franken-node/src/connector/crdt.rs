@@ -793,6 +793,107 @@ mod tests {
     }
 
     #[test]
+    fn negative_serde_lww_entry_rejects_negative_timestamp() {
+        let err = serde_json::from_str::<LwwEntry>(r#"{"value":"x","timestamp":-1}"#);
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_lww_map_rejects_object_timestamp() {
+        let err = serde_json::from_str::<LwwMap>(
+            r#"{
+  "crdt_type":"lww_map",
+  "entries":{"k":{"value":"x","timestamp":{"nested":1}}}
+}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_or_set_rejects_string_tag_counter() {
+        let err = serde_json::from_str::<OrSet>(
+            r#"{
+  "crdt_type":"or_set",
+  "adds":{"x":[{"replica_id":"r1","counter":"1"}]},
+  "removes":{},
+  "next_dot_by_replica":{"r1":1}
+}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_or_set_rejects_malformed_next_dot_map() {
+        let err = serde_json::from_str::<OrSet>(
+            r#"{
+  "crdt_type":"or_set",
+  "adds":{},
+  "removes":{},
+  "next_dot_by_replica":["r1"]
+}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_or_set_rejects_remove_value_that_is_not_tag_set() {
+        let err = serde_json::from_str::<OrSet>(
+            r#"{
+  "crdt_type":"or_set",
+  "adds":{},
+  "removes":{"x":{"replica_id":"r1","counter":1}},
+  "next_dot_by_replica":{}
+}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_gcounter_rejects_string_count() {
+        let err = serde_json::from_str::<GCounter>(
+            r#"{"crdt_type":"gcounter","counts":{"r1":"1"}}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_pncounter_rejects_array_positive_counter() {
+        let err = serde_json::from_str::<PnCounter>(
+            r#"{
+  "crdt_type":"pncounter",
+  "positive":[],
+  "negative":{"crdt_type":"gcounter","counts":{}}
+}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_crdt_error_rejects_missing_actual_type() {
+        let err = serde_json::from_str::<CrdtError>(
+            r#"{"CRDT_TYPE_MISMATCH":{"expected":"lww_map"}}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn negative_serde_crdt_error_rejects_unknown_variant() {
+        let err = serde_json::from_str::<CrdtError>(
+            r#"{"CRDT_NOT_A_REAL_ERROR":{"expected":"lww_map","actual":"or_set"}}"#,
+        );
+
+        assert!(err.is_err());
+    }
+
+    #[test]
     fn or_set_remove_unknown_element_does_not_create_tombstone() {
         let mut s = OrSet::new();
 

@@ -1396,6 +1396,78 @@ mod tests {
         }));
     }
 
+    fn valid_protocol_error_frame_value() -> Value {
+        serde_json::json!({
+            "code": "FN-AUTH-FRANKEN_PROTOCOL_AUTH_FAILED",
+            "canonical_code": "FRANKEN_PROTOCOL_AUTH_FAILED",
+            "retryable": true,
+            "retry_after_ms": 1000,
+            "trace_id": "trace-protocol-valid"
+        })
+    }
+
+    fn assert_protocol_frame_missing_field_is_rejected(field: &str) {
+        let mut value = valid_protocol_error_frame_value();
+        value
+            .as_object_mut()
+            .expect("protocol frame test fixture must be a JSON object")
+            .remove(field);
+
+        let err = serde_json::from_value::<ProtocolErrorFrame>(value)
+            .expect_err("missing protocol frame field must fail deserialization");
+
+        assert!(
+            err.to_string().contains(field),
+            "error {err} should identify missing field {field}"
+        );
+    }
+
+    #[test]
+    fn negative_protocol_frame_deserialization_rejects_missing_code() {
+        assert_protocol_frame_missing_field_is_rejected("code");
+    }
+
+    #[test]
+    fn negative_protocol_frame_deserialization_rejects_missing_canonical_code() {
+        assert_protocol_frame_missing_field_is_rejected("canonical_code");
+    }
+
+    #[test]
+    fn negative_protocol_frame_deserialization_rejects_missing_retryable() {
+        assert_protocol_frame_missing_field_is_rejected("retryable");
+    }
+
+    #[test]
+    fn negative_protocol_frame_deserialization_rejects_missing_trace_id() {
+        assert_protocol_frame_missing_field_is_rejected("trace_id");
+    }
+
+    #[test]
+    fn negative_protocol_frame_deserialization_rejects_string_retry_after_ms() {
+        let mut value = valid_protocol_error_frame_value();
+        value["retry_after_ms"] = serde_json::json!("1000");
+
+        let err = serde_json::from_value::<ProtocolErrorFrame>(value)
+            .expect_err("string retry_after_ms must fail deserialization");
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_protocol_frame_deserialization_rejects_negative_retry_after_ms() {
+        let mut value = valid_protocol_error_frame_value();
+        value["retry_after_ms"] = serde_json::json!(-1);
+
+        let err = serde_json::from_value::<ProtocolErrorFrame>(value)
+            .expect_err("negative retry_after_ms must fail deserialization");
+
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("invalid value") || rendered.contains("u64"),
+            "negative retry_after_ms error should mention unsigned coercion: {rendered}"
+        );
+    }
+
     #[test]
     fn protocol_frame_deserialization_rejects_non_bool_retryable() {
         let value = serde_json::json!({
@@ -1409,6 +1481,78 @@ mod tests {
         let result = serde_json::from_value::<ProtocolErrorFrame>(value);
 
         assert!(result.is_err());
+    }
+
+    fn valid_sdk_error_payload_value() -> Value {
+        serde_json::json!({
+            "code": "FN-AUTH-FRANKEN_PROTOCOL_AUTH_FAILED",
+            "canonical_code": "FRANKEN_PROTOCOL_AUTH_FAILED",
+            "category": "TRANSIENT",
+            "retryable": true,
+            "trace_id": "trace-sdk-valid",
+            "message": "session auth failed",
+            "context": {
+                "route": "/v1/control/session"
+            }
+        })
+    }
+
+    fn assert_sdk_payload_missing_field_is_rejected(field: &str) {
+        let mut value = valid_sdk_error_payload_value();
+        value
+            .as_object_mut()
+            .expect("sdk payload test fixture must be a JSON object")
+            .remove(field);
+
+        let err = serde_json::from_value::<SdkErrorPayload>(value)
+            .expect_err("missing SDK payload field must fail deserialization");
+
+        assert!(
+            err.to_string().contains(field),
+            "error {err} should identify missing field {field}"
+        );
+    }
+
+    #[test]
+    fn negative_sdk_payload_deserialization_rejects_missing_code() {
+        assert_sdk_payload_missing_field_is_rejected("code");
+    }
+
+    #[test]
+    fn negative_sdk_payload_deserialization_rejects_missing_canonical_code() {
+        assert_sdk_payload_missing_field_is_rejected("canonical_code");
+    }
+
+    #[test]
+    fn negative_sdk_payload_deserialization_rejects_missing_category() {
+        assert_sdk_payload_missing_field_is_rejected("category");
+    }
+
+    #[test]
+    fn negative_sdk_payload_deserialization_rejects_missing_trace_id() {
+        assert_sdk_payload_missing_field_is_rejected("trace_id");
+    }
+
+    #[test]
+    fn negative_sdk_payload_deserialization_rejects_numeric_message() {
+        let mut value = valid_sdk_error_payload_value();
+        value["message"] = serde_json::json!(404);
+
+        let err = serde_json::from_value::<SdkErrorPayload>(value)
+            .expect_err("numeric SDK payload message must fail deserialization");
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_sdk_payload_deserialization_rejects_non_string_context_value() {
+        let mut value = valid_sdk_error_payload_value();
+        value["context"]["route"] = serde_json::json!(["/v1/control/session"]);
+
+        let err = serde_json::from_value::<SdkErrorPayload>(value)
+            .expect_err("non-string SDK payload context values must fail deserialization");
+
+        assert!(err.to_string().contains("invalid type"));
     }
 
     #[test]

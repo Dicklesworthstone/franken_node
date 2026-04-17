@@ -904,6 +904,153 @@ mod tests {
     }
 
     #[test]
+    fn validate_rejects_trace_id_with_trailing_space_at_valid_length() {
+        let mut c = ctx(None);
+        c.trace_id.pop();
+        c.trace_id.push(' ');
+
+        let err = c.validate().unwrap_err();
+
+        assert_eq!(c.trace_id.len(), 32);
+        assert_eq!(err.code(), "TRC_INVALID_FORMAT");
+        assert!(err.to_string().contains("trace_id must be 32 hex chars"));
+    }
+
+    #[test]
+    fn validate_rejects_parent_span_id_that_is_too_long() {
+        let mut c = ctx(None);
+        c.parent_span_id = Some("00000000000000000".to_string());
+
+        let err = c.validate().unwrap_err();
+
+        assert_eq!(err.code(), "TRC_INVALID_FORMAT");
+        assert!(
+            err.to_string()
+                .contains("parent_span_id must be 16 hex chars")
+        );
+    }
+
+    #[test]
+    fn record_rejects_child_before_parent_without_partial_insert() {
+        let mut store = TraceStore::new();
+        let root = ctx(None);
+        let child = root.child(&sid(2), "ts-child");
+
+        let err = store.record(&child).unwrap_err();
+
+        assert_eq!(err.code(), "TRC_PARENT_NOT_FOUND");
+        assert!(store.stitch(&tid()).is_empty());
+    }
+
+    #[test]
+    fn record_rejects_self_parent_without_partial_insert() {
+        let mut store = TraceStore::new();
+        let span = sid(3);
+        let c = TraceContext {
+            trace_id: tid(),
+            span_id: span.clone(),
+            parent_span_id: Some(span),
+            timestamp: "ts-self-parent".into(),
+        };
+
+        let err = store.record(&c).unwrap_err();
+
+        assert_eq!(err.code(), "TRC_INVALID_FORMAT");
+        assert!(store.stitch(&tid()).is_empty());
+    }
+
+    #[test]
+    fn record_duplicate_span_with_different_parent_is_rejected_without_overwrite() {
+        let mut store = TraceStore::new();
+        let root = ctx(None);
+        let first_child = root.child(&sid(2), "ts-first-child");
+        let other_parent = root.child(&sid(3), "ts-other-parent");
+        let duplicate_with_other_parent = TraceContext {
+            trace_id: tid(),
+            span_id: sid(2),
+            parent_span_id: Some(sid(3)),
+            timestamp: "ts-duplicate-other-parent".into(),
+        };
+        store.record(&root).unwrap();
+        store.record(&first_child).unwrap();
+        store.record(&other_parent).unwrap();
+
+        let err = store.record(&duplicate_with_other_parent).unwrap_err();
+
+        assert_eq!(err.code(), "TRC_DUPLICATE_SPAN_ID");
+        let spans = store.stitch(&tid());
+        assert_eq!(spans.len(), 3);
+        assert_eq!(spans[1].timestamp, "ts-first-child");
+    }
+
+    #[test]
+    fn conformance_rejects_invalid_parent_artifact_and_child_orphan() {
+        let root = ctx(None);
+        let child = root.child(&sid(2), "ts-child");
+        let arts = vec![
+            TracedArtifact {
+                artifact_id: " root ".into(),
+                artifact_type: "invoke".into(),
+                trace_context: Some(root),
+            },
+            TracedArtifact {
+                artifact_id: "child".into(),
+                artifact_type: "receipt".into(),
+                trace_context: Some(child),
+            },
+        ];
+
+        let report = TraceStore::check_conformance(&arts);
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, tid());
+        assert_eq!(report.violations.len(), 2);
+        assert!(report.violations.iter().any(|violation| {
+            violation.artifact_id == " root " && violation.reason.contains("whitespace")
+        }));
+        assert!(report.violations.iter().any(|violation| {
+            violation.artifact_id == "child" && violation.reason.contains("TRC_PARENT_NOT_FOUND")
+        }));
+    }
+
+    #[test]
+    fn conformance_rejects_invalid_artifact_id_before_missing_context() {
+        let arts = vec![TracedArtifact {
+            artifact_id: " \t ".into(),
+            artifact_type: "invoke".into(),
+            trace_context: None,
+        }];
+
+        let report = TraceStore::check_conformance(&arts);
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, "");
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.violations[0].reason.contains("must not be empty"));
+        assert!(
+            !report.violations[0]
+                .reason
+                .contains("missing trace context")
+        );
+    }
+
+    #[test]
+    fn conformance_rejects_padded_reserved_artifact_id_as_reserved() {
+        let arts = vec![TracedArtifact {
+            artifact_id: " <unknown> ".into(),
+            artifact_type: "invoke".into(),
+            trace_context: Some(ctx(None)),
+        }];
+
+        let report = TraceStore::check_conformance(&arts);
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.trace_id, "");
+        assert_eq!(report.violations.len(), 1);
+        assert!(report.violations[0].reason.contains("reserved"));
+    }
+
+    #[test]
     fn all_error_codes_present() {
         let errors = [
             TraceError::MissingTraceId,

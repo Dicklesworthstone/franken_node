@@ -657,8 +657,12 @@ impl VoiScheduler {
 // ---------------------------------------------------------------------------
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -1424,6 +1428,123 @@ mod tests {
                 .iter()
                 .any(|event| event.code == EVT_PREEMPTION)
         );
+    }
+
+    #[test]
+    fn negative_zero_storm_windows_rejected() {
+        let cfg = VoiConfig {
+            storm_windows: 0,
+            ..Default::default()
+        };
+
+        let err = cfg.validate().expect_err("zero storm windows must fail");
+
+        assert!(
+            matches!(err, VoiError::InvalidConfig(message) if message.contains("storm_windows"))
+        );
+    }
+
+    #[test]
+    fn negative_nan_regime_multiplier_rejected() {
+        let cfg = VoiConfig {
+            regime_multiplier: f64::NAN,
+            ..Default::default()
+        };
+
+        let err = cfg
+            .validate()
+            .expect_err("non-finite regime multiplier must fail");
+
+        assert!(
+            matches!(err, VoiError::InvalidConfig(message) if message.contains("regime_multiplier"))
+        );
+    }
+
+    #[test]
+    fn negative_zero_sum_weights_rejected() {
+        let cfg = VoiConfig {
+            weight_staleness: 0.0,
+            weight_uncertainty: 0.0,
+            weight_downstream: 0.0,
+            weight_historical: 0.0,
+            ..Default::default()
+        };
+
+        let err = cfg.validate().expect_err("zero total weight must fail");
+
+        assert!(matches!(err, VoiError::InvalidConfig(message) if message.contains("sum to 1.0")));
+    }
+
+    #[test]
+    fn negative_get_unknown_diagnostic_returns_none() {
+        let sched = make_scheduler();
+
+        assert!(sched.get_diagnostic("definitely_missing").is_none());
+        assert!(
+            !sched
+                .diagnostic_names()
+                .contains(&"definitely_missing".to_string())
+        );
+    }
+
+    #[test]
+    fn negative_schedule_empty_registry_does_not_emit_events() {
+        let mut sched = VoiScheduler::new(VoiConfig::default()).unwrap();
+
+        let err = sched.schedule(42).expect_err("empty schedule must fail");
+
+        assert_eq!(err, VoiError::EmptyRegistry);
+        assert!(sched.events().is_empty());
+    }
+
+    #[test]
+    fn negative_record_finding_unknown_keeps_known_score_stable() {
+        let mut sched = make_scheduler();
+        let before = sched.compute_voi("health_ping", 1000).unwrap();
+
+        let err = sched
+            .record_finding("missing_diagnostic", false)
+            .expect_err("unknown diagnostic must fail");
+        let after = sched.compute_voi("health_ping", 1000).unwrap();
+
+        assert_eq!(err, VoiError::UnknownDiagnostic("missing_diagnostic".into()));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn negative_register_invalid_after_valid_keeps_registry_stable() {
+        let mut sched = VoiScheduler::new(VoiConfig::default()).unwrap();
+        sched
+            .register_diagnostic(simple_diagnostic(
+                "valid_diag",
+                10.0,
+                PriorityClass::Standard,
+            ))
+            .unwrap();
+        let before_names = sched.diagnostic_names();
+
+        let err = sched
+            .register_diagnostic(simple_diagnostic(
+                "invalid_diag",
+                f64::NEG_INFINITY,
+                PriorityClass::Critical,
+            ))
+            .expect_err("invalid diagnostic must fail");
+
+        assert!(
+            matches!(err, VoiError::InvalidDiagnostic(message) if message.contains("cost must be finite and > 0"))
+        );
+        assert_eq!(sched.diagnostic_names(), before_names);
+        assert!(sched.get_diagnostic("invalid_diag").is_none());
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_existing_and_drops_new_item() {
+        let mut values = vec!["old-a".to_string(), "old-b".to_string()];
+
+        push_bounded(&mut values, "new".to_string(), 0);
+
+        assert!(values.is_empty());
     }
 
     // -- Error display --

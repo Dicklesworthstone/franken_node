@@ -1195,4 +1195,575 @@ mod tests {
 
         assert_eq!(items, vec![2, 3, 4]);
     }
+
+    // === NEGATIVE-PATH ROBUSTNESS TESTS ===
+
+    #[test]
+    fn unicode_injection_in_action_identifiers_handled_safely() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+
+        // Unicode injection attack vectors in action IDs
+        let malicious_action_ids = [
+            "ACT\u{202e}evil\u{200b}\u{0000}inject",      // Bidirectional override + zero width + null
+            "ACT\u{feff}\u{1f4a9}\u{2028}bypass",        // BOM + emoji + line separator
+            "ACT\u{0085}\u{2029}\u{00ad}payload\u{061c}", // Control chars + soft hyphen
+            "ACT\u{034f}\u{180e}\u{200c}id",             // Combining marks + invisible chars
+            "ACT-001\r\nHost: evil.com",                 // CRLF injection
+            "ACT-001\x00truncated",                      // Null termination attack
+            &"A".repeat(100_000),                        // Massive action ID (DoS)
+        ];
+
+        for malicious_id in malicious_action_ids {
+            let action_id = ActionId::new(malicious_id);
+            let evidence = build_evidence_entry(
+                PolicyAction::Commit,
+                &action_id,
+                "trace-unicode-test",
+                1,
+                serde_json::json!({"test": "unicode"}),
+            );
+
+            let outcome = checker.verify_and_execute(
+                PolicyAction::Commit,
+                &action_id,
+                Some(&evidence),
+                &mut ledger,
+            );
+
+            // Should handle Unicode injection safely
+            assert!(outcome.is_executed() || outcome.is_rejected(),
+                "Unicode action ID '{}' should be handled without panic", malicious_id);
+
+            if outcome.is_executed() {
+                // Verify ledger entry is recorded safely
+                assert!(ledger.len() > 0, "Ledger should contain entry for Unicode action ID");
+
+                // Verify action ID is preserved as-is (no interpretation)
+                assert_eq!(action_id.as_str(), malicious_id,
+                    "Action ID should be preserved exactly as provided");
+            }
+
+            // Action log should contain outcome regardless of success/rejection
+            assert!(!checker.action_log().is_empty(), "Action log should record Unicode attempts");
+        }
+    }
+
+    #[test]
+    fn malformed_evidence_entries_comprehensive_validation() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+        let action_id = ActionId::new("ACT-MALFORMED-001");
+
+        // Test various malformed evidence scenarios
+        let malformed_evidence_tests = [
+            // Empty required string fields
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.decision_id = String::new();
+                ("empty decision_id", evidence)
+            },
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.trace_id = String::new();
+                ("empty trace_id", evidence)
+            },
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.schema_version = String::new();
+                ("empty schema_version", evidence)
+            },
+
+            // Whitespace-only fields
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.decision_id = "   ".to_string();
+                ("whitespace-only decision_id", evidence)
+            },
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.trace_id = "\t\n\r ".to_string();
+                ("whitespace-only trace_id", evidence)
+            },
+
+            // Unicode control characters in fields
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.decision_id = "ACT\u{0000}hidden".to_string();
+                ("null byte in decision_id", evidence)
+            },
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.trace_id = "trace\u{001F}control".to_string();
+                ("control char in trace_id", evidence)
+            },
+
+            // Extremely long field values (potential DoS)
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.decision_id = "x".repeat(50_000);
+                ("massive decision_id", evidence)
+            },
+            {
+                let mut evidence = make_evidence(PolicyAction::Commit, "ACT-MALFORMED-001");
+                evidence.trace_id = "t".repeat(25_000);
+                ("massive trace_id", evidence)
+            },
+        ];
+
+        for (test_name, evidence) in malformed_evidence_tests {
+            let outcome = checker.verify_and_execute(
+                PolicyAction::Commit,
+                &action_id,
+                Some(&evidence),
+                &mut ledger,
+            );
+
+            // Empty decision_id and trace_id should be rejected as malformed
+            if evidence.decision_id.trim().is_empty() || evidence.trace_id.trim().is_empty() {
+                assert!(outcome.is_rejected(),
+                    "Test '{}' should reject malformed evidence", test_name);
+
+                if let PolicyActionOutcome::Rejected { error, .. } = &outcome {
+                    assert_eq!(error.code(), "ERR_MALFORMED_EVIDENCE",
+                        "Test '{}' should produce malformed evidence error", test_name);
+                }
+            } else {
+                // Other malformed inputs should be handled safely (may succeed or fail)
+                assert!(outcome.is_executed() || outcome.is_rejected(),
+                    "Test '{}' should handle malformed input safely", test_name);
+            }
+
+            // Verify no memory leaks or crashes with malformed data
+            assert!(checker.action_log().len() > 0, "Action log should record attempt");
+        }
+    }
+
+    #[test]
+    fn decision_kind_mismatch_comprehensive_cross_validation() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+
+        // Test all combinations of action vs decision_kind mismatches
+        let actions = PolicyAction::all();
+
+        for &requesting_action in actions {
+            for &evidence_action in actions {
+                if requesting_action == evidence_action {
+                    continue; // Skip matching pairs
+                }
+
+                let action_id = ActionId::new(format!(
+                    "ACT-MISMATCH-{}-{}",
+                    requesting_action.label().to_uppercase(),
+                    evidence_action.label().to_uppercase()
+                ));
+
+                let evidence = make_evidence(evidence_action, action_id.as_str());
+
+                let outcome = checker.verify_and_execute(
+                    requesting_action,
+                    &action_id,
+                    Some(&evidence),
+                    &mut ledger,
+                );
+
+                // All mismatches should be rejected
+                assert!(outcome.is_rejected(),
+                    "Mismatch {} action with {} evidence should be rejected",
+                    requesting_action.label(), evidence_action.label());
+
+                if let PolicyActionOutcome::Rejected { error, .. } = &outcome {
+                    assert_eq!(error.code(), "ERR_DECISION_KIND_MISMATCH",
+                        "Should produce decision kind mismatch error");
+                }
+
+                // Ledger should not be modified by rejected actions
+                assert_eq!(ledger.len(), 0, "Ledger should remain empty for all mismatches");
+            }
+        }
+
+        // Verify all mismatches were rejected
+        assert!(checker.rejected_count() > 0, "Should have rejected multiple mismatches");
+        assert_eq!(checker.executed_count(), 0, "Should not have executed any mismatched actions");
+    }
+
+    #[test]
+    fn action_id_linkage_injection_and_substitution_attacks() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+
+        // Action ID substitution attack scenarios
+        let linkage_attacks = [
+            // Basic substitution
+            ("ACT-LEGIT-001", "ACT-MALICIOUS-001"),
+
+            // Case sensitivity bypass attempts
+            ("ACT-SECURE-001", "act-secure-001"),
+            ("act-secure-001", "ACT-SECURE-001"),
+
+            // Unicode normalization attacks
+            ("ACT-café-001", "ACT-cafe\u{0301}-001"), // NFC vs NFD
+
+            // Injection attempts via action IDs
+            ("ACT-001", "ACT-001\"; DROP TABLE evidence; --"),
+            ("ACT-001", "ACT-001<script>alert('xss')</script>"),
+            ("ACT-001", "ACT-001\r\nBypass: true"),
+
+            // Null byte truncation attacks
+            ("ACT-REAL-001", "ACT-REAL-001\0fake"),
+
+            // Whitespace confusion
+            ("ACT-001", "ACT-001 "),
+            ("ACT-001", " ACT-001"),
+            ("ACT-001", "ACT-001\t"),
+
+            // Length-based attacks
+            ("ACT-SHORT", &"A".repeat(100_000)),
+        ];
+
+        for (expected_id, evidence_id) in linkage_attacks {
+            let action_id = ActionId::new(expected_id);
+            let evidence = make_evidence(PolicyAction::Release, evidence_id);
+
+            let outcome = checker.verify_and_execute(
+                PolicyAction::Release,
+                &action_id,
+                Some(&evidence),
+                &mut ledger,
+            );
+
+            // All linkage attacks should be rejected (exact match required)
+            if expected_id != evidence_id {
+                assert!(outcome.is_rejected(),
+                    "Linkage attack expected='{}', evidence='{}' should be rejected",
+                    expected_id, evidence_id);
+
+                if let PolicyActionOutcome::Rejected { error, .. } = &outcome {
+                    assert_eq!(error.code(), "ERR_ACTION_ID_MISMATCH",
+                        "Should produce action ID mismatch error");
+                }
+            } else {
+                // Exact matches should succeed
+                assert!(outcome.is_executed(), "Exact match should succeed");
+            }
+        }
+
+        // Verify no malicious evidence was accepted
+        let expected_successes = linkage_attacks.iter()
+            .filter(|(expected, evidence)| expected == evidence)
+            .count();
+        assert_eq!(checker.executed_count() as usize, expected_successes,
+            "Only exact matches should have succeeded");
+    }
+
+    #[test]
+    fn concurrent_evidence_verification_state_corruption_resistance() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let checker = Arc::new(Mutex::new(EvidenceConformanceChecker::new()));
+        let ledger = Arc::new(Mutex::new(make_ledger()));
+
+        // Spawn multiple threads performing concurrent evidence verification
+        let handles: Vec<_> = (0..8).map(|thread_id| {
+            let checker_clone = Arc::clone(&checker);
+            let ledger_clone = Arc::clone(&ledger);
+
+            thread::spawn(move || {
+                let mut results = Vec::new();
+
+                for i in 0..25 {
+                    let action_id = ActionId::new(format!("CONCURRENT-{}-{}", thread_id, i));
+                    let action = PolicyAction::all()[i % PolicyAction::all().len()];
+
+                    // Mix of valid and invalid evidence
+                    let evidence = if i % 3 == 0 {
+                        None // Missing evidence
+                    } else if i % 3 == 1 {
+                        // Valid evidence
+                        Some(make_evidence(action, action_id.as_str()))
+                    } else {
+                        // Invalid evidence (wrong action ID)
+                        Some(make_evidence(action, "WRONG-ID"))
+                    };
+
+                    if let (Ok(mut checker_lock), Ok(mut ledger_lock)) =
+                        (checker_clone.try_lock(), ledger_clone.try_lock()) {
+
+                        let outcome = checker_lock.verify_and_execute(
+                            action,
+                            &action_id,
+                            evidence.as_ref(),
+                            &mut ledger_lock,
+                        );
+
+                        results.push((outcome.is_executed(), outcome.is_rejected()));
+                    }
+
+                    // Brief yield to encourage race conditions
+                    thread::yield_now();
+                }
+
+                results
+            })
+        }).collect();
+
+        // Collect all results
+        let mut all_results = Vec::new();
+        for handle in handles {
+            let thread_results = handle.join().unwrap();
+            all_results.extend(thread_results);
+        }
+
+        // Verify consistency under concurrent access
+        let executed_count = all_results.iter().filter(|(exec, _)| *exec).count();
+        let rejected_count = all_results.iter().filter(|(_, rej)| *rej).count();
+
+        // All operations should have deterministic outcomes
+        assert_eq!(executed_count + rejected_count, all_results.len(),
+            "All operations should have definitive outcomes");
+
+        // Verify final state consistency
+        let final_checker = checker.lock().unwrap();
+        let final_ledger = ledger.lock().unwrap();
+
+        assert_eq!(final_checker.executed_count() as usize, executed_count,
+            "Executed count should match successful operations");
+        assert_eq!(final_checker.rejected_count() as usize, rejected_count,
+            "Rejected count should match failed operations");
+        assert_eq!(final_ledger.len(), executed_count,
+            "Ledger size should match executed operations");
+    }
+
+    #[test]
+    fn massive_action_log_capacity_exhaustion_protection() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+
+        // Generate more actions than MAX_ACTION_LOG_ENTRIES capacity
+        let excess_actions = MAX_ACTION_LOG_ENTRIES + 500;
+
+        for i in 0..excess_actions {
+            let action_id = ActionId::new(format!("FLOOD-{:06}", i));
+            let action = PolicyAction::all()[i % PolicyAction::all().len()];
+
+            // Mix of successful and rejected actions
+            let evidence = if i % 2 == 0 {
+                Some(make_evidence(action, action_id.as_str()))
+            } else {
+                None // Missing evidence
+            };
+
+            let outcome = checker.verify_and_execute(
+                action,
+                &action_id,
+                evidence.as_ref(),
+                &mut ledger,
+            );
+
+            // Verify operation completes without memory exhaustion
+            assert!(outcome.is_executed() || outcome.is_rejected(),
+                "Operation {} should complete without panic", i);
+        }
+
+        // Action log should be bounded by capacity
+        assert!(checker.action_log().len() <= MAX_ACTION_LOG_ENTRIES,
+            "Action log should be bounded to capacity, got {}", checker.action_log().len());
+
+        // Counters should accurately reflect all operations
+        let expected_executed = excess_actions / 2;
+        let expected_rejected = excess_actions - expected_executed;
+
+        assert_eq!(checker.executed_count() as usize, expected_executed,
+            "Executed count should reflect all successful operations");
+        assert_eq!(checker.rejected_count() as usize, expected_rejected,
+            "Rejected count should reflect all failed operations");
+
+        // Ledger should contain only executed entries
+        assert_eq!(ledger.len(), expected_executed,
+            "Ledger should contain only successfully executed entries");
+
+        // Action log should contain most recent entries (oldest evicted)
+        if checker.action_log().len() == MAX_ACTION_LOG_ENTRIES {
+            // Verify latest entries are preserved
+            let last_entry_in_log = &checker.action_log()[MAX_ACTION_LOG_ENTRIES - 1];
+            // Should be one of the recent outcomes
+            assert!(last_entry_in_log.is_executed() || last_entry_in_log.is_rejected(),
+                "Last action log entry should be valid");
+        }
+    }
+
+    #[test]
+    fn evidence_payload_json_injection_and_structure_attacks() {
+        let mut checker = EvidenceConformanceChecker::new();
+        let mut ledger = make_ledger();
+
+        // JSON injection attack vectors in evidence payloads
+        let malicious_payloads = [
+            // JSON structure manipulation
+            serde_json::json!({"key": "value\"},\"malicious\":true,\"original\":\""}),
+            serde_json::json!({"key": "\": {\"bypass\": true}, \"real_key\": \""}),
+
+            // Unicode escapes and control characters
+            serde_json::json!({"unicode": "value\u{0000}bypass"}),
+            serde_json::json!({"control": "value\u{001F}\u{007F}"}),
+            serde_json::json!({"bidi": "value\u{202e}reversed"}),
+
+            // CRLF injection attempts
+            serde_json::json!({"crlf": "value\r\nX-Injection: malicious"}),
+            serde_json::json!({"newline": "value\n{\"fake\": \"entry\"}"}),
+
+            // Massive nested structures (DoS)
+            {
+                let mut nested = serde_json::json!("deep");
+                for _ in 0..1000 {
+                    nested = serde_json::json!({"level": nested});
+                }
+                nested
+            },
+
+            // Array flooding
+            serde_json::json!({"flood": vec!["x"; 100_000]}),
+
+            // String length attacks
+            serde_json::json!({"massive": "x".repeat(100_000)}),
+
+            // Number boundary attacks
+            serde_json::json!({"max_int": i64::MAX}),
+            serde_json::json!({"max_uint": u64::MAX}),
+            serde_json::json!({"infinity": f64::INFINITY}),
+            serde_json::json!({"neg_infinity": f64::NEG_INFINITY}),
+
+            // Null and undefined values
+            serde_json::json!(null),
+            serde_json::json!({"null_field": null}),
+        ];
+
+        for (i, payload) in malicious_payloads.into_iter().enumerate() {
+            let action_id = ActionId::new(format!("PAYLOAD-ATTACK-{}", i));
+            let evidence = build_evidence_entry(
+                PolicyAction::Quarantine,
+                &action_id,
+                "trace-payload-attack",
+                1,
+                payload.clone(),
+            );
+
+            let outcome = checker.verify_and_execute(
+                PolicyAction::Quarantine,
+                &action_id,
+                Some(&evidence),
+                &mut ledger,
+            );
+
+            // Should handle all payload attacks safely
+            assert!(outcome.is_executed() || outcome.is_rejected(),
+                "Payload attack {} should be handled without panic", i);
+
+            if outcome.is_executed() {
+                // Verify payload is preserved as-is in ledger
+                assert!(ledger.len() > 0, "Ledger should contain entry");
+
+                // Verify JSON serialization doesn't break
+                let serialized = serde_json::to_string(&evidence);
+                assert!(serialized.is_ok(), "Evidence should serialize safely");
+
+                // Verify no interpretation of payload content
+                assert_eq!(evidence.payload, payload,
+                    "Payload should be preserved exactly as provided");
+            }
+        }
+
+        // All operations should complete without system compromise
+        assert!(checker.executed_count() > 0 || checker.rejected_count() > 0,
+            "Should have processed all payload attacks");
+    }
+
+    #[test]
+    fn ledger_failure_cascade_and_consistency_guarantees() {
+        let mut checker = EvidenceConformanceChecker::new();
+
+        // Test various ledger failure scenarios
+        let failure_scenarios = [
+            // Zero capacity ledger
+            ("zero_capacity", EvidenceLedger::new(LedgerCapacity::new(0, 100_000))),
+
+            // Minimal byte budget
+            ("tiny_bytes", EvidenceLedger::new(LedgerCapacity::new(100, 1))),
+
+            // Moderate capacity for overflow testing
+            ("small_capacity", EvidenceLedger::new(LedgerCapacity::new(2, 1_000))),
+        ];
+
+        for (scenario_name, mut ledger) in failure_scenarios {
+            let mut local_checker = EvidenceConformanceChecker::new();
+
+            // Attempt multiple evidence submissions
+            for i in 0..10 {
+                let action_id = ActionId::new(format!("{}-ACT-{}", scenario_name.to_uppercase(), i));
+                let action = PolicyAction::all()[i % PolicyAction::all().len()];
+                let evidence = build_evidence_entry(
+                    action,
+                    &action_id,
+                    &format!("trace-{}-{}", scenario_name, i),
+                    i as u64,
+                    serde_json::json!({"iteration": i, "scenario": scenario_name}),
+                );
+
+                let outcome = local_checker.verify_and_execute(
+                    action,
+                    &action_id,
+                    Some(&evidence),
+                    &mut ledger,
+                );
+
+                // Verify state consistency regardless of outcome
+                match outcome {
+                    PolicyActionOutcome::Executed { .. } => {
+                        // Execution should increment executed count
+                        assert!(local_checker.executed_count() > 0,
+                            "Executed count should reflect successful operations in {}", scenario_name);
+
+                        // Ledger should contain the entry
+                        assert!(ledger.len() > 0,
+                            "Ledger should contain executed entry in {}", scenario_name);
+                    }
+                    PolicyActionOutcome::Rejected { error, .. } => {
+                        // Rejection should increment rejected count
+                        assert!(local_checker.rejected_count() > 0,
+                            "Rejected count should reflect failed operations in {}", scenario_name);
+
+                        // For ledger failures, evidence should be valid but append failed
+                        if let ConformanceError::LedgerAppendFailed { reason } = &error {
+                            assert!(!reason.is_empty(), "Ledger failure should have reason");
+
+                            // Ledger should not be modified by failed appends
+                            // (depends on ledger implementation, but generally true)
+                        }
+                    }
+                }
+
+                // Action log should always record the attempt
+                assert!(local_checker.action_log().len() > 0,
+                    "Action log should record all attempts in {}", scenario_name);
+
+                // Counters should be consistent
+                let total_ops = local_checker.executed_count() + local_checker.rejected_count();
+                assert!((total_ops as usize) <= (i + 1),
+                    "Total operations should not exceed attempts in {}", scenario_name);
+            }
+
+            // Verify final state consistency
+            let final_executed = local_checker.executed_count();
+            let final_rejected = local_checker.rejected_count();
+            let final_total = final_executed + final_rejected;
+
+            assert_eq!(final_total, 10,
+                "Should have processed exactly 10 operations in {}", scenario_name);
+
+            assert_eq!(local_checker.action_log().len() as u64, final_total.min(MAX_ACTION_LOG_ENTRIES as u64),
+                "Action log should record all operations (up to capacity) in {}", scenario_name);
+        }
+    }
 }

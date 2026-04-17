@@ -694,6 +694,144 @@ mod tests {
     }
 
     #[test]
+    fn negative_serialization_mismatch_with_control_chars_still_fails() {
+        let result = check_serialization("s-control", "line1\nline2", "actual\tvalue", "expected");
+
+        assert!(!result.passed);
+        assert_eq!(result.class, InteropClass::Serialization);
+        assert!(result.details.contains("expected=expected"));
+        assert!(result.details.contains("actual=actual\tvalue"));
+        assert!(result.reproducer.is_some());
+    }
+
+    #[test]
+    fn negative_object_id_empty_left_does_not_match_nonempty_right() {
+        let result = check_object_id("obj-empty-left", "", "object-id");
+
+        assert!(!result.passed);
+        assert_eq!(result.class, InteropClass::ObjectId);
+        assert!(result.details.contains("id_a="));
+        assert!(result.details.contains("id_b=object-id"));
+        assert!(result.reproducer.is_some());
+    }
+
+    #[test]
+    fn negative_signature_empty_details_still_emits_reproducer() {
+        let result = check_signature("sig-empty-detail", false, "");
+
+        assert!(!result.passed);
+        assert_eq!(result.class, InteropClass::Signature);
+        assert_eq!(result.details, "");
+        assert!(
+            result
+                .reproducer
+                .as_ref()
+                .is_some_and(|reproducer| reproducer.contains("\"case\":\"sig-empty-detail\""))
+        );
+    }
+
+    #[test]
+    fn negative_revocation_inverse_disagreement_records_false_true() {
+        let result = check_revocation("rev-inverse", false, true);
+
+        assert!(!result.passed);
+        assert_eq!(result.class, InteropClass::Revocation);
+        assert_eq!(result.details, "impl_a=false, impl_b=true");
+        assert!(
+            result
+                .reproducer
+                .as_ref()
+                .is_some_and(|reproducer| reproducer.contains("\"impl_b\":true"))
+        );
+    }
+
+    #[test]
+    fn negative_source_diversity_overflow_sources_count_fails_closed() {
+        let too_large = format!("{}0", usize::MAX);
+        let cases = vec![InteropTestCase {
+            class: InteropClass::SourceDiversity,
+            case_id: "sd-overflow-sources".into(),
+            input: too_large.clone(),
+            expected_output: "1".into(),
+            implementation: "impl_a".into(),
+        }];
+
+        let results = run_suite(&cases);
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+        assert_eq!(
+            results[0].details,
+            format!("invalid sources count: {too_large}")
+        );
+    }
+
+    #[test]
+    fn negative_source_diversity_overflow_required_count_fails_closed() {
+        let too_large = format!("{}0", usize::MAX);
+        let cases = vec![InteropTestCase {
+            class: InteropClass::SourceDiversity,
+            case_id: "sd-overflow-required".into(),
+            input: "1".into(),
+            expected_output: too_large.clone(),
+            implementation: "impl_a".into(),
+        }];
+
+        let results = run_suite(&cases);
+
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].passed);
+        assert_eq!(
+            results[0].details,
+            format!("invalid required count: {too_large}")
+        );
+    }
+
+    #[test]
+    fn negative_run_suite_mixed_failures_preserve_order_and_classes() {
+        let cases = vec![
+            InteropTestCase {
+                class: InteropClass::Serialization,
+                case_id: "s-mixed".into(),
+                input: "actual".into(),
+                expected_output: "expected".into(),
+                implementation: "impl_a".into(),
+            },
+            InteropTestCase {
+                class: InteropClass::ObjectId,
+                case_id: "o-mixed".into(),
+                input: "left-id".into(),
+                expected_output: "right-id".into(),
+                implementation: "impl_b".into(),
+            },
+            InteropTestCase {
+                class: InteropClass::SourceDiversity,
+                case_id: "sd-mixed".into(),
+                input: "none".into(),
+                expected_output: "2".into(),
+                implementation: "impl_c".into(),
+            },
+        ];
+
+        let results = run_suite(&cases);
+
+        assert_eq!(results.len(), 3);
+        assert!(results.iter().all(|result| !result.passed));
+        assert_eq!(results[0].class, InteropClass::Serialization);
+        assert_eq!(results[1].class, InteropClass::ObjectId);
+        assert_eq!(results[2].class, InteropClass::SourceDiversity);
+    }
+
+    #[test]
+    fn negative_summarize_empty_results_returns_no_class_entries() {
+        let summary = summarize(&[]);
+
+        assert!(summary.is_empty());
+        assert!(!summary.contains_key(&InteropClass::Serialization));
+        assert!(!summary.contains_key(&InteropClass::SourceDiversity));
+    }
+
+    #[test]
     fn all_error_codes_present() {
         let errors = [
             InteropError::SerializationMismatch {

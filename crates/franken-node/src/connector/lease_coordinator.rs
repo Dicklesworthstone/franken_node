@@ -114,7 +114,10 @@ struct SignerVerificationState {
 
 fn identity_is_canonical(identity: &str) -> bool {
     let trimmed = identity.trim();
-    !trimmed.is_empty() && trimmed == identity && !identity.chars().any(char::is_whitespace)
+    !trimmed.is_empty()
+        && trimmed == identity
+        && !identity.contains('\0')
+        && !identity.chars().any(char::is_whitespace)
 }
 
 /// Error for coordinator operations.
@@ -570,17 +573,26 @@ mod tests {
 
     #[test]
     fn negative_internal_tab_standard_tier_uses_dangerous_threshold() {
-        assert_eq!(custom_threshold_config().threshold_for_tier("Stan\tdard"), 7);
+        assert_eq!(
+            custom_threshold_config().threshold_for_tier("Stan\tdard"),
+            7
+        );
     }
 
     #[test]
     fn negative_internal_newline_standard_tier_uses_dangerous_threshold() {
-        assert_eq!(custom_threshold_config().threshold_for_tier("Stan\ndard"), 7);
+        assert_eq!(
+            custom_threshold_config().threshold_for_tier("Stan\ndard"),
+            7
+        );
     }
 
     #[test]
     fn negative_internal_carriage_standard_tier_uses_dangerous_threshold() {
-        assert_eq!(custom_threshold_config().threshold_for_tier("Stan\rdard"), 7);
+        assert_eq!(
+            custom_threshold_config().threshold_for_tier("Stan\rdard"),
+            7
+        );
     }
 
     #[test]
@@ -3162,5 +3174,190 @@ mod tests {
         }
 
         assert!(failures.is_empty());
+    }
+
+    #[test]
+    fn negative_nul_identity_is_not_canonical() {
+        assert!(!identity_is_canonical("node\0a"));
+    }
+
+    #[test]
+    fn negative_nul_lease_id_is_rejected_for_selection() {
+        let err = select_coordinator(&candidates(), "lease\0bad", "trace-nul-lease")
+            .expect_err("embedded NUL must not seed coordinator selection");
+
+        assert_eq!(err, CoordinatorError::NoCandidates);
+        assert_eq!(err.code(), "LC_NO_CANDIDATES");
+    }
+
+    #[test]
+    fn negative_nul_trace_id_is_rejected_for_selection() {
+        let err = select_coordinator(&candidates(), "lease-nul-trace", "trace\0bad")
+            .expect_err("embedded NUL must not be copied into selection receipts");
+
+        assert_eq!(err, CoordinatorError::NoCandidates);
+        assert_eq!(err.code(), "LC_NO_CANDIDATES");
+    }
+
+    #[test]
+    fn negative_nul_node_id_candidate_is_ineligible_for_selection() {
+        let cands = vec![
+            CoordinatorCandidate {
+                node_id: "node\0bad".to_string(),
+                weight: u64::MAX,
+            },
+            CoordinatorCandidate {
+                node_id: "node-valid".to_string(),
+                weight: 1,
+            },
+        ];
+
+        let selection = select_coordinator(&cands, "lease-nul-node", "trace-nul-node")
+            .expect("valid candidate should remain selectable");
+
+        assert_eq!(selection.selected, "node-valid");
+        assert_eq!(selection.candidates, vec!["node-valid".to_string()]);
+    }
+
+    #[test]
+    fn negative_only_nul_node_id_candidate_errors() {
+        let cands = vec![CoordinatorCandidate {
+            node_id: "node\0bad".to_string(),
+            weight: 10,
+        }];
+
+        let err = select_coordinator(&cands, "lease-only-nul-node", "trace-only-nul-node")
+            .expect_err("NUL-bearing node identity must not be selectable");
+
+        assert_eq!(err, CoordinatorError::NoCandidates);
+    }
+
+    #[test]
+    fn negative_nul_signer_id_cannot_satisfy_quorum_even_if_known() {
+        let known = vec!["s\u{0}1".to_string()];
+        let sigs = vec![valid_sig("s\u{0}1", "payload-a")];
+
+        let v = verify_quorum(
+            &qconfig(),
+            "lease-nul-signer",
+            "Standard",
+            &sigs,
+            &known,
+            "payload-a",
+            "trace-nul-signer",
+            "ts",
+        );
+
+        assert!(!v.passed);
+        assert_eq!(v.received, 0);
+        assert!(
+            v.failures
+                .iter()
+                .any(|failure| is_unknown_for(failure, "s\u{0}1"))
+        );
+    }
+
+    #[test]
+    fn negative_nul_known_signer_does_not_authorize_clean_signer() {
+        let known = vec!["s1\0shadow".to_string()];
+        let sigs = vec![valid_sig("s1", "payload-a")];
+
+        let v = verify_quorum(
+            &qconfig(),
+            "lease-nul-known-signer",
+            "Standard",
+            &sigs,
+            &known,
+            "payload-a",
+            "trace-nul-known-signer",
+            "ts",
+        );
+
+        assert!(!v.passed);
+        assert_eq!(v.received, 0);
+        assert!(
+            v.failures
+                .iter()
+                .any(|failure| is_unknown_for(failure, "s1"))
+        );
+    }
+
+    #[test]
+    fn negative_nul_content_identity_marks_known_signature_invalid() {
+        let known = vec!["s1".to_string()];
+        let sigs = vec![valid_sig("s1", "payload\0a")];
+
+        let v = verify_quorum(
+            &qconfig(),
+            "lease-nul-content",
+            "Standard",
+            &sigs,
+            &known,
+            "payload\0a",
+            "trace-nul-content",
+            "ts",
+        );
+
+        assert!(!v.passed);
+        assert_eq!(v.received, 0);
+        assert!(
+            v.failures
+                .iter()
+                .any(|failure| is_invalid_for(failure, "s1"))
+        );
+    }
+
+    #[test]
+    fn negative_nul_tier_marks_known_signature_invalid() {
+        let known = vec!["s1".to_string(), "s2".to_string(), "s3".to_string()];
+        let sigs = vec![
+            valid_sig("s1", "payload-a"),
+            valid_sig("s2", "payload-a"),
+            valid_sig("s3", "payload-a"),
+        ];
+
+        let v = verify_quorum(
+            &qconfig(),
+            "lease-nul-tier",
+            "Standard\0shadow",
+            &sigs,
+            &known,
+            "payload-a",
+            "trace-nul-tier",
+            "ts",
+        );
+
+        assert!(!v.passed);
+        assert_eq!(v.received, 0);
+        assert!(
+            v.failures
+                .iter()
+                .any(|failure| is_invalid_for(failure, "s1"))
+        );
+    }
+
+    #[test]
+    fn negative_nul_timestamp_marks_known_signature_invalid() {
+        let known = vec!["s1".to_string()];
+        let sigs = vec![valid_sig("s1", "payload-a")];
+
+        let v = verify_quorum(
+            &qconfig(),
+            "lease-nul-timestamp",
+            "Standard",
+            &sigs,
+            &known,
+            "payload-a",
+            "trace-nul-timestamp",
+            "ts\0shadow",
+        );
+
+        assert!(!v.passed);
+        assert_eq!(v.received, 0);
+        assert!(
+            v.failures
+                .iter()
+                .any(|failure| is_invalid_for(failure, "s1"))
+        );
     }
 }

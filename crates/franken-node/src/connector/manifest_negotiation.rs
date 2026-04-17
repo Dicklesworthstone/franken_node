@@ -789,4 +789,182 @@ mod tests {
         assert!(result.features_ok);
         assert!(rejected_reason(&result).contains("required_features must not contain NUL bytes"));
     }
+
+    #[test]
+    fn malformed_transport_cap_unknown_case_is_rejected() {
+        let err = serde_json::from_str::<TransportCap>("\"HTTP2\"").unwrap_err();
+
+        assert!(err.to_string().contains("HTTP2"));
+    }
+
+    #[test]
+    fn malformed_semver_json_string_is_rejected() {
+        let err = serde_json::from_value::<SemVer>(serde_json::json!("1.2.3")).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn malformed_semver_missing_patch_field_is_rejected() {
+        let payload = serde_json::json!({
+            "major": 1,
+            "minor": 2
+        });
+
+        let err = serde_json::from_value::<SemVer>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("patch"));
+    }
+
+    #[test]
+    fn malformed_connector_manifest_missing_version_is_rejected() {
+        let payload = serde_json::json!({
+            "connector_id": "conn-missing-version",
+            "required_features": ["auth"],
+            "transport_caps": ["http2"]
+        });
+
+        let err = serde_json::from_value::<ConnectorManifest>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("version"));
+    }
+
+    #[test]
+    fn malformed_connector_manifest_scalar_features_is_rejected() {
+        let payload = serde_json::json!({
+            "connector_id": "conn-bad-features",
+            "version": SemVer::new(1, 2, 3),
+            "required_features": "auth",
+            "transport_caps": ["http2"]
+        });
+
+        let err = serde_json::from_value::<ConnectorManifest>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("sequence"));
+    }
+
+    #[test]
+    fn malformed_host_capabilities_missing_max_version_is_rejected() {
+        let payload = serde_json::json!({
+            "min_version": SemVer::new(1, 0, 0),
+            "available_features": ["auth"],
+            "transport_caps": ["http2"]
+        });
+
+        let err = serde_json::from_value::<HostCapabilities>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("max_version"));
+    }
+
+    #[test]
+    fn malformed_rejected_outcome_missing_reason_is_rejected() {
+        let payload = serde_json::json!({
+            "rejected": {}
+        });
+
+        let err = serde_json::from_value::<Outcome>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("reason"));
+    }
+
+    #[test]
+    fn malformed_negotiation_result_missing_trace_id_is_rejected() {
+        let result = negotiate(&good_manifest(), &host_caps(), "trace-ok", "ts");
+        let mut payload = serde_json::to_value(result).unwrap();
+        payload
+            .as_object_mut()
+            .expect("negotiation result serializes to object")
+            .remove("trace_id");
+
+        let err = serde_json::from_value::<NegotiationResult>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("trace_id"));
+    }
+
+    #[test]
+    fn semver_parse_rejects_radix_exponent_and_grouped_components() {
+        for value in ["0x1.2.3", "1.0b10.3", "1.2.3e0", "1_000.2.3"] {
+            let err = SemVer::parse(value).unwrap_err();
+
+            assert!(matches!(err, ManifestError::ManifestInvalid { .. }));
+        }
+    }
+
+    #[test]
+    fn semver_parse_rejects_embedded_control_characters() {
+        for value in ["1.\t2.3", "1.2.\n3", "1.\0.3", "1.2.3\r"] {
+            let err = SemVer::parse(value).unwrap_err();
+
+            assert!(matches!(err, ManifestError::ManifestInvalid { .. }));
+        }
+    }
+
+    #[test]
+    fn feature_matching_does_not_trim_required_entries() {
+        let required = vec!["auth ".to_string(), "\tstreaming".to_string()];
+        let available = vec!["auth".to_string(), "streaming".to_string()];
+
+        let missing = check_features(&required, &available);
+
+        assert_eq!(missing, required);
+    }
+
+    #[test]
+    fn feature_matching_does_not_normalize_zero_width_joiners() {
+        let required = vec!["auth\u{200d}".to_string(), "stream\u{200b}ing".to_string()];
+        let available = vec!["auth".to_string(), "streaming".to_string()];
+
+        let missing = check_features(&required, &available);
+
+        assert_eq!(missing, required);
+    }
+
+    #[test]
+    fn duplicate_missing_features_are_reported_verbatim() {
+        let required = vec![
+            "auth".to_string(),
+            "telemetry".to_string(),
+            "telemetry".to_string(),
+            "batch".to_string(),
+        ];
+        let available = vec!["auth".to_string(), "batch".to_string()];
+
+        let missing = check_features(&required, &available);
+
+        assert_eq!(missing, vec!["telemetry".to_string(), "telemetry".to_string()]);
+    }
+
+    #[test]
+    fn malformed_connector_manifest_missing_transport_caps_is_rejected() {
+        let payload = serde_json::json!({
+            "connector_id": "conn-missing-transport",
+            "version": SemVer::new(1, 2, 3),
+            "required_features": ["auth"]
+        });
+
+        let err = serde_json::from_value::<ConnectorManifest>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("transport_caps"));
+    }
+
+    #[test]
+    fn malformed_host_capabilities_scalar_transport_caps_is_rejected() {
+        let payload = serde_json::json!({
+            "min_version": SemVer::new(1, 0, 0),
+            "max_version": SemVer::new(2, 0, 0),
+            "available_features": ["auth"],
+            "transport_caps": "http2"
+        });
+
+        let err = serde_json::from_value::<HostCapabilities>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("sequence"));
+    }
+
+    #[test]
+    fn malformed_outcome_wrong_variant_casing_is_rejected() {
+        let err = serde_json::from_value::<Outcome>(serde_json::json!("Accepted")).unwrap_err();
+
+        assert!(err.to_string().contains("Accepted"));
+    }
 }

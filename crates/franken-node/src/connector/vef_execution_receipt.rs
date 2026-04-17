@@ -144,6 +144,10 @@ fn is_sha256_prefixed(value: &str) -> bool {
     hex.len() == 64 && hex.chars().all(|ch| ch.is_ascii_hexdigit())
 }
 
+fn contains_nul(value: &str) -> bool {
+    value.contains('\0')
+}
+
 fn invalid_artifact_identity_reason(value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed == RESERVED_ARTIFACT_ID {
@@ -151,6 +155,9 @@ fn invalid_artifact_identity_reason(value: &str) -> Option<String> {
     }
     if trimmed != value {
         return Some("artifact_identity contains leading or trailing whitespace".to_string());
+    }
+    if contains_nul(value) {
+        return Some("artifact_identity contains NUL byte".to_string());
     }
     None
 }
@@ -177,6 +184,12 @@ pub fn validate_receipt(receipt: &ExecutionReceipt) -> Result<(), ExecutionRecei
             "actor_identity contains leading or trailing whitespace",
         ));
     }
+    if contains_nul(&receipt.actor_identity) {
+        return Err(ExecutionReceiptError::new(
+            error_codes::ERR_VEF_RECEIPT_INVALID_VALUE,
+            "actor_identity contains NUL byte",
+        ));
+    }
     if receipt.artifact_identity.trim().is_empty() {
         return Err(ExecutionReceiptError::new(
             error_codes::ERR_VEF_RECEIPT_MISSING_FIELD,
@@ -199,6 +212,12 @@ pub fn validate_receipt(receipt: &ExecutionReceipt) -> Result<(), ExecutionRecei
         return Err(ExecutionReceiptError::new(
             error_codes::ERR_VEF_RECEIPT_INVALID_VALUE,
             "trace_id contains leading or trailing whitespace",
+        ));
+    }
+    if contains_nul(&receipt.trace_id) {
+        return Err(ExecutionReceiptError::new(
+            error_codes::ERR_VEF_RECEIPT_INVALID_VALUE,
+            "trace_id contains NUL byte",
         ));
     }
     if receipt.capability_context.is_empty() {
@@ -227,6 +246,16 @@ pub fn validate_receipt(receipt: &ExecutionReceipt) -> Result<(), ExecutionRecei
             "capability_context keys/values must not contain leading or trailing whitespace",
         ));
     }
+    if receipt
+        .capability_context
+        .iter()
+        .any(|(k, v)| contains_nul(k) || contains_nul(v))
+    {
+        return Err(ExecutionReceiptError::new(
+            error_codes::ERR_VEF_RECEIPT_INVALID_VALUE,
+            "capability_context keys/values must not contain NUL bytes",
+        ));
+    }
     if !is_sha256_prefixed(&receipt.policy_snapshot_hash) {
         return Err(ExecutionReceiptError::new(
             error_codes::ERR_VEF_RECEIPT_INVALID_VALUE,
@@ -241,6 +270,16 @@ pub fn validate_receipt(receipt: &ExecutionReceipt) -> Result<(), ExecutionRecei
         return Err(ExecutionReceiptError::new(
             error_codes::ERR_VEF_RECEIPT_INVALID_VALUE,
             "witness_references entries must be non-empty strings",
+        ));
+    }
+    if receipt
+        .witness_references
+        .iter()
+        .any(|item| contains_nul(item))
+    {
+        return Err(ExecutionReceiptError::new(
+            error_codes::ERR_VEF_RECEIPT_INVALID_VALUE,
+            "witness_references entries must not contain NUL bytes",
         ));
     }
     Ok(())
@@ -683,5 +722,77 @@ mod tests {
         ] {
             assert!(parsed.get(field).is_some(), "missing field {field}");
         }
+    }
+
+    #[test]
+    fn test_validate_rejects_actor_identity_with_nul() {
+        let mut receipt = make_receipt();
+        receipt.actor_identity = "agent:purple\0harbor".to_string();
+
+        let err = validate_receipt(&receipt).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
+        assert!(err.message.contains("actor_identity"));
+    }
+
+    #[test]
+    fn test_validate_rejects_artifact_identity_with_nul() {
+        let mut receipt = make_receipt();
+        receipt.artifact_identity = "artifact:ext\0franken-node-core".to_string();
+
+        let err = validate_receipt(&receipt).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
+        assert!(err.message.contains("artifact_identity"));
+    }
+
+    #[test]
+    fn test_validate_rejects_trace_id_with_nul() {
+        let mut receipt = make_receipt();
+        receipt.trace_id = "trace\0receipt-001".to_string();
+
+        let err = validate_receipt(&receipt).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
+        assert!(err.message.contains("trace_id"));
+    }
+
+    #[test]
+    fn test_validate_rejects_capability_key_with_nul() {
+        let mut receipt = make_receipt();
+        receipt
+            .capability_context
+            .insert("scope\0shadow".to_string(), "runtime".to_string());
+
+        let err = validate_receipt(&receipt).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
+        assert!(err.message.contains("capability_context"));
+    }
+
+    #[test]
+    fn test_validate_rejects_capability_value_with_nul() {
+        let mut receipt = make_receipt();
+        receipt
+            .capability_context
+            .insert("scope".to_string(), "runtime\0shadow".to_string());
+
+        let err = validate_receipt(&receipt).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
+        assert!(err.message.contains("capability_context"));
+    }
+
+    #[test]
+    fn test_validate_rejects_witness_reference_with_nul() {
+        let mut receipt = make_receipt();
+        receipt
+            .witness_references
+            .push("witness:alpha\0shadow".to_string());
+
+        let err = validate_receipt(&receipt).unwrap_err();
+
+        assert_eq!(err.code, error_codes::ERR_VEF_RECEIPT_INVALID_VALUE);
+        assert!(err.message.contains("witness_references"));
     }
 }

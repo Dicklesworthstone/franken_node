@@ -1069,6 +1069,248 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod service_fresh_negative_tests {
+    use super::*;
+
+    #[test]
+    fn empty_method_uses_generic_status_without_mutation_codes() {
+        let codes = default_status_codes("");
+
+        assert_eq!(codes, vec![200, 400, 401, 403, 500]);
+        assert!(!codes.contains(&201));
+        assert!(!codes.contains(&204));
+        assert!(!codes.contains(&409));
+    }
+
+    #[test]
+    fn lowercase_get_does_not_receive_get_status_surface() {
+        let codes = default_status_codes("get");
+
+        assert_eq!(codes, vec![200, 400, 401, 403, 500]);
+        assert!(!codes.contains(&404));
+        assert!(!codes.contains(&429));
+        assert!(!codes.contains(&503));
+    }
+
+    #[test]
+    fn endpoint_catalog_entry_rejects_null_status_codes() {
+        let raw = serde_json::json!({
+            "group": "operator",
+            "path": "/v1/operator/status",
+            "method": "GET",
+            "auth_method": "ApiKey",
+            "policy_hook": "operator.status.read",
+            "lifecycle": "stable",
+            "trace_propagation": true,
+            "status_codes": null,
+            "conformance_status": "pass"
+        });
+
+        let result = serde_json::from_value::<EndpointCatalogEntry>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn performance_baseline_rejects_object_latency_field() {
+        let raw = serde_json::json!({
+            "endpoint": "GET /v1/operator/status",
+            "status": "unavailable_pending_transport",
+            "p50_ms": null,
+            "p95_ms": { "ms": 15.0 },
+            "p99_ms": null,
+            "provenance": "pending live transport"
+        });
+
+        let result = serde_json::from_value::<PerformanceBaseline>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn request_lifecycle_rejects_unknown_transport_kind() {
+        let raw = serde_json::json!({
+            "transport_boundary_kind": "live_transport_v2",
+            "transport_owns_listener": false,
+            "endpoint_group": "operator",
+            "route_path": "/v1/operator/status",
+            "perf_baseline_status": "unavailable_pending_transport",
+            "perf_baseline_provenance": "pending live transport",
+            "request_lifecycle": "caller-owned in-process dispatch only",
+            "cancellation_semantics": "no transport-owned cancellation boundary"
+        });
+
+        let result = serde_json::from_value::<RequestLifecycleProvenance>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn middleware_coverage_rejects_missing_auth_coverage() {
+        let raw = serde_json::json!({
+            "policy_hook_coverage": true,
+            "error_formatting_coverage": true,
+            "tracing_coverage": true,
+            "rate_limiting_coverage": true
+        });
+
+        let result = serde_json::from_value::<MiddlewareCoverage>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn service_config_rejects_null_rate_limit_override() {
+        let raw = serde_json::json!({
+            "bind_target_hint": "127.0.0.1:9090",
+            "rate_limits": {
+                "operator": null
+            },
+            "otel_enabled": false,
+            "service_name": "franken-node-control-plane"
+        });
+
+        let result = serde_json::from_value::<ServiceConfig>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn endpoint_report_rejects_string_performance_baselines() {
+        let raw = serde_json::json!({
+            "endpoints": [],
+            "middleware_coverage": {
+                "auth_coverage": true,
+                "policy_hook_coverage": true,
+                "error_formatting_coverage": true,
+                "tracing_coverage": true,
+                "rate_limiting_coverage": true
+            },
+            "transport_boundary": {
+                "kind": "in_process_catalog",
+                "owns_listener": false,
+                "bind_target_hint": "127.0.0.1:9090",
+                "request_lifecycle": "caller-owned in-process dispatch only",
+                "cancellation_semantics": "no transport-owned cancellation boundary"
+            },
+            "performance_baselines": "none",
+            "generated_at": "2026-01-01T00:00:00Z"
+        });
+
+        let result = serde_json::from_value::<EndpointReport>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn endpoint_catalog_entry_rejects_null_trace_propagation() {
+        let raw = serde_json::json!({
+            "group": "operator",
+            "path": "/v1/operator/status",
+            "method": "GET",
+            "auth_method": "ApiKey",
+            "policy_hook": "operator.status.read",
+            "lifecycle": "stable",
+            "trace_propagation": null,
+            "status_codes": [200, 400],
+            "conformance_status": "pass"
+        });
+
+        let result = serde_json::from_value::<EndpointCatalogEntry>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn endpoint_catalog_entry_rejects_status_code_overflow() {
+        let raw = serde_json::json!({
+            "group": "operator",
+            "path": "/v1/operator/status",
+            "method": "GET",
+            "auth_method": "ApiKey",
+            "policy_hook": "operator.status.read",
+            "lifecycle": "stable",
+            "trace_propagation": true,
+            "status_codes": [200, 70000],
+            "conformance_status": "pass"
+        });
+
+        let result = serde_json::from_value::<EndpointCatalogEntry>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn transport_boundary_status_rejects_missing_bind_target_hint() {
+        let raw = serde_json::json!({
+            "kind": "in_process_catalog",
+            "owns_listener": false,
+            "request_lifecycle": "caller-owned in-process dispatch only",
+            "cancellation_semantics": "no transport-owned cancellation boundary"
+        });
+
+        let result = serde_json::from_value::<TransportBoundaryStatus>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn performance_baseline_rejects_null_endpoint() {
+        let raw = serde_json::json!({
+            "endpoint": null,
+            "status": "unavailable_pending_transport",
+            "p50_ms": null,
+            "p95_ms": null,
+            "p99_ms": null,
+            "provenance": "pending live transport"
+        });
+
+        let result = serde_json::from_value::<PerformanceBaseline>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn request_lifecycle_rejects_string_listener_ownership() {
+        let raw = serde_json::json!({
+            "transport_boundary_kind": "in_process_catalog",
+            "transport_owns_listener": "false",
+            "endpoint_group": "operator",
+            "route_path": "/v1/operator/status",
+            "perf_baseline_status": "unavailable_pending_transport",
+            "perf_baseline_provenance": "pending live transport",
+            "request_lifecycle": "caller-owned in-process dispatch only",
+            "cancellation_semantics": "no transport-owned cancellation boundary"
+        });
+
+        let result = serde_json::from_value::<RequestLifecycleProvenance>(raw);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn endpoint_report_rejects_null_middleware_coverage() {
+        let raw = serde_json::json!({
+            "endpoints": [],
+            "middleware_coverage": null,
+            "transport_boundary": {
+                "kind": "in_process_catalog",
+                "owns_listener": false,
+                "bind_target_hint": "127.0.0.1:9090",
+                "request_lifecycle": "caller-owned in-process dispatch only",
+                "cancellation_semantics": "no transport-owned cancellation boundary"
+            },
+            "performance_baselines": [],
+            "generated_at": "2026-01-01T00:00:00Z"
+        });
+
+        let result = serde_json::from_value::<EndpointReport>(raw);
+
+        assert!(result.is_err());
+    }
+}
+
 /// Integration tests: API middleware pipeline → Security intent firewall.
 ///
 /// Validates that the API layer (auth, rate-limit, policy hooks) correctly

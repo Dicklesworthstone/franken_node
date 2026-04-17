@@ -497,6 +497,16 @@ fn validate_claim(claim: &DurableClaim) -> Result<(), DurableClaimGateError> {
             reason: "claim_id must not contain NUL bytes".to_string(),
         });
     }
+    if claim.claim_type.trim().is_empty() {
+        return Err(DurableClaimGateError::InvalidClaim {
+            reason: "claim_type must not be empty".to_string(),
+        });
+    }
+    if contains_nul(&claim.claim_type) {
+        return Err(DurableClaimGateError::InvalidClaim {
+            reason: "claim_type must not contain NUL bytes".to_string(),
+        });
+    }
     if claim.claim_hash.trim().is_empty() {
         return Err(DurableClaimGateError::InvalidClaim {
             reason: "claim_hash must not be empty".to_string(),
@@ -512,6 +522,7 @@ fn validate_claim(claim: &DurableClaim) -> Result<(), DurableClaimGateError> {
             reason: "required_proofs must not be empty".to_string(),
         });
     }
+    let mut marker_ids = BTreeSet::new();
     for marker_id in &claim.required_markers {
         if marker_id.trim().is_empty() {
             return Err(DurableClaimGateError::InvalidClaim {
@@ -523,7 +534,13 @@ fn validate_claim(claim: &DurableClaim) -> Result<(), DurableClaimGateError> {
                 reason: "required_markers must not contain NUL bytes".to_string(),
             });
         }
+        if !marker_ids.insert(marker_id.as_str()) {
+            return Err(DurableClaimGateError::InvalidClaim {
+                reason: "required_markers must not contain duplicate marker ids".to_string(),
+            });
+        }
     }
+    let mut proof_types = BTreeSet::new();
     for proof_type in &claim.required_proofs {
         if let ProofType::Custom(value) = proof_type {
             if value.trim().is_empty() {
@@ -536,6 +553,11 @@ fn validate_claim(claim: &DurableClaim) -> Result<(), DurableClaimGateError> {
                     reason: "custom proof type must not contain NUL bytes".to_string(),
                 });
             }
+        }
+        if !proof_types.insert(proof_type.clone()) {
+            return Err(DurableClaimGateError::InvalidClaim {
+                reason: "required_proofs must not contain duplicate proof types".to_string(),
+            });
         }
     }
     Ok(())
@@ -966,6 +988,84 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_claim_type_is_rejected_before_event_emission() {
+        let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
+        let mut claim = base_claim();
+        claim.claim_type = " \t ".to_string();
+
+        let err = gate
+            .evaluate_claim(&claim, &valid_input(), 10)
+            .expect_err("blank claim type must be rejected");
+
+        assert_eq!(
+            err,
+            DurableClaimGateError::InvalidClaim {
+                reason: "claim_type must not be empty".to_string(),
+            }
+        );
+        assert!(gate.events().is_empty());
+    }
+
+    #[test]
+    fn claim_type_with_nul_is_rejected_before_event_emission() {
+        let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
+        let mut claim = base_claim();
+        claim.claim_type = "commit\0confirmation".to_string();
+
+        let err = gate
+            .evaluate_claim(&claim, &valid_input(), 10)
+            .expect_err("claim type containing NUL must be rejected");
+
+        assert_eq!(
+            err,
+            DurableClaimGateError::InvalidClaim {
+                reason: "claim_type must not contain NUL bytes".to_string(),
+            }
+        );
+        assert!(gate.events().is_empty());
+    }
+
+    #[test]
+    fn duplicate_required_marker_is_rejected_before_event_emission() {
+        let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
+        let mut claim = base_claim();
+        claim.required_markers = vec!["marker-a".to_string(), "marker-a".to_string()];
+
+        let err = gate
+            .evaluate_claim(&claim, &valid_input(), 10)
+            .expect_err("duplicate required marker must be rejected");
+
+        assert_eq!(
+            err,
+            DurableClaimGateError::InvalidClaim {
+                reason: "required_markers must not contain duplicate marker ids".to_string(),
+            }
+        );
+        assert!(gate.events().is_empty());
+    }
+
+    #[test]
+    fn duplicate_required_proof_is_rejected_before_event_emission() {
+        let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
+        let mut claim = base_claim();
+        claim
+            .required_proofs
+            .push(ProofType::MerkleInclusion);
+
+        let err = gate
+            .evaluate_claim(&claim, &valid_input(), 10)
+            .expect_err("duplicate required proof type must be rejected");
+
+        assert_eq!(
+            err,
+            DurableClaimGateError::InvalidClaim {
+                reason: "required_proofs must not contain duplicate proof types".to_string(),
+            }
+        );
+        assert!(gate.events().is_empty());
+    }
+
+    #[test]
     fn proof_with_empty_proof_hash_is_rejected_as_invalid() {
         let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
         let mut input = valid_input();
@@ -1116,6 +1216,95 @@ mod tests {
                 current_epoch: 12,
             })
         );
+    }
+
+    #[test]
+    fn proof_at_exact_expiry_epoch_is_rejected() {
+        let mut gate = DurableClaimGate::new(DurableClaimGateConfig {
+            verification_timeout_ms: 1000,
+            freshness_window_epochs: 10,
+        })
+        .unwrap();
+        let mut input = valid_input();
+        for proof in &mut input.proofs {
+            proof.issued_at_epoch = 10;
+            proof.expires_at_epoch = 12;
+        }
+
+        let decision = gate.evaluate_claim(&base_claim(), &input, 12).unwrap();
+
+        assert!(!decision.accepted);
+        assert_eq!(
+            decision.denial_reason,
+            Some(ClaimDenialReason::ProofExpired {
+                proof_type: ProofType::MerkleInclusion,
+                proof_epoch: 10,
+                current_epoch: 12,
+            })
+        );
+    }
+
+    #[test]
+    fn marker_case_mismatch_is_unavailable() {
+        let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
+        let mut claim = base_claim();
+        claim.required_markers = vec!["MARKER-A".to_string()];
+        let input = valid_input();
+
+        let decision = gate.evaluate_claim(&claim, &input, 10).unwrap();
+
+        assert!(!decision.accepted);
+        assert_eq!(
+            decision.denial_reason,
+            Some(ClaimDenialReason::MarkerUnavailable {
+                marker_id: "MARKER-A".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn first_matching_invalid_proof_denies_even_if_later_duplicate_is_valid() {
+        let mut gate = DurableClaimGate::new(DurableClaimGateConfig::default()).unwrap();
+        let mut input = valid_input();
+        let valid_merkle = input.proofs[0].clone();
+        input.proofs[0].verified = false;
+        input.proofs.insert(1, valid_merkle);
+
+        let decision = gate.evaluate_claim(&base_claim(), &input, 10).unwrap();
+
+        assert!(!decision.accepted);
+        assert_eq!(
+            decision.denial_reason,
+            Some(ClaimDenialReason::ProofInvalid {
+                proof_type: ProofType::MerkleInclusion,
+                detail: "verification_failed".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn expired_later_required_proof_blocks_acceptance() {
+        let mut gate = DurableClaimGate::new(DurableClaimGateConfig {
+            verification_timeout_ms: 1000,
+            freshness_window_epochs: 10,
+        })
+        .unwrap();
+        let mut input = valid_input();
+        input.proofs[1].issued_at_epoch = 10;
+        input.proofs[1].expires_at_epoch = 11;
+
+        let decision = gate.evaluate_claim(&base_claim(), &input, 11).unwrap();
+
+        assert!(!decision.accepted);
+        assert_eq!(
+            decision.denial_reason,
+            Some(ClaimDenialReason::ProofExpired {
+                proof_type: ProofType::MarkerMmr,
+                proof_epoch: 10,
+                current_epoch: 11,
+            })
+        );
+        assert!(decision.evidence_entry.is_none());
     }
 
     #[test]

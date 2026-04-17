@@ -811,6 +811,107 @@ mod tests {
     }
 
     #[test]
+    fn negative_method_error_code_rejects_unknown_variant() {
+        let err = serde_json::from_str::<MethodErrorCode>(r#""METHOD_TIMEOUT""#).unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_method_declaration_rejects_missing_name() {
+        let err = serde_json::from_str::<MethodDeclaration>(
+            r#"{
+                "version":"1.0.0",
+                "has_input_schema":true,
+                "has_output_schema":true
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("name"));
+    }
+
+    #[test]
+    fn negative_method_declaration_rejects_string_schema_flag() {
+        let err = serde_json::from_str::<MethodDeclaration>(
+            r#"{
+                "name":"handshake",
+                "version":"1.0.0",
+                "has_input_schema":"true",
+                "has_output_schema":true
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_validation_result_rejects_scalar_errors() {
+        let err = serde_json::from_str::<MethodValidationResult>(
+            r#"{
+                "method":"handshake",
+                "required":true,
+                "status":"FAIL",
+                "version_expected":"1.0.0",
+                "version_found":null,
+                "errors":"not-a-list"
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_validation_error_rejects_unknown_code() {
+        let err = serde_json::from_str::<MethodValidationError>(
+            r#"{"code":"METHOD_TIMEOUT","message":"timed out"}"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("unknown variant"));
+    }
+
+    #[test]
+    fn negative_contract_report_rejects_missing_summary() {
+        let err = serde_json::from_str::<ContractReport>(
+            r#"{
+                "connector_id":"conn",
+                "schema_version":"1.0.0",
+                "verdict":"FAIL",
+                "methods":[]
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("summary"));
+    }
+
+    #[test]
+    fn negative_report_summary_rejects_negative_counts() {
+        let err = serde_json::from_str::<ReportSummary>(
+            r#"{
+                "total_methods":-1,
+                "required_methods":8,
+                "passing":0,
+                "failing":8,
+                "skipped":1
+            }"#,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("invalid value"));
+    }
+
+    #[test]
+    fn negative_padded_major_version_is_not_parsed() {
+        assert_eq!(parse_major_version(" 1.0.0"), None);
+        assert_eq!(parse_major_version("1.0.0 "), None);
+        assert!(!is_version_compatible("1.0.0", " 1.0.0"));
+    }
+
+    #[test]
     fn serde_roundtrip_report() {
         let report = validate_contract("test-conn", &full_declarations());
         let json = serde_json::to_string(&report).unwrap();

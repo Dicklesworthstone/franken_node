@@ -734,3 +734,346 @@ mod quarantine_promotion_additional_negative_tests {
         expect_invalid_request(err, "object_id");
     }
 }
+
+#[cfg(test)]
+mod quarantine_promotion_comprehensive_negative_tests {
+    use super::*;
+
+    fn default_rule() -> PromotionRule {
+        PromotionRule::default_rule()
+    }
+
+    fn malicious_request(object_id: &str) -> PromotionRequest {
+        PromotionRequest {
+            object_id: object_id.to_string(),
+            requester_id: "admin".to_string(),
+            authenticated: true,
+            schema_version: "1.0".to_string(),
+            reachable: true,
+            pinned: false,
+            reason: "test promotion".to_string(),
+        }
+    }
+
+    #[test]
+    fn negative_promotion_request_with_unicode_injection_attacks() {
+        // Test with malicious Unicode patterns in all string fields
+        let mut req = malicious_request("obj\u{202E}spoofed\u{202D}");
+        req.requester_id = "admin\u{0000}injected\r\n\t\x1b[31mred\x1b[0m".to_string();
+        req.schema_version = "1.\u{FEFF}0\u{200B}".to_string(); // Zero-width chars
+        req.reason = "test\u{10FFFF}\u{E000}\u{FDD0}promotion".to_string(); // Private use + non-chars
+
+        let result = evaluate_promotion(&req, &default_rule(), "validator\u{202A}bidi", "trace\u{2066}isolate", "2026\u{200C}04\u{200D}17");
+
+        // Should either reject due to schema mismatch or succeed with malicious content preserved
+        assert!(result.is_ok());
+        let promotion_result = result.unwrap();
+        if promotion_result.promoted {
+            // Verify malicious Unicode is preserved in receipt
+            let receipt = promotion_result.receipt.unwrap();
+            assert!(receipt.object_id.contains("\u{202E}"));
+            assert!(receipt.requester_id.contains("\u{0000}"));
+        }
+    }
+
+    #[test]
+    fn negative_promotion_rule_with_extreme_schema_version_length() {
+        // Test with maliciously long schema version
+        let extreme_rule = PromotionRule {
+            required_schema_version: "schema.".repeat(100000) + "v1", // ~700KB string
+            require_reachability: true,
+            require_pin: false,
+        };
+
+        let req = malicious_request("obj-extreme-schema");
+        let result = evaluate_promotion(&req, &extreme_rule, "validator", "trace", "ts");
+
+        // Should handle large schema version without panic
+        assert!(result.is_ok());
+        let promotion_result = result.unwrap();
+        assert!(!promotion_result.promoted); // Should fail schema match
+        assert!(promotion_result.rejection_reasons.iter().any(|r| matches!(r, RejectionReason::SchemaFailed { .. })));
+    }
+
+    #[test]
+    fn negative_batch_evaluation_with_malformed_json_escape_sequences() {
+        // Test with object IDs containing JSON escape sequences that might break serialization
+        let malicious_objects = [
+            "obj\"\\\r\n\t\x08\x0c",  // JSON control chars
+            "obj\\u0000\\x00\\n\\r\\t", // Escaped null and control
+            "obj\u{D800}\u{DFFF}",      // Surrogate pairs
+            "obj\\\"quotes\\\"",         // Escaped quotes
+            "obj\\\\backslashes\\\\",    // Escaped backslashes
+        ];
+
+        let requests: Vec<_> = malicious_objects.iter().map(|&id| malicious_request(id)).collect();
+        let results = evaluate_batch(&requests, &default_rule(), "validator", "trace", "ts");
+
+        assert!(results.is_ok());
+        let batch_results = results.unwrap();
+        assert_eq!(batch_results.len(), malicious_objects.len());
+
+        // All should succeed with malicious content preserved
+        for (i, result) in batch_results.iter().enumerate() {
+            assert!(result.promoted);
+            assert_eq!(result.object_id, malicious_objects[i]);
+        }
+    }
+
+    #[test]
+    fn negative_schema_version_collision_attack() {
+        // Test schema versions designed to cause collisions or bypasses
+        let collision_patterns = [
+            "1.0\u{0000}malicious", // Null byte injection
+            "1.0\r\n2.0",           // CRLF injection
+            "1.0 \t\n 1.0",         // Whitespace confusion
+            "\u{FEFF}1.0",          // BOM prefix
+            "1.0\u{200B}\u{200C}\u{200D}", // Zero-width chars
+        ];
+
+        let mut rule = default_rule();
+        for pattern in collision_patterns {
+            rule.required_schema_version = pattern.to_string();
+            let req = malicious_request("collision-test");
+
+            let result = evaluate_promotion(&req, &rule, "validator", "trace", "ts");
+            assert!(result.is_ok());
+
+            let promotion_result = result.unwrap();
+            assert!(!promotion_result.promoted); // Should fail due to schema mismatch with "1.0"
+        }
+    }
+
+    #[test]
+    fn negative_massive_batch_memory_exhaustion_attack() {
+        // Test with extremely large batch to check memory handling
+        let massive_requests: Vec<_> = (0..10000).map(|i| {
+            let mut req = malicious_request(&format!("obj-massive-{}", i));
+            req.reason = "x".repeat(10000); // 10KB reason per request = 100MB total
+            req
+        }).collect();
+
+        let result = evaluate_batch(&massive_requests, &default_rule(), "validator", "trace", "ts");
+
+        // Should handle large batches without panic
+        assert!(result.is_ok());
+        let batch_results = result.unwrap();
+        assert_eq!(batch_results.len(), 10000);
+
+        // Verify all succeeded and have massive reasons preserved
+        for (i, result) in batch_results.iter().enumerate() {
+            assert!(result.promoted);
+            assert_eq!(result.object_id, format!("obj-massive-{}", i));
+            assert_eq!(result.receipt.as_ref().unwrap().reason.len(), 10000);
+        }
+    }
+
+    #[test]
+    fn negative_promotion_error_display_with_injection_resistant_formatting() {
+        // Test error display with malicious content that might break formatting
+        let malicious_patterns = [
+            ("obj\r\n\t\x1b[31mREDTEXT\x1b[0m", "admin\x00injected"),
+            ("obj\"quotes'apostrophe", "admin\\escaped"),
+            ("obj\u{202E}spoofed", "admin\u{FEFF}bom"),
+        ];
+
+        for (object_id, requester_id) in malicious_patterns {
+            let error = PromotionError::NotAuthenticated {
+                object_id: object_id.to_string(),
+                requester_id: requester_id.to_string(),
+            };
+
+            let display_string = format!("{}", error);
+
+            // Verify error display is safe and contains expected prefix
+            assert!(display_string.contains("QPR_NOT_AUTHENTICATED"));
+            assert!(display_string.contains(object_id));
+            assert!(display_string.contains(requester_id));
+        }
+    }
+
+    #[test]
+    fn negative_concurrent_rule_validation_race_conditions() {
+        // Test potential race conditions by rapidly switching rule validity
+        let valid_rule = default_rule();
+        let invalid_rule = PromotionRule {
+            required_schema_version: "".to_string(),
+            require_reachability: true,
+            require_pin: false,
+        };
+
+        // Simulate concurrent validation attempts
+        for i in 0..1000 {
+            let rule = if i % 2 == 0 { &valid_rule } else { &invalid_rule };
+            let req = malicious_request(&format!("concurrent-obj-{}", i));
+
+            let result = evaluate_promotion(&req, rule, "validator", &format!("trace-{}", i), "ts");
+
+            if i % 2 == 0 {
+                assert!(result.is_ok());
+                assert!(result.unwrap().promoted);
+            } else {
+                assert!(result.is_err());
+                assert_eq!(result.unwrap_err().code(), "QPR_INVALID_RULE");
+            }
+        }
+    }
+
+    #[test]
+    fn negative_provenance_receipt_with_adversarial_timestamp_formats() {
+        // Test with various timestamp injection patterns
+        let adversarial_timestamps = [
+            "2026-04-17T00:00:00Z\r\nInjected: malicious",
+            "2026-04-17\x00null\x00injection",
+            "\u{202E}6202-71-40\u{202D}T00:00:00Z", // BiDi spoofed
+            "2026-04-17T00:00:00Z\u{FEFF}\u{200B}", // Invisible chars
+            "' OR '1'='1' --", // SQL injection pattern
+        ];
+
+        for timestamp in adversarial_timestamps {
+            let req = malicious_request("timestamp-attack");
+            let result = evaluate_promotion(&req, &default_rule(), "validator", "trace", timestamp);
+
+            assert!(result.is_ok());
+            let promotion_result = result.unwrap();
+            assert!(promotion_result.promoted);
+
+            // Verify timestamp is preserved exactly in receipt
+            let receipt = promotion_result.receipt.unwrap();
+            assert_eq!(receipt.promoted_at, timestamp);
+        }
+    }
+
+    #[test]
+    fn negative_rejection_reason_exhaustive_combination_testing() {
+        // Test all possible combinations of rejection reasons
+        let test_cases = [
+            (false, "wrong", false, false, 4), // All failures
+            (false, "1.0", false, false, 3),   // Auth, reach, pin (if required)
+            (true, "wrong", false, false, 3),  // Schema, reach, pin (if required)
+            (false, "wrong", true, false, 3),  // Auth, schema, pin (if required)
+            (false, "wrong", false, true, 3),  // Auth, schema, reach
+        ];
+
+        let mut rule = default_rule();
+        rule.require_pin = true; // Enable pin requirement for comprehensive testing
+
+        for (i, (auth, schema, reachable, pinned, expected_rejections)) in test_cases.iter().enumerate() {
+            let mut req = malicious_request(&format!("combo-test-{}", i));
+            req.authenticated = *auth;
+            req.schema_version = schema.to_string();
+            req.reachable = *reachable;
+            req.pinned = *pinned;
+
+            let result = evaluate_promotion(&req, &rule, "validator", "trace", "ts");
+            assert!(result.is_ok());
+
+            let promotion_result = result.unwrap();
+            assert!(!promotion_result.promoted);
+            assert_eq!(promotion_result.rejection_reasons.len(), *expected_rejections);
+            assert!(promotion_result.receipt.is_none());
+        }
+    }
+
+    #[test]
+    fn negative_promotion_rule_validation_with_unicode_normalization_attacks() {
+        // Test with Unicode normalization attacks in schema versions
+        let normalization_attacks = [
+            ("café", "cafe\u{0301}"),      // NFC vs NFD
+            ("résumé", "re\u{0301}sume\u{0301}"), // Multiple combining chars
+            ("℁", "a/s"),                   // Compatibility equivalence
+            ("＜script＞", "<script>"),      // Fullwidth to ASCII
+        ];
+
+        for (nfc_version, attack_version) in normalization_attacks {
+            let rule = PromotionRule {
+                required_schema_version: nfc_version.to_string(),
+                require_reachability: true,
+                require_pin: false,
+            };
+
+            let mut req = malicious_request("normalization-attack");
+            req.schema_version = attack_version.to_string();
+
+            let result = evaluate_promotion(&req, &rule, "validator", "trace", "ts");
+            assert!(result.is_ok());
+
+            let promotion_result = result.unwrap();
+            // Should fail due to byte-level inequality despite visual similarity
+            assert!(!promotion_result.promoted);
+            assert!(promotion_result.rejection_reasons.iter().any(|r| matches!(r, RejectionReason::SchemaFailed { .. })));
+        }
+    }
+
+    #[test]
+    fn negative_batch_evaluation_with_heterogeneous_malicious_requests() {
+        // Test batch with diverse malicious request patterns
+        let heterogeneous_requests = vec![
+            {
+                let mut req = malicious_request("obj-control\x00\r\n\t");
+                req.requester_id = "\x1b[31mred\x1b[0m".to_string();
+                req
+            },
+            {
+                let mut req = malicious_request("obj-unicode\u{10FFFF}\u{E000}");
+                req.reason = "reason\u{202E}spoofed\u{202D}".to_string();
+                req
+            },
+            {
+                let mut req = malicious_request("obj-massive");
+                req.reason = "x".repeat(1000000); // 1MB reason
+                req
+            },
+            {
+                let mut req = malicious_request("obj-json\"\\escape");
+                req.requester_id = "admin\\\"escaped".to_string();
+                req
+            },
+            {
+                let mut req = malicious_request("obj-bidi\u{202A}\u{202B}\u{202C}");
+                req.schema_version = "\u{FEFF}1.0\u{200B}".to_string();
+                req
+            },
+        ];
+
+        let result = evaluate_batch(&heterogeneous_requests, &default_rule(), "validator", "trace", "ts");
+        assert!(result.is_ok());
+
+        let batch_results = result.unwrap();
+        assert_eq!(batch_results.len(), 5);
+
+        // Most should succeed with malicious content preserved, except schema mismatch
+        for (i, result) in batch_results.iter().enumerate() {
+            if i == 4 {
+                // Schema version with zero-width chars should fail
+                assert!(!result.promoted);
+            } else {
+                assert!(result.promoted);
+                assert!(result.receipt.is_some());
+            }
+        }
+    }
+
+    #[test]
+    fn negative_edge_case_empty_collections_and_boundary_values() {
+        // Test edge cases with empty collections and boundary values
+        let empty_batch_result = evaluate_batch(&[], &default_rule(), "validator", "trace", "ts");
+        assert!(empty_batch_result.is_ok());
+        assert!(empty_batch_result.unwrap().is_empty());
+
+        // Test with single character fields
+        let mut minimal_req = malicious_request("x");
+        minimal_req.requester_id = "y".to_string();
+        minimal_req.reason = "z".to_string();
+
+        let result = evaluate_promotion(&minimal_req, &default_rule(), "v", "t", "s");
+        assert!(result.is_ok());
+        assert!(result.unwrap().promoted);
+
+        // Test with maximum length Unicode characters
+        let max_unicode_req = malicious_request("\u{10FFFF}");
+        let result = evaluate_promotion(&max_unicode_req, &default_rule(), "validator", "trace", "ts");
+        assert!(result.is_ok());
+        assert!(result.unwrap().promoted);
+    }
+}

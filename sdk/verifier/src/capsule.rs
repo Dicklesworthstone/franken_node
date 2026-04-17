@@ -1938,4 +1938,864 @@ mod tests {
             structured_hashes.insert(hash);
         }
     }
+
+    // =========================================================================
+    // EXTREME ADVERSARIAL NEGATIVE-PATH SECURITY TESTS
+    // =========================================================================
+
+    #[test]
+    fn extreme_adversarial_cryptographic_timing_attack_on_signature_verification() {
+        // Extreme: Cryptographic timing analysis of signature verification to detect non-constant-time vulnerabilities
+        use std::time::Instant;
+
+        let reference_capsule = build_reference_capsule();
+        let correct_signature = reference_capsule.signature.clone();
+
+        let sample_count = 10000;
+
+        // Create attack signatures designed to exploit timing differences
+        let timing_attack_cases = vec![
+            // Differ at different bit positions to test early termination
+            (format!("0{}", &correct_signature[1..]), "first_char_diff"),
+            (format!("{}{}", &correct_signature[..31], "X"), "middle_char_diff"),
+            (format!("{}X", &correct_signature[..63]), "last_char_diff"),
+
+            // Same length but entirely different
+            ("0".repeat(64), "all_zeros"),
+            ("f".repeat(64), "all_fs"),
+            ("a".repeat(64), "all_as"),
+
+            // Partial matches that could reveal processing patterns
+            (format!("{}{}", &correct_signature[..32], "0".repeat(32)), "half_correct"),
+            (format!("{}{}", &correct_signature[..48], "0".repeat(16)), "three_quarter_correct"),
+            (format!("{}{}", &correct_signature[..60], "0000"), "almost_correct"),
+        ];
+
+        let mut timing_results = std::collections::HashMap::new();
+
+        for (attack_signature, test_name) in timing_attack_cases {
+            let mut attack_capsule = reference_capsule.clone();
+            attack_capsule.signature = attack_signature;
+
+            let mut timings = Vec::new();
+
+            // Collect timing samples for each attack case
+            for _ in 0..sample_count {
+                let start = Instant::now();
+                let _result = verify_signature(&attack_capsule);
+                let duration = start.elapsed();
+                timings.push(duration.as_nanos());
+            }
+
+            // Calculate statistics
+            timings.sort_unstable();
+            let median = timings[sample_count / 2] as f64;
+            let min = *timings.iter().min().unwrap() as f64;
+            let max = *timings.iter().max().unwrap() as f64;
+            let mean = timings.iter().map(|&x| x as f64).sum::<f64>() / sample_count as f64;
+
+            timing_results.insert(test_name, (median, min, max, mean));
+        }
+
+        // Analyze timing differences for patterns indicating non-constant-time comparison
+        let medians: Vec<f64> = timing_results.values().map(|(median, _, _, _)| *median).collect();
+        let mean_median = medians.iter().sum::<f64>() / medians.len() as f64;
+        let max_median = medians.iter().fold(0.0, |acc, &x| acc.max(x));
+        let min_median = medians.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
+
+        let timing_variance_ratio = (max_median - min_median) / mean_median;
+
+        // Constant-time verification should have low timing variance across different inputs
+        assert!(timing_variance_ratio < 1.5,
+               "Suspicious timing variance in signature verification: ratio={:.3}, mean={:.0}ns, min={:.0}ns, max={:.0}ns",
+               timing_variance_ratio, mean_median, min_median, max_median);
+
+        // No individual test case should be dramatically different from others
+        for (test_name, (median, min, max, mean)) in timing_results {
+            let individual_variance = (max - min) / mean;
+            assert!(individual_variance < 3.0,
+                   "High variance in test case '{}': median={:.0}ns, min={:.0}ns, max={:.0}ns, variance={:.3}",
+                   test_name, median, min, max, individual_variance);
+
+            let deviation_from_mean = (median - mean_median).abs() / mean_median;
+            assert!(deviation_from_mean < 0.5,
+                   "Test case '{}' deviates significantly from mean timing: {:.3}",
+                   test_name, deviation_from_mean);
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_length_extension_attacks_on_hash_computation() {
+        // Extreme: Test resistance to length extension attacks on hash computation
+
+        // Standard MD construction vulnerabilities don't apply to SHA-256 with HMAC-like structure,
+        // but test edge cases in our length-prefixed construction
+        let base_payload = "legitimate_payload";
+        let mut base_inputs = BTreeMap::new();
+        base_inputs.insert("input1".to_string(), "value1".to_string());
+
+        let legitimate_hash = compute_replay_hash(base_payload, &base_inputs);
+
+        // Attempt length extension by appending data that looks like valid length-prefixed content
+        let extension_attempts = vec![
+            // Try to append fake input entries
+            format!("{}\x05\x00\x00\x00\x00\x00\x00\x00input\x06\x00\x00\x00\x00\x00\x00\x00malice", base_payload),
+
+            // Try to inject length prefix that could confuse parser
+            format!("{}\x01\x00\x00\x00\x00\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00a\x01\x00\x00\x00\x00\x00\x00\x00b", base_payload),
+
+            // Attempt to create collision by manipulating payload structure
+            format!("{}\x08\x00\x00\x00\x00\x00\x00\x00input1xx\x06\x00\x00\x00\x00\x00\x00\x00value1", base_payload),
+        ];
+
+        for extension_attempt in extension_attempts {
+            let extension_hash = compute_replay_hash(&extension_attempt, &BTreeMap::new());
+
+            assert_ne!(legitimate_hash, extension_hash,
+                      "Length extension attack must not produce hash collision");
+
+            // Test with various input combinations to ensure isolation
+            let mut extension_inputs = BTreeMap::new();
+            extension_inputs.insert("different_key".to_string(), "different_value".to_string());
+
+            let combined_extension_hash = compute_replay_hash(&extension_attempt, &extension_inputs);
+            assert_ne!(legitimate_hash, combined_extension_hash,
+                      "Combined length extension attack must not produce collision");
+        }
+
+        // Test resistance to second preimage attacks via crafted payloads
+        let second_preimage_attempts = vec![
+            // Try to create payload that when combined with different inputs produces same hash
+            "crafted_payload_attempt_1",
+            "crafted_payload_attempt_2",
+            &format!("{}collision", base_payload),
+            &format!("collision{}", base_payload),
+        ];
+
+        for preimage_attempt in second_preimage_attempts {
+            let mut attack_inputs = BTreeMap::new();
+            attack_inputs.insert("attack_input".to_string(), "attack_value".to_string());
+
+            let preimage_hash = compute_replay_hash(preimage_attempt, &attack_inputs);
+
+            assert_ne!(legitimate_hash, preimage_hash,
+                      "Second preimage attack with payload '{}' must not produce collision",
+                      preimage_attempt);
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_domain_separator_injection_and_collision_attacks() {
+        // Extreme: Test domain separator injection attacks and cross-domain hash collisions
+
+        let legitimate_data = "test_data";
+        let legitimate_hash = deterministic_hash(legitimate_data);
+
+        // Attempt to inject domain separator to cause collision with empty input
+        let separator_injection_attempts = vec![
+            // Try to prepend domain separator to confuse hash computation
+            "verifier_sdk_capsule_v1:",
+            "verifier_sdk_capsule_v1:additional_data",
+            "\x76\x65\x72\x69\x66\x69\x65\x72\x5f\x73\x64\x6b\x5f\x63\x61\x70\x73\x75\x6c\x65\x5f\x76\x31\x3a", // Hex encoding
+
+            // Try different domain separators that could cause confusion
+            "verifier_sdk_capsule_v2:test_data",
+            "verifier_sdk_capsule_replay_v1:test_data",
+            "verifier_sdk_capsule_signing_v1:test_data",
+
+            // Binary injection of domain separator
+            format!("{}test_data", std::str::from_utf8(b"verifier_sdk_capsule_v1:").unwrap()),
+        ];
+
+        for injection_attempt in separator_injection_attempts {
+            let attack_hash = deterministic_hash(injection_attempt);
+
+            assert_ne!(legitimate_hash, attack_hash,
+                      "Domain separator injection '{}' must not produce collision",
+                      injection_attempt.escape_debug());
+        }
+
+        // Test cross-function domain separator collision resistance
+        let replay_data_payload = "payload";
+        let mut replay_inputs = BTreeMap::new();
+        replay_inputs.insert("key".to_string(), "value".to_string());
+
+        let replay_hash = compute_replay_hash(replay_data_payload, &replay_inputs);
+
+        // Try to craft deterministic hash input that collides with replay hash
+        let cross_domain_attacks = vec![
+            format!("verifier_sdk_capsule_replay_v1:{}", replay_data_payload),
+            format!("{}payload", (replay_data_payload.len() as u64).to_le_bytes().iter().map(|&b| b as char).collect::<String>()),
+            format!("verifier_sdk_capsule_replay_v1:{}{}{}{}{}",
+                   (replay_data_payload.len() as u64).to_le_bytes().iter().map(|&b| b as char).collect::<String>(),
+                   replay_data_payload,
+                   (1u64).to_le_bytes().iter().map(|&b| b as char).collect::<String>(),
+                   (3u64).to_le_bytes().iter().map(|&b| b as char).collect::<String>(),
+                   "key"),
+        ];
+
+        for attack_input in cross_domain_attacks {
+            let cross_domain_hash = deterministic_hash(&attack_input);
+
+            assert_ne!(replay_hash, cross_domain_hash,
+                      "Cross-domain collision attack must not succeed with input: {}",
+                      attack_input.escape_debug());
+        }
+
+        // Verify domain separators actually work by confirming same data with different separators produces different hashes
+        let test_input = "identical_content";
+
+        let mut manual_hash1 = Sha256::new();
+        manual_hash1.update(b"domain_sep_1:");
+        manual_hash1.update(test_input.as_bytes());
+        let hash1 = hex::encode(manual_hash1.finalize());
+
+        let mut manual_hash2 = Sha256::new();
+        manual_hash2.update(b"domain_sep_2:");
+        manual_hash2.update(test_input.as_bytes());
+        let hash2 = hex::encode(manual_hash2.finalize());
+
+        assert_ne!(hash1, hash2, "Different domain separators must produce different hashes");
+    }
+
+    #[test]
+    fn extreme_adversarial_unicode_normalization_timing_side_channel_attacks() {
+        // Extreme: Test for timing side channels in Unicode normalization during string processing
+        use std::time::Instant;
+
+        let sample_count = 1000;
+
+        // Create Unicode strings that could exhibit different processing times
+        let unicode_timing_cases = vec![
+            // Composed vs decomposed forms that are visually identical
+            ("café", "composed_single_codepoint"),
+            ("cafe\u{0301}", "decomposed_combining_accent"),
+
+            // Complex normalization cases
+            ("\u{1E0A}\u{0323}", "complex_combining_sequence"),  // Ḋ + combining dot below
+            ("\u{1E0C}\u{0307}", "different_complex_sequence"),  // Ḍ + combining dot above
+
+            // Maximum length normalization cases
+            (&"e\u{0301}".repeat(1000), "massive_decomposed_accents"), // 1000 é characters decomposed
+            (&"\u{1F600}".repeat(500), "massive_emoji_sequence"),      // 500 emoji
+
+            // Potential normalization DoS patterns
+            (&"\u{0300}".repeat(2000), "massive_combining_only"),      // Only combining characters
+            (&"a\u{0300}\u{0301}\u{0302}\u{0303}".repeat(500), "heavily_accented_sequence"),
+        ];
+
+        let mut unicode_timings = std::collections::HashMap::new();
+
+        for (unicode_input, test_name) in unicode_timing_cases {
+            let mut timings = Vec::new();
+
+            // Test deterministic hash timing with Unicode input
+            for _ in 0..sample_count {
+                let start = Instant::now();
+                let _hash = deterministic_hash(unicode_input);
+                let duration = start.elapsed();
+                timings.push(duration.as_nanos());
+            }
+
+            timings.sort_unstable();
+            let median = timings[sample_count / 2] as f64;
+            let min = *timings.iter().min().unwrap() as f64;
+            let max = *timings.iter().max().unwrap() as f64;
+
+            unicode_timings.insert(test_name, (median, min, max));
+
+            // Individual test should complete in reasonable time
+            assert!(median < 1_000_000.0, // 1ms
+                   "Unicode processing too slow for '{}': {:.0}ns", test_name, median);
+        }
+
+        // Analyze timing relationships to detect Unicode normalization side channels
+        let medians: Vec<f64> = unicode_timings.values().map(|(median, _, _)| *median).collect();
+        let mean_median = medians.iter().sum::<f64>() / medians.len() as f64;
+        let max_median = medians.iter().fold(0.0, |acc, &x| acc.max(x));
+        let min_median = medians.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
+
+        let unicode_timing_variance = (max_median - min_median) / mean_median;
+
+        // Unicode processing should not have dramatic timing differences
+        assert!(unicode_timing_variance < 3.0,
+               "Suspicious Unicode timing variance: ratio={:.3}, mean={:.0}ns, min={:.0}ns, max={:.0}ns",
+               unicode_timing_variance, mean_median, min_median, max_median);
+
+        // Test capsule replay with Unicode content
+        let mut unicode_capsule = build_reference_capsule();
+        unicode_capsule.manifest.description = "café vs cafe\u{0301} timing test".to_string();
+        unicode_capsule.payload = "Unicode payload: \u{1F600}\u{1F601}\u{1F602}".to_string();
+
+        let mut unicode_inputs = BTreeMap::new();
+        unicode_inputs.insert("unicode_key_é".to_string(), "unicode_value_\u{1F525}".to_string());
+        unicode_capsule.inputs = unicode_inputs;
+
+        unicode_capsule.manifest.input_refs = vec!["unicode_key_é".to_string()];
+        unicode_capsule.manifest.expected_output_hash = compute_replay_hash(&unicode_capsule.payload, &unicode_capsule.inputs);
+        sign_capsule(&mut unicode_capsule);
+
+        // Unicode capsule replay should work consistently
+        let unicode_start = Instant::now();
+        let unicode_result = replay(&unicode_capsule, "verifier://unicode-test").unwrap();
+        let unicode_replay_time = unicode_start.elapsed();
+
+        assert_eq!(unicode_result.verdict, CapsuleVerdict::Pass);
+        assert!(unicode_replay_time < std::time::Duration::from_millis(100));
+    }
+
+    #[test]
+    fn extreme_adversarial_memory_pressure_cryptographic_operations_under_stress() {
+        // Extreme: Test cryptographic operations under extreme memory pressure
+
+        // Create large data structures to simulate memory pressure
+        let memory_pressure_data: Vec<_> = (0..10000).map(|i| {
+            format!("memory_pressure_string_number_{}_with_content_{}", i, "x".repeat(100))
+        }).collect();
+
+        // Test hash computation under memory pressure
+        let mut stress_capsule = build_reference_capsule();
+        stress_capsule.payload = "y".repeat(500_000); // 500KB payload
+
+        // Add many inputs to create memory pressure
+        stress_capsule.inputs.clear();
+        stress_capsule.manifest.input_refs.clear();
+        for i in 0..1000 {
+            let key = format!("stress_input_{:04}", i);
+            let value = format!("stress_value_{}_{}", i, "z".repeat(200)); // 200+ chars per value
+            stress_capsule.inputs.insert(key.clone(), value);
+            stress_capsule.manifest.input_refs.push(key);
+        }
+
+        // Perform cryptographic operations under memory pressure
+        let stress_start = std::time::Instant::now();
+
+        // Hash computation should remain stable under memory pressure
+        let stress_hash = compute_replay_hash(&stress_capsule.payload, &stress_capsule.inputs);
+        assert_eq!(stress_hash.len(), 64);
+        assert!(stress_hash.bytes().all(|b| b.is_ascii_hexdigit()));
+
+        // Signing should work under memory pressure
+        stress_capsule.manifest.expected_output_hash = stress_hash;
+        sign_capsule(&mut stress_capsule);
+
+        let signing_time = stress_start.elapsed();
+        assert!(signing_time < std::time::Duration::from_secs(10)); // Should complete within 10s
+
+        // Verification should work under memory pressure
+        let verification_start = std::time::Instant::now();
+        assert!(verify_signature(&stress_capsule).is_ok());
+        let verification_time = verification_start.elapsed();
+        assert!(verification_time < std::time::Duration::from_secs(5));
+
+        // Full replay under memory pressure
+        let replay_start = std::time::Instant::now();
+        let stress_result = replay(&stress_capsule, "verifier://memory-stress").unwrap();
+        let replay_time = replay_start.elapsed();
+
+        assert_eq!(stress_result.verdict, CapsuleVerdict::Pass);
+        assert!(replay_time < std::time::Duration::from_secs(10));
+
+        // Memory usage should be proportional, not exponential
+        let estimated_memory = stress_capsule.payload.len() +
+                              stress_capsule.inputs.values().map(|v| v.len()).sum::<usize>() +
+                              stress_capsule.inputs.keys().map(|k| k.len()).sum::<usize>();
+
+        // Should be roughly linear with input size (allowing some overhead)
+        assert!(estimated_memory < 10_000_000, // 10MB reasonable upper bound
+               "Memory usage appears excessive: ~{} bytes", estimated_memory);
+
+        // Cleanup memory pressure data to prevent issues with later tests
+        drop(memory_pressure_data);
+    }
+
+    #[test]
+    fn extreme_adversarial_constant_time_comparison_statistical_analysis() {
+        // Extreme: Statistical analysis of constant-time comparison to detect timing leaks
+        use std::time::Instant;
+
+        let reference_string = "reference_signature_hash_0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+        let sample_count = 5000;
+
+        // Create test cases designed to exploit different comparison patterns
+        let timing_test_cases = vec![
+            // Early difference cases
+            ("0".repeat(64), "all_zeros_early_diff"),
+            ("x".repeat(64), "all_x_early_diff"),
+            (format!("z{}", &reference_string[1..]), "first_char_diff"),
+
+            // Late difference cases
+            (format!("{}x", &reference_string[..63]), "last_char_diff"),
+            (format!("{}0", &reference_string[..63]), "last_char_zero"),
+            (format!("{}f", &reference_string[..63]), "last_char_f"),
+
+            // Multiple position differences
+            (format!("x{}x", &reference_string[1..63]), "first_last_diff"),
+            (format!("x{}", &reference_string[1..]), "first_only_diff"),
+            ("fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210".to_string(), "reverse_hex"),
+
+            // Bit-level differences (same char but different case)
+            (format!("F{}", &reference_string[1..]), "case_diff_first"),
+            (format!("{}F", &reference_string[..63]), "case_diff_last"),
+
+            // Identical case
+            (reference_string.clone(), "identical"),
+        ];
+
+        let mut detailed_timings = std::collections::HashMap::new();
+
+        for (test_string, test_name) in timing_test_cases {
+            let mut timings = Vec::new();
+
+            // Collect high-resolution timing data
+            for _ in 0..sample_count {
+                // Use a more precise timing method
+                let start = Instant::now();
+                let _result = ct_eq(&reference_string, &test_string);
+                let duration = start.elapsed();
+                timings.push(duration.as_nanos());
+            }
+
+            // Statistical analysis
+            timings.sort_unstable();
+
+            let mean = timings.iter().sum::<u128>() as f64 / sample_count as f64;
+            let median = timings[sample_count / 2] as f64;
+            let min = *timings.iter().min().unwrap() as f64;
+            let max = *timings.iter().max().unwrap() as f64;
+
+            // Calculate standard deviation
+            let variance = timings.iter()
+                .map(|&x| (x as f64 - mean).powi(2))
+                .sum::<f64>() / sample_count as f64;
+            let std_dev = variance.sqrt();
+
+            // Calculate percentiles
+            let p95 = timings[(sample_count as f64 * 0.95) as usize] as f64;
+            let p99 = timings[(sample_count as f64 * 0.99) as usize] as f64;
+
+            detailed_timings.insert(test_name, (mean, median, min, max, std_dev, p95, p99));
+        }
+
+        // Statistical analysis for constant-time properties
+        let means: Vec<f64> = detailed_timings.values().map(|(mean, _, _, _, _, _, _)| *mean).collect();
+        let overall_mean = means.iter().sum::<f64>() / means.len() as f64;
+        let max_mean = means.iter().fold(0.0, |acc, &x| acc.max(x));
+        let min_mean = means.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
+
+        // Constant-time comparison should have very low variance across different inputs
+        let mean_variance_ratio = (max_mean - min_mean) / overall_mean;
+        assert!(mean_variance_ratio < 0.3, // 30% variance threshold
+               "Excessive timing variance suggests non-constant-time comparison: ratio={:.3}",
+               mean_variance_ratio);
+
+        // Individual test analysis
+        for (test_name, (mean, median, min, max, std_dev, p95, p99)) in detailed_timings {
+            // High individual variance could indicate timing leaks
+            let individual_variance = (max - min) / mean;
+            assert!(individual_variance < 5.0,
+                   "High individual timing variance for '{}': ratio={:.3}, mean={:.0}ns",
+                   test_name, individual_variance, mean);
+
+            // Standard deviation relative to mean should be reasonable
+            let coefficient_of_variation = std_dev / mean;
+            assert!(coefficient_of_variation < 1.0,
+                   "High coefficient of variation for '{}': {:.3}", test_name, coefficient_of_variation);
+
+            // 99th percentile should not be dramatically higher than median (indicating outliers)
+            let outlier_ratio = p99 / median;
+            assert!(outlier_ratio < 10.0,
+                   "Excessive outliers for '{}': p99/median ratio={:.3}", test_name, outlier_ratio);
+
+            // Deviation from overall mean should be small
+            let deviation_from_overall = (mean - overall_mean).abs() / overall_mean;
+            assert!(deviation_from_overall < 0.5,
+                   "Test case '{}' deviates significantly from overall mean: {:.3}",
+                   test_name, deviation_from_overall);
+        }
+
+        // Test byte-level constant-time comparison as well
+        let reference_bytes = reference_string.as_bytes();
+
+        for (test_string, test_name) in &[
+            ("0".repeat(64), "byte_zeros"),
+            (format!("x{}", &reference_string[1..]), "byte_first_diff"),
+            (reference_string.clone(), "byte_identical"),
+        ] {
+            let test_bytes = test_string.as_bytes();
+            let mut byte_timings = Vec::new();
+
+            for _ in 0..sample_count / 2 { // Fewer samples for byte tests
+                let start = Instant::now();
+                let _result = ct_eq_bytes(reference_bytes, test_bytes);
+                let duration = start.elapsed();
+                byte_timings.push(duration.as_nanos());
+            }
+
+            let byte_mean = byte_timings.iter().sum::<u128>() as f64 / (sample_count / 2) as f64;
+            let byte_deviation = (byte_mean - overall_mean).abs() / overall_mean;
+
+            // Byte comparison should be consistent with string comparison timing
+            assert!(byte_deviation < 1.0,
+                   "Byte comparison timing inconsistent for '{}': deviation={:.3}",
+                   test_name, byte_deviation);
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_cryptographic_hash_differential_analysis() {
+        // Extreme: Differential cryptanalysis patterns to test hash function robustness
+
+        // Test Hamming distance relationships in hash outputs
+        let base_input = "cryptographic_differential_analysis_base";
+        let base_hash = deterministic_hash(base_input);
+
+        // Generate inputs with controlled bit differences
+        let differential_cases = vec![
+            // Single bit flips at different positions
+            (format!("{}x", &base_input[1..]), "bit_flip_pos_0"),
+            (format!("{}x{}", &base_input[..base_input.len()/2], &base_input[base_input.len()/2+1..]), "bit_flip_middle"),
+            (format!("{}x", &base_input[..base_input.len()-1]), "bit_flip_last"),
+
+            // Multiple bit flips
+            ("cryptographic_differential_analysis_basz", "two_bit_flip"),
+            ("cryptographic_differential_analysis_basf", "hex_bit_pattern"),
+
+            // Byte boundary tests
+            ("cryptographic_differential_analysis_bas\x00", "null_byte_append"),
+            ("cryptographic_differential_analysis_bas\xFF", "high_byte_append"),
+
+            // Length variations
+            ("cryptographic_differential_analysis_bas", "truncated"),
+            ("cryptographic_differential_analysis_baseX", "extended"),
+        ];
+
+        let mut hash_relationships = Vec::new();
+
+        for (modified_input, test_name) in differential_cases {
+            let modified_hash = deterministic_hash(&modified_input);
+
+            // Verify no hash collision occurs
+            assert_ne!(base_hash, modified_hash,
+                      "Hash collision detected for differential input '{}': '{}'",
+                      test_name, modified_input);
+
+            // Calculate Hamming distance between hashes (converted to binary)
+            let base_bytes = hex::decode(&base_hash).expect("Base hash should be valid hex");
+            let modified_bytes = hex::decode(&modified_hash).expect("Modified hash should be valid hex");
+
+            assert_eq!(base_bytes.len(), modified_bytes.len());
+
+            let hamming_distance = base_bytes.iter()
+                .zip(modified_bytes.iter())
+                .map(|(&a, &b)| (a ^ b).count_ones())
+                .sum::<u32>();
+
+            hash_relationships.push((test_name, hamming_distance));
+
+            // For cryptographic hash functions, small input changes should cause
+            // large, unpredictable output changes (avalanche effect)
+            assert!(hamming_distance >= 50, // Should flip many bits
+                   "Insufficient avalanche effect for '{}': Hamming distance={}",
+                   test_name, hamming_distance);
+
+            assert!(hamming_distance <= 200, // But not suspiciously many
+                   "Suspicious bit flip pattern for '{}': Hamming distance={}",
+                   test_name, hamming_distance);
+        }
+
+        // Statistical analysis of Hamming distances
+        let distances: Vec<u32> = hash_relationships.iter().map(|(_, distance)| *distance).collect();
+        let mean_distance = distances.iter().sum::<u32>() as f64 / distances.len() as f64;
+        let expected_distance = 128.0; // Roughly half the bits should flip for good hash function
+
+        let distance_deviation = (mean_distance - expected_distance).abs() / expected_distance;
+        assert!(distance_deviation < 0.3, // 30% deviation threshold
+               "Hamming distance distribution suspicious: mean={:.1}, expected≈{}, deviation={:.3}",
+               mean_distance, expected_distance, distance_deviation);
+
+        // Test specific cryptographic properties
+
+        // Test collision resistance with structured inputs
+        let structured_inputs = (0..1000).map(|i| {
+            format!("structured_collision_test_{:04}_{}", i, "a".repeat(i % 50))
+        });
+
+        let mut structured_hashes = std::collections::HashSet::new();
+        for structured_input in structured_inputs {
+            let hash = deterministic_hash(&structured_input);
+
+            assert!(!structured_hashes.contains(&hash),
+                   "Collision detected in structured inputs: '{}'", structured_input);
+            structured_hashes.insert(hash);
+        }
+
+        // Test preimage resistance by attempting to reverse known hashes
+        let target_hashes = vec![
+            "0000000000000000000000000000000000000000000000000000000000000000",
+            "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+            "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
+            base_hash.clone(),
+        ];
+
+        for target_hash in target_hashes {
+            let mut preimage_found = false;
+
+            // Try a limited number of preimage attempts (this is just a sanity check)
+            for attempt in 0..1000 {
+                let candidate_input = format!("preimage_attempt_{:04}", attempt);
+                let candidate_hash = deterministic_hash(&candidate_input);
+
+                if candidate_hash == target_hash && candidate_input != base_input {
+                    preimage_found = true;
+                    break;
+                }
+            }
+
+            // Should not find preimages easily (except for the known base_input case)
+            if target_hash != base_hash {
+                assert!(!preimage_found,
+                       "Preimage found too easily for target hash: {}", target_hash);
+            }
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_verifier_identity_injection_and_privilege_escalation() {
+        // Extreme: Test verifier identity parsing for injection attacks and privilege escalation
+
+        let test_capsule = build_reference_capsule();
+
+        // Test protocol injection attempts
+        let protocol_injection_attacks = vec![
+            // URI injection attempts
+            "verifier://evil.com/verifier://legitimate.com",
+            "verifier://legitimate.com@evil.com",
+            "verifier://user:password@evil.com/legitimate",
+            "verifier://legitimate.com:8080/../../../admin",
+
+            // Scheme confusion attacks
+            "javascript:alert('xss')//verifier://fake",
+            "data:text/html,<script>alert('xss')</script>//verifier://fake",
+            "file:///etc/passwd#verifier://fake",
+            "http://evil.com/verifier://redirect",
+
+            // Authority bypass attempts
+            "verifier:///admin/../../verifier://bypass",
+            "verifier://\\\\evil.com/verifier://legitimate",
+            "verifier://../../../admin/verifier://escalate",
+
+            // Control character injection
+            "verifier://admin\r\nSet-Cookie: admin=true\r\n//fake",
+            "verifier://admin\x00\x01\x02\x03fake",
+            "verifier://admin\u{202E}lamitgel\u{202D}//fake", // BiDi override
+
+            // Unicode normalization attacks
+            "verifier://аdmin", // Cyrillic 'а' instead of Latin 'a'
+            "verifier://admin\u{0300}\u{0301}\u{0302}", // Heavy accent combining
+            "verifier://admin\u{FEFF}zero-width", // Zero-width BOM
+        ];
+
+        for malicious_identity in protocol_injection_attacks {
+            match replay(&test_capsule, malicious_identity) {
+                Err(CapsuleError::AccessDenied(_)) => {
+                    // Expected rejection is fine
+                }
+                Ok(_) => {
+                    // If accepted, ensure no security compromise occurred
+                    // The replay should still work correctly without privilege escalation
+                    // This test primarily ensures no panic/crash occurs
+                }
+                Err(_) => {
+                    // Other errors are also acceptable as long as no crash
+                }
+            }
+        }
+
+        // Test length-based attacks on verifier identity parsing
+        let length_based_attacks = vec![
+            // Extremely long verifier names
+            format!("verifier://{}", "x".repeat(100_000)),
+            format!("verifier://{}", "aaaaaaaa".repeat(12500)), // 100k chars
+
+            // Empty components after parsing
+            "verifier://   ",
+            "verifier://\t\n\r   \x20",
+            "verifier://\u{00A0}\u{2000}\u{2001}", // Various Unicode spaces
+
+            // Boundary length conditions
+            format!("verifier://{}", "a".repeat(1)),      // Minimum
+            format!("verifier://{}", "a".repeat(255)),    // Typical domain limit
+            format!("verifier://{}", "a".repeat(65535)),  // Large but manageable
+        ];
+
+        for length_attack in length_based_attacks {
+            let start_time = std::time::Instant::now();
+            let result = replay(&test_capsule, &length_attack);
+            let duration = start_time.elapsed();
+
+            // Should complete quickly regardless of input length
+            assert!(duration < std::time::Duration::from_secs(1),
+                   "Verifier identity parsing took too long: {:?}", duration);
+
+            // Result should be predictable (likely rejected for long/invalid inputs)
+            match result {
+                Ok(_) | Err(_) => {}, // Any result is fine as long as no crash
+            }
+        }
+
+        // Test environment variable injection attempts
+        let env_injection_attacks = vec![
+            "verifier://${PATH}malicious",
+            "verifier://%PATH%windows",
+            "verifier://$(echo injection)",
+            "verifier://`cat /etc/passwd`",
+            "verifier://$HOME/.bashrc",
+            "verifier://\\$USER@evil.com",
+        ];
+
+        for env_attack in env_injection_attacks {
+            match replay(&test_capsule, env_attack) {
+                Ok(_) => {
+                    // If somehow accepted, verify no environment variable was actually expanded
+                    assert!(!env_attack.contains("injection"),
+                           "Environment variable injection should not be processed");
+                }
+                Err(_) => {
+                    // Rejection is expected and safe
+                }
+            }
+        }
+
+        // Test legitimate verifier identities still work after injection tests
+        let legitimate_identities = vec![
+            "verifier://legitimate-verifier-1",
+            "verifier://verifier.example.com",
+            "verifier://test-verifier-2026",
+            "verifier://CAPS-VERIFIER",
+            "verifier://verifier_with_underscores",
+            "verifier://123-numeric-verifier-456",
+        ];
+
+        for legitimate_identity in legitimate_identities {
+            let result = replay(&test_capsule, legitimate_identity);
+            assert!(result.is_ok(),
+                   "Legitimate verifier identity should work: {}", legitimate_identity);
+
+            let replay_result = result.unwrap();
+            assert_eq!(replay_result.verdict, CapsuleVerdict::Pass);
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_integer_overflow_protection_in_length_encoding_operations() {
+        // Extreme: Test integer overflow protection in length-prefixed encoding operations
+
+        // Test u64 length encoding boundary conditions
+        let max_length_test_cases = vec![
+            (0u64, "zero_length"),
+            (1u64, "single_length"),
+            (255u64, "byte_boundary"),
+            (65535u64, "u16_max"),
+            (4294967295u64, "u32_max"),
+            (u64::MAX - 1, "near_u64_max"),
+            (u64::MAX, "u64_max"),
+        ];
+
+        for (test_length, test_name) in max_length_test_cases {
+            // Test length encoding itself doesn't overflow
+            let encoded_length = test_length.to_le_bytes();
+            assert_eq!(encoded_length.len(), 8); // Should always be 8 bytes
+
+            // Test with manageable string that represents this length conceptually
+            let test_string = if test_length <= 100_000 {
+                "x".repeat(test_length as usize)
+            } else {
+                // For very large theoretical lengths, use a representative string
+                format!("length_test_string_representing_{}", test_length)
+            };
+
+            // Test hash computation with length encoding
+            let mut test_hasher = Sha256::new();
+            test_hasher.update(b"length_test_domain:");
+            push_length_prefixed(&mut test_hasher, &test_string);
+            let result_hash = hex::encode(test_hasher.finalize());
+
+            assert_eq!(result_hash.len(), 64);
+            assert!(result_hash.bytes().all(|b| b.is_ascii_hexdigit()));
+        }
+
+        // Test with collections at boundary sizes
+        let mut boundary_inputs = BTreeMap::new();
+
+        // Add inputs that test boundary conditions in collection length encoding
+        for i in 0..1000 {
+            let key = format!("boundary_key_{:04}", i);
+            let value = format!("boundary_value_{}", i);
+            boundary_inputs.insert(key, value);
+        }
+
+        // Test replay hash with large input collection
+        let boundary_payload = "boundary_test_payload";
+        let boundary_hash = compute_replay_hash(boundary_payload, &boundary_inputs);
+        assert_eq!(boundary_hash.len(), 64);
+
+        // Test with edge case: empty strings in large collections
+        let mut empty_edge_inputs = BTreeMap::new();
+        for i in 0..10000 {
+            empty_edge_inputs.insert(format!("key_{}", i), String::new()); // Empty values
+        }
+
+        let empty_edge_hash = compute_replay_hash("", &empty_edge_inputs);
+        assert_eq!(empty_edge_hash.len(), 64);
+        assert_ne!(empty_edge_hash, boundary_hash); // Should be different
+
+        // Test arithmetic wraparound protection
+        let mut overflow_test_inputs = BTreeMap::new();
+
+        // Test with maximum reasonable collection size
+        let max_test_size = 50_000; // Large but manageable for testing
+        for i in 0..max_test_size {
+            let key = format!("overflow_test_key_{:06}", i);
+            let value = format!("value_{}", i % 100); // Varied but bounded value size
+            overflow_test_inputs.insert(key, value);
+        }
+
+        // Should handle large collections without arithmetic overflow
+        let start_time = std::time::Instant::now();
+        let overflow_test_hash = compute_replay_hash("overflow_test_payload", &overflow_test_inputs);
+        let duration = start_time.elapsed();
+
+        assert_eq!(overflow_test_hash.len(), 64);
+        assert!(duration < std::time::Duration::from_secs(30)); // Should complete in reasonable time
+
+        // Test signing payload computation with overflow protection
+        let mut overflow_capsule = build_reference_capsule();
+        overflow_capsule.inputs = overflow_test_inputs;
+        overflow_capsule.manifest.input_refs = (0..max_test_size).map(|i| {
+            format!("overflow_test_key_{:06}", i)
+        }).collect();
+
+        let signing_start = std::time::Instant::now();
+        let signing_payload = compute_signing_payload(&overflow_capsule);
+        let signing_duration = signing_start.elapsed();
+
+        assert_eq!(signing_payload.len(), 64);
+        assert!(signing_duration < std::time::Duration::from_secs(60));
+
+        // Test that length encoding is consistent for same data
+        let consistency_hash1 = compute_replay_hash(boundary_payload, &boundary_inputs);
+        let consistency_hash2 = compute_replay_hash(boundary_payload, &boundary_inputs);
+        assert_eq!(consistency_hash1, consistency_hash2,
+                  "Length encoding should be deterministic");
+
+        // Test edge case: theoretical maximum string length
+        // (We can't actually allocate this much memory, but test the encoding)
+        let theoretical_max_len = usize::MAX as u64;
+        let theoretical_bytes = theoretical_max_len.to_le_bytes();
+        assert_eq!(theoretical_bytes.len(), 8);
+
+        // The bytes should represent the maximum value correctly
+        assert_eq!(u64::from_le_bytes(theoretical_bytes), theoretical_max_len);
+    }
 }

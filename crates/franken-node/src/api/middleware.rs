@@ -1691,3 +1691,163 @@ mod api_middleware_schema_negative_tests {
         assert!(result.is_err());
     }
 }
+
+#[cfg(test)]
+mod api_middleware_edge_negative_tests {
+    use super::*;
+
+    fn open_route() -> RouteMetadata {
+        RouteMetadata {
+            method: "GET".to_string(),
+            path: "/v1/operator/status".to_string(),
+            group: EndpointGroup::Operator,
+            lifecycle: EndpointLifecycle::Stable,
+            auth_method: AuthMethod::None,
+            policy_hook: PolicyHook {
+                hook_id: "operator.status.read".to_string(),
+                required_roles: vec![],
+            },
+            trace_propagation: true,
+        }
+    }
+
+    #[test]
+    fn negative_trace_context_rejects_missing_span_id() {
+        let value = serde_json::json!({
+            "trace_id": "0af7651916cd43dd8448eb211c80319c",
+            "trace_flags": 1
+        });
+
+        let result = serde_json::from_value::<TraceContext>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_trace_context_rejects_trace_flags_over_u8() {
+        let value = serde_json::json!({
+            "trace_id": "0af7651916cd43dd8448eb211c80319c",
+            "span_id": "b7ad6b7169203331",
+            "trace_flags": 300
+        });
+
+        let result = serde_json::from_value::<TraceContext>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_endpoint_lifecycle_rejects_unknown_variant() {
+        let result = serde_json::from_str::<EndpointLifecycle>(r#""Retired""#);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_rate_limit_config_rejects_missing_fail_closed() {
+        let value = serde_json::json!({
+            "sustained_rps": 10,
+            "burst_size": 20
+        });
+
+        let result = serde_json::from_value::<RateLimitConfig>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_route_metadata_rejects_missing_policy_hook() {
+        let value = serde_json::json!({
+            "method": "GET",
+            "path": "/v1/operator/status",
+            "group": "Operator",
+            "lifecycle": "Stable",
+            "auth_method": "None",
+            "trace_propagation": true
+        });
+
+        let result = serde_json::from_value::<RouteMetadata>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_auth_identity_rejects_numeric_roles() {
+        let value = serde_json::json!({
+            "principal": "apikey:test-key",
+            "method": "ApiKey",
+            "roles": [1, 2]
+        });
+
+        let result = serde_json::from_value::<AuthIdentity>(value);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn negative_authenticate_api_key_without_separator_rejected() {
+        let keys = std::collections::BTreeSet::from(["test-key-123".to_string()]);
+        let err = authenticate(
+            Some("ApiKeytest-key-123"),
+            &AuthMethod::ApiKey,
+            "trace-api-no-space",
+            &keys,
+        )
+        .expect_err("API key scheme must require a separating space");
+
+        assert!(matches!(
+            err,
+            ApiError::AuthFailed {
+                detail,
+                trace_id,
+            } if detail == "expected Authorization: ApiKey <key>"
+                && trace_id == "trace-api-no-space"
+        ));
+    }
+
+    #[test]
+    fn negative_middleware_handler_error_logs_endpoint_error() {
+        let mut limiter = RateLimiter::new(default_rate_limit(EndpointGroup::Operator));
+        let keys = std::collections::BTreeSet::new();
+
+        let (result, log) = execute_middleware_chain(
+            &open_route(),
+            None,
+            Some("00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01"),
+            &mut limiter,
+            &keys,
+            |_identity, ctx| {
+                Err::<(), _>(ApiError::Internal {
+                    detail: "handler failed".to_string(),
+                    trace_id: ctx.trace_id.clone(),
+                })
+            },
+        );
+
+        assert!(matches!(result, Err(ApiError::Internal { .. })));
+        assert_eq!(log.status, 500);
+        assert_eq!(log.event_code, event_codes::ENDPOINT_ERROR);
+        assert_eq!(log.principal, "anonymous");
+    }
+
+    #[test]
+    fn negative_service_metrics_count_request_but_drop_nonfinite_latency() {
+        let mut metrics = ServiceMetrics::default();
+        let log = RequestLog {
+            method: "GET".to_string(),
+            route: "/v1/operator/status".to_string(),
+            status: 500,
+            latency_ms: f64::INFINITY,
+            trace_id: "trace-nonfinite-latency".to_string(),
+            principal: "anonymous".to_string(),
+            endpoint_group: EndpointGroup::Operator.as_str().to_string(),
+            event_code: event_codes::ENDPOINT_ERROR.to_string(),
+        };
+
+        metrics.record_request(&log);
+
+        assert_eq!(metrics.request_count, 1);
+        assert!(metrics.latencies["operator"].samples.is_empty());
+        assert_eq!(metrics.error_counts[event_codes::ENDPOINT_ERROR], 1);
+    }
+}

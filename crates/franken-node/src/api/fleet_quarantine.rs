@@ -1712,8 +1712,12 @@ pub fn handle_reconcile(
 }
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -3890,5 +3894,156 @@ mod tests {
             err,
             FleetTransportError::SerializationError { .. }
         ));
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_without_retaining_new_item() {
+        let mut events = vec![
+            FleetControlEvent::fleet_released("trace-1", "zone-1", "incident-1"),
+            FleetControlEvent::fleet_released("trace-2", "zone-1", "incident-2"),
+        ];
+
+        push_bounded(
+            &mut events,
+            FleetControlEvent::fleet_released("trace-3", "zone-1", "incident-3"),
+            0,
+        );
+
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn negative_push_bounded_overfull_input_keeps_newest_tail() {
+        let mut events = vec![
+            FleetControlEvent::fleet_released("trace-1", "zone-1", "incident-1"),
+            FleetControlEvent::fleet_released("trace-2", "zone-1", "incident-2"),
+            FleetControlEvent::fleet_released("trace-3", "zone-1", "incident-3"),
+        ];
+
+        push_bounded(
+            &mut events,
+            FleetControlEvent::fleet_released("trace-4", "zone-1", "incident-4"),
+            2,
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].trace_id, "trace-3");
+        assert_eq!(events[1].trace_id, "trace-4");
+    }
+
+    #[test]
+    fn negative_fleet_snapshot_validate_rejects_blank_schema_version() {
+        let snapshot = FleetStateSnapshot {
+            schema_version: String::new(),
+            actions: Vec::new(),
+            nodes: Vec::new(),
+        };
+
+        let err = snapshot
+            .validate()
+            .expect_err("blank schema version must fail");
+
+        assert!(err.to_string().contains("schema_version"));
+    }
+
+    #[test]
+    fn negative_fleet_snapshot_validate_rejects_whitespace_schema_version() {
+        let snapshot = FleetStateSnapshot {
+            schema_version: " \t\n ".to_string(),
+            actions: Vec::new(),
+            nodes: Vec::new(),
+        };
+
+        let err = snapshot
+            .validate()
+            .expect_err("whitespace schema version must fail");
+
+        assert!(err.to_string().contains("schema_version"));
+    }
+
+    #[test]
+    fn negative_action_envelope_rejects_blank_top_level_zone_id() {
+        let err = FleetActionEnvelope::new(
+            "action-1",
+            "trace-fleet-1",
+            " ",
+            test_issued_at(),
+            1,
+            FleetAction::Reconcile,
+        )
+        .expect_err("blank envelope zone id must fail");
+
+        assert!(err.to_string().contains("zone_id"));
+    }
+
+    #[test]
+    fn negative_action_envelope_rejects_blank_quarantine_scope_zone_id() {
+        let err = FleetActionEnvelope::new(
+            "action-1",
+            "trace-fleet-1",
+            "zone-1",
+            test_issued_at(),
+            1,
+            FleetAction::Quarantine {
+                extension_id: "ext-1".to_string(),
+                scope: QuarantineScope {
+                    zone_id: "\n".to_string(),
+                    tenant_id: None,
+                    affected_nodes: 1,
+                    reason: "blank scope zone should fail".to_string(),
+                },
+            },
+        )
+        .expect_err("blank quarantine scope zone id must fail");
+
+        assert!(err.to_string().contains("zone_id"));
+    }
+
+    #[test]
+    fn negative_action_envelope_rejects_blank_revocation_scope_zone_id() {
+        let err = FleetActionEnvelope::new(
+            "action-1",
+            "trace-fleet-1",
+            "zone-1",
+            test_issued_at(),
+            1,
+            FleetAction::Revoke {
+                extension_id: "ext-1".to_string(),
+                scope: RevocationScope {
+                    zone_id: "\t".to_string(),
+                    tenant_id: None,
+                    severity: RevocationSeverity::Mandatory,
+                    reason: "blank scope zone should fail".to_string(),
+                },
+            },
+        )
+        .expect_err("blank revocation scope zone id must fail");
+
+        assert!(err.to_string().contains("zone_id"));
+    }
+
+    #[test]
+    fn negative_status_request_deserialize_rejects_numeric_zone_id() {
+        let raw = serde_json::json!({
+            "zone_id": 42_u64
+        });
+
+        let result: Result<StatusRequest, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "status zone_id must remain a string");
+    }
+
+    #[test]
+    fn negative_quarantine_scope_deserialize_rejects_affected_nodes_overflow() {
+        let raw = serde_json::json!({
+            "zone_id": "zone-1",
+            "tenant_id": null,
+            "affected_nodes": 4_294_967_296_u64,
+            "reason": "overflow should fail"
+        });
+
+        let result: Result<QuarantineScope, _> = serde_json::from_value(raw);
+
+        assert!(result.is_err(), "affected_nodes must fit in u32");
     }
 }

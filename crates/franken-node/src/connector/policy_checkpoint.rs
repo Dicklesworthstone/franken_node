@@ -443,6 +443,16 @@ impl PolicyCheckpointChain {
         trace_id: &str,
     ) -> Result<&PolicyCheckpoint, CheckpointChainError> {
         self.reject_if_chain_invalid(trace_id, epoch_id, self.next_seq, &channel)?;
+        if let Err(err) = validate_checkpoint_fields(&channel, policy_hash, signer, trace_id) {
+            self.emit_rejection_event(
+                trace_id,
+                epoch_id,
+                self.next_seq,
+                &channel,
+                err.to_string(),
+            );
+            return Err(err);
+        }
 
         let sequence = self.next_seq;
         let parent_hash = self.head_hash.clone();
@@ -539,6 +549,21 @@ impl PolicyCheckpointChain {
             checkpoint.sequence,
             &checkpoint.channel,
         )?;
+        if let Err(err) = validate_checkpoint_fields(
+            &checkpoint.channel,
+            &checkpoint.policy_hash,
+            &checkpoint.signer,
+            trace_id,
+        ) {
+            self.emit_rejection_event(
+                trace_id,
+                checkpoint.epoch_id,
+                checkpoint.sequence,
+                &checkpoint.channel,
+                err.to_string(),
+            );
+            return Err(err);
+        }
 
         // INV-PCK-MONOTONIC
         if checkpoint.sequence != self.next_seq {
@@ -846,6 +871,48 @@ impl Default for PolicyCheckpointChain {
 // Helpers
 // ---------------------------------------------------------------------------
 
+fn validate_canonical_nonempty_field(
+    field_name: &str,
+    value: &str,
+) -> Result<(), CheckpointChainError> {
+    if value.trim().is_empty() {
+        return Err(CheckpointChainError::SerializationFailure(format!(
+            "{field_name} must be non-empty"
+        )));
+    }
+    if value.trim() != value {
+        return Err(CheckpointChainError::SerializationFailure(format!(
+            "{field_name} must not contain surrounding whitespace"
+        )));
+    }
+    if value.chars().any(char::is_control) {
+        return Err(CheckpointChainError::SerializationFailure(format!(
+            "{field_name} must not contain control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn validate_release_channel(channel: &ReleaseChannel) -> Result<(), CheckpointChainError> {
+    if let ReleaseChannel::Custom(name) = channel {
+        validate_canonical_nonempty_field("custom channel", name)?;
+    }
+    Ok(())
+}
+
+fn validate_checkpoint_fields(
+    channel: &ReleaseChannel,
+    policy_hash: &str,
+    signer: &str,
+    trace_id: &str,
+) -> Result<(), CheckpointChainError> {
+    validate_release_channel(channel)?;
+    validate_canonical_nonempty_field("policy_hash", policy_hash)?;
+    validate_canonical_nonempty_field("signer", signer)?;
+    validate_canonical_nonempty_field("trace_id", trace_id)?;
+    Ok(())
+}
+
 fn len_to_u64(len: usize) -> u64 {
     u64::try_from(len).unwrap_or(u64::MAX)
 }
@@ -875,7 +942,7 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     }
 
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -897,6 +964,106 @@ mod tests {
             bytes.push(b'0');
         }
         String::from_utf8(bytes).expect("test hashes are ASCII")
+    }
+
+    fn assert_create_checkpoint_input_rejected(
+        channel: ReleaseChannel,
+        policy_hash: &str,
+        signer: &str,
+        trace_id: &str,
+        expected_detail: &str,
+    ) {
+        let mut chain = PolicyCheckpointChain::new();
+        let err = chain
+            .create_checkpoint(1, channel, policy_hash, signer, trace_id)
+            .expect_err("invalid checkpoint input must be rejected");
+
+        assert_eq!(err.code(), error_codes::CHECKPOINT_SERIALIZATION_ERROR);
+        assert!(err.to_string().contains(expected_detail));
+        assert!(chain.is_empty());
+        assert_eq!(chain.next_seq(), 0);
+        assert!(chain.head_hash().is_none());
+
+        let events = chain.events();
+        assert_eq!(events.len(), 1);
+        let rejection = &events[0];
+        assert_eq!(
+            rejection.event_code,
+            event_codes::PCK_003_CHECKPOINT_REJECTED
+        );
+        assert_eq!(rejection.event_name, event_names::CHECKPOINT_REJECTED);
+        assert_eq!(rejection.sequence, 0);
+        assert!(rejection.detail.contains(expected_detail));
+    }
+
+    fn checkpoint_for_append(
+        chain: &PolicyCheckpointChain,
+        channel: ReleaseChannel,
+        policy_hash: &str,
+        signer: &str,
+    ) -> PolicyCheckpoint {
+        let sequence = chain.next_seq();
+        let epoch_id = 2;
+        let parent_hash = chain.head_hash().map(str::to_string);
+        let timestamp = 2000;
+        let checkpoint_hash = PolicyCheckpoint::compute_hash(
+            sequence,
+            epoch_id,
+            &channel,
+            policy_hash,
+            parent_hash.as_deref(),
+            timestamp,
+            signer,
+        );
+        PolicyCheckpoint {
+            sequence,
+            epoch_id,
+            channel,
+            policy_hash: policy_hash.to_string(),
+            parent_hash,
+            timestamp,
+            signer: signer.to_string(),
+            checkpoint_hash,
+        }
+    }
+
+    fn assert_append_checkpoint_input_rejected(
+        channel: ReleaseChannel,
+        policy_hash: &str,
+        signer: &str,
+        trace_id: &str,
+        expected_detail: &str,
+    ) {
+        let mut chain = PolicyCheckpointChain::new();
+        let original_head = chain
+            .create_checkpoint(1, ReleaseChannel::Stable, "seed-policy", "alice", "seed-trace")
+            .expect("seed checkpoint")
+            .checkpoint_hash
+            .clone();
+        let checkpoint = checkpoint_for_append(&chain, channel, policy_hash, signer);
+        let starting_events = chain.events().len();
+
+        let err = chain
+            .append_checkpoint(checkpoint, trace_id)
+            .expect_err("invalid checkpoint append input must be rejected");
+
+        assert_eq!(err.code(), error_codes::CHECKPOINT_SERIALIZATION_ERROR);
+        assert!(err.to_string().contains(expected_detail));
+        assert_eq!(chain.len(), 1);
+        assert_eq!(chain.next_seq(), 1);
+        assert_eq!(chain.head_hash(), Some(original_head.as_str()));
+
+        let rejection = chain
+            .events()
+            .last()
+            .expect("invalid append should emit a rejection event");
+        assert_eq!(chain.events().len(), starting_events + 1);
+        assert_eq!(
+            rejection.event_code,
+            event_codes::PCK_003_CHECKPOINT_REJECTED
+        );
+        assert_eq!(rejection.event_name, event_names::CHECKPOINT_REJECTED);
+        assert!(rejection.detail.contains(expected_detail));
     }
 
     // ── ReleaseChannel tests ─────────────────────────────────────────
@@ -1215,6 +1382,94 @@ mod tests {
     }
 
     #[test]
+    fn negative_create_rejects_empty_policy_hash_without_mutation() {
+        assert_create_checkpoint_input_rejected(
+            ReleaseChannel::Stable,
+            "",
+            "alice",
+            "trace-policy",
+            "policy_hash must be non-empty",
+        );
+    }
+
+    #[test]
+    fn negative_create_rejects_padded_policy_hash_without_mutation() {
+        assert_create_checkpoint_input_rejected(
+            ReleaseChannel::Stable,
+            " policy ",
+            "alice",
+            "trace-policy",
+            "policy_hash must not contain surrounding whitespace",
+        );
+    }
+
+    #[test]
+    fn negative_create_rejects_empty_signer_without_mutation() {
+        assert_create_checkpoint_input_rejected(
+            ReleaseChannel::Beta,
+            "policy",
+            "",
+            "trace-signer",
+            "signer must be non-empty",
+        );
+    }
+
+    #[test]
+    fn negative_create_rejects_control_char_signer_without_mutation() {
+        assert_create_checkpoint_input_rejected(
+            ReleaseChannel::Beta,
+            "policy",
+            "ali\nce",
+            "trace-signer",
+            "signer must not contain control characters",
+        );
+    }
+
+    #[test]
+    fn negative_create_rejects_empty_trace_id_without_mutation() {
+        assert_create_checkpoint_input_rejected(
+            ReleaseChannel::Canary,
+            "policy",
+            "alice",
+            "",
+            "trace_id must be non-empty",
+        );
+    }
+
+    #[test]
+    fn negative_create_rejects_padded_trace_id_without_mutation() {
+        assert_create_checkpoint_input_rejected(
+            ReleaseChannel::Canary,
+            "policy",
+            "alice",
+            " trace ",
+            "trace_id must not contain surrounding whitespace",
+        );
+    }
+
+    #[test]
+    fn negative_create_rejects_empty_custom_channel_without_mutation() {
+        assert_create_checkpoint_input_rejected(
+            ReleaseChannel::Custom(String::new()),
+            "policy",
+            "alice",
+            "trace-channel",
+            "custom channel must be non-empty",
+        );
+    }
+
+    #[test]
+    fn negative_create_rejects_padded_custom_channel_without_mutation() {
+        assert_create_checkpoint_input_rejected(
+            ReleaseChannel::Custom(" nightly ".to_string()),
+            "policy",
+            "alice",
+            "trace-channel",
+            "custom channel must not contain surrounding whitespace",
+        );
+    }
+
+    #[test]
     fn test_create_rejects_existing_invalid_chain_contents() {
         let mut chain = PolicyCheckpointChain::new();
         chain
@@ -1361,6 +1616,50 @@ mod tests {
         assert_eq!(last_event.sequence, 1);
         assert_eq!(last_event.channel, "beta");
         assert_eq!(last_event.detail, "checkpoint appended: seq=1 epoch=1");
+    }
+
+    #[test]
+    fn negative_append_rejects_empty_policy_hash_without_mutation() {
+        assert_append_checkpoint_input_rejected(
+            ReleaseChannel::Beta,
+            "",
+            "alice",
+            "trace-append-policy",
+            "policy_hash must be non-empty",
+        );
+    }
+
+    #[test]
+    fn negative_append_rejects_padded_signer_without_mutation() {
+        assert_append_checkpoint_input_rejected(
+            ReleaseChannel::Beta,
+            "policy",
+            " alice ",
+            "trace-append-signer",
+            "signer must not contain surrounding whitespace",
+        );
+    }
+
+    #[test]
+    fn negative_append_rejects_control_char_trace_id_without_mutation() {
+        assert_append_checkpoint_input_rejected(
+            ReleaseChannel::Canary,
+            "policy",
+            "alice",
+            "trace\nappend",
+            "trace_id must not contain control characters",
+        );
+    }
+
+    #[test]
+    fn negative_append_rejects_empty_custom_channel_without_mutation() {
+        assert_append_checkpoint_input_rejected(
+            ReleaseChannel::Custom(String::new()),
+            "policy",
+            "alice",
+            "trace-append-channel",
+            "custom channel must be non-empty",
+        );
     }
 
     #[test]
@@ -2425,5 +2724,108 @@ mod tests {
             h1, h2,
             "length-prefixed channel labels must prevent custom-channel boundary collision"
         );
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_existing_items() {
+        let mut items = vec!["old".to_string()];
+
+        push_bounded(&mut items, "new".to_string(), 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn negative_push_bounded_overfull_cap_one_keeps_only_newest_item() {
+        let mut items = vec!["oldest".to_string(), "middle".to_string()];
+
+        push_bounded(&mut items, "newest".to_string(), 1);
+
+        assert_eq!(items, vec!["newest".to_string()]);
+    }
+
+    #[test]
+    fn negative_checkpoint_deserialize_rejects_missing_signer() {
+        let json = r#"{
+            "sequence": 0,
+            "epoch_id": 1,
+            "channel": "Stable",
+            "policy_hash": "abc",
+            "parent_hash": null,
+            "timestamp": 1000,
+            "checkpoint_hash": "abc"
+        }"#;
+
+        let err = serde_json::from_str::<PolicyCheckpoint>(json).unwrap_err();
+
+        assert!(err.to_string().contains("signer"));
+    }
+
+    #[test]
+    fn negative_checkpoint_deserialize_rejects_string_sequence() {
+        let json = r#"{
+            "sequence": "0",
+            "epoch_id": 1,
+            "channel": "Stable",
+            "policy_hash": "abc",
+            "parent_hash": null,
+            "timestamp": 1000,
+            "signer": "alice",
+            "checkpoint_hash": "abc"
+        }"#;
+
+        let err = serde_json::from_str::<PolicyCheckpoint>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_chain_deserialize_rejects_missing_checkpoints() {
+        let json = r#"{
+            "head_hash": null,
+            "next_seq": 0,
+            "events": []
+        }"#;
+
+        let err = serde_json::from_str::<PolicyCheckpointChain>(json).unwrap_err();
+
+        assert!(err.to_string().contains("checkpoints"));
+    }
+
+    #[test]
+    fn negative_chain_deserialize_rejects_scalar_events() {
+        let json = r#"{
+            "checkpoints": [],
+            "head_hash": null,
+            "next_seq": 0,
+            "events": "not-a-list"
+        }"#;
+
+        let err = serde_json::from_str::<PolicyCheckpointChain>(json).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn negative_event_deserialize_rejects_missing_event_code() {
+        let json = r#"{
+            "event_name": "CHECKPOINT_CREATED",
+            "trace_id": "trace-1",
+            "epoch_id": 1,
+            "sequence": 0,
+            "channel": "stable",
+            "detail": "created"
+        }"#;
+
+        let err = serde_json::from_str::<CheckpointChainEvent>(json).unwrap_err();
+
+        assert!(err.to_string().contains("event_code"));
+    }
+
+    #[test]
+    fn negative_release_channel_deserialize_rejects_scalar_custom_payload() {
+        let err = serde_json::from_str::<ReleaseChannel>(r#"{"Custom":123}"#).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
     }
 }

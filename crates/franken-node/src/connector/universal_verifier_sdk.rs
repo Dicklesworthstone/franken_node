@@ -43,6 +43,10 @@ const CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY: &str = "signature_algorithm";
 const CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY: &str = "ed25519_public_key";
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
+    if cap == 0 {
+        items.clear();
+        return;
+    }
     if items.len() >= cap {
         let overflow = items.len() - cap + 1;
         items.drain(0..overflow);
@@ -1975,5 +1979,137 @@ mod tests {
         let mut sorted = keys.clone();
         sorted.sort();
         assert_eq!(keys, sorted);
+    }
+
+    #[test]
+    fn negative_push_bounded_zero_capacity_clears_without_appending() {
+        let mut items = vec!["old", "older"];
+
+        push_bounded(&mut items, "new", 0);
+
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn negative_validate_manifest_rejects_nul_inside_expected_output_digest() {
+        let mut manifest = build_reference_manifest();
+        let digest = deterministic_hash("nul-digest");
+        manifest.expected_output_hash = format!("{}\u{0}{}", &digest[..32], &digest[33..]);
+
+        match validate_manifest(&manifest) {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("expected_output_hash"));
+            }
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_validate_manifest_rejects_whitespace_schema_version() {
+        let mut manifest = build_reference_manifest();
+        manifest.schema_version = " vsdk-v1.0 ".to_string();
+
+        match validate_manifest(&manifest) {
+            Err(VsdkError::SchemaUnsupported(msg)) => {
+                assert!(msg.contains("unsupported schema version"));
+            }
+            other => unreachable!("expected SchemaUnsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_verify_capsule_signature_rejects_empty_algorithm_metadata() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.metadata.insert(
+            CAPSULE_SIGNATURE_ALGORITHM_METADATA_KEY.to_string(),
+            String::new(),
+        );
+
+        match verify_capsule_signature(&capsule) {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("unsupported signature algorithm"));
+            }
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_verify_capsule_signature_rejects_empty_public_key_metadata() {
+        let mut capsule = build_reference_capsule();
+        capsule.manifest.metadata.insert(
+            CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY.to_string(),
+            String::new(),
+        );
+
+        match verify_capsule_signature(&capsule) {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains(CAPSULE_SIGNER_PUBLIC_KEY_METADATA_KEY));
+            }
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_replay_capsule_rejects_nul_suffixed_input_key() {
+        let mut capsule = build_reference_capsule();
+        capsule
+            .inputs
+            .insert("artifact_a\u{0}".to_string(), "content_of_a".to_string());
+
+        match replay_capsule(&capsule, "v1") {
+            Err(VsdkError::ManifestIncomplete(msg)) => {
+                assert!(msg.contains("input_refs"));
+                assert!(msg.contains("provided"));
+            }
+            other => unreachable!("expected ManifestIncomplete, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_verify_capsule_signature_rejects_unsigned_metadata_addition() {
+        let mut capsule = build_reference_capsule();
+        capsule
+            .manifest
+            .metadata
+            .insert("unsigned-extra".to_string(), "tampered".to_string());
+
+        match verify_capsule_signature(&capsule) {
+            Err(VsdkError::SignatureMismatch { .. }) => {}
+            other => unreachable!("expected SignatureMismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn negative_seal_session_with_inconclusive_step_fails_closed() {
+        let mut session = create_session("s-inconclusive", "v1");
+        let result = ReplayResult {
+            capsule_id: "capsule-inconclusive".to_string(),
+            verdict: CapsuleVerdict::Inconclusive,
+            expected_output_hash: deterministic_hash("expected"),
+            actual_output_hash: deterministic_hash("actual"),
+            replay_duration_ms: 0,
+            verifier_identity: "v1".to_string(),
+            detail: "manual inconclusive replay".to_string(),
+        };
+
+        record_session_step(&mut session, &result).unwrap();
+        let verdict = seal_session(&mut session).unwrap();
+
+        assert_eq!(verdict, CapsuleVerdict::Fail);
+        assert_eq!(session.final_verdict, Some(CapsuleVerdict::Fail));
+    }
+
+    #[test]
+    fn negative_verifier_sdk_deserialize_rejects_config_type_confusion() {
+        let json = r#"{
+            "verifier_identity": "v1",
+            "schema_version": "vsdk-v1.0",
+            "supported_claim_types": ["migration_safety"],
+            "config": ["schema_version", "vsdk-v1.0"]
+        }"#;
+
+        let result: Result<VerifierSdk, _> = serde_json::from_str(json);
+
+        assert!(result.is_err());
     }
 }

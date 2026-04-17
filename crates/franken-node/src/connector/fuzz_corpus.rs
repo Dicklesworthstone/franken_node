@@ -1889,4 +1889,153 @@ targets = ["directory_scan"]
         assert!(detail.contains("target binary unavailable"));
         assert!(!detail.contains("measured fixture coverage"));
     }
+
+    #[test]
+    fn add_seed_preserves_missing_target_name_in_error() {
+        let mut adapter = DeterministicFuzzTestAdapter::new(1);
+
+        let err = adapter
+            .add_seed(make_seed(
+                "missing_target",
+                "seed",
+                DeterministicSeedOutcome::Handled,
+            ))
+            .unwrap_err();
+
+        assert_eq!(err, FuzzError::MissingTarget("missing_target".to_string()));
+    }
+
+    #[test]
+    fn fixture_gate_triages_each_crash_seed_for_same_target() {
+        let mut adapter = DeterministicFuzzTestAdapter::new(1);
+        adapter.add_target(make_target("parser_fuzz", FuzzCategory::ParserInput));
+        for input in ["crash_one", "prefix_crash_two"] {
+            adapter
+                .add_seed(make_seed(
+                    "parser_fuzz",
+                    input,
+                    DeterministicSeedOutcome::Rejected,
+                ))
+                .unwrap();
+        }
+
+        let report = adapter.run_fixture_gate();
+
+        assert_eq!(report.verdict, "FAIL");
+        assert_eq!(report.triaged_crashes.len(), 2);
+        assert_eq!(report.target_results[0].crashes, 2);
+    }
+
+    #[test]
+    fn fixture_gate_does_not_promote_rejected_fixture_without_crash_marker() {
+        let mut adapter = DeterministicFuzzTestAdapter::new(1);
+        adapter.add_target(make_target("parser_fuzz", FuzzCategory::ParserInput));
+        adapter
+            .add_seed(make_seed(
+                "parser_fuzz",
+                "invalid_but_non_crashing",
+                DeterministicSeedOutcome::Rejected,
+            ))
+            .unwrap();
+
+        let report = adapter.run_fixture_gate();
+
+        assert_eq!(report.verdict, "PASS");
+        assert!(report.triaged_crashes.is_empty());
+        assert_eq!(report.target_results[0].crashes, 0);
+    }
+
+    #[test]
+    fn prepare_truthful_campaign_rejects_empty_seed_roots() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("fuzz/corpus/migration")).unwrap();
+        fs::create_dir_all(dir.path().join("fuzz/regression/migration")).unwrap();
+        let target = negative_truthful_target("migration_directory_scan", "migration");
+
+        let error =
+            prepare_truthful_campaign(dir.path(), &target).expect_err("empty roots must fail");
+
+        assert!(error.contains("has no executable seeds"));
+        assert!(error.contains("migration_directory_scan"));
+    }
+
+    #[test]
+    fn prepare_truthful_campaign_rejects_missing_regression_seed_root() {
+        let dir = tempdir().expect("tempdir");
+        write_file(
+            &dir.path().join("fuzz/corpus/migration/seed.txt"),
+            b"src/main.rs",
+        );
+        let target = negative_truthful_target("migration_directory_scan", "migration");
+
+        let error =
+            prepare_truthful_campaign(dir.path(), &target).expect_err("missing root must fail");
+
+        assert!(error.contains("missing seed directory"));
+        assert!(error.contains("fuzz/regression/migration"));
+    }
+
+    #[test]
+    fn coverage_fixture_type_mismatch_is_unavailable() {
+        let dir = tempdir().expect("tempdir");
+        write_file(
+            &dir.path().join("fuzz/coverage/latest_migration.json"),
+            br#"{
+  "timestamp": "2026-02-20T12:00:00Z",
+  "target": "migration_directory_scan",
+  "corpus_size": "two",
+  "lines_covered": 19,
+  "lines_total": 24,
+  "coverage_pct": 79.1,
+  "new_paths_found": 1,
+  "crashes_found": 0,
+  "event_code": "FZT-004"
+}"#,
+        );
+
+        let coverage = load_category_coverage(dir.path(), "migration");
+
+        assert_eq!(coverage.observation.coverage_status, "unavailable");
+        assert!(coverage.artifact_ref.is_none());
+        assert!(
+            coverage
+                .observation
+                .coverage_detail
+                .contains("invalid JSON")
+        );
+    }
+
+    #[test]
+    fn aggregate_crash_creates_seed_crash_triage_without_error_detail() {
+        let report = negative_execution_report("crash", "panic during target execution");
+        let health = report.health.clone();
+
+        let aggregate =
+            aggregate_truthful_reports("fcg-negative", &health, 1, vec![report], Vec::new());
+
+        assert_eq!(aggregate.verdict, "FAIL");
+        assert!(aggregate.error_detail.is_none());
+        assert_eq!(aggregate.triaged_failures.len(), 1);
+        assert_eq!(aggregate.triaged_failures[0].classifier, "seed_crash");
+        assert_eq!(aggregate.triaged_failures[0].outcome, "crash");
+    }
+
+    #[test]
+    fn aggregate_target_missing_marks_seed_as_not_executed() {
+        let report = negative_execution_report(
+            "target_missing",
+            "unsupported truthful fuzz target `missing`",
+        );
+        let health = report.health.clone();
+
+        let aggregate =
+            aggregate_truthful_reports("fcg-negative", &health, 1, vec![report], Vec::new());
+
+        assert_eq!(aggregate.verdict, "ERROR");
+        assert_eq!(aggregate.seeds_total, 1);
+        assert_eq!(aggregate.seeds_executed, 0);
+        assert_eq!(aggregate.targets[0].outcome, "error");
+        let detail = aggregate.error_detail.as_deref().expect("error detail");
+        assert!(detail.contains("unsupported truthful fuzz target"));
+    }
 }

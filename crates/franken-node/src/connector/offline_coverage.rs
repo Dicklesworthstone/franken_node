@@ -139,6 +139,11 @@ fn validate_event(event: &CoverageEvent) -> Result<(), CoverageError> {
             reason: "artifact_id contains leading or trailing whitespace".into(),
         });
     }
+    if event.artifact_id.contains('\0') {
+        return Err(CoverageError::InvalidEvent {
+            reason: "artifact_id must not contain null bytes".into(),
+        });
+    }
     let scope = event.scope.trim();
     if scope.is_empty() {
         return Err(CoverageError::InvalidEvent {
@@ -148,6 +153,11 @@ fn validate_event(event: &CoverageEvent) -> Result<(), CoverageError> {
     if event.scope != scope {
         return Err(CoverageError::InvalidEvent {
             reason: "scope contains leading or trailing whitespace".into(),
+        });
+    }
+    if event.scope.contains('\0') {
+        return Err(CoverageError::InvalidEvent {
+            reason: "scope must not contain null bytes".into(),
         });
     }
     Ok(())
@@ -901,5 +911,114 @@ mod tests {
                 scope: "prod ".into()
             }
         );
+    }
+
+    #[test]
+    fn null_byte_artifact_id_is_rejected_without_mutation() {
+        let mut t = OfflineCoverageTracker::new();
+
+        let err = t
+            .record_event(ev("artifact\0id", true, 100, "prod"))
+            .unwrap_err();
+
+        assert_eq!(err.code(), "OCT_INVALID_EVENT");
+        assert!(err.to_string().contains("null bytes"));
+        assert_eq!(t.event_count(), 0);
+        assert_eq!(t.scope_count(), 0);
+    }
+
+    #[test]
+    fn null_byte_scope_is_rejected_without_mutation() {
+        let mut t = OfflineCoverageTracker::new();
+
+        let err = t
+            .record_event(ev("a1", true, 100, "prod\0shadow"))
+            .unwrap_err();
+
+        assert_eq!(err.code(), "OCT_INVALID_EVENT");
+        assert!(err.to_string().contains("null bytes"));
+        assert_eq!(t.event_count(), 0);
+        assert_eq!(t.scope_count(), 0);
+    }
+
+    #[test]
+    fn equal_timestamp_unavailable_then_available_remains_unavailable() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", false, 200, "prod")).unwrap();
+        t.record_event(ev("a1", true, 200, "prod")).unwrap();
+
+        let m = t.compute_metrics("prod").unwrap();
+
+        assert_eq!(m.total_artifacts, 1);
+        assert_eq!(m.available_count, 0);
+        assert_eq!(m.repair_debt_count, 1);
+    }
+
+    #[test]
+    fn stale_unavailable_event_does_not_override_newer_available_state() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 200, "prod")).unwrap();
+        t.record_event(ev("a1", false, 100, "prod")).unwrap();
+
+        let m = t.compute_metrics("prod").unwrap();
+
+        assert_eq!(m.available_count, 1);
+        assert_eq!(m.repair_debt_count, 0);
+        assert_eq!(t.event_count(), 2);
+    }
+
+    #[test]
+    fn coverage_threshold_just_above_actual_triggers_breach() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+        t.record_event(ev("a2", false, 101, "prod")).unwrap();
+
+        let alerts = t
+            .check_slos(&[slo("coverage", 0.500_001)], "prod", 200, "trace-edge")
+            .unwrap();
+
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].slo_name, "coverage");
+        assert_eq!(alerts[0].actual_value, 0.5);
+        assert_eq!(alerts[0].trace_id, "trace-edge");
+    }
+
+    #[test]
+    fn unknown_metric_after_valid_target_returns_error() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", false, 100, "prod")).unwrap();
+
+        let err = t
+            .check_slos(
+                &[slo("coverage", 0.9), slo("not_a_real_metric", 1.0)],
+                "prod",
+                200,
+                "trace-mixed-targets",
+            )
+            .unwrap_err();
+
+        assert_eq!(
+            err,
+            CoverageError::UnknownMetric {
+                metric_name: "not_a_real_metric".into()
+            }
+        );
+    }
+
+    #[test]
+    fn invalid_event_between_valid_updates_does_not_change_metrics() {
+        let mut t = OfflineCoverageTracker::new();
+        t.record_event(ev("a1", true, 100, "prod")).unwrap();
+        let before = t.compute_metrics("prod").unwrap();
+
+        let err = t
+            .record_event(ev("bad\0id", false, 101, "prod"))
+            .unwrap_err();
+        let after = t.compute_metrics("prod").unwrap();
+
+        assert_eq!(err.code(), "OCT_INVALID_EVENT");
+        assert_eq!(before.available_count, after.available_count);
+        assert_eq!(before.repair_debt_count, after.repair_debt_count);
+        assert_eq!(t.event_count(), 1);
     }
 }

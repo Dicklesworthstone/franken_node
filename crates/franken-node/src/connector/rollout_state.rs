@@ -999,4 +999,77 @@ mod tests {
             other => panic!("expected cancel_phase replay mismatch, got {other:?}"),
         }
     }
+
+    fn sample_state_value() -> serde_json::Value {
+        serde_json::to_value(sample_state()).expect("sample rollout state should serialize")
+    }
+
+    #[test]
+    fn malformed_rollout_state_missing_connector_id_is_rejected() {
+        let mut payload = sample_state_value();
+        payload
+            .as_object_mut()
+            .expect("rollout state fixture should be a JSON object")
+            .remove("connector_id");
+
+        let err = serde_json::from_value::<RolloutState>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("connector_id"));
+    }
+
+    #[test]
+    fn malformed_rollout_state_missing_lifecycle_state_is_rejected() {
+        let mut payload = sample_state_value();
+        payload
+            .as_object_mut()
+            .expect("rollout state fixture should be a JSON object")
+            .remove("lifecycle_state");
+
+        let err = serde_json::from_value::<RolloutState>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("lifecycle_state"));
+    }
+
+    #[test]
+    fn malformed_rollout_state_missing_health_is_rejected() {
+        let mut payload = sample_state_value();
+        payload
+            .as_object_mut()
+            .expect("rollout state fixture should be a JSON object")
+            .remove("health");
+
+        let err = serde_json::from_value::<RolloutState>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("health"));
+    }
+
+    #[test]
+    fn malformed_rollout_state_unknown_rollout_phase_is_rejected() {
+        let mut payload = sample_state_value();
+        payload["rollout_phase"] = serde_json::json!("dark_launch");
+
+        let err = serde_json::from_value::<RolloutState>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("dark_launch"));
+    }
+
+    #[test]
+    fn malformed_rollout_state_non_numeric_version_is_rejected() {
+        let mut payload = sample_state_value();
+        payload["version"] = serde_json::json!("one");
+
+        let err = serde_json::from_value::<RolloutState>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("invalid type"));
+    }
+
+    #[test]
+    fn malformed_rollout_state_unknown_cancel_phase_is_rejected() {
+        let mut payload = sample_state_value();
+        payload["cancel_phase"] = serde_json::json!("Paused");
+
+        let err = serde_json::from_value::<RolloutState>(payload).unwrap_err();
+
+        assert!(err.to_string().contains("Paused"));
+    }
 }

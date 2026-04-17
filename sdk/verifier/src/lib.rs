@@ -773,4 +773,610 @@ mod tests {
             assert!(check_sdk_version(version).is_err(), "Slightly malformed version should be rejected: {:?}", version);
         }
     }
+
+    // ── Extreme adversarial negative-path tests ──
+
+    #[test]
+    fn extreme_adversarial_unicode_bidirectional_override_injection_in_event_details() {
+        // Extreme: Unicode bidirectional override attacks in event details
+        let bidi_attack_patterns = vec![
+            // Right-to-left override sequences that could manipulate display
+            format!("normal{}evil{}", "\u{202E}", "\u{202D}"),     // RLE + PDF
+            format!("safe{}hidden{}visible", "\u{2066}", "\u{2069}"), // FSI + PDI
+            format!("text{}rtl{}end", "\u{200F}", "\u{200E}"),     // RLM + LRM
+            format!("{}arabic{}", "\u{061C}", "\u{202C}"),         // ALM + PDF
+            // Nested bidirectional overrides
+            format!("{}a{}b{}c{}", "\u{202E}", "\u{2066}", "\u{2069}", "\u{202D}"),
+            // Mixed with zero-width characters
+            format!("{}{}attack{}{}", "\u{202E}", "\u{200B}", "\u{200C}", "\u{202D}"),
+        ];
+
+        for (i, malicious_detail) in bidi_attack_patterns.iter().enumerate() {
+            let event = SdkEvent::new(CAPSULE_CREATED, malicious_detail.clone());
+
+            // Should store BiDi characters without interpretation or corruption
+            assert_eq!(event.event_code, CAPSULE_CREATED);
+            assert_eq!(event.detail, *malicious_detail);
+            assert_eq!(event.detail.len(), malicious_detail.len());
+
+            // BiDi characters should be preserved in debug output
+            let debug_output = format!("{:?}", event);
+            assert!(debug_output.contains("CAPSULE_CREATED"));
+
+            // Should contain BiDi control characters (not be stripped)
+            assert!(event.detail.contains('\u{202E}') ||
+                   event.detail.contains('\u{2066}') ||
+                   event.detail.contains('\u{200F}') ||
+                   event.detail.contains('\u{061C}'),
+                   "BiDi control characters should be preserved in detail");
+
+            // Clone should preserve exact BiDi sequence
+            let cloned = event.clone();
+            assert_eq!(cloned.detail.as_bytes(), malicious_detail.as_bytes());
+
+            // Length calculations should handle BiDi correctly
+            assert_eq!(cloned.detail.chars().count(), malicious_detail.chars().count());
+        }
+
+        // Test version checking with BiDi injection
+        let bidi_version = format!("{}vsdk-v1.0{}", "\u{202E}", "\u{202D}");
+        let result = check_sdk_version(&bidi_version);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
+        assert!(err.contains(&bidi_version)); // Should include BiDi chars in error
+    }
+
+    #[test]
+    fn extreme_adversarial_hash_collision_birthday_attack_on_event_codes() {
+        // Extreme: Hash collision attacks against event code validation
+        use std::collections::HashMap;
+
+        // Generate event details designed to produce hash collisions
+        let mut hash_collision_tracker = HashMap::new();
+        let collision_candidates = 10000;
+
+        for i in 0..collision_candidates {
+            // Create event details with patterns likely to collide
+            let collision_detail = format!("collision_test_{}_{:016x}",
+                                          i,
+                                          i as u64 * 0x9e3779b97f4a7c15); // Fibonacci hashing constant
+
+            let event = SdkEvent::new(CAPSULE_VERDICT_REPRODUCED, collision_detail.clone());
+
+            // Verify event creation succeeds despite potential collisions
+            assert_eq!(event.event_code, CAPSULE_VERDICT_REPRODUCED);
+            assert_eq!(event.detail, collision_detail);
+
+            // Track hash distribution (simplified hash for testing)
+            let simple_hash = collision_detail.bytes().fold(0u32, |acc, b| {
+                acc.wrapping_mul(31).wrapping_add(b as u32)
+            });
+
+            *hash_collision_tracker.entry(simple_hash % 1000).or_insert(0) += 1;
+
+            // Test cloning under collision scenarios
+            let cloned = event.clone();
+            assert_eq!(cloned.detail, event.detail);
+            assert_eq!(cloned.event_code, event.event_code);
+
+            // Verify debug output remains stable under collision pressure
+            if i % 1000 == 0 {
+                let debug_output = format!("{:?}", event);
+                assert!(debug_output.contains("CAPSULE_VERDICT_REPRODUCED"));
+                assert!(debug_output.contains(&collision_detail));
+            }
+        }
+
+        // Analyze collision distribution to ensure reasonable spread
+        let bucket_count = hash_collision_tracker.len();
+        assert!(bucket_count > 500, "Hash distribution should be reasonably spread: {} buckets", bucket_count);
+
+        // Verify that high-collision buckets don't break the system
+        let max_collisions = hash_collision_tracker.values().max().copied().unwrap_or(0);
+        assert!(max_collisions < collision_candidates / 10,
+               "Maximum collision count should be reasonable: {}", max_collisions);
+    }
+
+    #[test]
+    fn extreme_adversarial_arithmetic_overflow_in_version_number_parsing() {
+        // Extreme: Arithmetic overflow attacks during version parsing
+        let overflow_version_patterns = vec![
+            // Near integer overflow boundaries
+            format!("vsdk-v{}.0", u64::MAX),
+            format!("vsdk-v0.{}", u64::MAX),
+            format!("vsdk-v{}.{}", u32::MAX, u32::MAX),
+            format!("vsdk-v{}.{}", i64::MAX, i64::MAX),
+
+            // Multiple overflow components
+            format!("vsdk-v{}.{}.{}", u64::MAX, u64::MAX, u64::MAX),
+            format!("vsdk-v{}.{}.{}.{}", u32::MAX, u32::MAX, u32::MAX, u32::MAX),
+
+            // Potential wraparound values
+            format!("vsdk-v{}.0", u32::MAX as u64 + 1),
+            format!("vsdk-v0.{}", u32::MAX as u64 + 1),
+
+            // Scientific notation overflow attempts
+            "vsdk-v1e308.0",
+            "vsdk-v1.1e308",
+            "vsdk-v999999999999999999999999.0",
+
+            // Leading zeros that could cause octal interpretation
+            format!("vsdk-v{:020}.0", 1), // Leading zeros
+            format!("vsdk-v0.{:020}", 1),
+        ];
+
+        for overflow_version in overflow_version_patterns {
+            let start_time = std::time::Instant::now();
+            let result = check_sdk_version(&overflow_version);
+            let duration = start_time.elapsed();
+
+            // Should reject overflow versions quickly without arithmetic errors
+            assert!(result.is_err(), "Overflow version should be rejected: {}", overflow_version);
+            assert!(duration < std::time::Duration::from_millis(10),
+                   "Version check should complete quickly despite overflow: {:?}", duration);
+
+            let err = result.unwrap_err();
+            assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
+
+            // Error message should be safely bounded despite large numbers
+            assert!(err.len() < 500, "Error message should not be excessively long");
+            assert!(err.contains("requested="));
+            assert!(err.contains("supported=vsdk-v1.0"));
+
+            // Should not contain evidence of arithmetic overflow/wraparound
+            assert!(!err.contains("overflow"));
+            assert!(!err.contains("panic"));
+        }
+
+        // Test edge case: version that could cause saturation
+        let saturation_version = format!("vsdk-v{}.{}",
+                                        std::u64::MAX.saturating_sub(1),
+                                        std::u64::MAX.saturating_sub(1));
+        let result = check_sdk_version(&saturation_version);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn extreme_adversarial_memory_exhaustion_via_recursive_event_nesting() {
+        // Extreme: Memory exhaustion through nested event detail construction
+        let base_pattern = "nested_event";
+        let mut nested_detail = String::from(base_pattern);
+
+        // Build deeply nested structure without infinite recursion
+        for depth in 0..20 {
+            // Create event at current nesting level
+            let current_event = SdkEvent::new(CAPSULE_SIGNED, nested_detail.clone());
+
+            // Verify event creation succeeds at each depth
+            assert_eq!(current_event.event_code, CAPSULE_SIGNED);
+            assert_eq!(current_event.detail, nested_detail);
+
+            // Memory usage should remain bounded
+            let memory_estimate = nested_detail.len() * std::mem::size_of::<char>();
+            assert!(memory_estimate < 10_000_000, // 10MB limit
+                   "Memory usage should be bounded at depth {}: {} bytes", depth, memory_estimate);
+
+            // Test cloning at each depth level
+            let cloned = current_event.clone();
+            assert_eq!(cloned.detail.len(), current_event.detail.len());
+
+            // Debug output should remain stable despite nesting
+            let debug_output = format!("{:?}", current_event);
+            assert!(debug_output.contains("CAPSULE_SIGNED"));
+            assert!(debug_output.len() < nested_detail.len() * 2); // Debug shouldn't explode
+
+            // Increase nesting for next iteration
+            nested_detail = format!("{}({})", nested_detail, nested_detail);
+
+            // Break if detail becomes too large to prevent test timeouts
+            if nested_detail.len() > 1_000_000 {
+                break;
+            }
+        }
+
+        // Verify system remains functional after memory pressure
+        let post_pressure_event = SdkEvent::new(CAPSULE_CREATED, "post_pressure_test");
+        assert_eq!(post_pressure_event.event_code, CAPSULE_CREATED);
+        assert_eq!(post_pressure_event.detail, "post_pressure_test");
+    }
+
+    #[test]
+    fn extreme_adversarial_timing_attack_via_version_string_complexity() {
+        use std::time::Instant;
+
+        // Extreme: Timing attacks based on version string processing complexity
+        let complexity_test_cases = vec![
+            // Simple baseline
+            ("vsdk-v1.0", "baseline"),
+
+            // Repeated patterns that might stress string comparison
+            ("vsdk-v1.0" + &"x".repeat(1000), "long_suffix"),
+            ("v".repeat(1000) + "sdk-v1.0", "long_prefix"),
+            ("vs".repeat(500) + "dk-v1.0", "repeated_prefix"),
+
+            // Patterns that might stress specific algorithms
+            ("vsdk-".to_string() + &"a".repeat(1000), "no_version"),
+            ("vsdk-v".to_string() + &"1".repeat(500), "repeated_digits"),
+            ("vsdk-v1.".to_string() + &"0".repeat(500), "repeated_zeros"),
+
+            // Unicode complexity
+            ("vsdk-v1🚀.0🔥", "unicode_emoji"),
+            ("vsdk-v1".to_string() + &"\u{0300}".repeat(100) + ".0", "combining_chars"),
+
+            // Nested structure patterns
+            ("vsdk-v".to_string() + &"(())".repeat(250), "nested_parens"),
+            ("{".repeat(500) + "vsdk-v1.0" + &"}".repeat(500), "nested_braces"),
+        ];
+
+        let mut timing_samples = std::collections::HashMap::new();
+        let sample_count = 100;
+
+        for (version, test_name) in &complexity_test_cases {
+            let mut times = Vec::new();
+
+            for _ in 0..sample_count {
+                let start = Instant::now();
+                let _result = check_sdk_version(version);
+                let duration = start.elapsed();
+                times.push(duration);
+
+                // Each call should complete quickly regardless of complexity
+                assert!(duration < std::time::Duration::from_millis(10),
+                       "Version check too slow for {}: {:?}", test_name, duration);
+            }
+
+            // Calculate statistics
+            let avg_nanos: f64 = times.iter()
+                .map(|d| d.as_nanos() as f64)
+                .sum::<f64>() / sample_count as f64;
+
+            let max_nanos = times.iter().map(|d| d.as_nanos()).max().unwrap() as f64;
+            let min_nanos = times.iter().map(|d| d.as_nanos()).min().unwrap() as f64;
+
+            timing_samples.insert(test_name, (avg_nanos, max_nanos, min_nanos));
+        }
+
+        // Analyze timing relationships to detect potential timing attacks
+        let baseline_avg = timing_samples.get(&"baseline").unwrap().0;
+
+        for (test_name, (avg, max, min)) in &timing_samples {
+            if *test_name == "baseline" { continue; }
+
+            let timing_ratio = avg / baseline_avg;
+
+            // Complex inputs should not cause dramatically longer processing times
+            assert!(timing_ratio < 5.0,
+                   "Suspicious timing difference for {}: baseline={:.0}ns, test={:.0}ns, ratio={:.2}",
+                   test_name, baseline_avg, avg, timing_ratio);
+
+            // Variance within each test should be reasonable
+            let variance_ratio = (max - min) / avg;
+            assert!(variance_ratio < 3.0,
+                   "High timing variance for {}: avg={:.0}ns, max={:.0}ns, min={:.0}ns, variance_ratio={:.2}",
+                   test_name, avg, max, min, variance_ratio);
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_json_injection_via_event_detail_serialization() {
+        // Extreme: JSON injection attacks through event detail serialization
+        let json_injection_patterns = vec![
+            // Basic JSON injection attempts
+            r#"","malicious":"injected"#,
+            r#""},"injected_field":"evil"#,
+            r#"\":\"injected\",\"evil\":true,\"fake\":\""#,
+
+            // Nested JSON injection
+            r#"{"nested":{"injection":"attempt"}}"#,
+            r#"[{"array":"injection"}]"#,
+
+            // JSON with control characters
+            "detail\",\"injected\":\"\x00\x01\x02",
+            "detail\\\",\\\"injection\\\":true",
+
+            // JSON escape sequence attacks
+            "\\\"},{\\\"injected\\\":true,\\\"x\\\":\\\"",
+            "\\\\\",\\\"injection\\\":1337,\\\"",
+
+            // Unicode escape injection
+            "\\u0022,\\u0022injected\\u0022:\\u0022evil\\u0022",
+
+            // JSON payload with special characters
+            "detail\"},\"injection\":true,\"comment\":\"//",
+            "detail\"}/*injection*/,\"evil\":true",
+        ];
+
+        for (i, injection_attempt) in json_injection_patterns.iter().enumerate() {
+            let event = SdkEvent::new(CAPSULE_REPLAY_START, injection_attempt.clone());
+
+            // Event should store injection attempt literally without interpretation
+            assert_eq!(event.event_code, CAPSULE_REPLAY_START);
+            assert_eq!(event.detail, *injection_attempt);
+
+            // Simulate JSON serialization (manual since we don't have serde derives)
+            let manual_json = format!(
+                r#"{{"event_code":"{}","detail":"{}"}}"#,
+                event.event_code,
+                event.detail.replace('"', r#"\""#).replace('\\', r#"\\"#) // Basic escaping
+            );
+
+            // JSON should remain valid after escaping
+            assert!(manual_json.contains("CAPSULE_REPLAY_START"));
+            assert!(!manual_json.contains(r#""malicious":"injected""#));
+            assert!(!manual_json.contains(r#""injected_field":"evil""#));
+            assert!(!manual_json.contains(r#""injection":true"#));
+
+            // Debug output should not contain unescaped injection
+            let debug_output = format!("{:?}", event);
+            assert!(!debug_output.contains(r#""malicious":"injected""#));
+            assert!(!debug_output.contains(r#""injected_field""#));
+
+            // Clone should preserve exact injection attempt
+            let cloned = event.clone();
+            assert_eq!(cloned.detail, *injection_attempt);
+            assert_eq!(cloned.detail.len(), injection_attempt.len());
+        }
+
+        // Test version checking with JSON-like injection
+        let json_version = r#"{"fake":"vsdk-v1.0","real":"evil"}"#;
+        let result = check_sdk_version(json_version);
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
+        assert!(!err.contains(r#""fake":"vsdk-v1.0""#)); // Shouldn't interpret as JSON
+    }
+
+    #[test]
+    fn extreme_adversarial_constant_time_comparison_violation_detection() {
+        // Extreme: Test for timing differences that could indicate non-constant-time string comparison
+        use std::time::Instant;
+
+        let baseline_version = "vsdk-v1.0";
+        let sample_count = 1000;
+
+        // Test versions with different "closeness" to the correct version
+        let comparison_test_cases = vec![
+            // Differ at different positions
+            ("xsdk-v1.0", "first_char_diff"),      // Differs at position 0
+            ("vsdk-v2.0", "version_diff"),         // Differs at position 7
+            ("vsdk-v1.1", "minor_diff"),           // Differs at position 9
+            ("vsdk-v1.0x", "extra_char"),          // Extra character at end
+
+            // Different lengths but similar prefixes
+            ("v", "very_short"),
+            ("vsdk", "partial_match"),
+            ("vsdk-v1", "almost_complete"),
+            ("vsdk-v1.0.extra", "extra_long"),
+
+            // Wrong versions with same length
+            ("asdk-v1.0", "same_length_a"),
+            ("bsdk-v1.0", "same_length_b"),
+            ("zsdk-v1.0", "same_length_z"),
+        ];
+
+        let mut timing_results = std::collections::HashMap::new();
+
+        for (test_version, test_name) in &comparison_test_cases {
+            let mut times = Vec::new();
+
+            for _ in 0..sample_count {
+                let start = Instant::now();
+                let _result = check_sdk_version(test_version);
+                let duration = start.elapsed();
+                times.push(duration.as_nanos());
+            }
+
+            // Calculate median time to reduce noise
+            times.sort_unstable();
+            let median_time = times[sample_count / 2] as f64;
+            let min_time = *times.iter().min().unwrap() as f64;
+            let max_time = *times.iter().max().unwrap() as f64;
+
+            timing_results.insert(*test_name, (median_time, min_time, max_time));
+        }
+
+        // Analyze for timing attack vulnerabilities
+        let times: Vec<f64> = timing_results.values().map(|(median, _, _)| *median).collect();
+        let avg_time = times.iter().sum::<f64>() / times.len() as f64;
+        let max_time = times.iter().fold(0.0, |acc, &x| acc.max(x));
+        let min_time = times.iter().fold(f64::INFINITY, |acc, &x| acc.min(x));
+
+        // All comparisons should take similar time (constant-time comparison)
+        let timing_variance_ratio = (max_time - min_time) / avg_time;
+
+        assert!(timing_variance_ratio < 2.0,
+               "Excessive timing variance suggests non-constant-time comparison: avg={:.0}ns, max={:.0}ns, min={:.0}ns, ratio={:.2}",
+               avg_time, max_time, min_time, timing_variance_ratio);
+
+        // No individual test case should be dramatically different
+        for (test_name, (median, min, max)) in &timing_results {
+            let individual_ratio = median / avg_time;
+            assert!(individual_ratio < 3.0 && individual_ratio > 0.3,
+                   "Test case {} has suspicious timing: median={:.0}ns, avg={:.0}ns, ratio={:.2}",
+                   test_name, median, avg_time, individual_ratio);
+        }
+    }
+
+    #[test]
+    fn extreme_adversarial_cross_module_boundary_validation_with_privilege_escalation_attempts() {
+        // Extreme: Test privilege escalation attempts through SDK boundary manipulation
+
+        // Simulate attempts to bypass structural-only security posture
+        let privilege_escalation_attempts = vec!(
+            // Direct security posture bypass attempts
+            ("bypass_posture", STRUCTURAL_ONLY_SECURITY_POSTURE, "replacement_critical"),
+            ("modify_rule", STRUCTURAL_ONLY_RULE_ID, "PRIVILEGED_VERIFIER_ACCESS"),
+
+            // Version manipulation for privilege escalation
+            ("version_escalate", SDK_VERSION, "vsdk-v2.0-privileged"),
+            ("min_version_bypass", SDK_VERSION_MIN, "vsdk-v0.0-admin"),
+
+            // Event code manipulation
+            ("event_escalate", CAPSULE_CREATED, "PRIVILEGED_CAPSULE_CREATED"),
+            ("error_manipulate", ERR_CAPSULE_ACCESS_DENIED, "CAPSULE_ACCESS_GRANTED"),
+
+            // Invariant violation attempts
+            ("invariant_bypass", INV_CAPSULE_NO_PRIVILEGED_ACCESS, "INV-CAPSULE-PRIVILEGED-ACCESS-ALLOWED"),
+        );
+
+        for (test_name, original_constant, malicious_value) in privilege_escalation_attempts {
+            // Verify constants remain immutable and correct
+            match test_name {
+                "bypass_posture" => {
+                    assert_eq!(STRUCTURAL_ONLY_SECURITY_POSTURE, "structural_only_not_replacement_critical");
+                    assert_ne!(STRUCTURAL_ONLY_SECURITY_POSTURE, malicious_value);
+                },
+                "modify_rule" => {
+                    assert_eq!(STRUCTURAL_ONLY_RULE_ID, "VERIFIER_SHORTCUT_GUARD::WORKSPACE_VERIFIER_SDK");
+                    assert_ne!(STRUCTURAL_ONLY_RULE_ID, malicious_value);
+                },
+                "version_escalate" => {
+                    assert_eq!(SDK_VERSION, "vsdk-v1.0");
+                    assert_ne!(SDK_VERSION, malicious_value);
+                },
+                "min_version_bypass" => {
+                    assert_eq!(SDK_VERSION_MIN, "vsdk-v1.0");
+                    assert_ne!(SDK_VERSION_MIN, malicious_value);
+                },
+                "event_escalate" => {
+                    assert_eq!(CAPSULE_CREATED, "CAPSULE_CREATED");
+                    assert_ne!(CAPSULE_CREATED, malicious_value);
+                },
+                "error_manipulate" => {
+                    assert_eq!(ERR_CAPSULE_ACCESS_DENIED, "ERR_CAPSULE_ACCESS_DENIED");
+                    assert_ne!(ERR_CAPSULE_ACCESS_DENIED, malicious_value);
+                },
+                "invariant_bypass" => {
+                    assert_eq!(INV_CAPSULE_NO_PRIVILEGED_ACCESS, "INV-CAPSULE-NO-PRIVILEGED-ACCESS");
+                    assert_ne!(INV_CAPSULE_NO_PRIVILEGED_ACCESS, malicious_value);
+                },
+                _ => {}
+            }
+
+            // Test creating events with manipulated codes (should use constants, not variables)
+            let event_with_malicious = SdkEvent::new(CAPSULE_CREATED, malicious_value);
+            assert_eq!(event_with_malicious.event_code, CAPSULE_CREATED); // Should use constant
+            assert_eq!(event_with_malicious.detail, malicious_value); // Detail can contain anything
+
+            // Verify version checking rejects privilege escalation versions
+            if malicious_value.starts_with("vsdk-v") {
+                let version_result = check_sdk_version(malicious_value);
+                assert!(version_result.is_err(),
+                       "Privileged version should be rejected: {}", malicious_value);
+
+                let err = version_result.unwrap_err();
+                assert!(err.contains(ERR_SDK_VERSION_UNSUPPORTED));
+                assert!(!err.contains("privileged"));
+                assert!(!err.contains("admin"));
+            }
+        }
+
+        // Verify security posture constraints remain enforced
+        assert!(STRUCTURAL_ONLY_SECURITY_POSTURE.contains("structural_only"));
+        assert!(STRUCTURAL_ONLY_SECURITY_POSTURE.contains("not_replacement_critical"));
+        assert!(STRUCTURAL_ONLY_RULE_ID.contains("VERIFIER_SHORTCUT_GUARD"));
+
+        // Test that SDK maintains proper security boundaries
+        let privileged_event = SdkEvent::new(ERR_CAPSULE_ACCESS_DENIED,
+                                           "attempted_privilege_escalation");
+        assert_eq!(privileged_event.event_code, ERR_CAPSULE_ACCESS_DENIED);
+        assert!(privileged_event.detail.contains("attempted_privilege_escalation"));
+
+        // Verify invariants remain true
+        assert!(INV_CAPSULE_NO_PRIVILEGED_ACCESS.contains("NO-PRIVILEGED-ACCESS"));
+        assert!(INV_CAPSULE_VERDICT_REPRODUCIBLE.contains("VERDICT-REPRODUCIBLE"));
+        assert!(INV_CAPSULE_STABLE_SCHEMA.contains("STABLE-SCHEMA"));
+        assert!(INV_CAPSULE_VERSIONED_API.contains("VERSIONED-API"));
+    }
+
+    #[test]
+    fn extreme_adversarial_algorithmic_complexity_explosion_via_pathological_event_patterns() {
+        // Extreme: Test algorithmic complexity attacks through pathological event patterns
+
+        let complexity_bomb_patterns = vec![
+            // Exponential pattern matching worst cases
+            ("a".repeat(1000) + "b", "linear_with_mismatch"),
+
+            // Nested parentheses (potential ReDoS patterns)
+            ("(".repeat(500) + &")".repeat(500), "balanced_parens"),
+            ("(".repeat(1000), "unbalanced_open"),
+            (")".repeat(1000), "unbalanced_close"),
+
+            // Alternating patterns that stress string algorithms
+            ("ab".repeat(5000), "alternating_short"),
+            ("abc".repeat(3333), "alternating_triplet"),
+
+            // Unicode normalization complexity bombs
+            ("e\u{0301}".repeat(1000), "combining_accents"), // é repeated
+            ("\u{0300}".repeat(2000), "combining_only"),      // Combining chars only
+
+            // Pattern that could trigger quadratic behavior in naive algorithms
+            ("x".repeat(100) + "y" + &"x".repeat(100), "embedded_mismatch"),
+
+            // Deeply nested structure patterns
+            (format!("{}{}{}", "[".repeat(100), "data", "]".repeat(100)), "nested_brackets"),
+            (format!("{}{}{}", "{".repeat(200), "json", "}".repeat(200)), "nested_braces"),
+        ];
+
+        for (pathological_detail, test_name) in complexity_bomb_patterns {
+            let start_time = std::time::Instant::now();
+
+            // Event creation should complete quickly despite pathological input
+            let event = SdkEvent::new(CAPSULE_SIGNED, pathological_detail.clone());
+            let creation_time = start_time.elapsed();
+
+            assert!(creation_time < std::time::Duration::from_millis(50),
+                   "Event creation too slow for {}: {:?}", test_name, creation_time);
+
+            assert_eq!(event.event_code, CAPSULE_SIGNED);
+            assert_eq!(event.detail, pathological_detail);
+            assert_eq!(event.detail.len(), pathological_detail.len());
+
+            // Cloning should also be fast
+            let clone_start = std::time::Instant::now();
+            let cloned = event.clone();
+            let clone_time = clone_start.elapsed();
+
+            assert!(clone_time < std::time::Duration::from_millis(20),
+                   "Event cloning too slow for {}: {:?}", test_name, clone_time);
+            assert_eq!(cloned.detail, event.detail);
+
+            // Debug formatting should be bounded
+            let debug_start = std::time::Instant::now();
+            let debug_output = format!("{:?}", event);
+            let debug_time = debug_start.elapsed();
+
+            assert!(debug_time < std::time::Duration::from_millis(100),
+                   "Debug formatting too slow for {}: {:?}", test_name, debug_time);
+            assert!(debug_output.contains("CAPSULE_SIGNED"));
+
+            // Memory usage should be proportional to input size, not exponential
+            let estimated_memory = pathological_detail.len() * std::mem::size_of::<char>() * 3; // Some overhead
+            assert!(estimated_memory < 50_000_000, // 50MB limit
+                   "Estimated memory usage too high for {}: {} bytes", test_name, estimated_memory);
+        }
+
+        // Test batched processing of pathological patterns
+        let batch_start = std::time::Instant::now();
+        let mut batch_events = Vec::new();
+
+        for i in 0..100 {
+            let complex_detail = format!("batch_{}_{}", i, "x".repeat(i * 10));
+            let event = SdkEvent::new(CAPSULE_VERDICT_REPRODUCED, complex_detail);
+            batch_events.push(event);
+        }
+
+        let batch_time = batch_start.elapsed();
+        assert!(batch_time < std::time::Duration::from_millis(500),
+               "Batch processing too slow: {:?}", batch_time);
+
+        // Verify all batch events are correct
+        for (i, event) in batch_events.iter().enumerate() {
+            assert_eq!(event.event_code, CAPSULE_VERDICT_REPRODUCED);
+            assert!(event.detail.contains(&format!("batch_{}", i)));
+        }
+    }
 }

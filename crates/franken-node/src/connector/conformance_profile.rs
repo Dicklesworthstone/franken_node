@@ -22,6 +22,10 @@ fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     items.push(item);
 }
 
+fn contains_nul(value: &str) -> bool {
+    value.as_bytes().contains(&0)
+}
+
 // ── Profile ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -101,7 +105,11 @@ impl ProfileMatrix {
             }
             if caps
                 .iter()
-                .any(|capability| capability.trim().is_empty() || capability.trim() != capability)
+                .any(|capability| {
+                    capability.trim().is_empty()
+                        || capability.trim() != capability
+                        || contains_nul(capability)
+                })
             {
                 return Err(ProfileError::InvalidMatrix(format!(
                     "{profile} has empty or non-canonical required capabilities"
@@ -870,5 +878,92 @@ mod tests {
         assert!(eval.results.iter().any(|result| {
             result.capability == "auth" && !result.passed && result.details == "no test result"
         }));
+    }
+
+    #[test]
+    fn matrix_validation_rejects_nul_required_capability() {
+        let matrix = ProfileMatrix {
+            required: BTreeMap::from([(Profile::Mvp, vec!["auth\0shadow".to_string()])]),
+        };
+
+        let err = matrix.validate().unwrap_err();
+
+        assert_eq!(err.code(), "CPM_INVALID_MATRIX");
+        assert!(err.to_string().contains("empty or non-canonical"));
+    }
+
+    #[test]
+    fn matrix_validation_rejects_nul_after_canonical_prefix() {
+        let matrix = ProfileMatrix {
+            required: BTreeMap::from([(
+                Profile::Full,
+                vec!["serialization".to_string(), "fencing\0".to_string()],
+            )]),
+        };
+
+        let err = matrix.validate().unwrap_err();
+
+        assert_eq!(err.code(), "CPM_INVALID_MATRIX");
+        assert!(err.to_string().contains("Full"));
+    }
+
+    #[test]
+    fn measured_capability_with_nul_suffix_is_treated_as_missing() {
+        let matrix = ProfileMatrix {
+            required: BTreeMap::from([(Profile::Mvp, vec!["auth".to_string()])]),
+        };
+        let results = vec![cap("auth\0shadow", true)];
+
+        let eval = evaluate_claim(&matrix, Profile::Mvp, &results, 1).unwrap();
+
+        assert_eq!(eval.verdict, "FAIL");
+        assert!(!eval.can_publish);
+        assert_eq!(eval.metadata.capabilities_passed, 0);
+        assert!(eval.results.iter().any(|result| {
+            result.capability == "auth" && !result.passed && result.details == "no test result"
+        }));
+    }
+
+    #[test]
+    fn publish_blocks_when_only_nul_prefixed_measured_capability_is_present() {
+        let matrix = ProfileMatrix {
+            required: BTreeMap::from([(Profile::Mvp, vec!["auth".to_string()])]),
+        };
+        let results = vec![cap("\0auth", true)];
+
+        let err = publish_claim(&matrix, Profile::Mvp, &results, 1).unwrap_err();
+
+        assert_eq!(err.code(), "CPM_CLAIM_BLOCKED");
+        assert!(err.to_string().contains("0/1 capabilities passed"));
+    }
+
+    #[test]
+    fn duplicate_nul_measured_capability_does_not_override_valid_failure() {
+        let matrix = ProfileMatrix {
+            required: BTreeMap::from([(Profile::Mvp, vec!["auth".to_string()])]),
+        };
+        let results = vec![cap("auth", false), cap("auth\0shadow", true)];
+
+        let eval = evaluate_claim(&matrix, Profile::Mvp, &results, 1).unwrap();
+
+        assert_eq!(eval.verdict, "FAIL");
+        assert_eq!(eval.metadata.capabilities_passed, 0);
+        assert!(eval.results.iter().any(|result| {
+            result.capability == "auth" && !result.passed && result.details == "failed"
+        }));
+    }
+
+    #[test]
+    fn matrix_with_nul_required_capability_without_validation_still_blocks_clean_result() {
+        let matrix = ProfileMatrix {
+            required: BTreeMap::from([(Profile::Mvp, vec!["auth\0shadow".to_string()])]),
+        };
+
+        let err = publish_claim(&matrix, Profile::Mvp, &[cap("auth", true)], 1).unwrap_err();
+        let eval = evaluate_claim(&matrix, Profile::Mvp, &[cap("auth", true)], 1).unwrap();
+
+        assert_eq!(err.code(), "CPM_CLAIM_BLOCKED");
+        assert_eq!(eval.metadata.capabilities_passed, 0);
+        assert_eq!(eval.metadata.capabilities_total, 1);
     }
 }

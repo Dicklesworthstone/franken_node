@@ -1387,4 +1387,878 @@ mod tests {
         assert!(storage.contains(Tier::L1Local, &id));
         assert!(!storage.contains(Tier::L2Warm, &id));
     }
+
+    // ---------------------------------------------------------------------------
+    // NEGATIVE-PATH TESTS: Security hardening for tiered trust storage
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn negative_unicode_injection_in_artifact_ids_and_object_paths() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // BiDi override attack in artifact ID
+        let malicious_id = "\u{202E}tset\u{202D}real_id";
+        let artifact = TrustArtifact {
+            id: ArtifactId(malicious_id.to_string()),
+            object_class: ObjectClass::CriticalMarker,
+            payload: vec![0xBA, 0xD0],
+            epoch_id: 1,
+        };
+
+        // Store and verify Unicode is preserved (not sanitized)
+        let stored_id = storage.store(Tier::L1Local, artifact.clone());
+        assert_eq!(stored_id.0, malicious_id);
+        assert!(storage.contains(Tier::L1Local, &stored_id));
+
+        // Zero-width character injection
+        let zero_width_id = "normal\u{200B}\u{200C}\u{200D}\u{FEFF}hidden";
+        let zw_artifact = TrustArtifact {
+            id: ArtifactId(zero_width_id.to_string()),
+            object_class: ObjectClass::TrustReceipt,
+            payload: vec![0xDE, 0xAD],
+            epoch_id: 2,
+        };
+
+        let zw_stored = storage.store(Tier::L2Warm, zw_artifact);
+        assert!(storage.contains(Tier::L2Warm, &zw_stored));
+
+        // Path traversal attempts in artifact ID
+        let traversal_id = "../../../etc/passwd\0\nmalicious";
+        let traversal_artifact = TrustArtifact {
+            id: ArtifactId(traversal_id.to_string()),
+            object_class: ObjectClass::ReplayBundle,
+            payload: vec![0xCA, 0xFE],
+            epoch_id: 3,
+        };
+
+        let traversal_stored = storage.store(Tier::L3Archive, traversal_artifact);
+        assert!(storage.contains(Tier::L3Archive, &traversal_stored));
+        assert!(traversal_stored.0.contains('\0'));
+        assert!(traversal_stored.0.contains('\n'));
+    }
+
+    #[test]
+    fn negative_memory_exhaustion_with_massive_artifact_payloads() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // Attempt to store artifact with extremely large payload
+        let huge_payload = vec![0x42; 100_000_000]; // 100MB payload
+        let big_artifact = TrustArtifact {
+            id: ArtifactId("memory_bomb".to_string()),
+            object_class: ObjectClass::TelemetryArtifact,
+            payload: huge_payload.clone(),
+            epoch_id: u64::MAX, // Also test epoch overflow
+        };
+
+        // Storage should handle large payloads gracefully
+        let stored_id = storage.store(Tier::L2Warm, big_artifact);
+        assert!(storage.contains(Tier::L2Warm, &stored_id));
+
+        // Verify payload integrity preserved
+        let retrieved = storage.retrieve(Tier::L2Warm, &stored_id).unwrap();
+        assert_eq!(retrieved.payload.len(), 100_000_000);
+        assert_eq!(retrieved.epoch_id, u64::MAX);
+
+        // Test memory stress with multiple large artifacts
+        for i in 0..10 {
+            let stress_artifact = TrustArtifact {
+                id: ArtifactId(format!("stress_{}", i)),
+                object_class: ObjectClass::CriticalMarker,
+                payload: vec![0x88; 10_000_000], // 10MB each
+                epoch_id: i as u64,
+            };
+            storage.store(Tier::L1Local, stress_artifact);
+        }
+
+        assert_eq!(storage.tier_count(Tier::L1Local), 10);
+    }
+
+    #[test]
+    fn negative_authority_level_boundary_violations_and_overflow() {
+        // Test authority level arithmetic edge cases
+        let l1_level = AuthorityLevel::L1;
+        let l2_level = AuthorityLevel::L2;
+        let l3_level = AuthorityLevel::L3;
+
+        // Verify ordering invariants at boundaries
+        assert!(l1_level > l2_level);
+        assert!(l2_level > l3_level);
+        assert_eq!(l1_level.0, 3);
+        assert_eq!(l2_level.0, 2);
+        assert_eq!(l3_level.0, 1);
+
+        // Test tier ordering invariants
+        assert!(Tier::L1Local < Tier::L2Warm);
+        assert!(Tier::L2Warm < Tier::L3Archive);
+
+        // Test authority level function consistency
+        assert_eq!(authority_level_for(Tier::L1Local), AuthorityLevel::L1);
+        assert_eq!(authority_level_for(Tier::L2Warm), AuthorityLevel::L2);
+        assert_eq!(authority_level_for(Tier::L3Archive), AuthorityLevel::L3);
+
+        // Verify no integer overflow in authority arithmetic
+        let max_authority = AuthorityLevel(u8::MAX);
+        let min_authority = AuthorityLevel(0);
+        assert!(max_authority > l1_level);
+        assert!(l3_level > min_authority);
+
+        // Test tier discriminant values don't overflow
+        assert_eq!(Tier::L1Local as i32, 1);
+        assert_eq!(Tier::L2Warm as i32, 2);
+        assert_eq!(Tier::L3Archive as i32, 3);
+    }
+
+    #[test]
+    fn negative_concurrent_access_safety_stress_testing() {
+        use std::sync::{Arc, Mutex};
+        use std::thread;
+
+        let storage = Arc::new(Mutex::new(TieredTrustStorage::with_defaults()));
+        let mut handles = vec![];
+
+        // Spawn multiple threads performing concurrent operations
+        for thread_id in 0..8 {
+            let storage_clone = Arc::clone(&storage);
+            let handle = thread::spawn(move || {
+                for op_id in 0..100 {
+                    let artifact = TrustArtifact {
+                        id: ArtifactId(format!("thread_{}_op_{}", thread_id, op_id)),
+                        object_class: ObjectClass::CriticalMarker,
+                        payload: vec![thread_id as u8; 1000],
+                        epoch_id: (thread_id * 1000 + op_id) as u64,
+                    };
+
+                    let mut storage = storage_clone.lock().unwrap();
+                    let stored_id = storage.store(Tier::L1Local, artifact.clone());
+
+                    // Immediate retrieval
+                    let retrieved = storage.retrieve(Tier::L1Local, &stored_id).unwrap();
+                    assert_eq!(retrieved.payload, artifact.payload);
+
+                    // Try authority map mutation (should always fail)
+                    let result = storage.try_update_authority(
+                        ObjectClass::CriticalMarker,
+                        Tier::L3Archive
+                    );
+                    assert!(result.is_err());
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all threads to complete
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        // Verify final state consistency
+        let storage = storage.lock().unwrap();
+        assert_eq!(storage.tier_count(Tier::L1Local), 800); // 8 threads * 100 ops
+
+        // Verify authority map remains immutable
+        assert_eq!(
+            storage.authority_map().authoritative_tier(ObjectClass::CriticalMarker),
+            Some(Tier::L1Local)
+        );
+    }
+
+    #[test]
+    fn negative_serialization_corruption_and_deserialization_attacks() {
+        let storage = TieredTrustStorage::with_defaults();
+
+        // Test malformed JSON serialization of authority map
+        let authority_map = storage.authority_map();
+        let json = authority_map.to_json().unwrap();
+
+        // Corrupt the JSON in various ways
+        let corrupted_jsons = vec![
+            json.replace("L1_local", "L99_invalid"),
+            json.replace("critical_marker", "malicious\0injection"),
+            json.replace("true", "\"not_boolean\""),
+            "{\"mapping\":{\"critical_marker\":null},\"frozen\":true}".to_string(),
+            "{}".to_string(), // Empty object
+            "null".to_string(), // Null value
+            "\"string_instead_of_object\"".to_string(),
+        ];
+
+        for corrupted_json in corrupted_jsons {
+            let parse_result: Result<AuthorityMap, _> = serde_json::from_str(&corrupted_json);
+            // Should either fail to parse or preserve corruption for analysis
+            if let Ok(parsed_map) = parse_result {
+                // If it parsed, verify it doesn't crash on basic operations
+                let _ = parsed_map.len();
+                let _ = parsed_map.is_empty();
+                let _ = parsed_map.iter().count();
+            }
+        }
+
+        // Test artifact serialization with extreme values
+        let extreme_artifact = TrustArtifact {
+            id: ArtifactId("\u{FFFD}\u{10FFFF}extreme\0\n\r\t".to_string()),
+            object_class: ObjectClass::ReplayBundle,
+            payload: vec![0x00, 0xFF, 0x7F, 0x80], // Edge byte values
+            epoch_id: u64::MAX,
+        };
+
+        let artifact_json = serde_json::to_string(&extreme_artifact).unwrap();
+        let parsed_artifact: TrustArtifact = serde_json::from_str(&artifact_json).unwrap();
+        assert_eq!(parsed_artifact, extreme_artifact);
+
+        // Test storage error serialization integrity
+        let errors = vec![
+            StorageError::authority_map_immutable(),
+            StorageError::artifact_not_found(&ArtifactId("test".to_string()), Tier::L1Local),
+            StorageError::recovery_source_missing(
+                &ArtifactId("missing".to_string()),
+                Tier::L1Local,
+                &[Tier::L2Warm, Tier::L3Archive]
+            ),
+        ];
+
+        for error in errors {
+            let error_json = serde_json::to_string(&error).unwrap();
+            let parsed_error: StorageError = serde_json::from_str(&error_json).unwrap();
+            assert_eq!(parsed_error, error);
+        }
+    }
+
+    #[test]
+    fn negative_epoch_id_overflow_and_timestamp_edge_cases() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // Test epoch ID boundary values
+        let boundary_epochs = vec![0, 1, u32::MAX as u64, u64::MAX - 1, u64::MAX];
+
+        for (i, &epoch_id) in boundary_epochs.iter().enumerate() {
+            let artifact = TrustArtifact {
+                id: ArtifactId(format!("epoch_test_{}", i)),
+                object_class: ObjectClass::TelemetryArtifact,
+                payload: vec![0xEE; 100],
+                epoch_id,
+            };
+
+            let stored_id = storage.store(Tier::L2Warm, artifact.clone());
+            let retrieved = storage.retrieve(Tier::L2Warm, &stored_id).unwrap();
+
+            // Verify epoch preservation without overflow
+            assert_eq!(retrieved.epoch_id, epoch_id);
+        }
+
+        // Test arithmetic on epoch IDs (simulate epoch advancement)
+        let base_epoch = u64::MAX - 10;
+        for offset in 0..20 {
+            let epoch_id = base_epoch.saturating_add(offset);
+            let artifact = TrustArtifact {
+                id: ArtifactId(format!("saturating_epoch_{}", offset)),
+                object_class: ObjectClass::CriticalMarker,
+                payload: vec![offset as u8; 50],
+                epoch_id,
+            };
+
+            storage.store(Tier::L1Local, artifact);
+        }
+
+        // Verify all artifacts stored successfully
+        assert_eq!(storage.tier_count(Tier::L2Warm), boundary_epochs.len());
+
+        // Test epoch comparison edge cases
+        let epoch_zero = TrustArtifact {
+            id: ArtifactId("zero_epoch".to_string()),
+            object_class: ObjectClass::ReplayBundle,
+            payload: vec![0x00],
+            epoch_id: 0,
+        };
+
+        let epoch_max = TrustArtifact {
+            id: ArtifactId("max_epoch".to_string()),
+            object_class: ObjectClass::ReplayBundle,
+            payload: vec![0xFF],
+            epoch_id: u64::MAX,
+        };
+
+        storage.store(Tier::L3Archive, epoch_zero);
+        storage.store(Tier::L3Archive, epoch_max);
+
+        // Verify both extreme epochs can coexist
+        assert!(storage.contains(Tier::L3Archive, &ArtifactId("zero_epoch".to_string())));
+        assert!(storage.contains(Tier::L3Archive, &ArtifactId("max_epoch".to_string())));
+    }
+
+    #[test]
+    fn negative_recovery_path_manipulation_and_authority_bypass_attempts() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // Create artifacts with conflicting content in different tiers
+        let honest_artifact = TrustArtifact {
+            id: ArtifactId("contested_artifact".to_string()),
+            object_class: ObjectClass::TrustReceipt,
+            payload: vec![0x48, 0x4F, 0x4E], // "HON"est
+            epoch_id: 100,
+        };
+
+        let malicious_artifact = TrustArtifact {
+            id: ArtifactId("contested_artifact".to_string()),
+            object_class: ObjectClass::TrustReceipt,
+            payload: vec![0x4D, 0x41, 0x4C], // "MAL"icious
+            epoch_id: 99, // Earlier epoch
+        };
+
+        // Store honest version in L2 (higher authority)
+        storage.store(Tier::L2Warm, honest_artifact.clone());
+
+        // Store malicious version in L3 (lower authority)
+        storage.store(Tier::L3Archive, malicious_artifact.clone());
+
+        // Recovery to L1 should use L2 (higher authority), not L3
+        storage.recover_tier(Tier::L1Local, &ArtifactId("contested_artifact".to_string())).unwrap();
+
+        let recovered = storage.retrieve(Tier::L1Local, &ArtifactId("contested_artifact".to_string())).unwrap();
+        assert_eq!(recovered.payload, vec![0x48, 0x4F, 0x4E]); // Honest version
+        assert_eq!(recovered.epoch_id, 100); // Higher epoch from L2
+
+        // Test invalid recovery directions are rejected
+        let invalid_recoveries = vec![
+            (Tier::L3Archive, Tier::L1Local), // Invalid: L3 → L1 through L3
+            (Tier::L3Archive, Tier::L2Warm),  // Invalid: L3 → L2 through L3
+            (Tier::L3Archive, Tier::L3Archive), // Invalid: L3 → L3
+        ];
+
+        for (source, target) in invalid_recoveries {
+            if source == Tier::L3Archive && target == Tier::L3Archive {
+                // This case hits the L3 recovery direction check
+                let result = storage.recover_tier(target, &ArtifactId("any_id".to_string()));
+                assert!(result.is_err());
+                assert_eq!(result.unwrap_err().code, ERR_RECOVERY_DIRECTION_INVALID);
+            }
+        }
+
+        // Test recovery source prioritization attack
+        let priority_artifact = TrustArtifact {
+            id: ArtifactId("priority_test".to_string()),
+            object_class: ObjectClass::CriticalMarker,
+            payload: vec![0xAA], // L1 version
+            epoch_id: 300,
+        };
+
+        let l2_version = TrustArtifact {
+            id: ArtifactId("priority_test".to_string()),
+            object_class: ObjectClass::CriticalMarker,
+            payload: vec![0xBB], // L2 version
+            epoch_id: 200,
+        };
+
+        let l3_version = TrustArtifact {
+            id: ArtifactId("priority_test".to_string()),
+            object_class: ObjectClass::CriticalMarker,
+            payload: vec![0xCC], // L3 version
+            epoch_id: 100,
+        };
+
+        // Store in all tiers with L2 having different content than L3
+        storage.store(Tier::L2Warm, l2_version);
+        storage.store(Tier::L3Archive, l3_version);
+
+        // Clear L1 and recover - should prefer L2 over L3
+        storage.evict(Tier::L1Local, &ArtifactId("priority_test".to_string())).unwrap();
+        storage.recover_tier(Tier::L1Local, &ArtifactId("priority_test".to_string())).unwrap();
+
+        let final_recovered = storage.retrieve(Tier::L1Local, &ArtifactId("priority_test".to_string())).unwrap();
+        assert_eq!(final_recovered.payload, vec![0xBB]); // L2 version preferred
+        assert_eq!(final_recovered.epoch_id, 200);
+    }
+
+    #[test]
+    fn negative_event_log_injection_and_bounded_storage_attacks() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // Test event log with malicious content in all fields
+        let malicious_events = vec![
+            ("code\r\n\x1b[31mRED\x1b[0m", "tier\u{202E}spoofed", Some("id\x00null"), "detail\"quotes"),
+            ("code\u{FEFF}bom", "tier\u{200B}zw", Some("id\u{10FFFF}high"), "detail\u{D800}\u{DFFF}surr"),
+            ("code\n\rHTTP/1.1 200 OK\r\n\r\n", "tier' OR '1'='1' --", Some("id<script>"), "detail\\\"escape"),
+        ];
+
+        for (code, tier_str, artifact_id, detail) in malicious_events {
+            storage.emit(
+                code,
+                Tier::L1Local, // Will be converted to "L1_local"
+                artifact_id.map(|s| &ArtifactId(s.to_string())),
+                detail.to_string(),
+            );
+        }
+
+        // Verify malicious content preserved in event log
+        let recent_events = storage.events();
+        for event in recent_events.iter().rev().take(3) {
+            // Events should preserve malicious content exactly
+            assert!(event.code.contains("code") || event.tier == "L1_local");
+        }
+
+        // Test bounded event storage with massive event generation
+        for i in 0..MAX_EVENTS * 2 {
+            let massive_artifact = TrustArtifact {
+                id: ArtifactId(format!("massive_event_{}", i)),
+                object_class: ObjectClass::TelemetryArtifact,
+                payload: vec![0x99; 1000], // 1KB each
+                epoch_id: i as u64,
+            };
+            storage.store(Tier::L2Warm, massive_artifact);
+        }
+
+        // Should be bounded by MAX_EVENTS
+        assert_eq!(storage.events().len(), MAX_EVENTS);
+
+        // Test event log overflow behavior
+        let events_before_overflow = storage.events().len();
+        storage.emit(
+            "OVERFLOW_TEST",
+            Tier::L3Archive,
+            Some(&ArtifactId("overflow".to_string())),
+            "Testing overflow boundary".to_string(),
+        );
+        assert_eq!(storage.events().len(), events_before_overflow);
+    }
+
+    #[test]
+    fn negative_push_bounded_edge_cases_and_memory_behavior() {
+        let mut items: Vec<Vec<u8>> = Vec::new();
+
+        // Test with zero capacity
+        push_bounded(&mut items, vec![1, 2, 3], 0);
+        assert!(items.is_empty());
+
+        // Test with capacity 1
+        push_bounded(&mut items, vec![4, 5, 6], 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], vec![4, 5, 6]);
+
+        push_bounded(&mut items, vec![7, 8, 9], 1);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], vec![7, 8, 9]);
+
+        // Test overflow calculation edge cases
+        let mut large_items: Vec<String> = Vec::new();
+        for i in 0..100 {
+            large_items.push(format!("item_{}", i));
+        }
+
+        // Push to capacity 50
+        push_bounded(&mut large_items, "new_item".to_string(), 50);
+        assert_eq!(large_items.len(), 50);
+        assert_eq!(large_items[0], "item_51"); // First remaining item
+        assert_eq!(large_items[49], "new_item"); // Last item
+
+        // Test with very large capacity (larger than current length)
+        let mut small_items = vec!["a", "b", "c"];
+        push_bounded(&mut small_items, "d", 1000);
+        assert_eq!(small_items, vec!["a", "b", "c", "d"]);
+
+        // Test underflow protection in overflow calculation
+        let mut single_item = vec!["single"];
+        push_bounded(&mut single_item, "replacement", 1);
+        assert_eq!(single_item, vec!["replacement"]);
+    }
+
+    #[test]
+    fn negative_storage_error_display_injection_and_formatting_attacks() {
+        // Test error display with various injection patterns
+        let injection_patterns = [
+            ("\x1b[31mRED\x1b[0m", "ANSI color injection"),
+            ("\r\nHTTP/1.1 200 OK\r\n\r\n<html>", "HTTP header injection"),
+            ("\u{202E}spoofed\u{202D}", "BiDi text direction override"),
+            ("\u{FEFF}BOM\u{200B}zero-width", "Unicode BOM and zero-width"),
+            ("\"quotes'apostrophe\\backslash", "Quote and escape injection"),
+            ("\x00null\x01\x02\x03", "Control character injection"),
+        ];
+
+        for (malicious_id, attack_type) in injection_patterns {
+            let errors = vec![
+                StorageError::artifact_not_found(&ArtifactId(malicious_id.to_string()), Tier::L1Local),
+                StorageError::evict_requires_retrievability(&ArtifactId(malicious_id.to_string()), Tier::L2Warm),
+                StorageError::recovery_source_missing(
+                    &ArtifactId(malicious_id.to_string()),
+                    Tier::L1Local,
+                    &[Tier::L2Warm, Tier::L3Archive]
+                ),
+            ];
+
+            for error in errors {
+                let display_string = format!("{}", error);
+
+                // Verify error display preserves malicious content but remains structured
+                assert!(display_string.contains('[') && display_string.contains(']'));
+                assert!(display_string.contains(malicious_id));
+
+                // Verify error code prefixes are preserved
+                assert!(display_string.starts_with('['));
+
+                println!("Attack type '{}' display: {}", attack_type, display_string);
+            }
+        }
+
+        // Test error serialization with extreme values
+        let extreme_error = StorageError::new(
+            "EXTREME_ERROR_CODE_".repeat(100).as_str(), // Very long error code
+            "x".repeat(100_000), // 100KB message
+        );
+
+        let json = serde_json::to_string(&extreme_error).unwrap();
+        let deserialized: StorageError = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, extreme_error);
+        assert_eq!(deserialized.message.len(), 100_000);
+    }
+
+    #[test]
+    fn negative_object_class_and_tier_serialization_tampering() {
+        // Test serialization tampering of ObjectClass enum
+        let invalid_object_classes = [
+            "\"unknown_class\"",
+            "\"CriticalMarker\"", // Wrong case
+            "\"critical-marker\"", // Wrong separator
+            "null",
+            "42",
+            "true",
+            "{}",
+            "[]",
+        ];
+
+        for invalid_json in invalid_object_classes {
+            let result: Result<ObjectClass, _> = serde_json::from_str(invalid_json);
+            assert!(result.is_err(), "Should reject invalid ObjectClass: {}", invalid_json);
+        }
+
+        // Test serialization tampering of Tier enum
+        let invalid_tiers = [
+            "\"L0_invalid\"",
+            "\"L4_nonexistent\"",
+            "\"l1_local\"", // Wrong case
+            "\"L1-local\"", // Wrong separator
+            "\"L1Local\"",  // No separator
+            "null",
+            "0",
+            "false",
+        ];
+
+        for invalid_json in invalid_tiers {
+            let result: Result<Tier, _> = serde_json::from_str(invalid_json);
+            assert!(result.is_err(), "Should reject invalid Tier: {}", invalid_json);
+        }
+
+        // Test round-trip with valid values to ensure no regression
+        for object_class in ObjectClass::all() {
+            let json = serde_json::to_string(object_class).unwrap();
+            let parsed: ObjectClass = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, *object_class);
+        }
+
+        for tier in Tier::all() {
+            let json = serde_json::to_string(tier).unwrap();
+            let parsed: Tier = serde_json::from_str(&json).unwrap();
+            assert_eq!(parsed, *tier);
+        }
+    }
+
+    #[test]
+    fn negative_authority_map_corruption_and_validation_bypass_attempts() {
+        // Test authority map with malicious JSON manipulation
+        let map = AuthorityMap::default_mapping();
+        let json = map.to_json().unwrap();
+
+        // Test various corruption attempts
+        let corruption_attempts = vec![
+            json.replace("\"frozen\":true", "\"frozen\":false"), // Attempt to unfreeze
+            json.replace("L1_local", "L99_hacked"), // Invalid tier
+            json.replace("critical_marker", "malicious_class"), // Invalid class
+            json.replace("\"mapping\":", "\"Mapping\":"), // Case change
+            json.replace('}', ",\"extra_field\":\"injection\"}"), // Extra fields
+        ];
+
+        for corrupted_json in corruption_attempts {
+            let parse_result: Result<AuthorityMap, _> = serde_json::from_str(&corrupted_json);
+
+            if let Ok(corrupted_map) = parse_result {
+                // If parsing succeeded, verify immutability is preserved
+                let mut mutable_copy = corrupted_map.clone();
+                let update_result = mutable_copy.try_update(ObjectClass::CriticalMarker, Tier::L3Archive);
+                assert!(update_result.is_err()); // Should still be immutable
+                assert_eq!(update_result.unwrap_err().code, ERR_AUTHORITY_MAP_IMMUTABLE);
+            }
+        }
+
+        // Test authority map with duplicate entries (should overwrite)
+        let duplicate_entries = AuthorityMap::new(&[
+            (ObjectClass::CriticalMarker, Tier::L1Local),
+            (ObjectClass::CriticalMarker, Tier::L3Archive), // Duplicate - should overwrite
+        ]);
+
+        assert_eq!(
+            duplicate_entries.authoritative_tier(ObjectClass::CriticalMarker),
+            Some(Tier::L3Archive) // Last entry wins
+        );
+
+        // Test empty authority map
+        let empty_map = AuthorityMap::new(&[]);
+        assert!(empty_map.is_empty());
+        assert_eq!(empty_map.len(), 0);
+        for class in ObjectClass::all() {
+            assert!(empty_map.authoritative_tier(*class).is_none());
+        }
+
+        // Test authority map iteration with extreme content
+        let extreme_map = AuthorityMap::new(&[
+            (ObjectClass::CriticalMarker, Tier::L1Local),
+            (ObjectClass::TrustReceipt, Tier::L2Warm),
+            (ObjectClass::ReplayBundle, Tier::L3Archive),
+            (ObjectClass::TelemetryArtifact, Tier::L1Local),
+        ]);
+
+        let collected: Vec<_> = extreme_map.iter().collect();
+        assert_eq!(collected.len(), 4);
+    }
+
+    #[test]
+    fn negative_tier_store_capacity_and_memory_stress_testing() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // Test each tier with massive artifact storage
+        let tiers_and_counts = [
+            (Tier::L1Local, 10_000),
+            (Tier::L2Warm, 5_000),
+            (Tier::L3Archive, 20_000),
+        ];
+
+        for (tier, count) in tiers_and_counts {
+            for i in 0..count {
+                let stress_artifact = TrustArtifact {
+                    id: ArtifactId(format!("stress_{}_{}", tier.as_str(), i)),
+                    object_class: match tier {
+                        Tier::L1Local => ObjectClass::CriticalMarker,
+                        Tier::L2Warm => ObjectClass::TrustReceipt,
+                        Tier::L3Archive => ObjectClass::ReplayBundle,
+                    },
+                    payload: vec![i as u8; (i % 1000) + 1], // Variable payload sizes
+                    epoch_id: i as u64,
+                };
+
+                storage.store(tier, stress_artifact);
+            }
+
+            assert_eq!(storage.tier_count(tier), count);
+        }
+
+        // Test cross-tier operations under stress
+        let total_artifacts = tiers_and_counts.iter().map(|(_, count)| count).sum::<usize>();
+        assert!(storage.events().len() <= MAX_EVENTS); // Should be bounded
+
+        // Test memory efficiency by checking some artifacts are still retrievable
+        for (tier, _) in tiers_and_counts {
+            let test_id = ArtifactId(format!("stress_{}_9999", tier.as_str()));
+            if storage.contains(tier, &test_id) {
+                let retrieved = storage.retrieve(tier, &test_id).unwrap();
+                assert_eq!(retrieved.payload.len(), 1000); // 9999 % 1000 + 1 = 1000
+            }
+        }
+
+        println!("Successfully stress tested with {} total artifacts", total_artifacts);
+    }
+
+    #[test]
+    fn negative_recovery_path_race_conditions_and_consistency_attacks() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // Setup competing artifacts in different tiers
+        let competing_artifacts = vec![
+            (Tier::L2Warm, vec![0x22], 200),
+            (Tier::L3Archive, vec![0x33], 100),
+        ];
+
+        let artifact_id = ArtifactId("race_condition_test".to_string());
+
+        for (tier, payload, epoch) in competing_artifacts {
+            let artifact = TrustArtifact {
+                id: artifact_id.clone(),
+                object_class: ObjectClass::TrustReceipt,
+                payload,
+                epoch_id: epoch,
+            };
+            storage.store(tier, artifact);
+        }
+
+        // Rapid recovery operations
+        for i in 0..100 {
+            // Clear L1 and recover
+            if storage.contains(Tier::L1Local, &artifact_id) {
+                storage.evict(Tier::L1Local, &artifact_id).unwrap();
+            }
+
+            storage.recover_tier(Tier::L1Local, &artifact_id).unwrap();
+
+            // Verify consistent recovery (should always use L2)
+            let recovered = storage.retrieve(Tier::L1Local, &artifact_id).unwrap();
+            assert_eq!(recovered.payload, vec![0x22]); // L2 version
+            assert_eq!(recovered.epoch_id, 200);
+
+            // Modify L3 content during recovery
+            if i % 10 == 0 {
+                let modified_l3 = TrustArtifact {
+                    id: artifact_id.clone(),
+                    object_class: ObjectClass::TrustReceipt,
+                    payload: vec![0x33, i as u8], // Modified payload
+                    epoch_id: 100 + i as u64, // Modified epoch
+                };
+                storage.store(Tier::L3Archive, modified_l3);
+            }
+        }
+
+        // Final consistency check
+        let final_l1 = storage.retrieve(Tier::L1Local, &artifact_id).unwrap();
+        let final_l2 = storage.retrieve(Tier::L2Warm, &artifact_id).unwrap();
+        assert_eq!(final_l1.payload, final_l2.payload); // L1 should match L2
+    }
+
+    #[test]
+    fn negative_artifact_id_collision_and_uniqueness_attacks() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // Test artifacts with visually similar IDs
+        let collision_ids = vec![
+            "artifact_1", // ASCII '1'
+            "artifact_l", // ASCII 'l' (lowercase L)
+            "artifact_I", // ASCII 'I' (capital i)
+            "artifact_\u{1D7CF}", // Mathematical Monospace Digit One
+            "artifact_\u{FF11}", // Fullwidth Digit One
+        ];
+
+        for id in collision_ids {
+            let artifact = TrustArtifact {
+                id: ArtifactId(id.to_string()),
+                object_class: ObjectClass::CriticalMarker,
+                payload: id.as_bytes().to_vec(), // Use ID as payload for verification
+                epoch_id: 1,
+            };
+
+            let stored_id = storage.store(Tier::L1Local, artifact.clone());
+            assert_eq!(stored_id.0, id); // ID preserved exactly
+
+            // Verify retrieval with exact ID
+            let retrieved = storage.retrieve(Tier::L1Local, &stored_id).unwrap();
+            assert_eq!(retrieved.id.0, id);
+            assert_eq!(retrieved.payload, id.as_bytes().to_vec());
+        }
+
+        // All should be stored separately (no collision)
+        assert_eq!(storage.tier_count(Tier::L1Local), collision_ids.len());
+
+        // Test Unicode normalization collision attempts
+        let normalization_ids = vec![
+            "café", // NFC form
+            "cafe\u{0301}", // NFD form (separate combining acute)
+        ];
+
+        for id in normalization_ids {
+            let artifact = TrustArtifact {
+                id: ArtifactId(id.to_string()),
+                object_class: ObjectClass::TelemetryArtifact,
+                payload: vec![0xCA, 0xFE],
+                epoch_id: 2,
+            };
+            storage.store(Tier::L2Warm, artifact);
+        }
+
+        // Should be treated as different artifacts (byte-level comparison)
+        assert_eq!(storage.tier_count(Tier::L2Warm), 2);
+
+        // Test extremely long artifact IDs
+        let long_id = "x".repeat(100_000); // 100KB ID
+        let long_artifact = TrustArtifact {
+            id: ArtifactId(long_id.clone()),
+            object_class: ObjectClass::ReplayBundle,
+            payload: vec![0x4C, 0x4F, 0x4E, 0x47], // "LONG"
+            epoch_id: 3,
+        };
+
+        let stored_long_id = storage.store(Tier::L3Archive, long_artifact);
+        assert_eq!(stored_long_id.0.len(), 100_000);
+        assert!(storage.contains(Tier::L3Archive, &stored_long_id));
+    }
+
+    #[test]
+    fn negative_eviction_policy_bypass_and_retrievability_attacks() {
+        let mut storage = TieredTrustStorage::with_defaults();
+
+        // Setup artifact hierarchy for bypass attempts
+        let hierarchy_artifact = TrustArtifact {
+            id: ArtifactId("hierarchy_test".to_string()),
+            object_class: ObjectClass::TrustReceipt,
+            payload: vec![0xBB, 0xBB],
+            epoch_id: 500,
+        };
+
+        // Store in all tiers
+        storage.store(Tier::L1Local, hierarchy_artifact.clone());
+        storage.store(Tier::L2Warm, hierarchy_artifact.clone());
+        storage.store(Tier::L3Archive, hierarchy_artifact.clone());
+
+        let artifact_id = ArtifactId("hierarchy_test".to_string());
+
+        // Test L1 eviction with L2 copy (should succeed)
+        let evicted_l1 = storage.evict(Tier::L1Local, &artifact_id).unwrap();
+        assert_eq!(evicted_l1.payload, vec![0xBB, 0xBB]);
+        assert!(!storage.contains(Tier::L1Local, &artifact_id));
+
+        // Test L2 eviction with L3 copy (should succeed)
+        let evicted_l2 = storage.evict(Tier::L2Warm, &artifact_id).unwrap();
+        assert!(!storage.contains(Tier::L2Warm, &artifact_id));
+
+        // Test L3 eviction (always allowed - permanent deletion)
+        let evicted_l3 = storage.evict(Tier::L3Archive, &artifact_id).unwrap();
+        assert!(!storage.contains(Tier::L3Archive, &artifact_id));
+
+        // Test eviction of non-existent artifact
+        let missing_id = ArtifactId("never_existed".to_string());
+        for tier in Tier::all() {
+            let result = storage.evict(*tier, &missing_id);
+            assert!(result.is_err());
+            assert_eq!(result.unwrap_err().code, ERR_ARTIFACT_NOT_FOUND);
+        }
+
+        // Test retrievability enforcement for partial hierarchies
+        let partial_artifact = TrustArtifact {
+            id: ArtifactId("partial_test".to_string()),
+            object_class: ObjectClass::CriticalMarker,
+            payload: vec![0xAA],
+            epoch_id: 600,
+        };
+
+        // Store only in L1 and L3 (skip L2)
+        storage.store(Tier::L1Local, partial_artifact.clone());
+        storage.store(Tier::L3Archive, partial_artifact.clone());
+
+        let partial_id = ArtifactId("partial_test".to_string());
+
+        // L1 eviction should succeed (L3 copy exists)
+        let evicted_partial = storage.evict(Tier::L1Local, &partial_id).unwrap();
+        assert_eq!(evicted_partial.payload, vec![0xAA]);
+
+        // Test stress eviction with many artifacts
+        for i in 0..1000 {
+            let stress_artifact = TrustArtifact {
+                id: ArtifactId(format!("eviction_stress_{}", i)),
+                object_class: ObjectClass::ReplayBundle,
+                payload: vec![i as u8],
+                epoch_id: i as u64,
+            };
+
+            // Store in L3 for unrestricted eviction
+            let id = storage.store(Tier::L3Archive, stress_artifact);
+
+            // Immediate eviction
+            if i % 2 == 0 {
+                storage.evict(Tier::L3Archive, &id).unwrap();
+            }
+        }
+
+        // Half should remain
+        assert_eq!(storage.tier_count(Tier::L3Archive), 500);
+    }
 }

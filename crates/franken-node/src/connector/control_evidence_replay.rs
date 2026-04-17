@@ -156,6 +156,13 @@ pub fn build_replay_context(
         satisfied: true,
     }];
 
+    let policy_snapshot_id =
+        if policy_snapshot_id.trim() != policy_snapshot_id || policy_snapshot_id.contains('\0') {
+            ""
+        } else {
+            policy_snapshot_id
+        };
+
     ReplayContext::new(candidates, constraints, entry.epoch, policy_snapshot_id)
 }
 
@@ -1858,8 +1865,7 @@ mod tests {
         assert_eq!(ctx.candidates.len(), MAX_CANDIDATES);
         assert_eq!(ctx.candidates[0].id, "DEC-HUGE-CANDIDATES");
         assert!(ctx.candidates.iter().any(|candidate| {
-            candidate.id == "DEC-HUGE-CANDIDATES"
-                && candidate.score.to_bits() == 1.0f64.to_bits()
+            candidate.id == "DEC-HUGE-CANDIDATES" && candidate.score.to_bits() == 1.0f64.to_bits()
         }));
     }
 
@@ -1973,5 +1979,170 @@ mod tests {
         push_bounded(&mut values, 7, 0);
 
         assert!(values.is_empty());
+    }
+
+    #[test]
+    fn negative_build_replay_context_with_padded_snapshot_is_invalid() {
+        let entry = make_entry(
+            DecisionType::HealthGateEval,
+            DecisionOutcome::Pass,
+            "DEC-PADDED-SNAPSHOT",
+            1000,
+        );
+
+        let ctx = build_replay_context(&entry, " snap-padded ");
+
+        assert!(!ctx.is_valid());
+        assert_eq!(ctx.policy_snapshot_id, "");
+        assert!(!ctx.candidates.is_empty());
+    }
+
+    #[test]
+    fn negative_build_replay_context_with_null_snapshot_is_invalid() {
+        let entry = make_entry(
+            DecisionType::FencingDecision,
+            DecisionOutcome::Grant,
+            "DEC-NULL-SNAPSHOT",
+            1000,
+        );
+
+        let ctx = build_replay_context(&entry, "snap\0shadow");
+
+        assert!(!ctx.is_valid());
+        assert_eq!(ctx.policy_snapshot_id, "");
+        assert_eq!(ctx.candidates[0].id, "DEC-NULL-SNAPSHOT");
+    }
+
+    #[test]
+    fn negative_verify_from_entry_with_padded_policy_snapshot_errors() {
+        let mut gate = ControlReplayGate::new();
+        let entry = make_entry(
+            DecisionType::MigrationDecision,
+            DecisionOutcome::Proceed,
+            "DEC-PADDED-VERIFY",
+            1000,
+        );
+
+        let verdict = gate.verify_from_entry(&entry, "\tsnap-padded");
+
+        assert!(verdict.is_error());
+        assert!(!gate.gate_pass());
+        assert_eq!(gate.summary().errors, 1);
+        assert!(gate.events().iter().any(|event| {
+            event.code == event_codes::RPL_005_GATE_DECISION
+                && event.decision_id == "DEC-PADDED-VERIFY"
+                && event.verdict == "BLOCK"
+        }));
+    }
+
+    #[test]
+    fn negative_verify_from_entry_with_null_policy_snapshot_errors() {
+        let mut gate = ControlReplayGate::new();
+        let entry = make_entry(
+            DecisionType::RolloutTransition,
+            DecisionOutcome::Proceed,
+            "DEC-NULL-VERIFY",
+            1000,
+        );
+
+        let verdict = gate.verify_from_entry(&entry, "snap\0shadow");
+
+        assert!(verdict.is_error());
+        assert_eq!(gate.verdicts().len(), 1);
+        assert_eq!(gate.summary().errors, 1);
+        assert!(gate.events().iter().any(|event| {
+            event.code == event_codes::RPL_004_ERROR && event.decision_id == "DEC-NULL-VERIFY"
+        }));
+    }
+
+    #[test]
+    fn negative_batch_with_padded_snapshot_error_keeps_gate_closed_after_success() {
+        let mut gate = ControlReplayGate::new();
+        let bad_entry = make_entry(
+            DecisionType::HealthGateEval,
+            DecisionOutcome::Pass,
+            "DEC-PADDED-BATCH",
+            1000,
+        );
+        let good_entry = make_entry(
+            DecisionType::FencingDecision,
+            DecisionOutcome::Grant,
+            "DEC-GOOD-BATCH",
+            2000,
+        );
+        let bad_ctx = build_replay_context(&bad_entry, " snap-bad ");
+        let good_ctx = build_replay_context(&good_entry, "snap-good");
+
+        let results = gate.verify_batch(&[(bad_entry, bad_ctx), (good_entry, good_ctx)]);
+
+        assert_eq!(results.len(), 2);
+        assert!(results[0].is_error());
+        assert!(results[1].is_reproduced());
+        assert!(!gate.gate_pass());
+        assert_eq!(gate.summary().errors, 1);
+        assert_eq!(gate.summary().reproduced, 1);
+    }
+
+    #[test]
+    fn negative_report_after_mixed_diverged_and_error_has_blocking_counts() {
+        let mut gate = ControlReplayGate::new();
+        let diverged_entry = make_entry(
+            DecisionType::HealthGateEval,
+            DecisionOutcome::Pass,
+            "DEC-DIVERGED-REPORT",
+            1000,
+        );
+        let diverged_ctx = ReplayContext::new(
+            vec![Candidate {
+                id: "DEC-DIVERGED-ACTUAL".into(),
+                decision_kind: LedgerDecisionKind::Deny,
+                score: 1.0,
+                metadata: serde_json::json!({}),
+            }],
+            vec![Constraint {
+                id: "policy-gate".into(),
+                description: "control-plane policy gate".into(),
+                satisfied: true,
+            }],
+            42,
+            "snap-report",
+        );
+        gate.verify(&diverged_entry, &diverged_ctx);
+
+        let error_entry = make_entry(
+            DecisionType::MigrationDecision,
+            DecisionOutcome::Proceed,
+            "DEC-ERROR-REPORT",
+            2000,
+        );
+        gate.verify_from_entry(&error_entry, "snap\0bad");
+
+        let report = gate.to_report();
+
+        assert_eq!(report["gate_pass"], false);
+        assert_eq!(report["summary"]["total"], 2);
+        assert_eq!(report["summary"]["diverged"], 1);
+        assert_eq!(report["summary"]["errors"], 1);
+        assert_eq!(report["summary"]["reproduced"], 0);
+    }
+
+    #[test]
+    fn negative_take_events_after_padded_snapshot_error_preserves_verdict() {
+        let mut gate = ControlReplayGate::new();
+        let entry = make_entry(
+            DecisionType::QuarantineAction,
+            DecisionOutcome::Promote,
+            "DEC-DRAIN-PADDED",
+            1000,
+        );
+        gate.verify_from_entry(&entry, " snap-drain ");
+
+        let events = gate.take_events();
+
+        assert!(!events.is_empty());
+        assert!(gate.events().is_empty());
+        assert_eq!(gate.verdicts().len(), 1);
+        assert_eq!(gate.summary().errors, 1);
+        assert!(!gate.gate_pass());
     }
 }
