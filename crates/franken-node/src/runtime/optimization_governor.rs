@@ -45,7 +45,7 @@ const MAX_DECISION_LOG_ENTRIES: usize = 4096;
 
 fn push_bounded<T>(items: &mut Vec<T>, item: T, cap: usize) {
     if items.len() >= cap {
-        let overflow = items.len() - cap + 1;
+        let overflow = items.len().saturating_sub(cap).saturating_add(1);
         items.drain(0..overflow);
     }
     items.push(item);
@@ -230,28 +230,28 @@ impl SafetyEnvelope {
     pub fn violations(&self, metrics: &PredictedMetrics) -> Vec<String> {
         let mut vs = Vec::new();
         if metrics.latency_ms > self.max_latency_ms {
-            vs.push(format!(
+            push_bounded(&mut vs, format!(
                 "latency {}ms > cap {}ms",
                 metrics.latency_ms, self.max_latency_ms
-            ));
+            ), 10);
         }
         if metrics.throughput_rps < self.min_throughput_rps {
-            vs.push(format!(
+            push_bounded(&mut vs, format!(
                 "throughput {}rps < floor {}rps",
                 metrics.throughput_rps, self.min_throughput_rps
-            ));
+            ), 10);
         }
         if !(metrics.error_rate_pct <= self.max_error_rate_pct) {
-            vs.push(format!(
+            push_bounded(&mut vs, format!(
                 "error rate {:.2}% > ceiling {:.2}%",
                 metrics.error_rate_pct, self.max_error_rate_pct
-            ));
+            ), 10);
         }
         if metrics.memory_mb > self.max_memory_mb {
-            vs.push(format!(
+            push_bounded(&mut vs, format!(
                 "memory {}MB > cap {}MB",
                 metrics.memory_mb, self.max_memory_mb
-            ));
+            ), 10);
         }
         vs
     }
@@ -700,7 +700,7 @@ impl OptimizationGovernor {
                 event_codes::GOV_005,
                 &ap.trace_id,
             );
-            reverted_ids.push(ap.proposal_id.clone());
+            push_bounded(&mut reverted_ids, ap.proposal_id.clone(), MAX_DECISION_LOG_ENTRIES);
         }
 
         for id in &reverted_ids {
